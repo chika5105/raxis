@@ -1,8 +1,6 @@
-//! V2_GAPS §12.4 — Operator-ergonomics IPC handlers.
-//!
+//! Operator-ergonomics IPC handlers.
 //! V2.4 closes out the wire-stub stage from V2.3 with **real
 //! handlers** for four of the five operator-ergonomics variants:
-//!
 //! | Variant                   | V2.3 status         | V2.4 status                                       |
 //! |---------------------------|---------------------|---------------------------------------------------|
 //! | `ProposeDefaults`         | `FAIL_NOT_YET_…`    | ✅ Returns the policy-derived defaults JSON       |
@@ -10,20 +8,16 @@
 //! | `DryRunAdmit`             | `FAIL_NOT_YET_…`    | ✅ Runs admission validation without commit       |
 //! | `SubscribeInitiative`     | `FAIL_NOT_YET_…`    | ⚠️  Stays V3 — depends on bidir streaming socket   |
 //! | `DescribeInitiativePause` | `FAIL_NOT_YET_…`    | ✅ Reports pause state from the kernel store      |
-//!
 //! `SubscribeInitiative` remains a wire-stub because the operator
 //! socket is single-shot request/response (one
 //! `read_json_frame_async` ↔ one `write_json_frame_async`); a real
 //! subscribe handler requires bidirectional streaming, which is the
-//! same wire-shape change `KernelPush` transport (V2_GAPS §12.1)
+//! same wire-shape change `KernelPush` transport
 //! lands in V3. The other four are pure read/validate operations and
 //! do not need streaming.
-//!
 //! ## Invariant safety (`INV-OPERATOR-ERG-01`)
-//!
 //! Every handler in this module is a **read-only kernel operation**.
 //! It MUST NOT:
-//!
 //! 1. Insert / update / delete any row in `kernel.db` (no
 //!    `tx.commit()`; no `INSERT`).
 //! 2. Reserve any token budget, allocate any session, or mutate any
@@ -33,7 +27,6 @@
 //!    handler so the operator's actions are forensically traceable;
 //!    we follow that allowance only for `DryRunAdmit`
 //!    (`DryRunAdmitted` audit kind).
-//!
 //! All four real handlers are pure functions of `(ctx, request)`:
 //! re-running them with the same inputs produces the same response.
 //! This is what `operator-ergonomics.md §5.3` requires for
@@ -52,15 +45,13 @@ use crate::ipc::context::HandlerContext;
 // ---------------------------------------------------------------------------
 
 /// Handle `OperatorRequest::ProposeDefaults`.
-///
 /// `operator-ergonomics.md §5.3` describes a richer surface that
 /// rewrites a plan TOML in-place by filling `# @raxis-default`
 /// annotations from `[token_policy_defaults]` / `[default_executor_image]`
-/// / `[default_verifier_images]` / `[default_protected_paths]` /
+/// `[default_verifier_images]` / `[default_protected_paths]` /
 /// `[prepare]` policy sections. Those policy sections are V3 work
-/// (V2_GAPS.md §C10 setup wizard tracks them); V2.4 ships an
+/// ( setup wizard tracks them); V2.4 ships an
 /// **operator-grade subset**:
-///
 /// 1. Reads the currently-loaded `PolicyBundle` snapshot.
 /// 2. Returns a small JSON document carrying the defaults that
 ///    *do* exist in the V2 policy schema today (provider catalog,
@@ -71,7 +62,6 @@ use crate::ipc::context::HandlerContext;
 ///    that pre-date the V3 prepare-time renderer skip rendering and
 ///    advise the operator that interactive defaulting requires a
 ///    V3 CLI.
-///
 /// The response is a **pure function** of the active policy epoch.
 /// Calling this twice without an epoch advance returns byte-
 /// identical JSON.
@@ -167,12 +157,10 @@ pub async fn handle_propose_defaults(
 // ---------------------------------------------------------------------------
 
 /// Handle `OperatorRequest::EstimateCost`.
-///
 /// Returns a dollar cost upper bound for the supplied plan, derived
 /// **from the operator-declared per-provider `[providers.<id>.pricing]`
-/// tables** (V2 `v2_extended_gaps.md §2.5 phase A` —
+/// tables** (
 /// `ProviderPricing`). The estimate is intentionally conservative:
-///
 /// 1. Parses the plan TOML; counts `[[tasks]]` entries.
 /// 2. For each task, estimates token consumption from the optional
 ///    `[tasks.token_policy.max_tokens_total]` declaration when
@@ -189,13 +177,11 @@ pub async fn handle_propose_defaults(
 ///    overhead allowance (admission-units are operator-defined and
 ///    treated as cents in the upper-bound projection — this is the
 ///    same convention the kernel's budget enforcer uses internally).
-///
 /// **No-LLM-provider deployments.** When the policy declares zero
 /// LLM providers (e.g. a degraded read-only deployment), token cost
 /// is reported as `0`; the admission-overhead allowance is still
 /// included so operators see a non-zero upper bound for the
 /// kernel-side admission charge.
-///
 /// Per `INV-OPERATOR-ERG-01` this handler does NOT verify the plan
 /// signature, NOT commit any rows, and NOT reserve any budget. The
 /// caller is expected to combine the returned upper bound with the
@@ -240,7 +226,6 @@ pub async fn handle_estimate_cost(
     // providers without pricing are skipped (per `PolicyBundle::
     // validate` contract, every LLM provider MUST declare pricing,
     // so the latter set is empty in any validated bundle).
-    //
     // Why "1M, 1M" as the comparator: it linearises the cost
     // function so the most-expensive provider for *any* token mix is
     // the one with the highest combined-1M cost. This is exact for
@@ -356,16 +341,13 @@ fn micro_dollars_to_cents(micro: u128) -> u128 {
 // ---------------------------------------------------------------------------
 
 /// Handle `OperatorRequest::DryRunAdmit`.
-///
 /// Runs a subset of admission validation without persisting any row
 /// or starting any session. V2.4 dry-run is **plan-only** —
 /// signature validation and the in-tx admission step (§8.1 step 12)
 /// are V3 work because they require `BEGIN IMMEDIATE` and would
 /// leak transactional state if interrupted mid-run.
-///
 /// V2.4 checks (mirrors `cli/src/commands/plan_validate.rs` plus
 /// the policy ceiling cross-checks):
-///
 /// 1. Plan TOML parses.
 /// 2. Required sections present (`[workspace]`, `[[tasks]]`).
 /// 3. `[workspace] lane_id` exists and is non-empty.
@@ -375,7 +357,6 @@ fn micro_dollars_to_cents(micro: u128) -> u128 {
 ///    default + the operator's `[git] target_ref_locked` flag.
 /// 6. Returns the resolved `target_ref` and any non-fatal
 ///    warnings the operator should review before live submission.
-///
 /// On any fatal check failure the response is
 /// `OperatorResponse::Error { code: <FAIL_*>, detail: ... }` with
 /// the **same** code a real `CreateInitiative` would have surfaced.
@@ -491,7 +472,7 @@ pub async fn handle_dry_run_admit(
         };
     }
 
-    // Resolve target_ref (V2_GAPS.md §12.8 / §12.9).
+    // Resolve target_ref.
     let plan_target_ref = parsed
         .get("workspace")
         .and_then(|v| v.get("target_ref"))
@@ -641,24 +622,21 @@ fn check_dag_acyclic(tasks: &[toml::Value]) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// Handle `OperatorRequest::SubscribeInitiative`.
-///
 /// V2.4 returns `FAIL_NOT_YET_IMPLEMENTED` because the operator
 /// socket is single-shot request/response. A real implementation
 /// requires bidirectional streaming on the operator UDS (the same
-/// transport `KernelPush` lands in V3 — V2_GAPS §12.1). The wire
+/// transport `KernelPush` lands in V3 — ). The wire
 /// shape (`OperatorRequest::SubscribeInitiative { initiative_id }`
 /// → `OperatorResponse::InitiativeSubscribed { initiative_id }`)
 /// is **stable in V2.4**; V3 will swap the dispatcher arm without
 /// reshaping the JSON envelopes.
-///
 /// Why not poll-based? Polling against `DescribeInitiativePause`
 /// works, but it cannot deliver `KernelPush` events
 /// (`AllReviewersPassed`, `IntegrationMergeCompleted`,
 /// `EscalationRaised`, etc.) at low latency. The V3 design uses the
-/// existing `KernelPushDispatcher` (V2_GAPS §12.1) and reuses the
+/// existing `KernelPushDispatcher` and reuses the
 /// existing operator UDS rather than introducing a second socket.
 /// Single-shot acknowledgement for `SubscribeInitiative`.
-///
 /// This handler is what the standard request/response dispatch
 /// path calls when the operator dispatcher intercepts the
 /// streaming variant via [`stream_subscribe_initiative`]. It
@@ -667,7 +645,6 @@ fn check_dag_acyclic(tasks: &[toml::Value]) -> Result<(), String> {
 /// acknowledgement that the streaming dispatcher writes as the
 /// first frame, or the typed error envelope to return without
 /// upgrading the connection.
-///
 /// **Why two functions** (vs. inlining): the streaming code path
 /// runs ON the per-connection task and needs the `&mut UnixStream`
 /// to write the live event frames. The acknowledgement check is
@@ -735,19 +712,15 @@ pub async fn validate_subscribe_admission(
 // ---------------------------------------------------------------------------
 
 /// Handle `OperatorRequest::DescribeInitiativePause`.
-///
 /// Reports whether `initiative_id` is currently paused (operator
 /// quarantine, escalation hold, or a non-Executing terminal-leaning
 /// state) and lists any outstanding escalations the operator must
 /// resolve before resume becomes legal.
-///
 /// **V2.4 pause definition.** An initiative is "paused" if any of:
-///
 /// * It has a row in `initiative_quarantines` (operator pressed the
 ///   quarantine button — see `views::initiative_quarantines`).
 /// * Its `state` is one of `Blocked`, `Failed`, `Aborted` (cannot
 ///   make forward progress without operator intervention).
-///
 /// `paused_at` reports the quarantine `quarantined_at` time when
 /// available; otherwise it falls back to the initiative's
 /// `completed_at` (terminal states) and `None` when no timestamp
@@ -829,7 +802,7 @@ pub async fn handle_describe_initiative_pause(
     };
 
     let is_paused_by_quarantine = quarantine_row.is_some();
-    let is_paused_by_state = matches!(row.state.as_str(), "Blocked" | "Failed" | "Aborted",);
+    let is_paused_by_state = matches!(row.state.as_str(), "Blocked" | "Failed" | "Aborted");
     let is_paused_by_escalations = !outstanding_escalations.is_empty();
     let is_paused = is_paused_by_quarantine || is_paused_by_state || is_paused_by_escalations;
 
@@ -852,15 +825,13 @@ struct DescribeOutcome {
 }
 
 // ---------------------------------------------------------------------------
-// ListTaskOutputs — v2_extended_gaps.md §3.2 StructuredOutput tool
+// ListTaskOutputs — StructuredOutput tool
 // ---------------------------------------------------------------------------
 
 /// Handle `OperatorRequest::ListTaskOutputs`.
-///
 /// Returns every row of `structured_outputs` whose `task_id`
 /// equals the request id, ordered by `emitted_at` ascending.
 /// Read-only; upholds `INV-OPERATOR-ERG-01`.
-///
 /// Returns `Error{FAIL_LIST_TASK_OUTPUTS, …}` on any sqlite
 /// error; an empty list (no outputs emitted yet for the task)
 /// is reported as a successful `TaskOutputsListed { outputs: [] }`
@@ -918,11 +889,10 @@ pub async fn handle_list_task_outputs(task_id: String, ctx: &HandlerContext) -> 
 }
 
 // ---------------------------------------------------------------------------
-// SubscribeInitiative streaming runner — v2_extended_gaps.md §2.1
+// SubscribeInitiative streaming runner —
 // ---------------------------------------------------------------------------
 
 /// Streaming companion to [`validate_subscribe_admission`].
-///
 /// Called by the operator dispatcher AFTER the per-request
 /// `permitted_ops` + cert gate AND after
 /// `validate_subscribe_admission` has returned `Ok`. The first
@@ -931,7 +901,6 @@ pub async fn handle_list_task_outputs(task_id: String, ctx: &HandlerContext) -> 
 /// is a `raxis_types::InitiativeEvent` published via the kernel's
 /// in-process [`crate::push::InitiativeEventBus`]. The function
 /// returns when:
-///
 /// * the initiative reaches a terminal state — written as a
 ///   `Closed { reason: InitiativeTerminal }` final frame, then
 ///   the function returns `Ok(())`;
@@ -940,7 +909,6 @@ pub async fn handle_list_task_outputs(task_id: String, ctx: &HandlerContext) -> 
 /// * the broadcast channel reports `Lagged(n)` — written as a
 ///   `Closed { reason: KernelShutdown }` final frame and
 ///   `Ok(())` returned (the operator is expected to reconnect).
-///
 /// The streaming runner consumes the connection — once it
 /// returns, `dispatch_loop` is finished with this connection. We
 /// do not loop back to read another request because the operator
@@ -1026,7 +994,6 @@ where
 
 // ---------------------------------------------------------------------------
 // Tests for the streaming SubscribeInitiative runner.
-//
 // We exercise `stream_subscribe_initiative` against a `tokio::io::duplex`
 // pair so we can drive the bus from the test thread and read the
 // resulting frames off the "client" half. The runner takes a generic
@@ -1180,7 +1147,6 @@ mod stream_tests {
         // Subscribe with the runner THEN drop every Sender by
         // dropping the bus. The runner sees `Closed` from the
         // broadcast channel and writes a KernelShutdown frame.
-        //
         // The bus is shared via Arc, so we need to drop both the
         // ctx clone and the original Arc to let the channel sender
         // hit refcount zero. The runner holds only a Receiver.

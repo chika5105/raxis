@@ -1,10 +1,8 @@
 //! `ModelClient` — guest-side LLM API surface.
-//!
-//! Closes V2_GAPS.md §B1 substep "Model API client via Gateway" by
+//!substep "Model API client via Gateway" by
 //! giving each planner role binary a single, transport-agnostic
-//! Anthropic Messages API client. Per `e2e-live-test-gap.md` the
+//! Anthropic Messages API client.the
 //! production egress path is:
-//!
 //! ```text
 //!   planner binary
 //!      │  HTTPS POST https://api.anthropic.com/v1/messages
@@ -17,7 +15,6 @@
 //!      ▼
 //!   api.anthropic.com:443
 //! ```
-//!
 //! From the planner's POV, the model client is just a `reqwest`
 //! HTTPS client targeting the upstream URL. The Anthropic API key
 //! is held by the kernel/gateway — the planner binary itself never
@@ -26,13 +23,10 @@
 //! parameter; the gateway will reject any request that includes a
 //! planner-supplied `x-api-key` header per `peripherals.md §3.2`
 //! "Credential injection precedence").
-//!
 //! ## Why Anthropic-shaped types live in `planner-core`
-//!
 //! The Anthropic Messages API is the **only** model API V2 ships
 //! against — we do not abstract the on-the-wire shape behind a
 //! provider-agnostic enum because:
-//!
 //! 1. Tool-use semantics differ enough between Anthropic / OpenAI /
 //!    Gemini that any "lowest common denominator" type would lose
 //!    information (tool-result blocks, structured tool errors, etc).
@@ -42,16 +36,13 @@
 //!    is policy-layer concern, not planner-binary concern.
 //! 3. A future `OpenAiClient` impl plugs into the same
 //!    [`ModelClient`] trait without touching the dispatch loop.
-//!
 //! ## V2 limits (declared so future work has a target)
-//!
 //! * **No streaming.** V2 uses non-streaming Messages API
 //!   responses — the planner waits for the full response before
 //!   running tool dispatch. Streaming changes the dispatch-loop
 //!   shape (mid-stream `tool_use` events) and is deferred.
-//!
 //!   This is the **structural enforcement of
-//!   `INV-GATEWAY-STREAM-ATOMICITY`** (V2_GAPS.md §13 Category 1):
+//!   `INV-GATEWAY-STREAM-ATOMICITY`**:
 //!   because the V2 [`ModelClient::create_message`] call is one
 //!   request → one fully-buffered response, every assistant
 //!   turn (`stop_reason`, `content`, `usage`) is observed
@@ -73,7 +64,6 @@
 //!   automatic / implicit caching; the per-response cache-hit
 //!   token counts surface uniformly through [`Usage`] so the
 //!   dispatch loop's token telemetry remains provider-agnostic.
-//!
 //!   Per `prompt-caching.md` (the normative spec), the dispatch
 //!   loop opts into all three flags by default since the system
 //!   prompt + tool definitions are stable per session and the
@@ -91,7 +81,6 @@ use thiserror::Error;
 // ---------------------------------------------------------------------------
 
 /// One Anthropic message in the conversation history.
-///
 /// **Wire shape.** Matches the Anthropic Messages API exactly so the
 /// JSON serialisation `cargo` produces is the on-the-wire body. We
 /// do NOT round-trip through a generic `serde_json::Value` to keep
@@ -111,15 +100,12 @@ pub struct Message {
 }
 
 /// One content block within a [`Message`].
-///
 /// `serde(tag = "type", rename_all = "snake_case")` matches the
 /// Anthropic-side discriminator. The block-shape variants here are
 /// the subset the V2 dispatch loop reads / writes:
-///
 /// * `text` — plain text, both directions.
 /// * `tool_use` — assistant requests a tool call.
 /// * `tool_result` — user (planner) returns the tool's output.
-///
 /// Other block kinds (`image`, `document`) round-trip as
 /// [`ContentBlock::Other`] so an upstream payload that adds new
 /// kinds doesn't break the planner's deserialisation.
@@ -184,11 +170,9 @@ pub enum ContentBlock {
 }
 
 /// Tool definition the planner advertises to the model.
-///
 /// `name` MUST match a registered tool in the dispatch loop's
 /// [`crate::tools::ToolRegistry`]; `input_schema` is the JSON Schema
 /// the model uses to construct the `tool_use.input` payload.
-///
 /// Anthropic's API rejects names containing characters outside
 /// `[A-Za-z0-9_]`; the planner-side registry enforces the same rule
 /// at registration time.
@@ -211,16 +195,13 @@ pub struct ToolSpec {
 // ---------------------------------------------------------------------------
 
 /// Cache-control TTL hint applied to a cache breakpoint.
-///
 /// Anthropic supports two ephemeral durations:
-///
 /// * `Short` — 5 minutes (default). Cache writes are billed at
 ///   1.25× the base input-token price; cache reads at 0.10×.
 ///   Idle prompts older than 5 min require a fresh cache write.
 /// * `Long` — 1 hour. Cache writes are billed at 2× base; reads
 ///   at 0.10×. Use when prompts may sit idle longer than 5 min
 ///   (long agentic workloads, slow human follow-ups).
-///
 /// Maps to Anthropic's `cache_control: { type: "ephemeral", ttl: "1h" }`
 /// (`Long`) vs. plain `cache_control: { type: "ephemeral" }` (`Short`).
 /// Bedrock uses the same shape; OpenAI / Gemini ignore TTL hints
@@ -239,13 +220,11 @@ pub enum CacheTtl {
 }
 
 /// Cache-control marker placed on a cache breakpoint.
-///
 /// Anthropic / Bedrock wire shape:
 /// ```json
 /// { "type": "ephemeral" }            // 5-minute TTL (default)
 /// { "type": "ephemeral", "ttl": "1h" }  // 1-hour TTL
 /// ```
-///
 /// Currently `"ephemeral"` is the only supported `type` upstream;
 /// the variant is named for the wire-shape value it serializes to
 /// so future cache-control modes (if Anthropic adds them) can land
@@ -295,7 +274,6 @@ impl CacheControl {
 
 /// Top-level request body for Anthropic's
 /// `POST /v1/messages` endpoint.
-///
 /// **Wire-shape note.** This struct uses a hand-written
 /// [`Serialize`] impl rather than `#[derive(Serialize)]` because
 /// the Anthropic prompt-caching wire shape requires conditional
@@ -344,8 +322,7 @@ pub struct MessageRequest {
     #[serde(default)]
     pub temperature: Option<f32>,
 
-    /// V2_GAPS §C9 — opt into Anthropic's SSE streaming endpoint.
-    ///
+    /// opt into Anthropic's SSE streaming endpoint.
     /// When `true`, the upstream returns a `text/event-stream`
     /// body with incremental events; consumers go through
     /// [`ModelClient::create_message_stream`] (see also
@@ -356,7 +333,6 @@ pub struct MessageRequest {
     pub stream: bool,
 
     /// **Prompt caching opt-in: cache the system prompt.**
-    ///
     /// When `true`, the on-the-wire `system` field is projected as
     /// a single-element block array
     /// `[{ "type": "text", "text": ..., "cache_control": {...} }]`
@@ -366,11 +342,9 @@ pub struct MessageRequest {
     /// prefix get a cache READ (10% of base input price) instead
     /// of recomputing. Ignored by OpenAI / Gemini (they cache
     /// transparently — see [`Usage::cache_read_input_tokens`]).
-    ///
     /// **Default `false`** for backward compat; the planner
     /// dispatch loop sets it `true` per
     /// `prompt-caching.md §"Per-role defaults"`.
-    ///
     /// `#[serde(skip)]` because this is a request-construction
     /// flag, not an Anthropic-shaped wire field — the manual
     /// `Serialize` impl reads it to drive the projection but never
@@ -379,13 +353,11 @@ pub struct MessageRequest {
     pub cache_system: bool,
 
     /// **Prompt caching opt-in: cache the tool definitions.**
-    ///
     /// When `true`, the LAST tool in `tools` carries
     /// `cache_control: { "type": "ephemeral" }` on the wire so
     /// Anthropic / Bedrock cache the entire tools section. Tool
     /// definitions are large, stable per session, and cached
     /// reads cost 10% of base input price.
-    ///
     /// Ignored by OpenAI / Gemini per the same rationale as
     /// [`Self::cache_system`].
     #[serde(skip)]
@@ -393,7 +365,6 @@ pub struct MessageRequest {
 
     /// **Prompt caching opt-in: cache the growing message
     /// history.**
-    ///
     /// When `true`, emits a top-level
     /// `cache_control: { "type": "ephemeral" }` so Anthropic
     /// applies its **automatic caching** rule — the cache
@@ -402,7 +373,6 @@ pub struct MessageRequest {
     /// previous breakpoint from cache. Best for multi-turn
     /// conversations where the message history grows monotonically
     /// (the steady-state agentic dispatch shape).
-    ///
     /// Bedrock + Vertex AI do not support automatic caching
     /// (per `prompt-caching.md §"Provider parity"`); on those
     /// providers the flag is suppressed at projection time.
@@ -412,7 +382,6 @@ pub struct MessageRequest {
 
     /// **TTL hint for the cache breakpoints set by the
     /// `cache_*` flags above.**
-    ///
     /// `None` (default) is wire-equivalent to [`CacheTtl::Short`]
     /// (5-minute ephemeral). `Some(CacheTtl::Long)` switches every
     /// breakpoint emitted by this request to the 1-hour tier
@@ -426,7 +395,7 @@ pub struct MessageRequest {
 }
 
 impl Default for MessageRequest {
-    /// V2_GAPS §C9 — convenience constructor used by tests + the
+    /// convenience constructor used by tests + the
     /// retry / fallback / circuit breaker shells. `..Default::default()`
     /// at construction sites avoids cascade-edit churn whenever a
     /// new optional field lands.
@@ -449,7 +418,6 @@ impl Default for MessageRequest {
 
 impl serde::Serialize for MessageRequest {
     /// Manual Anthropic-Messages wire-shape serializer that:
-    ///
     /// 1. Always emits `model` + `max_tokens`.
     /// 2. Skips `temperature` when `None`, `tools` when empty,
     ///    `stream` when `false` (matches the prior derive-based
@@ -468,7 +436,6 @@ impl serde::Serialize for MessageRequest {
     /// 5. When `cache_messages`, emits a top-level
     ///    `cache_control: { "type": "ephemeral" }` (with optional
     ///    `ttl` honoring [`Self::cache_ttl`]).
-    ///
     /// This impl is the production wire-shape contract; any
     /// serde-output regression must be caught by the
     /// `request_serialises_*` golden tests in this module.
@@ -634,7 +601,6 @@ pub struct MessageResponse {
 
 /// Token-usage counters from one Anthropic response. Wire shape
 /// matches the Anthropic API exactly.
-///
 /// **Streaming-friendly defaults.** All four fields carry
 /// `#[serde(default)]` so partial-usage payloads (Anthropic's
 /// mid-stream `message_delta` event surfaces only `output_tokens`;
@@ -668,7 +634,6 @@ pub struct Usage {
     /// support prompt caching. The dispatch loop folds this into
     /// the cumulative input-token budget total so a session that
     /// hits cache heavily stays within its policy ceiling.
-    ///
     /// Provider attribution:
     /// * Anthropic / Bedrock — `usage.cache_read_input_tokens`
     /// * OpenAI — `usage.prompt_tokens_details.cached_tokens`
@@ -682,7 +647,6 @@ pub struct Usage {
 // ---------------------------------------------------------------------------
 
 /// Errors surfaced by `ModelClient::chat` implementations.
-///
 /// Variants are mapped onto a stable [`crate::PlannerError::exit_code`] in
 /// the planner binary's `main`; tests assert on the discriminant rather than
 /// the wrapped error text.
@@ -738,11 +702,10 @@ pub trait ModelClient: Send + Sync {
     /// (buffered). The dispatch loop calls this once per turn.
     async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse, ModelError>;
 
-    /// V2_GAPS §C9 — start a streaming Messages API request and
+    /// start a streaming Messages API request and
     /// return a [`tokio::sync::mpsc::Receiver`] that yields
     /// [`crate::streaming::StreamEvent`]s as the upstream
     /// generates content.
-    ///
     /// The terminal event on a successful stream is always
     /// [`crate::streaming::StreamEvent::Complete`] carrying the
     /// fully-aggregated [`MessageResponse`]. Intermediate events
@@ -750,13 +713,11 @@ pub trait ModelClient: Send + Sync {
     /// observability-only — the dispatch loop's tool-execution
     /// logic consumes only the terminal `Complete` (per
     /// `INV-PROVIDER-04`).
-    ///
     /// **Default impl.** Calls [`Self::create_message`] and emits
     /// a synthetic four-event stream
     /// (`MessageStart`, `Usage`, `Stop`, `Complete`). Providers
     /// that support real SSE streaming (V2.4: AnthropicClient)
     /// override this to wire the upstream chunk reader.
-    ///
     /// **Idle-timeout.** Implementors that override this method
     /// MUST surface
     /// [`ModelError::Timeout`] when no chunk arrives for longer
@@ -795,11 +756,9 @@ pub trait ModelClient: Send + Sync {
 /// Production Anthropic Messages API client. POSTs to
 /// `<base_url>/v1/messages` (default
 /// `https://api.anthropic.com`).
-///
 /// The buffered `create_message` path goes through an
 /// [`crate::http_fetch::HttpFetch`] so the same client works in
 /// every substrate:
-///
 /// * Subprocess / `Mediated` substrates pass
 ///   [`crate::http_fetch::DirectHttpFetch`] (`reqwest` direct
 ///   egress + transparent tproxy interception in the VM).
@@ -807,7 +766,6 @@ pub trait ModelClient: Send + Sync {
 ///   [`crate::http_fetch::KernelMediatedHttpFetch`] which routes
 ///   each call through `IpcMessage::PlannerFetchRequest` to the
 ///   kernel + gateway.
-///
 /// Streaming (`create_message_stream`) still uses the embedded
 /// `reqwest::Client` directly because SSE is reqwest-specific; the
 /// kernel-mediated transport falls through the default
@@ -840,7 +798,6 @@ impl AnthropicClient {
     /// Construct a new client over the default direct-egress HTTP
     /// transport. Equivalent to
     /// `AnthropicClient::with_http_fetch(base_url, Arc::new(DirectHttpFetch::new()))`.
-    ///
     /// The `api_key` parameter is **deliberately absent** — the
     /// gateway injects credentials into the outbound request per
     /// `peripherals.md §3.2 "Credential injection precedence"`. A
@@ -938,8 +895,7 @@ impl ModelClient for AnthropicClient {
         Ok(parsed)
     }
 
-    /// V2_GAPS §C9 — real Anthropic SSE streaming.
-    ///
+    /// real Anthropic SSE streaming.
     /// Sets `stream: true` on the outbound request, opens an SSE
     /// connection to `<base_url>/v1/messages`, and reads chunks
     /// through the [`crate::streaming::SseParser`] /
@@ -950,18 +906,13 @@ impl ModelClient for AnthropicClient {
     /// a final `Stop { stop_reason: "stream_idle_timeout_after_30_s" }`
     /// event so the buffered consumer sees a deterministic close
     /// shape rather than a torn channel.
-    ///
     /// The reader task closes the receiver cleanly on:
-    ///
     /// * Anthropic emitting `event: message_stop` (normal close).
     /// * The HTTP connection ending (graceful upstream EOF).
-    ///
     /// And surfaces a synthesized terminal `Stop` event then closes on:
-    ///
     /// * Per-chunk idle timeout.
     /// * Transport / connection errors.
     /// * Aggregator rejecting a malformed frame.
-    ///
     /// Pre-stream errors (non-2xx response, transport refusal)
     /// surface synchronously as `Err(ModelError::*)` from this
     /// function; the consumer never sees a half-open receiver in
@@ -1109,12 +1060,10 @@ impl ModelClient for AnthropicClient {
 
 // ---------------------------------------------------------------------------
 // Test fakes
-//
 // Gated on `debug_assertions || test` per the workspace's mock-isolation
 // discipline (see `raxis-test-support/src/lib.rs` Layer 1). In a release
 // build of any crate that depends on `raxis-planner-core`, `MockModelClient`
 // does not exist and any reference to it fails to compile with E0432.
-//
 // This is an interim measure. The clean long-term path is to extract the
 // `ModelClient` trait into a `raxis-planner-substrate` crate (like
 // `raxis-gateway-substrate`) so `raxis-test-support` can host the mock
@@ -1123,7 +1072,6 @@ impl ModelClient for AnthropicClient {
 // ---------------------------------------------------------------------------
 
 /// In-memory test fake — pre-canned responses driven by the test.
-///
 /// The dispatch-loop unit tests construct one `MockModelClient`
 /// queued with a sequence of `MessageResponse` values and verify
 /// the dispatch behaviour against each turn's response.
@@ -1223,7 +1171,7 @@ mod tests {
         );
         // `stream: false` is the default and MUST be skipped from
         // the wire so existing call sites that opted-out of
-        // streaming see no on-the-wire diff (V2_GAPS §C9).
+        // streaming see no on-the-wire diff.
         assert!(
             json.get("stream").is_none(),
             "stream=false (default) MUST be omitted from the wire"
@@ -1245,7 +1193,6 @@ mod tests {
     }
 
     /// **Prompt-caching wire shape — system breakpoint.**
-    ///
     /// When `cache_system = true`, the on-the-wire `system` field
     /// MUST project to a single-element block array carrying
     /// `cache_control: { "type": "ephemeral" }`. This is the
@@ -1293,7 +1240,6 @@ mod tests {
     }
 
     /// **Prompt-caching wire shape — tools breakpoint.**
-    ///
     /// When `cache_tools = true`, the LAST tool in `tools`
     /// carries `cache_control`; earlier tools do NOT. This pins
     /// the cache prefix at the end of the (tools + system)
@@ -1330,7 +1276,6 @@ mod tests {
     }
 
     /// **Prompt-caching wire shape — automatic top-level breakpoint.**
-    ///
     /// When `cache_messages = true`, the request body emits a
     /// top-level `cache_control: { "type": "ephemeral" }` so
     /// Anthropic applies its automatic-caching rule to the growing
@@ -1348,7 +1293,6 @@ mod tests {
     }
 
     /// **Prompt-caching wire shape — opt-out is byte-stable.**
-    ///
     /// When all three cache flags are `false` (the legacy default),
     /// the serialized request MUST NOT contain ANY of:
     /// system block array, per-tool cache_control, or top-level
@@ -1463,9 +1407,8 @@ mod tests {
         let _client = AnthropicClient::new("https://api.anthropic.com");
     }
 
-    /// V2_GAPS §C9 — drive AnthropicClient::create_message_stream
+    /// drive AnthropicClient::create_message_stream
     /// end-to-end against a local SSE mock. Verifies that:
-    ///
     /// 1. The outgoing request carries `stream: true` (so Anthropic
     ///    returns SSE rather than a buffered JSON envelope).
     /// 2. The receiver yields the expected sequence of events

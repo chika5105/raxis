@@ -1,4 +1,4 @@
-//! V2_GAPS §C2 — provider failure handling (MVP).
+//! provider failure handling (MVP).
 //!
 //! Wraps any [`ModelClient`] in a retry/backoff/fallback shell so a
 //! transient upstream failure (network blip, 429, 5xx) does NOT bubble

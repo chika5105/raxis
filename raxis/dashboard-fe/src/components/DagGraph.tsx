@@ -100,7 +100,7 @@ const TITLE_MAX_CHARS = 16;
 /// Static SVG DAG renderer using `dagre` for layered layout.
 /// Operator-tooling-grade — no zoom/pan, just a clean readable
 /// view that scales with the canvas. ≤ 50 nodes is the target
-/// (`v2_extended_gaps.md §4.4` ergonomic budget).
+/// ergonomic budget.
 export function DagGraph({
   nodes,
   edges,

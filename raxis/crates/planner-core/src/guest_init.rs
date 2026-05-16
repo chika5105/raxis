@@ -153,7 +153,7 @@ mod linux {
         // hooked up to anything (the kernel's `init_post()` only
         // sets them up if `/dev/console` already existed at exec
         // time). Without this redirection the planner's `eprintln`
-        // / `tracing` output goes nowhere — which means panic
+        // `tracing` output goes nowhere — which means panic
         // backtraces, mount errors, env hydration errors, and the
         // dispatch-loop diagnostics all silently disappear, leaving
         // the host with nothing but a vsock RST.

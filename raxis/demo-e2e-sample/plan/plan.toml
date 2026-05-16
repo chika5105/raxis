@@ -6,7 +6,7 @@
 #
 # The kernel reads `[plan.initiative].description` as the orchestrator
 # seed prompt and `[[tasks]].description` as each Executor / Reviewer
-# seed prompt. Both fields are REQUIRED (V2 v2_extended_gaps.md §1.1).
+# seed prompt. Both fields are REQUIRED.
 
 [meta]
 version = 1

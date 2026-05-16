@@ -1,12 +1,9 @@
 //! Upstream MongoDB connection driver.
-//!
 //! Normative reference: `credential-proxy.md §14.3` (lazy connect on
 //! first allowed query) and `§14.8.4` (per-proxy implementation
-//! matrix for MongoDB), plus `v2_extended_gaps.md §2.2`
+//! matrix for MongoDB), plus
 //! (SCRAM-SHA-256 upstream auth).
-//!
 //! # What this module owns
-//!
 //! * Parsing the **credential value** (resolved through
 //!   `Arc<dyn CredentialBackend>`) as a Mongo Standard Connection
 //!   String like `mongodb://host:27017/db` or
@@ -24,45 +21,42 @@
 //! * Surfacing structured errors at every failure point so the proxy
 //!   can map them to the three V2.1 audit events (`UpstreamConnected`,
 //!   `UpstreamFailed`, `DatabaseQueryCompleted`).
-//!
 //! # SCRAM-SHA-256 wire shape (RFC 5802 + 7677, MongoDB OP_MSG envelope)
-//!
 //! Once the TCP connect succeeds the proxy issues, in order:
-//!
 //! 1. `saslStart` (database = `authSource` from URL or `"admin"`):
 //!    ```text
 //!    { saslStart: 1, mechanism: "SCRAM-SHA-256",
 //!      payload: BinData(0, "n,,n=<user>,r=<client-nonce>"),
 //!      autoAuthorize: 1, options: { skipEmptyExchange: true } }
 //!    ```
-//!
+//!    The `n,,` prefix is the RFC 5802 §5.1 gs2-header: a `n`
+//!    cbind-flag (no channel binding), an empty authzid placeholder,
+//!    and the trailing comma that separates the gs2-header from the
+//!    bare client-first message. Its base64 form `biws` is what the
+//!    proxy later reflects through the `c=biws` channel-binding
+//!    attribute on the client-final message in step 3.
 //! 2. The server's reply carries `payload = "r=<combined>,s=<salt>,i=<iter>"`
 //!    where `<combined>` MUST start with `<client-nonce>`. The proxy
 //!    enforces both RFC 5802 §5 invariants (nonce prefix match +
 //!    `iter >= 4096` minimum from the SCRAM spec — MongoDB's default
 //!    is 15_000 but legacy clusters can be lower).
-//!
 //! 3. `saslContinue` with the next conversation id and
 //!    `payload = "c=biws,r=<combined>,p=<base64(client_proof)>"`
 //!    where `client_proof = client_key XOR client_signature`,
 //!    `client_key = HMAC-SHA256(salted_password, "Client Key")`,
 //!    `salted_password = PBKDF2-HMAC-SHA256(password, salt, iter, 32)`,
 //!    and `client_signature = HMAC-SHA256(SHA256(client_key), auth_message)`.
-//!
 //! 4. The server's reply carries `payload = "v=<base64(server_signature)>"`
 //!    where `server_signature = HMAC-SHA256(server_key, auth_message)`
 //!    and `server_key = HMAC-SHA256(salted_password, "Server Key")`.
 //!    The proxy MUST verify this in constant time. Mismatch surfaces
 //!    as `UpstreamError::AuthRejected("scram server-signature mismatch")`.
-//!
 //! 5. The server typically replies with `done: true` on the third
 //!    message; if the first conversation reply already carries
 //!    `done: true` (a 1-step fast-path some MongoDB versions use
 //!    when `skipEmptyExchange: true` is set), the proxy moves on
 //!    without sending step 3.
-//!
 //! # Why we relay packets verbatim post-handshake
-//!
 //! Just as for MySQL, the Mongo proxy already does per-command
 //! classification + restriction enforcement on the agent's `OP_MSG`
 //! BEFORE it forwards to the upstream. After that gate, the proxy
@@ -268,7 +262,6 @@ pub struct ParsedUpstreamUrl {
 
 impl ParsedUpstreamUrl {
     /// Parse a Mongo SCS URL out of a resolved credential value.
-    ///
     /// Accepts both the no-auth form (`mongodb://host:27017/db`)
     /// and the SCRAM-SHA-256 form
     /// (`mongodb://user:pass@host:27017/db?authSource=admin`).
@@ -460,16 +453,13 @@ pub struct UpstreamSession {
 
 impl UpstreamSession {
     /// Open a new upstream session against the parsed URL.
-    ///
     /// Auth modes:
-    ///
     /// * `mongodb://host:port/db` (no userinfo) — pure plaintext +
     ///   `--noauth`. Connect succeeds as soon as TCP is up.
     /// * `mongodb://user:pass@host:port/db?authSource=admin`
     ///   (userinfo present) — drives SCRAM-SHA-256 SASL against
     ///   `authSource` (default `admin`). Failure surfaces as
     ///   `UpstreamError::AuthRejected` for the audit trail.
-    ///
     /// `tls=true` / `ssl=true` is rejected as `Handshake` because
     /// the proxy still talks plaintext only on the upstream socket
     /// (V3 work). Operators on `mongo:7` containers can keep
@@ -797,6 +787,12 @@ async fn scram_sha256_authenticate(
     }
     let client_nonce = base64::engine::general_purpose::STANDARD.encode(cnonce_bytes);
     let client_first_bare = format!("n={saslprep_user},r={client_nonce}");
+    // RFC 5802 §5.1: gs2-header = gs2-cbind-flag "," [ authzid ] ","
+    // For SCRAM-SHA-256 without channel binding and without an authzid,
+    // the header MUST be exactly `n,,` (the trailing comma is the empty-
+    // authzid placeholder, not optional). Its base64 encoding is `biws`,
+    // which is the value the server later reflects back through the
+    // c=biws channel-binding attribute on the client-final message.
     let gs2_header = "n,,";
     let client_first_message = format!("{gs2_header}{client_first_bare}");
 
@@ -847,8 +843,8 @@ async fn scram_sha256_authenticate(
     let server_key = hmac_sha256(&salted_password, b"Server Key");
 
     let channel_binding = base64::engine::general_purpose::STANDARD.encode(gs2_header.as_bytes());
-    let client_final_bare = format!("c={channel_binding},r={}", parsed_first.combined_nonce,);
-    let auth_message = format!("{client_first_bare},{server_first},{client_final_bare}",);
+    let client_final_bare = format!("c={channel_binding},r={}", parsed_first.combined_nonce);
+    let auth_message = format!("{client_first_bare},{server_first},{client_final_bare}");
     let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
     let mut client_proof = client_key;
     for (a, b) in client_proof.iter_mut().zip(client_signature.iter()) {
@@ -952,7 +948,7 @@ fn parse_server_first_message(s: &str) -> Result<ServerFirstMessage, String> {
             }
             // RFC 5802 §5.1: server may include `m=<mandatory-extension>`.
             // If it does, we must abort because we don't understand it.
-            "m" => return Err(format!("server requires unknown extension: {v}",)),
+            "m" => return Err(format!("server requires unknown extension: {v}")),
             _ => {}
         }
     }
@@ -1574,7 +1570,7 @@ mod tests {
     /// salt=base64("W22ZaJ0SNY7soEsUEjb6gQ=="), iter=4096
     /// expected salted_password (hex):
     /// 89b69552fcc52f9c0c8a6cb4afdcdfa9e8b1f1e84a48ad0f7a9e7e6e6c8c8c8c
-    /// — but RFC 7677 uses different salt; we just pin a known
+    /// but RFC 7677 uses different salt; we just pin a known
     /// reference vector here against the standalone pbkdf2 crate.
     #[test]
     fn pbkdf2_hmac_sha256_matches_reference_vector() {
@@ -1608,13 +1604,13 @@ mod tests {
     /// `mechanism: SCRAM-SHA-256` string + a BinData payload.
     #[test]
     fn build_sasl_start_doc_includes_mechanism_and_payload() {
-        let doc = build_sasl_start_doc("admin", "SCRAM-SHA-256", b"n,,n=demo,r=AAA");
+        let doc = build_sasl_start_doc("admin", "SCRAM-SHA-256", b"n,n=demo,r=AAA");
         let needle_mech = b"SCRAM-SHA-256";
         assert!(
             doc.windows(needle_mech.len()).any(|w| w == needle_mech),
             "mechanism must appear verbatim in BSON",
         );
-        let needle_payload = b"n,,n=demo,r=AAA";
+        let needle_payload = b"n,n=demo,r=AAA";
         assert!(
             doc.windows(needle_payload.len())
                 .any(|w| w == needle_payload),
@@ -1681,7 +1677,6 @@ mod tests {
     /// Minimal MongoDB SCRAM-SHA-256 server fixture. Reads the
     /// proxy's saslStart/saslContinue OP_MSG frames and emits the
     /// expected server-first / server-final replies.
-    ///
     /// `expect_proof_valid` controls whether the server validates
     /// the client's proof using its known `password` (true) or
     /// always returns an `e=invalid-proof` server-final (false).
@@ -1698,7 +1693,7 @@ mod tests {
         let frame = mock_read_op_msg(s).await?;
         let payload = mock_extract_payload(&frame).expect("saslStart payload");
         let cf = std::str::from_utf8(&payload).unwrap();
-        // gs2_header `n,,` then bare `n=user,r=cnonce`
+        // RFC 5802 gs2-header `n,,` then bare `n=user,r=cnonce`.
         assert!(cf.starts_with("n,,n="));
         let bare = &cf[3..];
         let user_part = bare.split(',').next().unwrap();
@@ -1743,8 +1738,8 @@ mod tests {
         let stored_key = sha256_digest(&client_key);
         let server_key = hmac_sha256(&salted, b"Server Key");
         let cf_bare = format!("n={user},r={cnonce}");
-        let cl_final_bare = format!("c=biws,r={combined}",);
-        let auth_msg = format!("{cf_bare},{server_first},{cl_final_bare}",);
+        let cl_final_bare = format!("c=biws,r={combined}");
+        let auth_msg = format!("{cf_bare},{server_first},{cl_final_bare}");
         let cli_sig = hmac_sha256(&stored_key, auth_msg.as_bytes());
         let mut expected_proof = client_key;
         for (a, b) in expected_proof.iter_mut().zip(cli_sig.iter()) {

@@ -24,7 +24,7 @@
 //! read-only browse of operator-blessed source material. The
 //! `OperatorWorktreeAccessed` / `OperatorDiffViewed` /
 //! `OperatorFileContentFetched` emissions were retired in
-//! `worker/audit-noise-sweep-r2` per the signal-vs-noise policy
+//! the second audit-noise sweep per the signal-vs-noise policy
 //! in `specs/v2/dashboard-operator-action-audit-coverage.md` —
 //! the worktrees are operator-blessed, no kernel state changes
 //! on a read, and a per-click chain row only ever proved

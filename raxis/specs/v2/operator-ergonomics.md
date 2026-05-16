@@ -462,7 +462,7 @@ There are two conceptually distinct git locations operators can confuse:
 
 | Location | Owned by | Purpose | Operator-configurable? |
 |---|---|---|---|
-| **Operator worktree** (e.g., `~/work/myproject/`) | Operator | Where the operator authors code, runs `raxis-cli`, and edits `plan.toml`. | Yes — the operator's filesystem; identified to the CLI via `$PWD` or `--suggest-from`. Bound to a session at session-creation time and validated against `policy.toml [sessions] allowed_worktree_roots`. |
+| **operator worktree** (e.g., `~/work/myproject/`) | Operator | Where the operator authors code, runs `raxis-cli`, and edits `plan.toml`. | Yes — the operator's filesystem; identified to the CLI via `$PWD` or `--suggest-from`. Bound to a session at session-creation time and validated against `policy.toml [sessions] allowed_worktree_roots`. |
 | **Kernel main_repos** (`<data_dir>/main_repos/<initiative_id>/`) | Kernel | The kernel's internal SQLite-backed git store where it materializes `refs/heads/main` after each `IntegrationMerge`. | No — implementation detail; not an operator-facing config. References to `main_repo` in [`integration-merge.md`](integration-merge.md) and `kernel-store.md` are about this kernel-internal location. |
 
 The §4.5.6 suggestion mechanism reads from the **operator worktree**.

@@ -89,7 +89,7 @@ toml         = { workspace = true }
 # round-trip; `toml_edit` exposes the document-preserving API we need.
 toml_edit    = "0.22"
 thiserror    = { workspace = true }
-# `raxis setup` (V2_GAPS §C10) computes a SHA-256 fingerprint of the
+# `raxis setup` computes a SHA-256 fingerprint of the
 # operator-supplied parameters and stores it in `.setup_state.json`
 # so subsequent runs can detect drift in inputs without rolling
 # forward stale phases.

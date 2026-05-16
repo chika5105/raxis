@@ -1,21 +1,17 @@
 //! Restriction set for the Azure IMDS proxy.
-//!
 //! Reference: `specs/v2/credential-proxy.md §3.4`. Azure's IMDS
 //! endpoint mints scoped tokens — one resource URI per call. The
 //! restriction surface is therefore not a path allowlist (the wire
 //! path is fixed) but a *resource* allowlist. The proxy refuses to
 //! mint tokens for resources outside `allowed_resources` even when
 //! the agent passes `?resource=<arbitrary-uri>` to the IMDS endpoint.
-//!
 //! # Per-resource action filtering (V2.3)
-//!
-//! Per `V2_GAPS.md §9 Phase 2` Azure's restriction set acquires a
+//!Azure's restriction set acquires a
 //! per-resource `allowed_actions` table. The Azure access-token
 //! response carries a `xms_action` claim that the SDKs check
 //! before issuing the actual API call (e.g. ARM Resource Manager
 //! reads `Microsoft.Storage/storageAccounts/read`). V2.3 ships a
 //! declarative variant of this filter:
-//!
 //!   * `allowed_actions`: a `(resource, action)` pair list. When
 //!     present and non-empty for a given `resource`, the proxy
 //!     adds an `x-ms-allowed-actions` header to the token
@@ -23,9 +19,7 @@
 //!     header in V2.3 — runtime enforcement requires the V3
 //!     ARM-aware egress proxy that parses outbound REST URLs and
 //!     matches them against the action vocabulary.
-//!
 //! Behaviour summary:
-//!
 //!   * `allowed_resources` is the **mandatory** gate: a request
 //!     for a resource not in the list gets `400 Bad Request`.
 //!   * `allowed_actions` is **declarative + audit echo**: the
@@ -71,7 +65,7 @@ pub struct ResourceActions {
     /// `["Microsoft.Storage/storageAccounts/read",
     ///   "Microsoft.Storage/storageAccounts/listKeys/action"]`).
     /// Empty list means "no actions declared for this resource"
-    /// — operationally equivalent to omitting the entry; allowed
+    /// operationally equivalent to omitting the entry; allowed
     /// for forward-compatibility with operators who want to
     /// enumerate the resource without scoping its actions.
     #[serde(default)]

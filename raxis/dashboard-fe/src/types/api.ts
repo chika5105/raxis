@@ -256,8 +256,8 @@ export interface RecentSessionEntry {
 
 /// Wire shape for one record returned by
 /// `GET /api/tasks/:task_id/llm-turns`. Mirrors
-/// `raxis_dashboard::data::TaskLlmTurnView` field-for-field
-/// post-iter64. `INV-DASHBOARD-LLM-TURN-PANEL-WIRE-SHAPE-01`.
+/// `raxis_dashboard::data::TaskLlmTurnView` field-for-field.
+/// `INV-DASHBOARD-LLM-TURN-PANEL-WIRE-SHAPE-01`.
 export interface TaskLlmTurnView {
   /// Monotonic 1-indexed turn number — one per call to
   /// `TaskLlmCapture::append`. Ordered so the FE can render
@@ -878,7 +878,7 @@ export interface StreamEventEnvelope {
   /// Event kind. For audit-bridge frames this is the audit
   /// `event_kind` PascalCase string (`IntentAccepted`, …); for
   /// future gateway frames this'll be `model_chunk` / `tool_call`
-  /// / `tool_result` / `terminal` / `heartbeat`. The wire is
+  /// `tool_result` / `terminal` / `heartbeat`. The wire is
   /// open — new kinds may appear without a frontend release.
   kind: string;
   /// Free-form structured payload parsed from the SSE `data:`

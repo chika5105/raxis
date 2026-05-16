@@ -185,6 +185,16 @@ pub fn require_disk_hygiene_with_threshold(threshold_pct: u32) {
 /// guest dir). De-duped by the `Mounted on` column so a single
 /// physical volume backing several monitored paths is reported
 /// once.
+///
+/// Probe-failure handling: when `df` itself fails unexpectedly on
+/// a path that exists (command spawn error, non-zero exit,
+/// unparseable output), emit a structured stderr line so the
+/// developer sees that the hygiene probe could NOT measure that
+/// volume — silently dropping the probe would let a host with a
+/// broken mount pass the preflight even though we have no
+/// evidence it has free space. Paths that simply do not exist
+/// (`/private/tmp` on a minimal CI image, `/var/folders` outside
+/// macOS) are still skipped silently — they're optional inputs.
 fn probe_disk_pressure(_threshold_pct: u32) -> Vec<raxis_types::DiskVolumeReport> {
     let repo_root = workspace_repo_root();
     let mut targets: Vec<PathBuf> = vec![repo_root, PathBuf::from("/private/tmp")];
@@ -202,17 +212,28 @@ fn probe_disk_pressure(_threshold_pct: u32) -> Vec<raxis_types::DiskVolumeReport
         if !t.exists() {
             continue;
         }
-        let Some((mount, used_pct, free_kb)) = df_mount_and_pct(&t) else {
-            continue;
-        };
-        if !seen.insert(mount.clone()) {
-            continue;
+        match df_mount_and_pct(&t) {
+            Ok((mount, used_pct, free_kb)) => {
+                if !seen.insert(mount.clone()) {
+                    continue;
+                }
+                out.push(raxis_types::DiskVolumeReport {
+                    mount,
+                    used_pct,
+                    free_human: human_bytes(free_kb.saturating_mul(1024)),
+                });
+            }
+            Err(reason) => {
+                eprintln!(
+                    "{HOST_PREFLIGHT_LOG_PREFIX} HostHygieneDiskProbeFailed \
+                     {{\"path\":{path_json},\"reason\":{reason_json}}}",
+                    path_json = serde_json::to_string(&t.to_string_lossy())
+                        .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                    reason_json = serde_json::to_string(&reason)
+                        .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                );
+            }
         }
-        out.push(raxis_types::DiskVolumeReport {
-            mount,
-            used_pct,
-            free_human: human_bytes(free_kb.saturating_mul(1024)),
-        });
     }
     out
 }
@@ -234,24 +255,40 @@ pub fn emit_operator_attention_to_stderr(err: &raxis_types::HostPreflightError) 
     );
 }
 
-fn df_mount_and_pct(target: &Path) -> Option<(String, u32, u64)> {
+fn df_mount_and_pct(target: &Path) -> Result<(String, u32, u64), String> {
     let out = std::process::Command::new("df")
         .args(["-Pk", &target.to_string_lossy()])
         .output()
-        .ok()?;
+        .map_err(|e| format!("spawn df: {e}"))?;
     if !out.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "df exit={:?}: {}",
+            out.status.code(),
+            stderr.trim()
+        ));
     }
     let body = String::from_utf8_lossy(&out.stdout);
-    let line = body.lines().nth(1)?;
+    let line = body
+        .lines()
+        .nth(1)
+        .ok_or_else(|| "df output had fewer than 2 lines".to_owned())?;
     let fields: Vec<&str> = line.split_whitespace().collect();
     if fields.len() < 6 {
-        return None;
+        return Err(format!(
+            "df output had {} fields (expected ≥6): {line:?}",
+            fields.len()
+        ));
     }
-    let avail_kb: u64 = fields[3].parse().ok()?;
-    let used_pct: u32 = fields[4].trim_end_matches('%').parse().ok()?;
+    let avail_kb: u64 = fields[3]
+        .parse()
+        .map_err(|e| format!("parse avail_kb {:?}: {e}", fields[3]))?;
+    let used_pct: u32 = fields[4]
+        .trim_end_matches('%')
+        .parse()
+        .map_err(|e| format!("parse used_pct {:?}: {e}", fields[4]))?;
     let mount = fields[5..].join(" ");
-    Some((mount, used_pct, avail_kb))
+    Ok((mount, used_pct, avail_kb))
 }
 
 fn human_bytes(n: u64) -> String {
@@ -1428,11 +1465,42 @@ pub fn write_provider_credentials(data_dir: &Path) {
     );
 }
 
+/// Write a credentials-bearing file at exactly mode 0600.
+///
+/// The sequence matches `kernel/src/bootstrap.rs::write_file_0400`:
+///
+/// 1. `OpenOptions::create(true).truncate(true).mode(0o600)` — on
+///    the `O_CREAT` path the file comes into existence at 0600.
+///    On the existing-file path the mode is preserved and may be
+///    wider (e.g. an operator hand-edited `creds/foo.env` and
+///    accidentally left it world-readable). Bytes have not yet
+///    been written.
+///
+/// 2. `set_permissions(0o600)` — tightens the mode BEFORE we write
+///    the body. The file is still empty at this point, so even
+///    if the existing file had been at 0644 we never expose body
+///    bytes at the wider mode. The open file descriptor retains
+///    its write access regardless of the on-disk permission bits.
+///
+/// 3. `write_all(body)` then `sync_all` durably land the bytes at
+///    the now-correct 0600 mode.
 fn write_with_mode_0600(path: &Path, body: &[u8]) {
-    std::fs::write(path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap_or_else(|e| panic!("open {} O_CREAT|0600: {e}", path.display()));
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))
         .unwrap_or_else(|e| panic!("chmod 0600 {}: {e}", path.display()));
+    f.write_all(body)
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    f.sync_all()
+        .unwrap_or_else(|e| panic!("fsync {}: {e}", path.display()));
 }
 
 // ---------------------------------------------------------------------------
@@ -2149,10 +2217,11 @@ pub fn realistic_lifecycle_deadline() -> Duration {
 /// [`realistic_lifecycle_deadline`].
 ///
 /// The bound on filesystem reads is the deadline itself: the
-/// scan reads `kernel.stderr.log` at most once per 500 ms
-/// (the existing poll cadence) and never blocks on a pipe —
-/// `read_to_string` against a regular file is bounded by the
-/// file size which the kernel caps via its log rotation.
+/// scan reads only the NEW bytes of `kernel.stderr.log` at most
+/// once per 500 ms (the existing poll cadence) via a
+/// byte-offset cursor (`StderrTailScanner`). On long runs with
+/// verbose logging this avoids the previous O(N²) behaviour
+/// where each iteration re-read the entire log from byte zero.
 pub fn poll_for_dual_lifecycle_completion(
     data_dir: &Path,
     initiative_ids: [&str; 2],
@@ -2162,6 +2231,7 @@ pub fn poll_for_dual_lifecycle_completion(
     let stderr_path = data_dir.join("kernel.stderr.log");
     let start = Instant::now();
     let mut last_len = 0usize;
+    let mut tail = StderrTailScanner::new();
     loop {
         if start.elapsed() > deadline {
             let stderr_tail = std::fs::read_to_string(&stderr_path)
@@ -2195,7 +2265,7 @@ pub fn poll_for_dual_lifecycle_completion(
         // `RootfsErofs`) leaves the test waiting the full
         // [`realistic_lifecycle_deadline`] for an event that will
         // never arrive.
-        if let Some(failure) = scan_stderr_for_terminal_spawn_failure(&stderr_path, &initiative_ids)
+        if let Some(failure) = tail.scan_for_terminal_spawn_failure(&stderr_path, &initiative_ids)
         {
             let stderr_tail = std::fs::read_to_string(&stderr_path)
                 .ok()
@@ -2344,10 +2414,85 @@ struct TerminalSpawnFailure {
     hint: String,
 }
 
-/// Scan `kernel.stderr.log` for either of the kernel's terminal
-/// spawn-failure JSON lines bound to one of `watched_initiatives`.
-/// Returns a [`TerminalSpawnFailure`] on the first match, `None`
-/// otherwise.
+/// Cursor over `kernel.stderr.log` that remembers how many bytes
+/// have already been scanned, so the polling loop only inspects
+/// new bytes on each iteration.
+///
+/// Without this, a 60-minute realistic-scenario run with verbose
+/// kernel logging makes the watchdog re-read the entire log file
+/// every 500 ms — O(N²) on log size — which can pin a core and
+/// inflate iteration latency to the point of starving the audit
+/// poll itself.
+///
+/// The cursor only advances past complete (newline-terminated)
+/// lines. A trailing partial line (write-in-progress, kernel
+/// buffer not yet flushed) stays unscanned and is re-read on the
+/// next iteration. False-positive cost is bounded to one
+/// partial-line read per iteration.
+pub(crate) struct StderrTailScanner {
+    offset: u64,
+}
+
+impl StderrTailScanner {
+    pub(crate) fn new() -> Self {
+        Self { offset: 0 }
+    }
+
+    /// Scan only the new (post-cursor) bytes for either of the
+    /// kernel's terminal spawn-failure JSON lines bound to one of
+    /// `watched_initiatives`. Returns a [`TerminalSpawnFailure`] on
+    /// the first match, `None` otherwise. Advances the cursor past
+    /// every complete line read.
+    fn scan_for_terminal_spawn_failure(
+        &mut self,
+        stderr_path: &Path,
+        watched_initiatives: &[&str; 2],
+    ) -> Option<TerminalSpawnFailure> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut file = std::fs::File::open(stderr_path).ok()?;
+        let file_len = file.metadata().ok()?.len();
+        // Log rotation / truncation: cursor would be past EOF;
+        // restart from the beginning so we don't silently miss
+        // the new file's contents.
+        if self.offset > file_len {
+            self.offset = 0;
+        }
+        file.seek(SeekFrom::Start(self.offset)).ok()?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).ok()?;
+        if bytes.is_empty() {
+            return None;
+        }
+        // Only inspect complete (newline-terminated) lines; carry
+        // any trailing partial line over to the next iteration.
+        let last_newline = bytes.iter().rposition(|&b| b == b'\n');
+        let scan_end = match last_newline {
+            Some(idx) => idx + 1,
+            // No newline yet in the new bytes — entire buffer is a
+            // partial line. Don't advance the cursor.
+            None => return None,
+        };
+        let scan_bytes = &bytes[..scan_end];
+        let hit = scan_stderr_bytes(scan_bytes, watched_initiatives);
+        self.offset = self.offset.saturating_add(scan_end as u64);
+        hit
+    }
+}
+
+/// Test-friendly wrapper: scan a stderr fixture from the
+/// beginning each call. Production callers use
+/// [`StderrTailScanner`] to avoid re-reading old bytes.
+fn scan_stderr_for_terminal_spawn_failure(
+    stderr_path: &Path,
+    watched_initiatives: &[&str; 2],
+) -> Option<TerminalSpawnFailure> {
+    StderrTailScanner::new().scan_for_terminal_spawn_failure(stderr_path, watched_initiatives)
+}
+
+/// Scan a byte slice (one or more newline-terminated JSON lines)
+/// for either of the kernel's terminal spawn-failure events
+/// bound to one of `watched_initiatives`.
 ///
 /// The two schemas we match on, verbatim from the kernel:
 ///
@@ -2371,8 +2516,8 @@ struct TerminalSpawnFailure {
 /// the kernel may still resolve. Only the two
 /// `*_spawn_failed` / `*SpawnFailed` events are *terminal* for
 /// the boot path.
-fn scan_stderr_for_terminal_spawn_failure(
-    stderr_path: &Path,
+fn scan_stderr_bytes(
+    bytes: &[u8],
     watched_initiatives: &[&str; 2],
 ) -> Option<TerminalSpawnFailure> {
     /// Token shared by both terminal-failure event names.
@@ -2380,7 +2525,6 @@ fn scan_stderr_for_terminal_spawn_failure(
     /// The historical orchestrator schema uses snake_case.
     const ORCH_TOKEN: &[u8] = b"orchestrator_spawn_failed";
 
-    let bytes = std::fs::read(stderr_path).ok()?;
     for line in bytes.split(|&b| b == b'\n') {
         if line.is_empty() {
             continue;
@@ -2914,6 +3058,105 @@ mod tests {
         let log = tmp.path().join("does-not-exist.log");
         let hit = scan_stderr_for_terminal_spawn_failure(&log, &["a", "b"]);
         assert!(hit.is_none(), "missing-file must be a no-op, got {hit:?}");
+    }
+
+    /// `StderrTailScanner` only inspects bytes past its internal
+    /// cursor. The polling loop appends new lines between calls, and
+    /// each scan should pay for only the new bytes — not the full
+    /// log every iteration. Regression for the O(N²) behaviour where
+    /// a 60-min run re-read the entire kernel.stderr.log every 500 ms.
+    #[test]
+    fn stderr_tail_scanner_skips_already_seen_bytes() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log = tmp.path().join("kernel.stderr.log");
+        let initiative = "019e20c9-e093-7052-a0d1-1c97ef8b0090";
+
+        // Round 1: write some unrelated lines.
+        std::fs::write(
+            &log,
+            b"{\"level\":\"info\",\"event\":\"sockets_bound\"}\n\
+              {\"level\":\"info\",\"event\":\"session_vm_transient_retry\",\
+                \"attempt\":1}\n",
+        )
+        .expect("seed stderr fixture");
+
+        let mut tail = StderrTailScanner::new();
+        let before_offset = tail.offset;
+        let hit = tail.scan_for_terminal_spawn_failure(&log, &[initiative, initiative]);
+        assert!(hit.is_none(), "no terminal failure in round 1");
+        assert!(
+            tail.offset > before_offset,
+            "cursor must advance past complete lines we scanned",
+        );
+
+        // Round 2: append the terminal failure. Scanner should pick
+        // it up and the cursor should advance to the new EOF.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .expect("append-open stderr fixture");
+        writeln!(
+            f,
+            "{{\"level\":\"error\",\"event\":\"orchestrator_spawn_failed\",\
+              \"initiative_id\":\"{initiative}\",\
+              \"session_id\":\"sess-1\",\
+              \"error\":\"boom\",\"hint\":\"recovery::reconcile\"}}"
+        )
+        .expect("append failure line");
+        drop(f);
+
+        let pre = tail.offset;
+        let hit = tail
+            .scan_for_terminal_spawn_failure(&log, &[initiative, initiative])
+            .expect("must surface the appended failure");
+        assert_eq!(hit.event, "orchestrator_spawn_failed");
+        assert!(tail.offset > pre, "cursor must advance past appended line");
+
+        // Round 3: no new bytes. Scanner must short-circuit and
+        // not return the (already-reported) failure again.
+        let stable = tail.offset;
+        let hit = tail.scan_for_terminal_spawn_failure(&log, &[initiative, initiative]);
+        assert!(
+            hit.is_none(),
+            "already-scanned failure must not re-fire on the next poll iteration; \
+             got {hit:?}",
+        );
+        assert_eq!(tail.offset, stable, "cursor must not advance with no new bytes");
+    }
+
+    /// Log rotation / truncation: the file shrinks below the cursor.
+    /// The scanner must restart from byte zero so the new file's
+    /// contents are not silently skipped.
+    #[test]
+    fn stderr_tail_scanner_handles_truncation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log = tmp.path().join("kernel.stderr.log");
+        let initiative = "019e20c9-e093-7052-a0d1-1c97ef8b0090";
+
+        // Seed a big file, advance the cursor past it.
+        std::fs::write(&log, "filler\n".repeat(64)).expect("seed");
+        let mut tail = StderrTailScanner::new();
+        let _ = tail.scan_for_terminal_spawn_failure(&log, &[initiative, initiative]);
+        assert!(tail.offset > 0, "cursor must have advanced");
+
+        // Truncate to a smaller file with a terminal failure on the
+        // very first line. The scanner must NOT skip it.
+        std::fs::write(
+            &log,
+            format!(
+                "{{\"level\":\"error\",\"event\":\"orchestrator_spawn_failed\",\
+                  \"initiative_id\":\"{initiative}\",\
+                  \"session_id\":\"sess-1\",\
+                  \"error\":\"truncated\",\"hint\":\"...\"}}\n"
+            ),
+        )
+        .expect("truncate");
+
+        let hit = tail
+            .scan_for_terminal_spawn_failure(&log, &[initiative, initiative])
+            .expect("post-truncation failure must surface");
+        assert_eq!(hit.event, "orchestrator_spawn_failed");
     }
 
     // ─── INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01 ───────────────

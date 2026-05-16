@@ -29,7 +29,7 @@ on the final accepting Reviewer verdict.
 - **Anthropic credentials** at
   `$RAXIS_DATA_DIR/providers/anthropic-prod.toml` (mode 0600).
 - This scenario assumes the V2.5+ surface: see
-  [V2_STATUS.md](../../../specs/v2/V2_STATUS.md) for the
+ for the
   revision-cycle landed-status table.
 
 ---
@@ -81,7 +81,7 @@ cp /path/to/raxis/guides/scenarios/22-reviewer-rejection-then-pass/plan.toml "$D
 > The plan deliberately omits `max_review_rejections` and
 > `max_revision_rounds`. The V2.6 plan-toml parser will surface
 > those ceilings; today the kernel silently ignores them — see
-> `specs/v2/V2_GAPS.md §12.13`. Until that lands, rely on the
+> . Until that lands, rely on the
 > Reviewer's wall-clock budget to bound the loop.
 
 ---
@@ -162,7 +162,7 @@ rm -rf "$DEMO_ROOT"
 - Concepts: [`../../CONCEPTS.md#agent-types`](../../CONCEPTS.md#agent-types).
 - Pattern: [`../../patterns/single-executor-reviewer.md`](../../patterns/single-executor-reviewer.md).
 - Spec: `specs/v2/v2-deep-spec.md §Step 13` (revision-cycle
-  protocol); `specs/v2/V2_STATUS.md` (V2.5 surface table).
+  protocol); (V2.5 surface table).
 - Related scenarios:
   - [`02-single-executor-reviewer`](../02-single-executor-reviewer/)
     — the happy path with no rejection.

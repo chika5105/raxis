@@ -1,8 +1,6 @@
 //! Planner-harness error taxonomy.
-//!
 //! Each variant maps to a structured exit code in the binary's
 //! `main`. The convention is:
-//!
 //!   * exit-code `0`  — clean shutdown signalled by the kernel
 //!   * exit-code `2`  — argv contract violation
 //!     ([`PlannerError::BadArg`], [`PlannerError::MissingValue`],
@@ -17,10 +15,8 @@
 //!     (orchestrator/executor — reviewer Idle is allowed via
 //!     scaffold path)
 //!   * exit-code `6`  — cumulative token ceiling tripped
-//!     (V2_GAPS.md §C1)
 //!   * exit-code `7`  — driver failure (transport, model, intent
 //!     submission). Stderr carries the structured detail.
-//!
 //! These exit codes are chosen so the kernel-side `SessionVmExited`
 //! audit event carries enough information to distinguish a planner
 //! crash from a kernel-substrate-supplied bad spec without having
@@ -153,6 +149,6 @@ mod tests {
             .exit_code(),
             6,
         );
-        assert_eq!(PlannerError::DriverFailure("any".to_owned()).exit_code(), 7,);
+        assert_eq!(PlannerError::DriverFailure("any".to_owned()).exit_code(), 7);
     }
 }

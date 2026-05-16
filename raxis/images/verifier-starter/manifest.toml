@@ -4,7 +4,7 @@
 #   - peripherals.md §3.3 (verifier spawn envelope)
 #   - verifier-processes.md §6 (witness body shape + exit-code mapping)
 #   - planner-harness.md §14.4 (image-build pipeline)
-#   - V2_GAPS.md A8 (verifier runtime — shipped, iter62)
+#   - A8 (verifier runtime — shipped, iter62)
 #   - INV-VERIFIER-RESERVED-ALIAS-MUTUAL-EXCLUSION-01 (D11)
 #
 # Trust model

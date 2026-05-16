@@ -154,7 +154,7 @@ tries to connect to a *non-localhost* address on port 5432 does it hit `raxis-tp
 
 > **DEPRECATED framing — describes legacy mechanism (D3 in §0).** The diagram's "Kernel Host" column and "via iptables REDIRECT" header reflect the pre-Tier1Tproxy-deletion shape, where iptables on a NIC-attached VM was the architecturally interesting redirect hop. Under `EgressTier::Mediated` the iptables REDIRECT still happens but it is in-VM only (no NIC); the load-bearing path is `agent → in-VM tproxy → AF_VSOCK → kernel-side admission handler → upstream`, with the kernel-side handler being the component that opens the upstream socket. The control-flow (admission request, Admit/Deny verdict, CONNECT-style tunnel) is unchanged. The canonical A3 data-flow diagram lives in [`airgap-architecture.md`](airgap-architecture.md).
 
-<!-- Original ASCII diagram (auto-converted to mermaid in iter62-linkify-repair):
+<!-- Original ASCII diagram (auto-converted to mermaid in):
      Agent process                raxis-tproxy (localhost:3129)        Kernel Host
                                   via iptables REDIRECT
          |                               |                                |
@@ -210,7 +210,7 @@ end-to-end between the agent and the real server.
 For HTTPS, the TPROXY reads the SNI (Server Name Indication) from the ClientHello
 TLS handshake — this is sent in plaintext before encryption begins:
 
-<!-- Original ASCII diagram (auto-converted to mermaid in iter62-linkify-repair):
+<!-- Original ASCII diagram (auto-converted to mermaid in):
      Client → raxis-tproxy: [TLS ClientHello with SNI extension: stripe.com]
      raxis-tproxy: extract SNI = "stripe.com"
      raxis-tproxy → Kernel: ProxyAdmission { host: "stripe.com", port: 443, protocol: "https" }
@@ -390,7 +390,7 @@ When the agent tries to connect directly to a real database host (bypassing the
 credential proxy), the iptables rule for port 5432 (excluding localhost) redirects
 to `raxis-tproxy`:
 
-<!-- Original ASCII diagram (auto-converted to mermaid in iter62-linkify-repair):
+<!-- Original ASCII diagram (auto-converted to mermaid in):
      Agent: psycopg2.connect("postgresql://user:real_pass@postgres-staging.company.internal:5432/mydb")
        → TCP connect to postgres-staging.company.internal:5432
        → iptables: NOT localhost → REDIRECT → raxis-tproxy:3129
@@ -430,7 +430,7 @@ security violation, no audit event, no strike counter.
 
 > **DEPRECATED framing on step 4 — describes legacy mechanism (D5 in §0).** Step 4 still runs but installs the A3 rule shape (single-rule REDIRECT into `raxis-tproxy` + DNS `udp/53` stub-forwarder rule), not the per-port set published in §3.1. Steps 1–3 and 5–10 are unchanged under `EgressTier::Mediated`. The canonical A3 boot-sequence walkthrough lives in [`airgap-architecture.md`](airgap-architecture.md).
 
-<!-- Original ASCII diagram (auto-converted to mermaid in iter62-linkify-repair):
+<!-- Original ASCII diagram (auto-converted to mermaid in):
      1. Kernel allocates VM, assigns session_id
      2. Kernel starts all credential proxies declared in [[tasks.credentials]]:
         - PostgresProxy → localhost:5432

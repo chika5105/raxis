@@ -1,6 +1,6 @@
 # Prompt caching
 
-> **Status.** Active (iter58). Wires Anthropic's prompt-caching feature
+> **Status.** Active. Wires Anthropic's prompt-caching feature
 > into `planner-core`'s dispatch loop and surfaces equivalent
 > cache-hit attribution from every other supported provider
 > (Bedrock-via-Anthropic, OpenAI, Gemini).
@@ -180,7 +180,7 @@ benefit identically).
 ## Opt-out is byte-stable
 
 When all three cache flags are `false` (the
-`MessageRequest::default()` shape and the pre-iter58 behavior),
+`MessageRequest::default()` shape and the earlier behavior),
 the serialized request body is byte-identical to the legacy
 wire shape:
 
@@ -247,7 +247,7 @@ should derive:
   `cachedContents` resource via the Generative Language API,
   then reference by name on subsequent requests. Requires
   gateway-side cache-resource lifecycle management. Out of
-  scope for iter58.
+  scope for.
 * **Sidecar protocol forwarding.** The `SidecarRequest` shape
   in `crates/planner-core/src/sidecar_client.rs` does NOT
   currently forward the `cache_*` flags; sidecars are

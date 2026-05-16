@@ -2,7 +2,7 @@
 //!
 //! Audit discipline: pure read-only browser. The
 //! `OperatorViewedInbox` emission was retired in
-//! `worker/audit-tightening` per the signal-vs-noise policy in
+//! an earlier audit-noise sweep per the signal-vs-noise policy in
 //! `specs/v2/dashboard-operator-action-audit-coverage.md` —
 //! the inbox is itself a projection of the audit chain, so a
 //! per-open audit row drowns out the signal it surfaces.

@@ -2,8 +2,8 @@
 // Theme context — light / dark with operator-controlled persistence
 // ─────────────────────────────────────────────────────────────────
 //
-// Spec: raxis/specs/v2/v2_extended_gaps.md §4.4 (UI design — dark
-// mode default, operator readability is non-negotiable).
+// UI design: dark mode default, operator readability is
+// non-negotiable.
 //
 // Operator UX contract:
 //

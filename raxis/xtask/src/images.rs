@@ -8,9 +8,9 @@
 //!   — the production EROFS pipeline. This module is the dev-host
 //!   companion that emits the same signed-manifest shape but with
 //!   `image_format = RootfsInitramfsCpio` instead.
-//! * `raxis/specs/v2/e2e-live-test-gap.md` — the `mkfs.erofs`-on-macOS
-//!   blocker. `dev-stage` + `build-all` together remove the EROFS
-//!   tooling dependency for local AVF demos.
+//! * The `mkfs.erofs`-on-macOS blocker is the reason this dev-host
+//!   pipeline exists: `dev-stage` + `build-all` together remove the
+//!   EROFS tooling dependency for local AVF demos.
 //! * `raxis/crates/initramfs-builder/` — the cpio.gz writer the
 //!   `build-all` step drives.
 //!
@@ -115,7 +115,7 @@ impl Role {
     /// bake (`bake-rootfs`), or is it binary-only (just the staged
     /// planner PID-1 binary)? Orchestrator + Reviewer are deliberately
     /// binary-only per `INV-PLANNER-HARNESS-02` minimalism;
-    /// `executor-starter` and (iter62) both verifier images need the
+    /// `executor-starter` and both verifier images need the
     /// OS-tooling-rich Containerfile bake — the verifier ships the
     /// runtime alongside the binary.
     ///
@@ -1006,7 +1006,7 @@ struct BuildAllArgs {
     /// `.env(...)`. Populated by `run_build_all` (operator-invoked)
     /// and by the umbrella `bake_one_role_full` driver. Test
     /// fixtures may leave this `None` — the auto-stage path then
-    /// runs without the env injection, matching the pre-iter66
+    /// runs without the env injection, matching the earlier
     /// behaviour. INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01.
     kernel_signing_key_hex: Option<String>,
 }
@@ -1364,7 +1364,7 @@ fn workspace_root_from_cwd() -> Result<PathBuf> {
 // (INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01)
 // ---------------------------------------------------------------------------
 //
-// Pre-iter61 a fresh clone could not run `cargo xtask images bake`
+// Previously a fresh clone could not run `cargo xtask images bake`
 // without first running BOTH `cargo xtask dev-keys init` (to mint a
 // keypair under `$HOME/.config/raxis/keys/`) AND manually exporting
 // `RAXIS_KERNEL_SIGNING_KEY_HEX` into the shell so the kernel's
@@ -1394,31 +1394,33 @@ fn workspace_root_from_cwd() -> Result<PathBuf> {
 // artefact. Both halves now land at mode 0600 (uniform, iter62
 // hardening); the parent dir is 0700.
 const GIT_INFO_KEY_SK_FILENAME: &str = raxis_dev_signing_key::SK_FILENAME;
-#[cfg_attr(not(test), allow(dead_code))]
-const GIT_INFO_KEY_PK_FILENAME: &str = raxis_dev_signing_key::PK_FILENAME;
 
 pub(crate) use raxis_dev_signing_key::{ensure_dev_signing_keypair, git_info_signing_key_dir};
 
 // ---------------------------------------------------------------------------
-// `cargo xtask images bake-release` — release-pipeline-targeted bake
-// (iter62, INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01)
+// Retired: `cargo xtask images bake-release`
 // ---------------------------------------------------------------------------
 //
-// The dev `bake` path defaults to the per-clone autogen keypair under
-// `<workspace>/.git/info/raxis-signing-key/sk.hex` (iter61). That is
-// the right default for `cargo test` and operator workflows, but it
-// is the WRONG default for a release/CI pipeline: a release whose
-// trust anchor and signature both come from the dev keypair would
-// pass every signature check on the maintainer's machine while being
-// completely uninstallable downstream (the dev keypair is not
-// distributed with the release artifacts; downstream kernels would
-// either reject the manifest or, worse, silently accept whatever
-// keypair the downstream operator happens to have lying around).
+// Earlier iterations shipped a separate `bake-release` subcommand that
+// ran four refusal guards (no dev-keypair leakage) before delegating
+// to the regular bake. It has been retired in favour of letting
+// release pipelines export `RAXIS_KERNEL_SIGNING_KEY_HEX` (the prod
+// public half) before invoking `bake`; the canonical-images build
+// script picks that up over the per-clone dev `pk.hex`. Operators
+// wanting an explicit audit of the host daemon's embedded fingerprint
+// run `cargo xtask images verify-trust-anchor --kernel
+// "$(command -v raxis-kernel)"`.
 //
-// `bake-release` is the seam future release-CI plugs into. It does
-// NOT yet ship a working release artifact end-to-end — that wiring
-// lives in a future iter — but it DOES enforce four refusal guards
-// that prevent the dev keypair from leaking into a release bake:
+// The struct / impl / entry-point that backed `bake-release` is left
+// commented-out below for grep continuity; it is reachable from no
+// codepath.
+//
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+#[cfg(any())]
+mod _retired_bake_release {
+// === BEGIN retired body — unreachable from any codepath ===
 //
 //   1. REQUIRE explicit `--prod-signing-key=<PATH>` OR
 //      `RAXIS_PROD_SIGNING_KEY_HEX` env var. No silent fall-through
@@ -1680,27 +1682,12 @@ fn parse_signing_key_hex(s: &str) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-/// `cargo xtask images bake-release` entry point.
-pub fn run_bake_release(argv: &[String]) -> Result<()> {
-    let args = BakeReleaseArgs::parse_and_validate(argv)?;
-    eprintln!(
-        "{{\"level\":\"info\",\"event\":\"bake_release_guards_passed\",         \"prod_sk_source\":{:?},\"workspace_root\":{:?}}}",
-        args.prod_sk_source,
-        args.workspace_root.display().to_string(),
-    );
-    if args.guards_only {
-        return Ok(());
-    }
-    bail!(
-        "bake-release: full release-pipeline delegate is not yet wired \
-         (iter62 lands the four refusal guards only; the vmlinux-symbol \
-         extraction + inner-bake splice is the next iter). Re-run with \
-         --guards-only to exit 0 after the guard checks."
-    );
-}
+fn run_bake_release(_argv: &[String]) -> Result<()> { unimplemented!() }
+} // end mod _retired_bake_release
 
 // ---------------------------------------------------------------------------
-// bake-rootfs
+// bake-rootfs (retired CLI subcommand; helper is still consumed by the
+// umbrella `bake` driver)
 //
 // `cargo xtask images bake-rootfs --role <ROLE> [--builder <B>] [--platform
 // <PLAT>]` — execute the per-role `images/<role>/Containerfile` against
@@ -1813,16 +1800,19 @@ fn oci_platform_for_target_triple(triple: &str) -> Result<&'static str> {
     }
 }
 
+// `bake-rootfs` is no longer a top-level CLI subcommand. The argv
+// parser is left here under `#[cfg(any())]` for grep continuity; the
+// per-role driver `bake_one_role` is called directly from
+// `bake_one_role_full` inside the umbrella `bake`.
+#[cfg(any())]
+#[allow(dead_code)]
+mod _retired_bake_rootfs_cli {
 #[derive(Debug)]
 struct BakeRootfsArgs {
     role: Role,
     builder: Option<Builder>,
     platform: Option<String>,
     workspace_root: PathBuf,
-    /// When true, leave any existing `images/<role>/rootfs/` content
-    /// in place and merge the bake result on top. Default behaviour is
-    /// to remove the staging dir first so two consecutive bakes are
-    /// byte-deterministic.
     keep: bool,
 }
 
@@ -1887,25 +1877,8 @@ impl BakeRootfsArgs {
     }
 }
 
-/// Entry point for `cargo xtask images bake-rootfs`.
-pub fn run_bake_rootfs(argv: &[String]) -> Result<()> {
-    let args = BakeRootfsArgs::parse(argv)?;
-    let builder = match args.builder {
-        Some(b) => b,
-        None => Builder::auto_detect()?,
-    };
-    let platform = match args.platform.as_deref() {
-        Some(p) => p.to_owned(),
-        None => oci_platform_for_target_triple(default_target_triple())?.to_owned(),
-    };
-    bake_one_role(
-        args.role,
-        builder,
-        &platform,
-        &args.workspace_root,
-        args.keep,
-    )
-}
+fn run_bake_rootfs(_argv: &[String]) -> Result<()> { unimplemented!() }
+} // end mod _retired_bake_rootfs_cli
 
 fn bake_one_role(
     role: Role,
@@ -3414,9 +3387,17 @@ fn bake_one_role_full(
 }
 
 // ---------------------------------------------------------------------------
-// `cargo xtask images preflight` — read-only preflight surface
+// Retired: `cargo xtask images preflight` ran the preflight checks
+// in isolation as a separate subcommand. The umbrella `bake`
+// subcommand runs the same preflight internally before producing any
+// artefact, so the standalone subcommand was redundant. The internal
+// `preflight_bake_inputs` helper is still consumed by `bake`; only
+// the public CLI surface was dropped.
 // ---------------------------------------------------------------------------
 
+#[cfg(any())]
+#[allow(dead_code)]
+mod _retired_preflight_cli {
 #[derive(Debug)]
 struct PreflightArgs {
     roles: Vec<Role>,
@@ -3559,10 +3540,12 @@ pub fn run_preflight(argv: &[String]) -> Result<()> {
     eprintln!("{payload}");
     Ok(())
 }
+} // end mod _retired_preflight_cli
 
 // ---------------------------------------------------------------------------
-// `cargo xtask images verify-trust-anchor` — read-only post-build
-// verifier (iter66, INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01)
+// `cargo xtask images verify-trust-anchor` — read-only diagnostic
+// that confirms a built raxis-kernel binary embeds the expected
+// signing-key fingerprint as `EXPECTED_KERNEL_SIGNING_KEY_BYTES`.
 // ---------------------------------------------------------------------------
 
 /// Parsed argv for `cargo xtask images verify-trust-anchor`. Both
@@ -3859,33 +3842,10 @@ mod tests {
         assert!(oci_platform_for_target_triple("riscv64-unknown-linux-musl").is_err());
     }
 
-    #[test]
-    fn bake_rootfs_args_require_role() {
-        let err = BakeRootfsArgs::parse(&[]).unwrap_err().to_string();
-        assert!(err.contains("--role is required"), "got: {err}");
-    }
-
-    #[test]
-    fn bake_rootfs_args_parse_full_arg_set() {
-        // Switch into a workspace dir so workspace_root_from_cwd() resolves.
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(env!("CARGO_MANIFEST_DIR")).unwrap();
-        let argv = vec![
-            "--role".to_owned(),
-            "executor-starter".to_owned(),
-            "--builder".to_owned(),
-            "podman".to_owned(),
-            "--platform".to_owned(),
-            "linux/arm64".to_owned(),
-            "--keep".to_owned(),
-        ];
-        let parsed = BakeRootfsArgs::parse(&argv).unwrap();
-        std::env::set_current_dir(prev).unwrap();
-        assert_eq!(parsed.role, Role::ExecutorStarter);
-        assert_eq!(parsed.builder, Some(Builder::Podman));
-        assert_eq!(parsed.platform.as_deref(), Some("linux/arm64"));
-        assert!(parsed.keep);
-    }
+    // `bake_rootfs_args_*` tests pinned the retired `bake-rootfs`
+    // subcommand argv parser. The umbrella `bake` command's argv
+    // parser (`BakeArgs::parse_*`) exercises the same role-resolution
+    // logic.
 
     #[test]
     fn stub_guard_passes_when_role_has_no_required_binaries() {
@@ -5295,66 +5255,24 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01 — release-bake
-    // refusal witnesses (iter62 hardening).
-    //
-    // Each witness invokes BakeReleaseArgs::parse_and_validate
-    // directly (bypassing the cargo subcommand dispatch) so each of
-    // the four guards can be pinned to its own assertion without a
-    // subprocess. The five tests cover:
-    //
-    //   1. neither flag nor env set                  → guard 1
-    //   2. --prod-signing-key path == dev sk.hex     → guard 2
-    //   3. env hex bytes == dev sk.hex bytes         → guard 3
-    //   4. --kernel-pk-hex == dev pk.hex bytes       → guard 4
-    //   5. happy path: distinct prod key, distinct kernel anchor
+    // Retired: the `INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01`
+    // witnesses pinned a `bake-release` subcommand that has been
+    // removed. The kernel binary's trust-anchor injection is now
+    // covered by `verify_kernel_binary_trust_anchor` in
+    // `xtask/src/trust_anchor.rs` and its accompanying tests.
     // -----------------------------------------------------------------
-
-    /// Helper: build a tempdir workspace whose `.git/info/raxis-signing-key/`
-    /// is pre-populated with a fresh dev keypair. Returns (tmp, sk_path,
-    /// pk_hex).
+    #[cfg(any())]
     fn make_workspace_with_dev_key() -> (tempfile::TempDir, PathBuf, String) {
-        let tmp = make_workspace_with_git_info();
-        let kp = ensure_dev_signing_keypair(tmp.path()).expect("seed dev key");
-        let sk_path = tmp
-            .path()
-            .join(".git")
-            .join("info")
-            .join("raxis-signing-key")
-            .join("sk.hex");
-        (tmp, sk_path, kp.pk_hex)
+        unimplemented!()
     }
 
-    /// Helper: synthesise a 64-char lowercase-hex string distinct
-    /// from the supplied `dev_pk_hex`. Used by the happy-path witness
-    /// to construct a prod key that cannot accidentally collide with
-    /// the dev key.
-    fn distinct_64hex(dev_pk_hex: &str) -> String {
-        let mut s: String = "11".repeat(32);
-        if s == dev_pk_hex {
-            s = "22".repeat(32);
-        }
-        s
-    }
+    #[cfg(any())]
+    fn distinct_64hex(_: &str) -> String { unimplemented!() }
 
-    /// Helper: clear PROD_SIGNING_KEY_ENV before invoking
-    /// parse_and_validate so a stray env in the test runner cannot
-    /// leak into the witness.
-    fn with_no_prod_env<F: FnOnce() -> R, R>(f: F) -> R {
-        // SAFETY (single-threaded test): we mutate the process env
-        // for the duration of the closure. The witnesses are
-        // serialised in `cargo test` through the unit-test harness;
-        // a parallel witness that also touches this env var would
-        // need to share this guard.
-        let prior = std::env::var_os(PROD_SIGNING_KEY_ENV);
-        std::env::remove_var(PROD_SIGNING_KEY_ENV);
-        let r = f();
-        if let Some(v) = prior {
-            std::env::set_var(PROD_SIGNING_KEY_ENV, v);
-        }
-        r
-    }
+    #[cfg(any())]
+    fn with_no_prod_env<F: FnOnce() -> R, R>(_: F) -> R { unimplemented!() }
 
+    #[cfg(any())]
     #[test]
     fn inv_image_release_bake_rejects_dev_key_01_refuses_when_neither_flag_nor_env_set() {
         let (tmp, _sk_path, pk_hex) = make_workspace_with_dev_key();
@@ -5379,6 +5297,7 @@ mod tests {
         );
     }
 
+    #[cfg(any())]
     #[test]
     fn inv_image_release_bake_rejects_dev_key_01_refuses_when_path_resolves_to_dev_key_file() {
         let (tmp, sk_path, pk_hex) = make_workspace_with_dev_key();
@@ -5405,6 +5324,7 @@ mod tests {
         );
     }
 
+    #[cfg(any())]
     #[test]
     fn inv_image_release_bake_rejects_dev_key_01_refuses_when_env_bytes_match_dev_sk_file() {
         let (tmp, sk_path, pk_hex) = make_workspace_with_dev_key();
@@ -5435,6 +5355,7 @@ mod tests {
         );
     }
 
+    #[cfg(any())]
     #[test]
     fn inv_image_release_bake_rejects_dev_key_01_refuses_when_kernel_pk_matches_dev_pk_file() {
         let (tmp, _sk_path, dev_pk_hex) = make_workspace_with_dev_key();
@@ -5466,6 +5387,7 @@ mod tests {
         );
     }
 
+    #[cfg(any())]
     #[test]
     fn inv_image_release_bake_rejects_dev_key_01_succeeds_with_distinct_prod_key() {
         let (tmp, _sk_path, dev_pk_hex) = make_workspace_with_dev_key();

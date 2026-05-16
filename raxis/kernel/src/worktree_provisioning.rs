@@ -174,7 +174,7 @@ pub fn provision_orchestrator_worktree(
             reason: format!(
                 "operator-configured target_ref {target_ref:?} does not exist \
                  in {} — operator must populate the source repository before \
-                 any plan is approved (V2_GAPS §C5/§12.8)",
+                 any plan is approved",
                 main_repo.display(),
             ),
         })?;

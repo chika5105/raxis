@@ -59,11 +59,10 @@ pub trait AuditSink: Send + Sync {
 }
 ```
 
-> **⚠️ Earlier drafts of this doc described a `details: Option<&str>`
-> 4th argument and a `Result<(), …>` return. Both are wrong.** The
-> 4th arg is `initiative_id` and the method returns the materialised
-> `AuditEvent` (carrying the freshly-assigned `seq` and `event_id`)
-> so callers can correlate downstream notifications with the chain
+> **Note.** The 4th argument is `initiative_id` (not a free-form
+> `details` string), and the method returns the materialised
+> `AuditEvent` carrying the freshly-assigned `seq` and `event_id` so
+> callers can correlate downstream notifications with the chain
 > record they emitted.
 
 **Ordering invariant (INV-AUDIT-PAIRED-01).** Every `emit` call
@@ -89,13 +88,7 @@ chain-side witness reads (`PathAllowlistPositiveWitness` matches
 `ReviewerSubstantiveDisagreementWitness` matches `IntentAccepted {
 intent_kind: "SubmitReview", task_id: <reviewer_*> }` for each
 reviewer; `MultiInitiativeIsolationWitness` partitions the chain
-fan-out by `initiative_id`). Pre-fix the kernel emitted only an
-`eprintln!` log line and the audit chain carried zero
-`IntentAccepted` rows — the realistic-scenario fix-loop iter40
-reproduction (`/tmp/raxis-e2e-realistic-iter40.log`) showed every
-sub-task completing on first executor spawn, every chain-fanout
-witness then collapsing to a false negative because the chain had
-no `IntentAccepted` row to attribute. A failed `audit.emit` here is
+fan-out by `initiative_id`). A failed `audit.emit` here is
 best-effort per `kernel-store.md §2.5.2` (logged on stderr; the
 boot-time reconciler closes any gap from the durable
 `task_intent_ranges` row the Phase-C tx persists).
@@ -117,7 +110,7 @@ The `AuditEventKind` enum is large. The major families:
 | Break-glass | `BreakglassActivated`, `BreakglassExpired` | Emergency overrides |
 | Budget | `BudgetReserved`, `BudgetReleased`, `TokenBudgetExceeded` | Lane admission and release |
 | Policy | `PolicyEpochAdvanced`, `PolicyAdvanceRejected`, `PolicyAdvanceFailed` | `policy_manager::advance_epoch` |
-| Push | `KernelPushEnqueued` | Per-session V2.3 dispatcher (see V2_GAPS §12.1) |
+| Push | `KernelPushEnqueued` | Per-session V2.3 dispatcher |
 | Recovery | `ReconciliationGap` | Boot-time reconciler: gap between SQLite tail and JSONL tail |
 | Security | `SecurityViolation { violation_class }` | Static dispatch matrix or pre-auth blocklist (see `SecurityViolationClass`) |
 

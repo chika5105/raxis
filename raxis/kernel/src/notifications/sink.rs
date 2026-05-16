@@ -195,9 +195,9 @@ fn bridge_kind_if_relevant(kind: &AuditEventKind) -> Option<AuditEventKind> {
             // the full `INV-VERIFIER-AUDIT-PAIRED-WRITE-01` lifecycle:
             // spawn → (exit + witness) | timeout | digest mismatch |
             // artifact rejected. No counter bump in
-            // `bridge_audit_to_metric` (Worker 1 owns observability;
-            // we use the existing audit-event surface for visibility
-            // and let a follow-up extend the metric mapping if needed).
+            // `bridge_audit_to_metric` — the existing audit-event
+            // surface provides visibility, and a follow-up can extend
+            // the metric mapping if needed.
             | AuditEventKind::VerifierVmSpawned { .. }
             | AuditEventKind::VerifierVmExited { .. }
             | AuditEventKind::VerifierWitnessReceived { .. }

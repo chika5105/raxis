@@ -347,7 +347,7 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
             // FailInvalidDiff is a *validation* rejection (empty
             // diff, unchanged head_sha, malformed format, path-
             // scope violation, non-ancestor base/head, …) — NOT
-            // a substrate / VM crash. Pre-iter62 the rejection
+            // a substrate / VM crash. Previously the rejection
             // returned to the planner, the planner exited
             // because its terminal intent was rejected, the
             // post-exit hook in
@@ -428,24 +428,46 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
             if respawn_kinds {
                 let task_id_for_lookup = req.task_id.as_str().to_owned();
                 let store_for_lookup = Arc::clone(&ctx.store);
-                let initiative_id_opt = tokio::task::spawn_blocking(move || {
-                    let conn = store_for_lookup.lock_sync();
-                    conn.query_row(
-                        "SELECT initiative_id FROM tasks WHERE task_id = ?1",
-                        rusqlite::params![&task_id_for_lookup],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .ok()
-                })
-                .await
-                .ok()
-                .flatten();
+                // Two distinct "no respawn" paths converge here.
+                // Pre-fix the join-failure path was silently
+                // folded into the `task_lookup_miss` log via
+                // `.ok().flatten()`, masking a kernel-internal
+                // failure (panic/cancel in the SQLite reader) as
+                // a benign "task not found". Split the cases so
+                // the operator log surfaces the real cause when
+                // the DAG stalls.
+                let initiative_id_opt: Option<String> =
+                    match tokio::task::spawn_blocking(move || {
+                        let conn = store_for_lookup.lock_sync();
+                        conn.query_row(
+                            "SELECT initiative_id FROM tasks WHERE task_id = ?1",
+                            rusqlite::params![&task_id_for_lookup],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .ok()
+                    })
+                    .await
+                    {
+                        Ok(opt) => opt,
+                        Err(join_err) => {
+                            eprintln!(
+                                "{{\"level\":\"error\",\
+                                 \"event\":\"orchestrator_respawn_skipped\",\
+                                 \"reason\":\"spawn_blocking_join_failed\",\
+                                 \"task_id\":\"{task}\",\"intent_kind\":\"{kind}\",\
+                                 \"error\":\"{join_err}\"}}",
+                                task = req.task_id.as_str(),
+                                kind = req.intent_kind.as_str(),
+                            );
+                            None
+                        }
+                    };
 
                 if let Some(init_id) = initiative_id_opt {
                     let ctx_for_respawn = Arc::clone(ctx);
                     tokio::spawn(async move {
                         // `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`
-                        // (iter65) — the EarlyResponse dispatch path
+                        // — the EarlyResponse dispatch path
                         // is fired by a worker-tier intent's
                         // accepted-response cascade, not by an
                         // orchestrator session's exit. There is no
@@ -640,8 +662,8 @@ fn run_phase_a(
 
     // ── Step 2A: Orchestrator + StructuredOutput early-dispatch ───────────
     //
-    // Spec: `v2_extended_gaps.md §3.2` authorises the Orchestrator to
-    // emit `IntentKind::StructuredOutput` for initiative-scoped
+    // The Orchestrator is authorised to emit
+    // `IntentKind::StructuredOutput` for initiative-scoped
     // progress / diagnostic / summary updates. The dispatch matrix
     // (`authority::dispatch_matrix`) already cleared the
     // `(StructuredOutput, Some(Orchestrator))` cell as Authorized at
@@ -1625,10 +1647,10 @@ fn run_phase_c(
     // kernel-store.md §2.5.2: a failed audit emit logs and proceeds
     // (the reconciler closes the gap on next boot).
     //
-    // V2 `v2_extended_gaps.md §1.2` — host-side fast-forward of the
-    // operator-configured `target_ref`. Performed inline here, AFTER
-    // the SQLite intent commit and BEFORE the audit emission +
-    // optional push. The kernel reads the per-initiative
+    // V2 host-side fast-forward of the operator-configured
+    // `target_ref`. Performed inline here, AFTER the SQLite
+    // intent commit and BEFORE the audit emission + optional
+    // push. The kernel reads the per-initiative
     // `target_ref` from the orchestrator plan-fields registry
     // (resolved at admission time from `[workspace] target_ref` /
     // `[git] default_target_ref` / hardcoded fallback). The merge
@@ -1926,7 +1948,7 @@ fn run_phase_c(
             }
         }
 
-        // V2_GAPS §C6 — kernel push protocol. After IntegrationMerge,
+        // kernel push protocol. After IntegrationMerge,
         // if `[git] auto_push = true`, push the configured target_ref
         // to the configured remote using the host's git credential
         // helpers / SSH config. The merge already committed; push
@@ -3284,7 +3306,7 @@ pub(crate) fn bump_executor_crash_retry_count_in_tx(
 /// V2.3 §12.1 / Step 25 push wiring — resolve an `initiative_id` to
 /// the live Orchestrator session that should receive the push.
 ///
-/// The mapping closes the V2_GAPS §12.1 gap: every kernel-side push
+/// The mapping closes the gap: every kernel-side push
 /// carries a `SessionId` envelope, but the call sites that fire
 /// pushes (Step 25 review aggregation, Step 21 sub-task admit, etc.)
 /// only know the `initiative_id` of the executor / reviewer they
@@ -3673,7 +3695,7 @@ fn handle_submit_review(
     //                         on the live Orchestrator session
     //                         resolved via
     //                         `active_orchestrator_session_id_for_
-    //                         initiative` (V2_GAPS §12.1). When no
+    //                         initiative`. When no
     //                         live orchestrator is bound the audit
     //                         row remains the canonical signal —
     //                         the Orchestrator picks up the verdict
@@ -3833,7 +3855,7 @@ fn handle_submit_review(
             );
         }
 
-        // ── V2_GAPS §12.1 — Step 25 push fan-out ─────────────────────────────
+        // ── Step 25 push fan-out ─────────────────────────────
         //
         // Audit row is durable; now best-effort enqueue the matching
         // `KernelPush` on the live Orchestrator session. The push
@@ -3927,8 +3949,8 @@ fn handle_submit_review(
 // handle_structured_output — V2 §3.2 typed mid-session output.
 //
 // Spec references:
-//   * `v2_extended_gaps.md §3.2` — typed mid-session communication
-//     enum (`StructuredOutputKind`).
+//   * `StructuredOutputKind` — the typed mid-session
+//     communication enum.
 //   * `crates/types/src/structured_output.rs` — payload shape +
 //     `validate_and_normalise` + size caps.
 //
@@ -4119,7 +4141,7 @@ fn handle_structured_output(
 // ---------------------------------------------------------------------------
 //
 // Spec references:
-//   * `v2_extended_gaps.md §3.2` — `structured_output` is a typed
+//   * `structured_output` is a typed
 //     mid-session tool any planner-class agent (Executor, Reviewer,
 //     **Orchestrator**) may call. The Orchestrator emits its
 //     coordinator-level outputs (initiative-scoped progress reports,
@@ -4624,6 +4646,37 @@ fn missing_predecessors_for_activation(
     rows.collect()
 }
 
+/// Tear down a session whose VM came up successfully but whose
+/// kernel-side activation FSM transition could not commit. The
+/// VM is alive inside `SessionSpawnService.sessions`; dropping
+/// the caller-side `SpawnHandle` does NOT terminate it — only an
+/// explicit `terminate_session` call does. Without this, the
+/// activation SQL failure would leak the VM (capacity counters,
+/// operator views, and the recovery sweep would all disagree
+/// with the still-running guest). Best-effort: a teardown
+/// failure is logged but does not propagate; the spawn-service
+/// shutdown is the final backstop.
+async fn terminate_session_after_activation_failure(
+    spawn: &Arc<raxis_session_spawn::SessionSpawnService>,
+    session_id: &str,
+    reason: &str,
+) {
+    let grace = std::time::Duration::from_secs(2);
+    if let Err(e) = spawn.terminate_session(session_id, grace).await {
+        eprintln!(
+            "{{\"level\":\"warn\",\
+             \"event\":\"ActivateSubTaskTerminateOnRollbackFailed\",\
+             \"session_id\":{session_json},\
+             \"reason\":{reason_json},\
+             \"error\":\"{e}\"}}",
+            session_json = serde_json::to_string(session_id)
+                .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+            reason_json = serde_json::to_string(reason)
+                .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+        );
+    }
+}
+
 async fn handle_activate_sub_task(
     req: IntentRequest,
     _session: authority::session::SessionRow,
@@ -4667,7 +4720,7 @@ async fn handle_activate_sub_task(
         }
     }
 
-    // ── Step 1.4: V2_GAPS §D2 — disk-full watchdog gate. ───────────────
+    // ── Step 1.4: disk-full watchdog gate. ───────────────
     //
     // INV-CAPACITY-02 (`host-capacity.md §7.1`): refuse new
     // write-class admissions when the watchdog has flipped to
@@ -4681,7 +4734,7 @@ async fn handle_activate_sub_task(
         return Err((PlannerErrorCode::FailDiskFull, TaskState::Admitted));
     }
 
-    // ── Step 1.5: V2_GAPS §D2 — pre-admission cap check. ───────────────
+    // ── Step 1.5: pre-admission cap check. ───────────────
     //
     // INV-CAPACITY-01 (`host-capacity.md §4.2`): refuse to spawn
     // another microVM if the strict `[host_capacity]
@@ -4755,7 +4808,7 @@ async fn handle_activate_sub_task(
         /// Reviewer per INV-PLANNER-HARNESS-02).
         vm_image_alias: String,
 
-        /// V2 `v2_extended_gaps.md §1.1` — operator-authored seed
+        /// operator-authored seed
         /// prompt for the planner agent (Executor / Reviewer).
         /// Empty when the plan omitted `[[tasks.X]] description`;
         /// the spawn path then leaves `RAXIS_PLANNER_TASK_PROMPT`
@@ -4942,7 +4995,7 @@ async fn handle_activate_sub_task(
                             ));
                         }
                     };
-                    // V2 `v2_extended_gaps.md §1.1` — fetch the
+                    // fetch the
                     // operator-authored seed prompt out of the same
                     // signed-plan-derived registry entry so the spawn
                     // path can stamp it into the planner's env table.
@@ -5215,7 +5268,7 @@ async fn handle_activate_sub_task(
         None
     };
 
-    // V2 `v2_extended_gaps.md §1.1` — stamp the operator-authored
+    // stamp the operator-authored
     // task prompt into the substrate's env table so the spawned
     // planner binary's dispatch driver has a concrete user-message
     // seed. The plan-side validator already rejected plans whose
@@ -5478,7 +5531,7 @@ async fn handle_activate_sub_task(
         Arc::clone(&ctx.session_spawn),
         &ctx.plan_registry,
         &ctx.store,
-        // V2 `v2_extended_gaps.md §2.5` — pass the live policy
+        // pass the live policy
         // snapshot so the spawn path can stamp `[budget.token_caps]`
         // into the planner-VM env. Reading off the existing
         // `policy_snapshot` (loaded earlier in this handler) keeps
@@ -5615,9 +5668,41 @@ async fn handle_activate_sub_task(
                      \"task_id\":\"{}\",\"activation_id\":\"{}\",\"reason\":\"{e}\"}}",
                     task_id_owned, lookup.activation_id,
                 );
+                // The VM is alive (`spawn_executor_for_task` returned
+                // a `SpawnHandle`) but the activation FSM transition
+                // could not commit — the SubtaskActivations row is
+                // stuck in `PendingActivation`, the kernel state
+                // would never converge to "Active". `SpawnHandle`
+                // does not own the isolation session (it lives in
+                // `SessionSpawnService.sessions`), so dropping
+                // `spawn_handle` here would leak the VM and the
+                // session row would stay alive in the service's
+                // internal map until next reboot. Tear down the VM
+                // explicitly before returning so accounting,
+                // operator views, and the recovery sweep all agree
+                // the activation never landed.
+                terminate_session_after_activation_failure(
+                    &ctx.session_spawn,
+                    &lookup.new_session_id,
+                    "activation_sql_commit_failed",
+                )
+                .await;
+                drop(spawn_handle);
                 return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
             }
-            Err(_) => {
+            Err(join_err) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"ActivateSubTaskActivateJoinFailed\",\
+                     \"task_id\":\"{}\",\"activation_id\":\"{}\",\"reason\":\"{join_err}\"}}",
+                    task_id_owned, lookup.activation_id,
+                );
+                terminate_session_after_activation_failure(
+                    &ctx.session_spawn,
+                    &lookup.new_session_id,
+                    "activation_spawn_blocking_join_failed",
+                )
+                .await;
+                drop(spawn_handle);
                 return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
             }
         }
@@ -6127,7 +6212,7 @@ async fn handle_retry_sub_task(
                             // to see (a) the prior_activation_id so
                             // they can grep the audit chain for the
                             // matching `ExecutorRespawnFromReviewRejection`
-                            // / `SessionVmSpawned`, (b) the closed
+                            // `SessionVmSpawned`, (b) the closed
                             // admit-set hint so the LLM/operator
                             // immediately knows which downstream
                             // intent to pivot to (`ActivateSubTask`
@@ -6212,7 +6297,7 @@ async fn handle_retry_sub_task(
             //      For Reviewer-rejection retries we bump the
             //      `review_reject_count` on the NEW row (prior + 1)
             //      instead of carrying the prior row's value
-            //      verbatim. Pre-iter62 the counter relied on
+            //      verbatim. Previously the counter relied on
             //      `increment_executor_review_reject_count` firing
             //      the bump in the SubmitReview aggregator's
             //      terminal-`AtLeastOneRejected` branch, but
@@ -6311,7 +6396,7 @@ async fn handle_retry_sub_task(
             // When the orchestrator retries an executor task, every
             // downstream Reviewer that already voted on the prior
             // round MUST be re-activated so the panel votes against
-            // the executor's NEW `head_sha`. Pre-iter62 the Reviewer
+            // the executor's NEW `head_sha`. Previously the Reviewer
             // panel was treated as one-shot terminal:
             // `lint-runner-python` retried 5× while
             // `review-lint-defect-A` and `-B` had a single
@@ -6624,7 +6709,7 @@ async fn handle_retry_sub_task(
     // Reviewer-rejection retries; `prior` verbatim on crash
     // retries) so the audit payload aligns row-for-row with
     // `subtask_activations.review_reject_count` on the new row.
-    // Pre-iter62 the audit emitted the pre-bump value (the bump
+    // Previously the audit emitted the pre-bump value (the bump
     // was assumed to fire later in the SubmitReview aggregator's
     // terminal-`AtLeastOneRejected` branch); reviewer
     // reactivation was broken, so the aggregator never re-fired
@@ -6968,7 +7053,7 @@ struct TaskRow {
     lane_id: String,
     state: String,
     initiative_id: String,
-    /// V2 `v2_extended_gaps.md §2.5` — running total of micro-dollar
+    /// running total of micro-dollar
     /// LLM-token cost on this task across every accepted intent.
     /// `0` for V2.4-and-earlier tasks (the column was added by
     /// migration 12 with `DEFAULT 0`).
@@ -7100,7 +7185,7 @@ fn parse_task_state(s: &str) -> TaskState {
     }
 }
 
-/// V2 `v2_extended_gaps.md §1.2` — categorise a `MainMergeError` for
+/// categorise a `MainMergeError` for
 /// the `MergeFastForwardFailed` audit row + structured operator log.
 ///
 /// The `category` strings are part of the audit wire contract:
@@ -8832,7 +8917,7 @@ mod tests {
     /// `parse_plan_tasks` → `PlanRegistry::insert`) populates the
     /// registry atomically with the sealed plan bundle; these
     /// integration tests skip the admission path and seed `tasks`
-    /// / `task_dag_edges` directly, so they MUST mirror the
+    /// `task_dag_edges` directly, so they MUST mirror the
     /// registry seeding here. Forgetting the call would surface
     /// as a `NoSuccessors` aggregator outcome under fail-closed
     /// semantics (see commit "kernel/initiatives: fail closed on
@@ -11966,7 +12051,7 @@ mod tests {
     ///      `RetrySubTask` (per `v2-deep-spec.md §Step 12 V2.5b`)
     ///      BEFORE issuing the follow-up `ActivateSubTask`. The
     ///      post-exit hook respawns a fresh orchestrator.
-    ///   4. Iter48 (pre-iter54): kernel admitted a second
+    ///   4. Iter48 (earlier): kernel admitted a second
     ///      `RetrySubTask` against the round-2 PendingActivation
     ///      row, the LLM kept re-issuing the retry because the
     ///      KSB stamped `retry_admissible=true`, and the
@@ -12058,7 +12143,7 @@ mod tests {
         // anchor) and must NOT emit `SessionRevoked` (no prior
         // session was bound — the prior `RetrySubTask` already
         // revoked it). Iter48's noise-mode would have emitted the
-        // respawn anchor here even on the pre-iter54 admission;
+        // respawn anchor here even on the earlier admission;
         // iter54's rejection path keeps the audit chain quiet so
         // the dashboard's per-task history doesn't show a phantom
         // "respawn from review rejection" that never actually
@@ -12302,7 +12387,7 @@ mod tests {
 
     /// `INV-RETRY-REVIEW-REJECT-COUNT-MONOTONIC-01` — the new
     /// activation row carries `review_reject_count = prior + 1`
-    /// on every Reviewer-rejection retry. Pre-iter62 the counter
+    /// on every Reviewer-rejection retry. Previously the counter
     /// stalled at 1 across N retries (the SubmitReview aggregator
     /// never re-fired because reviewers were not being re-
     /// activated; see `INV-RETRY-REVIEWER-PANEL-REACTIVATED-01`).
@@ -12479,7 +12564,7 @@ mod tests {
     /// and a fresh `PendingActivation` `subtask_activations` row
     /// is inserted for each reviewer.
     ///
-    /// The pre-iter62 behaviour was that reviewers stayed
+    /// The earlier behaviour was that reviewers stayed
     /// terminal one-shot — both `review-lint-defect-A/B` had a
     /// single activation row across 5 executor retries on
     /// `lint-runner-python` per the iter62 forensics.

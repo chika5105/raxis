@@ -91,7 +91,7 @@ Initiative `Status: Completed`. The audit chain shows
   Reviewer rejects the first attempt.
 - **Increase the retry budget.** *(V2.6 — not wired today.)* The
   planned `max_review_rejections` task field is reserved but the
-  kernel does not yet parse it (see `specs/v2/V2_GAPS.md` §12.13).
+  kernel does not yet parse it (see §12.13).
   The counter substrate (`subtask_activations.review_reject_count`)
   IS now bumped per terminal-rejection round; the parser + ceiling
   check in `handle_retry_sub_task` are the remaining follow-ups.

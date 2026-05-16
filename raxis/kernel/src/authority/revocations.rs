@@ -1,9 +1,7 @@
-// raxis-kernel::authority::revocations — V2_GAPS §D1 cert-revocation store.
-//
+// raxis-kernel::authority::revocations — cert-revocation store.
 // Normative reference: `specs/v2/key-revocation.md` (full V2 spec)
-// and `V2_GAPS.md §D1` (closeout of what V2.3 actually ships vs.
+// and (closeout of what V2.3 actually ships vs.
 // what V3 will add).
-//
 // V2.3 scope (admission-time gate only):
 //   * The store loads `<data_dir>/revocations/<pubkey_hex>.toml` at
 //     kernel boot. Each file is one signed `RevocationRecord`.
@@ -18,7 +16,6 @@
 //     this from inside `cert_status_with_revocation` to
 //     short-circuit cert-status to `Revoked` before computing the
 //     four-zone state.
-//
 // V3 (deferred):
 //   * Confirm that `revoked_by_pubkey_hex` matches a known operator
 //     entry in the active policy bundle. V2.3 just verifies the
@@ -31,7 +28,6 @@
 //     (§5.2 step 4 of `key-revocation.md`).
 //   * `KernelPush::SessionRevoked` envelope dispatch.
 //   * Restart-time reconciliation against `key_trust_state` view.
-//
 // Permissions:
 //   The directory `<data_dir>/revocations/` is created by the
 //   kernel boot path (see `bootstrap.rs`) with mode 0700; revocation
@@ -45,7 +41,6 @@ use raxis_types::operator_cert::{RevocationReason, RevocationRecord};
 
 /// In-memory snapshot of the revocation directory, populated at
 /// kernel boot. Keyed by `subject_pubkey_hex` (lowercase 64-char hex).
-///
 /// **Concurrency.** The store is read-only after construction so it
 /// requires no internal synchronisation; multiple `enforce` calls
 /// can call `lookup` concurrently. A future "live update via
@@ -76,7 +71,7 @@ impl RevocationStore {
 
     /// Load `<data_dir>/revocations/*.toml`. Tolerates a missing
     /// directory (returns an empty store with `LoadStats::default()`
-    /// — the operator may not have revoked any certs yet).
+    /// the operator may not have revoked any certs yet).
     /// Records that fail signature verification are SKIPPED with a
     /// stderr warning so a tampered record cannot mask a legitimate
     /// revocation by simply breaking the loader.

@@ -1,4 +1,4 @@
-//! V2_GAPS §C3 — provider model selection (MVP).
+//! provider model selection (MVP).
 //!
 //! Closes the operator-grade leg of `provider-model-selection.md` so
 //! a planner-role binary can:
@@ -221,7 +221,7 @@ pub const KNOWN_MODELS: &[KnownModel] = &[
         deprecated: None,
         context_window: Some(1_000_000),
     },
-    // --- AWS Bedrock (Anthropic-on-Bedrock; V2_GAPS §C2 BedrockClient) ---
+    // --- AWS Bedrock (Anthropic-on-Bedrock; BedrockClient) ---
     KnownModel {
         name: "anthropic.claude-3-5-sonnet-20241022-v2:0",
         provider: ProviderId::Bedrock,

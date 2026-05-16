@@ -393,8 +393,8 @@ pub enum MetricName {
 
     // ── V3 §3 expansions — admit / deny / default-grant / stall ─────
     //
-    // Mirror the audit events emitted by `worker/reviewer-orch-egress-defaults`
-    // and `worker/secrets-model-realignment`. Surfaced on dashboards
+    // Mirror the audit events emitted by the egress-defaults
+    // and secrets-model realignment sweeps. Surfaced on dashboards
     // `60-egress.json` (admit / deny / stall by chokepoint) and
     // `50-credential-proxies.json` (substitution by service).
     /// `raxis.egress.admit.total` — Counter (chokepoint).

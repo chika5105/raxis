@@ -11,9 +11,9 @@
 //!
 //! Audit discipline: paging the chain is itself a read-only
 //! browse, so the `OperatorViewedAuditChain` emission was retired
-//! in `worker/audit-tightening`. The chain re-verify path
+//! in an earlier audit-noise sweep. The chain re-verify path
 //! (`?reverify=true`) was emitting `OperatorAuditChainReverified`
-//! per request; `worker/audit-noise-sweep-r2` retired that too
+//! per request; the second audit-noise sweep retired that too
 //! because verifying the audit chain does not mutate kernel
 //! state and emitting an audit row about verifying the audit
 //! chain is recursive noise. The data-layer rate-limit

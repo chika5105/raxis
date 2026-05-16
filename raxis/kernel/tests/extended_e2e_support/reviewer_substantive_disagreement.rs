@@ -39,7 +39,7 @@
 //! the Round-2 path can land the corrective edit there).
 //!
 //! **Iter55 per-language split — `lint-runner-python`, not
-//! `lint-runner`.** Pre-iter55 the realistic plan carried a
+//! `lint-runner`.** Previously the realistic plan carried a
 //! single monolithic `lint-runner` task that ran the full
 //! `scripts/check.sh` (Rust + TS + Python) against any defect
 //! the executor introduced. Iter54 surfaced the over-broad
@@ -134,10 +134,10 @@ pub const TASK_REVIEW_LINT_B: &str = "review-lint-defect-B";
 /// mention at least one of these for the substantive check to
 /// pass.
 ///
-/// **Iter55 note.** Pre-iter55, all three basenames were live
+/// **Iter55 note.** Previously, all three basenames were live
 /// — the lint-defect prompt offered the executor a choice of
 /// Rust / TS / Python defects, and any of the three could surface
-/// in the captured `out/lint/check-output.txt`. Post-iter55, the
+/// in the captured `out/lint/check-output.txt`. Currently, the
 /// lint-defect prompt is PINNED to Python
 /// (`py-pkg/src/sample_py/greet.py` ruff F401 unused-import) so
 /// the dual-Reviewer disagreement pair on `lint-runner-python`

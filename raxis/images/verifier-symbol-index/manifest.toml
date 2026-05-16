@@ -5,7 +5,7 @@
 #   - verifier-processes.md §6 (witness body shape)
 #   - INV-VERIFIER-12 (reserved alias `raxis-verifier-symbol-index`)
 #   - INV-VERIFIER-CANONICAL-SYMBOL-INDEX-DIGEST-PINNED-01 (D11)
-#   - V2_GAPS.md A8 (verifier runtime — shipped, iter62)
+#   - A8 (verifier runtime — shipped, iter62)
 #
 # Trust model
 # ───────────

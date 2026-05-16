@@ -1,7 +1,7 @@
 # RAXIS Glossary — End-to-End Explained
 
 > **Audience.** Anyone reading any other concept guide, spec, or
-> recipe and wanting a one-stop lookup for an unfamiliar Raxis
+> recipe and wanting a one-stop lookup for an unfamiliar RAXIS
 > term. Operators authoring policy or plans; contributors
 > changing kernel internals; reviewers triaging an admission
 > rejection.
@@ -44,13 +44,13 @@
 
 ## Top-level entities
 
-These are the nouns every Raxis sentence is built from.
+These are the nouns every RAXIS sentence is built from.
 
 | Term | Meaning | Defined in |
 |---|---|---|
-| **Raxis** | The project. A multi-agent orchestration kernel that runs operator-signed plans against operator-isolated microVMs and merges the results into operator-controlled git refs. The kernel is the only trusted code in the loop. | top-level [`README.md`](README.md), [`specs/v2/v2-deep-spec.md`](../specs/v2/v2-deep-spec.md) |
+| **RAXIS** | The project. A multi-agent orchestration kernel that runs operator-signed plans against operator-isolated microVMs and merges the results into operator-controlled git refs. The kernel is the only trusted code in the loop. | top-level [`README.md`](README.md), [`specs/v2/v2-deep-spec.md`](../specs/v2/v2-deep-spec.md) |
 | **Kernel** | The single trusted binary (`raxis-kernel`) that admits intents, spawns agent VMs, runs verifiers, persists the audit chain, and enforces every invariant. Everything else (planners, agents, CLI) is unprivileged client. | [`specs/v1/kernel-core.md`](../specs/v1/kernel-core.md) |
-| **Operator** | A human (or fleet of humans) holding an Ed25519 keypair the kernel trusts to sign `policy.toml` and (optionally) to approve plans. Operators are the highest authority Raxis recognises. | [04](04-delegations-and-authority.md), [`specs/v1/policy.md`](../specs/v1/policy.md) |
+| **Operator** | A human (or fleet of humans) holding an Ed25519 keypair the kernel trusts to sign `policy.toml` and (optionally) to approve plans. Operators are the highest authority RAXIS recognises. | [04](04-delegations-and-authority.md), [`specs/v1/policy.md`](../specs/v1/policy.md) |
 | **Initiative** | One logical unit of work the kernel is driving end-to-end: a plan, its task DAG, its in-flight sessions, its audit subset, its merge target. Initiative state lives in the `initiatives` table. | [10](10-v2-orchestration.md) |
 | **Plan** | The operator-authored TOML (`plan.toml`) declaring the workspace, the task DAG, and per-task scopes. Submitted as one Initiative; sealed (parsed + stored) into the kernel store at `approve_plan`. | [10](10-v2-orchestration.md), [recipes/plan/](../guides/recipes/plan/) |
 | **Plan bundle** | The post-`approve_plan` form of the plan: `plan_artifact_sha256`, the `task_dag_edges` rows, and the `TaskPlanFields` registry entries. The bundle is the kernel's source of truth at runtime; the original `plan.toml` text is no longer consulted. | `kernel/src/initiatives/lifecycle.rs::approve_plan` |
@@ -121,7 +121,7 @@ and the kernel's first authorisation decision is made on
 | **`ActivateSubTask`** | Orchestrator-only. The single VM-spawn entrypoint: creates a new `subtask_activations` row in `Active` and asks the substrate to spawn the Executor or Reviewer VM. | [10](10-v2-orchestration.md) |
 | **`RetrySubTask`** | Orchestrator-only. Cleanup-and-prepare for a retry: validates the prior activation is `Failed`, checks both retry ceilings, revokes the prior session, inserts a new `PendingActivation` row carrying counters forward, resets `tasks.state` to `Admitted`. **Does not spawn** — the Orchestrator follows up with `ActivateSubTask`. | [`patterns/04-retry-on-failure`](../guides/recipes/patterns/04-retry-on-failure.md), `kernel/src/handlers/intent.rs::handle_retry_sub_task` |
 | **`SubmitReview`** | Reviewer-only. Carries `{ approved: bool, critique: Option<String> }`. Bumps `review_reject_count` on terminal-rejection at the aggregator. | [10](10-v2-orchestration.md) |
-| **`StructuredOutput`** | Typed payload (V2.5). One of `TaskSummary`, `ProgressReport`, `DiagnosticFlag`. Persists structured agent reasoning to the audit chain without affecting task FSM. | `v2_extended_gaps.md §3.2` |
+| **`StructuredOutput`** | Typed payload (V2.5). One of `TaskSummary`, `ProgressReport`, `DiagnosticFlag`. Persists structured agent reasoning to the audit chain without affecting task FSM. | |
 | **Dispatch matrix** | The compile-time `(IntentKind, SessionAgentType) → Authorized \| Unauthorized` lookup at `kernel/src/authority/dispatch_matrix.rs`. The first authorisation gate every IntentRequest passes through. | [10](10-v2-orchestration.md) |
 
 ---

@@ -49,7 +49,7 @@ The opponent argues RAXIS is a safety tool applied to a reliability problem. Tha
 
 Consider: a single agent touching one wrong file is a reliability problem, recoverable by `git revert`. One hundred concurrent agents each touching one wrong file, under no enforcement, is a systemic incident that costs hours to diagnose and reverse. The blast radius scales with autonomy. RAXIS was built because moving from one agent to multi-agent workflows makes uncontrolled reliability failures compose into safety incidents.
 
-More precisely, the WHO surgical safety checklist (framing that would dismiss it as overkill for “reliable” surgeons) reduced mortality by 47% across institutions that already had highly trained professionals. The checklist did not make surgeons smarter. It made systematic errors, the kind that happen not from incompetence but from the compounding of small omissions under normal pressure, detectable before they propagated. RAXIS is a surgical checklist at the level of code admission. The agent is competent most of the time. RAXIS catches the compounding of small omissions.
+More precisely: the WHO surgical safety checklist — which by the framing above would be dismissed as overkill for "reliable" surgeons — reduced mortality by 47% across institutions that already had highly trained professionals. The checklist did not make surgeons smarter. It made systematic errors detectable before they propagated — the kind that happen not from incompetence but from the compounding of small omissions under normal pressure. RAXIS is a surgical checklist at the level of code admission. The agent is competent most of the time. RAXIS catches the compounding of small omissions.
 
 ---
 
@@ -101,7 +101,7 @@ Financial audits cannot verify that every business decision was economically opt
 
 RAXIS provides the same property for agent actions. When an agent ships incorrect code that passes all gates, the audit log says: which session produced it, under which plan epoch, which verifier run certified it, and which operator approved the plan that authorized the scope. That is **attribution**. Attribution is prerequisite for accountability; accountability is prerequisite for trust at scale.
 
-A system that produces auditable incorrect outputs is easier to improve than one that produces unauditable incorrect outputs. You fix the first by improving verifiers. You fix the second by archaeology or rebuild because you may not know where failure occurred.
+A system that produces auditable incorrect outputs is easier to improve than one that produces unauditable incorrect outputs. You fix the first by improving verifiers. You fix the second by archaeology — or by rebuilding from scratch, because you may not know where failure occurred.
 
 ---
 

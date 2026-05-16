@@ -9,36 +9,35 @@
 >
 > **Update log**
 >
->   * 2026-05-13 (`worker/audit-noise-sweep-r2`) — second sweep
->     of read-only `Operator*` emissions retired. The previous
->     round left a handful of "operator looked at one named
->     resource" emissions in place under the theory that
->     touching a specific resource was forensically interesting
->     even when no state changed. iter49 dashboard QA showed
->     the survivors (`OperatorHealthQueried`,
->     `OperatorOpenedSessionStream`, `OperatorWorktreeAccessed`,
->     `OperatorDiffViewed`, `OperatorFileContentFetched`,
->     `OperatorListedCredentials`,
->     `OperatorListedSystemCredentials`,
->     `OperatorAuditChainReverified`,
->     `OperatorNotificationViewed`) were still drowning the
->     chain on the new noise floor — operator clicks the
->     subsystem-health refresh every 5 s; that's 17 k rows per
->     operator per day with zero forensic content. The user's
->     stricter rule kicks in: keep only operator actions that
->     directly affect the initiative; remove dashboard read /
->     list / view / query / stream / chain-reverify events.
->     Audit fixtures inside `crates/audit-tools/` deliberately
->     stay UNCHANGED so audit-tools verify-chain still pins
->     forensic decode of pre-sweep chains.
->   * 2026-05-13 (`worker/audit-tightening`) — read-only
->     `OperatorViewed*` emissions retired. The chain is the
->     system's forensic ledger of state-affecting actions; pure
->     pageviews belong in observability metrics, not the chain.
->     iter48 surfaced 1258 / 1260 chain rows being
->     `OperatorViewed*` noise, which drowned out actual signal.
->     See §signal-vs-noise below for the policy and the
->     coverage table for the per-endpoint status.
+> * **Second sweep.** Read-only `Operator*` survivors were
+>   retired. The first sweep had left a handful of "operator
+>   looked at one named resource" emissions in place under
+>   the theory that touching a specific resource was
+>   forensically interesting even when no state changed.
+>   Dashboard QA showed the survivors (`OperatorHealthQueried`,
+>   `OperatorOpenedSessionStream`, `OperatorWorktreeAccessed`,
+>   `OperatorDiffViewed`, `OperatorFileContentFetched`,
+>   `OperatorListedCredentials`,
+>   `OperatorListedSystemCredentials`,
+>   `OperatorAuditChainReverified`,
+>   `OperatorNotificationViewed`) were still drowning the
+>   chain on the new noise floor — operator clicks the
+>   subsystem-health refresh every 5 s; that's 17 k rows per
+>   operator per day with zero forensic content. The
+>   stricter rule kicks in: keep only operator actions that
+>   directly affect the initiative; remove dashboard read /
+>   list / view / query / stream / chain-reverify events.
+>   Audit fixtures inside `crates/audit-tools/` deliberately
+>   stay UNCHANGED so audit-tools verify-chain still pins
+>   forensic decode of pre-sweep chains.
+> * **First sweep.** Read-only `OperatorViewed*` emissions
+>   were retired. The chain is the system's forensic ledger
+>   of state-affecting actions; pure pageviews belong in
+>   observability metrics, not the chain. A dashboard QA pass
+>   surfaced 1258 / 1260 chain rows being `OperatorViewed*`
+>   noise, which drowned out actual signal. See
+>   §signal-vs-noise below for the policy and the coverage
+>   table for the per-endpoint status.
 
 ## §1 — Why this spec exists
 
@@ -69,18 +68,17 @@ required audit emission, and the current status. Statuses:
     unless marked **RETIRED** below.
   * **NEW** — credential-viewer family added alongside this
     spec.
-  * **RETIRED** — emission was removed by `worker/audit-tightening`
-    (round 1, 2026-05-13). The pre-existing `AuditEventKind`
-    variant is marked `#[deprecated]` so already-persisted
-    chains continue to decode; new chain rows of these kinds
-    are no longer written. Replacement (if any) is named in
-    the row's comment.
-  * **RETIRED — round 2** — emission was removed by
-    `worker/audit-noise-sweep-r2` (2026-05-13). Same
-    `#[deprecated]`-on-the-enum, audit-tools-still-decode
-    contract as round 1. These survivors of round 1 were
-    retired under the user's stricter rule: keep only
-    operator actions that directly affect the initiative.
+  * **RETIRED** — emission was removed in the first audit-noise
+    sweep. The pre-existing `AuditEventKind` variant is marked
+    `#[deprecated]` so already-persisted chains continue to
+    decode; new chain rows of these kinds are no longer written.
+    Replacement (if any) is named in the row's comment.
+  * **RETIRED — round 2** — emission was removed in the second
+    audit-noise sweep. Same `#[deprecated]`-on-the-enum,
+    audit-tools-still-decode contract as round 1. These
+    survivors of round 1 were retired under the stricter rule:
+    keep only operator actions that directly affect the
+    initiative.
   * **EXCLUDED** — never auditable by design.
 
 | Action | Endpoint | Method | Audit emission | Severity | Status |
@@ -158,7 +156,7 @@ time.
 
 ## §signal-vs-noise — what the audit chain is for
 
-> Pinned by `worker/audit-tightening` after iter48 surfaced
+> Pinned after dashboard QA surfaced
 > 1258 / 1260 chain rows being `OperatorViewed*` pageview
 > noise. This section is the policy. It is NOT an `INV-*`
 > invariant — the user pushed back on lint-style invariants for
@@ -319,7 +317,7 @@ variants plus this §section is the canonical record.
 ### Recent-activity feed
 
 The dashboard Overview's "Recent activity" widget surfaced the
-iter48 noise. After both rounds, the surviving `Operator*`
+noise. After both rounds, the surviving `Operator*`
 emissions are exclusively state-affecting / security-relevant,
 so the widget's allow-list got smaller too — round 2 dropped
 `OperatorAuditChainReverified` (no longer emitted), keeping

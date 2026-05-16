@@ -1,9 +1,7 @@
 //! Audit-sink decorator that bridges every per-session audit
 //! emit onto the dashboard's [`SessionStreamCapture`].
-//!
 //! # Why this exists
-//!
-//! `specs/v2/v2_extended_gaps.md §4.3` ships the **agent stream
+//! ships the **agent stream
 //! capture** surface (bounded file ring + broadcast channel +
 //! SSE endpoint). The capture is allocated at boot and the SSE
 //! endpoint subscribes correctly, but until this decorator
@@ -13,23 +11,19 @@
 //! an empty broadcast channel. The dashboard's "Waiting for
 //! stream events…" placeholder was the only thing operators
 //! ever saw.
-//!
 //! Wrapping the production audit sink with
 //! [`StreamingAuditSink`] turns every kernel audit emit that
 //! carries a `session_id` into a live SSE frame on that
 //! session's stream — operators watching a session detail
 //! page see `IntentAccepted`, `WitnessAccepted`,
 //! `SessionVmExited`, etc. flow in as they happen.
-//!
 //! Eventually the gateway will also publish raw model token
 //! chunks through the same capture (the spec's intended
 //! primary source). Until then the audit-event mirror is
 //! enough to make the surface visibly alive AND it carries
 //! the most operator-relevant signal (state changes), not
 //! just LLM tokens.
-//!
 //! # Invariants
-//!
 //! * **Audit-write ordering is preserved.** The inner sink's
 //!   `append` runs to completion (and returns its `Ok` /
 //!   `Err`) BEFORE the stream mirror fires. A stream-push
@@ -97,7 +91,6 @@ fn mirror_to_capture(capture: &SessionStreamCapture, session_id: &str, event: &A
     // `dashboard-fe/src/types/api.ts::StreamEventEnvelope`:
     //   { at_ms, kind, payload: { seq, event_id, payload,
     //     initiative_id?, task_id? } }
-    //
     // We carry the audit `seq` inside the payload so the
     // operator UI can deep-link to the audit-chain row for
     // any event the SSE stream surfaced.

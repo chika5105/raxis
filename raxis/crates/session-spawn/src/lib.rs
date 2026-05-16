@@ -61,7 +61,7 @@
 //!   abort → credential-proxies-shutdown. This matches the
 //!   audit-after-state-mutation discipline (the audit event for
 //!   each tier lands AFTER the state mutation it describes).
-//! * **`INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65).** The
+//! * **`INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01`.** The
 //!   VM-concurrency cap consumer ([`SessionSpawnService::active_count`])
 //!   reads `SELECT COUNT(*) FROM sessions WHERE revoked = 0` from
 //!   the durable `Store` injected via [`SessionSpawnService::with_store`],
@@ -69,12 +69,12 @@
 //!   owner of the substrate handles (`Box<dyn IsolationSession>`,
 //!   the per-session admission `JoinHandle`, the credential-proxy
 //!   handles); it is NOT the source of truth for cap admission.
-//!   The pre-iter65 in-memory projection leaked entries on every
+//!   The earlier in-memory projection leaked entries on every
 //!   `planner_self_exit` revoke (which bypasses
 //!   `terminate_session`), pinning `current_running` at the cap
 //!   forever and rejecting every subsequent admission with
 //!   `FailVmConcurrencyAtCap` against an empty audit-truth state.
-//! * **`INV-SESSION-SPAWN-LEDGER-MIRRORS-AUDIT-01` (iter65).** At
+//! * **`INV-SESSION-SPAWN-LEDGER-MIRRORS-AUDIT-01`.** At
 //!   every kernel state-emit point the count of un-revoked rows in
 //!   the `sessions` table equals
 //!   `count(SessionVmSpawned) − count(SessionVmExited)` for sessions
@@ -301,7 +301,7 @@ pub enum SpawnError {
 /// shared across every IPC handler that needs to spawn or terminate
 /// a session.
 ///
-/// **`INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65).** The
+/// **`INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01`.** The
 /// in-memory `sessions` map below is NOT the source of truth for
 /// the VM-concurrency cap admission gate. It is the kernel-side
 /// owner of the substrate handles (`Box<dyn IsolationSession>`,
@@ -317,7 +317,7 @@ pub enum SpawnError {
 /// against the durable store via the optional `Arc<Store>` wired
 /// in by [`Self::with_store`]. The DB is the audit-equivalent
 /// projection: every `SessionVmSpawned` writes a row, every
-/// `SessionVmExited` flips `revoked = 1`. Pre-iter65 the cap
+/// `SessionVmExited` flips `revoked = 1`. Previously the cap
 /// gate read `self.sessions.lock().len()`, which leaked entries
 /// on the `planner_self_exit` revoke path (the revoke handler
 /// in `kernel/src/session_spawn_orchestrator.rs::spawn_planner_dispatcher`
@@ -353,7 +353,7 @@ pub struct SessionSpawnService {
     /// `with_egress_stall_tracker` before the orchestrator-spawn
     /// service is constructed (see `kernel/src/main.rs`).
     egress_stall_tracker: Option<Arc<EgressStallTracker>>,
-    /// **`INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65).**
+    /// **`INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01`.**
     /// The durable store handle the cap-admission consumer
     /// ([`Self::active_count`]) queries. Optional so legacy
     /// fixtures that exercise spawn / terminate in isolation
@@ -411,7 +411,7 @@ impl SessionSpawnService {
         }
     }
 
-    /// **`INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65).**
+    /// **`INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01`.**
     /// Inject the durable [`raxis_store::Store`] handle the
     /// cap-admission consumer reads. Production boot
     /// (`kernel::main`, `kernel::ipc::context::HandlerContext::new`)
@@ -1095,7 +1095,7 @@ impl SessionSpawnService {
                 }
             };
         }
-        // Pre-iter65 fallback for unit-test fixtures that never
+        // Previously fallback for unit-test fixtures that never
         // wire a store. NOT used on the production cap-admission
         // path — production main / `HandlerContext::new` always
         // call `with_store`.

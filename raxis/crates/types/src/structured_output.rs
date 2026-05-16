@@ -1,18 +1,15 @@
-// raxis-types::structured_output — V2 `v2_extended_gaps.md §3.2`
+// raxis-types::structured_output — V2
 // typed mid-session communication enum.
-//
 // **Why a closed enum and not open-ended JSON.** The kernel is a
 // reference monitor that structurally validates every IPC payload
 // (R-2 — Mediated I/O). Open-ended JSON would create an
 // unvalidatable surface — every consumer (audit chain, dashboard,
 // downstream planner KSB) would have to re-implement validation,
 // and none of them would be able to enforce schema invariants.
-//
 // The enum below is the SINGLE source of truth for what an agent
 // can emit; adding a new variant is a wire-protocol bump and
 // requires a coordinated change across `raxis-types`,
 // `raxis-kernel::handlers`, the operator dashboard, and the CLI.
-//
 // **Invariant matrix (§3.2 spec):**
 // * R-1  (Domain separation) — the kernel scopes every output to
 //        the emitting session's `(initiative_id, task_id)`.
@@ -49,13 +46,11 @@ pub const STRUCTURED_OUTPUT_MAX_PATH_BYTES: usize = 4_096;
 /// pin it here so the kernel and CLI agree on the number.
 pub const STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT: u32 = 10;
 
-/// **`v2_extended_gaps.md §3.2` — typed mid-session output kinds.**
-///
+/// **typed mid-session output kinds.**
 /// Each variant has a fixed schema the kernel validates before
 /// accepting; over-budget / malformed inputs are rejected with
 /// `FAIL_STRUCTURED_OUTPUT_INVALID` and the audit chain records
 /// no row.
-///
 /// **Wire shape (INV-IPC-BINCODE).** Default external-tag serde
 /// representation. The canonical IPC encoder is `bincode::serde`
 /// which does NOT support `serde::deserialize_any` and therefore
@@ -369,7 +364,7 @@ mod tests {
     /// `DiagnosticSeverity` is a unit-only enum and uses
     /// `rename_all = "snake_case"` so the JSON projection uses
     /// `"info" / "warning" / "critical"`. This shape is wire-stable
-    /// — the SQL `severity` column and the operator dashboard
+    /// the SQL `severity` column and the operator dashboard
     /// match on it byte-for-byte.
     #[test]
     fn diagnostic_severity_json_round_trip_uses_snake_case() {

@@ -63,8 +63,7 @@ and `kernel/src/authority/session.rs::accept_envelope_and_advance_sequence`):
    is looked up directly in `sessions.session_token` via
    `authority::session::get_session_by_token`. The lookup is exact
    match on the column (UNIQUE constraint, single index hit). The
-   token is **not** HMAC-derived from `session_id` — earlier drafts
-   of this doc said it was; that was wrong. The token is opaque
+   token is **not** HMAC-derived from `session_id`; it is opaque
    random bytes.
 2. **Envelope nonce + sequence check.**
    `accept_envelope_and_advance_sequence` verifies in one

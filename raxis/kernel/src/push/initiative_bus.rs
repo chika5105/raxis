@@ -1,24 +1,19 @@
 //! Per-initiative realtime event bus
-//! (`v2_extended_gaps.md §2.1 SubscribeInitiative`).
-//!
+//! (` SubscribeInitiative`).
 //! # Why an in-process broadcast bus
-//!
 //! The operator UDS is single-shot today, so before this module
 //! every "subscribe" surface had to fall back to polling. The bus
 //! lets the kernel publish lifecycle events (task FSM transitions,
 //! escalations, integration merges, structured outputs, terminal
 //! state) once, and have any number of `SubscribeInitiative`
 //! sessions tap them via a `tokio::sync::broadcast` channel.
-//!
 //! There is no SQL-backed queue: the audit chain is the durable
 //! record. Subscribers that attach late see only events emitted
 //! after attach time, exactly the behaviour
-//! `v2_extended_gaps.md §2.1` describes ("hold the connection
+//! describes ("hold the connection
 //! open … receive events as they happen"). Operators that need
 //! the historical record use `raxis audit tail`.
-//!
 //! # Wire bridging
-//!
 //! The kernel does NOT publish raw `AuditEventKind` to subscribers
 //! (that type lives in `raxis_audit_tools` and is too internal a
 //! shape to commit to as a wire contract). Instead, the
@@ -26,14 +21,11 @@
 //! enum into the public `raxis_types::InitiativeEvent` enum at
 //! emit time. Adding a new operator-visible event therefore
 //! requires:
-//!
 //! 1. An `AuditEventKind` variant (durable record).
 //! 2. A mapping arm in `audit_kind_to_initiative_event`.
 //! 3. A round-trip test in `initiative_event::tests`.
 //! 4. A new variant in `InitiativeEvent` if no existing one fits.
-//!
 //! # Capacity & overflow
-//!
 //! Each per-initiative channel is sized to
 //! [`PER_INITIATIVE_BROADCAST_CAPACITY`]. If a slow operator
 //! subscriber falls more than that many events behind, it sees a
@@ -60,7 +52,6 @@ pub const PER_INITIATIVE_BROADCAST_CAPACITY: usize = 256;
 /// Process-wide initiative-event bus. One instance lives in
 /// `HandlerContext::initiative_bus`. Cloned via `Arc` into the
 /// audit-sink wrapper and the operator-streaming handler.
-///
 /// Channel allocation is lazy: a publish or subscribe call
 /// against an unknown initiative_id allocates the
 /// `broadcast::Sender` on first touch. The bookkeeping mutex is
@@ -128,13 +119,11 @@ impl InitiativeEventBus {
 /// audit kinds that are not interesting to a
 /// `SubscribeInitiative` stream (e.g. internal
 /// cache-invalidations) — the audit chain still records them.
-///
 /// `task_id` comes from the `AuditSink::emit` call site (the
 /// `task_id` argument). `emitted_at` is the audit row's commit
 /// timestamp; the kernel mirrors the timestamp into the wire
 /// frame so subscribers don't have to reconstruct it from
 /// out-of-band clocks.
-///
 /// Adding a new wire-visible event requires:
 ///   1. Add the `InitiativeEvent` variant in `raxis-types`.
 ///   2. Add an arm here + a round-trip test in this file.
@@ -174,7 +163,7 @@ pub fn audit_kind_to_initiative_event(
         } => Some(InitiativeEvent::ReviewAggregationCompleted {
             task_id: executor_task_id.clone(),
             // Spec strings are `"AllPassed"` / `"AtLeastOneRejected"`
-            // / `"NoSuccessors"` (audit-paired-writes.md §2). The
+            // `"NoSuccessors"` (audit-paired-writes.md §2). The
             // wire boolean is `true` iff every reviewer approved.
             all_passed: verdict == "AllPassed",
         }),
@@ -244,14 +233,12 @@ pub fn audit_kind_to_initiative_event(
 
 /// `AuditSink` decorator that mirrors operator-visible events to
 /// the in-process [`InitiativeEventBus`].
-///
 /// The wire contract is: **broadcast happens AFTER the inner
 /// sink's `emit` returns Ok**. A failed audit emit MUST NOT
 /// leak onto the operator stream — operators trust the audit
 /// chain to be the source of truth, so an event the chain never
 /// recorded would mislead them. Mirrors the kernel's
 /// `audit-paired-writes.md §2` "audit-then-broadcast" rule.
-///
 /// A failed downstream emit is not fatal; we propagate the inner
 /// sink's `Result` unchanged so paired-write callers see exactly
 /// the same error they would have without the wrapper.

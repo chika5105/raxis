@@ -3,9 +3,9 @@
 //! Audit discipline: the list and detail endpoints are pure
 //! read-only browsers. The `OperatorViewedSessionList` /
 //! `OperatorViewedSession` emissions were retired in
-//! `worker/audit-tightening`, and the SSE attach
+//! an earlier audit-noise sweep, and the SSE attach
 //! (`OperatorOpenedSessionStream`) emission was retired in
-//! `worker/audit-noise-sweep-r2`. The session is already
+//! the second audit-noise sweep. The session is already
 //! running; the operator's read-only attach to its capture
 //! stream does not affect kernel state and the per-attach
 //! audit row only ever proved "someone looked", which the
@@ -299,7 +299,7 @@ where
     // SSE attach is a read-only window into the session's
     // existing capture stream — no kernel state changes here
     // and the audit row only ever recorded "someone looked".
-    // Retired in `worker/audit-noise-sweep-r2` per the
+    // Retired in the second audit-noise sweep per the
     // signal-vs-noise policy in
     // `specs/v2/dashboard-operator-action-audit-coverage.md`.
     // Fast-path the kernel-shutdown case: a freshly-attached

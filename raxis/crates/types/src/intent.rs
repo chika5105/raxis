@@ -1,9 +1,7 @@
 // raxis-types::intent — IntentRequest, IntentResponse, IntentKind, BudgetSnapshot.
-//
 // Normative reference: peripherals.md §3.1 "IntentRequest wire shape" and
 // "IntentResponse wire shape". The JSON shown in the spec is a human-readable
 // projection; the canonical types are defined here.
-//
 // Wire encoding: bincode 2.0.1 with `config::standard()` wrapped in a 4-byte
 // LE length prefix by `raxis-ipc::frame`. The serde names here are used only
 // for JSON projections (operator UIs, test harnesses); they are NOT transmitted
@@ -19,7 +17,6 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 /// The kind of action the planner is asserting with an IntentRequest.
-///
 /// v1 values — the kernel rejects any other string with FAIL_POLICY_VIOLATION.
 /// V2 values — gated by the static dispatch matrix (v2-deep-spec.md §Step 20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -44,12 +41,10 @@ pub enum IntentKind {
     /// **V2.** Orchestrator-only. Requests that the Kernel admit and spawn
     /// the sub-task identified by `task_id` (an Executor or Reviewer
     /// sub-task declared in the operator-signed plan).
-    ///
     /// Authorization: gated by the static dispatch matrix
     /// (v2-deep-spec.md §Step 20) AND the `can_delegate` boolean on the
     /// session row (INV-DELEGATE-01). `can_delegate = 1` ⇔
     /// `session_agent_type = Orchestrator`.
-    ///
     /// Wire fields used: `task_id` only (every other field is unused).
     /// Rejection codes:
     ///   * `FAIL_POLICY_VIOLATION` if dispatch matrix says the session
@@ -68,14 +63,12 @@ pub enum IntentKind {
     /// appropriate counter (`crash_retry_count` for VM-crash failures,
     /// `review_reject_count` for Reviewer rejections), and returns
     /// `FAIL_INVALID_REQUEST` if either ceiling is exceeded.
-    ///
     /// Wire fields used: `task_id` only.
     RetrySubTask,
 
     /// **V2.** Reviewer-only. Reports the Reviewer's verdict on the
     /// Executor's `evaluation_sha` set into the Reviewer's session by
     /// the Kernel at activation time.
-    ///
     /// Wire fields used:
     ///   * `task_id` — the Reviewer's own task_id (NOT the Executor's;
     ///     the Kernel reverse-joins via `task_dag_edges` to the
@@ -89,18 +82,16 @@ pub enum IntentKind {
     ///     path). Oversized critique ⇒ `FAIL_INVALID_ARGUMENT`.
     SubmitReview,
 
-    /// **V2 `v2_extended_gaps.md §3.2`.** Executor / Orchestrator —
+    /// **V2 .** Executor / Orchestrator —
     /// emit a typed mid-session output (progress report, diagnostic
     /// flag, task summary). NON-TERMINAL: the session continues
     /// after the kernel records the output. Reviewer is NEVER
     /// authorized to submit this kind (INV-PLANNER-HARNESS-02).
-    ///
     /// Wire fields used: `structured_output` (must be `Some(_)`;
     /// `None` ⇒ `FAIL_STRUCTURED_OUTPUT_INVALID`). `task_id` is
     /// required so the kernel can scope the row to the correct
     /// `(initiative_id, task_id)` per R-1. `base_sha` / `head_sha`
     /// are unused.
-    ///
     /// Rate-limit: per-session N outputs (kernel-side counter,
     /// reset on session expiry). Exceeding ⇒
     /// `FAIL_STRUCTURED_OUTPUT_RATE_LIMITED`.
@@ -122,10 +113,8 @@ impl IntentKind {
     }
 
     /// Whether this intent kind requires `base_sha` and `head_sha`.
-    ///
     /// V1: required for all kinds except `ReportFailure` (peripherals.md
     /// §3.1).
-    ///
     /// V2: `ActivateSubTask`, `RetrySubTask`, and `SubmitReview` operate
     /// at the sub-task lifecycle layer, NOT the commit layer; they
     /// carry no SHA range. The Kernel ignores `base_sha` / `head_sha`
@@ -214,7 +203,6 @@ pub struct ApprovalToken {
 // ---------------------------------------------------------------------------
 
 /// The planner's intent submission message. Sent on the planner UDS socket.
-///
 /// Wire shape: bincode 2.0.1 standard() inside a 4-byte LE length prefix
 /// frame produced by `raxis-ipc::frame`. The JSON in the spec is illustrative.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,7 +254,6 @@ pub struct IntentRequest {
     /// **V2 SubmitReview only.** The Reviewer's verdict on the
     /// Executor's `evaluation_sha`. Required when `intent_kind =
     /// SubmitReview`; ignored for every other kind.
-    ///
     /// `Some(true)` — Reviewer approves the Executor's commits. The
     /// Kernel marks this Reviewer's `subtask_activations` row
     /// `Completed` and runs the reverse-DAG query to check whether
@@ -274,17 +261,14 @@ pub struct IntentRequest {
     /// (Logical AND verdict; v2-deep-spec.md §Step 25). On the last
     /// Reviewer approving, the Kernel sends
     /// `KernelPush::AllReviewersPassed` to the Orchestrator.
-    ///
     /// `Some(false)` — Reviewer rejects the Executor's commits.
     /// `critique` MUST be non-empty (kernel returns
     /// `FAIL_INVALID_ARGUMENT` if absent). The kernel writes the
     /// critique to the Executor's `tasks.last_critique`, increments
     /// `subtask_activations.review_reject_count`, and pushes
     /// `KernelPush::ReviewFailed` to the Orchestrator.
-    ///
     /// `None` for any non-`SubmitReview` kind. `None` on `SubmitReview`
     /// returns `FAIL_INVALID_REQUEST`.
-    ///
     /// **Wire encoding note:** this field is NOT marked
     /// `#[serde(skip_serializing_if = "Option::is_none")]` because the
     /// canonical wire format is bincode 2.0.1 in `bincode::serde` mode,
@@ -307,13 +291,11 @@ pub struct IntentRequest {
     /// processes a single turn (v2-deep-spec.md §Step 22). 32 KiB is
     /// generous for actionable feedback while preventing context-
     /// flooding DoS.
-    ///
     /// Required to be `Some(non-empty)` when `approved = false`;
     /// ignored when `approved = true` (kernel does not store the text);
     /// must be `None` for every non-`SubmitReview` intent kind.
-    ///
     /// **Wire encoding note:** see the analogous comment on `approved`
-    /// — `skip_serializing_if` is intentionally absent here for bincode
+    /// `skip_serializing_if` is intentionally absent here for bincode
     /// round-trip compatibility.
     #[serde(default)]
     pub critique: Option<String>,
@@ -327,10 +309,8 @@ pub struct IntentRequest {
     /// `Consumed` state under `class = MergeConflict` and belongs
     /// to the submitting Orchestrator's session before admitting
     /// the merge (Check 6b in `integration-merge.md §4`).
-    ///
     /// `None` for every standard (LLM-resolved or conflict-free)
     /// merge AND for every non-`IntegrationMerge` intent kind.
-    ///
     /// **Why optional, not a separate intent variant:** the
     /// admission pipeline (Checks 1–5, 7, 8) is identical for both
     /// merge paths; the only difference is the additional
@@ -339,7 +319,6 @@ pub struct IntentRequest {
     /// duplicate every other check and tempt the kernel into
     /// path-specific divergence. INV-05 (audit chain attribution)
     /// is achievable from the optional field alone.
-    ///
     /// **Wire encoding note:** see the analogous comment on
     /// `approved` — `skip_serializing_if` is intentionally absent
     /// for bincode round-trip compatibility (a skipped Option would
@@ -349,14 +328,12 @@ pub struct IntentRequest {
     pub resolved_via_escalation: Option<EscalationId>,
 
     // ── V2 §2.5 token-limit enforcement (per-intent token reporting) ──
-    /// **V2 `v2_extended_gaps.md §2.5` per-intent token report.**
-    ///
+    /// **V2 per-intent token report.**
     /// The cumulative token usage the planner has consumed in its
     /// dispatch loop *up to and including* the LLM turn that
     /// produced this intent. Stamped by
     /// `crate::IntentSubmitter` from the dispatch loop's
     /// `(cum_in, cum_out)` counters.
-    ///
     /// **Required by every planner-submitted intent.** Forward-only,
     /// no V1/V2.4 fallback path: every planner binary that runs
     /// against the V2.5+ kernel populates this field unconditionally.
@@ -365,7 +342,6 @@ pub struct IntentRequest {
     /// LLM turn fired); `None` is reserved for synthetic
     /// kernel-injected intents where no dispatch loop ran (e.g.
     /// the recovery sweep's posthumous `ReportFailure`).
-    ///
     /// **Why on the request and not the response.** Both directions
     /// were considered. Carrying the report on the request makes
     /// every individual intent self-describing: kernel-side audit
@@ -374,7 +350,6 @@ pub struct IntentRequest {
     /// request keeps the admission pipeline's single-pass shape.
     /// The response carries the *post-admission* lane budget snapshot
     /// (see `IntentResponse.budget`), which is a different quantity.
-    ///
     /// **Wire encoding note:** see the analogous comment on
     /// `approved` — `skip_serializing_if` is intentionally absent
     /// for bincode round-trip compatibility.
@@ -382,15 +357,13 @@ pub struct IntentRequest {
     pub tokens_used: Option<TokensReport>,
 
     // ── V2 §3.2 StructuredOutput payload ───────────────────────────────
-    /// **V2 `v2_extended_gaps.md §3.2` typed mid-session output.**
-    ///
+    /// **V2 typed mid-session output.**
     /// Required to be `Some(_)` when `intent_kind = StructuredOutput`
     /// (kernel rejects with `FAIL_STRUCTURED_OUTPUT_INVALID`); MUST
     /// be `None` for every other intent kind. The kernel runs
     /// [`crate::structured_output::StructuredOutputKind::validate_and_normalise`]
     /// on the payload before storing it in `structured_outputs` —
     /// see the type doc for the closed enum's invariant matrix.
-    ///
     /// **Wire encoding note:** see the analogous comment on
     /// `approved` — `skip_serializing_if` is intentionally absent
     /// for bincode round-trip compatibility.
@@ -398,10 +371,9 @@ pub struct IntentRequest {
     pub structured_output: Option<crate::StructuredOutputKind>,
 }
 
-/// V2 `v2_extended_gaps.md §2.5` — cumulative LLM token usage the
+/// Cumulative LLM token usage the
 /// planner has consumed across its dispatch loop up to (and
 /// including) the turn that produced the carrying intent.
-///
 /// All counts are non-negative and saturate at `u64::MAX` in the
 /// driver before being stamped on the wire (so the wire shape never
 /// has to reason about overflow). Cache-read / cache-creation
@@ -499,7 +471,6 @@ pub struct IntentResponse {
 }
 
 /// The exclusive payload variants for IntentResponse.
-///
 /// **Wire format note (INV-IPC-BINCODE):** this enum is serialised through
 /// `raxis-ipc::frame` with `bincode::config::standard()`, which encodes
 /// enums positionally with a single varint discriminator. Earlier
@@ -511,7 +482,6 @@ pub struct IntentResponse {
 /// attribute had survived only because no test exercised the actual
 /// bincode round-trip — `kernel/tests/mock_planner_end_to_end.rs` is
 /// the regression guard.
-///
 /// The default external-tag representation works with bincode and stays
 /// compatible with JSON consumers that read the discriminant from the
 /// outer key (`{"Accepted": {...}}` / `{"Rejected": {...}}`). The flat
@@ -559,7 +529,7 @@ mod tests {
     /// (4 V1 — SingleCommit, IntegrationMerge, CompleteTask,
     /// ReportFailure; 3 V2 — ActivateSubTask, RetrySubTask,
     /// SubmitReview) plus 1 V2.5 — `StructuredOutput` from
-    /// `v2_extended_gaps.md §3.2`. The pinned-count test surfaces
+    /// . The pinned-count test surfaces
     /// accidental adds at the test layer before any dispatch matrix
     /// or store mapping regresses.
     #[test]
@@ -667,7 +637,6 @@ mod tests {
     /// format for `IntentRequest` is `bincode::serde` (peripherals.md
     /// §3.1, raxis-ipc::frame); the JSON projection is documentation
     /// only. We pin behaviour at THAT layer:
-    ///
     ///   1. A V2 codebase serialising an "old shape" intent (V2 fields
     ///      `None`) round-trips byte-for-byte through bincode.
     ///   2. The JSON projection includes the new fields explicitly as

@@ -12,7 +12,7 @@ BEGIN EXCLUSIVE;
 
 -- ── 1. sessions: add initiative_id (nullable) + partial index ────────────
 --
--- v2_extended_gaps.md §3.2 — a planner-class session needs a typed
+-- a planner-class session needs a typed
 -- back-reference to the initiative it was minted under so the kernel
 -- can route Orchestrator-emitted `structured_output` rows to the
 -- correct `initiatives.initiative_id` without a join through

@@ -1,10 +1,7 @@
 //! Operator authentication for the dashboard HTTP surface.
-//!
-//! Spec: `v2_extended_gaps.md §4.2` — challenge-response auth
+//! challenge-response auth
 //! using the same Ed25519 keys + operator certs the CLI uses.
-//!
 //! # Threat model + invariants
-//!
 //! 1. **No shared secrets.** No passwords. No bearer tokens
 //!    minted from operator-supplied data. The browser proves
 //!    knowledge of the operator's private key by signing a
@@ -310,7 +307,6 @@ pub struct OperatorClaims {
     /// pre-rotation token: `JwtSigner::verify` rejects tokens
     /// whose `gen` ≠ the current generation. See
     /// `INV-DASHBOARD-JWT-SECRET-PERSISTENT-01`.
-    ///
     /// `serde(default)` so JWTs minted by pre-V2.5 kernels
     /// (which never set this field) deserialize cleanly and are
     /// compared against generation `0` — they will fail verify
@@ -335,7 +331,6 @@ impl OperatorClaims {
 /// bound into every minted JWT and re-checked on verify, so a
 /// `raxis dashboard rotate-jwt-secret` invalidates every
 /// pre-rotation token without requiring a kernel restart.
-///
 /// In-process tests / `InMemoryDashboardData` paths that don't
 /// have a `data_dir` use [`JwtSigner::new_ephemeral`], which
 /// mints a process-local secret at generation `1` (legacy
@@ -353,7 +348,6 @@ impl JwtSigner {
     /// doesn't have a `data_dir` to persist into. Kernel boot
     /// uses [`JwtSigner::load_or_mint`] instead so JWTs survive
     /// supervisor-triggered restarts.
-    ///
     /// `ttl_secs` MUST be >= 60 in production; smaller values are
     /// clamped to 60 to prevent operator-self-DoS via accidentally
     /// short-lived tokens.
@@ -551,7 +545,6 @@ pub fn now_secs() -> u64 {
 
 /// Convenience constructor for the dashboard's auth state from a
 /// validated [`DashboardConfig`].
-///
 /// **JWT secret resolution.** If `cfg.data_dir` is `Some(_)` the
 /// signer is constructed via [`JwtSigner::load_or_mint`] — i.e.
 /// the kernel boots against the persistent secret at

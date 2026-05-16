@@ -337,7 +337,7 @@ Aborted / Cancelled edges) + `kernel/src/handlers/intent.rs::
 commit_task_completion` (cascade for the Completed edge).
 
 **Orchestrator-continuation re-spawn architecture (V2.5 hardening —
-`3e3605e` + `d7ca482` + `aafd4f2` + Live-e2e iter26 worker-premature-exit
+`3e3605e` + `d7ca482` + `aafd4f2` + Live-e2e worker-premature-exit
 fix).** The DAG advances by chaining orchestrator sessions: each
 orchestrator turn emits zero or more `ActivateSubTask` / `RetrySubTask`
 / `CompleteTask` / `SubmitReview` / `ReportFailure` intents, then the
@@ -391,7 +391,7 @@ bearing kernel concern with **three mutually exclusive paths**:
      `NOT NULL` by schema and was bound in the same
      `activate_subtask` transaction that booted the VM, so it is
      the canonical source of truth for a worker's initiative
-     binding (Live-e2e iter27 reproduced the iter15/iter20 deadlock
+     binding (Live-e2e reproduced the deadlock
      because Mode B short-circuited on `sessions.initiative_id =
      ''` — fixed by reading the column from the activation row).
    * The bound task's `tasks.state` is `Admitted` or `Running`
@@ -441,7 +441,7 @@ bearing kernel concern with **three mutually exclusive paths**:
    * Process death — SIGSEGV / panic / OOM-kill / kernel-side AVF
      shutdown without a paired terminal intent.
 
-   Symptom this hook fixes (live e2e iter25): the
+   Symptom this hook fixes (live e2e): the
    `credential-substitution-canary` realistic-scenario executor (parse
    `.env` → connect via credential proxy → `SELECT` → write/commit →
    `task_complete`) reproducibly hit `MaxTurnsExceeded` at turn 20;
@@ -452,8 +452,8 @@ bearing kernel concern with **three mutually exclusive paths**:
    by retiring the stranded row and firing the respawn explicitly.
    The companion `DEFAULT_PLANNER_MAX_TURNS` bump (`20 → 50 → 100`
    in `crates/planner-core/src/driver.rs`) was the cost-side fix:
-   iter25 reproduced the canary trip at 20, iter31 reproduced the
-   `materialize-records` two-fanout trip at 50 (25 postgres rows +
+   the canary tripped at 20, the
+   `materialize-records` two-fanout tripped at 50 (25 postgres rows +
    25 mongo docs + per-row writes), and `100` clears both empirical
    workloads with headroom while the token-cap envelope
    (`RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL` / `…_OUTPUT_TOTAL`)
@@ -520,7 +520,7 @@ bearing kernel concern with **three mutually exclusive paths**:
    (`INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`).** The V2.7
    precedence chain above resolves a SINGLE `max_turns` value that
    every attempt of the task shares. Production telemetry from
-   iter54/iter55 shows the dominant crash-retry failure mode is
+   shows the dominant crash-retry failure mode is
    "executor ran out of turns mid-edit on attempt 2 with the same
    budget that failed on attempt 1" — a fixed-budget retry asks the
    same agent to do the same work with the same scratch, which is
@@ -670,7 +670,7 @@ spec for forensic reproducibility.
 > NOT mean the Orchestrator decides whether the merge lands. The kernel structurally
 > adjudicates every `IntegrationMerge` intent against (a) the dispatch matrix, (b) the
 > hybrid path allowlist (Check 5), (c) ancestry / reachability (Check 4 / 8), and (d) the
-> iter49 outstanding-review fail-closed backstop (`run_phase_a` Step 3d, per
+> outstanding-review fail-closed backstop (`run_phase_a` Step 3d, per
 > [`agent-disagreement.md §3.6`](agent-disagreement.md)). Only after every gate admits does the kernel call
 > `raxis_domain_git::commit_merge_to_main` to advance `refs/heads/main`. A rejected
 > `IntegrationMerge` intent leaves `target_ref` untouched.
@@ -1004,13 +1004,13 @@ based on the terminal reason of the most recent activation. The Orchestrator has
 to either counter and cannot observe raw counter values — it only observes task state via push
 notifications.
 
-**Admission precondition — two retry-eligibility classes (`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` + iter54 reversal `INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01`).** `handle_retry_sub_task` admits a `RetrySubTask` against a prior activation row in exactly two states:
+**Admission precondition — two retry-eligibility classes (`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` + later reversal `INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01`).** `handle_retry_sub_task` admits a `RetrySubTask` against a prior activation row in exactly two states:
 
 1. `activation_state = 'Failed'` — the classic crash / `ReportFailure` path. The anchor in the audit chain is the preceding `TaskStateChanged { state: Failed }`.
 2. `activation_state = 'Completed'` AND `review_reject_count > 0` — the Reviewer-rejection retry (per [`agent-disagreement.md §3.6`](agent-disagreement.md) "Option A"). The Executor's task-FSM stays `Completed` regardless of reviewer verdict (per `kernel-store.md §2.5.1`); the `> 0` counter is the canonical witness that "a Reviewer rejected this round". The anchor in the audit chain is `ExecutorRespawnFromReviewRejection { task_id, prior_activation_id, new_activation_id, review_reject_count }` (defined in `crates/audit/src/event.rs`) — emitted by `handle_retry_sub_task` immediately after the new row is committed, paired post-commit with the SQLite insert per [`audit-paired-writes.md §4`](audit-paired-writes.md). A `Completed` activation with `review_reject_count = 0` represents a clean completion and is REJECTED with `FAIL_INVALID_REQUEST` — admitting it would let the orchestrator force a re-run of a successful task (paradigm-`R-6` Fail-Closed Default violation).
-~~3. `activation_state = 'PendingActivation'` AND `review_reject_count > 0`~~ — REMOVED in iter54 (`INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01`). The iter48 extension admitted this branch as a structural backstop for orchestrators that exited between `RetrySubTask` and the follow-up `ActivateSubTask`. In practice the admission contradicted the iter48 NNSP rule 3a (which already directed the orchestrator to call `activate_subtask` against the existing pending row): because the kernel was happy to accept the second `retry_subtask`, the KSB stamped `retry_admissible=true`, the NNSP's primary clause won over its diagnostic clause, and the orchestrator chained `retry_subtask → exit → respawn → retry_subtask` until `orchestrator_respawn_ceiling_exceeded` killed the initiative — iter54 reproduced this end-to-end on `lint-runner`. The kernel now REJECTS this branch with `FAIL_INVALID_REQUEST`; the KSB stamps `retry_admissible=false reason="prior state PendingActivation; …"`; the NNSP rule 3a steers the LLM to `activate_subtask`; `handle_activate_sub_task` promotes the existing pending row to `Active` and spawns the executor for the fresh activation. The iter48 NNSP fix (commit `4d19026`) was the LLM-facing half of the correct contract; the iter54 predicate flip is the kernel-facing half. The same `ExecutorRespawnFromReviewRejection` audit anchor is still emitted by the round-2 `Completed + review_reject_count > 0` admission; the round-3+ retry that hits this rejection path emits `RetrySubTaskRejectedNotRetryable` (not the respawn anchor). N.B. the original iter48 NNSP claim that `retry_admissible=false reason="prior state PendingActivation; …"`, but the kernel admit predicate here is the load-bearing structural backstop: a future NNSP regression, KSB projection bug, harness bug, or LLM hallucination MUST NOT deadlock the kernel. A `PendingActivation` activation with `review_reject_count = 0` (a brand-new round-1 admission, no Reviewer ever voted) is REJECTED — the orchestrator MUST issue `ActivateSubTask` (not `RetrySubTask`); admitting would race the pending spawn against the retry handler's revoke + insert. An `Active` activation is REJECTED regardless of `review_reject_count` — the executor VM is still running and admitting would race the executor's eventual `CompleteTask` cascade.
+~~3. `activation_state = 'PendingActivation'` AND `review_reject_count > 0`~~ — REMOVED by the later reversal (`INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01`). The orchestrator-died extension admitted this branch as a structural backstop for orchestrators that exited between `RetrySubTask` and the follow-up `ActivateSubTask`. In practice the admission contradicted NNSP rule 3a (which already directed the orchestrator to call `activate_subtask` against the existing pending row): because the kernel was happy to accept the second `retry_subtask`, the KSB stamped `retry_admissible=true`, the NNSP's primary clause won over its diagnostic clause, and the orchestrator chained `retry_subtask → exit → respawn → retry_subtask` until `orchestrator_respawn_ceiling_exceeded` killed the initiative — the regression reproduced this end-to-end on `lint-runner`. The kernel now REJECTS this branch with `FAIL_INVALID_REQUEST`; the KSB stamps `retry_admissible=false reason="prior state PendingActivation; …"`; the NNSP rule 3a steers the LLM to `activate_subtask`; `handle_activate_sub_task` promotes the existing pending row to `Active` and spawns the executor for the fresh activation. The NNSP fix (commit `4d19026`) was the LLM-facing half of the correct contract; the predicate flip is the kernel-facing half. The same `ExecutorRespawnFromReviewRejection` audit anchor is still emitted by the round-2 `Completed + review_reject_count > 0` admission; the round-3+ retry that hits this rejection path emits `RetrySubTaskRejectedNotRetryable` (not the respawn anchor). N.B. the original NNSP claim that `retry_admissible=false reason="prior state PendingActivation; …"`, but the kernel admit predicate here is the load-bearing structural backstop: a future NNSP regression, KSB projection bug, harness bug, or LLM hallucination MUST NOT deadlock the kernel. A `PendingActivation` activation with `review_reject_count = 0` (a brand-new round-1 admission, no Reviewer ever voted) is REJECTED — the orchestrator MUST issue `ActivateSubTask` (not `RetrySubTask`); admitting would race the pending spawn against the retry handler's revoke + insert. An `Active` activation is REJECTED regardless of `review_reject_count` — the executor VM is still running and admitting would race the executor's eventual `CompleteTask` cascade.
 
-The retry inserts a NEW `PendingActivation` row carrying both counters forward verbatim from the prior row. The prior row is NOT mutated (the FSM is forward-only — `Completed → Failed` backward transitions are forbidden; this is the load-bearing distinction from the rejected Option B in [`agent-disagreement.md §3.6`](agent-disagreement.md)). Both rows coexist for the same `task_id`; subsequent counter bumps in `increment_executor_review_reject_count` target the LATEST row by `created_at` (per-round counter semantics). On the iter48 `PendingActivation` branch the per-task activation row count is therefore at least 3 after a successful re-retry (round-1 `Completed`, round-2 `PendingActivation` from the prior admit, round-3 `PendingActivation` from this admit); the round-2 row stays immutable.
+The retry inserts a NEW `PendingActivation` row carrying both counters forward verbatim from the prior row. The prior row is NOT mutated (the FSM is forward-only — `Completed → Failed` backward transitions are forbidden; this is the load-bearing distinction from the rejected Option B in [`agent-disagreement.md §3.6`](agent-disagreement.md)). Both rows coexist for the same `task_id`; subsequent counter bumps in `increment_executor_review_reject_count` target the LATEST row by `created_at` (per-round counter semantics). On the orchestrator-died `PendingActivation` branch the per-task activation row count is therefore at least 3 after a successful re-retry (round-1 `Completed`, round-2 `PendingActivation` from the prior admit, round-3 `PendingActivation` from this admit); the round-2 row stays immutable.
 
 **V2.5 rationale extension — why `ReportFailure` from an Executor counts (and why this is not the same as letting a planner game its own counter).** The `crash_retry_count` was originally drafted as "kernel-side OS-level events only — never bumped by a planner-side intent". The clause was a hostile-planner mitigation: the *principal that asks for retries* (the **Orchestrator**) is also the principal that reads the ceiling check (`handle_retry_sub_task` returns `Accepted` or `FAIL_INVALID_REQUEST` based on `crash_retry_count < max_crash_retries`). If that same principal could bump the counter via an intent, a hostile planner could pretend to crash, observe nothing happens, and keep retrying forever — the budget would be advisory rather than load-bearing. So `ReportFailure` from the Orchestrator stays unauthorised (per the Step 11 dispatch matrix at line 1017) and the Orchestrator cannot self-promote a "retry-attempted" event into the budget.
 
@@ -1018,7 +1018,7 @@ The retry inserts a NEW `PendingActivation` row carrying both counters forward v
 
 The `bump_executor_crash_retry_count_in_tx` helper (`kernel/src/handlers/intent.rs`) increments the matching active `subtask_activations` row inside the same SQLite transaction as the `Running → Failed` cascade and the `c986e6d` activation-row close-out (see `kernel-core.md §4.6 task_transitions.rs`), so a process crash mid-flight leaves the store either entirely pre-bump or entirely post-bump. Best-effort on the bump itself: `Ok(0)` (no active row) and SQL errors both log on stderr but let the FSM transition proceed — the activation history is forensic, not on the audit-required path, and a dropped bump under-counts by at most one attempt.
 
-**V2.5b extension — Orchestrator no-progress respawn counter.** A third counter family, registered at the **per-initiative** scope rather than per-`subtask_activations` row, closes one loop class neither `crash_retry_count` nor `review_reject_count` covers: the Orchestrator's short-lived decision-cycle session boots, reads the KSB, calls one terminal tool, exits cleanly, and is re-spawned by the post-exit hook. When the kernel rejects the called intent (e.g. `RetrySubTaskRejectedNotRetryable` per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`), neither dual counter ever bumps because (a) the Orchestrator's task FSM never transitions to `Failed` — it exits cleanly — and (b) the bookkeeping `subtask_activations` rows belong to Executors, not Orchestrators. `iter42`-second-run reproduced this in production: 45 `SessionVmSpawned` events in 18 min, zero `crash_retry_count` bumps, zero `review_reject_count` bumps, zero progress.
+**V2.5b extension — Orchestrator no-progress respawn counter.** A third counter family, registered at the **per-initiative** scope rather than per-`subtask_activations` row, closes one loop class neither `crash_retry_count` nor `review_reject_count` covers: the Orchestrator's short-lived decision-cycle session boots, reads the KSB, calls one terminal tool, exits cleanly, and is re-spawned by the post-exit hook. When the kernel rejects the called intent (e.g. `RetrySubTaskRejectedNotRetryable` per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`), neither dual counter ever bumps because (a) the Orchestrator's task FSM never transitions to `Failed` — it exits cleanly — and (b) the bookkeeping `subtask_activations` rows belong to Executors, not Orchestrators. A second reproduction in production observed 45 `SessionVmSpawned` events in 18 min with zero `crash_retry_count` bumps, zero `review_reject_count` bumps, and zero progress.
 
 The counter lives on `initiatives.orchestrator_no_progress_respawn_count` (Migration 19; see `crates/store/src/migration.rs::render_migration_19_ddl`), increments by 1 inside `session_spawn_orchestrator::respawn_orchestrator_for_initiative` BEFORE the substrate spawn step (Step 1b), and resets to 0 inside `initiatives::task_transitions::transition_task_in_tx` on every legal task FSM transition. Honest DAG progress observably IS the reset signal. When the post-increment value strictly exceeds `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3, the kernel constant `orch_respawn_ceiling::MAX_ORCH_NO_PROGRESS_RESPAWNS`), the kernel marks the initiative `InitiativeState::Failed` in the same SQLite transaction and emits `AuditEventKind::OrchestratorRespawnCeilingExceeded { initiative_id, attempts, max_attempts }` per [`audit-paired-writes.md §4`](audit-paired-writes.md). Subsequent post-exit-hook triggers for the offending initiative are silently skipped by the `is_executing` preflight. Pinned by `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01` (`invariants.md §6 Scheduler / lifecycle limits`).
 
@@ -1551,7 +1551,7 @@ evaluate the same frozen `evaluation_sha` — there is no semantic reason they m
   `wire_str()` into `DagRow::aggregate_verdict` so the orchestrator's NNSP rule 3a
   pivots on the kernel's TERMINAL verdict (not the per-Reviewer `reviewer_verdicts=`
   block, which fires `approved=false` as soon as the FIRST sibling votes Reject and
-  produces a respawn loop per the iter42 regression — see [`agent-disagreement.md §3.6`](agent-disagreement.md)
+  produces a respawn loop per the regression — see [`agent-disagreement.md §3.6`](agent-disagreement.md)
   and `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`). The same function backs both the
   kernel's admission gate (`handle_submit_review`'s post-commit aggregator branch) AND
   the orchestrator's prompt logic — pinned equivalence in
@@ -3038,7 +3038,6 @@ Kernel involvement, and the Kernel's enforcement point (path allowlist at commit
 admission) is both necessary and sufficient to enforce the security boundary.
 
 ---
-
 
 #### VM Environment Configuration — Toolchains and Dependencies (INV-VM-CAP-03)
 

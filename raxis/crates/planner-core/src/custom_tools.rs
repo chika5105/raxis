@@ -3,16 +3,12 @@
 //! `planner-harness.md §INV-PLANNER-HARNESS-04`) and registers them
 //! as subprocess-executor [`crate::tools::Tool`]s in a planner-role
 //! registry.
-//!
-//! Closes V2_GAPS.md §B1 substep "Custom-tool loader + subprocess
+//!substep "Custom-tool loader + subprocess
 //! executor". The corresponding policy + plan validation lives in
 //! `kernel/src/initiatives/lifecycle.rs::validate_task_custom_tools`
 //! (gap-b2-custom-tools, follow-up).
-//!
 //! ## Wire shape
-//!
 //! Each custom tool decl carries:
-//!
 //! * `name` — ASCII identifier matching `[A-Za-z0-9_]{1,64}`.
 //! * `description` — Human-readable description (≤ 1 KiB).
 //! * `command` — Absolute path to an executable inside the planner VM
@@ -22,7 +18,6 @@
 //! * `timeout_secs` — Per-invocation deadline. Hard-capped at 300s
 //!   (5 minutes) by the loader; values above the cap are rejected at
 //!   registration time.
-//!
 //! The subprocess receives the model's `tool_use.input` as JSON on
 //! stdin, and is expected to write a `ToolOutput`-shaped JSON
 //! response to stdout (`{ "content": "...", "is_error": bool? }`).
@@ -116,7 +111,6 @@ pub fn validate_custom_tool(decl: &CustomToolDecl) -> Result<(), CustomToolError
 }
 
 /// Load + register a list of custom-tool decls into `registry`.
-///
 /// Each decl is validated, wrapped in a [`SubprocessTool`], and
 /// inserted into the registry. Name collisions surface as
 /// [`CustomToolError::NameCollision`] BEFORE the registry is

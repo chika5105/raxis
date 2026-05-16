@@ -1,7 +1,5 @@
 // Thin typed fetch wrapper for the Raxis dashboard HTTP API.
 //
-// Spec: raxis/specs/v2/v2_extended_gaps.md §4.3 / §4.5.
-//
 // Design notes:
 //   * One `apiFetch` entrypoint so JWT injection, error
 //     normalization, and 401 → /login redirect live in one place.

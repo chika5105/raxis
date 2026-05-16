@@ -1,6 +1,6 @@
 # Per-task LLM-turn capture
 
-**Status.** Implemented (iter58). Spec parity with
+**Status.** Implemented. Spec parity with
 `raxis/crates/dashboard-kernel/src/task_llm_capture.rs`,
 `raxis/kernel/src/gateway/client.rs`,
 `raxis/crates/dashboard/src/routes/tasks.rs`. Pinned by

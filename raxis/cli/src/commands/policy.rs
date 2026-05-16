@@ -30,7 +30,7 @@ use crate::errors::CliError;
 use crate::GlobalFlags;
 
 // ---------------------------------------------------------------------------
-// `raxis policy generate-sidecar-secret` — V2_GAPS §C5 / extensibility-traits.md §9A.7C.
+// `raxis policy generate-sidecar-secret` — `extensibility-traits.md §9A.7C`.
 //
 // Mints a 32-byte cryptographically-random shared secret for the
 // HTTP-sidecar HMAC-SHA256 authentication scheme and prints it as
@@ -536,7 +536,7 @@ force_misconfig_bypass = true
         assert!(scan_for_misconfig_bypass(b"not a valid = = = TOML").is_empty());
     }
 
-    // ----- generate-sidecar-secret helpers (V2_GAPS §C5) -----------------
+    // ----- generate-sidecar-secret helpers -----------------
 
     #[test]
     fn hex_encode_round_trips_through_hex_crate() {

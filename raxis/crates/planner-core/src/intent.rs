@@ -2,15 +2,11 @@
 //! tool ([`crate::dispatch::DispatchOutcome::TerminalTool`]) into an
 //! [`raxis_types::IntentRequest`] and ships it through the
 //! [`crate::transport::KernelTransport`].
-//!
-//! Closes V2_GAPS.md §B1 substeps "Intent submission
+//!substeps "Intent submission
 //! (executor → kernel via VSock)" and (in part)
 //! "Witness/verdict submission (reviewer → kernel via VSock)".
-//!
 //! ## Sequence numbering & nonce minting
-//!
 //! Each [`IntentSubmitter`] holds:
-//!
 //! * A monotonic `u64` sequence_number, starting at 1 and
 //!   incremented per submission. Pinned by
 //!   `peripherals.md §3.1` ("INV-PLANNER-04: monotonic per-session
@@ -20,9 +16,7 @@
 //!   entropy; counter-derived nonces (incrementing the seed per
 //!   submission) are sufficient and keep the per-session state
 //!   small.
-//!
 //! ## Why a separate submitter, not a method on the dispatch loop
-//!
 //! The dispatch loop terminates with a tool name + JSON input; the
 //! submitter knows how to convert each terminal tool into the
 //! matching [`IntentKind`]. Splitting the concerns keeps each
@@ -55,13 +49,12 @@ pub struct IntentSubmitter {
     task_id: TaskId,
     next_seq: std::sync::atomic::AtomicU64,
     nonce_seed: std::sync::atomic::AtomicU64,
-    /// V2 `v2_extended_gaps.md §2.5` — last known cumulative LLM
+    /// Last known cumulative LLM
     /// token usage. Updated by callers via
     /// [`IntentSubmitter::report_tokens`] every time the dispatch
     /// loop updates `(cum_in, cum_out)`. Stamped onto every
     /// outbound `IntentRequest::tokens_used` so the kernel can run
     /// the dollar-cost admission gate at intent admission time.
-    ///
     /// Stored behind a `std::sync::Mutex` so the dispatch loop and
     /// the terminal-tool submission path (which run on the same
     /// task) can share without a `&mut`.
@@ -70,11 +63,9 @@ pub struct IntentSubmitter {
 
 impl IntentSubmitter {
     /// Construct a new submitter.
-    ///
     /// `session_token` is the value the kernel stamped into the
     /// guest env at spawn time (`RAXIS_SESSION_TOKEN`); the
     /// [`crate::BootEnv`] reads it.
-    ///
     /// `task_id` is the planner-role binary's task id (the same
     /// value the orchestrator/executor/reviewer received via
     /// `--task-id` argv).
@@ -98,11 +89,10 @@ impl IntentSubmitter {
         }
     }
 
-    /// V2 `v2_extended_gaps.md §2.5` — record the latest cumulative
+    /// Record the latest cumulative
     /// LLM token counts. The dispatch loop calls this after every
     /// model turn so the next `submit_*` call carries an accurate
     /// `IntentRequest::tokens_used`.
-    ///
     /// Replaces the stored report wholesale (the dispatch loop
     /// owns the cumulative state; the submitter is just a relay).
     pub fn report_tokens(&self, tokens: TokensReport) {
@@ -142,8 +132,7 @@ impl IntentSubmitter {
 
     /// Build a fresh `IntentRequest` skeleton with the per-session
     /// fields populated. Caller fills in the kind-specific fields.
-    ///
-    /// V2 `v2_extended_gaps.md §2.5` — `tokens_used` is stamped from
+    /// `tokens_used` is stamped from
     /// the most-recent `report_tokens` snapshot. `Some(zero)` is
     /// the default when no LLM turn has fired yet (deterministic
     /// short-circuit terminal tools): the kernel still gets a
@@ -170,7 +159,6 @@ impl IntentSubmitter {
     }
 
     /// Submit a `SingleCommit` intent.
-    ///
     /// `base_sha` / `head_sha` form the commit range the kernel
     /// will validate ancestry + path-allowlist over. Both are
     /// validated as 40-char lowercase hex on construction; a
@@ -225,7 +213,6 @@ impl IntentSubmitter {
     }
 
     /// Submit an `ActivateSubTask` intent (orchestrator role).
-    ///
     /// `subtask_task_id` is the sub-task the orchestrator asks the
     /// kernel to activate; this REPLACES the orchestrator's own
     /// `task_id` field on the wire (per `intent.rs` doc, only
@@ -250,7 +237,6 @@ impl IntentSubmitter {
     }
 
     /// Submit a `SubmitReview` intent (reviewer role).
-    ///
     /// `approved = true` ⇒ green-light the predecessor executor's
     /// `evaluation_sha`. `approved = false` requires `critique`
     /// (max 32 KiB).
@@ -265,16 +251,14 @@ impl IntentSubmitter {
         self.send(IpcMessage::IntentRequest(req)).await
     }
 
-    /// **V2 `v2_extended_gaps.md §3.2`** — submit a typed mid-session
+    /// **V2 ** — submit a typed mid-session
     /// structured output (`progress_report`, `diagnostic_flag`, or
     /// `task_summary`).
-    ///
     /// Authorized for the executor + orchestrator roles only
     /// (the kernel's static dispatch matrix forbids the reviewer
     /// path; INV-PLANNER-HARNESS-02). A NON-TERMINAL intent —
     /// the dispatch loop continues after a successful submission;
     /// the kernel does NOT transition the task FSM.
-    ///
     /// The `payload` is normalised on the kernel side via
     /// [`StructuredOutputKind::validate_and_normalise`] (over-cap
     /// strings/lists are silently truncated; only fundamentally-
@@ -292,7 +276,6 @@ impl IntentSubmitter {
     /// **`INV-FAILURE-REASON-CONCRETE-01`** — emit a final
     /// [`PlannerExitOutcome`] notice immediately before the role
     /// binary exits.
-    ///
     /// The kernel's `drive_planner_stream` captures the most
     /// recent notice it sees and threads the cause into the
     /// Mode-B premature-exit synthesis in
@@ -302,7 +285,6 @@ impl IntentSubmitter {
     /// (60 used / 60 limit) without submitting a terminal
     /// intent"`) instead of the multi-option umbrella that
     /// `INV-FAILURE-REASON-CONCRETE-01` forbids.
-    ///
     /// **Best-effort.** Ack errors are returned to the caller
     /// but the role binary's `main` ignores them — the notice
     /// is forensic context, NOT a structural unstall (the
@@ -361,7 +343,6 @@ impl IntentSubmitter {
 
 /// Tool name → [`IntentKind`] mapping for the executor role's
 /// terminal tools.
-///
 /// Used by the executor's main loop to convert the dispatch-loop's
 /// terminal-tool short-circuit into the matching IPC intent
 /// without re-implementing the mapping in every binary.
@@ -439,7 +420,6 @@ pub struct TaskCompleteInput {
 
 impl TaskCompleteInput {
     /// Parse a `task_complete` terminal-tool argument blob.
-    ///
     /// Returns [`SubmitError::MalformedInput`] if the model did not emit a
     /// valid object with the expected `head_sha` string field.
     pub fn parse(v: &serde_json::Value) -> Result<Self, SubmitError> {
@@ -462,7 +442,6 @@ pub struct SubmitReviewInput {
 
 impl SubmitReviewInput {
     /// Parse a `submit_review` terminal-tool argument blob.
-    ///
     /// In addition to schema validation, enforces the invariant that a
     /// rejection MUST carry a critique.
     pub fn parse(v: &serde_json::Value) -> Result<Self, SubmitError> {

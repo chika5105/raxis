@@ -26,8 +26,8 @@
 // DAG legend) — i.e. either failing or skating just above WCAG AA
 // 4.5:1 with no headroom.
 //
-// Mirroring the pattern landed by `worker/fe-audit-banner-contrast`
-// (commit 9e8f063, ChainStatusBanner.tsx), each tone is now spelt
+// Mirroring the pattern landed in `ChainStatusBanner.tsx`,
+// each tone is now spelt
 // out with explicit per-mode Tailwind palette steps. Worst-case
 // contrast at the time of writing (text vs. composited tinted
 // background on `--c-panel-raised`):

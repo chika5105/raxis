@@ -560,10 +560,10 @@ const ALLOW_LIST: &[(&str, AttrSchema)] = &[
         },
     ),
     // ---- V3 §3 expansion: egress admit/deny/default-grant/stall + cred-proxy substitution
-    // (see worker/reviewer-orch-egress-defaults @ 4d8f5dc and
-    //  worker/secrets-model-realignment @ 6114f49). The values are
-    //  closed lexicons of operational chokepoint / provider-kind labels;
-    //  no PII flows through these keys (they describe code-paths, not data).
+    // (landed by the egress-defaults and secrets-model realignment
+    //  sweeps). The values are closed lexicons of operational
+    //  chokepoint / provider-kind labels; no PII flows through these
+    //  keys (they describe code-paths, not data).
     (
         "chokepoint",
         AttrSchema {

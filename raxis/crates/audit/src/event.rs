@@ -1009,7 +1009,7 @@ pub enum AuditEventKind {
     PlanRejected {
         initiative_id: String,
     },
-    /// V2_GAPS §12.4 — `OperatorRequest::DryRunAdmit` (V2.4) emits
+    /// `OperatorRequest::DryRunAdmit` (V2.4) emits
     /// exactly one `DryRunAdmitted` audit event per call so the
     /// operator's local audit chain reflects which plan was
     /// dry-run admitted at which time. This is the **only**
@@ -1191,7 +1191,7 @@ pub enum AuditEventKind {
         target_ref: String,
     },
 
-    /// V2 `v2_extended_gaps.md §1.2` — emitted when the kernel's
+    /// emitted when the kernel's
     /// host-side fast-forward of the operator-configured `target_ref`
     /// after a successful `IntegrationMerge` (Phase 1) fails. The
     /// underlying `commit_merge_to_target_ref` is non-mutating on
@@ -1230,7 +1230,7 @@ pub enum AuditEventKind {
         reason: String,
     },
 
-    /// V2_GAPS §C6 — emitted when the kernel begins a push to the
+    /// emitted when the kernel begins a push to the
     /// configured upstream remote after a successful Phase 3 of
     /// `IntegrationMerge`. The matching success → `PushCompleted` or
     /// failure → `PushFailed` follows.
@@ -1245,7 +1245,7 @@ pub enum AuditEventKind {
         refspec: String,
     },
 
-    /// V2_GAPS §C6 — emitted on `git push` exit-0. Carries the
+    /// emitted on `git push` exit-0. Carries the
     /// short summary line from `git push`'s stderr so an operator
     /// querying audit can see the upstream's confirmation message
     /// without re-running.
@@ -1262,7 +1262,7 @@ pub enum AuditEventKind {
         summary: String,
     },
 
-    /// V2_GAPS §C6 — emitted on `git push` exit-non-zero or on
+    /// emitted on `git push` exit-non-zero or on
     /// deadline / spawn failure. The kernel's parent transaction is
     /// already committed; `PushFailed` is purely informational and
     /// does NOT roll back the merge.
@@ -1526,7 +1526,7 @@ pub enum AuditEventKind {
     /// `IntentKind::CompleteTask` (or any other workspace-mutating
     /// intent) with `error_code = PlannerErrorCode::FailInvalidDiff`
     /// — i.e. a *validation* failure, NOT a substrate / VM crash.
-    /// Pre-iter62 the rejection was misclassified: the FailInvalidDiff
+    /// Previously the rejection was misclassified: the FailInvalidDiff
     /// rejection caused the planner to exit, the post-exit hook in
     /// `kernel/src/session_spawn_orchestrator.rs` synthesised
     /// `TaskFailedOnWorkerPrematureExit` and bumped
@@ -1909,7 +1909,7 @@ pub enum AuditEventKind {
         reason: String,
     },
 
-    /// V2_GAPS §C4 — successful notification delivery.
+    /// successful notification delivery.
     ///
     /// `channel_kind` is one of `"Shell" | "File" | "Email" |
     /// "Webhook" | "Sidecar"` (the wire enum's variant string).
@@ -2332,7 +2332,7 @@ pub enum AuditEventKind {
         backend_kind: String,
     },
 
-    /// V2_GAPS §C7 — emitted when `raxis credential add` writes a new
+    /// emitted when `raxis credential add` writes a new
     /// credential file. Carries the public-facing metadata only; the
     /// credential VALUE is never recorded. Forensic queries match
     /// on `name` to follow a credential through its lifecycle
@@ -2360,7 +2360,7 @@ pub enum AuditEventKind {
         backend_kind: String,
     },
 
-    /// V2_GAPS §C7 — emitted when `raxis credential remove` deletes
+    /// emitted when `raxis credential remove` deletes
     /// a credential file. `forced` distinguishes the defensive
     /// (`--force` was supplied) from the (V3-future) "gracefully
     /// detected zero active sessions" path.
@@ -2371,7 +2371,7 @@ pub enum AuditEventKind {
         forced: bool,
     },
 
-    /// V2_GAPS §D1 — emitted when `raxis cert revoke` writes a
+    /// emitted when `raxis cert revoke` writes a
     /// signed revocation record under `<data_dir>/revocations/`.
     /// The record itself is the durable artifact; this audit event
     /// is the wire-stable signal that other observability paths
@@ -2385,7 +2385,7 @@ pub enum AuditEventKind {
         revoked_by_pubkey_fingerprint: String,
     },
 
-    /// V2_GAPS §D1 — emitted EVERY TIME the kernel denies an
+    /// emitted EVERY TIME the kernel denies an
     /// operator op because the operator cert has been revoked.
     /// Not deduped: every rejection is a forensic breadcrumb so
     /// a forensic timeline can reconstruct exactly when an
@@ -2398,13 +2398,13 @@ pub enum AuditEventKind {
         revoked_at: i64,
     },
 
-    // ── V2_GAPS §D2 — host-capacity admission + watchdogs ──────────────
+    // ── host-capacity admission + watchdogs ──────────────
     //
     // V2 ships the *cap-enforcement* slice of `host-capacity.md` plus a
     // basic disk-full watchdog. The full admission queue with `Queued`
     // session state, round-robin fairness, per-operator overrides, and
     // WAL pressure monitoring is deferred to V3 (see
-    // `V2_GAPS.md §D2`).
+    // ``).
     /// Emitted when an `ActivateSubTask` (or first-task spawn) is
     /// refused because a host-capacity cap would be exceeded. V2
     /// returns `FAIL_VM_CONCURRENCY_AT_CAP` to the caller; the
@@ -2470,7 +2470,7 @@ pub enum AuditEventKind {
         details: String,
     },
 
-    /// V2_GAPS §12.1 — emitted by `kernel/src/push/dispatcher.rs`
+    /// emitted by `kernel/src/push/dispatcher.rs`
     /// when a `KernelPush` variant is enqueued for delivery to a
     /// session. V2.3 ships an in-memory `tokio::sync::broadcast`
     /// fan-out so internal subscribers (review-aggregation hooks,
@@ -2499,7 +2499,7 @@ pub enum AuditEventKind {
         task_id: Option<String>,
     },
 
-    /// V2_GAPS §C7 — emitted when `raxis credential verify` runs.
+    /// emitted when `raxis credential verify` runs.
     /// V2 verification is structural-only (file presence, mode 0600,
     /// uid match, non-empty body, optional `KEY=VALUE` parse).
     /// V3 will extend this with a live network probe per proxy type;
@@ -3013,14 +3013,14 @@ pub enum AuditEventKind {
         /// Operator-declared IAM role ARN. Empty when the decl
         /// does not declare one.
         role_arn: String,
-        /// V2_GAPS §9 Phase 2 — operator-declared service scope
+        /// operator-declared service scope
         /// (e.g. `["s3", "sqs"]`). Echoed in audit so reviewers
         /// can cross-check the egress allowlist; runtime
         /// enforcement is the V3 SigV4-aware egress proxy.
         /// Empty list when the operator declared no scope.
         #[serde(default)]
         allowed_services: Vec<String>,
-        /// V2_GAPS §9 Phase 2 — operator-declared region scope
+        /// operator-declared region scope
         /// (e.g. `["us-east-1"]`). Same enforcement model as
         /// `allowed_services`.
         #[serde(default)]
@@ -3045,7 +3045,7 @@ pub enum AuditEventKind {
         path_sha256: String,
         /// Operator-declared GCP project ID.
         project_id: String,
-        /// V2_GAPS §9 Phase 2 — operator-declared OAuth scopes.
+        /// operator-declared OAuth scopes.
         /// Echoed in audit so reviewers can confirm the scope
         /// narrowing the proxy applied to the token response.
         /// Empty list when no scope-level intent was declared.
@@ -3075,7 +3075,7 @@ pub enum AuditEventKind {
         request_sha256: String,
         /// Operator-declared tenant ID.
         tenant_id: String,
-        /// V2_GAPS §9 Phase 2 — operator-declared ARM action
+        /// operator-declared ARM action
         /// vocabulary for the requested resource. Echoed in audit
         /// so reviewers can confirm the declared scope. Empty list
         /// when no per-resource action filter was declared. V2.3
@@ -3534,7 +3534,7 @@ pub enum AuditEventKind {
     /// on the directory-listing endpoints (tree / log / status)
     /// that share the same path-safety surface.
     ///
-    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// **Deprecated** in the second audit-noise sweep. Retained
     /// on the enum so audit-tools can deserialize already-persisted
     /// chains that contain this variant; emit sites have been
     /// retired. The worktrees are operator-blessed and the read
@@ -3563,7 +3563,7 @@ pub enum AuditEventKind {
     /// Diffs leak file contents at scale, so the read was once
     /// audited even though no kernel state changed.
     ///
-    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// **Deprecated** in the second audit-noise sweep. Retained
     /// on the enum so audit-tools can deserialize already-persisted
     /// chains that contain this variant; emit sites have been
     /// retired. The diff is a read of operator-blessed source
@@ -3594,7 +3594,7 @@ pub enum AuditEventKind {
     /// rejects it, so leaking the rejected path is no worse than
     /// the operator-supplied query string).
     ///
-    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// **Deprecated** in the second audit-noise sweep. Retained
     /// on the enum so audit-tools can deserialize already-persisted
     /// chains that contain this variant; emit sites have been
     /// retired. The route-layer + kernel-side path-safety
@@ -3623,7 +3623,7 @@ pub enum AuditEventKind {
     /// worker thread on a chain walk but did not mutate kernel
     /// state.
     ///
-    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// **Deprecated** in the second audit-noise sweep. Retained
     /// on the enum so audit-tools can deserialize already-persisted
     /// chains that contain this variant; emit sites have been
     /// retired — emitting an audit row about verifying the audit
@@ -3653,7 +3653,7 @@ pub enum AuditEventKind {
     /// retirement so future contributors don't reintroduce
     /// per-view emissions.
     ///
-    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// **Deprecated** in the second audit-noise sweep. Retained
     /// on the enum so audit-tools can deserialize already-persisted
     /// chains that contain this variant.
     #[deprecated(
@@ -3674,7 +3674,7 @@ pub enum AuditEventKind {
     /// kernel subsystem's last-known health verdict; it does
     /// not affect kernel state.
     ///
-    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// **Deprecated** in the second audit-noise sweep. Retained
     /// on the enum so audit-tools can deserialize already-persisted
     /// chains that contain this variant; emit sites have been
     /// retired — health pings are dashboard heartbeat telemetry
@@ -3707,7 +3707,7 @@ pub enum AuditEventKind {
     /// only metadata (name, proxy type, mount target, file path,
     /// byte size, sha256 prefix) — never plaintext.
     ///
-    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// **Deprecated** in the second audit-noise sweep. Retained
     /// on the enum so audit-tools can deserialize already-persisted
     /// chains that contain this variant; emit sites have been
     /// retired — the reveal endpoint's
@@ -3760,7 +3760,7 @@ pub enum AuditEventKind {
     /// caller never reaches the data layer because the route returns
     /// 403 before any kernel call.
     ///
-    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// **Deprecated** in the second audit-noise sweep. Retained
     /// on the enum so audit-tools can deserialize already-persisted
     /// chains that contain this variant; emit sites have been
     /// retired for the same reason as
@@ -3808,7 +3808,7 @@ pub enum AuditEventKind {
     // `dashboard-operator-action-audit-coverage.md §gap-analysis`.
     /// Operator listed initiatives via `GET /api/initiatives`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained on
+    /// **Deprecated** in an earlier audit-noise sweep. Retained on
     /// the enum so audit-tools can deserialize already-persisted
     /// chains that contain this variant; emit sites have been
     /// retired. See `specs/v2/dashboard-operator-action-audit-
@@ -3830,7 +3830,7 @@ pub enum AuditEventKind {
     /// Operator opened the initiative-detail surface via
     /// `GET /api/initiatives/:id`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization of older chains; emit
     /// sites have been retired (signal-vs-noise policy in
     /// `specs/v2/dashboard-operator-action-audit-coverage.md`).
@@ -3849,7 +3849,7 @@ pub enum AuditEventKind {
     /// Operator opened the initiative DAG view via
     /// `GET /api/initiatives/:id/dag`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     #[deprecated(
         note = "Read-only operator views are no longer audited; emit only mutations and security events."
@@ -3866,7 +3866,7 @@ pub enum AuditEventKind {
     /// Operator opened the per-initiative task list via
     /// `GET /api/initiatives/:id/tasks`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     #[deprecated(
         note = "Read-only operator views are no longer audited; emit only mutations and security events."
@@ -3884,7 +3884,7 @@ pub enum AuditEventKind {
 
     /// Operator opened a task detail surface via `GET /api/tasks/:id`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     #[deprecated(
         note = "Read-only operator views are no longer audited; emit only mutations and security events."
@@ -3901,7 +3901,7 @@ pub enum AuditEventKind {
     /// Operator opened the task structured-outputs surface via
     /// `GET /api/tasks/:id/outputs`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     #[deprecated(
         note = "Read-only operator views are no longer audited; emit only mutations and security events."
@@ -3919,7 +3919,7 @@ pub enum AuditEventKind {
 
     /// Operator listed sessions via `GET /api/sessions`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     #[deprecated(
         note = "Read-only operator views are no longer audited; emit only mutations and security events."
@@ -3938,7 +3938,7 @@ pub enum AuditEventKind {
     /// Operator opened a session detail surface via
     /// `GET /api/sessions/:id`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     #[deprecated(
         note = "Read-only operator views are no longer audited; emit only mutations and security events."
@@ -3957,7 +3957,7 @@ pub enum AuditEventKind {
     /// emit one row; the keepalive frames the server emits
     /// every 15s never did.
     ///
-    /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
+    /// **Deprecated** in the second audit-noise sweep. Retained
     /// on the enum so audit-tools can deserialize already-persisted
     /// chains that contain this variant; emit sites have been
     /// retired. The session is already running before the attach
@@ -3979,7 +3979,7 @@ pub enum AuditEventKind {
 
     /// Operator listed escalations via `GET /api/escalations`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     #[deprecated(
         note = "Read-only operator views are no longer audited; emit only mutations and security events."
@@ -3996,7 +3996,7 @@ pub enum AuditEventKind {
     /// Operator opened an escalation detail surface via
     /// `GET /api/escalations/:id`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     #[deprecated(
         note = "Read-only operator views are no longer audited; emit only mutations and security events."
@@ -4012,7 +4012,7 @@ pub enum AuditEventKind {
 
     /// Operator paginated the audit chain via `GET /api/audit`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     /// The chain re-verify path (`?reverify=true`) still audits
     /// via `OperatorAuditChainReverified` — that pins a kernel
@@ -4036,7 +4036,7 @@ pub enum AuditEventKind {
 
     /// Operator opened the operator inbox via `GET /api/inbox`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     #[deprecated(
         note = "Read-only operator views are no longer audited; emit only mutations and security events."
@@ -4052,7 +4052,7 @@ pub enum AuditEventKind {
 
     /// Operator listed notifications via `GET /api/notifications`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     /// The mark-read / mark-all-read mutations still audit via
     /// `OperatorNotificationMarkedRead` /
@@ -4073,7 +4073,7 @@ pub enum AuditEventKind {
 
     /// Operator viewed the policy snapshot via `GET /api/policy`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     /// The `PUT /api/policy/toml` mutation still audits via
     /// `PolicyUpdatedViaDashboard`.
@@ -4092,7 +4092,7 @@ pub enum AuditEventKind {
     /// Operator viewed the raw `policy.toml` via
     /// `GET /api/policy/toml`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     /// The `write_policy` role gate (and its `OperatorAuth*`
     /// chain) remain the forensic trail for "who has the keys
@@ -4111,11 +4111,11 @@ pub enum AuditEventKind {
 
     /// Operator listed git worktrees via `GET /api/git/worktrees`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     /// The per-worktree detail / log / tree / file paths still
     /// audit via `OperatorWorktreeAccessed` / `OperatorDiffViewed`
-    /// / `OperatorFileContentFetched` because they surface
+    /// `OperatorFileContentFetched` because they surface
     /// operator-blessed source material.
     #[deprecated(
         note = "Read-only operator views are no longer audited; emit only mutations and security events."
@@ -4132,7 +4132,7 @@ pub enum AuditEventKind {
     /// Operator viewed a worktree's `git log` via
     /// `GET /api/git/worktrees/:name/log`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization. The current
     /// `/log` route emits `OperatorWorktreeAccessed { surface =
     /// "log" }` instead so the "looked at history" event still
@@ -4156,7 +4156,7 @@ pub enum AuditEventKind {
     /// Operator viewed the plan TOML for one initiative via
     /// `GET /api/initiatives/:id/plan`.
     ///
-    /// **Deprecated** in `worker/audit-tightening`. Retained for
+    /// **Deprecated** in an earlier audit-noise sweep. Retained for
     /// backwards-compatible deserialization; emit sites retired.
     #[deprecated(
         note = "Read-only operator views are no longer audited; emit only mutations and security events."
@@ -4464,7 +4464,7 @@ impl AuditEventKind {
     /// The canonical event_kind string written to the `event_kind` field.
     // Deprecated variants are still matched here so already-persisted
     // chains continue to decode cleanly; emit sites have been retired
-    // by `worker/audit-tightening` (see signal-vs-noise policy in
+    // by an earlier audit-noise sweep (see signal-vs-noise policy in
     // `specs/v2/dashboard-operator-action-audit-coverage.md`).
     #[allow(deprecated)]
     pub fn as_str(&self) -> &'static str {
@@ -5404,7 +5404,7 @@ mod path_read_accessed_tests {
         }
     }
 
-    /// V2 `v2_extended_gaps.md §1.2` — `MergeFastForwardFailed`
+    /// `MergeFastForwardFailed`
     /// round-trips through JSON, carrying every classification field
     /// an operator dashboard / runbook needs to route the alert
     /// without re-running the kernel. The variant is the durable
@@ -5452,7 +5452,7 @@ mod path_read_accessed_tests {
         }
     }
 
-    /// V2 `v2_extended_gaps.md §1.2` — the variant's
+    /// the variant's
     /// `as_str()` projection MUST equal the on-wire JSON
     /// `kind` field. This is the contract the
     /// audit-segment grep'er and the chain-walker rely on.

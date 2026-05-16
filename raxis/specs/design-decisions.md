@@ -150,8 +150,8 @@ Each entry follows the same structure — what was tempting about the alternativ
 
 **Considered because:** conversational chat is the standard interaction model for almost all existing agentic systems. Operators are used to telling agents "actually, do X instead" in a chat window, and multi-agent systems often rely on free-text message passing between agents.
 
-**Rejected because:** policy cannot be inferred from prose. 
-- **For Operator-to-Planner:** If an operator can bypass the structured task DAG by typing new instructions into a chat window, the cryptographically signed `plan.toml` is no longer the source of truth. This breaks the audit trail and enables implicit task creation that the kernel cannot properly gate or budget. 
+**Rejected because:** policy cannot be inferred from prose.
+- **For Operator-to-Planner:** If an operator can bypass the structured task DAG by typing new instructions into a chat window, the cryptographically signed `plan.toml` is no longer the source of truth. This breaks the audit trail and enables implicit task creation that the kernel cannot properly gate or budget.
 - **For Planner-to-Planner:** Direct free-text chat between agents creates invisible trust boundaries and un-auditable coordination that the kernel cannot enforce capabilities against (see also A.4).
 
 **How to adjust behavior without chat:**
@@ -247,7 +247,6 @@ contract: diff failure always falls back to blunt invalidation.
 Key design points: `CapabilityClass` enum (6 classes), coarse section-level diff (not
 field-level, which has false-negative risk), targeted SQL UPDATE, silent auto-renewal for
 unaffected sessions, blunt fallback on diff error, genesis-phase abort constraint.
-
 
 ---
 
@@ -452,7 +451,6 @@ The following mechanics from claw-code are studied and selectively reimplemented
 
 ---
 
-
 ---
 
 #### A.27 — Unmediated Direct Operator-to-Agent Communication
@@ -485,7 +483,7 @@ The following mechanics from claw-code are studied and selectively reimplemented
 
 **Problem 2 — Content validation is unsolvable at the message layer.** When `approve_plan` runs, the 7 shift-left checks validate the entire plan against a typed schema before any VM boots. An ad-hoc operator message arrives as a natural-language string after VMs are running. The Kernel cannot:
 - Parse intent from natural language
-- Check whether the requested action is within the agent's `path_allowlist`  
+- Check whether the requested action is within the agent's `path_allowlist`
 - Verify it doesn't introduce an implicit sub-task the DAG didn't authorize
 - Determine if it conflicts with a Reviewer's criteria for the current task
 - Know whether it amends, overrides, or merely clarifies the signed plan

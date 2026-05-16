@@ -294,7 +294,7 @@ asserts the bake actually contains both:
 If a future Containerfile change drops one of the lint
 toolchains silently, `verify.sh` fails with `INV-EXECUTOR-IMAGE-
 LINT-TOOLCHAIN-{PYTHON,JS}-01 VIOLATED` and a copy-pastable
-`cargo xtask images bake-rootfs --role executor-starter`
+`cargo xtask images bake --role executor-starter`
 remediation. Witness coverage:
 [`xtask/tests/executor_starter_lint_toolchain.rs`](../xtask/tests/executor_starter_lint_toolchain.rs).
 

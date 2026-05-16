@@ -1,8 +1,7 @@
 # Dashboard browser-QA checklist (live-e2e edition)
 
-Worker: `worker/dashboard-browser-qa`. This checklist is what we
-run when the sibling live-e2e worker resumes and a real kernel +
-dashboard come up under the test harness.
+This checklist is what we run when a real kernel + dashboard
+come up under the live-e2e test harness.
 
 We do **not** spin up our own kernel. We tail the live-e2e log
 (`/tmp/raxis-e2e-out.log` or `/tmp/raxis-e2e-realistic.log`) for
@@ -16,7 +15,7 @@ fix them in this branch as you go, push at the end.
 
 ## 0. Prep
 
-- [ ] `git status` clean on `worker/dashboard-browser-qa`.
+- [ ] `git status` clean on the QA branch.
 - [ ] `npm install` clean (no peer-dep noise).
 - [ ] `dashboard-fe/dist/index.html` exists (live-e2e's
       `locate_dashboard_dist()` needs it; without it, the kernel
@@ -279,7 +278,7 @@ open devtools, screenshot the console.
 - [ ] `npx vitest run` all green.
 - [ ] `npm run build` succeeds (dist/ regenerated).
 - [ ] All commits are well-scoped, conventional message.
-- [ ] Push to `worker/dashboard-browser-qa` (NOT main).
+- [ ] Push to the QA branch (NOT main).
 
 ---
 

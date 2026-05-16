@@ -1381,8 +1381,8 @@ mod kernel_respawn_tests {
 
     /// `INV-OBS-KERNEL-RESPAWN-COVERAGE-01` witness #2: when the
     /// sentinel does not surface `last_restart_unix_ts` (older
-    /// supervisor binaries pre-iter44) the counter still fires but
-    /// the histogram observation is skipped — better to surface the
+    /// supervisor binaries) the counter still fires but the
+    /// histogram observation is skipped — better to surface the
     /// rate than to lie about latency.
     #[test]
     fn missing_duration_emits_counter_only() {
@@ -1690,15 +1690,15 @@ pub const COMMAND_KIND_QUARANTINE_INITIATIVE: &str = "quarantine_initiative";
 /// Operator quarantines every initiative whose plan a given
 /// fingerprint signed.
 pub const COMMAND_KIND_QUARANTINE_PLANS_BY: &str = "quarantine_plans_by";
-/// V2_GAPS §12.4 — operator-ergonomics `propose-defaults` stub.
+/// operator-ergonomics `propose-defaults` stub.
 pub const COMMAND_KIND_PROPOSE_DEFAULTS: &str = "propose_defaults";
-/// V2_GAPS §12.4 — operator-ergonomics `cost-estimate` stub.
+/// operator-ergonomics `cost-estimate` stub.
 pub const COMMAND_KIND_ESTIMATE_COST: &str = "estimate_cost";
-/// V2_GAPS §12.4 — operator-ergonomics `submit --dry-run` stub.
+/// operator-ergonomics `submit --dry-run` stub.
 pub const COMMAND_KIND_DRY_RUN_ADMIT: &str = "dry_run_admit";
-/// V2_GAPS §12.4 — operator-ergonomics `initiative watch` stub.
+/// operator-ergonomics `initiative watch` stub.
 pub const COMMAND_KIND_SUBSCRIBE_INITIATIVE: &str = "subscribe_initiative";
-/// V2_GAPS §12.4 — operator-ergonomics `initiative resume` stub.
+/// operator-ergonomics `initiative resume` stub.
 pub const COMMAND_KIND_DESCRIBE_INITIATIVE_PAUSE: &str = "describe_initiative_pause";
 /// V2_extended_gaps §3.2 — `task outputs` listing.
 pub const COMMAND_KIND_LIST_TASK_OUTPUTS: &str = "list_task_outputs";
@@ -3067,7 +3067,7 @@ mod latency_metrics_wired_witness_tests {
     /// `record_planner_inference` lands ≥1 sample under
     /// `MetricName::PlannerInferenceDuration` and one increment
     /// under `MetricName::PlannerInferenceTokensTotal` per
-    /// direction. Pins the post-iter60 wire-up at
+    /// direction. Pins the later wire-up at
     /// `handlers/planner_fetch.rs`.
     #[test]
     fn planner_inference_helper_lands_observed_sample() {
@@ -3101,7 +3101,7 @@ mod latency_metrics_wired_witness_tests {
 
     /// `INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02` — invoking
     /// `record_gateway_upstream` lands ≥1 sample under
-    /// `MetricName::GatewayUpstreamDuration`. Pins the post-iter60
+    /// `MetricName::GatewayUpstreamDuration`. Pins the later
     /// wire-up at `handlers/planner_fetch.rs` (uses the gateway-
     /// reported `fr.latency_ms` to distinguish gateway-side
     /// upstream RTT from the kernel-measured end-to-end fetch
@@ -3129,7 +3129,7 @@ mod latency_metrics_wired_witness_tests {
 
     /// `INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03` — invoking
     /// `record_audit_event_append` lands ≥1 sample under
-    /// `MetricName::AuditEventAppendDuration`. Pins the post-iter60
+    /// `MetricName::AuditEventAppendDuration`. Pins the later
     /// wire-up at `NotifyingAuditSink::emit` (the centralised audit
     /// emit seam, success AND failure arms). The closed allow-list
     /// label fix is also pinned: the prior `kind` label was not in
@@ -3194,7 +3194,7 @@ mod latency_metrics_wired_witness_tests {
 
     /// `INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04` — invoking
     /// `record_audit_chain_length` lands ≥1 sample under
-    /// `MetricName::AuditChainLength`. Pins the post-iter60 wire-up
+    /// `MetricName::AuditChainLength`. Pins the later wire-up
     /// at the same `NotifyingAuditSink::emit` seam, post-success.
     #[test]
     fn audit_chain_length_helper_lands_observed_sample() {

@@ -27,7 +27,7 @@
 
 This invariant applies uniformly across all features. For each configurable dimension:
 
-### 1.1 INV-PLAN-POLICY-PRECEDENCE-01 (V2_GAPS.md §12.9)
+### 1.1 INV-PLAN-POLICY-PRECEDENCE-01
 
 > **INV-PLAN-POLICY-PRECEDENCE-01:** at admission time, for every
 > field where both policy and plan declare a value, the kernel's
@@ -44,8 +44,8 @@ This invariant applies uniformly across all features. For each configurable dime
 | **Policy-only** (e.g., `[[vm_images]] oci_digest`) | Sole authority | Plan cannot declare | Plan field ignored or rejected |
 | **Plan-only** (e.g., `[[tasks]]`, `path_allowlist`) | Constrains via ceilings | Sole authority | Policy bounds via ceilings/floors |
 
-The first concrete locked-field landing is `target_ref` (V2_GAPS
-§12.8); future locked fields plug into the same shape. The
+The first concrete locked-field landing is `target_ref`; future
+locked fields plug into the same shape. The
 Rust-side substrate is `kernel/src/initiatives/lifecycle.rs::resolve_target_ref`
 (an exemplar implementation of the
 `(policy_default, locked, plan_value) → resolved | FAIL_POLICY_LOCKED_FIELD`
@@ -54,7 +54,7 @@ contract). The wire codes
 `FAIL_WORKSPACE_TARGET_REF_INVALID` are registered in
 `raxis_types::OperatorErrorCode`.
 
-### 1.2 `[git]` section (V2_GAPS.md §12.8)
+### 1.2 `[git]` section
 
 ```toml
 # policy.toml — operator-side defaults for git-domain configuration.

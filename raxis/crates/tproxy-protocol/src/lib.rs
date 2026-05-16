@@ -81,7 +81,7 @@ pub enum AdmissionProtocol {
 
 impl AdmissionProtocol {
     /// Stable short string used in `TransparentProxyAdmitted`
-    /// / `TransparentProxyDenied` audit payloads. Pinned by tests
+    /// `TransparentProxyDenied` audit payloads. Pinned by tests
     /// so the wire shape downstream forensic tools depend on
     /// cannot drift silently.
     pub fn as_str(&self) -> &'static str {

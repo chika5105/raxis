@@ -657,7 +657,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 ```
 
-**`worktree_root` binding:** **Planner** sessions store a **non-NULL** absolute git worktree path; **Gateway** and **Verifier** sessions store **SQL NULL** (see `authority::create_session` — no sentinel strings). Range intents and planner-side VCS use this column via `authority::get_session`. Witness recheck and verifier spawn pass **`worktree_root` from the planner session** bound to `task.session_id`, not from the verifier's own session row. Not denormalised onto the task row.
+**`worktree_root` binding:** **planner** sessions store a **non-NULL** absolute git worktree path; **Gateway** and **Verifier** sessions store **SQL NULL** (see `authority::create_session` — no sentinel strings). Range intents and planner-side VCS use this column via `authority::get_session`. Witness recheck and verifier spawn pass **`worktree_root` from the planner session** bound to `task.session_id`, not from the verifier's own session row. Not denormalised onto the task row.
 
 **`base_sha` / `base_tracking_ref` binding:** When both are non-NULL (planner sessions that pin integration semantics), `base_sha` is the commit OID that Git resolves from `base_tracking_ref` in **`worktree_root`** at `create_session` — **`worktree_root` must be non-NULL** whenever these fields are resolved or re-resolved. Peel symbolic ref to commit (`git rev-parse` with commit peel semantics, same as used later for stale-base). Stale-base checks **must** re-resolve that **stored ref string** in that worktree, not a hard-coded branch name.
 
@@ -1940,9 +1940,8 @@ The operator socket is bound with `mode 0600` and owned by the kernel OS user �
 > ```
 >
 > Steps 2 and 3 are explicitly the operator's responsibility. The kernel has no knowledge of how the planner process is started, what model it uses, or where it runs. This separation is intentional: it keeps orchestration logic (model selection, API keys, retry-on-crash) outside the kernel's audit surface. The kernel's role is to validate every intent frame, enforce policy, and record the audit trail — not to manage agent lifecycle.
->
-> **Consequence for implementors:** Any kernel code path that calls `create_session(Role::Planner, ...)` without a corresponding `CreateSession` operator IPC message as the trigger is a spec violation. Session creation for planners MUST originate from an operator action, never from a timer, task state transition, or internal scheduler event.
 
+> **Consequence for implementors:** Any kernel code path that calls `create_session(Role::Planner, ...)` without a corresponding `CreateSession` operator IPC message as the trigger is a spec violation. Session creation for planners MUST originate from an operator action, never from a timer, task state transition, or internal scheduler event.
 
 #### Operator challenge-response handshake
 
@@ -2180,7 +2179,7 @@ A non-zero exit is **not** a gate failure. The gate outcome is determined only b
 > Email/Sidecar handlers — lives in [`cli-readonly.md`](cli-readonly.md) §5.6. This
 > section is the authoritative TOML schema and `PolicyBundle::validate`
 > contract that section refers to.  The V1-draft `Webhook` kind was
-> folded into `Sidecar` in V2.5 (forward-only — see V2_GAPS.md §C4).
+> folded into `Sidecar` in V2.5 (forward-only — see ).
 
 #### `[notifications]` in `policy.toml`
 
@@ -2266,8 +2265,6 @@ For each integration gap (Gaps 1–4), the following table shows what a maliciou
 | **Gap 4 — FSM** | Submit `CompleteTask` for a task whose `task_id` is not in the signed plan | INV-INIT-06 amendment + INV-SCHED-01: unknown task → `FAIL_UNKNOWN_TASK`; task row never existed |
 | **Gap 4 — FSM** | Land commits in the gap between the last accepted intent and `CompleteTask` to bypass path checks | INV-TASK-PATH-02: trailing segment `(evaluation_sha, CompleteTask.head_sha)` is topology-checked and path-checked at completion time |
 | **Gap 4 — FSM** | Slip a merge commit into the trailing segment to amplify touched paths | INV-TASK-PATH-02 step 4a: `topology_check` runs on the trailing segment with no `IntegrationMerge` carve-out |
-
-
 
 ### §2.5.8 — VCS Path Scope Enforcement
 
@@ -2384,7 +2381,7 @@ git -C <worktree_root> diff <base_sha> <head_sha> --name-status --no-renames
 - Assert all paths are relative (no leading `/`).
 - Result: `Vec<PathBuf>` sorted lexicographically (deterministic; appears verbatim in audit records).
 
-**`worktree_root` is per-session, set at `create_session` time.** For **planner** sessions it is supplied by the operator or orchestration layer — not by the planner at intent time and not from a global kernel config file. The intent handler reads **`session.worktree_root`** from the session row via `authority::get_session(session_id)` (**non-NULL** for planners). A planner-supplied path in an `IntentRequest` is ignored; the handler always uses the session-locked value. **Gateway/verifier** session rows store **NULL** here; they do not run `git -C` on their own session's `worktree_root`. **Planner** `worktree_root` is validated at `create_session` by running `git -C <worktree_root> rev-parse --git-dir`; failure returns `BOOT_ERR_VCS_ROOT`. Concurrent **planner** agent sessions operate on distinct non-NULL `worktree_root` paths (distinct `git worktree` directories backed by the same `.git` object store).
+**`worktree_root` is per-session, set at `create_session` time.** For **planner** sessions it is supplied by the operator or orchestration layer — not by the planner at intent time and not from a global kernel config file. The intent handler reads **`session.worktree_root`** from the session row via `authority::get_session(session_id)` (**non-NULL** for planners). A planner-supplied path in an `IntentRequest` is ignored; the handler always uses the session-locked value. **Gateway/verifier** session rows store **NULL** here; they do not run `git -C` on their own session's `worktree_root`. **planner** `worktree_root` is validated at `create_session` by running `git -C <worktree_root> rev-parse --git-dir`; failure returns `BOOT_ERR_VCS_ROOT`. Concurrent **planner** agent sessions operate on distinct non-NULL `worktree_root` paths (distinct `git worktree` directories backed by the same `.git` object store).
 
 ---
 
@@ -2654,7 +2651,7 @@ The snapshot insert is part of the same store transaction as the `tasks.status =
 >      `terminated_at` (the Completed cascade closed the row
 >      before the aggregator ran). Pre-fix, the helper filtered
 >      `WHERE terminated_at IS NULL` and the UPDATE matched zero
->      rows, leaving the counter structurally dead — iter41
+>      rows, leaving the counter structurally dead —
 >      reproduced this exact silent no-op.
 >
 >   2. **Retry precondition.** `handle_retry_sub_task` admits a
@@ -2829,7 +2826,7 @@ Same normative command as all other intent types. `base_sha` is the policy-pinne
 
 #### `worktree_root` — per-session model
 
-See §`vcs::diff` normative specification above — specifically the `worktree_root` paragraph immediately following the diff command. **Planner** sessions: non-NULL path, set at `create_session`, read by the intent handler via `authority::get_session`. **Gateway / Verifier** sessions: **SQL NULL** on their own row (§2.5.1 Table 4); verifier spawn and witness recheck still use the **planner** session’s `worktree_root` from `task.session_id`.
+See §`vcs::diff` normative specification above — specifically the `worktree_root` paragraph immediately following the diff command. **planner** sessions: non-NULL path, set at `create_session`, read by the intent handler via `authority::get_session`. **Gateway / Verifier** sessions: **SQL NULL** on their own row (§2.5.1 Table 4); verifier spawn and witness recheck still use the **planner** session’s `worktree_root` from `task.session_id`.
 
 ---
 

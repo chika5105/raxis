@@ -56,8 +56,7 @@ describe("stateTone", () => {
     // Each tone now bakes in BOTH a light-mode pair (-700 tinted
     // bg + -800/-900 text) AND a dark-mode pair (-500 tinted bg
     // + -200 text). This mirrors the local-component contrast
-    // pattern landed by `worker/fe-audit-banner-contrast`
-    // (commit 9e8f063, ChainStatusBanner.tsx) — see the
+    // pattern landed in `ChainStatusBanner.tsx` — see the
     // file-level comment in `state-color.ts` for the full WCAG
     // ratio table that motivates the move.
     const okClasses = toneClasses("ok");

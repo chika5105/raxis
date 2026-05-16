@@ -1,10 +1,8 @@
 // raxis-types::error — PlannerErrorCode and OperatorErrorCode enums.
-//
 // Normative reference:
 //   - peripherals.md §3.1 (planner-facing retry table)
 //   - peripherals.md §3 "Operator socket" (OperatorErrorCode table)
 //   - planner-api.md §"Error codes and remediation"
-//
 // Wire form: the enum variants serialize to their SCREAMING_SNAKE_CASE string
 // tag (matching the spec tables) via serde rename. bincode encodes them as
 // positional u32 discriminants — the string names are for JSON projection
@@ -19,18 +17,16 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 
 /// Coarse rejection reason returned to the planner on a Rejected IntentResponse.
-///
 /// INV-08: the kernel never returns more detail than this code to the planner,
 /// except the fixed PlannerErrorTemplate set for FAIL_POLICY_VIOLATION.
 /// Full remediation actions are in planner-api.md.
-///
 /// **INV-09** (opaque rejection codes) is **structurally enforced** by
 /// the variant set defined here: each variant is a coarse, named
 /// failure class — no variant carries a free-form payload that
 /// could leak which sub-check fired (e.g.,
 /// `FailPolicyViolation` does not name the specific allowlist
 /// rule that rejected it). Adding new variants requires a spec
-/// update; this is the only widening surface. V2_GAPS.md §13
+/// update; this is the only widening surface.
 /// Category 1 — annotation-only enforcement site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlannerErrorCode {
@@ -111,17 +107,15 @@ pub enum PlannerErrorCode {
     /// prompt teaches it to wait for the next
     /// `KernelPush::SubTaskCompleted { newly_activatable }` push and
     /// re-attempt activation, NOT to abandon the sub-task.
-    ///
     /// **Wire stability:** `DEPENDENCY_NOT_MET` is its own coarse code
     /// (NOT a `FAIL_POLICY_VIOLATION` template) precisely so the
     /// Orchestrator can reason about it as transient. INV-08 still
     /// applies — no further detail is leaked on the wire.
-    ///
     /// Retryable. v2-deep-spec.md §Step 21.
     #[serde(rename = "DEPENDENCY_NOT_MET")]
     DependencyNotMet,
 
-    /// **V2_GAPS §D2 — host-capacity admission cap.** The kernel
+    /// **host-capacity admission cap.** The kernel
     /// refuses to spawn another microVM because
     /// `running_vm_count >= [host_capacity] max_concurrent_vms`
     /// (`host-capacity.md §4.2`). Retryable: the agent should
@@ -131,7 +125,7 @@ pub enum PlannerErrorCode {
     #[serde(rename = "FAIL_VM_CONCURRENCY_AT_CAP")]
     FailVmConcurrencyAtCap,
 
-    /// **V2_GAPS §D2 — disk pressure halt.** A write-class intent
+    /// **disk pressure halt.** A write-class intent
     /// arrived while the disk-full watchdog was in `Halted` state
     /// (free space below `[host_capacity] min_free_disk_mb`).
     /// `disk_full_behavior = "halt_admit"` (V2 default) refuses
@@ -142,7 +136,7 @@ pub enum PlannerErrorCode {
     #[serde(rename = "FAIL_DISK_FULL")]
     FailDiskFull,
 
-    /// **V2 `v2_extended_gaps.md §3.2`** — the planner submitted a
+    /// **V2 ** — the planner submitted a
     /// `StructuredOutput` intent whose payload failed kernel-side
     /// validation: `structured_output = None` on a
     /// `IntentKind::StructuredOutput`, an unparseable `commit_sha`
@@ -153,7 +147,7 @@ pub enum PlannerErrorCode {
     #[serde(rename = "FAIL_STRUCTURED_OUTPUT_INVALID")]
     FailStructuredOutputInvalid,
 
-    /// **V2 `v2_extended_gaps.md §3.2`** — the planner exceeded
+    /// **V2 ** — the planner exceeded
     /// `STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT` accepted
     /// structured outputs in this session. Retryable on the next
     /// session activation; not retryable within the current
@@ -184,7 +178,6 @@ pub enum PlannerErrorCode {
     /// `worktree_provisioning::provision_executor_worktree` /
     /// `provision_reviewer_worktree` composition errors out before
     /// the substrate spawn.
-    ///
     /// Terminal — re-attempting the activation without operator
     /// intervention will hit the same gix failure on every retry.
     /// The audit chain carries a structured `ActivateSubTask*`
@@ -260,7 +253,6 @@ impl fmt::Display for PlannerErrorCode {
 // ---------------------------------------------------------------------------
 
 /// Machine-stable error identifier returned to the operator CLI on failure.
-///
 /// Every code has a corresponding `OperatorErrorDetail` variant (one-to-one
 /// mapping enforced by the spec). The wire form is the bare code string inside
 /// `OperatorResponse::Error { code, detail }`.
@@ -341,7 +333,7 @@ pub enum OperatorErrorCode {
     #[serde(rename = "FAIL_ESCALATION_NOT_PENDING")]
     FailEscalationNotPending,
 
-    /// **V2 (V2_GAPS.md §12.8 / §12.9, INV-PLAN-POLICY-PRECEDENCE-01).**
+    /// **V2 ( INV-PLAN-POLICY-PRECEDENCE-01).**
     /// The plan declared a value for a field whose policy-side
     /// counterpart is `_locked = true`, AND the plan value differs
     /// from the locked policy default. The kernel rejects admission
@@ -355,7 +347,7 @@ pub enum OperatorErrorCode {
     #[serde(rename = "FAIL_POLICY_LOCKED_FIELD")]
     FailPolicyLockedField,
 
-    /// **V2 (V2_GAPS.md §12.8).** The plan's
+    /// **V2.** The plan's
     /// `[workspace] target_ref` (or the operator's
     /// `[git] default_target_ref`) failed
     /// `raxis_policy::validate_target_ref_format` — the value did
@@ -368,7 +360,7 @@ pub enum OperatorErrorCode {
     #[serde(rename = "FAIL_WORKSPACE_TARGET_REF_INVALID")]
     FailWorkspaceTargetRefInvalid,
 
-    /// **V2_GAPS §12.4 — Operator-ergonomics IPC stub.** The
+    /// **Operator-ergonomics IPC stub.** The
     /// operator submitted one of the five `OperatorRequest`
     /// variants whose handler is V3 work
     /// (`ProposeDefaults`, `EstimateCost`, `DryRunAdmit`,
@@ -422,7 +414,6 @@ impl fmt::Display for OperatorErrorCode {
 // ---------------------------------------------------------------------------
 
 /// A non-empty, human-readable failure reason.
-///
 /// Pinned by `INV-FAILURE-REASON-MANDATORY-01` (`specs/invariants.md`):
 /// every transition into a terminal-failure or operator-blocked
 /// state (`TaskState::Failed`, `TaskState::Aborted`,
@@ -430,7 +421,6 @@ impl fmt::Display for OperatorErrorCode {
 /// `InitiativeState::Failed`, `InitiativeState::Aborted`,
 /// `InitiativeState::Blocked`, `SessionRevoked`) MUST carry a
 /// non-empty, human-readable reason string.
-///
 /// **Invariant.** `FailureReason::new(s)` rejects empty input,
 /// whitespace-only input, and inputs longer than
 /// [`MAX_FAILURE_REASON_LEN`] bytes. The single constructor
@@ -440,19 +430,16 @@ impl fmt::Display for OperatorErrorCode {
 /// emit site that takes `FailureReason` instead of
 /// `Option<String>` cannot compile if the caller doesn't supply
 /// a real reason.
-///
 /// **Why a newtype, not `String`.** A bare `String` permits
 /// `String::new()` / `"".to_string()` / `"   ".to_string()` —
 /// all three surface in the dashboard as the `"No reason
 /// supplied — kernel bug"` empty-state, which IS the operator-
 /// visible kernel bug this invariant catches. The newtype makes
 /// those constructions a compile error at the boundary.
-///
 /// **Why a newtype, not `Option<String>`.** A `None` carries
 /// the same semantic gap as `Some("")` — the dashboard renders
 /// both as the kernel-bug empty-state. Forcing the caller to
 /// produce a `FailureReason` removes the option entirely.
-///
 /// **Round-trips serde transparently** so the wire shape on the
 /// audit chain stays a bare string — no breaking change to the
 /// JSONL projection.
@@ -461,7 +448,6 @@ impl fmt::Display for OperatorErrorCode {
 pub struct FailureReason(String);
 
 /// Maximum byte length accepted by [`FailureReason::new`].
-///
 /// Generous on purpose — failure reasons frequently embed a
 /// stack-tail or planner-boot-error console excerpt to give the
 /// operator end-to-end forensic context. 4 KiB is comfortably
@@ -474,7 +460,6 @@ pub const MAX_FAILURE_REASON_LEN: usize = 4096;
 /// Constructor failure for [`FailureReason::new`]. Returned when
 /// the input is empty, whitespace-only, or exceeds
 /// [`MAX_FAILURE_REASON_LEN`] bytes.
-///
 /// **Why a dedicated error type.** A `Result<FailureReason,
 /// EmptyReasonError>` makes the constructor's contract explicit
 /// at the call site — the caller MUST handle the impossible-but-
@@ -505,7 +490,6 @@ impl FailureReason {
     /// Returns `Err(EmptyReasonError)` when the trimmed input is
     /// empty or when the byte length exceeds
     /// [`MAX_FAILURE_REASON_LEN`].
-    ///
     /// **Does NOT trim.** Leading/trailing whitespace is
     /// preserved verbatim because it can carry meaningful
     /// formatting (a multi-line stack tail with leading

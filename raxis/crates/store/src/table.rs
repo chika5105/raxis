@@ -1,7 +1,5 @@
 // raxis-store::table — Canonical DDL table name enum.
-//
 // Normative reference: kernel-store.md §2.5.1 "Canonical DDL Parts 1–4".
-//
 // Rules:
 //   - Every SQL string that references a table MUST use `Table::X.as_str()`
 //     rather than a raw string literal. This ensures a single point of truth
@@ -10,9 +8,7 @@
 //     stay in bijection with it. The unit test `all_variants_have_nonempty_str`
 //     guards against empty returns.
 //   - This enum is not serialized over the wire; it is a compile-time constant.
-//
 // ── Invariant: kernel.db never stores credential VALUES ───────────────────
-//
 // `kernel.db` is the kernel's metadata store. It records WHICH credentials
 // each task wants bound (see `Table::TaskCredentialProxies`) but it never
 // records the credential bytes themselves. Bytes — postgres URLs with
@@ -22,7 +18,6 @@
 // production deployments may swap in `VaultBackend`,
 // `AwsSecretsManagerBackend`, `Pkcs11HsmBackend`, etc. — see
 // `extensibility-traits.md §4`).
-//
 // Adding a column or table that would persist a credential VALUE is
 // forbidden by `credential-proxy.md §1.1`. Reviewers MUST reject such a
 // change.
@@ -89,7 +84,6 @@ pub enum Table {
     /// activation attempt — a retry inserts a NEW row, never updates
     /// the prior one. State machine: `PendingActivation → Active →
     /// Completed | Failed`.
-    ///
     /// **Why a separate table from `tasks`.** `tasks.state` is the V1
     /// operational FSM (Admitted → Running → ...). V2 adds a
     /// pre-activation state ("declared in plan, no VM yet") whose
@@ -100,13 +94,11 @@ pub enum Table {
     /// retry counters (`crash_retry_count`, `review_reject_count`),
     /// VirtioFS staging refs, and `evaluation_sha` (Reviewer activations)
     /// without polluting the V1 contract.
-    ///
     /// **Atomicity.** Inserted by `approve_plan → admit_in_tx` in the
     /// SAME transaction that inserts the `tasks` row (INV-STORE-02).
     /// This guarantees that an initiative cannot exist in a state where
     /// the operator-signed plan has a sub-task but the activation row
     /// is missing.
-    ///
     /// Only Executor and Reviewer tasks have rows here; the Orchestrator
     /// task is activated by the Kernel itself at initiative start
     /// (no `subtask_activations` row for it).
@@ -119,7 +111,6 @@ pub enum Table {
     /// `plan-bundle-sealing.md §3.2`), the Ed25519 signature, the
     /// signing operator's fingerprint, and (for schema_version >= 2)
     /// the `signed_at_unix_secs` + `bundle_nonce` envelope fields.
-    ///
     /// Retained **indefinitely** per `plan-bundle-sealing.md §10` (D8):
     /// the bundle is the foundational cryptographic input to the
     /// initiative state machine; deleting it destroys forensic
@@ -134,7 +125,6 @@ pub enum Table {
     /// `plan-bundle-sealing.md §5.4` notes V2 ships zero plan.toml
     /// fields that take host-side paths, so well-formed V2 bundles
     /// have exactly one row in this table per `bundle_sha256`).
-    ///
     /// Composite primary key `(bundle_sha256, artifact_seq)` keeps the
     /// per-artifact ordering stable for canonical decode and lets
     /// kernel-side `plan_bundle::read_artifact` join in O(1) without
@@ -149,7 +139,6 @@ pub enum Table {
     /// sequence inserts into this table inside the same `BEGIN
     /// IMMEDIATE` transaction that decides admission, so a concurrent
     /// re-submission of the same nonce cannot race past the check.
-    ///
     /// **Sweepable.** Unlike `plan_bundles` / `plan_bundle_artifacts`,
     /// this table participates in periodic GC: rows older than
     /// `max_plan_bundle_age_secs + max_clock_skew_secs +
@@ -164,11 +153,8 @@ pub enum Table {
     /// **Per-task credential-proxy declarations** parsed out of
     /// `[[tasks.credentials]]` at `approve_plan` time. One row per
     /// declared proxy per task.
-    ///
     /// # ⚠ This table does NOT store credential values.
-    ///
     /// Each row is **proxy metadata only**:
-    ///
     /// * `credential_name` — the policy-declared *name* of the
     ///   credential (e.g. `"db-prod"`); the actual secret bytes
     ///   resolve through the kernel's `CredentialBackend`.
@@ -177,7 +163,6 @@ pub enum Table {
     /// * `proxy_type` — `postgres | http | k8s | smtp`.
     /// * `proxy_json` — the per-proxy restriction blob (allow-lists,
     ///   upstream URL, etc.).
-    ///
     /// The credential **bytes themselves** (postgres URL with
     /// password, bearer tokens, kubeconfig YAML, …) are NEVER
     /// persisted in `kernel.db`. They live with the
@@ -185,18 +170,14 @@ pub enum Table {
     /// stores them in `~/.config/raxis/credentials/<name>.env` with
     /// `0600` perms enforced; production deployments may swap in a
     /// `VaultBackend`, `AwsSecretsManagerBackend`, etc.).
-    ///
     /// # Why a JSON column for `proxy_json`
-    ///
     /// (vs. a normalised per-proxy-type column set): the
     /// per-proxy-type schemas drift independently —
-    ///
     /// * postgres has `allow_only_select`;
     /// * http has `auth_mode`, `upstream_url`, allowed_methods,
     ///   allowed_path_prefixes;
     /// * k8s reuses http restrictions but is auditing-distinct;
     /// * future smtp adds rate-limit fields —
-    ///
     /// and the kernel never writes to this column outside of the
     /// approve_plan transaction. It is read once at session-spawn
     /// time and re-deserialised back into
@@ -204,9 +185,7 @@ pub enum Table {
     /// schema flat while preserving per-proxy fidelity. The
     /// `proxy_type` column is projected out of the JSON for
     /// index/query convenience and CHECK-clause pinning.
-    ///
     /// # Atomicity
-    ///
     /// Inserted by `approve_plan` in the SAME transaction that
     /// admits the parent `tasks` row (INV-STORE-02). Foreign key on
     /// `task_id` references `tasks(task_id)`.
@@ -218,13 +197,11 @@ pub enum Table {
     /// candidate-merge-tree → pre-merge-verifier → main-advance
     /// pipeline. One row per `IntegrationMerge` intent that reaches
     /// Check 5d.
-    ///
     /// Distinct from `initiatives.git_apply_pending` (which gates the
     /// SQLite-intent → git-apply boundary for the actual main advance
     /// per `integration-merge.md §11.1`); this table governs the
     /// *strictly earlier* candidate-merge-tree → pre-merge-verifier
     /// boundary in `integration-merge.md §11.10`.
-    ///
     /// **State machine.**
     /// ```text
     ///   AwaitingPreMergeVerifiers ─┬─→ PreMergeVerifiersPassed ─→ CompletedAdvanceApplied
@@ -232,14 +209,12 @@ pub enum Table {
     ///                              ├─→ DiscardedCandidateOnly      (Check 5d.2 failed; candidate never spawned)
     ///                              └─→ DiscardedCrashRecovery      (kernel restart sweep)
     /// ```
-    ///
     /// **Crash recovery.** The recovery sweep at boot scans this
     /// table for non-terminal rows (`AwaitingPreMergeVerifiers` /
     /// `PreMergeVerifiersPassed`) per
     /// `integration-merge.md §11.10.4`. Rows whose
     /// `candidate_merge_sha` worktree is missing are folded to
     /// `DiscardedCrashRecovery`.
-    ///
     /// **Atomicity.** Inserted at Check 5d.1 inside the same
     /// `BEGIN IMMEDIATE` transaction that records the
     /// `IntegrationMerge` intent acceptance, so a concurrent
@@ -247,13 +222,12 @@ pub enum Table {
     /// Foreign key on `initiative_id` references `initiatives(id)`.
     IntegrationMergeAttempts,
 
-    /// **V2 `v2_extended_gaps.md §3.2`** — typed mid-session
+    /// **V2 ** — typed mid-session
     /// outputs (progress reports, diagnostic flags, task summaries)
     /// emitted by executor / orchestrator agents via the
     /// `structured_output` planner tool. Read-only from CLI +
     /// dashboard; write path is the kernel intent handler at
     /// `handlers::intent::handle_structured_output` exclusively.
-    ///
     /// Schema: `(output_id, initiative_id, task_id, session_id,
     ///           kind, severity, payload_json, emitted_at)`.
     StructuredOutputs,
@@ -265,11 +239,9 @@ pub enum Table {
     /// operator configured. This table is the ground truth for
     /// "what notifications were generated" and backs `raxis inbox`,
     /// the dashboard notification view, and read/unread state.
-    ///
     /// The inbox.jsonl file is also always appended to as a durable
     /// fallback, but the SQLite table is the queryable, indexed,
     /// authoritative store.
-    ///
     /// Schema: `(notification_id, event_kind, initiative_id,
     ///           task_id, session_id, summary, payload_json, read,
     ///           source_event_id, created_at)`.
@@ -280,7 +252,6 @@ pub enum Table {
     /// consecutive failures, open/half-open/closed state, and the
     /// half-open probe slot for the kernel's provider failure-handling
     /// pipeline (`provider-failure-handling.md §6.3`).
-    ///
     /// State transitions are transactional: every `record_failure` /
     /// `record_success` / `Open → HalfOpen` promotion executes inside
     /// a single `BEGIN IMMEDIATE` transaction that also inserts the
@@ -288,11 +259,9 @@ pub enum Table {
     /// A kernel crash between the UPDATE and the INSERT cannot leave
     /// a moved breaker with no audit record — either both land or
     /// neither does.
-    ///
     /// Persistence across kernel restarts: a fresh boot does NOT
     /// reset breakers to `Closed`. An `Open` circuit that was mid-
     /// cooldown before the crash resumes where it left off.
-    ///
     /// Schema: `(provider, model, state, consecutive_failures,
     ///           last_failure_at_ms, last_failure_kind,
     ///           last_failure_http_code, opened_at_ms,
@@ -303,9 +272,7 @@ pub enum Table {
 
 impl Table {
     /// Returns the exact table name used in the migration DDL.
-    ///
     /// Matches kernel-store.md §2.5.1 table names verbatim.
-    ///
     /// `const fn` so callers can write `const TASKS: &str = Table::Tasks.as_str();`
     /// at module top-level — see kernel-store.md §2.5.1 INV-STORE-03 ("no raw
     /// SQL table-name literals in **any workspace crate that touches
@@ -434,7 +401,6 @@ mod tests {
     /// table at session-spawn time using its literal name in
     /// production SQL). Pinning the literal here surfaces any
     /// rename in code review. See `credential-proxy.md §3`.
-    ///
     /// **Naming note.** The table is `task_credential_proxies`,
     /// NOT `task_credentials`. The latter would falsely imply that
     /// credential bytes are persisted in `kernel.db`; they are

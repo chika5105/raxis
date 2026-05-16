@@ -11,7 +11,7 @@ flow.
 > **Status (V2.5).** Kernel-enforced *ceilings* on review rounds
 > (the planned `max_review_rejections` / `max_revision_rounds`
 > task fields) are NOT parsed today — see
-> `specs/v2/V2_GAPS.md` §12.13. The substrate they read against
+> §12.13. The substrate they read against
 > (`subtask_activations.review_reject_count`) is wired as of
 > V2.5 (`handle_submit_review` bumps the counter on terminal
 > rejection rounds), but the parser + `handle_retry_sub_task`

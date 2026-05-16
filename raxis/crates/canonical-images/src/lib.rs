@@ -1015,7 +1015,7 @@ mod tests {
     /// The exact error variant depends on whether the anchor was
     /// resolved to the all-zero placeholder or to a real key:
     ///
-    /// * Pre-iter62 (and release builds with no env-var input):
+    /// * Previously (and release builds with no env-var input):
     ///   anchor is the all-zero placeholder, so `signing_key_fp`
     ///   never matches and the verifier short-circuits with
     ///   `SigningKeyFpNotPopulated`.

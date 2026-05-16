@@ -154,7 +154,7 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
         // INV-NOTIFICATION-PRIORITY-PARITY-01.
         | "KernelPanicCaught"
         | "KernelSafetyInvariantViolated"
-        // `INV-NOTIFICATION-PRIORITY-PARITY-01` (iter65) — pre-iter65
+        // `INV-NOTIFICATION-PRIORITY-PARITY-01` (iter65) — earlier
         // this kind classified as `Medium` here while the typed
         // `notification_priority` classified it as `Critical`. The
         // typed surface is correct: the orchestrator respawn ceiling
@@ -172,7 +172,7 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
         // it as `Critical` per `INV-NOTIFICATION-PRIORITY-PARITY-01`.
         | "InitiativePermanentFailureEscalated"
         // Mirror arms for the typed `K::VerifierImageDigestMismatch`
-        // / `K::WitnessOperatorHintSpoofingDetected` => `Critical`
+        // `K::WitnessOperatorHintSpoofingDetected` => `Critical`
         // classifications below. Without them the typed wrapper
         // emits a Critical-priority audit row but
         // `notifications::dispatch` re-filters against the string
@@ -285,12 +285,12 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
 ///     shape regression test against silent additions.
 #[allow(clippy::too_many_lines)]
 // Deprecated `OperatorViewed*` variants (retired in
-// `worker/audit-tightening`) and `OperatorWorktreeAccessed` /
+// an earlier audit-noise sweep) and `OperatorWorktreeAccessed` /
 // `OperatorDiffViewed` / `OperatorFileContentFetched` /
 // `OperatorAuditChainReverified` / `OperatorHealthQueried` /
 // `OperatorListedCredentials` / `OperatorListedSystemCredentials`
-// / `OperatorOpenedSessionStream` / `OperatorNotificationViewed`
-// (retired in `worker/audit-noise-sweep-r2`) are still matched
+// `OperatorOpenedSessionStream` / `OperatorNotificationViewed`
+// (retired in the second audit-noise sweep) are still matched
 // here so already-persisted chains continue to classify
 // deterministically — every retired variant routes to `None`
 // (audit-chain only). See signal-vs-noise policy in
@@ -647,8 +647,8 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // ── iter62 verifier-runtime + intent-validation additions ──
         //
         // Wired in at integration time when these variants landed
-        // from `worker/iter62-verifier-runtime` and
-        // `worker/iter62-fixes-kernel`. The match in
+        // from the verifier-runtime work and
+        // the kernel-side fixes pass. The match in
         // `notification_priority` is intentionally exhaustive (see
         // the test-module banner below); these arms keep that
         // contract while routing each variant to the priority that
@@ -860,7 +860,7 @@ mod tests {
     /// classifier proves it still maps already-persisted chain
     /// rows of those kinds to `None` (the variants survive on
     /// the wire for backwards compatibility; emit sites were
-    /// retired by `worker/audit-tightening`).
+    /// retired by an earlier audit-noise sweep).
     #[test]
     #[allow(deprecated)]
     fn operator_passive_actions_are_audit_only() {

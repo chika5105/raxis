@@ -71,7 +71,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "budget",
     "explain",
     "top",
-    // V2_GAPS §C10 / §12.6 — non-interactive first-run scaffolding.
+    // §12.6 — non-interactive first-run scaffolding.
     "setup",
     // V2 §4.2 — operator-dashboard auth helper (`raxis auth sign`).
     "auth",
@@ -102,7 +102,7 @@ const CERT_SUBCOMMANDS: &[&str] = &[
     "verify",
     "list",
     "install",
-    // V2_GAPS §D1 — operator-cert revocation (admission-time MVP).
+    // operator-cert revocation (admission-time MVP).
     "revoke",
     "list-revocations",
 ];
@@ -475,9 +475,7 @@ fn require_arg<'a>(args: &'a [String], pos: usize, flag: &str) -> Result<&'a str
 }
 
 /// Precedence resolver for `--operator-key` / `RAXIS_OPERATOR_KEY`.
-///
 /// Rules (pinned by `operator_key_resolution_*` tests below):
-///
 /// 1. Explicit `--operator-key <path>` (the `flag_value`) always
 ///    wins, even if `RAXIS_OPERATOR_KEY` is set. Defence-in-depth:
 ///    a stale shell export must not silently override the path the
@@ -492,7 +490,6 @@ fn require_arg<'a>(args: &'a [String], pos: usize, flag: &str) -> Result<&'a str
 ///    `"usage: --operator-key <path> is required"` error so the
 ///    operator sees the same message they would have seen before
 ///    the env-var fallback existed (no silent skipping).
-///
 /// Security model: the env var stores a **path** (which is then
 /// `chmod 600` on disk), never the key bytes themselves. This
 /// preserves the §"Security model" invariant in
@@ -723,7 +720,7 @@ SUBCOMMANDS:
         GET /api/auth/challenge endpoint. Output the operator's public
         key + Ed25519 signature so the dashboard can complete the
         POST /api/auth/verify call without ever seeing the private key.
-        Spec: v2_extended_gaps.md §4.2.
+
 
     dashboard rotate-jwt-secret [--json]
         Rotate the dashboard's persisted HS256 signing secret at
@@ -818,7 +815,6 @@ READ-ONLY OBSERVATION:
 
 // ---------------------------------------------------------------------------
 // Operator-key resolution tests
-//
 // Pin the precedence rules between `--operator-key <path>` (the
 // global flag) and the `RAXIS_OPERATOR_KEY` env-var fallback. We
 // drive `resolve_operator_key_path` with an injected env-lookup
@@ -909,7 +905,6 @@ mod operator_key_resolution_tests {
 
 // ---------------------------------------------------------------------------
 // Catalog ↔ dispatcher consistency tests
-//
 // These tests exist purely to catch drift between the
 // `*_SUBCOMMANDS` constants used for "did you mean" closeness
 // suggestions and the `match` arms in `run`. If a new arm is added
@@ -935,7 +930,6 @@ mod catalog_consistency_tests {
 
     /// Source of truth: scrape the literal arm-strings out of the
     /// `match subcmd` in `fn run(...)` from this very file.
-    ///
     /// We deliberately do NOT parse Rust syntax — a regex over the
     /// raw source is sufficient because every dispatcher arm in
     /// `run` follows the convention `"<name>" => commands::...` or

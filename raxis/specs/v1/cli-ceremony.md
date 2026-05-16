@@ -783,7 +783,7 @@ Both arguments are **required**. There is no implicit staged location. The kerne
 
 **Purpose:** Verify the integrity of the JSONL audit chain. Does not connect to the kernel.
 
-**Status:** **CONSOLIDATED in V2.** The V1-draft `audit verify` single-segment shim has been removed; `verify-chain` is the only audit-verification surface (no two CLI commands may perform the same action, per V2_GAPS §C0).
+**Status:** **CONSOLIDATED in V2.** The V1-draft `audit verify` single-segment shim has been removed; `verify-chain` is the only audit-verification surface (no two CLI commands may perform the same action).
 
 **Usage:** `raxis verify-chain [--quick] [--from <seq>] [--audit-dir <path>]`
 

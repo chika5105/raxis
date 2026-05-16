@@ -1,7 +1,6 @@
 // raxis-kernel::notifications::handler::sidecar — V2.4 HTTP sidecar
 // channel handler.
-//
-// V2_GAPS.md §C4 architectural decision: third-party notification
+// architectural decision: third-party notification
 // integrations (Slack, PagerDuty, Teams, Discord, Opsgenie, custom)
 // must NOT live in the kernel. Each new integration gets its own
 // out-of-process sidecar reachable on localhost (or a private VPC
@@ -10,9 +9,7 @@
 // opaque `upstream_trace_id` (Slack `ts`, PagerDuty `dedup_key`,
 // Teams message id) which the kernel records in the
 // `NotificationDelivered` audit event.
-//
 // ## Wire shape
-//
 // Request:
 // ```text
 //   POST <channel.target> HTTP/1.1
@@ -20,7 +17,6 @@
 //   User-Agent: raxis-kernel/<version>
 //   X-RAXIS-Event-Kind: <event.event_kind>
 //   X-RAXIS-Event-Id:   <event.event_id>
-//
 //   {
 //     "event_kind":    "EscalationApproved",
 //     "event_id":      "550e8400-e29b-41d4-a716-446655440000",
@@ -33,15 +29,12 @@
 //     "human_summary": "..."
 //   }
 // ```
-//
 // Response (success):
 // ```text
 //   HTTP/1.1 2xx OK
 //   Content-Type: application/json
-//
 //   { "ok": true, "trace_id": "<opaque-string>" }
 // ```
-//
 // Failure mapping:
 // * 5xx                              → `Network` (retryable by caller)
 // * 4xx                              → `UpstreamRejected` (terminal)
@@ -49,13 +42,10 @@
 // * Body not parseable as JSON       → `UpstreamRejected("malformed")`
 // * Body missing `trace_id` on success → emit warning, treat as
 //   `UpstreamRejected` so the operator can debug their sidecar.
-//
-// ## Resource bounds (V2_GAPS.md §C4 backpressure)
-//
+// ## Resource bounds ( backpressure)
 // Per-channel `Semaphore` capped at `channel.max_in_flight` (default
 // 8) so a hanging sidecar cannot grow unbounded tokio tasks. The 9th
 // concurrent dispatch returns `Backpressure` immediately.
-//
 // Per-channel circuit breaker opens after 5 consecutive failures
 // inside a 60s window. While open, all dispatches drop with
 // `CircuitOpen`. After 60s the circuit enters half-open and admits
@@ -173,7 +163,7 @@ impl SidecarChannelState {
                     // Transition Open → HalfOpen (only one observer
                     // wins the CAS; losers see HalfOpen on next
                     // load and are admitted as the probe themselves
-                    // — slight over-admit at the boundary is fine).
+                    // slight over-admit at the boundary is fine).
                     let _ = self.circuit.compare_exchange(
                         CircuitState::Open as u8,
                         CircuitState::HalfOpen as u8,
@@ -210,7 +200,7 @@ impl SidecarChannelState {
     }
 }
 
-/// Three-state circuit breaker (V2_GAPS.md §C4).
+/// Three-state circuit breaker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {
     Closed = 0,
@@ -329,7 +319,7 @@ pub struct NotificationPayload<'a> {
 
 /// JSON shape the sidecar returns on success. `trace_id` is the
 /// upstream platform's id (Slack `ts`, PagerDuty `dedup_key`, etc.)
-/// — the kernel records it verbatim in the `NotificationDelivered`
+/// the kernel records it verbatim in the `NotificationDelivered`
 /// audit event.
 #[derive(Debug, serde::Deserialize)]
 pub struct SidecarSuccessResponse {

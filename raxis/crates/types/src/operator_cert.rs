@@ -77,7 +77,7 @@ impl CertKind {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// RevocationReason — V2_GAPS §D1 key/cert revocation taxonomy.
+// RevocationReason — key/cert revocation taxonomy.
 //
 // `Rotation` is forward-only: the cert was retired in the normal course
 // of operations. Plans signed before `revoked_at` remain valid, but

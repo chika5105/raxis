@@ -1,9 +1,7 @@
 //! End-to-end test for the SPA bundle serving path.
-//!
-//! Spec: `v2_extended_gaps.md §4.4` — when
+//! when
 //! `[dashboard].static_dir` is set, the dashboard's axum
 //! router mounts the directory as the fallback service so:
-//!
 //!   1. `GET /` returns `index.html` (entry point for the
 //!      Vite-built React app),
 //!   2. `GET /assets/<file>` returns the static asset
@@ -13,7 +11,6 @@
 //!      (deep-link reload doesn't 404),
 //!   4. `GET /api/*` continues to hit the JSON API and never
 //!      falls through to the static service.
-//!
 //! Uses the REAL [`raxis_dashboard::DashboardServer`] bound to
 //! `127.0.0.1:0` and a real `reqwest::Client`. The "bundle" is
 //! a tempdir with a stand-in `index.html` + asset so the test
@@ -117,7 +114,6 @@ async fn api_requests_do_not_fall_through_to_static_service() {
     // case used here. We just need to assert the response is
     // JSON-shaped (NOT the index.html stand-in) — this proves
     // the API router fires before the ServeDir fallback.
-    //
     // The dashboard wires `/api/health` behind the JWT
     // extractor, so an unauth'd request returns the JSON
     // `FAIL_DASHBOARD_AUTH_MISSING` envelope. Either way the

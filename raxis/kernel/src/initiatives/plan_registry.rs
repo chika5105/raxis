@@ -1,8 +1,6 @@
 // raxis-kernel::initiatives::plan_registry — In-memory plan field registry.
-//
 // Normative reference: kernel-store.md §2.5.8 "Plan fields are loaded from the
 // signed plan artifact, not from the `tasks` table." (lines 1911-ish).
-//
 // Why this lives in memory, not in `kernel.db`
 // --------------------------------------------
 // `path_allowlist`, `path_export_to_successors`, `path_export_globs`, and
@@ -13,14 +11,12 @@
 // so the intent handler and CompleteTask path-closure check can look them
 // up without re-parsing the (immutable) plan blob from
 // `signed_plan_artifacts` on every intent.
-//
 // The on-disk authority remains `signed_plan_artifacts.plan_bytes` — every
 // kernel boot re-parses every non-terminal initiative's plan and refills
 // the registry via `repopulate_from_store(...)`. A registry miss in the
 // hot path is fail-closed: the intent handler treats "no plan fields"
 // as `path_allowlist = []` (deny everything) so a corrupted or missing
 // plan can never silently widen `effective_allow`.
-//
 // Concurrency model
 // -----------------
 // Reads dominate (one read per intent). Writes happen only at
@@ -64,12 +60,10 @@ impl TaskKey {
 
 /// The four path-scope-relevant fields parsed from a `[[tasks]]` stanza
 /// in the signed plan artifact.
-///
 /// Defaults match the spec: `path_allowlist = []` (deny everything),
 /// `path_export_to_successors = false` (zero export blast radius),
 /// `path_export_globs = []` (full touched set when export is on; ignored
 /// when export is off), `path_scope_override = false` (no bypass).
-///
 /// **V2 §Step 27 fields:**
 ///   * `clone_strategy` — typed clone strategy (`full | blobless | sparse`).
 ///     Default `Blobless` matches the V2 spec rationale: uniformly safe for
@@ -82,7 +76,6 @@ impl TaskKey {
 ///     `validate_sparse_orchestrator_exclusion` rule still fires if a
 ///     hand-edited plan or a future spec change ever puts an
 ///     `Orchestrator` task in `[[tasks]]`.
-///
 /// Cloned (cheap — `Vec<String>` is heap-shared on Arc nowhere; this is a
 /// regular owning clone) on every `effective_allow` call so the lock is
 /// dropped immediately after lookup.
@@ -101,12 +94,10 @@ pub struct TaskPlanFields {
     /// V2.5 §13 — `[[plan.tasks.X]] vm_image` resolved at admission
     /// against the operator-published `[[vm_images]]` registry.
     /// Empty `""` when:
-    ///
     /// * The plan omits `vm_image` (legacy V1 behaviour — spawn
     ///   uses the canonical starter image).
     /// * The task is a Reviewer (which is structurally forbidden
     ///   from declaring an alias per `INV-PLANNER-HARNESS-02`).
-    ///
     /// The activation handler reads this through
     /// [`PlanRegistry::get`] to decide whether to spawn the
     /// canonical starter image or an operator-published one. The
@@ -117,13 +108,12 @@ pub struct TaskPlanFields {
     /// does not silently drift the image bytes.
     pub vm_image: String,
 
-    /// V2 `v2_extended_gaps.md §1.1` — operator-authored seed prompt
+    /// Operator-authored seed prompt
     /// for the executor / reviewer agent. Lives inside the signed
     /// plan artifact (`[[tasks]] description`); the kernel stamps it
     /// into the spawned planner binary's env as
     /// `RAXIS_PLANNER_TASK_PROMPT` so the dispatch loop has a
     /// concrete user message to seed the model with.
-    ///
     /// **Always non-empty in production.** The plan validator
     /// (`parse_plan_tasks` in `lifecycle.rs`) rejects any
     /// `[[tasks]]` row whose `description` is missing, empty, or
@@ -132,7 +122,6 @@ pub struct TaskPlanFields {
     /// convenience (`..Default::default()` spreads in unit tests);
     /// every production `TaskPlanFields` reaches the registry
     /// through the parser, which guarantees a non-empty value.
-    ///
     /// **Trust origin.** Comes from the operator-signed plan TOML;
     /// the agent never sees the prompt before it is rendered into
     /// the system / user messages by the role-binary's dispatch
@@ -145,7 +134,6 @@ pub struct TaskPlanFields {
     /// **VM-crash retries** for this sub-task. Read by
     /// `handle_retry_sub_task` against `subtask_activations.crash_retry_count`
     /// to decide whether a planner-issued `RetrySubTask` is admissible.
-    ///
     /// **Semantics.**
     /// * `Some(c)` — strict ceiling: the kernel admits a `RetrySubTask`
     ///   only while `crash_retry_count < c`. Once the counter reaches
@@ -155,7 +143,6 @@ pub struct TaskPlanFields {
     ///   the conservative default [`DEFAULT_MAX_CRASH_RETRIES`] so a
     ///   silent omission cannot widen the ceiling beyond a few
     ///   transient hypervisor failures.
-    ///
     /// **Crash classification.** `crash_retry_count` is bumped by the
     /// kernel on:
     ///   * SIGCHLD / non-zero VM exit (recovery sweep);
@@ -167,7 +154,6 @@ pub struct TaskPlanFields {
     ///     a crash loop, and the V2 ops contract bounds every
     ///     unsuccessful attempt against an Executor under the
     ///     same per-task ceiling).
-    ///
     /// The retry handler reads it at counter-check time only.
     pub max_crash_retries: Option<u32>,
 
@@ -177,7 +163,6 @@ pub struct TaskPlanFields {
     /// `subtask_activations.review_reject_count` to decide whether
     /// a planner-issued `RetrySubTask` against an Executor whose
     /// reviewers rejected can be re-spawned.
-    ///
     /// **Semantics.**
     /// * `Some(c)` — strict ceiling: the kernel admits a `RetrySubTask`
     ///   only while `review_reject_count < c`. Once the counter reaches
@@ -189,7 +174,6 @@ pub struct TaskPlanFields {
     ///   review-loop oscillation (v2-deep-spec.md §Step 12 rationale:
     ///   review-fail typically signals planner / spec mismatch and
     ///   benefits from human escalation rather than unbounded retry).
-    ///
     /// **Counter substrate.** `review_reject_count` is bumped exactly
     /// once per terminal-rejected aggregation round
     /// (`handle_submit_review` → `compute_aggregate_review_outcome`
@@ -205,9 +189,7 @@ pub struct TaskPlanFields {
     /// `Outcome::TurnsExceeded` and the VM exits clean (the kernel
     /// observes the exit and treats it as a deliberate ceiling
     /// surfacing per `INV-PLANNER-HARNESS-04`).
-    ///
     /// **Resolution precedence** (`INV-PLANNER-MAX-TURNS-PRECEDENCE-01`):
-    ///
     /// 1. `Some(c)` here ⇒ this exact ceiling, NO matter what the
     ///    policy or compiled default say. Operators can pin a TIGHT
     ///    budget for trivial Reviewer / single-edit tasks (e.g. `5`)
@@ -217,7 +199,6 @@ pub struct TaskPlanFields {
     ///    `policy.gateway.planner_max_turns_default`.
     /// 3. Policy default `None` ⇒ fall through to the compiled
     ///    `raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS` (100).
-    ///
     /// The kernel (`session_spawn_orchestrator::resolve_planner_max_turns`)
     /// performs this resolution at session-spawn time and stamps the
     /// result into the spawned VM's env table as
@@ -225,7 +206,6 @@ pub struct TaskPlanFields {
     /// (`RAXIS_PLANNER_MAX_TURNS`). The driver
     /// (`raxis_planner_core::driver::run_role_session_with_env_fn`)
     /// reads it at boot and hands it to `DispatchConfig::max_turns`.
-    ///
     /// **Validation.** `Some(0)` is rejected at plan-parse time with
     /// `LifecycleError::PlanInvalid` because a 0-turn budget is never
     /// useful and almost always indicates a typo (the agent would
@@ -241,7 +221,6 @@ pub struct TaskPlanFields {
     /// the per-task / per-policy / compiled `max_turns`
     /// (see [`Self::max_turns`] and
     /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`).
-    ///
     /// **Resolution precedence** (mirrors `max_turns`):
     /// 1. `Some(s)` here ⇒ `s` (policy default ignored).
     /// 2. `None` here + `Some(d)` on
@@ -249,7 +228,6 @@ pub struct TaskPlanFields {
     /// 3. Neither set ⇒ derived default
     ///    `max(round_up_to_5(base / 2), 10)` so cold-start retries
     ///    get a useful step even for plans that never declared one.
-    ///
     /// **Validation.** `Some(0)` is rejected at plan-parse time with
     /// `LifecycleError::PlanInvalid` — a zero step degenerates the
     /// progressive resolver back to a constant budget and would mask
@@ -266,7 +244,6 @@ pub struct TaskPlanFields {
     /// in turn falls back to `policy.[elastic].enabled`. Reviewer
     /// tasks MUST leave this `None` (the validator rejects any
     /// declaration with `FAIL_REVIEWER_ELASTIC_NOT_ALLOWED`).
-    ///
     /// Resolution precedence (`elastic-vm-scaling.md §2.2`):
     /// task-level explicit value beats initiative-level
     /// explicit value, which beats the policy `enabled` flag.
@@ -302,7 +279,6 @@ pub struct TaskPlanFields {
 
 /// V2 `v2-deep-spec.md §Step 12` — kernel default `max_crash_retries`
 /// applied when the plan omits the field.
-///
 /// Three retries is enough to absorb a transient hypervisor eviction
 /// or noisy-neighbour OOM without unbounded retry loops, and matches
 /// the V2 ops guidance that crash retries are environmental noise
@@ -311,7 +287,6 @@ pub const DEFAULT_MAX_CRASH_RETRIES: u32 = 3;
 
 /// V2 `v2-deep-spec.md §Step 12` — kernel default `max_review_rejections`
 /// applied when the plan omits the field.
-///
 /// Two rejections is the spec's recommended budget before human
 /// escalation: the planner gets the original attempt plus two
 /// chances to incorporate Reviewer critique before the operator
@@ -322,7 +297,6 @@ pub const DEFAULT_MAX_REVIEW_REJECTIONS: u32 = 2;
 /// V2.7 — kernel-side compiled fallback for `max_turns` resolution
 /// when **both** the per-task plan field AND the
 /// `[gateway].planner_max_turns_default` policy field are absent.
-///
 /// **Synchronisation contract.** This constant MUST equal
 /// `raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS`. The kernel cannot
 /// `pub use` the planner-core constant directly because the kernel
@@ -333,7 +307,6 @@ pub const DEFAULT_MAX_REVIEW_REJECTIONS: u32 = 2;
 /// witness test in `kernel/src/session_spawn_orchestrator.rs::tests`
 /// asserts the two constants are bit-equal at compile-time, so any
 /// future bump of one fails CI until both are bumped in lock-step.
-///
 /// Current value: `100`. Historical bumps documented in
 /// `guides/recipes/env/11-planner-env-vars.md` (20 → 50 → 100 across
 /// live-e2e iter25 / iter31).
@@ -384,15 +357,12 @@ impl TaskPlanFields {
     /// Resolve [`Self::max_turns`] against the policy-level default
     /// (`[gateway].planner_max_turns_default`) and the compiled
     /// fallback [`DEFAULT_PLANNER_MAX_TURNS`].
-    ///
     /// **Precedence** (`INV-PLANNER-MAX-TURNS-PRECEDENCE-01`):
-    ///
     /// 1. `Some(c)` on the per-task field ⇒ `c` (policy default
     ///    ignored).
     /// 2. `None` on the per-task field + `Some(d)` policy default ⇒
     ///    `d` (compiled default ignored).
     /// 3. `None` on both ⇒ [`DEFAULT_PLANNER_MAX_TURNS`].
-    ///
     /// Returns `(resolved_value, source_label)` so the
     /// `session_spawn_orchestrator` callsite can emit a structured
     /// `PlannerMaxTurnsResolved` log line whose `source` field names
@@ -414,19 +384,16 @@ impl TaskPlanFields {
 
 /// The orchestrator-scoped plan fields parsed from the optional
 /// `[orchestrator]` section of the signed plan TOML.
-///
 /// Step 11 introduces `cross_cutting_artifacts`: an exact-filename-only
 /// allowlist of files the Orchestrator may touch during
 /// `IntentKind::IntegrationMerge` even when no sub-task owns them
 /// (e.g. `Cargo.lock`, `package-lock.json`, `go.sum`). The field is
 /// operator-declared at sign time and sealed in the plan artifact.
-///
 /// **Format constraint (validated at admission).** Each entry MUST be
 /// an exact filename (no globs, no slashes — i.e., not a directory
 /// prefix and not a multi-segment path). The validator
 /// `validate_cross_cutting_artifacts` (in `lifecycle.rs`) enforces this
 /// at `approve_plan` time before the registry is populated.
-///
 /// **Default.** V1 plans (no `[orchestrator]` section) and V2 plans
 /// that omit the section default to an empty list, which means the
 /// hybrid allowlist degenerates to the union of sub-task allowlists.
@@ -440,7 +407,7 @@ pub struct OrchestratorPlanFields {
     /// metacharacters, no `..`, and no empty entries at admission time.
     pub cross_cutting_artifacts: Vec<String>,
 
-    /// V2 `v2_extended_gaps.md §1.1` — initiative-scoped seed prompt for
+    /// Initiative-scoped seed prompt for
     /// the orchestrator agent. Sourced from the plan TOML's
     /// `[plan.initiative] description` field at `approve_plan` time
     /// (the same field that `kernel-mechanics-prompt.md §3.2`
@@ -452,20 +419,18 @@ pub struct OrchestratorPlanFields {
     /// validator regression.
     pub description: String,
 
-    /// V2 `integration-merge.md §1.2` (V2_GAPS §12.8) — fully-qualified
+    /// V2 `integration-merge.md §1.2` — fully-qualified
     /// ref name that this initiative's `IntegrationMerge` advances.
     /// Resolved at `approve_plan` time by `resolve_target_ref` from
     /// the chain `[workspace] target_ref` (plan) → `[git]
     /// default_target_ref` (policy) → hardcoded fallback
     /// `"refs/heads/main"`. The `[git] target_ref_locked` policy
     /// knob can pin the value at admission time.
-    ///
     /// Always non-empty after `approve_plan`. The integration-merge
     /// handler reads this verbatim into
     /// `commit_merge_to_target_ref(...)` so the host-side
     /// fast-forward advances the operator-configured branch instead
     /// of always touching `refs/heads/main`.
-    ///
     /// **Default `"refs/heads/main"`.** Used both for V1 plans (no
     /// `[workspace]` section), test fixtures that
     /// `..Default::default()`-spread, and the `Default` impl. The
@@ -482,7 +447,6 @@ pub struct OrchestratorPlanFields {
     /// inherit from `policy.[elastic].enabled`. Resolution
     /// precedence: task-level explicit > initiative-level
     /// explicit > policy `enabled` flag.
-    ///
     /// Plan-narrows-policy (INV-ELASTIC-01): `Some(true)` is
     /// rejected at admission when policy `enabled = false`;
     /// `Some(false)` is always admissible. Reviewer tasks may
@@ -517,7 +481,6 @@ impl Default for OrchestratorPlanFields {
 
 /// In-memory registry of per-task plan fields. Single instance per kernel
 /// process, owned by `HandlerContext` behind `Arc`.
-///
 /// Two orthogonal projections live here:
 /// * `tasks` — keyed by `(initiative_id, task_id)`, holds per-task
 ///   `TaskPlanFields`. Populated by `approve_plan` from `[[tasks]]`.
@@ -537,7 +500,6 @@ impl PlanRegistry {
     }
 
     /// Insert or replace the plan fields for one task.
-    ///
     /// Idempotent. Re-inserting the same key with identical fields is a
     /// no-op from the caller's perspective; with different fields it
     /// overwrites (the latest call wins). In normal operation `approve_plan`
@@ -591,7 +553,6 @@ impl PlanRegistry {
     // ── V2 Step 11 — orchestrator-scoped fields ──────────────────────────
 
     /// Insert or replace the orchestrator plan fields for one initiative.
-    ///
     /// Idempotent. In normal operation `approve_plan` calls this once
     /// per initiative; a re-insert (e.g. from `repopulate_from_store`)
     /// overwrites with identical bytes since the signed plan artifact
@@ -622,7 +583,6 @@ impl PlanRegistry {
     }
 
     /// Snapshot every `(task_id, fields)` for the given initiative.
-    ///
     /// Used by Step 11's `compute_hybrid_effective_allow` to fold every
     /// sub-task's `path_allowlist` into the union before adding
     /// `cross_cutting_artifacts`. Returns an owned Vec so the caller
@@ -736,7 +696,7 @@ mod tests {
             SessionAgentType::Executor,
             "default session_agent_type must be Executor (V2 §Step 6)"
         );
-        // V2 `v2_extended_gaps.md §1.1` — `Default` MUST yield an
+        // `Default` MUST yield an
         // empty `description`. Production NEVER reaches the spawn
         // path with a default-constructed `TaskPlanFields`: every
         // entry in the registry is built by `parse_plan_tasks`,
@@ -779,7 +739,7 @@ mod tests {
     #[test]
     fn explicit_zero_max_retries_overrides_kernel_default() {
         // `Some(0)` means "the operator explicitly forbids retries"
-        // — distinct from `None` (omitted, default applies). The
+        // distinct from `None` (omitted, default applies). The
         // retry handler must observe the explicit zero rather than
         // the conservative default.
         let f = TaskPlanFields {
@@ -963,7 +923,7 @@ mod tests {
         assert_eq!(snapshot[0].1, f);
     }
 
-    // ── V2 `v2_extended_gaps.md §1.1` — task description plumbing ────
+    // ── task description plumbing ────
 
     #[test]
     fn description_round_trips_through_registry() {

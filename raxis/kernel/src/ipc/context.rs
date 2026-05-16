@@ -1,11 +1,8 @@
 // raxis-kernel::ipc::context — HandlerContext shared state for IPC handlers.
-//
 // Normative reference: kernel-core.md §2.2 `src/handlers/context.rs`.
-//
 // HandlerContext is the dependency-injected read-only (or Arc-shared) context
 // passed to every IPC handler. It is constructed once in main.rs after all
 // startup steps complete and cloned (via Arc) into each connection task.
-//
 // Fields added vs the minimal v1 starter:
 //   witness_dir — absolute path to <data_dir>/witness/ blob store. Required
 //                 by handlers/witness.rs per spec §2.3 witness.rs: "blob bytes
@@ -36,14 +33,12 @@ use crate::prompt::EpochBinding;
 use crate::session_spawn_orchestrator::{ExecutorSpawnContext, OrchestratorSpawn};
 
 /// Shared, read-only context for all IPC handlers.
-///
 /// All fields are `Arc`-wrapped so each connection task gets a cheap clone.
 /// The `store` is behind `Store` which itself contains a `tokio::sync::Mutex`.
 pub struct HandlerContext {
     /// Validated policy bundle, behind an `ArcSwap` so the kernel can flip
     /// the visible epoch in-process from `policy_manager::advance_epoch`
     /// without a kernel restart (kernel-core.md §`policy_manager.rs`).
-    ///
     /// **Read pattern:** all callers use `ctx.policy.load()` which returns
     /// a cheap `arc_swap::Guard<Arc<PolicyBundle>>` that can be deref'd to
     /// `&PolicyBundle`. Long-lived borrows should `policy.load_full()` to
@@ -59,7 +54,6 @@ pub struct HandlerContext {
     /// Append-only audit sink. Production wiring is `FileAuditSink` over
     /// the JSONL segment under `<data_dir>/audit/`. Tests use
     /// `FakeAuditSink`.
-    ///
     /// Per kernel-store.md §2.5.2, every audit emission MUST follow a
     /// successful SQLite commit; the trait does not enforce this — the
     /// kernel review process does. See `lifecycle::approve_plan` for a
@@ -68,7 +62,6 @@ pub struct HandlerContext {
     /// Absolute path to the kernel data directory (e.g. `~/.raxis`).
     pub data_dir: PathBuf,
     /// Absolute path to the witness blob store (`<data_dir>/witness/`).
-    ///
     /// Spec §2.3 witness.rs: all witness blob writes go through the
     /// `witness_index::write_blob_to_disk` + `insert_witness_index_in_tx`
     /// pair (both inside the verifier-token consume transaction per
@@ -77,7 +70,6 @@ pub struct HandlerContext {
     /// starts (startup step 5, store open).
     pub witness_dir: PathBuf,
     /// In-memory per-task plan-fields registry.
-    ///
     /// Per kernel-store.md §2.5.8 line 1911, the four path-scope fields
     /// (`path_allowlist`, `path_export_to_successors`, `path_export_globs`,
     /// `path_scope_override`) are NOT persisted to the `tasks` table —
@@ -121,21 +113,18 @@ pub struct HandlerContext {
     /// `Err`, so by the time any IPC handler is dispatched the
     /// kernel is guaranteed to have an admissible
     /// substrate (Linux+KVM ⇒ Firecracker; macOS ⇒ AVF).
-    ///
     /// **Why non-Option** (vs. the V1 `Option<Arc<...>>` shape):
     /// session-spawn code paths can dispatch through this field
     /// directly without a `None` guard at every call site. The
     /// substrate-unavailable failure mode is moved entirely into
     /// kernel boot — there is no longer a degraded-mode kernel
     /// that admits operator queries while refusing every spawn.
-    ///
     /// Threaded into `HandlerContext` per `extensibility-traits.md
     /// §3.8` boot-order step 6a so every IPC handler dispatches
     /// through the same `Arc<dyn Backend>` clone.
     pub isolation: Arc<dyn IsolationBackend>,
 
     /// V2 credential-store backend selected at boot.
-    ///
     /// Always present — the kernel boot path constructs a default
     /// [`raxis_credentials_file::FileCredentialBackend`] when
     /// `policy.toml` omits `[credential_backend]`, then wraps it in
@@ -143,7 +132,6 @@ pub struct HandlerContext {
     /// the spec-mandated `CredentialAccessed` event. Consumed by
     /// the credential proxy (per session) and the gateway (provider
     /// API keys). Per `extensibility-traits.md §4.4`.
-    ///
     /// **Why non-Option** (unlike `isolation`): a kernel without a
     /// credential backend cannot spawn any session that declares
     /// `[[tasks.credentials]]` and cannot dispatch any
@@ -154,7 +142,6 @@ pub struct HandlerContext {
     pub credentials: Arc<dyn CredentialBackend>,
 
     /// V2 per-session credential-proxy lifecycle manager.
-    ///
     /// Constructed once at kernel boot from the same
     /// `Arc<dyn CredentialBackend>` as `credentials` above (so the
     /// proxy resolves the same names through the same audit
@@ -170,7 +157,6 @@ pub struct HandlerContext {
     /// etc.). At teardown the kernel calls `handles.shutdown()` to
     /// abort the listeners and emit one `CredentialProxyStopped`
     /// per proxy with the final counter snapshot.
-    ///
     /// **Why non-Option**: a kernel without a proxy manager cannot
     /// admit any session that declares `[[tasks.credentials]]` —
     /// failing closed at session-spawn would be a worse user
@@ -182,7 +168,6 @@ pub struct HandlerContext {
     pub proxy_manager: Arc<CredentialProxyManager>,
 
     /// V2 per-session VM-spawn composer.
-    ///
     /// Wraps the `(isolation, proxy_manager, audit)` tuple plus a
     /// per-spawn `Box<dyn AdmissionService>` into the single async
     /// surface the kernel calls when an orchestrator-driven trigger
@@ -190,7 +175,6 @@ pub struct HandlerContext {
     /// (`terminate_session`). Owns the per-session admission-loop
     /// listener lifetime + the live `Box<dyn IsolationSession>`
     /// handle table.
-    ///
     /// Constructed once at kernel boot from the same trios this
     /// `HandlerContext` already carries — there is no other
     /// independent state. The service ALONE knows which sessions
@@ -199,7 +183,6 @@ pub struct HandlerContext {
     /// service's in-memory table is the substrate-visible row.
     /// Both are reconciled at boot through the spawn callsite (see
     /// `extensibility-traits.md §3.5`).
-    ///
     /// **Why non-Option**: the kernel cannot drive any production
     /// session-spawn without it. Failing closed at session-spawn
     /// time would be a worse user experience than failing closed at
@@ -211,7 +194,6 @@ pub struct HandlerContext {
     /// V2 orchestrator-spawn surface — the trait `handle_approve_plan`
     /// calls to drive the canonical Orchestrator VM boot after the
     /// SQL transaction has committed.
-    ///
     /// Production wires `LiveOrchestratorSpawn` (delegates to
     /// `SessionSpawnService::spawn_session` against the real
     /// canonical image bytes resolved via the boot-time install-dir).
@@ -223,7 +205,6 @@ pub struct HandlerContext {
     /// `session_spawn_orchestrator::tests::*`) wire
     /// `LiveOrchestratorSpawn` themselves against a tempdir-built
     /// fake image.
-    ///
     /// **Why a trait** (vs. an `Option<OrchestratorSpawnContext>`):
     /// avoids a degraded "missing context" mode in `HandlerContext`
     /// and lets test fixtures wire a no-op impl with the same shape
@@ -235,7 +216,6 @@ pub struct HandlerContext {
     /// V2 executor / reviewer spawn-context — shared boot-time
     /// install-dir + kernel-version + per-agent VM resource
     /// budgets used by the `IntentKind::ActivateSubTask` handler.
-    ///
     /// The activation handler does NOT go through a trait surface
     /// for executor / reviewer spawn (deliberately — see
     /// `session_spawn_orchestrator::spawn_executor_for_task` doc
@@ -246,7 +226,6 @@ pub struct HandlerContext {
     /// `host-capacity.md §4.1` reference values and can be
     /// overridden at boot when the relevant `[isolation]` policy
     /// keys land.
-    ///
     /// **Why a separate struct** (vs. extracting fields from
     /// `Arc<dyn OrchestratorSpawn>`): the orchestrator-spawn trait
     /// hides its concrete impl behind a `dyn` pointer, so the
@@ -258,7 +237,6 @@ pub struct HandlerContext {
     pub executor_spawn: Arc<ExecutorSpawnContext>,
 
     /// V2 domain adapter selected at boot.
-    ///
     /// `extensibility-traits.md §2` — the single seam between the
     /// domain-agnostic kernel core and the domain-specific state
     /// primitives that vary per problem domain. The kernel boot
@@ -266,7 +244,6 @@ pub struct HandlerContext {
     /// SE-domain reference impl) and stores it here. Future trading
     /// / healthcare / robotics adapters plug into the same field
     /// behind a `cfg`-gated boot-time selector.
-    ///
     /// **Why a concrete `IntentKind = SeIntentKind` binding**: the
     /// kernel's IPC handlers compile against a single domain at a
     /// time — there is no run-time dispatch over multiple
@@ -274,7 +251,6 @@ pub struct HandlerContext {
     /// monomorphised at the kernel binary boundary; per-domain
     /// kernels are produced by swapping the `cfg` flag at build.
     /// V2 ships only the SE binding.
-    ///
     /// **Why non-Option**: the kernel cannot admit any intent
     /// without a domain adapter to compute the touched-set against
     /// (`R-9` admission gate). A degraded boot without a domain
@@ -286,7 +262,6 @@ pub struct HandlerContext {
     /// V2 OCI image resolver — turns a policy- / plan-pinned
     /// `oci_digest` into the on-disk path the isolation backend
     /// boots.
-    ///
     /// Production wires `raxis_image_cache::ProductionResolver`
     /// rooted at `<data_dir>/oci-cache/` (`image-cache.md §4` on-
     /// disk layout). Boot constructs it after `data_dir` is known
@@ -294,14 +269,12 @@ pub struct HandlerContext {
     /// `PrePopulatedResolver` (the default this field is
     /// constructed with) which resolves only digests pre-staged
     /// on disk.
-    ///
     /// **Why a trait** (vs. an `Option<...>`): mirrors every other
     /// `Arc<dyn ...>` substrate field. The kernel's session-spawn
     /// path (when V3 routes operator `[[vm_images]]` resolution
     /// through this hook) MUST always have a resolver to call —
     /// failing closed at boot is preferable to a runtime "no
     /// resolver was configured" surprise.
-    ///
     /// **V2 consumer surface.** Currently consumed only by the
     /// `raxis doctor cache prune` subcommand which exercises
     /// [`ImageResolver::prune_unreferenced`]; the
@@ -313,8 +286,7 @@ pub struct HandlerContext {
     /// HandlerContext signature churn.
     pub image_resolver: Arc<dyn ImageResolver>,
 
-    /// V2_GAPS §D2 — host-capacity disk-full watchdog.
-    ///
+    /// host-capacity disk-full watchdog.
     /// `None` means "no watchdog wired" — the production boot path
     /// in `kernel/src/main.rs` always wires one (defaulting to a
     /// 5-second poll on `<data_dir>` per `host-capacity.md §7.1`),
@@ -323,11 +295,10 @@ pub struct HandlerContext {
     /// "always healthy" (the watchdog otherwise refuses
     /// write-class admission below `min_free_disk_mb`). Set after
     /// construction via [`with_disk_watchdog`].
-    ///
     /// [`with_disk_watchdog`]: HandlerContext::with_disk_watchdog
     pub disk_watchdog: Option<Arc<crate::capacity::DiskWatchdog>>,
 
-    /// V2_GAPS §12.1 — Kernel-side `KernelPush` dispatcher
+    /// Kernel-side `KernelPush` dispatcher
     /// (V2.3 in-memory MVP). Handlers call
     /// `push_dispatcher.enqueue(session_id, KernelPush::*, now)`
     /// at the spec-correct call sites; the dispatcher allocates
@@ -338,7 +309,7 @@ pub struct HandlerContext {
     /// with the `pending_pushes` SQL queue is V3 (§12.1).
     pub push_dispatcher: Arc<crate::push::KernelPushDispatcher>,
 
-    /// V2_GAPS §C4 — per-channel `SidecarChannelState` registry for
+    /// per-channel `SidecarChannelState` registry for
     /// the V2.4 `Sidecar` notification kind. Each
     /// `[[notifications.channels]]` of kind `Sidecar` lazily
     /// allocates one entry on first dispatch; the entry holds the
@@ -347,7 +318,7 @@ pub struct HandlerContext {
     /// `raxis status`. See `notifications::handler::sidecar`.
     pub sidecar_registry: Arc<crate::notifications::handler::sidecar::SidecarRegistry>,
 
-    /// `v2_extended_gaps.md §2.1` — per-initiative realtime
+    /// Per-initiative realtime
     /// event bus. The audit sink stored in `Self::audit` is wrapped
     /// in [`crate::push::BroadcastingAuditSink`] so every successful
     /// audit emit that carries an `initiative_id` AND maps to a
@@ -359,12 +330,11 @@ pub struct HandlerContext {
     /// each frame as a length-prefixed JSON record.
     pub initiative_bus: Arc<crate::push::InitiativeEventBus>,
 
-    /// V2_GAPS §C5 — content-addressed immutable artifact store
+    /// content-addressed immutable artifact store
     /// rooted at `<data_dir>/artifacts/`. Writes are
     /// `<root>/<category>/<sha256>.<ext>` with `O_CREAT|O_EXCL`
     /// and on-read SHA-256 verification (the spec's §1.3 tamper
     /// detector).
-    ///
     /// Wired call sites:
     /// * `policy_manager::advance_epoch` writes the verified
     ///   policy bytes to `Category::Policy` AFTER signature
@@ -381,7 +351,6 @@ pub struct HandlerContext {
     ///   writes each operator public key to `Category::Keys`
     ///   so a future `raxis keys list` can enumerate every
     ///   public key the kernel ever trusted, byte-for-byte.
-    ///
     /// **Why `Option`:** test fixtures that don't exercise the
     /// store leave this `None`; the production boot path always
     /// wires it. The `advance_epoch` / `approve_plan` callsites
@@ -391,7 +360,6 @@ pub struct HandlerContext {
     pub artifact_store: Option<Arc<ArtifactStore>>,
 
     /// V3 — authority-side OpenTelemetry observability hub.
-    ///
     /// Held as `Arc<ObservabilityHub>` so handlers can call
     /// `ctx.observability.start_span(...)` / `record_counter(...)`
     /// without paying for a clone on every call. The hub is
@@ -400,7 +368,6 @@ pub struct HandlerContext {
     /// populated with a [`ObservabilityHub::disabled`] instance so
     /// emit sites can be unconditional (the disabled hub
     /// short-circuits before sanitisation).
-    ///
     /// Production wiring: `kernel/src/main.rs` reads
     /// `[observability].enabled`, builds a `RingFileExporter` rooted
     /// at `<data_dir>/observability/`, constructs the hub, and
@@ -408,7 +375,6 @@ pub struct HandlerContext {
     /// separate `raxis-otel-pusher` binary tails the same ring
     /// directory and ships OTLP — the kernel itself never imports
     /// OTLP transport per `INV-OTEL-03`.
-    ///
     /// **Why non-Option**: emit sites are pervasive (intent
     /// admission, gateway fetch, verifier execution, notification
     /// dispatch, operator IPC, escalation, session spawn). Threading
@@ -418,7 +384,6 @@ pub struct HandlerContext {
     pub observability: Arc<ObservabilityHub>,
 
     /// V1 Tier 4 — emergency operator override (break-glass) state.
-    ///
     /// Held as `Arc<BreakglassState>` so handlers can call
     /// `ctx.breakglass.check()` on the gate-evaluation hot path
     /// without paying for a clone. Production wiring opens the
@@ -426,7 +391,6 @@ pub struct HandlerContext {
     /// (see `main.rs`); tests construct
     /// [`crate::breakglass::BreakglassState::disabled`] which keeps
     /// the cache empty and skips all on-disk persistence.
-    ///
     /// **Why non-Option**: the gate-evaluation path
     /// (`gates::evaluate_claims` step 1) checks this on every
     /// admission. A disabled instance behaves identically to an
@@ -436,20 +400,17 @@ pub struct HandlerContext {
 
     /// V2 reviewer-egress-defaults-decision.md §7 — kernel-wide
     /// sliding-window egress-stall tracker.
-    ///
     /// Shared across both egress chokepoints:
     ///   - `raxis-egress-admission::run_admission_loop` (Tier-1
     ///     transparent-proxy admission), wired through
     ///     `SessionSpawnService::with_egress_stall_tracker`.
     ///   - `crate::handlers::planner_fetch::handle` (kernel-mediated
     ///     `PlannerFetchRequest` `DomainNotAllowed` rejections).
-    ///
     /// Each chokepoint feeds the tracker on every denial and emits
     /// one `SessionEgressStallDetected` audit event per
     /// (session, destination) bucket per sliding window. The
     /// `source` field on the event tags which chokepoint observed
     /// the stall.
-    ///
     /// **Why `Arc`**: the tracker is shared concurrently across
     /// every per-session admission task and every planner_fetch
     /// dispatch; cloning the `Arc` is cheap and the inner
@@ -460,7 +421,6 @@ pub struct HandlerContext {
     /// intent sub-case) — per-session in-memory tracker of the
     /// last `IntentRequest` each substrate-spawned planner
     /// submitted before its IPC channel went to EOF.
-    ///
     /// Written by [`crate::ipc::server::drive_planner_stream`] on
     /// every IntentRequest arm; read (and consumed) by the Mode-B
     /// post-exit synthesis hook in
@@ -478,7 +438,6 @@ pub struct HandlerContext {
     // SWEEP-IGNORE-END
     /// (the iter56 regression baseline that
     /// `INV-FAILURE-REASON-CONCRETE-01` now forbids).
-    ///
     /// **Why non-Option**: the tracker is forensic, never gates
     /// admission, and the default-empty state is a no-op for
     /// every code path that doesn't write to it. Threading
@@ -508,7 +467,7 @@ impl HandlerContext {
     ) -> Self {
         let witness_dir = data_dir.join("witness");
 
-        // `v2_extended_gaps.md §2.1` — install the per-initiative
+        // Install the per-initiative
         // realtime bus and wrap the inbound audit sink so every
         // successful audit emit fans an `InitiativeEvent` out to
         // `SubscribeInitiative` subscribers. The wrapper is
@@ -545,7 +504,7 @@ impl HandlerContext {
             )
             .with_egress_stall_tracker(Arc::clone(&egress_stall_tracker))
             // `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65)
-            // — derive `active_count` from the `sessions` table,
+            // derive `active_count` from the `sessions` table,
             // not the leaky in-memory live-handle map.
             .with_store(Arc::clone(&store)),
         );
@@ -561,7 +520,7 @@ impl HandlerContext {
         let image_resolver: Arc<dyn ImageResolver> =
             Arc::new(PrePopulatedResolver::new(data_dir.join("oci-cache")));
 
-        // V2_GAPS §D1 — load the operator-cert revocation store
+        // load the operator-cert revocation store
         // from `<data_dir>/revocations/`. A missing directory
         // returns an empty store; tampered records are skipped
         // with a stderr warning. Both signals propagate to the
@@ -634,7 +593,7 @@ impl HandlerContext {
         }
     }
 
-    /// V2_GAPS §C5 — install the boot-time artifact store after
+    /// install the boot-time artifact store after
     /// `HandlerContext::new`. Production boot in `main.rs` opens
     /// the store at `<data_dir>/artifacts/` and calls this
     /// setter; tests that exercise the store wire it from a
@@ -707,13 +666,13 @@ impl HandlerContext {
             )
             .with_egress_stall_tracker(tracker)
             // `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65)
-            // — preserve the store handle on rebuild.
+            // preserve the store handle on rebuild.
             .with_store(Arc::clone(&self.store)),
         );
         self
     }
 
-    /// V2_GAPS §C4 — replace the auto-allocated `SidecarRegistry`
+    /// replace the auto-allocated `SidecarRegistry`
     /// with one shared from `main.rs`. Production calls this so the
     /// `NotifyingAuditSink` and the `HandlerContext` point at the
     /// same registry (one set of counters, one circuit-breaker
@@ -727,7 +686,7 @@ impl HandlerContext {
         self
     }
 
-    /// V2_GAPS §D2 — install the boot-time disk-full watchdog.
+    /// install the boot-time disk-full watchdog.
     /// Production wires this from `main.rs` after the audit sink
     /// is open; tests can leave the field `None` to opt out of
     /// disk-pressure gating.
@@ -758,7 +717,6 @@ impl HandlerContext {
     /// kernel boot (when `policy.toml [credential_backend]` selects
     /// a non-default backend) and by tests that want to inject a
     /// stub backend for negative-path coverage.
-    ///
     /// IMPORTANT: this also rebuilds `proxy_manager` so the proxy
     /// resolves credentials through the same backend the rest of
     /// the kernel uses. Tests that swap the credentials backend
@@ -776,7 +734,6 @@ impl HandlerContext {
         // too. The composer holds no per-session state at
         // construction time, so a swap is safe outside an active
         // spawn.
-        //
         // V2 reviewer-egress-defaults-decision.md §7: re-inject
         // the shared `EgressStallTracker` so the Tier-1 admission
         // loop keeps emitting `SessionEgressStallDetected` after
@@ -789,7 +746,7 @@ impl HandlerContext {
             )
             .with_egress_stall_tracker(Arc::clone(&self.egress_stall_tracker))
             // `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65)
-            // — preserve the store handle across credential-backend
+            // preserve the store handle across credential-backend
             // swaps so the cap-admission gate keeps reading
             // audit-truth.
             .with_store(Arc::clone(&self.store)),
@@ -802,7 +759,6 @@ impl HandlerContext {
 /// for tests. Centralised here so every test fixture in the kernel
 /// crate constructs the same shape — and a future migration to a
 /// different default for tests only needs to touch this one helper.
-///
 /// The backend is wrapped in `AuditingBackend` against the supplied
 /// `Arc<dyn AuditSink>` so audit-sensitive tests can assert on
 /// `CredentialAccessed` / `CredentialRotated` events emitted through
@@ -840,10 +796,9 @@ pub fn build_default_test_domain(
 /// tests don't exercise spawn paths; they only need the trait
 /// surface to satisfy the non-Option `HandlerContext::isolation`
 /// field.
-///
 /// The placeholder self-reports `IsolationLevel::TestOnly` so the
 /// kernel's `verify_admission_tier` would refuse it in production
-/// — it lives here purely to satisfy the trait surface in
+/// it lives here purely to satisfy the trait surface in
 /// non-spawn-driving in-process unit tests. Production binaries
 /// never construct this; they go through
 /// `isolation_select::select_isolation_backend` which returns the
@@ -895,15 +850,12 @@ impl raxis_isolation::Backend for FailClosedTestIsolation {
 /// Build a no-op [`OrchestratorSpawn`] for in-process kernel unit
 /// tests that exercise the IPC dispatch tree without driving a
 /// real substrate boot.
-///
 /// Returns a counter-backed implementation that:
-///
 /// * Accepts every `spawn_for_initiative` call.
 /// * Records the `(session_id, initiative_id)` pair so tests can
 ///   assert the IPC handler reached the substrate-spawn callsite.
 /// * Returns `Ok(())` without binding any credential proxy or
 ///   admission listener.
-///
 /// Mirrors the cfg-gated `build_fail_closed_test_isolation` /
 /// `build_default_test_credentials` / `build_default_test_domain`
 /// pattern: production binaries never construct this — they wire
@@ -918,14 +870,12 @@ pub fn build_test_orchestrator_spawn() -> Arc<dyn OrchestratorSpawn> {
 
 /// Build a default [`ExecutorSpawnContext`] for in-process kernel
 /// unit tests.
-///
 /// The context points at a never-existing install dir
 /// (`/tmp/raxis-test-executor-spawn-non-existent`) and a
 /// deterministic-but-fake kernel version. Production binaries
 /// never construct this — they wire the boot-time real values from
 /// `main.rs`. Mirrors the cfg-gated `build_fail_closed_test_isolation`
-/// / `build_test_orchestrator_spawn` discipline.
-///
+/// `build_test_orchestrator_spawn` discipline.
 /// **Why a known-bad path.** Activation handlers that resolve the
 /// canonical Executor / Reviewer image will fail-closed with
 /// `OrchestratorSpawnError::ExecutorStarterImageMissing` /

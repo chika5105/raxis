@@ -9,8 +9,8 @@
 // affordance pattern used by GitHub, Vercel, Linear, etc.
 //
 // Placement note for sibling refactors: this is a self-contained
-// component. If `worker/dashboard-clickability-nav` restructures
-// the header, the toggle can be re-located by changing a single
+// component. If a future header refactor restructures
+// the placement, the toggle can be re-located by changing a single
 // JSX line in <Shell> — no internal coupling.
 
 import clsx from "clsx";

@@ -1481,15 +1481,15 @@ The reverse is **not** supported. A V2.0 kernel cannot read a V2.1 chain (the un
 
 | Alt | Description | R-7? | Latency cost vs V1 | Complexity | Verdict |
 | --- | --- | --- | --- | --- | --- |
-| **A** | Embed audit row in same SQLite transaction as state | ❌ Violates R-7 (audit can be rolled back with state) | -1 fsync (audit becomes free) | Low | **Rejected** by R-7. |
+| **A** | Embed audit row in same SQLite transaction as state | ❌ Violates R-7 (audit can be rolled back with state) | -1 fsync (audit becomes free) | Low | **rejected** by R-7. |
 | **B** | V1 baseline: SQLite first, JSONL post-commit, recovery patches gaps | ⚠️ Conditional on kernel restart | 0 (baseline) | Low | Status quo; R-7 conditional. |
-| **C** | JSONL first, SQLite second, single event (no pairing) | ❌ Phantoms indistinguishable from real entries without SQLite | +1 fsync | Low | **Rejected**: no information advantage over D, same SQLite consultation cost, weaker chain self-narration. |
+| **C** | JSONL first, SQLite second, single event (no pairing) | ❌ Phantoms indistinguishable from real entries without SQLite | +1 fsync | Low | **rejected**: no information advantage over D, same SQLite consultation cost, weaker chain self-narration. |
 | **D** | JSONL pending → SQLite → JSONL confirmed (proposal floor) | ✅ With SQLite snapshot | +1 fsync (~50%) | Medium | Accepted as floor; refined by D′. |
 | **D′** | D, but pending records pre/post digests + idempotency_key + KernelClaims; confirmed records `sqlite_commit_id` + `actual_post_state_digest`; deliberate rollback gets `StateChangeRolledBack` | ✅ Strictly stronger | +1 fsync (~50%) | Medium | **Recommended (this spec).** |
-| **E** | True 2-phase commit with external coordinator (e.g. FoundationDB, ZooKeeper) | ✅ | Much higher (network round-trip) | Very high | **Rejected**: over-engineered for V2. RAXIS is single-host single-store; introducing distributed coordination violates the deployment model. |
-| **F** | Pre-allocate seq slot in JSONL before SQLite, fill after | ✅ | +1 fsync | High (chain hashing must accommodate "to-be-filled" slots; signature scheme breaks) | **Rejected**: same R-7 property as D′ with materially more complex implementation. |
+| **E** | True 2-phase commit with external coordinator (e.g. FoundationDB, ZooKeeper) | ✅ | Much higher (network round-trip) | Very high | **rejected**: over-engineered for V2. RAXIS is single-host single-store; introducing distributed coordination violates the deployment model. |
+| **F** | Pre-allocate seq slot in JSONL before SQLite, fill after | ✅ | +1 fsync | High (chain hashing must accommodate "to-be-filled" slots; signature scheme breaks) | **rejected**: same R-7 property as D′ with materially more complex implementation. |
 | **G** | "Optimistic confirmed": only emit pending + periodic `AuditChainCheckpoint { last_committed_seq, sqlite_state_digest }` event | ⚠️ Weaker (verifier window unbounded between checkpoints) | ~0 (amortised) | Medium | **Useful as a follow-on hardening layer in V2.2**, not a replacement for D′. |
-| **H** | Pure pending without confirmed; assume "no rollback emitted within N seconds" means committed | ❌ Time-based assumptions are not a chain property | 0 | Low | **Rejected**: violates "chain integrity verifiable from chain alone" — a verifier replaying the chain has no clock for "N seconds." |
+| **H** | Pure pending without confirmed; assume "no rollback emitted within N seconds" means committed | ❌ Time-based assumptions are not a chain property | 0 | Low | **rejected**: violates "chain integrity verifiable from chain alone" — a verifier replaying the chain has no clock for "N seconds." |
 
 ### §11.2 Why D′, not just D
 
@@ -1818,11 +1818,11 @@ The same rule applies to the SQLite columns these events project from: `tasks.bl
 
 **Cross-references.** `INV-FAILURE-REASON-MANDATORY-01` (`specs/invariants.md`); [`dashboard-hardening.md §5.5`](dashboard-hardening.md) and `§5.5.1` (the dashboard half of the contract); `crates/types/src/error.rs::FailureReason` (the newtype); `kernel/tests/failure_reason_invariant_witness.rs` (witness suite).
 
-**Verification.** `kernel/tests/failure_reason_invariant_witness.rs` carries witnesses for newtype rejection (`failure_reason_newtype_rejects_empty_string`, `failure_reason_newtype_rejects_whitespace_only`, `failure_reason_newtype_accepts_valid_reason`), audit-event payload shape (`session_revoked_audit_carries_revoked_by_display_name`, `initiative_aborted_audit_carries_operator_attribution_when_present`), SQL projection (`tasks_block_reason_persists_failure_reason_verbatim`), and the iter56 clean-exit-no-terminal-intent sub-case templates (`tasks_block_reason_clean_exit_with_activity_is_non_generic`, `tasks_block_reason_clean_exit_without_activity_is_non_generic` — both pin that the synthesised `TaskFailedOnWorkerPrematureExit::failure_reason` is non-generic and that the pre-fix umbrella `"MaxTurnsExceeded / TokensExceeded / DispatchIdle / process death"` substring is absent from both branches).
+**Verification.** `kernel/tests/failure_reason_invariant_witness.rs` carries witnesses for newtype rejection (`failure_reason_newtype_rejects_empty_string`, `failure_reason_newtype_rejects_whitespace_only`, `failure_reason_newtype_accepts_valid_reason`), audit-event payload shape (`session_revoked_audit_carries_revoked_by_display_name`, `initiative_aborted_audit_carries_operator_attribution_when_present`), SQL projection (`tasks_block_reason_persists_failure_reason_verbatim`), and the clean-exit-no-terminal-intent sub-case templates (`tasks_block_reason_clean_exit_with_activity_is_non_generic`, `tasks_block_reason_clean_exit_without_activity_is_non_generic` — both pin that the synthesised `TaskFailedOnWorkerPrematureExit::failure_reason` is non-generic and that the pre-fix umbrella `"MaxTurnsExceeded / TokensExceeded / DispatchIdle / process death"` substring is absent from both branches).
 
-**Sub-cases of the kernel-side `TaskFailedOnWorkerPrematureExit` synthesis path (iter56).** The Mode-B post-exit hook in `kernel/src/session_spawn_orchestrator.rs::spawn_planner_dispatcher` is the kernel's authoritative emitter of `TaskFailedOnWorkerPrematureExit` for substrate-spawned VMs that exit without a terminal intent. The `failure_reason` field MUST carry one of three shapes — never the pre-iter56 generic umbrella `"MaxTurnsExceeded / TokensExceeded / DispatchIdle / process death"` placeholder, which is the regression alarm for this invariant:
+**Sub-cases of the kernel-side `TaskFailedOnWorkerPrematureExit` synthesis path.** The Mode-B post-exit hook in `kernel/src/session_spawn_orchestrator.rs::spawn_planner_dispatcher` is the kernel's authoritative emitter of `TaskFailedOnWorkerPrematureExit` for substrate-spawned VMs that exit without a terminal intent. The `failure_reason` field MUST carry one of three shapes — never the earlier generic umbrella `"MaxTurnsExceeded / TokensExceeded / DispatchIdle / process death"` placeholder, which is the regression alarm for this invariant:
 
-  1. **`drive_planner_stream` returned `Err(_)`** — the dispatch error string is inlined verbatim (existing pre-iter56 behaviour, retained).
+  1. **`drive_planner_stream` returned `Err(_)`** — the dispatch error string is inlined verbatim (existing earlier behaviour, retained).
   2. **Clean EOF with prior `IntentRequest` observed** — the per-session activity tracker (`kernel/src/session_activity.rs::SessionActivityTracker`) supplies the last `(intent_kind, sequence_number, outcome, timestamp)` tuple, which the synthesis hook quotes verbatim.
   3. **Clean EOF with no `IntentRequest` observed** — distinct boot-failure / model-init-failure surface, named explicitly so operators can disambiguate from sub-case (2).
 
@@ -1836,7 +1836,7 @@ See `specs/invariants.md §INV-FAILURE-REASON-MANDATORY-01` for the canonical te
 
 **Forbidden-phrase set (case-insensitive).** The audit chain MUST NOT carry any terminal-failure event whose reason payload contains any of the following substrings:
 
-  * `MaxTurnsExceeded / TokensExceeded` (the canonical iter56 umbrella head; the rest of the umbrella tail variants `TokensExceeded / DispatchIdle` and `DispatchIdle / process death` are also forbidden).
+  * `MaxTurnsExceeded / TokensExceeded` (the canonical umbrella head; the rest of the umbrella tail variants `TokensExceeded / DispatchIdle` and `DispatchIdle / process death` are also forbidden).
   * `(no reason)`
   * `see logs`
   * `internal error` (when used as a `failure_reason` payload value; the dashboard's HTTP 500 wire body is intentionally generic for security reasons and is allowlisted in `kernel/tests/concrete_reason_sweep.rs`).
@@ -1845,7 +1845,7 @@ See `specs/invariants.md §INV-FAILURE-REASON-MANDATORY-01` for the canonical te
 
 The same rule applies to the SQLite columns these events project from: `tasks.block_reason`, `initiatives.abort_reason`, `sessions.revoke_reason`. The dashboard's `<FailureReasonPanel>` projection reads these columns directly; a placeholder value bypasses the kernel-bug empty-state badge that fires on `null` / `""` and is therefore strictly worse than a missing reason.
 
-**Justification.** A reason that hedges between possibilities (the iter56 multi-option umbrella) is operationally indistinguishable from a missing reason — the operator cannot triage either way. Concreteness is what makes the audit chain operator-actionable: every Failed entity ships a reason that names the SPECIFIC cause AND the remedy, so the on-call engineer can route the page without grepping `kernel.stderr.log`.
+**Justification.** A reason that hedges between possibilities (the multi-option umbrella) is operationally indistinguishable from a missing reason — the operator cannot triage either way. Concreteness is what makes the audit chain operator-actionable: every Failed entity ships a reason that names the SPECIFIC cause AND the remedy, so the on-call engineer can route the page without grepping `kernel.stderr.log`.
 
 **Enforcement.** Three layers:
 
@@ -1853,7 +1853,7 @@ The same rule applies to the SQLite columns these events project from: `tasks.bl
   2. **Per-formatter inline unit tests** — `session_spawn_orchestrator::concrete_reason_tests` drives `build_worker_post_exit_failure_reason` into every variant and asserts the surfaced reason (a) is non-empty, (b) does not contain a forbidden phrase, (c) names the SPECIFIC cause.
   3. **File-sweep regression guard** — `kernel/tests/concrete_reason_sweep.rs` walks `kernel/src/**.rs` and `dashboard-fe/src/**.{ts,tsx}` (stripping `SWEEP-IGNORE-BEGIN`/`SWEEP-IGNORE-END` regions) and fails if any non-allowlisted file contains a forbidden phrase.
 
-**Cross-references.** `INV-FAILURE-REASON-CONCRETE-01` (`specs/invariants.md`); [`dashboard-hardening.md §5.5.1`](dashboard-hardening.md) (the dashboard half of the contract — post-fix the kernel-bug badge fires only on actual gaps, never on the iter56 umbrella); [`planner-harness.md`](planner-harness.md) (the `PlannerExitOutcome` wire surface); `crates/types/src/planner_exit.rs` (the structured cause); `kernel/src/session_spawn_orchestrator.rs::build_worker_post_exit_failure_reason` (the Mode-B synthesiser); `kernel/tests/concrete_reason_sweep.rs` (the regression sweep).
+**Cross-references.** `INV-FAILURE-REASON-CONCRETE-01` (`specs/invariants.md`); [`dashboard-hardening.md §5.5.1`](dashboard-hardening.md) (the dashboard half of the contract — post-fix the kernel-bug badge fires only on actual gaps, never on the umbrella); [`planner-harness.md`](planner-harness.md) (the `PlannerExitOutcome` wire surface); `crates/types/src/planner_exit.rs` (the structured cause); `kernel/src/session_spawn_orchestrator.rs::build_worker_post_exit_failure_reason` (the Mode-B synthesiser); `kernel/tests/concrete_reason_sweep.rs` (the regression sweep).
 
 **Verification.** Inline unit tests in `kernel/src/session_spawn_orchestrator.rs::concrete_reason_tests` (`concrete_reason_max_turns_reached`, `concrete_reason_max_tokens_reached`, `concrete_reason_idle_no_terminal_intent`, `concrete_reason_tool_error_budget_exhausted`, `concrete_reason_explicit_give_up`, `concrete_reason_unknown_variant`, `concrete_reason_clean_completion_in_synth_path`, `concrete_reason_dispatch_error_fallback`, `concrete_reason_no_notice_no_dispatch_error_fallback`, `used_limit_rendering_stable`); type-side tests in `crates/types/src/planner_exit.rs::tests`; the file sweep `no_umbrella_reason_in_kernel_or_dashboard_emit_sites`.
 
@@ -1976,11 +1976,4 @@ not happen silently when a second operator could catch it.
 Cross-reference: `specs/v2/dashboard-hardening.md §2.7`,
 `specs/v2/dashboard-operator-action-audit-coverage.md`,
 `specs/v2/secrets-model.md §5.1`.
-
-
-
-
-
-
-
 

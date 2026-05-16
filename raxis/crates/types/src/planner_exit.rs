@@ -1,13 +1,10 @@
 // raxis-types::planner_exit — structured planner exit outcome.
-//
 // Normative reference:
 //   - specs/invariants.md `INV-FAILURE-REASON-CONCRETE-01`
 //   - specs/v2/audit-paired-writes.md §14.8 (failure_reason concreteness)
 //   - specs/v2/planner-harness.md (planner driver loop exit shapes)
-//
 // Why this type exists
 // ====================
-//
 // A planner VM that exits without submitting a terminal intent
 // (`CompleteTask` / `SubmitReview` / `ReportFailure`) forces the
 // kernel into Mode-B premature-exit synthesis (see
@@ -22,7 +19,6 @@
 // but the operator still couldn't tell whether the executor needed
 // a higher `RAXIS_PLANNER_MAX_TURNS`, a higher token cap, a
 // substrate reboot, or something else entirely.
-//
 // `PlannerExitOutcome` closes that gap. The planner-core driver
 // (which knows EXACTLY why the dispatch loop is exiting) wraps its
 // `DriverOutcome` into a `PlannerExitOutcome` and ships it to the
@@ -32,15 +28,11 @@
 // the `PlannerStreamOutcome` return value. The Mode-B synthesiser
 // in `session_spawn_orchestrator` then formats a CONCRETE
 // `block_reason` like:
-//
 //   "executor planner reached max_turns budget (60 used / 60 limit)
 //    without submitting a terminal intent"
-//
 // instead of the multi-option umbrella.
-//
 // Wire contract
 // =============
-//
 // The variants are serialised via the `IpcMessage::PlannerExitNotice`
 // envelope (positional bincode 2.0.1 standard() — same codec as
 // every other planner-socket frame). Adding a NEW variant is a
@@ -51,22 +43,18 @@
 use serde::{Deserialize, Serialize};
 
 /// Why the planner-core dispatch driver loop terminated.
-///
 /// One variant per terminal shape the driver can reach
 /// (`crates/planner-core/src/driver.rs::DriverOutcome` →
 /// `PlannerExitOutcome` mapping lives in
 /// `planner-core::driver::driver_outcome_to_exit_outcome`).
-///
 /// `CleanCompletion` is the success path — the planner submitted
 /// a terminal intent (`CompleteTask` / `SubmitReview` /
 /// `ReportFailure` / `IntegrationMerge` / `ActivateSubTask` /
 /// `RetrySubTask`) and is exiting normally. In that case the
 /// kernel's Mode-B synthesis is a no-op because the EarlyResponse
 /// dispatch on the terminal intent already drove the FSM.
-///
 /// All other variants represent gaps the operator must
 /// triage:
-///
 ///   * `MaxTurnsReached` — bump
 ///     `RAXIS_PLANNER_MAX_TURNS` or `[gateway].planner_max_turns_default`
 ///     in policy.
@@ -88,7 +76,6 @@ use serde::{Deserialize, Serialize};
 ///     it doesn't know how to decode. `detail` carries the
 ///     planner-side `Display` of the unknown outcome so the
 ///     synthesised `block_reason` is still concrete.
-///
 /// **Serde contract — INV-IPC-BINCODE.** Default external-tag
 /// representation (NO `#[serde(tag = ...)]`). The earlier draft of
 /// this enum used internally-tagged-with-content
@@ -107,7 +94,7 @@ use serde::{Deserialize, Serialize};
 /// "limit": 60}}` in JSON, positional varint-tagged in bincode)
 /// is the canonical fix and matches the same conclusion already
 /// recorded for `IntentOutcome` (`crates/types/src/intent.rs:510`)
-/// and for the discussion in `specs/v2/v2_extended_gaps.md` §IPC
+/// and for the discussion in §IPC
 /// bincode contract. Variants and field names are unchanged so
 /// the tag-only delta is backward-compatible at the audit-event
 /// projection level (the audit chain sees the same kind / payload
@@ -227,24 +214,19 @@ impl PlannerExitOutcome {
     /// `"reviewer"` / `"orchestrator"`) — stamped onto the
     /// returned string so the dashboard's `FailureReasonPanel`
     /// can show e.g.
-    ///
     ///   "executor planner reached max_turns budget
     ///    (60 used / 60 limit) without submitting a terminal
     ///    intent"
-    ///
     /// instead of a generic umbrella. Returns `None` for
     /// `CleanCompletion` — the caller skips Mode-B synthesis
     /// entirely in that case.
-    ///
     /// **Forbidden phrases the formatter MUST NOT use** (each
     /// would re-introduce the
     /// `INV-FAILURE-REASON-CONCRETE-01` regression):
-    ///
     ///   * `"MaxTurnsExceeded / TokensExceeded / …"` — multi-
     ///     option umbrella the kernel synthesised pre-fix.
     ///   * `"unknown"` / `"unspecified"` / `"see logs"` /
     ///     `"internal error"` — opaque placeholders.
-    ///
     /// The witness test in `kernel/tests/concrete_reason_witness.rs`
     /// asserts every variant produces a string that
     /// (a) is non-empty, (b) does not match the forbidden

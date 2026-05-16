@@ -171,7 +171,7 @@ These deferrals are listed in §11.3.
 - The `ProxyStats` counter additions (§10).
 - The per-proxy implementation matrix update (§11).
 - The cross-spec amendments ([`credential-proxy.md`](credential-proxy.md),
-  `03-credential-proxies.md`, [`V2_STATUS.md`](V2_STATUS.md)) (§16).
+  `03-credential-proxies.md`) (§16).
 
 ### Out of scope
 
@@ -1028,8 +1028,6 @@ This PR updates:
 - `raxis-concepts/03-credential-proxies.md` to expand the
   `allowed_tables` / `allowed_collections` / `max_rows_per_query`
   conceptual surface with a link to this spec.
-- [`V2_STATUS.md`](V2_STATUS.md) to add a line for the proxy table-allowlist
-  feature with status "shipped".
 - `invariants.md` §3-equivalent table — adds the six
   `INV-PROXY-TABLE-*` rows above.
 

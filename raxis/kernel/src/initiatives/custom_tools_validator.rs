@@ -1,4 +1,4 @@
-//! V2_GAPS §B2 — kernel-side validation of operator-declared custom
+//! kernel-side validation of operator-declared custom
 //! tools at plan-approve time.
 //!
 //! Closes the kernel-side leg of `custom-tools.md` so a plan that

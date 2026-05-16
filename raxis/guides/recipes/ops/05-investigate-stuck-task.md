@@ -81,7 +81,7 @@ Possible states:
 - Orchestrator hasn't responded yet → the Orchestrator session
   itself may be stuck; recurse: `raxis explain <orchestrator_task_id>`.
 - Retry was requested but the kernel didn't action it (V2.6
-  follow-up) → see `V2_GAPS.md §12.13`. Manual: `raxis task retry`.
+  follow-up) → run `raxis task retry` manually.
 - Escalation was raised → see step 4.
 
 ### 4. Pending escalation

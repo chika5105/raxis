@@ -883,7 +883,7 @@ impl Drop for ComposeStackGuard {
         // explicit `teardown_on_drop` toggle. See
         // `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01` and the
         // `compose_stack_drop_skips_down_when_keep_running`
-        // / `compose_stack_drop_runs_teardown_when_no_keep_alive_signal`
+        // `compose_stack_drop_runs_teardown_when_no_keep_alive_signal`
         // witness pair.
         let should_run =
             should_run_compose_teardown(self.teardown_on_drop, self.work_dir.as_deref());

@@ -628,8 +628,6 @@ SQLite's `VACUUM` rebuilds the database file, reclaiming free pages. RAXIS runs 
 
 The kernel uses a single writer connection and a small pool of reader connections (default 4 readers). This avoids SQLite's database-wide write-lock contention. The connection pool size is fixed at startup, not configurable per intent — see Alt G in §16 for why.
 
-
-
 ---
 
 ## 12. File Descriptor Limits

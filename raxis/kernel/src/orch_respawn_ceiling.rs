@@ -409,6 +409,33 @@ pub fn insert_logical_deadlock_escalation_in_tx(
     };
 
     let Some((task_id, session_id, lineage_id)) = triple else {
+        // Both Tier-1 (worker-session-anchored) and Tier-2
+        // (orchestrator-anchored) FK resolutions came back empty.
+        // In production this is structurally unreachable on the
+        // ceiling-exceeded path: the ceiling is fired from the
+        // post-orchestrator-exit hook, which means an Orchestrator
+        // session row necessarily exists on the initiative. Tier-2
+        // joining against ANY task on the initiative further
+        // guarantees a triple unless the initiative was admitted
+        // with zero tasks (impossible — `approve_plan` rejects
+        // empty plans). Reaching this branch therefore means the
+        // store is in a state the kernel's higher-level invariants
+        // forbid; surface the discrepancy loudly so a forensic
+        // reader can correlate the missing escalation row with the
+        // structured-log emission, rather than silently dropping
+        // the operator-actionable surface.
+        eprintln!(
+            "{{\"level\":\"error\",\
+             \"event\":\"OrchRespawnCeilingFkResolutionExhausted\",\
+             \"initiative_id\":{init_json},\
+             \"attempts\":{attempts},\
+             \"window_secs\":{window_secs},\
+             \"reason\":\"both tier-1 (worker-session) and tier-2 \
+                         (orchestrator-session) FK resolutions \
+                         returned no rows; escalation insert skipped\"}}",
+            init_json = serde_json::to_string(initiative_id)
+                .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+        );
         return Ok(None);
     };
 
@@ -462,7 +489,7 @@ pub fn insert_logical_deadlock_escalation_in_tx(
          preserve the Failed terminal state."
     );
 
-    // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01` (iter65)
+    // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01`
     // — the idempotency key is keyed on `(initiative_id,
     // ceiling_attempt_count)` so the same ceiling event can't
     // double-insert (a re-fire of the same ceiling-exceeded path
@@ -472,7 +499,7 @@ pub fn insert_logical_deadlock_escalation_in_tx(
     // counter (`approve_logical_deadlock_escalation_in_tx`,
     // counter back to 0, fresh re-deadlock walks counter back up
     // to MAX+1) gets a fresh row keyed on the new
-    // `attempts` value. Pre-iter65 the key was just the
+    // `attempts` value. Previously the key was just the
     // initiative_id, which deduplicated EVERY ceiling re-trip on
     // the same initiative across the operator's lifetime —
     // that's wrong.
@@ -946,7 +973,7 @@ mod tests {
     }
 
     // ── `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01` ──
-    // (iter65) regression suite for
+    // regression suite for
     // `insert_logical_deadlock_escalation_in_tx`.
 
     fn seed_orch_session(
@@ -1111,7 +1138,7 @@ mod tests {
     }
 
     /// Tier-2 fallback: orchestrator session + a task with no
-    /// session_id (no worker ever spawned). Pre-iter65 the helper
+    /// session_id (no worker ever spawned). Previously the helper
     /// returned `Ok(None)` here and the escalation never landed;
     /// iter65 falls back to the orchestrator session.
     #[test]
@@ -1201,7 +1228,7 @@ mod tests {
     /// Distinct `attempts` value (the operator approved + reset,
     /// the counter walked back up past the ceiling, the kernel
     /// surfaces a higher counter value) inserts a fresh row.
-    /// Pre-iter65 the key was just the initiative_id, which
+    /// Previously the key was just the initiative_id, which
     /// silently deduplicated this re-trip.
     #[test]
     fn distinct_attempts_count_inserts_a_separate_row() {

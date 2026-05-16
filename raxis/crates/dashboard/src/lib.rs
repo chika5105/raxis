@@ -1,10 +1,7 @@
 //! `raxis-dashboard` — operator HTTP backend (V2 §4).
-//!
-//! Normative reference: `specs/v2/v2_extended_gaps.md §4`
+
 //! (Operator Dashboard).
-//!
 //! # What this crate owns
-//!
 //! * Axum-based HTTP server bound to a configurable
 //!   `[dashboard]` address (default `127.0.0.1:9820`).
 //! * Challenge-response operator authentication using the same
@@ -30,9 +27,7 @@
 //!   (`PUT /api/policy/toml`) that delegates to
 //!   `raxis_policy::load_policy` + the kernel's existing epoch-
 //!   advance path.
-//!
 //! # What this crate deliberately does NOT own
-//!
 //! * The kernel boot path. `kernel/src/main.rs` constructs the
 //!   `Arc<dyn DashboardData>`, the JWT secret (`OsRng` 32 bytes),
 //!   and the dashboard listener address; this crate exposes only
@@ -44,10 +39,8 @@
 //!   checks are unchanged.
 //! * Static asset serving. The React bundle is mounted into the
 //!   axum router at the kernel level via `tower_http::services::ServeDir`
-//!   — see `kernel/src/dashboard_glue.rs::serve_static`.
-//!
+//! see `kernel/src/dashboard_glue.rs::serve_static`.
 //! # Crate layout
-//!
 //! * [`config`] — [`DashboardConfig`] (parsed from `[dashboard]`
 //!   in `policy.toml`).
 //! * [`auth`] — challenge mint, signed-challenge verification,

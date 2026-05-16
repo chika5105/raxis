@@ -1,0 +1,1095 @@
+================================================================================
+  RAXIS E2E Realistic-Scenario Dry-Run — Every Code Path, Step by Step
+================================================================================
+
+  Purpose
+  -------
+  This is a forensic dry-run of `extended_e2e_realistic_scenario.rs::
+  realistic_session_lifecycle` (`RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1`).
+  Every step lists the file:line that runs, what state it expects, what it
+  mutates, the audit event(s) it emits, and the failure modes that could
+  surface (each annotated with [BUG-CANDIDATE] when worth a second look).
+
+  Read order
+  ----------
+  Top-to-bottom is the wall-clock order of operations. The kernel daemon
+  runs in parallel with the harness from §3 onwards; per-phase concurrency
+  is called out inline.
+
+  Conventions
+  -----------
+  HARNESS-N   step on the test process (cargo test)
+  KERNEL-N    step on the spawned raxis-kernel daemon
+  VM-N        step on a microVM guest (orchestrator/executor/reviewer)
+  WIT-N       witness assertion at end-of-run
+  [BUG-N]     numbered bug candidate for later triage
+
+
+================================================================================
+  PHASE 0 — Preflight
+================================================================================
+
+  HARNESS-0.1 : tests/extended_e2e_realistic_scenario.rs::realistic_session_lifecycle()
+                ────────────────────────────────────────────────────────────
+                * read env: RAXIS_LIVE_E2E, RAXIS_LIVE_E2E_REALISTIC
+                * if either off → wiring_smoke_test() and return early
+                  (synthetic chain + witness wire-up; never spawns kernel)
+
+  HARNESS-0.2 : acquire_test_lock()
+                ────────────────────
+                Cross-binary advisory file lock at
+                $TMPDIR/raxis-cargo-test-build.lock so two `cargo test`
+                instances cannot race a cargo rebuild of the kernel
+                binary. RAII guard held for the rest of the test.
+
+  HARNESS-0.3 : require_disk_hygiene()
+                ───────────────────────
+                * df / probe on repo volume + /private/tmp + every
+                  /var/folders/* dir
+                * dedupe by mount; threshold 90%
+                * on over-threshold:
+                  - eprintln!("OPERATOR_ATTENTION_REQUIRED HostHygiene
+                    DiskPressure {json}")
+                  - panic with HostPreflightError::DiskPressure Display
+                [BUG-1] probe_disk_pressure ignores `df` failures silently
+                        (returns Vec without the failed volumes). If a
+                        critical mount errors out (broken NFS), we proceed
+                        as if it's healthy. Low impact for dev; document.
+
+  HARNESS-0.4 : ensure_extended_stack_up_or_panic()
+                ────────────────────────────────────
+                * RAXIS_LIVE_E2E_NO_AUTO_DOCKER=1 → skip
+                * else: `docker compose -f live-e2e/docker-compose.extended.e2e.yml up -d --wait`
+                * timeout via harness_timeout::run_command_output_timeout
+                * brings up: postgres, mongo, redis, mailhog, mysql, mssql,
+                  otel-collector, prometheus, grafana
+
+  HARNESS-0.5 : require_tcp_reachable(PG_HOST_PORT, "...")
+                require_tcp_reachable(MONGO_HOST_PORT, "...")
+                ─────────────────────────────────────────────
+                500 ms TcpStream::connect_timeout probe. Panics with the
+                remediation `docker compose ... up -d --wait` on failure.
+
+  HARNESS-0.6 : require_anthropic_dev_key()
+                ─────────────────────────────
+                * read raxis/.env (CARGO_MANIFEST_DIR.parent().join(".env"))
+                * scan lines for `ANTHROPIC-API-DEV-KEY=...`
+                * panic on missing / empty value
+
+  HARNESS-0.7 : require_gcp_adc()
+                ───────────────────
+                * assert ~/.config/gcloud/application_default_credentials.json
+                  exists. Hint message includes `gcloud auth application-
+                  default login`.
+
+  HARNESS-0.8 : require_gateway_binary() -> PathBuf
+                ────────────────────────────────────
+                * read RAXIS_GATEWAY_BINARY
+                * assert absolute & exists
+                * panic with `cargo build -p raxis-gateway --release` hint
+
+  HARNESS-0.9 : require_canonical_images()
+                ───────────────────────────
+                * read RAXIS_INSTALL_DIR
+                * assert {orchestrator, reviewer, executor-starter}-core-
+                  <kernel-version>.img + matching .manifest.toml exist
+                * fast-fail with rebake hint
+
+
+================================================================================
+  PHASE 1 — Bootstrap (kernel run in RAXIS_BOOTSTRAP=1, exits on success)
+================================================================================
+
+  HARNESS-1.1 : build_operator_key(&REALISTIC_OPERATOR_SEED) -> (SigningKey, OperatorFingerprint)
+                ─────────────────────────────────────────────────────────────
+                * REALISTIC_OPERATOR_SEED = [0xD0; 32]   (distinct from
+                  extended-scenario's [0xCE; 32])
+                * ed25519 SigningKey from bytes
+                * fingerprint_8 = sha256(pubkey)[..8] -> OperatorFingerprint
+                [BUG-2] Two parallel test runs against the SAME tempdir
+                        (rare; only ad-hoc local) would collide on socket
+                        path. Tempdir bootstrap makes this safe; flag only.
+
+  HARNESS-1.2 : bootstrap_with_custom_cert(&signing_key) -> (PathBuf, PathBuf)
+                ────────────────────────────────────────────────────────────
+                * build_and_locate_kernel() → cargo build & resolve path
+                * (macOS) codesign_kernel_for_avf → ad-hoc-sign with
+                  release/raxis.entitlements + --options runtime
+                * ephemeral_cert_with_key with permitted_ops:
+                    CreateInitiative, ApprovePlan, AbortInitiative,
+                    RotateEpoch, OperatorCertInstall
+                  display_name = "realism-e2e-operator"
+                * tempfile::tempdir().keep() → leak PathBuf
+                * write cert to <data_dir>/operator.cert.toml
+                * spawn: RAXIS_BOOTSTRAP=1 RAXIS_DATA_DIR=<dir>
+                                 RAXIS_OPERATOR_CERT=<cert> raxis-kernel
+                * .output() blocks until child exits
+
+  KERNEL-1.1  : kernel/src/main.rs::main()
+                ─────────────────────────
+                Step 0   banner (or banner_json if RAXIS_LOG_FORMAT=json)
+                Step 0.5 canonical_images_preflight::
+                         assert_trust_anchor_present_or_panic()
+                         (panics with BOOT_ERR_KERNEL_TRUST_ANCHOR_UNPOPULATED
+                          when EXPECTED_KERNEL_SIGNING_KEY_BYTES is all-zero)
+                Step 1   data_dir = env RAXIS_DATA_DIR
+                         bootstrap_mode = RAXIS_BOOTSTRAP is_ok
+                spawn_deadlock_watcher(data_dir.clone()) [feature gated]
+                Step 2   tokio::spawn_blocking(|| bootstrap::run(&config))
+                            └─ bootstrap::run_inner(config)
+                                  ├─ mkdir keys policy audit providers
+                                  │     runtime sockets notifications
+                                  ├─ chmod 0700 keys/ providers/
+                                  ├─ guard: refuse if authority_keypair.pem
+                                  │     exists && !force
+                                  ├─ purge_existing_keys_if_force
+                                  ├─ mint authority + quality + verifier_token keys
+                                  ├─ load operator cert from path OR stdin
+                                  ├─ validate_cert_structurally + verify_cert_self_signature
+                                  ├─ write keys/operator_<fp>.{pub,cert.toml} 0444
+                                  ├─ render genesis policy.toml with operator entry
+                                  ├─ write policy.toml 0644
+                                  ├─ open kernel.db (Connection::open + apply_pragmas + migrations)
+                                  ├─ INSERT policy_epoch_history (epoch=1, signing_key fp)
+                                  ├─ open audit segment-000.jsonl
+                                  └─ emit AuditEventKind::GenesisCreated  (seq=0,
+                                       prev_sha256=000...000)
+                            └─ std::process::exit(0)
+                * on join failure → exit_with_code(KernelError::BootstrapFailed)
+
+  HARNESS-1.3 : bootstrap_output.status.success() assert
+                ──────────────────────────────────────────
+                * if not, panic with stderr dump
+                * returns (kernel_bin, data_dir)
+
+
+================================================================================
+  PHASE 2 — Pre-Daemon Policy / Credential / Repo Seed
+================================================================================
+
+  HARNESS-2.1 : enable_gateway_in_policy(&data_dir, &gateway_binary)
+                ─────────────────────────────────────────────────────
+                * read <data_dir>/policy/policy.toml
+                * assert NO existing `\n[gateway]\n` (genesis must not have it)
+                * append:
+                    [gateway] binary_path, spawn_timeout_secs=30,
+                              respawn_backoff_ms=1000,
+                              max_consecutive_respawns=5
+                    [egress]  domains=["api.anthropic.com"], patterns=[]
+                    [[providers]] anthropic-realism-e2e (kind=Anthropic,
+                              credentials_file=anthropic-realism-e2e.toml,
+                              inference_timeout_ms=120000,
+                              data_fetch_timeout_ms=30000, pricing.*)
+                    [[lanes]] e2e-realistic-lane (8 concurrent, 100000 cost, 100 prio)
+                    [[lanes]] e2e-realistic-sibling-lane (8, 100000, 100)
+                * append observability_policy_block():
+                    [observability] enabled=true
+                    [observability.ring] segment_max=16MiB total_max=256MiB
+                                         queue_depth=4096
+                    [observability.metrics] enabled=true export_interval=5s
+                    [observability.resource] service_name=raxis-kernel-live-e2e
+                                             environment=live-e2e
+                    [observability.resource.extra] run_kind=realistic-scenario
+                    [observability.pusher] otlp_endpoint=http://127.0.0.1:4318
+                                           protocol=http compression=gzip
+                                           export_timeout=10s batch=256
+                                           flush=1s max_inflight=4
+                * conditional: if raxis-verifier-no-secrets exists alongside
+                  gateway_binary, append [[gates]] gate_type=NoSecretStrings
+                  verifier_command=<path> max_wall_seconds=30 max_memory=256MiB
+                  network_allowed=false
+                * write back
+                [BUG-3] [gateway].binary_path uses gw.display() which on
+                        Windows could mis-quote backslashes. Linux/macOS
+                        only — non-issue here.
+
+  HARNESS-2.2 : mutate_dashboard_block_in_policy(&data_dir)
+                ─────────────────────────────────────────────
+                * rebind dashboard to configured_dashboard_port() (env
+                  RAXIS_E2E_DASHBOARD_PORT or default 19820)
+                * inject static_dir = workspace/dashboard-fe/dist (when built)
+                  → without this the dashboard serves JSON-only
+
+  HARNESS-2.3 : write_credentials(&data_dir)
+                ──────────────────────────────
+                * mkdir credentials/
+                * write 0600 .env files for each protocol:
+                    test-pg-dev.env       postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e_pg
+                    test-mongo-dev.env    mongodb://...127.0.0.1:27399/raxis_e2e_mongo?authSource=admin
+                    test-redis-dev.env    redis://...
+                    test-smtp-dev.env     smtp://...
+                  (mysql, mssql, http, aws, gcp, azure mirrored if opt-in)
+                [BUG-4] write_with_mode_0600 implementation uses
+                        OpenOptions::create(true).write(true).mode(0o600).
+                        If the file already exists with different mode,
+                        umask + create won't re-chmod. Test driver wipes
+                        the data dir each run so safe in practice.
+
+  HARNESS-2.4 : write_provider_credentials(&data_dir)
+                ─────────────────────────────────────
+                * mkdir providers/
+                * write 0600 anthropic-realism-e2e.toml:
+                    api_key = "<ANTHROPIC-API-DEV-KEY from raxis/.env>"
+
+  HARNESS-2.5 : seed_realistic_main_repository(&data_dir)
+                ────────────────────────────────────────────
+                * wipe + mkdir <data_dir>/repositories/main
+                * run live-e2e/seed/repo/rich-multilang-001/scripts/
+                  materialize_seed.sh <main_repo>
+                    └─ 11 commits across rust-crate/, ts-pkg/, py-pkg/
+                       with a feature-branch merge + cross-language rename
+                * stage_fake_creds_env: drop bait .env with FAKE credentials
+                  (canaries for INV-SECRET-05 / credential-substitution-canary)
+                * stage_scripts_into_worktree: stock-Python check_*.py
+                  scripts (psycopg2, pymongo, redis, smtplib, pymysql,
+                  pymssql) + run_all_services.sh wrapper
+                * 12th commit with pinned identity:
+                    GIT_AUTHOR_NAME = raxis-realistic-seed
+                    GIT_AUTHOR_EMAIL = realistic@raxis.invalid
+                    GIT_AUTHOR_DATE = 2026-01-02T00:00:00Z
+                    message = "test(realistic): bait .env + transparent-
+                              proxy scripts overlay"
+                * git rev-parse refs/heads/main → log to stderr
+                [BUG-5] If host has user.email/user.name committer hooks
+                        that block the commit (rare corporate setups),
+                        the test panics with `git commit failed`. Pinned
+                        env vars override author identity but NOT
+                        signing key hooks. Document as a host-config
+                        constraint.
+
+  HARNESS-2.6 : maybe_refresh_examples(...)
+                ────────────────────────────
+                * RAXIS_E2E_REFRESH_EXAMPLES=1 → rewrite live-e2e/examples/
+                  from authoritative sources (live policy, plan tomls,
+                  credentials, prompts)
+                * assert_no_real_anthropic_key scan over examples/credentials/
+                * panic if regex matches → INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01
+                * default off → no-op
+
+
+================================================================================
+  PHASE 3 — Kernel Daemon Start (normal mode)
+================================================================================
+
+  HARNESS-3.1 : pg_seed = seed_postgres()    (panics on docker not up)
+                mongo_seed = seed_mongodb()
+                redis_seed = seed_redis()
+                smtp_seed = seed_smtp()
+                mysql_seed = seed_mysql()    (opt-in via RAXIS_LIVE_MYSQL_URL)
+                mssql_seed = seed_mssql()    (opt-in)
+                ─────────────────────────────────────────────────────
+                Each helper:
+                * connects to its docker container via the published port
+                * CREATE TABLE / INSERT rows / SET keys / RPUSH / MAIL
+                  with deterministic fixture data
+                * returns a `*Seed` struct the witnesses key on
+
+  HARNESS-3.2 : spawn_kernel_normal(&kernel_bin, data_dir, &install_dir) -> KernelInstance
+                ────────────────────────────────────────────────────────────
+                * spawn: RAXIS_DATA_DIR=<dir> RAXIS_INSTALL_DIR=<inst>
+                         raxis-kernel
+                  with stdout = Piped, stderr = Piped
+                * spawn stderr reader thread → push each line into
+                  Arc<Mutex<Vec<String>>> AND write to
+                  <data_dir>/kernel.stderr.log
+                * return KernelInstance { child, stderr_lines, data_dir }
+
+  KERNEL-3.1  : kernel/src/main.rs::main() — non-bootstrap path
+                ───────────────────────────────────────────────
+                Step 0    boot banner
+                Step 0.5  assert_trust_anchor_present_or_panic
+                Step 1    data_dir, bootstrap_mode=false
+                          spawn_deadlock_watcher [if feature]
+                Step 2    SKIPPED — not bootstrap mode
+                Step 2.5  data_dir_layout::ensure_data_dir_layout(&data_dir)
+                          INV-DATA-DIR-LAYOUT-COMPLETE-ON-BOOT-01
+                          creates: audit/, witness/, escalations/, plans/,
+                          sockets/, runtime/, providers/, notifications/,
+                          credentials/, worktrees/, transfer/, artifacts/,
+                          observability/, ...
+                Step 3    raxis_policy::load_policy(<data_dir>/policy/policy.toml)
+                            ├─ canonical_decode + signature verify against trust anchor
+                            ├─ structural validate + lane registry pinning
+                            └─ wrap in Arc<ArcSwap<PolicyBundle>>
+                          policy_epoch_at_boot = bundle.epoch()
+                          capacity::check_fd_limit_at_boot(required_min_fd_limit)
+                          → exit(64) on Insufficient
+                          → eprintln on Ok / Unknown
+                Step 4    authority::load_key_registry(&data_dir)
+                            ├─ load authority_keypair.pem, quality_keypair.pem,
+                            │  verifier_token_key.bin
+                            └─ map operator_<fp>.pub files in keys/
+                Step 5    Store::open(<data_dir>/kernel.db)
+                            ├─ Connection::open + apply_pragmas (WAL,
+                            │  synchronous=FULL, foreign_keys=ON,
+                            │  temp_store=MEMORY)
+                            └─ migration::apply_pending
+                Step 6    spawn_blocking(recovery::reconcile(&store, &audit_dir))
+                          → SweptTaskRecord[]   (empty on fresh boot)
+                Step 7a   audit_path = <data_dir>/audit/segment-000.jsonl
+                          last_chain_state(&audit_path) → resume info (next_seq, prev_sha256)
+                                                          OR None on genesis
+                          AuditWriter::open(path, starting_seq, starting_prev)
+                          FileAuditSink::new(writer) → Arc<FileAuditSink>
+                Step 7b   notifications::SidecarRegistry::new()
+                          SessionStreamCapture::new(&data_dir) → Option<Arc>
+                          TaskLlmCapture::new(&data_dir)       → Option<Arc>
+                          set_panic_hook to flush task_llm_capture
+                          safety::install_safety_audit_sink(inner_audit)
+                          panic_hook::install_kernel_panic_hook(inner_audit, None)
+                          SessionCapture::new(&data_dir)       → Option<Arc>
+                          observability_boot::build_obs_hub(&policy, &data_dir, version)
+                          file_audit_sink.set_observability_hub(hub)
+                          set_global_observability_hub on:
+                            raxis_worktree_provision (-04)
+                            raxis_ipc::frame        (-05)
+                            raxis_egress_admission   (-06)
+                          chain audit sink:
+                            NotifyingAuditSink::new(inner_audit, policy, data_dir)
+                              .with_sidecar_registry .with_store .with_observability
+                            wrap with StreamingAuditSink(stream_capture)
+                            wrap with SessionLifecycleObserver(session_capture)
+                Step 8    inner_audit.emit(KernelStarted { data_dir, policy_epoch,
+                                                          schema_version=1 })
+                          policy_manager::emit_default_provider_egress_applied
+                Step 8a   spawn_blocking(recovery::reconcile_git_apply_pending(...))
+                          → repaired / verified / inconsistent counts
+                Step 8a'' restart_lifecycle::read_sentinel_for_restart
+                          rehydrate_restart_context(audit, sentinel, recovery_ms)
+                          → dumps_processed, KernelRestart{Initiated,Completed}
+                          observability::record_kernel_respawn / refused
+                Step 8a'''spawn_blocking(recovery::reconcile_after_supervisor_restart)
+                          → AutoResumeReport (only when supervisor restart_completed > 0)
+                Step 8a'  capacity::DiskWatchdog::new + spawn(audit clone)
+                Step 8b   canonical_images_preflight::verify_canonical_images_at_boot
+                          per role (reviewer + orchestrator):
+                            Ok / Missing / ManifestMissing / TrustAnchorUnpopulated
+                            / Tampered (→ SecurityViolationDetected)
+                            / ManifestRejected (→ SecurityViolationDetected)
+                Step 8b.1 probe_linux_kernel_binary_at_boot
+                          → Present / Missing (warn only)
+                Step 8c   isolation_select::select_isolation_backend
+                          allow_fallback = RAXIS_UNSAFE_FALLBACK_ISOLATION
+                          → IsolationSubstrateSelected audit
+                          → IsolationFallbackBypass audit if fallback_bypass_required
+                          → exit(64) on Err with IsolationSubstrateRefused
+                Step 8a   heartbeat_loop (runtime::heartbeat_loop) → 5s cadence
+                Step 8b   plan_bundle_nonce_sweep_loop
+                Step 7b   initiatives::PlanRegistry::new()
+                          spawn_blocking(repopulate_plan_registry from store)
+                Step 7c   build HandlerContext (giant struct):
+                            policy registry store audit data_dir
+                            plan_registry gateway_client epoch_binding
+                            credentials isolation_backend
+                            orchestrator_spawn = LiveOrchestratorSpawn(
+                              OrchestratorSpawnContext .with_data_dir
+                                .with_scale_down_history .with_rate_limiter,
+                              SessionSpawnService .with_observability
+                                .with_egress_stall_tracker .with_store,
+                              store, plan_registry, policy)
+                            executor_spawn  = ExecutorSpawnContext .with_data_dir
+                                              .with_scale_down_history
+                                              .with_rate_limiter
+                            domain          = GitAdapter(main_root, sessions_root, transfer_root)
+                            .with_disk_watchdog .with_artifact_store
+                            .with_sidecar_registry .with_observability
+                            .with_egress_stall_tracker
+                Step 8.6  BreakglassState::open → Arc → .with_breakglass
+                          ctx = Arc::new(ctx_inner)
+                Step 8.5  spawn(gateway::spawn_and_supervise(...))
+                Step 8.6  load_dashboard_config(policy_path) → start_dashboard_with_advancer
+                          eprintln "RAXIS dashboard: <url>"
+                          structured log "dashboard_started"
+                Step 9    ipc::server::start(&data_dir, ctx).await
+                            ├─ mkdir sockets/
+                            ├─ remove any stale operator.sock/planner.sock/gateway.sock
+                            ├─ UnixListener::bind operator.sock → chmod 0600
+                            ├─ UnixListener::bind planner.sock  → chmod 0660
+                            ├─ UnixListener::bind gateway.sock  → chmod 0660
+                            ├─ install SIGTERM/SIGINT handlers (must be BEFORE
+                            │  sockets_bound log)
+                            ├─ server_log::sockets_bound(operator, planner, gateway)
+                            │  ★ THIS IS THE "kernel ready" SIGNAL THE HARNESS SCANS
+                            ├─ spawn accept_operator_loop
+                            ├─ spawn accept_planner_loop
+                            ├─ spawn accept_gateway_loop
+                            └─ wait_for_shutdown(sigterm, sigint, op, pl, gw)
+
+  HARNESS-3.3 : kernel.wait_until_ready_or_panic(READY_DEADLINE=15s)
+                ───────────────────────────────────────────────────
+                * scan captured stderr for `"event":"sockets_bound"`
+                * 20ms sleep cadence
+                * panic with captured_stderr() on timeout
+
+  HARNESS-3.4 : ensure_otel_pusher_or_panic(ctx)
+                ───────────────────────────────────
+                * locate or build raxis-otel-pusher
+                * spawn as RAII supervisor child
+                * smoke-probe Prometheus until `up{job=~"raxis.*"}=1`
+                * panic with OTEL_PUSHER_VIOLATION_TOKEN on failure
+                  INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01
+
+  HARNESS-3.5 : open_dashboard_with_autologin(&signing_key, port, "realism-e2e")
+                ────────────────────────────────────────────────────────────
+                * mint short-lived JWT via dashboard JWT secret
+                * `open <url>` (macOS) / xdg-open (Linux) — best effort
+                * tier3.set_dashboard_url(url)
+
+
+================================================================================
+  PHASE 4 — Operator IPC: Authentication
+================================================================================
+
+  HARNESS-4.1 : OperatorIpc::connect(op_socket, signing_key, seed, fp)
+                ────────────────────────────────────────────────────
+                * UnixStream::connect(operator.sock)
+                * read JSON frame → {challenge_hex: 32 bytes hex}
+                * sign challenge bytes with ed25519 SigningKey
+                * compute policy_fingerprint = sha256(pubkey)[..16] hex
+                * send response: {fingerprint, signed_challenge_hex}
+                * read ack → assert status == "Ok"
+                * return OperatorIpc { stream, seed }
+
+  KERNEL-4.1  : ipc::server::handle_operator_connection
+                ─────────────────────────────────────────
+                * auth::make_challenge() → 32 CSPRNG bytes hex
+                  (panics on RNG failure → close socket; never sends
+                   degraded challenge)
+                * write_json_frame_async(challenge)
+                * read_json_frame_async → ResponseEnvelope
+                * policy_snapshot = ctx.policy.load_full()
+                * auth::verify_response(challenge, response, snapshot)
+                  └─ check fingerprint ↔ operator_<fp>.pub
+                  └─ ed25519 verify signed_challenge against pubkey
+                  └─ check cert valid (not expired, permitted_ops, …)
+                * Ok → write {status: "Ok"} → enter dispatch_loop
+                * Unauthorized → write {status: "Unauthorized", reason} → close
+                [BUG-6] policy_snapshot is captured ONCE before verify.
+                        If the operator's cert is rotated mid-handshake
+                        the next handshake re-reads. Documented: in-flight
+                        handshakes use the captured snapshot. OK.
+
+
+================================================================================
+  PHASE 5 — Submit + Approve Both Plans
+================================================================================
+
+  HARNESS-5.1 : initiative_primary = uuid::Uuid::now_v7()  (UUIDv7 + dashes)
+                initiative_sibling = uuid::Uuid::now_v7()
+                ────────────────────────────────────────────
+                MUST be UUID — `InitiativeId::parse` rejects non-UUID
+
+  HARNESS-5.2 : conn.submit_plan(&initiative_primary, plan_primary_pre)
+                ────────────────────────────────────────────────────
+                * plan_realistic::realistic_plan_toml()  (called earlier
+                  in HARNESS-2.5b for the example-refresh path)
+                * build_plan_bundle(plan_toml):
+                    plan_bytes = plan_toml.as_bytes().to_vec()
+                    plan_sha = sha256(plan_bytes)
+                    BundleArtifact { name: "plan.toml", bytes, sha256 }
+                    signed_at = unix_now_secs()
+                    nonce = mint_bundle_nonce() (CSPRNG 32 bytes)
+                    PlanBundle::new_v2_1(signed_at, signed_at, nonce,
+                                         "/raxis/realism-e2e", artifacts)
+                * canonical_encode(&bundle) → canonical bytes
+                * bundle_sha = crypto_bundle_sha256(&canonical)
+                * sig_input = signing_input(&bundle_sha)
+                * signature = signing_key.sign(&sig_input)
+                * fingerprint = fingerprint_8(&pubkey)
+                * write frame: {op: "CreateInitiative",
+                                payload: {initiative_id, plan_bundle_hex,
+                                          bundle_sha256_hex, signature_hex,
+                                          signed_by_hex}}
+                * read ack → assert status == "InitiativeCreated"
+                * assert response.payload.initiative_id roundtrip
+
+  KERNEL-5.1  : ipc/operator.rs::operator::dispatch_loop
+                  → match op == "CreateInitiative"
+                  → handle_create_initiative(initiative_id, plan_bundle_hex,
+                                            bundle_sha256_hex, signature_hex,
+                                            signed_by_hex, operator, ctx)
+                ────────────────────────────────────────────────────────────
+                * decode hex fields (FAIL_PAYLOAD_INVALID on bad hex)
+                * recompute crypto_bundle_sha256(&canonical) ==? bundle_sha
+                  (FAIL_PLAN_BUNDLE_SHA_MISMATCH)
+                * recompute signing_input(&bundle_sha) → verify
+                  with policy.operator_pubkey(signed_by_hex)
+                * verify nonce freshness (signed_at within
+                  [now-max_skew, now+max_skew]; INV-PLAN-BUNDLE-FRESH)
+                * INSERT plan_bundle_nonces_seen (nonce + first_seen_at,
+                  FAIL_PLAN_BUNDLE_REPLAY on UNIQUE conflict)
+                * parse PlanBundle from canonical bytes
+                * extract artifacts[plan.toml].bytes → plan_toml
+                * call lifecycle::create_initiative_v2:
+                    ├─ load_plan_toml(plan_toml) → PlanRoot
+                    ├─ validate plan structure (validate_plan_root)
+                    ├─ resolve target_ref against policy [git] block
+                    ├─ INSERT initiatives (state='Created')
+                    ├─ INSERT tasks (state='Admitted')      (×N tasks)
+                    ├─ populate plan_registry path fields
+                    ├─ INSERT initiative_envelope (sealed bytes)
+                    ├─ emit InitiativeCreated audit row
+                    └─ COMMIT
+                * respond {status: "InitiativeCreated",
+                           payload: {initiative_id: ...}}
+
+                [BUG-7] If validate_workspace_lane_in_policy() runs at
+                        approve_plan, not at create_initiative, then a
+                        broken lane_id is accepted at CreateInitiative
+                        and only surfaced at ApprovePlan. Confirmed by
+                        comment in operator.rs:1532-1545. Not a bug but
+                        worth a UI hint at CreateInitiative.
+
+  HARNESS-5.3 : conn.approve_plan(&initiative_primary, &fingerprint)
+                ────────────────────────────────────────────────────
+                * approving_operator = policy_fingerprint_32(&pubkey)
+                * write frame: {op: "ApprovePlan",
+                                payload: {initiative_id, approving_operator}}
+                * read ack → assert status == "PlanApproved"
+
+  KERNEL-5.2  : operator::dispatch_loop → handle_approve_plan
+                ────────────────────────────────────────────
+                Step A    Cert-ops check: ApprovePlan in permitted_ops
+                Step B    approving_operator == authenticated.fingerprint?
+                          → FAIL_OPERATOR_IDENTITY_MISMATCH
+                Step C    policy_snapshot.operator_entry(approving_op)
+                          → FAIL_OPERATOR_UNKNOWN
+                Step D    decode pubkey hex; on err → FAIL_POLICY_OPERATOR_PUBKEY_INVALID
+                Step E    snapshot:
+                            git_default_target_ref, git_target_ref_locked,
+                            environments map, permitted_credentials list,
+                            vm_images list, default_executor_image option,
+                            elastic config, lanes list, operator display_name
+                Step F    spawn_blocking(lifecycle::approve_plan(...))
+                            ├─ load initiative row (must be 'Created')
+                            ├─ verify plan signature against snapshot pubkey
+                            ├─ load_plan_toml → PlanRoot
+                            ├─ validate_workspace_lane_in_policy   ← §Step 28
+                            │   PlanLaneNotInPolicy on missing lane
+                            ├─ validate_task_vm_images against policy
+                            ├─ validate environment access (INV-ENV-01)
+                            ├─ validate task graph (topological sort + cycles)
+                            ├─ validate path-allowlist shape per task
+                            ├─ resolve per-initiative target_ref
+                            ├─ derive base_sha / target_sha / commit_intent
+                            ├─ allocate orchestrator session_id (UUIDv7)
+                            ├─ INSERT sessions (orchestrator,
+                            │      session_agent_type='Orchestrator',
+                            │      initiative_id, status='Created',
+                            │      session_token=CSPRNG 32 bytes hex)
+                            ├─ UPDATE initiatives state='Executing'
+                            ├─ INSERT lane_budget_reservations (one per task)
+                            ├─ assemble orchestrator task_prompt from
+                            │  the plan + KSB header
+                            ├─ emit PlanApproved audit
+                            ├─ emit SessionCreated audit (orchestrator session)
+                            ├─ COMMIT
+                            └─ return ApprovePlanResult {
+                                 initiative_id, tasks_admitted,
+                                 orchestrator_session_id, orchestrator_task_prompt }
+                Step G    if result.orchestrator_session_id is Some:
+                            allowlist = build_egress_allowlist_from_policy
+                            ctx.orchestrator_spawn.spawn_for_initiative
+                              .await
+                            └─ LiveOrchestratorSpawn::spawn_for_initiative
+                                ├─ SessionSpawnService::spawn_session
+                                │   ├─ load canonical image
+                                │   ├─ verify manifest signature against
+                                │   │  trust anchor
+                                │   ├─ allocate VsockId pair / kernel_ipc_fd
+                                │   ├─ provision_orchestrator_worktree
+                                │   │   └─ raxis-domain-git: git clone
+                                │   │      <data_dir>/repositories/main
+                                │   │      → <data_dir>/worktrees/
+                                │   │      orch-<initiative_id>/
+                                │   ├─ render guest env (RAXIS_VSOCK_LOOPBACK_PLAN
+                                │   │   RAXIS_SESSION_TOKEN, kernel UDS path,
+                                │   │   token caps, max_turns env, sleep cap,
+                                │   │   provider env, …)
+                                │   ├─ start ProxyManager for the session
+                                │   │   (creates per-protocol UDS proxies)
+                                │   ├─ isolation.launch(VmSpec) → SessionHandle
+                                │   ├─ AdmissionLoop start → tproxy admit/deny
+                                │   ├─ wait for vsock handshake from guest
+                                │   ├─ emit SessionVmSpawned audit (with
+                                │   │   task_id=None for orchestrator)
+                                │   └─ return SessionHandle { session_id,
+                                │       admission_loopback, kernel_ipc_stream, ... }
+                                └─ spawn_planner_dispatcher(&mut handle, ctx)
+                                    └─ Mode-B: drive_planner_stream on the
+                                       surrendered IPC fd, with
+                                       session_id_for_activity = Some(orch_session_id)
+                Step H    eprintln "orchestrator_spawn_ok" structured log
+                            OR "orchestrator_spawn_failed" + hint  ← polled by
+                                                                     HARNESS-6.2
+                Step I    return OperatorResponse::PlanApproved
+
+  HARNESS-5.4 : conn.submit_plan(&initiative_sibling, plan_sibling_pre)
+                conn.approve_plan(&initiative_sibling, &fingerprint)
+                ────────────────────────────────────────────────────
+                Same flow on the sibling-lane plan; uses
+                multi_initiative::sibling_plan_toml()
+
+  KERNEL-5.3  : drop OperatorIpc → UnixStream closes
+                ────────────────────────────────────
+
+
+================================================================================
+  PHASE 6 — Lifecycle Polling + Per-Task Execution
+================================================================================
+
+  HARNESS-6.1 : chain = poll_for_dual_lifecycle_completion(
+                          kernel.data_dir(),
+                          [&initiative_primary, &initiative_sibling],
+                          realistic_lifecycle_deadline()) // env-overridable, default 3600s
+                ─────────────────────────────────────────────────────────
+                Loop, 500ms cadence:
+
+                1. deadline check → panic with stderr tail + chain summary
+                2. scan_stderr_for_terminal_spawn_failure(stderr_path, ids)
+                   * memmem pre-filter for "SpawnFailed" / "orchestrator_spawn_failed"
+                   * JSON parse each match
+                   * event must be one of two exact strings:
+                       "orchestrator_spawn_failed"
+                       "ActivateSubTaskSpawnFailed"
+                   * initiative_id must match one of the watched ids
+                   * → panic immediately with kernel.error + kernel.hint
+                3. read_audit_chain(audit_dir)
+                   * for each .jsonl in audit/:
+                       split by '\n'
+                       try parse each line as AuditEvent
+                       ignore parse failures, append to vec
+                4. for each event scan for:
+                   * SecurityViolation / SecurityViolationDetected → panic
+                   * OrchestratorRespawnCeilingExceeded on watched id → panic
+                5. merged_a = any IntegrationMergeCompleted on init_primary
+                   merged_b = any IntegrationMergeCompleted on init_sibling
+                   both true → return events
+                6. else sleep 500ms, loop
+
+  KERNEL-6.x  : Concurrent kernel-side activity during HARNESS-6.1 poll
+                ─────────────────────────────────────────────────────────
+
+                Orchestrator VM lifecycle (per initiative):
+                ┌──────────────────────────────────────────────────────┐
+                │  ORCH-A. VM boots; planner inside reads VSOCK env;   │
+                │          dials kernel UDS; KSB header arrives        │
+                │          (build_ksb_header_for_orchestrator)         │
+                │  ORCH-B. planner runs decision logic with budget     │
+                │          governed by max_turns; calls EXACTLY ONE    │
+                │          terminal tool:                              │
+                │            * activate_subtask                        │
+                │            * retry_subtask                           │
+                │            * complete_initiative                     │
+                │            * abort_initiative                        │
+                │            * resolve_escalation                      │
+                │            * ask_operator                            │
+                │  ORCH-C. kernel records IpcMessage IntentRequest;    │
+                │          handlers::intent::handle dispatches:        │
+                │            ActivateSubTask → handle_activate_sub_task│
+                │            RetrySubTask    → handle_retry_sub_task   │
+                │            CompleteInitiative → handle_complete_     │
+                │                                  initiative          │
+                │            etc.                                      │
+                │  ORCH-D. planner exits cleanly → spawn_planner_      │
+                │          dispatcher post-exit hook fires             │
+                │  ORCH-E. respawn_orchestrator_for_initiative:        │
+                │           * preflight: is_executing, active_orch     │
+                │           * skip if not_executing                    │
+                │           * skip ceiling check if capacity-pressure  │
+                │           * else increment_no_progress_count_in_tx   │
+                │             → CeilingOutcome::Permitted / Exceeded   │
+                │           * on Exceeded: paired-write LogicalDeadlock│
+                │             escalation + initiative.state='Failed'   │
+                │             + emit OrchestratorRespawnCeilingExceeded│
+                │             ★ TRIGGERS HARNESS POLL FAST-FAIL #4     │
+                │           * on Permitted: spawn next orchestrator    │
+                │             (goto ORCH-A)                            │
+                └──────────────────────────────────────────────────────┘
+
+                Executor / Reviewer VM lifecycle (per sub-task):
+                ┌──────────────────────────────────────────────────────┐
+                │  EXEC-A. Orchestrator calls ActivateSubTask          │
+                │  EXEC-B. handle_activate_sub_task:                   │
+                │           ├─ accept_activation_envelope:             │
+                │           │   verify nonce, signature, scope         │
+                │           ├─ Phase A (spawn_blocking on store):      │
+                │           │   load task row + plan task fields       │
+                │           │   resolve task_state                     │
+                │           │   verify FK chain + admission preconds   │
+                │           ├─ resolve VM image alias via policy       │
+                │           ├─ check vm_concurrency_cap                │
+                │           │   (sessions where revoked=0) ≥ ceiling   │
+                │           │   → FAIL_VM_CONCURRENCY_AT_CAP           │
+                │           ├─ async: ctx.session_spawn.spawn_session  │
+                │           │  (executor/reviewer spawn_context)       │
+                │           ├─ provision_executor_worktree or          │
+                │           │  provision_reviewer_worktree             │
+                │           │   └─ gix::clone --full from main repo    │
+                │           │      → <data_dir>/worktrees/<session_id>/│
+                │           ├─ start credential proxies bound to       │
+                │           │  per-task credentials                    │
+                │           ├─ isolation.launch → SessionHandle        │
+                │           ├─ emit SessionVmSpawned audit             │
+                │           │  (task_id = Some, session_id, role)      │
+                │           └─ spawn_planner_dispatcher                │
+                │  EXEC-C. planner runs task; emits IntentRequest      │
+                │          (SubmitArtifact, RequestReview,             │
+                │           CompleteTask, ReportFailure, etc.)         │
+                │  EXEC-D. handle_inner:                               │
+                │           Step 1   session lookup + validation       │
+                │           Step 1B  dispatch matrix INV-DISPATCH      │
+                │           Step 2   resolve task_row + state          │
+                │           Step 3   path-scope check for write intents│
+                │           Step 4   gate evaluation                   │
+                │            ...                                       │
+                │           Step 13  finalize → IntentResponse         │
+                │  EXEC-E. planner exits clean (CompleteTask /         │
+                │          ReportFailure path)                         │
+                │  EXEC-F. SessionVmExited audit (with PlannerExitOutcome│
+                │          or Mode-B synthesised reason)               │
+                │  EXEC-G. Reviewer activation cascade (when CompleteTask│
+                │          gates pass): reviewers spawn against the    │
+                │          executor's committed branch                 │
+                │  EXEC-H. ReviewAggregationCompleted → either         │
+                │          ExecutorRespawnFromReviewRejection (retry)  │
+                │          or task transitions to Completed            │
+                └──────────────────────────────────────────────────────┘
+
+                Final aggregate:
+                ┌──────────────────────────────────────────────────────┐
+                │  FIN-1.  When all tasks complete + no Failed:        │
+                │          IntegrationMergeRequested via Orchestrator's│
+                │          complete_initiative                         │
+                │  FIN-2.  Kernel runs IntegrationMerge phase:         │
+                │          ├─ resolve target_ref + base_sha            │
+                │          ├─ pre-merge verifier attempt               │
+                │          ├─ merge worktree → target_ref              │
+                │          ├─ git push (when policy.push enabled)      │
+                │          └─ emit IntegrationMergeCompleted           │
+                │          ★ THIS IS THE SIGNAL HARNESS-6.1 POLLS FOR  │
+                │  FIN-3.  initiative.state='Completed'                │
+                └──────────────────────────────────────────────────────┘
+
+                [BUG-8] handle_activate_sub_task triggers spawn_session;
+                        on real microVM substrates, spawn_session can take
+                        20-30 seconds for cold boot. Total per-task latency
+                        ≈ 4 min/task observed; with 10 tasks the lifecycle
+                        deadline of 3600s leaves ~20 min margin. If hosts
+                        contend (parallel tests, CPU sat), the deadline
+                        can blow.
+
+                [BUG-9] CompleteTask paired-write requires the planner to
+                        commit before returning. If the commit happens
+                        AFTER task_complete (the planner forgets to
+                        `git commit`), kernel rejects with
+                        CompleteTaskAdmitPathViolation. Plan prompts
+                        explicitly tell the planner to commit first; a
+                        regression in prompt wording would break this
+                        invisibly. Worth a witness assertion.
+
+                [BUG-10] iter57 fix: Cargo.lock auto-materialisation must
+                         be in path_allowlist of lint-runner-rust. If a
+                         future rich-multilang-001 update changes the
+                         workspace structure to require additional root
+                         artifacts (target/, .cargo/config.toml), the
+                         allowlist needs the same expansion. Currently
+                         only `Cargo.lock` is admitted. Watch for
+                         CompleteTaskAdmitPathViolation in the chain.
+
+                [BUG-11] poll_for_dual_lifecycle_completion's stderr scan
+                         calls std::fs::read on the log file every 500ms;
+                         under a 60-min run with ~10MB/min of stderr that
+                         scales to ~600MB read each iteration. The
+                         memmem prefilter prevents JSON parse cost but
+                         the file read itself is the bottleneck.
+                         Mitigation: keep a tail offset between iterations.
+
+  HARNESS-6.2 : Returns merged audit chain Vec<AuditEvent>
+                ───────────────────────────────────────────
+
+
+================================================================================
+  PHASE 7 — Witness Assertions (over the returned chain)
+================================================================================
+
+  HARNESS-7.1 : locate_executor_worktree_via_chain(data_dir, chain, TASK_XFILE_REFACTOR)
+                ────────────────────────────────────────────────────────────
+                * find SessionVmSpawned event for task_id
+                * worktree = <data_dir>/worktrees/<session_id>/
+                * assert .git/ exists
+                Identical helper for TASK_ALLOWLIST_POSITIVE
+
+  HARNESS-7.2 : locate_session_id_for_task(chain, TASK_LINT_DEFECT)
+                ─────────────────────────────────────────────────────
+                Used by ReviewerSubstantiveDisagreementWitness
+
+  HARNESS-7.3 : ReviewerSubstantiveDisagreementWitness
+                ────────────────────────────────────────
+                * sqlite_path = kernel.data_dir().join("kernel.db")
+                * read review_aggregation_history rows
+                * confirm both reviewers (review-lint-defect-A, -B) named
+                  `py-pkg/src/sample_py/greet.py` in critique
+                * confirm ReviewAggregationCompleted event with
+                  divergent verdicts → ExecutorRespawnFromReviewRejection
+
+  HARNESS-7.4 : Global witnesses (assert_all_satisfied):
+                * NoSecurityViolationWitness — no SecurityViolation* in chain
+                * PathAllowlistPositiveWitness — target/codegen/build_meta.txt
+                  exists on disk in positive_workdir AND chain has
+                  IntegrationMergeCompleted for the initiative
+                * MultiInitiativeIsolationWitness — primary+sibling share
+                  zero task_id and zero session_id
+                * CrashRecoveryWitness — TASK_MATERIALIZE shows respawn
+                  signature (SessionVmSpawned at seq N then later at seq M
+                  with no Failed in between)
+
+  HARNESS-7.5 : Service-evidence witnesses (collect_active_witness_failures):
+                * For each protocol (postgres/mongo/redis/smtp):
+                  - load expected fixture (PgSeed, MongoSeed, …)
+                  - read <service_workdir>/out/services/<protocol>.txt
+                  - assert canonical output present
+                  - assert credential-proxy audit row for the session
+                * mysql/mssql opt-in via env
+
+  HARNESS-7.6 : transparent_proxy_evidence witnesses:
+                * tp_workdir = locate_executor_worktree_via_chain for
+                  TASK_TRANSPARENT_PROXY_REALSCRIPTS
+                * assert wrapper summary at WRAPPER_SUMMARY_PATH
+                * assert credential-proxy started for the session
+                * assert NO TransparentProxyDenied {reason: "proxy_target_bypass"}
+                * stock-library proof: psycopg2/pymongo/redis/smtplib clients
+                  were the actual upstreams reached
+
+  HARNESS-7.7 : credential_substitution_evidence:
+                * cred_sub_workdir = ... TASK_CREDENTIAL_SUBSTITUTION_CANARY
+                * scan worktree files for REAL_PG_PASSWORD substring
+                * panic if real canary leaked
+                * verify CredentialBindSucceeded with substitution_applied=true
+
+  HARNESS-7.8 : Tier3Reporter.add_worktree(...) ×3
+                ──────────────────────────────────
+                Stores the worktree paths for the post-run artifact block
+
+  HARNESS-7.9 : Observability ring witness
+                ──────────────────────────
+                * metrics_jsonl = <data_dir>/observability/metrics/000001.jsonl
+                * std::fs::metadata(...).len() > 0
+                * panics on missing file or 0 bytes
+                  (catches iter48: hub enabled but periodic flush missing)
+
+
+================================================================================
+  PHASE 8 — Graceful Shutdown
+================================================================================
+
+  HARNESS-8.1 : keep_running = keep_running_after_exit_with_workdir(Some(data_dir))
+                ─────────────────────────────────────────────────────
+                * RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1 → true
+                * --keep-running-after-exit CLI flag → true
+                * KEEP_RUNNING touch-file in data_dir → true
+                * else false
+
+  HARNESS-8.2 : if !keep_running:
+                  status = kernel.shutdown_with(SIGTERM, SHUTDOWN_DEADLINE=60s)
+                ─────────────────────────────────────────────────────────────
+                * libc::kill(pid, SIGTERM)
+                * wait_with_timeout(60s) busy-poll child.try_wait every 20ms
+                * panic on timeout (after SIGKILL safety net)
+
+  KERNEL-8.1  : tokio::select! in wait_for_shutdown wins on sigterm_fut
+                ─────────────────────────────────────────────────────
+                * return ShutdownReason::SigTerm
+                * abort all three accept tasks (op/pl/gw)
+                * remove operator.sock / planner.sock / gateway.sock (ENOENT OK)
+                * eprintln "sockets_unbound"
+                * return Ok(ShutdownReason::SigTerm) from start()
+
+  KERNEL-8.2  : main.rs step 9.5
+                ──────────────────
+                * gateway_shutdown_tx.send(())
+                * heartbeat_shutdown_tx.send(())
+                * nonce_sweep_shutdown_tx.send(())
+                * dashboard_handle.shutdown() → serve_with_shutdown drains
+                * supervisor_handle.await → gateway subprocess reap
+                * heartbeat_handle.await → final {state:"Stopping"} write
+                * nonce_sweep_handle.await
+                * task_llm_capture.drain_and_shutdown()
+                * observability_hub.shutdown() → flush pending OTLP
+                Step 10  audit.emit(KernelStopped { reason })
+                Step 11  exit(0) when shutdown.is_clean()
+
+                [BUG-12] If a per-channel notification fan-out task is
+                         still running (e.g. slow sidecar HTTP POST),
+                         the SIGTERM does NOT explicitly cancel it.
+                         tokio::spawn'd tasks get aborted when the
+                         runtime drops at process exit, but if the
+                         shutdown writes the KernelStopped audit row
+                         BEFORE the in-flight fan-out finishes, the
+                         downstream NotificationDelivered audit can
+                         land AFTER KernelStopped or be lost entirely.
+                         Best-effort by design (handler::sidecar) but
+                         worth verifying that the audit-chain hash
+                         doesn't break.
+
+  HARNESS-8.3 : status.success() assert → panic with stderr on non-zero
+
+  HARNESS-8.4 : final_chain = walk_chain_or_panic(data_dir)
+                ──────────────────────────────────────────────
+                * verify_chain_full(&audit_dir):
+                   - seq 0 → no prev_sha256
+                   - seq N+1 prev_sha256 == sha256(seq N JSON line)
+                   - panic on first mismatch
+                * ChainReader::open(&audit_dir).records():
+                   - decode each row as AuditEvent
+                * panic on first decode failure
+
+  HARNESS-8.5 : assert_verifier_symbol_index_paired_write(&final_chain)
+                ───────────────────────────────────────────────────────
+                * for every VerifierVmSpawned with image_alias="raxis-verifier-
+                  symbol-index", ensure a matching VerifierWitnessReceived
+                  with verdict="Pass" shares the same verifier_run_id
+
+  HARNESS-8.6 : AuditChainWitness::for_data_dir(data_dir).assert_structural()
+                ────────────────────────────────────────────────────────────
+                * walk_structural over all segments
+                * report records_walked, last_seq, segments[], kinds_seen[]
+
+  HARNESS-8.7 : tier3.mark_success()
+                ────────────────────────
+                * disables the auto-keep-on-failure path
+                * Drop runs at scope end, emitting the post-run artifact block:
+                  - install dir, data dir, worktree list
+                  - dashboard URL
+                  - Grafana / Prometheus / OTel URLs
+                  - kernel.stderr.log tail
+
+
+================================================================================
+  KNOWN STRUCTURAL SEAMS WHERE BUGS HIDE
+================================================================================
+
+  S-1 : Store::lock_sync from async context
+       ────────────────────────────────────
+       INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01
+       * debug builds: panic with "Cannot block the current thread from
+         within a runtime"
+       * release builds: silent recovery via block_in_place
+       * EVERY handler that touches the store from async MUST be wrapped
+         in spawn_blocking. ipc/operator.rs and handlers/intent.rs already
+         do this; new handlers MUST follow.
+       Search command:
+         rg -n "store.lock_sync\(\)" raxis/kernel/src \
+            | rg -v "spawn_blocking"
+       expected hits = 0 inside async fns
+
+  S-2 : Audit chain seq resume + prev_sha256
+       ────────────────────────────────────
+       At Step 7a of boot, last_chain_state scans segment-000.jsonl line
+       by line:
+       * compute sha256 over each JSON line
+       * track prev_sha256 = sha256(previous line)
+       * return (next_seq, prev_sha256) of the last record
+       If the file is missing/empty → (0, None) genesis
+       If a malformed line is found → Err → exit AuditChainBroken
+       [HAZARD] The scan is line-based and does NOT validate that
+       prev_sha256 in each record matches sha256(previous line). That
+       validation is in verify_chain_full, called by recovery::reconcile
+       BEFORE last_chain_state. So the resume value is trusted to match
+       the chain's tail; a corrupted segment after recovery passes would
+       resume on a broken tail. Belt-and-braces: verify_chain_full re-runs
+       on every reboot.
+
+  S-3 : Notifications dispatch — kernel-owned writes even when silenced
+       ────────────────────────────────────────────────────────────────
+       In notifications/mod.rs::dispatch, the inbox.jsonl append AND the
+       SQLite notifications row write happen BEFORE the route is consulted.
+       Only after both writes does the fan-out check `Some([])` → return.
+       This is intentional (kernel ground-truth) but: a silenced route
+       still produces inbox + SQLite rows. Operators reading inbox.jsonl
+       see "silenced" notifications. Behavioural quirk to document.
+
+  S-4 : LogicalDeadlock FK satisfaction Tier 1 → Tier 2 → None
+       ───────────────────────────────────────────────────────
+       In orch_respawn_ceiling::insert_logical_deadlock_escalation_in_tx:
+       * Tier 1: most-recently FSM-touched task whose session_id is NOT NULL
+       * Tier 2: any task on initiative + most-recent Orchestrator session
+       * fallthrough: return Ok(None) → escalation row NOT inserted
+       This means INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01 can
+       silently degrade if BOTH tiers fail (no tasks at all). The kernel
+       still marks the initiative Failed and emits the audit row, but
+       there's no operator-actionable escalation. Defensive only — in
+       practice every initiative has at least one task row.
+
+  S-5 : Shutdown race on in-flight operator IPC frames
+       ────────────────────────────────────────────────
+       wait_for_shutdown returns on SIGTERM; abort_handle().abort() then
+       cancels each accept loop. An operator connection that's mid-frame
+       (dispatch_loop reading from socket) gets its task aborted, the
+       socket file removed, and the in-flight reply is dropped without
+       a graceful close. Operator CLI sees a connection-reset on the
+       wire. Cleaner shutdown would: stop accepting new connections,
+       drain existing ones with a deadline. V2 doesn't promise this and
+       operators handle reconnect. Live-e2e never racey because the
+       harness drops the OperatorIpc before SIGTERM.
+
+  S-6 : Drop ordering: Tier3Reporter / KernelInstance / OtelPusherSupervisor
+       ───────────────────────────────────────────────────────────────────
+       Drop runs in REVERSE declaration order in Rust. In the test
+       function locals:
+         tier3                 declared LAST  → drops FIRST
+         kernel                                → drops SECOND
+         _otel_pusher_supervisor → drops THIRD
+       Under success: tier3.mark_success() before scope end → Drop runs
+       the success branch (no extra noise).
+       Under panic: tier3.Drop emits the artifact block; kernel.Drop
+       SIGKILLs the kernel if not already exited; otel_supervisor.Drop
+       SIGTERMs + SIGKILLs the pusher.
+       Under keep-alive: all three drops short-circuit to no-op.
+       [HAZARD] If the panic happens AFTER tier3.mark_success() but
+       BEFORE the natural scope-end (e.g. inside an assert in WIT-7.x),
+       tier3.Drop still emits the artifact block because mark_success
+       only affects the workdir-keep policy, not the block emission. OK.
+
+  S-7 : poll loop stderr scan re-reads entire kernel.stderr.log every 500ms
+       ───────────────────────────────────────────────────────────────────
+       At kernel_driver.rs::scan_stderr_for_terminal_spawn_failure each
+       iteration: std::fs::read(path) → split('\n') → for-each memmem.
+       For a 60-min run with verbose logging, the read alone can take
+       tens of ms per iteration. Mitigation: keep a byte-offset cursor
+       between iterations and only scan new bytes. Worth fixing — at
+       least bound the read with a tail-only mode.
+
+  S-8 : enable_gateway_in_policy assumes EXACTLY ONE [gateway] block
+       ────────────────────────────────────────────────────────────
+       The helper asserts !body.contains("\n[gateway]\n") before appending.
+       If a future policy template ships with [gateway] (e.g. for an
+       in-tree dev gateway), the helper panics with "bootstrap template
+       changed". Documented; safe.
+
+  S-9 : Operator IPC handshake captures policy snapshot for entire flow
+       ────────────────────────────────────────────────────────────────
+       After authentication, dispatch_loop runs against an Arc<HandlerContext>
+       whose `policy` is the Arc<ArcSwap<PolicyBundle>>. Each handler
+       (handle_create_initiative, handle_approve_plan) calls policy.load()
+       or policy.load_full() to pin its OWN snapshot. So policy hot-reloads
+       between two CreateInitiative+ApprovePlan pairs on the SAME connection
+       can result in the two calls running against different epochs. The
+       SUBMIT step might validate against epoch N; APPROVE against epoch
+       N+1. Each invocation is internally consistent (snapshot pinned)
+       but cross-invocation drift is possible. Documented by the bundle
+       reload model; not a defect in V2.
+
+  S-10: Per-channel notification SQLite insert uses spawn_blocking +
+        lock_sync, but the equivalent test helper uses lock().await
+        ───────────────────────────────────────────────────────────
+        Production: tokio::task::spawn_blocking + Store::lock_sync
+        Test:       Store::lock().await
+        Both paths are correct under the lock-sync invariant. The test
+        helper migration is the canonical example of the new
+        lock().await preferred API.
+
+
+================================================================================
+  END OF DRY-RUN
+================================================================================

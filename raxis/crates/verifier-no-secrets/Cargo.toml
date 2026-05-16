@@ -11,8 +11,8 @@ repository.workspace  = true
 # Why this crate exists
 # ─────────────────────
 # Iter63 introduced a paired-write at the gate-recheck-clear edge in
-# `kernel/src/scheduler/dag.rs::transition_to_admitted` (commit 31177d5
-# on `worker/iter62-deep-sweep`). That paired-write only fires when the
+# `kernel/src/scheduler/dag.rs::transition_to_admitted` (landed by
+# the deep-sweep pass). That paired-write only fires when the
 # kernel's gate-evaluation pipeline crosses
 # `GatesPending → Admitted` after a `Pass` witness lands — which in
 # turn requires at least one real `[[gates]]` entry in the loaded

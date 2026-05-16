@@ -1,4 +1,4 @@
-//! V2_GAPS §C2/C3 — `GeminiClient`: Google Gemini `generateContent`.
+//! `GeminiClient`: Google Gemini `generateContent`.
 //!
 //! Translates the canonical Anthropic-flavoured [`MessageRequest`] /
 //! [`MessageResponse`] (defined in `crate::model`) into the Gemini

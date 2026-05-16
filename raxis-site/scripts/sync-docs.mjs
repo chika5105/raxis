@@ -87,6 +87,13 @@ function copyMarkdownTree(src, dst) {
       const rel = path.relative(src, abs);
       if (entry.isDirectory()) {
         if (SKIP_DIRS.has(entry.name)) continue;
+        // Refuse to recurse into our own destination if `src` happens to be a
+        // parent of `dst` (e.g. RAXIS_REPO_PATH=../ resolves to a directory
+        // that contains raxis-site/vendor/raxis-docs/). Without this guard
+        // sync-docs.mjs would copy its previous output back into itself and
+        // produce an arbitrarily deep `vendor/raxis-docs/raxis-site/vendor/...`
+        // tree until the OS rejects the path with ENAMETOOLONG.
+        if (path.resolve(abs) === path.resolve(dst)) continue;
         stack.push(abs);
         continue;
       }

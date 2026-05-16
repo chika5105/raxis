@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# V2 `v2_extended_gaps.md §2.4` — shared crate that owns the
+# Shared crate that owns the
 # Kernel-State-Block (KSB) wire shape rendered into the planner-role
 # LLM's system prompt every turn. Pinned in one place so the kernel
 # (which assembles + serializes the snapshot) and the planner-core

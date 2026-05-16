@@ -1,11 +1,9 @@
 //! Per-session agent-output stream surface
-//! (`v2_extended_gaps.md §4.3` — agent stream capture).
-//!
+//! (agent stream capture).
 //! The dashboard exposes the raw model-streaming output of every
 //! active session via `GET /api/sessions/:id/stream` (SSE). This
 //! module defines the wire-shape of one stream event and the
 //! lightweight subscriber handle the SSE handler holds.
-//!
 //! The underlying capture mechanism (bounded file ring + tokio
 //! broadcast channel) lives in `raxis-dashboard-kernel` so the
 //! dashboard crate stays decoupled from on-disk concerns. Tests
@@ -54,7 +52,6 @@ impl StreamSubscription {
     ///   * `Ok(None)` — the publisher dropped (session closed),
     ///   * `Err(lagged_count)` — slow subscriber missed
     ///     `lagged_count` events; the receiver remains usable.
-    ///
     /// The SSE handler should forward `Err(_)` as an `event:
     /// lagged\n` frame and continue reading.
     pub async fn recv(&mut self) -> Result<Option<StreamEvent>, u64> {

@@ -1,18 +1,18 @@
 # RAXIS V2 — `IntegrationMerge` Specification
 
-> **Status:** V2 Specified  
-> **Cross-references:**  
-> - [`v2-deep-spec.md §Step 8`](v2-deep-spec.md) — Orchestrator Performs `IntegrationMerge`; Kernel Adjudicates It (decision + rationale; the cross-reference language was tightened by `INV-KERNEL-DAG-AUTHORITY-01` — "owns the merge" is shorthand for "semantically resolves conflicts in the merge clone and emits the advisory intent", NOT "decides whether the merge lands")  
-> - [`v2-deep-spec.md §Step 9`](v2-deep-spec.md) — Bundle Routing (how Executor commits reach the Orchestrator)  
-> - [`v2-deep-spec.md §Step 11`](v2-deep-spec.md) — Hybrid Allowlist computation  
-> - [`v2-deep-spec.md §Step 24b`](v2-deep-spec.md) — Orchestrator Workspace Provisioning (RW clone from base SHA at initiative boot; the workspace this spec's merges happen in)  
-> - [`v2-deep-spec.md §Step 30`](v2-deep-spec.md) — Audit Attribution for Operator-Assisted Commits  
-> - [`planner-harness.md §4.7`](planner-harness.md) — Canonical Orchestrator Image (`INV-PLANNER-HARNESS-05`); the source of `bash`, `git`, `ripgrep`, and `edit_file` for V2 semantic conflict resolution  
-> - [`planner-harness.md §4.8`](planner-harness.md) — Orchestrator Not Operator-Configurable (`INV-PLANNER-HARNESS-06`); explains why §8's workflow lives in kernel-pinned NNSP bytes rather than operator configuration  
-> - [`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md) — **normative** Orchestrator NNSP including the `[KERNEL: INTEGRATION MERGE PROTOCOL]` and `[KERNEL: CONFLICT RESOLUTION PROTOCOL]` blocks  
-> - [`policy-plan-authority.md §4`](policy-plan-authority.md) `[orchestrator]` — operator-tunable policy knobs (`provider_alias`, `max_token_budget_per_initiative`, `all_merges_require_approval`)  
-> - [`agent-disagreement.md`](agent-disagreement.md) — sub-task `CompleteTask` admission gates (`FAIL_CIRCULAR_REVISION`, `FAIL_REVIEW_LOOP_EXCEEDED`, `FAIL_WALL_CLOCK_LIMIT_EXCEEDED`) that fire **before** sub-tasks reach the merge pipeline. `IntegrationMerge` itself is unchanged by that spec; what changes is which sub-tasks ever satisfy Check 4's `state = 'Completed'` precondition.  
-> - [`extensibility-traits.md §2`](extensibility-traits.md) — `DomainAdapter` trait. **`IntegrationMerge` is the SE-domain instantiation of `DomainAdapter::commit`**. The admission pipeline (Checks 1–7), the audit emissions, and the SQLite/git transactional boundary specified here are *paradigm-layer* and stay in the kernel binary. The git-specific cherry-pick / fetch / update-ref / push sequence in Phase 2 of Check 8 (and the touched-paths derivation in Check 5) is *implementation-layer* and lives in `crates/raxis-domain-git`. Other domains (trading, healthcare) reuse this entire spec verbatim and just plug a different adapter into the same Phase 2 call site.  
+> **Status:** V2 Specified
+> **Cross-references:**
+> - [`v2-deep-spec.md §Step 8`](v2-deep-spec.md) — Orchestrator Performs `IntegrationMerge`; Kernel Adjudicates It (decision + rationale; the cross-reference language was tightened by `INV-KERNEL-DAG-AUTHORITY-01` — "owns the merge" is shorthand for "semantically resolves conflicts in the merge clone and emits the advisory intent", NOT "decides whether the merge lands")
+> - [`v2-deep-spec.md §Step 9`](v2-deep-spec.md) — Bundle Routing (how Executor commits reach the Orchestrator)
+> - [`v2-deep-spec.md §Step 11`](v2-deep-spec.md) — Hybrid Allowlist computation
+> - [`v2-deep-spec.md §Step 24b`](v2-deep-spec.md) — Orchestrator Workspace Provisioning (RW clone from base SHA at initiative boot; the workspace this spec's merges happen in)
+> - [`v2-deep-spec.md §Step 30`](v2-deep-spec.md) — Audit Attribution for Operator-Assisted Commits
+> - [`planner-harness.md §4.7`](planner-harness.md) — Canonical Orchestrator Image (`INV-PLANNER-HARNESS-05`); the source of `bash`, `git`, `ripgrep`, and `edit_file` for V2 semantic conflict resolution
+> - [`planner-harness.md §4.8`](planner-harness.md) — Orchestrator Not Operator-Configurable (`INV-PLANNER-HARNESS-06`); explains why §8's workflow lives in kernel-pinned NNSP bytes rather than operator configuration
+> - [`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md) — **normative** Orchestrator NNSP including the `[KERNEL: INTEGRATION MERGE PROTOCOL]` and `[KERNEL: CONFLICT RESOLUTION PROTOCOL]` blocks
+> - [`policy-plan-authority.md §4`](policy-plan-authority.md) `[orchestrator]` — operator-tunable policy knobs (`provider_alias`, `max_token_budget_per_initiative`, `all_merges_require_approval`)
+> - [`agent-disagreement.md`](agent-disagreement.md) — sub-task `CompleteTask` admission gates (`FAIL_CIRCULAR_REVISION`, `FAIL_REVIEW_LOOP_EXCEEDED`, `FAIL_WALL_CLOCK_LIMIT_EXCEEDED`) that fire **before** sub-tasks reach the merge pipeline. `IntegrationMerge` itself is unchanged by that spec; what changes is which sub-tasks ever satisfy Check 4's `state = 'Completed'` precondition.
+> - [`extensibility-traits.md §2`](extensibility-traits.md) — `DomainAdapter` trait. **`IntegrationMerge` is the SE-domain instantiation of `DomainAdapter::commit`**. The admission pipeline (Checks 1–7), the audit emissions, and the SQLite/git transactional boundary specified here are *paradigm-layer* and stay in the kernel binary. The git-specific cherry-pick / fetch / update-ref / push sequence in Phase 2 of Check 8 (and the touched-paths derivation in Check 5) is *implementation-layer* and lives in `crates/raxis-domain-git`. Other domains (trading, healthcare) reuse this entire spec verbatim and just plug a different adapter into the same Phase 2 call site.
 >
 > This document is the **complete mechanical specification** for the `IntegrationMerge`
 > intent: its struct, the full admission pipeline, the multi-task merge sequencing model,
@@ -49,11 +49,10 @@ After `IntegrationMerge` is admitted:
 
 Where this spec uses the word "git" in a normative paragraph, that paragraph describes the V2 reference adapter's behaviour; the underlying paradigm contract stays domain-agnostic.
 
-### 1.2 Configurable target ref (V2_GAPS.md §12.8 / §12.9)
+### 1.2 Configurable target ref
 
 This spec mentions `refs/heads/main` throughout the historical
-text below. Per the V2.2 amendment landed alongside
-[`V2_GAPS.md §12.8 / §12.9`](V2_GAPS.md), the kernel actually advances a
+text below. Per the V2.2 amendment, the kernel actually advances a
 **resolved `target_ref`** that defaults to `refs/heads/main` but
 may be overridden per-initiative. The resolution chain runs at
 `lifecycle::approve_plan` admission time:
@@ -1192,7 +1191,6 @@ fn discard_candidate_merge_tree(
     //    in that case. The periodic git_maintenance_main sweep
     //    (kernel-lifecycle.md §10.5.3) is the catch-all if this
     //    targeted call is skipped or fails.
-    //
     //    Without this immediate GC, the orphan commit pollutes
     //    main_repo's loose-object area for up to 6h (the periodic
     //    cadence) — long enough that a high-failure-rate burst of

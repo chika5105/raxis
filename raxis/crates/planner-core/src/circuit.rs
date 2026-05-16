@@ -1,4 +1,4 @@
-//! V2_GAPS §C2 — per-provider circuit breaker (BLOCKER closure).
+//! per-provider circuit breaker (BLOCKER closure).
 //!
 //! Without this module, `FallbackModelClient` is **sticky on
 //! failure**: once a primary provider starts failing the chain falls

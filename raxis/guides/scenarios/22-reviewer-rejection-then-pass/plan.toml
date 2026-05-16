@@ -16,7 +16,7 @@ path_allowlist     = ["src/"]
 # NOTE (V2.5): per-task retry ceilings (`max_crash_retries` /
 # `max_review_rejections` / `max_revision_rounds`) are reserved
 # for the V2.6 plan-toml-parser work — see
-# `specs/v2/V2_GAPS.md` §12.13. The kernel parser today silently
+# §12.13. The kernel parser today silently
 # ignores any unknown task-field key, so declaring these here
 # would no-op. The substrate they read against
 # (`subtask_activations.review_reject_count`) is now wired by

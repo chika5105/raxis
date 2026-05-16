@@ -1,9 +1,8 @@
 # Dashboard backend hardening contract (V2.5)
 
-Normative companion to [`v2_extended_gaps.md §4`](v2_extended_gaps.md) (operator
-dashboard). This document records the guarantees the
-`raxis-dashboard` HTTP backend MUST hold through the live
-end-to-end run and the bounds it enforces to honour them.
+This document records the guarantees the `raxis-dashboard` HTTP
+backend MUST hold through the live end-to-end run and the
+bounds it enforces to honour them.
 
 The contract is split into:
 
@@ -1004,7 +1003,7 @@ the runtime debug_assert — file an immediate kernel bug citing
 `INV-FAILURE-REASON-MANDATORY-01` and the violating entity's
 `event_id` from the audit chain.
 
-**iter56 — clean-exit-no-terminal-intent sub-case (P2 layer).** The kernel's
+**Clean-exit-no-terminal-intent sub-case (P2 layer).** The kernel's
 Mode-B post-exit synthesis path
 (`kernel/src/session_spawn_orchestrator.rs::spawn_planner_dispatcher`)
 first received per-session activity-tracker breadcrumbs (the
@@ -1024,17 +1023,17 @@ spelunking required.
 *concreteness* gate: the reason MUST name the SPECIFIC cause
 and (where applicable) the operator-actionable remedy.
 Multi-option umbrella strings of the form
-`<Cause1> / <Cause2> / <Cause3>` (the canonical iter56
+`<Cause1> / <Cause2> / <Cause3>` (the canonical
 regression baseline) and opaque placeholders like
 `(no reason)` / `see logs` / `unknown reason` / `unspecified
 reason` / `something went wrong` are violations — see
 `specs/invariants.md` for the verbatim forbidden-phrase set.
 
 **Pre-fix dashboard symptom.** The `<FailureReasonPanel>`
-rendered the iter56 umbrella verbatim — `"executor VM exited
+rendered the umbrella verbatim — `"executor VM exited
 without submitting a terminal intent (MaxTurnsExceeded /
 TokensExceeded / DispatchIdle / process death). Kernel
-synthesised Running → Failed …"`. The P2 iter56 patch (`4f661a5`)
+synthesised Running → Failed …"`. The P2 kernel-side patch (`4f661a5`)
 replaced this with the activity-tracker template but STILL
 hedged the cause as `(likely MaxTurnsExceeded / TokensExceeded
 / DispatchIdle)` — a structurally identical multi-option
@@ -1269,7 +1268,7 @@ The byte-for-byte requirement is the load-bearing claim of
 | `ApiError::Gone` envelope mapping                 | `raxis/crates/dashboard/src/error.rs::tests::gone_yields_410_with_distinct_code`      |
 | Frontend component (loading / loaded / 404 / 410 / copy / download) | `raxis/dashboard-fe/src/test/initiative-plan-view.test.tsx` (6 cases) |
 
-### 5.8.7 Cross-reference with `worker/live-e2e-examples`
+### 5.8.7 Cross-reference with the live-e2e plan fixtures
 
 The dashboard reads the original sealed TOML from the
 kernel store (V1 or V2.1 path); the live-e2e harness
@@ -1353,19 +1352,19 @@ mid-supervision" — the operator should still see actionable
 chrome rather than a stale Healthy badge.
 
 **Cross-reference: orchestrator respawn-ceiling.** A separate
-in-flight worker (`worker/fix-loop-respawn2`) is adding an
-`OrchestratorRespawnCeilingExceeded` audit event to the kernel
-for the *logical* respawn-loop case (kernel alive, audit chain
-growing, but the orchestrator is stuck issuing rejected
-RetrySubTask intents in a tight loop). When that event lands,
-the supervisor sentinel will gain a new `Halted` sub-state
-(`OrchestratorRespawnCeiling`) and this banner MUST surface it
-under the same rose treatment so operators see both flavours
-of recovery in one panel — supervisor-side process recovery
-(this spec) and kernel-side logical recovery (the fix-loop
-worker's invariant). The banner switch is a one-liner in
-`KernelLifecycleBanner::headlineFor`; the cross-spec coordination
-ticket lives in [`self-healing-supervisor.md §10.7`](self-healing-supervisor.md).
+sweep adds an `OrchestratorRespawnCeilingExceeded` audit event
+to the kernel for the *logical* respawn-loop case (kernel alive,
+audit chain growing, but the orchestrator is stuck issuing
+rejected RetrySubTask intents in a tight loop). When that event
+lands, the supervisor sentinel will gain a new `Halted`
+sub-state (`OrchestratorRespawnCeiling`) and this banner MUST
+surface it under the same rose treatment so operators see both
+flavours of recovery in one panel — supervisor-side process
+recovery (this spec) and kernel-side logical recovery
+(orchestrator respawn ceiling). The banner switch is a one-liner
+in `KernelLifecycleBanner::headlineFor`; the cross-spec
+coordination ticket lives in
+[`self-healing-supervisor.md §10.7`](self-healing-supervisor.md).
 
 Cross-reference: `INV-DASHBOARD-KERNEL-LIFECYCLE-01`
 (`specs/invariants.md §11.12`),
@@ -1407,7 +1406,7 @@ The exhaustiveness contract is enforced on BOTH sides:
   `KERNEL_TASK_STATES` asserting `hasExplicitStateEntry` for
   each. A companion case specifically pins
   `stateTone("Running") !== stateTone("Admitted")` so a
-  tone-collision regression (the iter53 invisibility shape)
+  tone-collision regression (the invisibility shape)
   trips at TSC time rather than during a live-e2e run.
 
 * **Kernel side** (`crates/dashboard-kernel/src/lib.rs`): the
@@ -1422,7 +1421,7 @@ The exhaustiveness contract is enforced on BOTH sides:
   enum MUST be matched by a new entry in `KERNEL_TASK_STATES`
   on the TS side or both witnesses fail in the same commit.
 
-**Why the cross-language pin.** iter53 saw the IntegrationMerge
+**Why the cross-language pin.** saw the IntegrationMerge
 coordinator task sit in `Running` for the full lifetime of an
 initiative while the operator dashboard surface only ever
 displayed `Admitted` and `Completed` rows. The root cause was
@@ -1447,7 +1446,7 @@ Cross-reference: `INV-DASHBOARD-TASK-STATE-COMPLETENESS-01`
 ## 5.11.1 FSM state visibility contract (`INV-DASHBOARD-FSM-STATE-VISIBILITY-01`)
 
 Completeness (every variant has an entry) is necessary but not
-sufficient — the iter56 paper-cut was that every variant DID
+sufficient — the paper-cut was that every variant DID
 have an entry, but `Admitted` and `Running` rendered with
 near-identical visual weight (muted vs info tone, plus a
 pulsing dot conditional on `tone === "info"`). When the
@@ -1579,7 +1578,7 @@ and a stable display id (`«integration-merge»`):
 
 **Forbidden behaviour.** A future change that hides the
 coordinator from the task list AND keeps counting it in the
-denominator (the iter53 paper-cut), or renders it as an
+denominator (the paper-cut), or renders it as an
 opaque UUID-titled row that looks like a duplicate of the
 parent initiative, is forbidden. Option (B) — "exclude from
 `task_count` / `completed_tasks` and render a separate
@@ -1588,7 +1587,7 @@ as a future candidate but is **NOT** wired today; selecting it
 requires touching every consumer of `task_count` /
 `completed_tasks` in the FE plus the kernel-side projection,
 and option (A) preserves the existing arithmetic for minimum
-impedance per the iter53 fix-loop decision. The title carve-out
+impedance. The title carve-out
 + FE display-id helper are pure render-time substitutions, so
 a future migration to (B) does not need to re-litigate the
 title contract.
@@ -1628,7 +1627,7 @@ Both producers and consumers MUST honour the documented unit:
     `fn unix_now_s() -> u64` is the canonical helper for
     seconds-typed fields; `fn unix_now_ms() -> u64` is the
     canonical helper for `_ms`-suffixed fields. When a single
-    builder writes both unit families (the iter54
+    builder writes both unit families (the
     `subsystem_health` builder is the exemplar — it populates
     `last_observed_at` in seconds AND `generated_at_ms` in
     milliseconds in the same response struct), both locals
@@ -1647,7 +1646,7 @@ Both producers and consumers MUST honour the documented unit:
     `FailureReasonPanel.tsx` multiplies a documented
     `unixSeconds` by 1000 before passing to `new Date(...)`).
 
-**The bug class this prevents.** Iter54 surfaced the failure
+**The bug class this prevents.** surfaced the failure
 mode this section exists to forbid: the kernel emitted
 `unix_now_ms()` (milliseconds) into
 `SubsystemHealthCard.last_observed_at` — a field documented
@@ -1717,13 +1716,13 @@ with the code.
 
 ---
 
-## §10 — Permanent-failure escalation surface (iter65-review)
+## §10 — Permanent-failure escalation surface
 
 `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01` and
 `INV-OPERATOR-APPROVE-RECOVERY-SEMANTICS-01`. This section
 documents the per-cause approve semantics for the
 `AuditEventKind::InitiativePermanentFailureEscalated` chain
-anchor introduced in iter65-review and the underlying
+anchor introduced in and the underlying
 `LogicalDeadlock`-class escalation row.
 
 ### §10.1 — Per-cause approve matrix
@@ -1782,9 +1781,8 @@ required" badge per the `escalation_id` JSON-null signal.
 
 ### §10.4 — Deferred coverage
 
-Not every in-scope kind is wired in iter65-review; the
-following emit sites are tracked in
-`specs/iter65-followups.md`:
+Not every in-scope kind is wired yet. The
+following emit sites are deferred follow-ups:
 
 * `SessionVmFailedFinal` — emit site
   (`spawn_with_transient_retry`) lacks `Arc<HandlerContext>`;
@@ -1798,7 +1796,7 @@ following emit sites are tracked in
 * `EscalationRateLimitExceeded` — emit site is inside the
   escalation-submit transaction without `Arc<HandlerContext>`;
   the chain anchor still fires (Critical-classified per
-  iter65 Bug 4) but no per-event helper invocation lands.
+ Bug 4) but no per-event helper invocation lands.
 * `SessionEgressStallDetected` — emit site needs
   session→initiative_id resolution.
 * `InitiativeStateChanged{new_state: Failed}` (catch-all) —
@@ -1810,6 +1808,6 @@ continues to fire unchanged; only the operator-actionable
 escalation enrichment is missing. The
 `INV-NOTIFICATION-PRIORITY-PARITY-01`-extension means the
 notification dispatch gate still routes the chain event to
-Critical for every iter65-review-scope kind, so the
+Critical for every kind, so the
 inbox-level paging signal is preserved even on the deferred
 paths.

@@ -148,7 +148,7 @@ pub fn install_handlers(flag: IntentionalShutdownFlag) -> Arc<tokio::sync::Notif
 
 /// Send `signal` to `pid` via `nix::sys::signal::kill`. Returns
 /// `Ok(())` on success and `Err` on `ESRCH` (no such process)
-/// / `EPERM` / similar.
+/// `EPERM` / similar.
 #[cfg(unix)]
 pub fn send_signal(pid: u32, signal: nix::sys::signal::Signal) -> nix::Result<()> {
     let pid = nix::unistd::Pid::from_raw(pid as i32);

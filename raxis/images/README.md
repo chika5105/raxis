@@ -25,19 +25,28 @@ Each directory contains:
 
 ## Building locally
 
-The builder is hermetic; it never invokes a package manager or makes
-a network call. To build a manifest from a populated `rootfs/`:
+The end-to-end driver is **`cargo xtask images bake`** — one command
+that runs preflight, stages `vmlinux`, bakes each role's rootfs from
+its `Containerfile`, cross-compiles the planner agent, packs the tree
+into a signed cpio.gz initramfs, and writes the manifest. Operators
+should not invoke `raxis-image-builder` directly:
 
 ```bash
-$ export RAXIS_IMAGE_SIGNING_KEY=/path/to/raxis-image-signing-key.hex   # 0o600 file
-$ cargo run -p raxis-image-builder -- build reviewer
-$ cargo run -p raxis-image-builder -- build orchestrator
-$ cargo run -p raxis-image-builder -- build executor-starter
+$ export RAXIS_INSTALL_DIR="$HOME/.raxis-install"
+$ cargo xtask images bake                       # bake every role
+$ cargo xtask images bake --role orchestrator   # or one role at a time
 ```
 
-Output lands at `out/<role>.manifest.toml` — a TOML manifest carrying
-the per-file SHA-256s, the bundle hash, and the Ed25519 signature
-binding the bundle hash to the kernel signing key.
+The bake is hermetic — it never invokes a package manager or makes
+a network call. Output lands at
+`$RAXIS_INSTALL_DIR/images/<role>-<kver>.img` (initramfs) paired with
+`<role>-<kver>.manifest.toml` carrying the per-file SHA-256s, bundle
+hash, and the Ed25519 signature binding the bundle hash to the kernel
+signing key.
+
+`raxis-image-builder` is the underlying crate the bake invokes; it
+remains documented here for the rare case where a developer needs to
+re-sign an existing rootfs without re-running the full pipeline.
 
 To verify a manifest:
 

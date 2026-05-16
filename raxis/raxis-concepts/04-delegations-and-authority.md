@@ -77,8 +77,7 @@ CREATE TABLE IF NOT EXISTS delegations (
 ```
 
 There is **no** `granted_by`, `granted_at`, `scope_json`,
-`use_count`, or `max_uses` column. Earlier drafts of this doc claimed
-those columns; they are not part of the schema.
+`use_count`, or `max_uses` column on this table.
 
 `Revoked` and `Expired` are *runtime-derived* states, not stored
 values. The kernel computes them from `revoked_at` and `expires_at`
@@ -95,8 +94,8 @@ clause.
 > with a SQLite "no such column" error. The spec
 > (`kernel-store.md` §2.5.1 Table 7) and the migration agree; the
 > runtime implementation needs to be rewritten to match. This is
-> tracked in `specs/v2/V2_GAPS.md` ("Delegation runtime SQL drift");
-> see the `record_capability_use` and `list_delegations` siblings
+> tracked under "Delegation runtime SQL drift"; see the
+> `record_capability_use` and `list_delegations` siblings
 > for the same drift. Until that PR lands, the only path that works
 > end-to-end is `mark_stale_on_epoch_advance` (which uses the
 > spec-correct columns).
@@ -126,11 +125,11 @@ raxis delegation grant \
 | `--scope-json`  | no  | Free-form JSON included in the signing input. Currently NOT persisted in the table — it survives only in the operator audit row |
 | `--operator-key`| yes | Path to the operator Ed25519 private key (PEM or raw seed); used locally, never sent |
 
-**Flags that do NOT exist (despite earlier drafts):**
+**Flags that do NOT exist:**
 
 - `--max-uses` — the wire `max_uses` field is plumbed through to the
-  kernel handler but `cli/src/commands/delegation.rs` does not yet
-  surface a flag (see the inline TODO at line 83).
+  kernel handler, but `cli/src/commands/delegation.rs` does not yet
+  surface a flag.
 - `--scope` (alias for `--scope-json`) — must be exactly `--scope-json`.
 - `--session-id` — must be exactly `--session`.
 - `--reject` / `--reason` — this is delegation grant, not escalation.

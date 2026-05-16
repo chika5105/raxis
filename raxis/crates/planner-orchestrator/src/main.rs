@@ -1,8 +1,6 @@
 //! `raxis-orchestrator` — guest-side planner-harness binary for the
 //! [`raxis_planner_core::Role::Orchestrator`] role.
-//!
 //! ## Lifecycle (V2.4)
-//!
 //! 1. Kernel session-spawn lands the canonical orchestrator image,
 //!    `execve`s `/usr/local/bin/raxis-orchestrator --initiative-id <ID>`
 //!    inside the guest with `RAXIS_SESSION_TOKEN=<opaque>` set.
@@ -15,14 +13,13 @@
 //!    dispatch loop end-to-end (model client → tool registry →
 //!    [`raxis_planner_core::DispatchLoop`] → terminal intent
 //!    submission via UDS) and exits with a structured exit code on
-//!    completion / failure. Closes V2_GAPS.md §B1 substep
+//!    completion / failure.
 //!    `gap-b1-planner-binary-wiring`.
 //! 5. **Scaffold mode** — when the live-mode contract is unmet (the
 //!    V2.3 default for the kernel mock-planner harness), the binary
 //!    parks on Ctrl-C / SIGTERM exactly like the V2.3 scaffold did.
 //!    The behaviour is bit-for-bit identical, so no kernel
 //!    integration test changes were required to land V2.4.
-//!
 //! See `raxis-planner-core/src/driver.rs` for the env contract.
 
 use raxis_planner_core::{
@@ -33,7 +30,6 @@ use raxis_planner_core::{
 
 fn main() -> ! {
     // === PRE-RUNTIME PHASE ===
-    //
     // Step 1: when running as PID 1 inside a Linux initramfs
     // (AVF / Firecracker substrates), mount /proc, /sys, /dev,
     // /tmp before anything else. Without /proc the next step
@@ -51,7 +47,6 @@ fn main() -> ! {
     // function body runs, so we run the hydration in the
     // synchronous `main` and only then hand off to the async
     // runner.
-    //
     // The Apple-VZ substrate folds `VmSpec::env` into
     // `raxis.envb64=<base64>` on the kernel cmdline because there
     // is no `Command::env` analogue at the AVF surface. On other

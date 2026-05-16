@@ -1,23 +1,17 @@
 //! `InitiativeEvent` — wire shape of the realtime stream emitted by
-//! `OperatorRequest::SubscribeInitiative` (`v2_extended_gaps.md §2.1`).
-//!
+//! `OperatorRequest::SubscribeInitiative`.
 //! # Why this lives in `raxis-types`
-//!
 //! Both the kernel (publisher) and the CLI (subscriber, via
 //! `raxis initiative watch`) need to encode/decode these frames.
 //! Putting the enum in the shared types crate lets us pin a single
 //! wire shape and write one set of round-trip tests against it.
-//!
 //! # Wire format
-//!
 //! `InitiativeEvent` is serialised through `serde_json` as
 //! `{"kind": "<Variant>", "payload": {...}}` and framed by
 //! `raxis-ipc::write_json_frame_async` — exactly the same envelope
 //! every other operator IPC response uses today. The dispatch loop
 //! writes one frame per event; the CLI reads frames in a loop.
-//!
 //! # Stream lifecycle (kernel side)
-//!
 //! 1. The kernel writes a single `Subscribed { initiative_id }`
 //!    frame as the first payload after admission.
 //! 2. The kernel writes one frame per event off the in-process
@@ -27,7 +21,6 @@
 //!    drops the connection. The CLI uses `Closed` as the unambiguous
 //!    "stream finished cleanly" signal so a peer-half-close is
 //!    distinguishable from a transport hiccup.
-//!
 //! All variant-payload fields are simple owned strings / integers
 //! so the type does not depend on any other `raxis-*` crate; this
 //! keeps the dependency graph free of cycles between `raxis-types`
@@ -36,12 +29,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Realtime event delivered to a `SubscribeInitiative` stream.
-///
 /// Variant set is pinned by the
 /// `initiative_event_variant_count_is_pinned` test below. Adding
 /// a new variant is a wire change — bump the count assertion and
 /// add a round-trip test.
-///
 /// All payload fields use plain owned types
 /// (`String` / `Option<String>` / `i64`) rather than the typed
 /// `*Id` newtypes to keep `raxis-types::initiative_event`
@@ -103,7 +94,7 @@ pub enum InitiativeEvent {
         head_sha: Option<String>,
     },
 
-    /// A typed structured output (`v2_extended_gaps.md §3.2`) was
+    /// A typed structured output was
     /// emitted under this initiative. Surfaces the `kind`
     /// discriminator + optional severity so the operator can
     /// react to `diagnostic_flag/critical` without poll.

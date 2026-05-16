@@ -183,7 +183,7 @@ impl Backend for HttpBackend {
             // `futures_util`) and bail the moment our running total
             // exceeds `max_response_bytes`.
             //
-            // V2_GAPS §C9 — when `stream_idle_timeout` is set
+            // when `stream_idle_timeout` is set
             // (currently for `FetchKind::Inference`), each chunk
             // await is wrapped in `tokio::time::timeout(idle, …)`.
             // A provider that accepts the request but stalls
@@ -277,7 +277,7 @@ mod tests {
         }
     }
 
-    /// V2_GAPS §C9 — pin the per-chunk idle timeout. Server sends
+    /// pin the per-chunk idle timeout. Server sends
     /// the response head, then stalls indefinitely between body
     /// bytes. The backend MUST surface
     /// `BackendError::Timeout { timeout_ms }` after the configured

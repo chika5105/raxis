@@ -100,7 +100,7 @@ pub struct AuditWriter {
     /// `Some(_)`, `append` records one
     /// `raxis.audit.chain.stage.duration` histogram observation
     /// per stage (`hash`, `persist`, `verify`). When `None`
-    /// (CLI tools, unit tests, pre-iter61 hosts) the writer
+    /// (CLI tools, unit tests, earlier hosts) the writer
     /// runs untimed.
     observability_hub: Option<Arc<ObservabilityHub>>,
 }

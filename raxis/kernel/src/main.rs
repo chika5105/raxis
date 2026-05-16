@@ -12,7 +12,7 @@
 // 9-step startup sequence runs as one synchronous chain, so each
 // invariant ("disk verified before keys loaded", "audit chain
 // opened before any audit emission", etc.) holds by construction.
-// V2_GAPS.md §13 Category 1 — annotation-only enforcement site.
+// Category 1 — annotation-only enforcement site.
 //
 // V2 scaffolding note: many sibling modules expose structs / enum
 // variants / functions that the V2 hot path does not call yet
@@ -363,7 +363,7 @@ async fn main() {
     // (kernel-core.md §`policy_manager.rs`). Every reader goes through
     // `policy.load()` which is wait-free.
     let policy_epoch_at_boot = policy.epoch();
-    // V2_GAPS §D2 — boot-time FD limit check (host-capacity.md §12.1).
+    // boot-time FD limit check (host-capacity.md §12.1).
     //
     // The check runs BEFORE we wrap the policy in `ArcSwap` so we can
     // touch `policy.host_capacity()` directly without going through
@@ -443,6 +443,14 @@ async fn main() {
     // sync work onto a dedicated blocking-pool thread. Same pattern as
     // `handlers/witness::handle` (kernel-core.md async-safety contract).
     let audit_dir = data_dir.join("audit");
+    // `KernelRestartCompleted.recovery_sweep_ms` reflects the
+    // *complete* boot-recovery cost (Step 6 + Step 8a). Capture
+    // a monotonic `Instant` BEFORE Step 6 so the metric measures
+    // the full sweep, not just from `KernelStarted` onward. The
+    // pre-fix path used `unix_now_secs() - started_at` (whole
+    // seconds × 1000), which excluded Step 6 entirely and gave
+    // misleadingly small numbers to the operator dashboard.
+    let boot_recovery_started_at = std::time::Instant::now();
     // V2.5 (`self-healing-supervisor.md §3.5`): hoist the per-task
     // pre-sweep records out of Step 6 so the supervisor-aware
     // auto-resume codepath at Step 8a''' can consume them. Empty
@@ -566,14 +574,14 @@ async fn main() {
     // wire-up.
     let file_audit_sink: Arc<FileAuditSink> = Arc::new(FileAuditSink::new(writer));
     let inner_audit: Arc<dyn AuditSink> = file_audit_sink.clone();
-    // V2_GAPS §C4 — the per-kernel `SidecarRegistry` lives here so the
+    // the per-kernel `SidecarRegistry` lives here so the
     // notification dispatcher and `HandlerContext` share the same
     // per-channel state (concurrency caps, circuit breakers, drop
     // counters). Owned by an `Arc` so both the audit sink decorator
     // and the IPC context point at the same registry.
     let sidecar_registry = Arc::new(notifications::SidecarRegistry::new());
 
-    // V2 `v2_extended_gaps.md §4.3` — allocate the dashboard's
+    // allocate the dashboard's
     // session-stream capture EARLY so the audit sink can be
     // wrapped in `StreamingAuditSink` and every session-scoped
     // emit becomes a live SSE frame on the matching session's
@@ -679,8 +687,8 @@ async fn main() {
     //       eprintln paths.
     //
     // The Layer 1 boundary defense at `Store::lock_sync` lives in
-    // `crates/store/src/db.rs` (delivered by the parallel
-    // worker/iter66-async-store-lock-sweep work). Release builds
+    // `crates/store/src/db.rs` (delivered by the async store-lock
+    // sweep). Release builds
     // wrap `lock_sync` in `tokio::task::block_in_place` so a
     // mis-shaped call from a worker thread cannot crash the
     // daemon; debug builds keep the canonical tokio panic so CI
@@ -751,7 +759,7 @@ async fn main() {
     // INV-OBSERVABILITY-DATAPLANE-LATENCY-05 — pin the bincode-IPC
     // framing layer's process-global hub so every `write_frame` /
     // `read_frame` emits per-stage histograms (`encode` / `write`
-    // / `read` / `decode`) under
+    // `read` / `decode`) under
     // `raxis.kernel.substrate.ipc.frame.stage.duration`. Pairs with
     // the existing per-message-kind `KernelSubstrateIpcRoundtripDuration`
     // (round-trip total) so the dashboard can decompose a slow RTT
@@ -827,6 +835,17 @@ async fn main() {
     // Sending through the wrapper would still work — it just produces
     // an inbox line nobody reads.
     let started_at = raxis_runtime::unix_now_secs();
+    // BOOT_ERR_AUDIT_WRITE (exit code 16). The canonical
+    // `KernelStarted` event is the head of this kernel-process's
+    // segment of the audit chain — every subsequent event chains
+    // its `prev_sha256` off it. If we cannot write it durably we
+    // MUST refuse to boot rather than serve IPC: an operator
+    // grepping the chain for "what process produced this state"
+    // would see a gap where the kernel ran but never declared
+    // itself, and downstream `prev_sha256` recompute (which
+    // `verify_audit_chain` performs on the NEXT boot) would
+    // diverge. Pre-fix this was a stderr-only warning and the
+    // kernel proceeded.
     if let Err(e) = inner_audit.emit(
         AuditEventKind::KernelStarted {
             data_dir: data_dir.display().to_string(),
@@ -837,9 +856,9 @@ async fn main() {
         None,
         None,
     ) {
-        eprintln!(
-            "{{\"level\":\"error\",\"event\":\"KernelStarted\",\"audit_emit_failed\":\"{e}\"}}"
-        );
+        exit_with_code(KernelError::AuditWrite {
+            reason: format!("KernelStarted emit failed: {e}"),
+        });
     }
 
     // V2 reviewer-egress-defaults-decision.md §5: emit one
@@ -893,10 +912,21 @@ async fn main() {
                 }
             }
             Err(join_err) => {
-                eprintln!(
-                    "{{\"level\":\"error\",\"step\":\"git_apply_recovery\",\
-                     \"error\":\"spawn_blocking join failed: {join_err}\"}}",
-                );
+                // BOOT_ERR_AUDIT_CHAIN (exit code 13). The comment
+                // above says git recovery MUST run before IPC accept
+                // so a fresh `IntegrationMerge` admission cannot
+                // race the recovery sweep. A `spawn_blocking` join
+                // failure means we never executed the sweep, so
+                // `git_apply_pending` may remain set on rows the
+                // recovery sweep was supposed to repair. Logging
+                // and continuing would let the scheduler admit a
+                // racing merge against a half-recovered worktree —
+                // the very thing this step exists to prevent.
+                exit_with_code(KernelError::AuditChainBroken {
+                    reason: format!(
+                        "reconcile_git_apply_pending spawn_blocking join failed: {join_err}"
+                    ),
+                });
             }
         }
     }
@@ -912,9 +942,13 @@ async fn main() {
     // `verify-chain` hash-clean across the restart boundary). Runs
     // AFTER the `reconcile_git_apply_pending` sweep so
     // `KernelRestartCompleted.recovery_sweep_ms` reflects the
-    // *complete* boot recovery cost (Step 6 + Step 8a). Runs
-    // BEFORE the disk-watchdog and IPC accept so the audit chain
-    // already records the restart context if a downstream subsystem
+    // *complete* boot recovery cost. The metric is the elapsed
+    // millis on `boot_recovery_started_at` (a monotonic `Instant`
+    // captured before Step 6), so it covers Step 6 (`reconcile`) +
+    // Step 8a (`reconcile_git_apply_pending`) + Step 8a''
+    // (rehydration scan + this emit). Runs BEFORE the
+    // disk-watchdog and IPC accept so the audit chain already
+    // records the restart context if a downstream subsystem
     // refuses to come up.
     //
     // **Best-effort emit.** All audit emits below use `inner_audit`
@@ -933,13 +967,18 @@ async fn main() {
     // *supervisor's* spawn loop, not the kernel's own bookkeeping.
     {
         let unix_now = raxis_runtime::unix_now_secs();
-        // Wall-clock approximation of the boot-recovery sweep.
-        // Measured from `started_at` (the canonical KernelStarted
-        // timestamp captured at Step 8) to now. Sub-second
-        // precision isn't required for the audit row; a future
-        // PR can hoist an `Instant` if a tighter reading is
-        // needed.
-        let recovery_sweep_ms = unix_now.saturating_sub(started_at).saturating_mul(1000);
+        // Monotonic elapsed milliseconds from before Step 6 (the
+        // first sub-step of boot-recovery — `recovery::reconcile`)
+        // to now. Includes Step 6 + Step 8a (git_apply_pending
+        // recovery) + Step 8a'' (dump rehydration scan). The
+        // value is `u64` ms; we cap with `u64::MAX` rather than
+        // saturating to keep the audit row defensive against a
+        // pathologically long-running boot (one where the system
+        // clock advanced 500+ years).
+        let recovery_sweep_ms: u64 = u64::try_from(
+            boot_recovery_started_at.elapsed().as_millis(),
+        )
+        .unwrap_or(u64::MAX);
         let sentinel_path = data_dir.join("kernel_lifecycle_status.json");
         let sentinel = restart_lifecycle::read_sentinel_for_restart(&sentinel_path);
         let supervisor_restart_id = sentinel.as_ref().map(|s| {
@@ -1038,14 +1077,29 @@ async fn main() {
 
         // Step 8a''' (V2.5 `self-healing-supervisor.md §3.5`,
         // `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`):
-        // supervisor-aware auto-resume sweep.
+        // restart-aware auto-resume sweep.
         //
-        // Runs ONLY when the rehydration above emitted at least one
-        // `KernelRestartCompleted` event (i.e. the supervisor's
-        // sentinel said `status = "Restarting"` AND the kernel just
-        // booted). A non-supervised restart, an operator-initiated
-        // shutdown, or a fresh kernel boot all produce
-        // `kernel_restart_completed_emits == 0` and short-circuit
+        // Runs whenever the rehydration above emitted at least one
+        // `KernelRestartCompleted` event, which fires in EITHER of
+        // two restart-classification paths inside
+        // `rehydrate_restart_context`:
+        //
+        //   (a) the supervisor's `kernel_lifecycle_status.json`
+        //       sentinel said `status = "Restarting"` (i.e. the
+        //       `raxis-supervisor` process restarted us), OR
+        //   (b) the sentinel was absent but the prior kernel left
+        //       a `deadlock_dump_*.json` behind (i.e. an operator
+        //       manually restarted us after a deadlock without a
+        //       supervisor in play).
+        //
+        // Both paths represent "kernel came back from a forensic
+        // incident; the previous boot's recovery sweep swept any
+        // in-flight tasks to `BlockedRecoveryPending` and we want
+        // them resumed automatically so the orchestrator picks up
+        // where it left off without a manual `raxis task resume`
+        // per task". A fresh kernel boot (no dumps, no sentinel) or
+        // a clean operator-initiated shutdown produces
+        // `kernel_restart_completed_emits == 0` and short-circuits
         // here, leaving any swept tasks in `BlockedRecoveryPending`
         // for normal operator-resume disposition.
         //
@@ -1066,7 +1120,7 @@ async fn main() {
             let store_for_resume = Arc::clone(&store);
             let inner_audit_for_resume = Arc::clone(&inner_audit);
             let swept_for_resume = swept_tasks_detail.clone();
-            let resume_report = tokio::task::spawn_blocking(move || {
+            let resume_report = match tokio::task::spawn_blocking(move || {
                 recovery::reconcile_after_supervisor_restart(
                     &store_for_resume,
                     inner_audit_for_resume.as_ref(),
@@ -1075,13 +1129,30 @@ async fn main() {
                 )
             })
             .await
-            .unwrap_or_else(|join_err| {
-                eprintln!(
-                    "{{\"level\":\"error\",\"step\":\"supervisor_auto_resume\",\
-                     \"action\":\"join_failed\",\"error\":\"{join_err}\"}}"
-                );
-                recovery::AutoResumeReport::default()
-            });
+            {
+                Ok(report) => report,
+                Err(join_err) => {
+                    // BOOT_ERR_RECOVERY_SWEEP. The auto-resume
+                    // sweep MUST run before IPC accept so the
+                    // orchestrator never observes the transient
+                    // `BlockedRecoveryPending` window (see the
+                    // §3.5 ordering rationale just above). A
+                    // `spawn_blocking` join failure means we
+                    // never ran the sweep — tasks that the
+                    // supervisor restart was supposed to auto-
+                    // resume are stuck in `BlockedRecoveryPending`
+                    // and an operator must intervene to resume
+                    // each one. Pre-fix this was a `default()`
+                    // report (zeros across the board) and boot
+                    // proceeded silently.
+                    exit_with_code(KernelError::RecoverySweepFailed {
+                        reason: format!(
+                            "reconcile_after_supervisor_restart spawn_blocking join failed: \
+                             {join_err}"
+                        ),
+                    });
+                }
+            };
             if !resume_report.outcomes.is_empty() {
                 eprintln!(
                     "{{\"level\":\"info\",\"event\":\"supervisor_auto_resume_completed\",\
@@ -1130,7 +1201,7 @@ async fn main() {
         }
     }
 
-    // Step 8a': V2_GAPS §D2 — start the disk-full watchdog. The
+    // Step 8a': start the disk-full watchdog. The
     // watchdog polls `statvfs(disk_root)` every 5 seconds and
     // updates an atomic `DiskState` read by every write-class
     // intent handler. V2 ships only `halt_admit` behavior; the
@@ -1508,7 +1579,7 @@ async fn main() {
     {
         let store_for_repopulate = Arc::clone(&store);
         let registry_for_repopulate = Arc::clone(&plan_registry);
-        // V2 `v2_extended_gaps.md §1.2` — repopulate also needs the
+        // repopulate also needs the
         // operator policy's `[git] default_target_ref` /
         // `target_ref_locked` so it can re-resolve every initiative's
         // per-initiative target_ref against the *current* policy and
@@ -1712,7 +1783,7 @@ async fn main() {
         ))
     };
 
-    // V2_GAPS §C5 — open the content-addressed artifact store
+    // open the content-addressed artifact store
     // rooted at `<data_dir>/artifacts/`. The store is `O_CREAT |
     // O_EXCL` write-once and on-read SHA-256 verified; consumers
     // are `policy_manager::advance_epoch` (policy bytes),
@@ -1850,7 +1921,7 @@ async fn main() {
                 // WHERE revoked = 0` instead of the in-memory
                 // live-handle map. Without this wire the
                 // cap-admission gate falls back to the leaky
-                // pre-iter65 in-memory projection.
+                // earlier in-memory projection.
                 .with_store(Arc::clone(&store)),
             );
             // V2 `elastic-vm-scaling.md §4.4` — fresh scale-down
@@ -1872,7 +1943,7 @@ async fn main() {
                         install_dir.clone(),
                         kernel_version.to_owned(),
                     )
-                    // V2_GAPS §B1 — wire data_dir so the spawn path
+                    // wire data_dir so the spawn path
                     // can stamp `RAXIS_KERNEL_PLANNER_SOCKET` into
                     // the guest env (otherwise the planner binary
                     // has no transport to dial back to the kernel
@@ -1883,7 +1954,7 @@ async fn main() {
                     session_spawn_for_orch,
                     Arc::clone(&store),
                     Arc::clone(&plan_registry),
-                    // V2 `v2_extended_gaps.md §2.5` — share the live
+                    // share the live
                     // policy ArcSwap so the spawn path always reads
                     // the most-recent operator-signed
                     // `[budget.token_caps]` when stamping the
@@ -1905,7 +1976,7 @@ async fn main() {
                 install_dir.clone(),
                 kernel_version.to_owned(),
             )
-            // V2_GAPS §B1 — same data_dir wire-through for the
+            // same data_dir wire-through for the
             // executor / reviewer path so activations carry the
             // planner UDS env stamp without each IPC handler having
             // to thread the path itself.
@@ -1927,17 +1998,17 @@ async fn main() {
         ),
         Arc::clone(&domain),
     )
-    // V2_GAPS §D2 — install the disk-full watchdog so write-class
+    // install the disk-full watchdog so write-class
     // intent handlers see disk pressure on every poll. Tests that
     // do NOT spawn through the production boot path leave this
     // `None` and the handlers treat that as "always healthy"
     // (`HandlerContext::disk_watchdog`).
     .with_disk_watchdog(Arc::clone(&disk_watchdog))
-    // V2_GAPS §C5 — install the content-addressed immutable
+    // install the content-addressed immutable
     // artifact store so policy-push / plan-approve / cert-install
     // call sites land their bytes under `<data_dir>/artifacts/`.
     .with_artifact_store(Arc::clone(&artifact_store))
-    // V2_GAPS §C4 — share the per-kernel `SidecarRegistry`
+    // share the per-kernel `SidecarRegistry`
     // between the audit-sink dispatcher and `HandlerContext`. One
     // semaphore per channel, one circuit breaker per channel, one
     // counter set surfaced to `raxis status`.
@@ -2014,7 +2085,7 @@ async fn main() {
         })
     };
 
-    // Step 8.6: v2_extended_gaps.md §4 — start the operator
+    // Step 8.6: start the operator
     // dashboard HTTP server if `policy.toml [dashboard].enabled =
     // true`. Absent / disabled ⇒ no listener bound (zero
     // runtime cost). The handle is held until the orderly
@@ -2043,7 +2114,7 @@ async fn main() {
             // `JwtSigner::load_or_mint`, but its outcome value
             // is currently swallowed (the function builds an
             // `AuthState` and discards the bool). Doing the
-            // probe here lets the operator see "first boot
+            // probe here lets the operator"first boot
             // mint" vs "subsequent boot reload" in the kernel
             // stderr — the audit-trail equivalent for the
             // supervisor-triggered restart story.

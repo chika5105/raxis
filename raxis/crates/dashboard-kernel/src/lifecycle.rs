@@ -35,10 +35,8 @@
 //!
 //! ## Invariants
 //!
-//! See `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01` (paired with
-//! Worker 1) — the spec lives in `specs/invariants.md` and is
-//! mirrored in `RETURN_NOTE_TO_PARENT.md` while Worker 1 lands
-//! their side.
+//! See `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01` — the spec lives
+//! in `specs/invariants.md`.
 
 use raxis_dashboard::data::LifecycleAnnotation;
 
@@ -385,8 +383,8 @@ pub fn classify_for_task(
 // ---------------------------------------------------------------------------
 
 /// `kernel://` marker prefix that distinguishes self-exit
-/// revocations from operator-initiated ones. Worker 1's C1
-/// commit pins the canonical `revoked_by = "kernel://self-exit
+/// revocations from operator-initiated ones. Pins the
+/// canonical `revoked_by = "kernel://self-exit
 /// /<short-id>"` pattern; the prefix match here decouples the
 /// dashboard release cadence from the kernel's exact suffix
 /// scheme.
@@ -775,7 +773,7 @@ mod tests {
     /// as `SessionRevokedSelfExit`. Operator-initiated
     /// revocations (non-`kernel://` `revoked_by`) MUST classify
     /// as `SessionRevokedOperator`. This test pins the marker
-    /// pattern Worker 1's C1 commit will populate.
+    /// pattern the kernel-side self-exit path populates.
     #[test]
     fn classify_for_session_emits_self_exit_when_revoked_by_kernel_marker() {
         let session = "sess-revoke-1";

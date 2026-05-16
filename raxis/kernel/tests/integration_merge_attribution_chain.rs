@@ -1,9 +1,7 @@
 //! Real-runtime integration test for V2 Step 30 — Audit Attribution
 //! for Operator-Assisted Commits.
-//!
 //! Composes the components s30 added against real, on-disk objects
 //! (no fakes for the I/O surfaces under test):
-//!
 //!   * `raxis_audit_tools::AuditWriter` — actual file-backed JSONL
 //!     segment with chained SHA-256 prev hashes, written + read back
 //!     verbatim.
@@ -11,9 +9,8 @@
 //!     impl wrapping `AuditWriter`. Same `Arc<dyn AuditSink>`
 //!     coercion the kernel's `HandlerContext` performs at boot.
 //!   * `raxis_audit_tools::AuditEventKind::IntegrationMergeCompleted`
-//!     — the real audit variant carrying the s30 attribution
+//! the real audit variant carrying the s30 attribution
 //!     fields.
-//!
 //! Why this test does NOT call the kernel-internal verifier:
 //!   `raxis-kernel` is a bin-only crate; integration tests cannot
 //!   reach `handlers::integration_merge_attribution::
@@ -259,7 +256,7 @@ fn two_consecutive_merges_chain_through_prev_sha256() {
     assert_eq!(p1["escalation_id"], serde_json::json!("esc-77"));
 }
 
-/// V2 `v2_extended_gaps.md §1.2` — when the host-side fast-forward
+/// When the host-side fast-forward
 /// of the operator-configured `target_ref` fails (Phase 2), the
 /// kernel writes a `MergeFastForwardFailed` line to the audit chain
 /// AND keeps writing the standard `IntegrationMergeCompleted` line
@@ -267,7 +264,6 @@ fn two_consecutive_merges_chain_through_prev_sha256() {
 /// chain through `prev_sha256` so an external auditor reconstructing
 /// the timeline sees: Phase 1 done → Phase 2 alarm → operator
 /// recovery follow-up.
-///
 /// Pinning the on-disk shape here protects the operator dashboard,
 /// alert routing, and recovery runbooks — all of which pivot on the
 /// `category` discriminator string.

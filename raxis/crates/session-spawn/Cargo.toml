@@ -49,7 +49,7 @@ raxis-observability     = { path = "../observability" }
 # pinning `current_running` at the cap forever once a few sessions
 # leaked). The store handle is optional on `SessionSpawnService`
 # so legacy unit-test fixtures that never wire a store keep
-# compiling against the pre-iter65 in-memory fallback.
+# compiling against the earlier in-memory fallback.
 raxis-store             = { path = "../store" }
 
 serde       = { workspace = true }

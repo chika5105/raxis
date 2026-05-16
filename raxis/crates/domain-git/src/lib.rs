@@ -1,8 +1,6 @@
 //! Host-side main-branch fast-forward for V2 `IntegrationMerge`
 //! Phase 2.
-//!
 //! Normative reference:
-//!
 //! * `integration-merge.md §4 Check 8` (Phase 2: idempotent domain
 //!   commit, dispatched by the merge handler after Phase 1's
 //!   `git_apply_pending = 1` SQLite intent).
@@ -15,11 +13,8 @@
 //! * `v2-deep-spec.md §Step 8` (Orchestrator owns
 //!   `IntegrationMerge`; Kernel verifies ancestry and path
 //!   containment, then fast-forwards the main branch).
-//!
 //! ## What this crate does
-//!
 //! Two operations, both deliberately simple:
-//!
 //! 1. [`fetch_into_main`] — copy the merge commit (and its
 //!    transitive object graph) from the Orchestrator's worktree
 //!    object database (the `<data_dir>/worktrees/<orch_uuid>/.git/`
@@ -31,27 +26,22 @@
 //! 2. [`update_target_ref`] — atomically advance the
 //!    operator-configured target ref (default `refs/heads/main`,
 //!    overridable per-initiative via `[workspace] target_ref` in
-//!    plan.toml — see `V2_GAPS.md §12.8`) to point at the
+//!    plan.toml —) to point at the
 //!    requested commit SHA via `gix-ref::file::Transaction::commit`,
 //!    mirroring the host-side
 //!    `git update-ref <target_ref> <commit_sha>`.
-//!
 //! These two calls together implement the main-advancement work
 //! the spec calls "Phase 2 (idempotent domain commit)". They are
 //! independently idempotent:
-//!
 //! * Re-running [`fetch_into_main`] after the objects were
 //!   already copied is a no-op (gix's clone path skips objects
 //!   already present in the destination ODB).
 //! * Re-running [`update_target_ref`] when the configured
 //!   target ref already equals the target SHA is a no-op (the
 //!   transaction's precondition matches the target value).
-//!
 //! Either ordering of crash-recovery (Phase 2 partially completed,
 //! Phase 3 not yet started) replays cleanly.
-//!
 //! ## What this crate does NOT do
-//!
 //! * It does not perform the SQLite Phase 1 / Phase 3 transitions
 //!   (`integration-merge.md §11`); those stay in the kernel's
 //!   merge handler.
@@ -63,18 +53,14 @@
 //!   `vcs::is_ancestor` already verifies that the merge commit
 //!   descends from `base_sha` BEFORE Phase 2 runs (Check 3 in the
 //!   admission pipeline).
-//!
 //! ## Failure handling
-//!
 //! Every public function is fail-closed: a transient I/O error
 //! returns a typed `MainMergeError` and leaves the main ODB +
 //! refs untouched at any partial state the underlying gix call
 //! would have produced. The kernel's recovery path
 //! (`integration-merge.md §11.3`) re-invokes both calls on next
 //! boot if Phase 2 was incomplete; both are safe to retry.
-//!
-//! ## Invariants (annotation-only, V2_GAPS.md §13 Category 1)
-//!
+//! ## Invariants
 //! * **INV-MERGE-CONSISTENCY** — structurally enforced by the
 //!   gix-driven object-copy + ref-update sequence: the
 //!   ref-update is performed via
@@ -193,9 +179,7 @@ pub struct MainAdvance {
 /// main repository: copy objects, then advance
 /// the operator-configured target ref. This is the full Phase 2 of
 /// `integration-merge.md §4 Check 8`.
-///
 /// **Inputs.**
-///
 /// * `main_repo_root` — absolute path to the main repository
 ///   (the canonical state target for this initiative). Must be a
 ///   git repository the kernel has write access to.
@@ -209,14 +193,12 @@ pub struct MainAdvance {
 /// * `target_ref` — the fully-qualified ref name to advance
 ///   (e.g., `"refs/heads/main"` or `"refs/heads/raxis/auth-refactor"`).
 ///   The plan-side override + policy-side default + locked flag is
-///   resolved at admission time per `V2_GAPS.md §12.8`; this
+///   resolved at admission time per ; this
 ///   function takes the resolved string verbatim.
-///
 /// **Returns.** [`MainAdvance`] capturing the previous and
 /// current target-ref SHAs. The kernel reads `current_sha` back
 /// into `initiatives.current_sha` before issuing Phase 3's
 /// `git_apply_pending = 0` UPDATE.
-///
 /// **Idempotency.** Safe to call multiple times with the same
 /// `commit_sha`. Subsequent calls observe `already_at_target =
 /// true` and perform no work.
@@ -269,7 +251,7 @@ pub fn commit_merge_to_target_ref(
 /// Convenience wrapper around [`commit_merge_to_target_ref`] pinned
 /// to `refs/heads/main`, the canonical fallback when the initiative
 /// did not configure a per-initiative `target_ref`
-/// (`V2_GAPS.md §12.8` policy default). The production
+/// ( policy default). The production
 /// `IntegrationMerge` handler (`raxis-kernel::handlers::intent`)
 /// resolves `target_ref` from the orchestrator plan-fields registry
 /// and calls [`commit_merge_to_target_ref`] directly; this wrapper
@@ -291,11 +273,9 @@ pub fn commit_merge_to_main(
 
 /// Fetch a commit (and its transitive object graph) from the
 /// Orchestrator's worktree ODB into the main ODB.
-///
 /// Pure object copy: it never updates a ref. After this call the
 /// main ODB sees `commit_sha` as a reachable object but no
 /// branch points at it.
-///
 /// **Why a hand-rolled traversal, not `gix::clone::PrepareFetch`:**
 /// `PrepareFetch` refuses to operate against a non-empty
 /// destination, so it cannot be repurposed to pour objects into an
@@ -478,18 +458,16 @@ fn write_object_bytes(
 /// Atomically advance `target_ref` to `oid` via a `gix-ref`
 /// transaction. Used by [`commit_merge_to_target_ref`] but also
 /// exposed for tests that want to drive the ref update in isolation.
-///
 /// `expected_previous` is the value the kernel believes the target
 /// ref points at right now; if `Some`, the transaction's precondition
 /// requires the on-disk ref to equal that value (so a concurrent
 /// writer's update is detected and the transaction aborts). If
 /// `None`, the transaction is unconstrained — the target ref must
 /// not exist yet (an initial-commit pinning).
-///
 /// `target_ref` MUST be a fully-qualified ref name (e.g.,
 /// `"refs/heads/main"`, `"refs/heads/raxis/auth-refactor"`). The
 /// caller resolves the per-initiative override + policy default per
-/// `V2_GAPS.md §12.8`; this function performs no resolution.
+/// ; this function performs no resolution.
 pub fn update_target_ref(
     repo: &gix::Repository,
     oid: &gix::ObjectId,
@@ -531,7 +509,6 @@ pub fn update_target_ref(
 /// rooted at `main_repo_root`. Returns `Ok(None)` when the ref does
 /// not exist (the repo has no tip for this ref yet — common on
 /// first merge). Errors only when the repo itself cannot be opened.
-///
 /// Used by `recovery::reconcile_git_apply_pending` (Cases A vs B
 /// dispatch in `integration-merge.md §11.3`): the recovery
 /// procedure compares the recorded `db_sha` (from the most recent
@@ -580,7 +557,7 @@ fn parse_oid(sha: &str) -> Result<gix::ObjectId, MainMergeError> {
 }
 
 // ---------------------------------------------------------------------------
-// V2_GAPS §C6 — kernel push protocol (minimum-viable)
+// kernel push protocol (minimum-viable)
 // ---------------------------------------------------------------------------
 
 /// Format an `Option<i32>` exit code as a human-readable string.
@@ -642,10 +619,8 @@ pub enum PushError {
 /// V2 push uses whatever auth the host has wired into git, which
 /// is the operator-grade outcome and matches `integration-merge.md
 /// §14`'s "git push origin main" wire shape).
-///
 /// `deadline` bounds the subprocess so a hung push (network outage,
 /// auth prompt) cannot wedge the kernel commit path.
-///
 /// Returns [`PushOutcome`] on push success; the caller is
 /// responsible for emitting the matching `PushCompleted` audit
 /// event. Any non-zero exit surfaces as
@@ -946,11 +921,11 @@ mod tests {
         }
     }
 
-    /// V2_GAPS.md §12.8 — `commit_merge_to_target_ref` must
-    /// advance an arbitrary fully-qualified ref (here a PR-style
+    /// `commit_merge_to_target_ref` must advance an arbitrary
+    /// fully-qualified ref (here a PR-style
     /// `refs/heads/raxis/<initiative>` branch), not only
     /// `refs/heads/main`. This is the substrate for the PR-branch
-    /// workflow described in V2_GAPS §12.8.
+    /// workflow described in the integration spec.
     #[test]
     fn commit_merge_to_target_ref_advances_pr_style_branch() {
         let tmp = tempfile::tempdir().unwrap();
@@ -962,8 +937,7 @@ mod tests {
         // Pre-create the PR branch at base so the transaction has
         // an `expected_previous = Some(base_oid)` precondition to
         // satisfy. (Production: the kernel creates the branch at
-        // `initial_sha` during `approve_plan` per V2_GAPS §12.8
-        // step 1.)
+        // `initial_sha` during `approve_plan` per // step 1.)
         let create_branch = std::process::Command::new("git")
             .args(["branch", "raxis/auth-refactor", base.as_str()])
             .current_dir(&main)
@@ -1012,7 +986,7 @@ mod tests {
         assert_eq!(
             main_head, base,
             "refs/heads/main MUST NOT advance when the resolved \
-             target_ref is a non-main PR branch (V2_GAPS §12.8)"
+             target_ref is a non-main PR branch"
         );
     }
 
@@ -1032,7 +1006,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------
-    // V2_GAPS §C6 — push_to_remote tests
+    // push_to_remote tests
     // -------------------------------------------------------------
 
     /// Build a fixture where `main` is the main repo and `bare` is

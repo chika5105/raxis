@@ -1,22 +1,16 @@
 //! `raxis doctor` — preflight diagnostic for the operator's
 //! `<data_dir>` and the kernel's on-disk surfaces.
-//!
 //! Normative reference: cli-readonly.md §5.5.15.
-//!
 //! # What this command does
-//!
 //! Walks every invariant the kernel asserts at boot and reports the
 //! result as a typed list of `Check` records. Each check has an
 //! outcome (`Ok` | `Warn` | `Fail`); the command's exit code is the
 //! worst-of:
-//!
 //!   * 0 — every check is `Ok`.
 //!   * 1 — at least one `Warn`, no `Fail`.
 //!   * 2 — at least one `Fail`. The kernel is unlikely to boot
 //!     (or has booted into a broken state).
-//!
 //! # What this command does NOT do
-//!
 //! * It does NOT mutate anything. There is no "fix-it" mode — the
 //!   operator is responsible for editing files / setting permissions
 //!   based on the report.
@@ -25,9 +19,7 @@
 //! * It does NOT walk the full audit chain. Use `raxis verify-chain`
 //!   for the cryptographic walk; doctor uses the same quick-check
 //!   `raxis status` does so the report stays under one screen.
-//!
 //! # Checks performed (in order)
-//!
 //! 1. `<data_dir>/` exists and is a directory.
 //! 2. `<data_dir>/{keys,policy,audit,providers,runtime,sockets,notifications}/`
 //!    each exist with sensible mode bits.
@@ -49,17 +41,13 @@
 //!    * `FAIL` for `Expired` (recovery ops also denied),
 //!    * `FAIL` for `NotYetValid` (cert is dead-on-arrival),
 //!    * `OK`   for `Active` and `AlwaysActiveEmergency`.
-//!
 //!    Plus `WARN` for any operator entry with
 //!    `force_misconfig_bypass = true` so the operator is reminded
 //!    they have an audited structural override active.
-//!
 //! # Distribution-specific subcommands
-//!
 //! Two additional subcommands are dispatched by name as the first
 //! positional argument; both are referenced by the Homebrew formula's
 //! `post_install` block (`release-and-distribution.md §9.2`):
-//!
 //! * `raxis doctor signing-key-fp` — print the kernel binary's
 //!   compiled-in trust-anchor fingerprint
 //!   (`EXPECTED_KERNEL_SIGNING_KEY_BYTES`). Exit code 0 when a real
@@ -225,7 +213,6 @@ fn run_default(flags: &GlobalFlags, opts: DoctorOpts) -> Result<(), CliError> {
 
 /// `raxis doctor signing-key-fp` — print the kernel binary's
 /// compiled-in trust-anchor fingerprint.
-///
 /// Exit code:
 ///   * 0 — a real (non-placeholder) key is baked in.
 ///   * 1 — the binary was built without
@@ -233,7 +220,6 @@ fn run_default(flags: &GlobalFlags, opts: DoctorOpts) -> Result<(), CliError> {
 ///     path) set; surfaced loudly so an operator who installed
 ///     an unsigned `cargo build` knows their kernel cannot
 ///     verify any image manifest.
-///
 /// The compiled-in `EXPECTED_KERNEL_SIGNING_KEY_BYTES` constant is
 /// the public half of the kernel signing keypair; this command is
 /// therefore safe to run on any host, the output reveals nothing
@@ -279,7 +265,6 @@ fn run_signing_key_fp(opts: DoctorOpts) -> Result<(), CliError> {
 
 /// `raxis doctor canonical-images` — verify every shipped canonical
 /// image against the kernel's compile-time trust anchor.
-///
 /// Walks Reviewer, Orchestrator, and Executor-starter (when
 /// present) under `<install_dir>/images/`. Each verification calls
 /// the same entry point the kernel boot path uses
@@ -287,7 +272,6 @@ fn run_signing_key_fp(opts: DoctorOpts) -> Result<(), CliError> {
 /// matches what the kernel itself will see at boot — if doctor says
 /// OK, the kernel will boot OK; if doctor says FAIL, the kernel
 /// would refuse to spawn the matching role's VMs.
-///
 /// Exit code:
 ///   * 0 — every present image verifies.
 ///   * 1 — at least one image is missing on disk (Warn). Doctor
@@ -306,7 +290,6 @@ fn run_canonical_images(opts: DoctorOpts, install_dir: PathBuf) -> Result<(), Cl
 
     // We verify the two kernel-canonical image roles
     // (`INV-PLANNER-HARNESS-02` Reviewer and `-05` Orchestrator).
-    //
     // The Executor-starter image (`v2-deep-spec.md §Canonical
     // Images`) ships in the same install dir but is intentionally
     // NOT a CanonicalImageKind: operators may replace it with
@@ -433,13 +416,11 @@ fn verify_one(
 
 /// `raxis doctor cache prune` — sweep `<data_dir>/oci-cache/` for
 /// images that no live policy generation references.
-///
 /// V2 implementation walks every operator-registered policy
 /// generation in `policy_history` and computes the live `oci_digest`
 /// set as `policy_history[*].vm_images[*].oci_digest`. Any
 /// `images/sha256/<aa>/<full>/` or `blobs/sha256/<aa>/<full>.*` not
 /// in that set is removed (or just listed when `--dry-run`).
-///
 /// **What this does NOT do.** It does not consult in-flight
 /// initiative rows or running session rows for additional
 /// references. The §8 spec mentions both as additional sources of
@@ -449,7 +430,6 @@ fn verify_one(
 /// can run the kernel's background prune (which kicks in on every
 /// `policy_manager::advance_epoch`) — that path consumes the
 /// kernel's runtime view of active sessions + initiatives.
-///
 /// Exit code:
 ///   * 0 — prune completed successfully (any number of bytes
 ///     freed, including 0).
@@ -471,7 +451,7 @@ fn run_cache_prune(flags: &GlobalFlags, opts: DoctorOpts, dry_run: bool) -> Resu
     let live_digests: HashSet<OciDigest> = match enumerate_live_digests(&data_dir) {
         Ok(s) => s,
         Err(e) => {
-            let _ = writeln!(out, "raxis doctor cache prune — FAIL: {e}",);
+            let _ = writeln!(out, "raxis doctor cache prune — FAIL: {e}");
             std::process::exit(2);
         }
     };
@@ -549,7 +529,6 @@ fn run_cache_prune(flags: &GlobalFlags, opts: DoctorOpts, dry_run: bool) -> Resu
 
 /// Enumerate the union of `[[vm_images]] oci_digest = "sha256:..."`
 /// entries declared by the operator's current `<data_dir>/policy/policy.toml`.
-///
 /// **V2 conservative scope.** We deliberately do NOT walk historical
 /// policy generations from `policy_epoch_history` (the table records
 /// the SHA hash of each historical bundle but does not retain the
@@ -559,7 +538,6 @@ fn run_cache_prune(flags: &GlobalFlags, opts: DoctorOpts, dry_run: bool) -> Resu
 /// background prune (kicked from `policy_manager::advance_epoch`)
 /// IS the mechanism that consumes the runtime view; doctor is the
 /// off-line walker that operates on what's on disk only.
-///
 /// **TOML parse mode.** We use a hand-rolled TOML walk over
 /// `[[vm_images]]` blocks rather than going through
 /// [`raxis_policy::PolicyBundle`] because (a) `PolicyBundle::from_toml`
@@ -811,7 +789,7 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, CliError> {
             }
         }
         Some(other) => {
-            // V2_GAPS §12.5 / `operator-ergonomics.md §17.3` —
+            // `operator-ergonomics.md §17.3` —
             // `raxis doctor <category>` accepts seven category
             // selectors. Anything else is a typo.
             if let Some(cat) = DoctorCategory::parse(other) {
@@ -1119,7 +1097,6 @@ fn collect(data_dir: &Path) -> Report {
 /// Walk every row in the `operator_certificates` view and classify it
 /// against the four-zone model. See module docstring for the exact
 /// outcomes per zone.
-///
 /// Reading the kernel-managed view (rather than re-parsing
 /// `policy.toml`) keeps doctor honest: if `repopulate` skipped a
 /// cert (for instance due to migration drift), doctor will not see
@@ -1397,11 +1374,9 @@ fn render_json<W: Write>(out: &mut W, data_dir: &Path, report: &Report) {
 // ────────────────────────────────────────────────────────────────────
 // V2.3 — `raxis doctor <category>` per `operator-ergonomics.md §17`
 // ────────────────────────────────────────────────────────────────────
-//
 // Each category produces a `Report` containing one or more `Check`
 // rows whose `id` starts with `<category>.…` so the JSON output is
 // trivially groupable by consumers.
-//
 // V2.3 MVP scope deliberately keeps each category cheap and offline
 // where possible (host disk, TCP connect, store row-count, policy
 // listing). Live API checks against providers — the §17.2 spec
@@ -1482,8 +1457,7 @@ fn collect_policy(data_dir: &Path, r: &mut Report) {
 /// API call against upstream provider clouds; that path is V3 once
 /// the CLI can talk to the gateway without piggybacking on the
 /// operator-IPC socket).
-///
-/// **V2_GAPS §C5 — `sidecar.health`.** For every provider whose
+/// **`sidecar.health`.** For every provider whose
 /// `kind = "http_sidecar"` we additionally probe TCP reachability
 /// of `sidecar_endpoint`. This is the same fidelity as the
 /// `network.connect` row in `collect_network`: a successful TCP
@@ -1532,13 +1506,12 @@ fn collect_providers(data_dir: &Path, r: &mut Report) {
     r.push(
         "providers.live_check",
         Outcome::Warn,
-        "live one-token completion check is V3 (see V2_GAPS.md §12.5)",
+        "live one-token completion check is V3",
     );
 }
 
-/// V2_GAPS §C5 — TCP reachability probe for one `http_sidecar`
+/// TCP reachability probe for one `http_sidecar`
 /// provider. Emits exactly one `sidecar.health` row per provider.
-///
 /// **Outcomes:**
 /// * `Ok`   — TCP handshake completed within the 3 s timeout.
 /// * `Fail` — `sidecar_endpoint` parse error, DNS resolution
@@ -1625,7 +1598,7 @@ fn collect_sidecar_health(p: &raxis_policy::ProviderEntry, r: &mut Report) {
     }
 }
 
-/// V2_GAPS §C5 — minimal URL parse for sidecar endpoints. The
+/// minimal URL parse for sidecar endpoints. The
 /// sidecar protocol mandates `http://` or `https://` (validated by
 /// `PolicyBundle::validate`), so we do not need a full URL parser
 /// here. We extract `(host, port)` and default `port` to 80 / 443
@@ -1882,7 +1855,6 @@ fn collect_bundles(data_dir: &Path, r: &mut Report) {
 /// V2.5 §13 — `raxis doctor vm-images`. Walks the operator-published
 /// `[[vm_images]]` registry and emits per-entry diagnostic rows so
 /// operators can audit the registry without booting the kernel.
-///
 /// Per entry rows:
 /// * `vm_images.entry`        — `Ok` once the entry has been
 ///   re-validated (alias shape, digest shape, role_restriction
@@ -1893,7 +1865,6 @@ fn collect_bundles(data_dir: &Path, r: &mut Report) {
 ///   `Warn` otherwise (the production resolver pulls on demand
 ///   at first activation; the warning is a heads-up so operators
 ///   can pre-pull before the first session boots).
-///
 /// Top-level rows:
 /// * `vm_images.count` — how many entries the active policy
 ///   declares; `Warn` when zero (no operator-published images,
@@ -2229,13 +2200,11 @@ mod tests {
     }
 
     // ── Step-11: cert.* check coverage ────────────────────────────────
-    //
     // These tests build a real on-disk SQLite via `Store::open`,
     // insert one or more `operator_certificates` rows directly with
     // raw SQL (the kernel-side `repopulate` helper drives off a full
     // PolicyBundle which is heavy to construct in a unit test), then
     // re-open read-only and exercise `check_operator_certs`.
-    //
     // The `cert_status` classification is already tested in
     // `raxis-crypto::cert::tests`; here we only assert the
     // doctor-side mapping (status → Outcome + id format).
@@ -2591,7 +2560,7 @@ mod tests {
         assert!(r.checks.iter().any(|c| c.id == "bundles.db"));
     }
 
-    // V2_GAPS §C5 — sidecar URL parser tests. These are pure-function
+    // sidecar URL parser tests. These are pure-function
     // tests; the live TCP-probe path is exercised by the
     // `cli/tests/doctor_sidecar.rs` integration test (where we can
     // bind a real listener).

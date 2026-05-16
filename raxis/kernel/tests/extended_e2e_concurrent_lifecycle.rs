@@ -687,7 +687,7 @@ fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
     // every live-e2e run MUST drive at least one verifier-backed gate
     // through the kernel's recheck-clear edge so the iter63
     // paired-write at `kernel/src/scheduler/dag.rs::transition_to_admitted`
-    // (commit 31177d5 on `worker/iter62-deep-sweep`) gets active
+    // (the deep-sweep pass) gets active
     // production coverage. We append a single `[[gates]]` block that
     // points at `raxis-verifier-no-secrets`, the kernel-bundled
     // worktree-scanning verifier from `crates/verifier-no-secrets/`.
@@ -779,11 +779,28 @@ fn write_credentials(data_dir: &Path) {
     );
 }
 
+/// Write a credentials-bearing file at exactly mode 0600. Open
+/// with `O_CREAT` + mode 0600 so a brand-new file is created at
+/// 0600, chmod 0600 BEFORE the body bytes are written so an
+/// existing file at a wider mode is tightened before exposing the
+/// credential bytes, then write + fsync.
 fn write_with_mode_0600(path: &Path, body: &[u8]) {
-    std::fs::write(path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap_or_else(|e| panic!("open {} O_CREAT|0600: {e}", path.display()));
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))
         .unwrap_or_else(|e| panic!("chmod 0600 {}: {e}", path.display()));
+    f.write_all(body)
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    f.sync_all()
+        .unwrap_or_else(|e| panic!("fsync {}: {e}", path.display()));
 }
 
 fn write_provider_credentials(data_dir: &Path) {

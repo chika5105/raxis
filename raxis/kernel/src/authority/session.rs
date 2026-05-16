@@ -1,15 +1,11 @@
 // raxis-kernel::authority::session — Session lifecycle management.
-//
 // Normative reference: kernel-core.md §2.3 `src/authority/session.rs`.
-//
 // A session is a kernel-created authenticated connection credential for a
 // planner, gateway, or verifier process. Sessions are NOT created by the
 // connecting process — the operator (or kernel spawn path) creates them.
-//
 // Session token: 256-bit CSPRNG random bytes. Not HMAC-derived from session_id.
 // Stored as the token itself in the sessions table; presented by the process
 // on every IPC frame for auth.rs to validate.
-//
 // Planner sessions: worktree_root required; base_sha / base_tracking_ref recorded.
 // Gateway/Verifier sessions: worktree_root must be None (stored as SQL NULL).
 
@@ -73,20 +69,17 @@ pub struct SessionRow {
     /// initiative (today: Orchestrator coordinator sessions, soon
     /// Executor / Reviewer sub-task sessions). `None` for pre-V2
     /// sessions and for non-V2 substrates (Gateway / Verifier).
-    ///
     /// Populated by `auto_spawn_orchestrator_session_in_tx`
     /// (`v2-deep-spec.md §Step 6`) and read by:
-    ///
     /// * `intent::run_phase_a` — to route Orchestrator-emitted
     ///   `IntentKind::StructuredOutput` to the initiative-scoped
     ///   `handle_structured_output_orchestrator` handler without
     ///   doing a `tasks` lookup that would always fail
-    ///   (`v2_extended_gaps.md §3.2`).
+    ///  .
     /// * Recovery / dashboard surfaces — typed back-edge from a
     ///   coordinator session to its initiative without joining
     ///   through `subtask_activations` (which only covers
     ///   Executor / Reviewer descendants).
-    ///
     /// Backed by the nullable `sessions.initiative_id` column with
     /// FK to `initiatives(initiative_id) ON DELETE CASCADE`
     /// introduced in migration 18.
@@ -111,10 +104,8 @@ impl Default for SessionConfig {
 }
 
 /// Create a new session and insert the row into the `sessions` table.
-///
 /// - For `Role::Planner`: `worktree_root` must be `Some`.
 /// - For `Role::Gateway` / `Role::Verifier`: `worktree_root` must be `None`.
-///
 /// Returns the `(SessionId, session_token_hex)` pair on success. The raw token
 /// hex is sent to the operator/spawner; the kernel stores it directly in the
 /// sessions table for auth.rs to compare constant-time.
@@ -236,10 +227,8 @@ pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, 
 }
 
 /// Look up a session row by raw `session_token` hex string.
-///
 /// Called by the planner IPC dispatch loop to resolve the per-frame token
 /// to a session context before sequence/nonce validation.
-///
 /// Returns the raw row without applying revoked/expired guards — the caller
 /// performs those checks (they need the raw row for sequence number access).
 /// `SessionNotFound` if no row matches the token.
@@ -286,7 +275,6 @@ pub fn get_session_by_token(
 }
 
 /// Revoke a session by setting `revoked=1, revoked_at=now()`.
-///
 /// DDL Table 4: revoked INTEGER NOT NULL DEFAULT 0, revoked_at INTEGER (nullable).
 /// Uses conditional UPDATE WHERE revoked=0 (INV-STORE-02) to prevent double-revocation races.
 pub fn revoke_session(session_id: &SessionId, store: &Store) -> Result<(), AuthorityError> {
@@ -309,7 +297,6 @@ pub fn revoke_session(session_id: &SessionId, store: &Store) -> Result<(), Autho
 }
 
 /// Atomically advance the sequence number for a session.
-///
 /// Spec note: in the IPC path, callers should prefer
 /// [`accept_envelope_and_advance_sequence`] which combines the sequence-number
 /// CAS with the `nonce_cache` envelope-nonce dedup INSERT in a SINGLE
@@ -360,7 +347,6 @@ pub enum EnvelopeReplayReason {
 
 /// INV-01 chokepoint. ALL planner-class IPC handlers must route through this
 /// function before doing any other work.
-///
 /// Combines, in one SQLite transaction:
 ///   1. **Check (A)** — sequence number is exactly `sessions.sequence_number + 1`.
 ///   2. **Check (B)** — `INSERT INTO nonce_cache (session_id,
@@ -368,11 +354,9 @@ pub enum EnvelopeReplayReason {
 ///      duplicate `(session_id, envelope_nonce)` (UNIQUE) or
 ///      duplicate `(session_id, sequence_num)` (PK).
 ///   3. **Atomic advance** — `UPDATE sessions SET sequence_number = sequence_num`.
-///
 /// Either all three succeed and commit, or none do (transaction rollback). The
 /// invariant `sessions.sequence_number == MAX(nonce_cache.sequence_num)` is
 /// preserved across crashes.
-///
 /// Returns `Err(EnvelopeReplayReason)` on any failure for caller-side audit
 /// emission. The handler maps each reason to `PlannerErrorCode::Unauthorized`
 /// per INV-08 to avoid leaking which check failed.
@@ -619,7 +603,6 @@ mod tests {
     }
 
     // ── V2 SessionRow read-path coverage (Migration 5) ────────────────────
-    //
     // After Migration 5, `sessions` carries `session_agent_type TEXT NULL`
     // and `can_delegate INTEGER NOT NULL DEFAULT 0`. The `SessionRow`
     // surface must round-trip both columns so the dispatch matrix

@@ -1,4 +1,4 @@
-//! V2_GAPS §C2/C3 — `BedrockClient`: AWS Bedrock Runtime InvokeModel.
+//! `BedrockClient`: AWS Bedrock Runtime InvokeModel.
 //!
 //! Supports **Anthropic-on-Bedrock only** in V2. The full Bedrock
 //! `Converse` API lands in V3 alongside the gateway-side SigV4 plug-in

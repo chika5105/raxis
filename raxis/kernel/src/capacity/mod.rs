@@ -1,8 +1,6 @@
-// raxis-kernel::capacity — V2_GAPS §D2 host-capacity MVP.
-//
+// raxis-kernel::capacity — host-capacity MVP.
 // Normative reference: `specs/v2/host-capacity.md` (§4 VM concurrency,
-// §7 disk-full watchdog, §12 FD limits) and `V2_GAPS.md §D2`.
-//
+// §7 disk-full watchdog, §12 FD limits) and .
 // V2 SCOPE (this module).
 // =======================
 //   * `vm_admission` — INV-CAPACITY-01 strict cap on
@@ -20,7 +18,6 @@
 //   * `fd_limit` — boot-time `getrlimit(RLIMIT_NOFILE)` check.
 //     The kernel refuses to start when the soft limit is below
 //     `[host_capacity] required_min_fd_limit`.
-//
 // V3 DEFERRALS (NOT in this module).
 // =================================
 //   * Persistent admission queue with `sessions.state = 'Queued'`,
@@ -34,7 +31,6 @@
 //   * WAL pressure monitoring + `wal_max_size_mb` enforcement.
 //   * Audit reserve + `AuditWriteImpossible` total halt.
 //   * Worktree quota soft enforcement.
-//
 // Audit events emitted by this module (registered in
 // `raxis-policy::KNOWN_AUDIT_EVENT_KINDS`):
 //   * `AdmissionDeferredAtCap`         — `vm_admission`

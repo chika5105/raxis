@@ -5,7 +5,7 @@
 > **Cross-references:**
 > - `specs/invariants.md` — `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01` (the keep-running flag MUST default to off; absent any signal, all teardown paths execute as before).
 > - `specs/v2/e2e-extended-scenario.md` — realism-e2e harness whose teardown surface this spec gates.
-> - `specs/v2/e2e-live-test-gap.md §7.13` — graceful shutdown SIGTERM step the keep-alive flag conditionally skips.
+> - graceful shutdown SIGTERM step the keep-alive flag conditionally skips.
 > - `kernel/tests/common/keep_alive.rs` — single source of truth for the activation read.
 > - `kernel/tests/extended_e2e_support/docker_stack.rs::ComposeStackGuard` — Drop-side guard that wires the flag through compose-stack teardown.
 

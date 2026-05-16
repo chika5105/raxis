@@ -1,53 +1,40 @@
 //! `raxis initiative show <initiative_id>` — the canonical forensic
 //! surface for one initiative.
-//!
 //! Normative reference: `plan-bundle-sealing.md §8.5` (V2.1 bundle
 //! surface). This command is the SOLE forensic surface for an
 //! initiative; the V1-era `inspect-initiative` was retired and its
 //! quarantine + per-task joins were absorbed here per the V2
 //! "no two CLI commands do the same thing" rule
-//! (`v2_extended_gaps.md §1.1`).
-//!
+//!.
 //! # Surface
-//!
 //! `raxis initiative show <id> [--bundle] [--with-tasks] [--task-limit N]
 //!                             [--to <dir>] [--json]`
-//!
 //! Output composition:
-//!
 //!   * Base header — initiative id, state, created/approved/completed
 //!     timestamps. Always printed.
-//!
 //!   * Plan-bundle envelope — sha-256 prefix, schema version,
 //!     signed-by fingerprint prefix, sealed-at, signed-at, artifact
 //!     count, total-bytes. Always printed.
-//!
 //!   * Quarantine block — YES/NO; when YES the block carries
 //!     quarantined-at, quarantined-by (operator display), reason
 //!     (when stored), and `sweep_target` (when issued by an
 //!     `operator quarantine-plans-by` sweep). Always printed.
-//!
 //!   * Per-task table — task_id, state, lane, transitioned_at,
 //!     actor. Opt-in via `--with-tasks` so the default render stays
 //!     bytes-free for shared shells; `--task-limit N` caps the
 //!     listing (default 100) so a runaway plan can't flood the TTY.
-//!
 //!   * `--bundle` — adds a per-artifact `(seq, name, sha-256, size)`
 //!     listing. No artifact bytes are written; this is the read-only
 //!     operator surface §8.5 calls out as "for human inspection".
-//!
 //!   * `--bundle --to <dir>` — extracts every artifact under `<dir>`,
 //!     preserving `artifact_name` as the relative path (with
 //!     intermediate directory creation). Refuses to overwrite an
 //!     existing non-empty `<dir>` so the operator does not
 //!     accidentally clobber unrelated files. Implies the human
 //!     header is suppressed (the side-effect IS the output).
-//!
 //! `--json` emits the same data as a structured object (excludes
 //! `--to <dir>`, where the side-effect is the output).
-//!
 //! # Output discipline
-//!
 //! - All fingerprints / SHAs render as their first 16 hex characters
 //!   followed by `…` so log captures are grep-friendly without
 //!   leaking the full digest. Operators who need the full value pass
@@ -407,7 +394,7 @@ fn extract_artifacts(
 }
 
 /// Mirror of `kernel/src/initiatives/v2_admission.rs::validate_artifact_name`
-/// — reasserts the same discipline on the egress path. Empty names,
+/// reasserts the same discipline on the egress path. Empty names,
 /// names with leading `/`, names containing a literal `..` segment,
 /// or names with embedded NUL bytes are all rejected.
 fn is_safe_artifact_name(name: &str) -> bool {
@@ -940,7 +927,6 @@ mod tests {
     }
 
     // ── End-to-end: real Store + run() ───────────────────────────────────
-    //
     // These fixtures stand up a real on-disk SQLite store, seed an
     // initiative + V2 plan bundle through the typed
     // `raxis_store::plan_bundles` helpers (NOT raw SQL), and then

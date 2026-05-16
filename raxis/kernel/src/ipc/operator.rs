@@ -201,7 +201,7 @@ pub async fn dispatch_loop(
         let started = std::time::Instant::now();
 
         // ── Streaming branch: SubscribeInitiative
-        // (`v2_extended_gaps.md §2.1`) ────────────────────────────────────
+        // ────────────────────────────────────
         //
         // SubscribeInitiative is the only operator op that needs
         // ownership of the connection AFTER the per-request
@@ -423,7 +423,7 @@ fn request_context_fields(req: &OperatorRequest) -> Vec<(&'static str, String)> 
         OperatorRequest::QuarantinePlansBy {
             target_fingerprint, ..
         } => vec![("target_fingerprint", target_fingerprint.clone())],
-        // V2_GAPS §12.4 — operator-ergonomics IPC stubs. Identifier
+        // operator-ergonomics IPC stubs. Identifier
         // fields are surfaced so audit grep flows behave the same
         // shape as the V3 wired handlers.
         OperatorRequest::ProposeDefaults { initiative_id } => {
@@ -732,7 +732,7 @@ pub(crate) mod dispatch_log {
             OperatorResponse::Error { .. } => "Error",
             OperatorResponse::InitiativeQuarantined { .. } => "InitiativeQuarantined",
             OperatorResponse::QuarantineSwept { .. } => "QuarantineSwept",
-            // V2_GAPS §12.4 — operator-ergonomics IPC success
+            // operator-ergonomics IPC success
             // envelopes. As of V2.4 four of the five handlers emit
             // these arms for real (`ProposeDefaults`, `EstimateCost`,
             // `DryRunAdmit`, `DescribeInitiativePause`); only
@@ -890,12 +890,12 @@ async fn handle_request(
         } => handle_quarantine_plans_by(target_fingerprint, reason, operator, ctx).await,
 
         // ----------------------------------------------------------------
-        // V2_GAPS §12.4 — Operator-ergonomics IPC. V2.4 lands real
+        // Operator-ergonomics IPC. V2.4 lands real
         // handlers for ProposeDefaults / EstimateCost / DryRunAdmit /
         // DescribeInitiativePause. SubscribeInitiative remains a
         // wire-stub because it requires bidirectional streaming on
         // the operator socket (lands with V3 KernelPush transport,
-        // V2_GAPS §12.1). All five handlers live in
+        // ). All five handlers live in
         // `crate::ipc::operator_ergonomics` and uphold
         // `INV-OPERATOR-ERG-01` — read-only kernel operations.
         // ----------------------------------------------------------------
@@ -1145,7 +1145,7 @@ async fn handle_revoke_session(
             // every other kernel-driven `sessions.revoked` mutation
             // (`authority::session::revoke_session` is the SQL writer;
             // the paired-write was missing on the operator-driven seam
-            // pre-iter63 — see deep-sweep-2 D9 RETURN_NOTE).
+            // earlier — see the deep-sweep-2 D9 follow-up).
             let operator_display_name = ctx
                 .policy
                 .load()
@@ -1489,7 +1489,7 @@ async fn handle_approve_plan(
     };
 
     let policy_epoch = policy_snapshot.epoch();
-    // V2_GAPS.md §12.8 / §12.9 — snapshot the operator-side `[git]`
+    // §12.9 — snapshot the operator-side `[git]`
     // policy values from the same bundle we resolved the pubkey
     // from, so the per-initiative `target_ref` resolution happens
     // against the policy that was authoritative at approval time
@@ -1497,7 +1497,7 @@ async fn handle_approve_plan(
     // hop into `approve_plan`).
     let policy_default_target_ref = policy_snapshot.git_default_target_ref().to_owned();
     let policy_target_ref_locked = policy_snapshot.git_target_ref_locked();
-    // V2_GAPS §E1 — snapshot the operator-declared
+    // snapshot the operator-declared
     // `[environments.<label>]` map and `[[permitted_credentials]]`
     // list at approval time so the lifecycle validator can run
     // INV-ENV-01 (`environment-access-control.md §11`) against
@@ -1512,7 +1512,7 @@ async fn handle_approve_plan(
     > = policy_snapshot.environments().clone();
     let policy_permitted_credentials_snapshot: Vec<raxis_policy::PermittedCredentialConfig> =
         policy_snapshot.permitted_credentials().to_vec();
-    // V2_GAPS §13 (V2.5 BLOCKER) — snapshot the operator-published
+    // (V2.5 BLOCKER) — snapshot the operator-published
     // `[[vm_images]]` registry under the same epoch the plan was
     // submitted against so `validate_task_vm_images` resolves
     // every alias against a stable view of the policy. The
@@ -1610,7 +1610,7 @@ async fn handle_approve_plan(
             // for the orchestrator session_id means the boot failed.
             if let Some(orch_session_id) = result.orchestrator_session_id.as_deref() {
                 let allowlist = build_egress_allowlist_from_policy(&policy_snapshot);
-                // V2 `v2_extended_gaps.md §1.1` — clone the prompt
+                // clone the prompt
                 // because the trait takes ownership; we log only
                 // its byte length below (not the bytes themselves)
                 // to keep operator-authored content out of stderr
@@ -1676,7 +1676,7 @@ async fn handle_approve_plan(
             }
         }
         Err(e) => match &e {
-            // V2_GAPS.md §12.8 / §12.9 — surface the structured
+            // §12.9 — surface the structured
             // locked-field / format-invalid rejections with their
             // dedicated wire codes so the CLI's diagnostic does not
             // bury the conflict under a generic FAIL_APPROVE_PLAN.
@@ -2975,7 +2975,7 @@ fn op_name(req: &OperatorRequest) -> &'static str {
         OperatorRequest::RotateEpoch { .. } => "RotateEpoch",
         OperatorRequest::QuarantineInitiative { .. } => "QuarantineInitiative",
         OperatorRequest::QuarantinePlansBy { .. } => "QuarantinePlansBy",
-        // V2_GAPS §12.4 — operator-ergonomics stubs.
+        // operator-ergonomics stubs.
         OperatorRequest::ProposeDefaults { .. } => "ProposeDefaults",
         OperatorRequest::EstimateCost { .. } => "EstimateCost",
         OperatorRequest::DryRunAdmit { .. } => "DryRunAdmit",

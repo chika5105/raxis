@@ -30,7 +30,7 @@ use crate::server::{AppState, AuthorizedOperator};
 ///
 /// Audit discipline: pure read-only browse. The
 /// `OperatorViewedPolicySnapshot` emission was retired in
-/// `worker/audit-tightening` per the signal-vs-noise policy in
+/// an earlier audit-noise sweep per the signal-vs-noise policy in
 /// `specs/v2/dashboard-operator-action-audit-coverage.md`. The
 /// state-mutating `PUT /api/policy/toml` path continues to
 /// audit via `PolicyUpdatedViaDashboard`.
@@ -57,7 +57,7 @@ where
 ///
 /// Audit discipline: pure read-only browse. The
 /// `OperatorViewedPolicyToml` emission was retired in
-/// `worker/audit-tightening` per the signal-vs-noise policy in
+/// an earlier audit-noise sweep per the signal-vs-noise policy in
 /// `specs/v2/dashboard-operator-action-audit-coverage.md`. The
 /// raw TOML view is gated to `write_policy` role so the role
 /// gate (and its `OperatorAuth*` chain) remain the forensic

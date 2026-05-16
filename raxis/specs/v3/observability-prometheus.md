@@ -231,7 +231,7 @@ key that is not on the list drops the entire metric and bumps
 | `raxis.kernel.uptime.seconds`                  | Gauge          | (none) |
 | `raxis.observability.dropped.total`            | Counter        | `drop_reason` |
 
-### 3.11 Self-healing supervisor (iter44)
+### 3.11 Self-healing supervisor
 
 | Metric (OTel) | Type | Attributes |
 |---|---|---|
@@ -239,14 +239,14 @@ key that is not on the list drops the entire metric and bumps
 | `raxis.kernel.respawn.duration`                | Histogram (ms) | `trigger` |
 | `raxis.supervisor.refused_restart.total`       | Counter        | `reason` |
 
-### 3.12 Operator IPC (iter44)
+### 3.12 Operator IPC
 
 | Metric (OTel) | Type | Attributes |
 |---|---|---|
 | `raxis.operator.ipc.duration`                  | Histogram (ms) | `command_kind`, `accepted` |
 | `raxis.operator.ipc.total`                     | Counter        | `command_kind`, `accepted` |
 
-### 3.13 Kernel↔substrate IPC (iter44 slice 4b)
+### 3.13 Kernel↔substrate IPC
 
 | Metric (OTel) | Type | Attributes |
 |---|---|---|
@@ -262,7 +262,7 @@ projection of every dispatched `IpcMessage` request variant in
 `kernel/src/ipc/server.rs::drive_planner_stream`, plus an
 `unexpected` collapse for the catch-all arm. Pinned by
 `INV-OBS-IPC-ROUNDTRIP-COVERAGE-01`; full discussion in
-`invariants.md §11.13`. The histogram uses the iter44 IPC bucket
+`invariants.md §11.13`. The histogram uses the IPC bucket
 override `[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]`
 ms — substrate IPC round-trips span sub-millisecond ksb-update
 probes through multi-second `planner_fetch_request` tool calls.
@@ -415,7 +415,7 @@ into the Grafana container under the `raxis` folder:
 |---|---|---|
 | `00-overview.json`           | `raxis-00-overview`        | Mission-control entry point |
 | `10-isolation.json`          | `raxis-10-isolation`       | VM cold-boot four-tier histograms |
-| `15-ipc.json`                | `raxis-15-ipc`             | Operator + kernel↔substrate IPC (iter44) |
+| `15-ipc.json`                | `raxis-15-ipc`             | Operator + kernel↔substrate IPC |
 | `20-lifecycle.json`          | `raxis-20-lifecycle`       | Sessions / initiatives / lifecycle transitions |
 | `30-audit.json`              | `raxis-30-audit`           | Append latency, chain length, lag, fsync failures |
 | `40-planner.json`            | `raxis-40-planner`         | Inference latency / tokens / tool calls / retries |

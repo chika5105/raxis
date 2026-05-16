@@ -2,7 +2,7 @@
 //!
 //! Audit discipline: pure read-only browsers. The
 //! `OperatorViewedEscalationList` / `OperatorViewedEscalation`
-//! emissions were retired in `worker/audit-tightening` per the
+//! emissions were retired in an earlier audit-noise sweep per the
 //! signal-vs-noise policy in
 //! `specs/v2/dashboard-operator-action-audit-coverage.md` —
 //! dashboard pageviews are not state-affecting and belong in

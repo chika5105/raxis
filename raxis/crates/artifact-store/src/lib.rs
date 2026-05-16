@@ -1,4 +1,4 @@
-//! V2_GAPS §C5 — immutable artifact store (MVP).
+//! immutable artifact store (MVP).
 //!
 //! Closes the operator-grade leg of `immutable-artifact-store.md`:
 //! a content-addressed, write-once, hash-verified file store rooted

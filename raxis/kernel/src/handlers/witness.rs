@@ -652,13 +652,21 @@ async fn gate_recheck(
             );
 
             // Re-spawn verifiers for remaining missing gates.
+            // Failure to spawn a verifier on recheck used to be
+            // discarded silently — a task could then sit in
+            // `GatesPending` forever with no operator-visible
+            // signal beyond the prior `GatesStillPending` log.
+            // Surface each spawn failure as a structured stderr
+            // event so the operator sees which gate cannot make
+            // progress and can intervene (lift the gate, increase
+            // verifier capacity, or abort the task).
             for gate_type_str in &missing_gates {
                 if let Some(vconfig) = crate::gates::verifier_runner::VerifierConfig::from_policy(
                     &ctx.policy.load(),
                     gate_type_str,
                     &ctx.data_dir,
                 ) {
-                    let _ = crate::gates::verifier_runner::spawn_verifier_with_audit(
+                    if let Err(e) = crate::gates::verifier_runner::spawn_verifier_with_audit(
                         task_id,
                         gate_type_str,
                         evaluation_sha,
@@ -667,7 +675,20 @@ async fn gate_recheck(
                         ctx.store.as_ref(),
                         Some(ctx.audit.clone()),
                     )
-                    .await;
+                    .await
+                    {
+                        eprintln!(
+                            "{{\"level\":\"error\",\
+                             \"event\":\"WitnessRecheckVerifierRespawnFailed\",\
+                             \"task_id\":\"{task_id}\",\
+                             \"gate\":\"{gate_type_str}\",\
+                             \"error\":\"{e}\",\
+                             \"hint\":\"task remains GatesPending; \
+                                        the kernel will not auto-spawn this gate's \
+                                        verifier again on subsequent witnesses — \
+                                        operator action required\"}}"
+                        );
+                    }
                 }
             }
 

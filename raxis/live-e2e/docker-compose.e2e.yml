@@ -3,7 +3,7 @@
 # (`raxis/kernel/tests/full_e2e_session_lifecycle.rs`) AND for every
 # `raxis-live-e2e` slice that needs a real upstream service.
 #
-# Per `specs/v2/e2e-live-test-gap.md` §2.1.
+#§2.1.
 #
 # # Services
 #

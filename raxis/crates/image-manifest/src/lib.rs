@@ -1,8 +1,6 @@
 //! Typed `ImageManifest` for the canonical Reviewer, Orchestrator, and
 //! Executor-starter VM images.
-//!
 //! Normative references:
-//!
 //! * `planner-harness.md §14.4 — Image-build pipeline` (the table that
 //!   names the three manifest paths and the trust boundaries).
 //! * `planner-harness.md §14.2` — the `crates/raxis-image-manifest`
@@ -12,9 +10,7 @@
 //! * `system-requirements.md §11.2` — kernel signing key shape; the
 //!   Ed25519 signature in this crate's `ImageManifest` is over the
 //!   manifest's `bundle_hash` using that key.
-//!
 //! ## What the manifest is
-//!
 //! A binding between **a set of files** (the rootfs source tree) and
 //! **the kernel signing key**, surfaced as TOML so it can be inspected
 //! out-of-band and so a kernel-version upgrade can ship a new manifest
@@ -23,13 +19,10 @@
 //! the canonicalised file list (sorted by path, hex-encoded digests,
 //! newline-delimited). The `signature` is the Ed25519 signature over
 //! `bundle_hash`.
-//!
 //! ## Why typed-not-just-TOML
-//!
 //! TOML alone leaves room for kernel-side parser bugs to silently
 //! accept a malformed manifest. Routing every load through this crate
 //! enforces:
-//!
 //! 1. The manifest's schema-version matches what the kernel binary
 //!    knows how to validate (refuses unknown future versions —
 //!    fail-closed at the trust boundary).
@@ -40,11 +33,8 @@
 //! 4. The `bundle_hash` recomputed from the per-file digests matches
 //!    the value the manifest claims (catches accidental edits to the
 //!    file list without re-signing).
-//!
 //! All four are checked atomically in [`verify`].
-//!
 //! ## What the manifest is NOT
-//!
 //! It is not a Docker / OCI manifest. The OCI image directory and the
 //! EROFS rootfs blob produced by `raxis-image-builder` are
 //! intermediate artefacts; the `ImageManifest` is the kernel-side
@@ -61,9 +51,7 @@ use std::path::Path;
 /// Schema version; bumped on every breaking change to the manifest
 /// shape. The kernel refuses to admit a manifest with a version it
 /// does not know.
-///
 /// History:
-///
 /// * `1` — initial schema; `bundle_hash` covers file list only. No
 ///   commitment to the packed image artefact (`raxis-<role>-<kernel_version>.img`).
 /// * `2` — adds `image_artefact_sha256: String` and folds it into
@@ -78,7 +66,7 @@ use std::path::Path;
 ///   Firecracker) reads this field to decide whether to attach the
 ///   .img as a virtio-blk device (EROFS) or hand it to the boot
 ///   loader as an initial ramdisk (initramfs cpio.gz). Closes the
-///   `mkfs.erofs`-on-macOS gap from `e2e-live-test-gap.md`: dev-host
+///   `mkfs.erofs`-on-macOS gap from  dev-host
 ///   builds emit the InitramfsCpio shape, production builds keep the
 ///   RootfsErofs shape — both are kernel-trusted via the same signed
 ///   manifest. No legacy fallback: a v2 manifest is rejected with
@@ -105,12 +93,10 @@ pub const KEY_FP_LEN: usize = 32;
 /// `image_artefact_sha256`-pinned bytes are an EROFS-formatted
 /// virtio-blk image (production canonical layout) or an initramfs
 /// `cpio.gz` (dev-host layout produced by `raxis-initramfs-builder`).
-///
 /// **The format is signed.** The substrate trusts whatever the
 /// manifest says without re-probing the bytes; a tampered manifest
 /// claiming the wrong shape is caught by signature verification before
 /// the substrate sees the field.
-///
 /// `SCHEMA_VERSION = 3` addition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -145,7 +131,6 @@ impl ImageFormat {
 /// Which canonical role this image targets. Matches
 /// `raxis-types::Role` and the `[planner_role]` enum in the kernel
 /// session schema.
-///
 /// **Backwards-compatible additions (iter62, A8 verifier runtime).**
 /// Adding new variants to this enum is wire-compatible because the
 /// `#[serde(rename_all = "PascalCase")]` discriminant is a closed
@@ -167,7 +152,6 @@ pub enum Role {
     /// Opt-in Executor starter image (operator-elected via policy).
     ExecutorStarter,
     // === iter62 verifier-runtime: production verifier roles ===
-    //
     // Two distinct image identities so the kernel-canonical
     // symbol-index image (which operators MUST NOT override) has
     // its own digest pinning slot in `raxis-canonical-images`
@@ -185,7 +169,7 @@ pub enum Role {
     /// MUTUAL-EXCLUSION-01`). The kernel boot path treats this image
     /// like the executor-starter: trust comes from the signed
     /// manifest, not from a compile-time digest. Closes the
-    /// `V2_GAPS.md A8` runtime gap.
+    /// ` A8` runtime gap.
     Verifier,
     /// **Kernel-canonical symbol-index verifier** — the
     /// `raxis-verifier-symbol-index` image. Kernel-canonical in the
@@ -274,12 +258,10 @@ pub struct ImageManifest {
     pub kernel_version: String,
     /// Bundle hash (`SCHEMA_VERSION = 2`): SHA-256 over the canonical
     /// bytes
-    ///
     /// ```text
     /// "__image_artefact__\0{image_artefact_sha256}\n"
     ///   ++ for each (path, sha256) in sort(files): "{path}\0{sha256}\n"
     /// ```
-    ///
     /// Stored hex-encoded so the manifest stays human-readable; the
     /// in-memory representation in [`ImageManifest::bundle_hash_bytes`]
     /// is the `[u8; 32]` form.
@@ -291,7 +273,6 @@ pub struct ImageManifest {
     /// signature covers the artefact bytes; the kernel boot path
     /// trusts this field to be the expected SHA-256 of the on-disk
     /// .img and refuses to launch a VM whose blob digest disagrees.
-    ///
     /// `SCHEMA_VERSION = 2` addition.
     pub image_artefact_sha256: String,
     /// On-disk shape of the `image_artefact_sha256`-pinned bytes.
@@ -428,14 +409,11 @@ impl ImageManifest {
     }
 
     /// Recompute the bundle hash from the manifest.
-    ///
     /// Canonicalisation (`SCHEMA_VERSION = 3`):
-    ///
     /// 1. Header line `"__image_artefact__\0{image_artefact_sha256}\n"`.
     /// 2. Format line `"__image_format__\0{image_format.as_str()}\n"`.
     /// 3. Sort `files` by `path`, then hash
     ///    `"{path}\0{lowercase-hex sha256}\n"` for each entry.
-    ///
     /// The builder calls this after assembling `files` AND after
     /// computing the .img blob's digest; `verify` calls it when
     /// checking the signature. Folding `image_artefact_sha256` AND
@@ -506,7 +484,6 @@ impl ImageManifest {
 
 /// Verify a manifest end-to-end against the kernel's expected signing
 /// key.
-///
 /// 1. Schema version must equal [`SCHEMA_VERSION`] (already enforced
 ///    by [`ImageManifest::from_toml`], re-checked here defensively).
 /// 2. Recompute `bundle_hash` from `files` and confirm it matches the
@@ -1065,9 +1042,7 @@ mod tests {
     }
 
     // === iter62 verifier-runtime ===
-    //
     // Pin the iter62 additions to the closed `Role` enum so:
-    //
     //   * `as_dir_name` / `artefact_stem` agree with the per-role
     //     subdir layout the xtask bake pipeline writes
     //     (`images/<role.as_dir_name()>/manifest.toml` and

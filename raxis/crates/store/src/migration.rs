@@ -1,7 +1,5 @@
 // raxis-store::migration — DDL migrations for kernel.db.
-//
 // Normative reference: kernel-store.md §2.5.1 "Canonical DDL Parts 1–4"
-//
 // Migration rules (§2.5.1 note):
 //   - All 19 tables are created by migration 1 — the v1 baseline.
 //   - Each migration is applied inside a single BEGIN EXCLUSIVE ... COMMIT.
@@ -10,9 +8,7 @@
 //     the `schema_version` table.
 //   - `apply_pending` is idempotent: calling it on a fully-migrated DB
 //     is a no-op (MAX(version) check).
-//
 // ## Type-safe DDL composition (INV-STORE-03)
-//
 // Per kernel-store.md §2.5.1 INV-STORE-03 "no raw SQL table-name
 // literals", every table reference in this file's DDL is rendered
 // from `crate::Table` and every CHECK-constraint enum list is rendered
@@ -20,7 +16,6 @@
 // `render_migration_1_ddl` is the single point of substitution; the DDL
 // is rebuilt once per `apply_migration_1` call (negligible cost — the
 // kernel applies it at most once per boot on a fresh DB).
-//
 // **Drift safety.** Migration 1 is the historical v1 schema; its
 // rendered text MUST stay byte-identical across builds for a given
 // set of enum variants. The
@@ -43,14 +38,12 @@ use rusqlite::Connection;
 /// The current canonical schema version this build of `raxis-store`
 /// produces. Bumped together with every new `apply_migration_N`
 /// function below.
-///
 /// Normative reference: cli-readonly.md §5.3. The CLI compares this
 /// constant against `MAX(version) FROM schema_version` on every
 /// read-only connection open and exits with `ERR_SCHEMA_MISMATCH`
 /// (exit code 7) on mismatch — preventing the silent
 /// wrong-shape-row class of bug after a migration adds a column the
 /// CLI does not know about.
-///
 /// `pub` so kernel + CLI + every workspace crate that opens
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
@@ -58,11 +51,9 @@ use rusqlite::Connection;
 pub const SCHEMA_VERSION: u32 = 22;
 
 /// Apply all pending migrations to `conn`.
-///
 /// Safe to call on every startup — skips already-applied migrations. Returns
 /// `StoreError::Migration` if the schema is unreadable for any reason OTHER
 /// than the `schema_version` table not yet existing.
-///
 /// Why explicit error discrimination matters: an earlier implementation used
 /// `query_row(...).unwrap_or(0)` and treated *any* `rusqlite::Error` as a
 /// fresh DB. That swallowed `SQLITE_BUSY`, `SQLITE_IOERR`, file-permission
@@ -176,11 +167,9 @@ fn read_current_version(conn: &Connection) -> Result<i64, StoreError> {
 // ---------------------------------------------------------------------------
 // Migration 1 — v1 baseline: all 19 kernel.db tables.
 // kernel-store.md §2.5.1 DDL Parts 1–4.
-//
 // Applied atomically inside a single transaction. If the process crashes
 // mid-migration, SQLite rolls back and the DB is left at version 0 (no
 // schema_version row). The next startup re-applies from scratch.
-//
 // Table creation order matters: FK constraints require referenced tables
 // to exist before the referencing table.
 // ---------------------------------------------------------------------------
@@ -612,28 +601,22 @@ COMMIT;
 
 // ---------------------------------------------------------------------------
 // Migration 2 — v1.x: operator_certificates view table.
-//
 // Normative reference (forthcoming): kernel-store.md §2.5.7
 // "Operator Certificates".
-//
 // **Why a denormalised view table?**
-//
 //   The canonical source of truth for an operator's cert is the
 //   `[[operators.entries.cert]]` sub-table inside the currently-
 //   installed `policy.toml`. The kernel's `cert_check` runtime path
 //   needs three queries on every operator IPC dispatch:
-//
 //     - lookup-by-fingerprint:  `WHERE pubkey_fingerprint = ?`
 //     - expiry sweep:           `WHERE not_after < ? AND kind = 'Standard'`
 //     - kind filter:            `WHERE kind = 'EmergencyRecovery'`
-//
 //   Doing those three from the in-memory `Arc<PolicyBundle>` would
 //   require iterating the operator-entry array on every dispatch.
 //   That's tolerable when there are 3 operators, painful when there
 //   are 30, and the kernel already has a SQLite database per the
 //   architecture — using the table for bulk filters and the bundle
 //   for the wire response is the right factoring.
-//
 // **Atomicity contract.** This table is repopulated by `advance_epoch`
 // in the SAME transaction that updates `policy_epoch_history`. A
 // power-loss between `policy_epoch_history` insert and the cert table
@@ -643,7 +626,6 @@ COMMIT;
 // per cert, scoped to the new epoch_id; we do not maintain history
 // of past certs in this table (the audit chain is the historical
 // record).
-//
 // **Rows captured.** Every operator entry (cert is mandatory —
 // INV-CERT-01 — so there is no cert-less / "legacy" flow). An empty
 // table at boot indicates the genesis ceremony was incomplete and is
@@ -745,19 +727,15 @@ COMMIT;
 
 // ---------------------------------------------------------------------------
 // Migration 3 — initiative_quarantines (kernel-store.md §2.5.8).
-//
 // Adds the `initiative_quarantines` table. A row in this table marks an
 // initiative as frozen: the planner intent dispatcher rejects every
 // subsequent `IntentRequest` against it with `FAIL_INITIATIVE_QUARANTINED`.
-//
 // Two operator commands populate this table:
-//
 //   * `raxis initiative quarantine <id>` inserts a single row.
 //   * `raxis operator quarantine-plans-by <fingerprint>` sweeps all
 //     initiatives whose plan was signed by the named operator (joining
 //     `initiatives` against `signed_plan_artifacts.signed_by`) and
 //     inserts one row per match in a single transaction.
-//
 // The table is append-only in v1 (no "unquarantine"). To recover from a
 // false positive, the operator aborts the initiative entirely and starts
 // a fresh one — the quarantine row is left in place as the audit-trail
@@ -864,7 +842,6 @@ COMMIT;
 
 // ---------------------------------------------------------------------------
 // Migration 4 — spec/migration index parity (kernel-store.md §2.5.8).
-//
 // Adds `idx_initiative_quarantines_quarantined_at` to support the
 // `views::initiative_quarantines::list_all` reader, which executes
 //   `SELECT ... FROM initiative_quarantines ORDER BY quarantined_at DESC`
@@ -872,7 +849,6 @@ COMMIT;
 // SQLite must scan + sort the full table on every list; the table is
 // small in v1 but listing is the read-side hot path for forensics, so
 // we pay the index cost upfront rather than re-tuning later.
-//
 // The spec DDL block (kernel-store.md §2.5.8 "initiative_quarantines
 // schema") has always listed this index. Migration 3 shipped without
 // it (the historical v1 install had `idx_initiative_quarantines_by_
@@ -881,7 +857,6 @@ COMMIT;
 // the spec without removing the legacy index (legacy is harmless and
 // dropping it would force every running kernel to rebuild a perfectly
 // good index for no benefit).
-//
 // Why a separate migration rather than editing migration 3?
 // Migration 3 is HISTORICAL: changing its rendered DDL would force
 // already-installed v1 databases to re-run a migration they already
@@ -923,12 +898,10 @@ COMMIT;
 // ---------------------------------------------------------------------------
 // Migration 5 — V2 hierarchical orchestration substrate.
 // v2-deep-spec.md §1.2 (Steps 5, 6, 12, 16) and INV-DELEGATE-01.
-//
 // This single migration covers four V2 schema additions that arrive as
 // one atomic step because they collectively unlock the V2 sub-task
 // authority chain — partial application would leave the kernel
 // rejecting V2 plans at approve_plan time anyway:
-//
 //   1. `sessions.session_agent_type TEXT` — Orchestrator | Executor |
 //      Reviewer; NULL for V1-style legacy sessions (V1 path stays
 //      working).
@@ -948,13 +921,11 @@ COMMIT;
 //      (v2-deep-spec.md §Step 5). Carries `crash_retry_count` and
 //      `review_reject_count` per v2-deep-spec.md §Step 12 (dual retry
 //      counters), plus `evaluation_sha` for Reviewer activations.
-//
 // **V1 backward compatibility.** Every column added to `sessions` is
 // either NULLable or has a default; existing V1 rows survive without
 // modification and existing V1 handlers continue to read the row
 // without observing any new fields. The new `subtask_activations`
 // table is created empty; V1 initiatives never insert into it.
-//
 // Why a single migration rather than four: each piece is
 // individually trivial and they share the same review cycle. Splitting
 // them would force four separate hash pins on the rendered DDL with
@@ -1132,9 +1103,7 @@ COMMIT;
 // Migration 6 — V2 critique routing column on `tasks`.
 // v2-deep-spec.md §Step 22 ("Critique routing") and §Step 25 ("Parallel
 // reviewer aggregation").
-//
 // Adds a single nullable text column:
-//
 //   tasks.last_critique TEXT  — most recent reviewer-rejection critique,
 //                               aggregated across N parallel reviewers
 //                               for the SAME activation; cleared at the
@@ -1143,7 +1112,6 @@ COMMIT;
 //                               `approved=false`; the Executor's retry
 //                               prompt assembler reads it to prepend
 //                               into the system prompt (Step 22).
-//
 // **Why on `tasks` rather than `subtask_activations`.** v2-deep-spec.md
 // is internally inconsistent here: §Step 22 sketches the Kernel writing
 // to `tasks.last_critique` (singular, per-task), while the activation
@@ -1159,7 +1127,6 @@ COMMIT;
 //      `tasks`; the working DDL in §1.2 was a transcription drift.
 // Spec drift is corrected in this migration's spec reference (Part 8
 // is now authoritative for this column).
-//
 // **V1 backward compatibility.** The new column is NULLable with no
 // default; every V1 row gets `NULL` and every V1 read continues to
 // work because no V1 code reads `last_critique`.
@@ -1204,16 +1171,12 @@ COMMIT;
 // ---------------------------------------------------------------------------
 // Migration 7 — V2 per-Reviewer verdict column on `tasks`.
 // v2-deep-spec.md §Step 25 ("Parallel Reviewers and the Logical AND Verdict").
-//
 // Adds a single nullable text column with a CHECK constraint:
-//
 //   tasks.review_verdict TEXT CHECK (review_verdict IN ('Approved',
 //                                                        'Rejected'))
-//
 //     NULL  — no SubmitReview accepted for this task yet.
 //     'Approved' — Reviewer submitted `approved=true`.
 //     'Rejected' — Reviewer submitted `approved=false`.
-//
 // Why on `tasks` rather than `subtask_activations`. The Step 25
 // aggregation pass joins `task_dag_edges → tasks.review_verdict` to
 // answer the question "have all sibling Reviewers of this Executor
@@ -1224,7 +1187,6 @@ COMMIT;
 // accepted the verdict; the actual approve/reject signal is the
 // per-task `review_verdict` column added here). See doc on
 // `raxis_types::ReviewVerdict` for the full reasoning.
-//
 // V1 backward compatibility: NULLable, no DEFAULT — every V1 row keeps
 // `NULL`, every V1 read continues to work.
 // ---------------------------------------------------------------------------
@@ -1271,9 +1233,7 @@ COMMIT;
 
 // ---------------------------------------------------------------------------
 // Migration 8 — V2 Plan Bundle Sealing storage layout (§8.2)
-//
 // Normative reference: plan-bundle-sealing.md §8.2 ("Storage layout").
-//
 // Adds three V2 tables and one V1-table column:
 //   1. `plan_bundles`             — content-addressed store of every
 //                                    operator-signed plan bundle, keyed by
@@ -1291,14 +1251,12 @@ COMMIT;
 //                                    admission time, NOT in DDL — V1
 //                                    rows that pre-date the column must
 //                                    keep working unchanged).
-//
 // V1 backward compatibility: every existing `initiatives` row keeps its
 // `plan_artifact_sha256` (the V1 reference into `signed_plan_artifacts`)
 // and gets `plan_bundle_sha256 = NULL`. The V1 admission path is removed
 // for new initiatives (handled at the kernel-level `OperatorRequest`
 // dispatcher), but V1 reads (audit replay, recovery of pre-V2 history)
 // continue to work against the unchanged `signed_plan_artifacts` table.
-//
 // Replay-protection sweep cadence is implemented in
 // `kernel-lifecycle.md`'s maintenance loop, NOT in this migration.
 // Migration only creates the table + supporting index. The sweep query
@@ -1451,23 +1409,19 @@ COMMIT;
 
 // ---------------------------------------------------------------------------
 // Migration 9 — `tasks.clone_strategy` column for V2 worktree provisioning.
-//
 // Normative references:
 //   * v2-deep-spec.md §Step 27 ("Sparse-clone strategies")
 //   * worktree-provision/src/lib.rs — the §Step 27 doc-comments at the
 //     top of that crate name `tasks.clone_strategy` as the persistence
 //     target for the strategy chosen at admission time.
-//
 // Adds a single nullable text column with a CHECK constraint pinning
 // the universe of legal values to `CloneStrategy::ALL`:
-//
 //   tasks.clone_strategy TEXT
-//       — `full` | `blobless` | `sparse`. NULL on every V1 row (V1
+// `full` | `blobless` | `sparse`. NULL on every V1 row (V1
 //         knows nothing about clone strategies); NOT NULL on every V2
 //         row, enforced at the application layer in admission rather
 //         than in DDL so V1 tasks already on disk continue to read
 //         cleanly after the column is added.
-//
 // **Why on `tasks` rather than `subtask_activations`.** The clone
 // strategy is a property of the *task* (declared once at admission
 // time and re-used on every retry of that task), not of an individual
@@ -1477,7 +1431,6 @@ COMMIT;
 // activation of the same task). `subtask_activations` rows already
 // reference `tasks.task_id`, so the strategy is one JOIN away when
 // per-activation queries need it.
-//
 // **V1 backward compatibility.** The new column is NULLable with no
 // default, so every existing V1 row gets `NULL` automatically and
 // every V1 read continues to work unchanged. The CHECK clause
@@ -1528,20 +1481,16 @@ COMMIT;
 // ---------------------------------------------------------------------------
 // Migration 10 — `task_credential_proxies` table: per-task credential-proxy
 // declarations persisted at approve_plan time.
-//
 // Normative references:
 //   * credential-proxy.md §3 ("Plan-level declarations")
 //   * v2-deep-spec.md §Step 17 ("approve_plan shift-left validation")
-//
 // ⚠ THIS TABLE DOES NOT STORE CREDENTIAL VALUES.
-//
 // `task_credential_proxies` is a metadata-only registry of which
 // credential proxies should be bound for each task. Each row carries:
-//
 //   task_credential_proxies(task_id, credential_name, mount_as,
 //                           proxy_type, proxy_json,
 //                           created_at_unix_secs)
-//       — one row per `[[tasks.credentials]]` block declared on a
+// one row per `[[tasks.credentials]]` block declared on a
 //         V2 task. Inserted by `approve_plan` in the SAME
 //         transaction that inserts the parent `tasks` row
 //         (INV-STORE-02). Read once at session-spawn time by the
@@ -1549,7 +1498,6 @@ COMMIT;
 //         `proxy_json` back into
 //         `raxis_plan_credentials::TaskCredentialDecl` and uses the
 //         resulting decl to bind a fresh proxy listener.
-//
 // The credential bytes themselves (postgres URL with password,
 // bearer tokens, kubeconfig YAML, …) are NEVER persisted in
 // `kernel.db`. They live with the kernel's `CredentialBackend`. The
@@ -1559,11 +1507,9 @@ COMMIT;
 // `AwsSecretsManagerBackend`, or similar — but the kernel.db schema
 // stays the same: it only holds the *names* of credentials and the
 // proxy restrictions to apply.
-//
 // **Naming.** The table is `task_credential_proxies`, NOT
 // `task_credentials`. The shorter name was rejected because it
 // would falsely imply that credential bytes are persisted here.
-//
 // **Why a JSON column for `proxy_json`** (vs. a normalised
 // per-proxy-type column set):
 //   * Per-proxy-type fields drift independently:
@@ -1579,12 +1525,10 @@ COMMIT;
 //     per-proxy fidelity. The `proxy_type` column is projected out of
 //     the JSON for index/query convenience and to enable a CHECK
 //     clause that pins the legal proxy-type universe.
-//
 // **Composite primary key.** `(task_id, credential_name)` is unique
 // per task; `raxis-plan-credentials` already enforces this in its
 // parser (`parse_for_task` rejects duplicate `name` within a task),
 // but pinning it in DDL also as the PK gives us a hard backstop.
-//
 // **V1 backward compatibility.** New table; no V1 rows. Migration 10
 // is idempotent on a fresh DB *and* on a DB already at version 9.
 // ---------------------------------------------------------------------------
@@ -1665,20 +1609,16 @@ COMMIT;
 // ---------------------------------------------------------------------------
 // Migration 11 — V2 pre-merge verifier attempt tracking.
 // integration-merge.md §11.10.1 + §11.10.4; verifier-processes.md §16.
-//
 // Adds one new table:
-//
 //   integration_merge_attempts — one row per IntegrationMerge intent
 //                                 that reaches Check 5d. Tracks the
 //                                 candidate-merge-tree → pre-merge-verifier
 //                                 → main-advance pipeline FSM and is
 //                                 swept at boot per §11.10.4.
-//
 // The table is **strictly distinct** from `initiatives.git_apply_pending`
 // (which gates the §11.1 phase 1→2 boundary for the actual main advance);
 // `integration_merge_attempts` governs the strictly *earlier* candidate-
 // merge-tree → pre-merge-verifier boundary (§11.10).
-//
 // Atomicity: rows are inserted at Check 5d.1 in the same `BEGIN
 // IMMEDIATE` transaction that records the IntegrationMerge intent
 // acceptance, so a concurrent re-submission of the same merge cannot
@@ -1822,20 +1762,16 @@ COMMIT;
 
 // ---------------------------------------------------------------------------
 // Migration 12 — V2 §2.5 per-task LLM token-usage accounting.
-//
-// `v2_extended_gaps.md §2.5` admission gate requires the kernel to
+// admission gate requires the kernel to
 // know each task's cumulative LLM input/output token consumption
 // AND the corresponding micro-dollar cost (derived from the
 // operator-declared `[providers.<id>.pricing]` tables) to enforce
 // `policy.max_cost_per_task` as a real dollar ceiling rather than a
 // flat admission-units heuristic.
-//
 // We add three columns to `tasks`:
-//
 //   * cumulative_input_tokens         — INTEGER NOT NULL DEFAULT 0
 //   * cumulative_output_tokens        — INTEGER NOT NULL DEFAULT 0
 //   * cumulative_token_cost_micros    — INTEGER NOT NULL DEFAULT 0
-//
 // Why these live on `tasks` and not on a separate event table:
 // admission is a per-task decision — the kernel needs the
 // running totals at sub-millisecond cost on every intent
@@ -1843,12 +1779,10 @@ COMMIT;
 // query (`SUM(...) WHERE task_id = ?1`) inside the admission hot
 // path; co-locating the running totals on the task row keeps
 // admission O(1).
-//
 // Audit reconstruction still works: `IntentAccepted` audit
 // events carry the per-intent `tokens_used` payload (V2 §2.5
 // phase D), so the full per-turn history is replayable from the
 // audit chain alone.
-//
 // Defaults: NOT NULL DEFAULT 0 means existing rows on a V2.4 DB
 // being migrated forward see "no LLM tokens charged yet" — which
 // is correct because pre-migration tasks predate the
@@ -1897,11 +1831,9 @@ COMMIT;
 
 // ---------------------------------------------------------------------------
 // Migration 13 — V2 §3.2 `structured_outputs` table.
-//
-// `v2_extended_gaps.md §3.2` typed mid-session outputs (progress
+// typed mid-session outputs (progress
 // reports, diagnostic flags, task summaries) emitted by executor /
 // orchestrator agents via the `structured_output` planner tool.
-//
 // Schema:
 //   * output_id        UUID v4 (PK), kernel-generated.
 //   * initiative_id    text, FK to `initiatives.initiative_id`.
@@ -1918,13 +1850,11 @@ COMMIT;
 //                      `StructuredOutputKind` enum (tagged
 //                      snake_case).
 //   * emitted_at       integer unix-seconds.
-//
 // Indexes:
 //   * `(task_id, emitted_at)` — `raxis task outputs <id>` query.
 //   * `(initiative_id, emitted_at)` — dashboard initiative view.
 //   * `(session_id)` — per-session rate-limit lookup
 //     (`STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT`).
-//
 // Atomicity: a single INSERT is enough — no FSM transition, no
 // budget reservation. The §3.2 handler runs its INSERT inside the
 // same `BEGIN IMMEDIATE` transaction as the per-session rate-limit
@@ -1981,12 +1911,10 @@ COMMIT;
 
 // ---------------------------------------------------------------------------
 // Migration 14 — kernel-owned notifications table.
-//
 // Every notification the kernel generates is stored here unconditionally,
 // regardless of which delivery channels (Shell, File, Email, Sidecar)
 // the operator configured. This is the ground truth for `raxis inbox`,
 // the dashboard notification view, and read/unread state.
-//
 // The inbox.jsonl file continues to be appended to as a durable fallback,
 // but the SQLite table is the queryable, indexed, authoritative store.
 // ---------------------------------------------------------------------------
@@ -2047,7 +1975,6 @@ COMMIT;
 // ---------------------------------------------------------------------------
 // Migration 15 — provider_circuit_state table.
 // provider-failure-handling.md §6.3 / §6.4.
-//
 // Per-(provider, model) circuit-breaker state. State transitions are
 // transactional: every record_failure / record_success / Open → HalfOpen
 // promotion executes inside a single BEGIN IMMEDIATE that also inserts
@@ -2109,9 +2036,7 @@ COMMIT;
 // ---------------------------------------------------------------------------
 // Migration 16 — initiatives.git_apply_pending durable-recovery flag.
 // integration-merge.md §11.1 (DDL) + §11.2/§11.3 (recovery semantics).
-//
 // Three-phase model for IntegrationMerge admission:
-//
 //   * Phase 1 — SQLite BEGIN IMMEDIATE: UPDATE current_sha,
 //               SET git_apply_pending = 1, INSERT
 //               IntegrationMergeCompleted audit, UPDATE
@@ -2119,7 +2044,6 @@ COMMIT;
 //   * Phase 2 — Host-side `git fetch` + `git update-ref` against
 //               refs/heads/<target_ref> (idempotent).
 //   * Phase 3 — Single SQLite UPDATE: git_apply_pending = 0.
-//
 // Between Phase 1 and Phase 3 the row carries
 // `git_apply_pending = 1`. Startup recovery
 // (kernel-lifecycle.md §7 + integration-merge.md §11.3) scans
@@ -2129,7 +2053,6 @@ COMMIT;
 // the (a) consistent state or transitions the initiative to
 // `Blocked` with a `SecurityViolation { GitStateInconsistent }`
 // audit event (case C — §11.8 INV-MERGE-CONSISTENCY).
-//
 // The partial index keeps the boot-scan O(in-flight merges)
 // rather than O(all initiatives ever) (§11.1, end of section).
 // ---------------------------------------------------------------------------
@@ -2176,7 +2099,6 @@ COMMIT;
 // ---------------------------------------------------------------------------
 // Migration 17 — widen `task_credential_proxies.proxy_type` CHECK to
 // include every variant declared by `raxis_plan_credentials::ProxyVariant`.
-//
 // The original migration-10 DDL pinned the CHECK to the eight V2-baseline
 // proxy types (postgres, http, k8s, smtp, redis, aws, gcp, azure). Three
 // later proxy variants — `mysql`, `mssql`, `mongodb` — were added to
@@ -2187,7 +2109,6 @@ COMMIT;
 // transactional INSERT into `task_credential_proxies` fires
 // `CHECK constraint failed: proxy_type IN (...)` and the operator
 // sees `FAIL_APPROVE_PLAN` with no actionable detail.
-//
 // SQLite does NOT support `ALTER TABLE ... DROP CONSTRAINT` (or any
 // constraint-mutation idiom on a CHECK), so we rebuild the table
 // using the canonical `CREATE-NEW → INSERT-FROM-OLD → DROP-OLD →
@@ -2267,9 +2188,8 @@ COMMIT;
 // ---------------------------------------------------------------------------
 // Migration 18 — Orchestrator session ↔ initiative linkage + relax
 //                `structured_outputs.task_id` to nullable.
-//
 // Spec references:
-//   * `v2_extended_gaps.md §3.2` — `structured_output` is a tool any
+//   * `structured_output` is a tool any
 //     planner-class agent can call (Executor, Reviewer, **and**
 //     Orchestrator). The original migration-13 schema modelled the
 //     `structured_outputs` row as `(initiative_id, task_id, session_id)`
@@ -2287,9 +2207,7 @@ COMMIT;
 //     queries had to walk through `subtask_activations` (which only
 //     covers Executor / Reviewer descendants) to discover the
 //     coordinator — fragile and inconsistent.
-//
 // What changes:
-//
 //   1. `sessions` gains a nullable `initiative_id` column with a FK
 //      to `initiatives(initiative_id)` and a partial index covering
 //      the populated-only subset. Orchestrator sessions populate it
@@ -2299,7 +2217,6 @@ COMMIT;
 //      partial index probe). This gives the intent handler a single,
 //      typed lookup to recover the coordinator's owning initiative
 //      without join-walking through `subtask_activations`.
-//
 //   2. `structured_outputs` is rebuilt with a NULLABLE `task_id`.
 //      The FK to `tasks(task_id)` is preserved (FK still enforced
 //      when the value is non-null per SQLite semantics) so executor
@@ -2308,14 +2225,12 @@ COMMIT;
 //      `task_id IS NULL`. Indexes and the `(initiative_id, session_id,
 //      kind, severity, payload_json, emitted_at)` column shape are
 //      otherwise byte-identical to migration 13.
-//
 // SQLite has no `ALTER TABLE ... ALTER COLUMN`, so the
 // `structured_outputs` change uses the canonical
 // `CREATE-NEW → INSERT-FROM-OLD → DROP-OLD → RENAME` pattern (see
 // migration 17 for the precedent). The `sessions` change is a
 // straight `ALTER TABLE ADD COLUMN` because SQLite *does* support
 // adding a nullable column without a table rebuild.
-//
 // Atomicity: the entire migration runs inside one
 // `BEGIN EXCLUSIVE … COMMIT`, so a crash mid-migration leaves the
 // pre-migration schema fully intact (matches the every-migration
@@ -2342,7 +2257,7 @@ BEGIN EXCLUSIVE;
 
 -- ── 1. sessions: add initiative_id (nullable) + partial index ────────────
 --
--- v2_extended_gaps.md §3.2 — a planner-class session needs a typed
+-- a planner-class session needs a typed
 -- back-reference to the initiative it was minted under so the kernel
 -- can route Orchestrator-emitted `structured_output` rows to the
 -- correct `initiatives.initiative_id` without a join through
@@ -2412,7 +2327,6 @@ COMMIT;
 
 // ---------------------------------------------------------------------------
 // Migration 19 — Orchestrator no-progress respawn counter.
-//
 // `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01` requires a structural
 // backstop against unbounded orchestrator respawn loops on rejected
 // intents. The Orchestrator agent is short-lived (per
@@ -2425,10 +2339,8 @@ COMMIT;
 // loop on a rejected intent indefinitely (observed on the second
 // iter42: 45 `SessionVmSpawned` in 18 min, zero progress, zero
 // `Failed` transitions to trigger `crash_count`).
-//
 // This migration adds `orchestrator_no_progress_respawn_count` to
 // `initiatives`. The counter is:
-//
 //   * incremented in `respawn_orchestrator_for_initiative` BEFORE
 //     each new orchestrator session is spawned;
 //   * reset to 0 whenever the kernel observes a task-FSM advance or
@@ -2437,16 +2349,13 @@ COMMIT;
 //   * compared against
 //     `respawn_orchestrator_for_initiative`'s constant
 //     `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3).
-//
 // On ceiling exceed: the kernel marks the initiative `Failed` with
 // `reason = "orchestrator no-progress respawn ceiling exceeded"`,
 // emits `AuditEventKind::OrchestratorRespawnCeilingExceeded`, and
 // refuses further respawns for that initiative.
-//
 // Atomicity: single `BEGIN EXCLUSIVE … COMMIT`. Crash mid-migration
 // leaves the pre-migration schema intact (every-migration invariant
 // declared at the top of this module).
-//
 // Pre-Migration-19 rows default to 0 — the moment migration completes
 // every initiative observably has no respawns counted, consistent
 // with "fresh kernel start treats all initiatives as un-loop-stalled".
@@ -2486,7 +2395,6 @@ COMMIT;
 
 // ---------------------------------------------------------------------------
 // Migration 20 — Escalation initiator column.
-//
 // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` introduces the FIRST
 // kernel-initiated escalation class
 // (`EscalationClass::LogicalDeadlock`). Pre-Migration-20 every row
@@ -2496,7 +2404,6 @@ COMMIT;
 // `kernel/src/orch_respawn_ceiling.rs::insert_logical_deadlock_escalation_in_tx`
 // inserts a row whose `initiator` is `'Kernel'` instead of
 // `'Planner'`.
-//
 // This migration adds the column with a default of `'Planner'` so
 // pre-Migration-20 rows observably keep their original semantics
 // after the upgrade. The kernel approve/deny handlers consult the
@@ -2505,7 +2412,6 @@ COMMIT;
 // initiated rows are eligible — a planner-submitted row of the
 // same class would be rejected at admission, but the constraint
 // is encoded as a defense-in-depth check on the approve path).
-//
 // Atomicity: single `BEGIN EXCLUSIVE … COMMIT`. Crash mid-migration
 // leaves the pre-migration schema intact (every-migration invariant
 // declared at the top of this module).
@@ -2549,7 +2455,6 @@ COMMIT;
 
 // ---------------------------------------------------------------------------
 // Migration 21 — iter62 per-task cumulative cache-token columns.
-//
 // `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01` introduces two new
 // per-task SQLite columns mirroring the planner's
 // `TokensReport.cache_creation_tokens` /
@@ -2561,12 +2466,10 @@ COMMIT;
 // cache_* deltas — cost reconciliation against the provider's
 // billed cache_creation_input_tokens / cache_read_input_tokens was
 // then impossible without re-parsing the audit chain.
-//
 // The columns are `INTEGER NOT NULL DEFAULT 0` so pre-migration
 // rows surface as zero (no observable cache hits / creations
 // recorded) until the next `IntentRequest` admission lands and
 // the kernel issues the canonical UPDATE.
-//
 // Atomicity: single `BEGIN EXCLUSIVE … COMMIT`. Crash mid-
 // migration leaves the pre-migration schema intact (every-
 // migration invariant declared at the top of this module).
@@ -2611,7 +2514,6 @@ COMMIT;
 
 // ---------------------------------------------------------------------------
 // Migration 22 — iter62 validation_reject_count + max_validation_rejections.
-//
 // `INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01` introduces a third
 // per-activation counter on `subtask_activations` that disambiguates
 // validation-class rejections (FailInvalidDiff: empty diff, unchanged
@@ -2623,12 +2525,10 @@ COMMIT;
 // turns don't help when the planner produced a malformed terminal
 // intent). The new counter (default ceiling 2) gives validation
 // rejection a separate, properly-scoped budget.
-//
 // Both columns are `INTEGER NOT NULL DEFAULT 0` (counter) and
 // `INTEGER NOT NULL DEFAULT 2` (ceiling) respectively — pre-
 // migration rows surface as "no validation rejections so far,
 // stock ceiling".
-//
 // Atomicity: single `BEGIN EXCLUSIVE … COMMIT`. Crash mid-
 // migration leaves the pre-migration schema intact (every-
 // migration invariant declared at the top of this module).
@@ -2867,7 +2767,7 @@ mod tests {
             check_in_clause(&DelegationStatus::STORED, |s| DelegationStatus::as_sql_str(
                 s
             )
-            .expect("STORED variants must serialise"),),
+            .expect("STORED variants must serialise")),
             "('Active', 'StaleOnNextUse', 'RenewalRequired')",
         );
         // escalations.status — kernel-store.md §2.5.1 Table 9.
@@ -2955,7 +2855,7 @@ mod tests {
             Table::StructuredOutputs,
             // Migration 14 — v2: kernel-owned notification store
             //                (notification-routing.md §3 + §4 +
-            //                v2_extended_gaps.md §3.4). Source of truth
+            // ). Source of truth
             //                for raxis inbox + the dashboard
             //                /notifications page.
             Table::Notifications,
@@ -3331,7 +3231,6 @@ mod tests {
     }
 
     /// Hash-pin the rendered Migration 1 DDL.
-    ///
     /// **Why this test exists.** Migration 1 is the historical v1
     /// schema; once a database has been migrated to v1 it never
     /// re-runs Migration 1, so changing this DDL silently is a real
@@ -3340,9 +3239,7 @@ mod tests {
     /// change — whether intentional (you bumped a `Self::ALL` array,
     /// renamed a table, fixed a comment) or accidental (a
     /// reformatter touched the heredoc) — to surface in code review.
-    ///
     /// **What to do when this test fails.**
-    ///
     ///   1. Inspect the diff against the previous Migration 1 DDL.
     ///   2. If the change is *cosmetic only* (whitespace, comment),
     ///      update the pinned hash in this test.
@@ -3380,7 +3277,6 @@ mod tests {
     /// Pinned hash of the v1 baseline DDL produced by
     /// `render_migration_1_ddl()`. Captured on a 64-bit Unix host
     /// after the INV-STORE-03 type-safe-rendering refactor landed.
-    ///
     /// **Stability contract.** `DefaultHasher` is a `SipHash` with a
     /// fixed initial state; the digest is deterministic across
     /// builds and platforms FOR A GIVEN STD LIBRARY VERSION. If a
@@ -3520,7 +3416,6 @@ mod tests {
     /// INV-DELEGATE-01 enforced at the SQL layer (defense in depth):
     /// a row with can_delegate=1 AND session_agent_type ≠ 'Orchestrator'
     /// must be rejected by the row-level CHECK.
-    ///
     /// The application-layer create_session is the primary gate; this
     /// test pins the secondary database-level guard so that even a
     /// raw SQL writer (e.g. an admin debugging through `sqlite3`) cannot
@@ -6092,7 +5987,7 @@ mod tests {
     /// `validation_reject_count INTEGER NOT NULL DEFAULT 0` and
     /// `max_validation_rejections INTEGER NOT NULL DEFAULT 2`. The
     /// counter mirrors `review_reject_count` / `crash_retry_count`
-    /// — bumped per-row when the kernel rejects a CompleteTask
+    /// bumped per-row when the kernel rejects a CompleteTask
     /// with `FailInvalidDiff` — and the ceiling is the budget
     /// against which the orchestrator decides Failed vs retry.
     #[test]

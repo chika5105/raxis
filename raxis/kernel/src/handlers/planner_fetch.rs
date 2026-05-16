@@ -209,7 +209,7 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
     // `dashboard-kernel/src/task_llm_capture.rs` ring receives
     // one record per round-trip.
     //
-    // Pre-iter62 this was hardcoded to `None`, defeating the
+    // Previously this was hardcoded to `None`, defeating the
     // observer entirely — the iter62 forensics work-dir's
     // `llm-turns/` directory was empty across 22+ planner
     // sessions because every kernel-mediated fetch dropped

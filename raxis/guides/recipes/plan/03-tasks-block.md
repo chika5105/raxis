@@ -35,7 +35,7 @@ reference. Other recipes drill deeper into individual fields.
 > error but the kernel does NOT enforce them. The
 > `subtask_activations.review_reject_count` substrate is wired
 > (V2.5+), but the parser + ceiling enforcement are V2.6 follow-ups
-> in `specs/v2/V2_GAPS.md §12.13`. Don't rely on them; orchestrator
+> in . Don't rely on them; orchestrator
 > heuristics still drive escalation.
 
 ---

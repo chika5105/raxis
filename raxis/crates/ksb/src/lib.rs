@@ -3,7 +3,7 @@
 //! ships into the planner-role LLM's system prompt every turn
 //! (`kernel-mechanics-prompt.md` §"KSB delivery").
 //!
-//! Closes V2 `v2_extended_gaps.md §2.4` by giving the kernel and
+//! Closes by giving the kernel and
 //! the planner-core driver one source of truth for the wire shape:
 //!
 //! * **Kernel side.** `kernel/src/initiatives/ksb_assembly.rs` builds
@@ -218,7 +218,7 @@ pub struct KsbSnapshot {
 
     /// Initiative target ref the orchestrator's
     /// `IntegrationMerge` will fast-forward (resolved at admission
-    /// time per `V2_GAPS.md §12.8`). Empty for non-orchestrator
+    /// time per ``). Empty for non-orchestrator
     /// roles.
     #[serde(default)]
     pub target_ref: String,
@@ -277,7 +277,7 @@ pub struct KsbSnapshot {
     /// `tasks.last_critique`), surfaced into the executor / reviewer
     /// KSB on retry rounds (`attempt > 1` OR
     /// `review_reject_count > 0` OR `validation_reject_count > 0`).
-    /// Pre-iter62 the persisted column was correct but never
+    /// Previously the persisted column was correct but never
     /// projected into the KSB, so a retried executor produced the
     /// same flawed diff round after round — the round-N+1 turn
     /// could not reference the round-N reviewer feedback because
@@ -626,7 +626,7 @@ pub struct DagRow {
     /// becomes self-preventing rather than respawn-loop-discoverable.
     ///
     /// `serde(default)` for forward / backward wire compat with
-    /// any pre-iter50 dashboard / replay tool that decodes a KSB
+    /// any earlier dashboard / replay tool that decodes a KSB
     /// snapshot from disk: the renderer always emits the field on
     /// the wire so a fresh KSB carries it, but a stale
     /// JSON-decoded snapshot without the field defaults to
@@ -1261,7 +1261,7 @@ pub fn assemble_system_prompt(nnsp: &str, snapshot: &KsbSnapshot) -> Result<Stri
 
 // ---------------------------------------------------------------------------
 // Tests — moved verbatim from the legacy `planner-core::ksb` module
-// + extended with the new V2 `v2_extended_gaps.md §2.4` fields.
+// + extended with the new fields.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1632,7 +1632,7 @@ mod tests {
         }
     }
 
-    /// V2 `v2_extended_gaps.md §2.4` — the JSON wire shape MUST
+    /// the JSON wire shape MUST
     /// round-trip cleanly so the kernel-side serialise + driver-side
     /// deserialise pair produces a byte-identical render.
     #[test]
@@ -1653,7 +1653,7 @@ mod tests {
         );
     }
 
-    /// V2 `v2_extended_gaps.md §2.4` — adding a field is a
+    /// adding a field is a
     /// non-breaking change. A driver running an older
     /// `KsbSnapshot` schema MUST tolerate a kernel that emits
     /// extra keys (forward compat). serde's `#[serde(default)]`

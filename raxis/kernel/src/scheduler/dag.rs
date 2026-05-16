@@ -143,7 +143,7 @@ pub fn next_ready_tasks(initiative_id: &str, store: &Store) -> Result<Vec<String
 /// Called by `handlers/witness.rs` after a gate-recheck returns Pass.
 ///
 /// **`INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` / `INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01`.**
-/// Pre-iter63 this helper performed a raw `UPDATE tasks SET state=Admitted`
+/// Previously this helper performed a raw `UPDATE tasks SET state=Admitted`
 /// that bypassed the kernel-wide FSM-transition pipeline at
 /// `task_transitions::transition_task_with_audit`, which meant the
 /// audit chain carried a `GatesPending` task with no
@@ -200,7 +200,7 @@ mod tests {
     //! `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` witness for the
     //! gate-recheck `GatesPending → Admitted` edge.
     //!
-    //! Pre-iter63 `transition_to_admitted` performed a raw
+    //! Previously `transition_to_admitted` performed a raw
     //! `UPDATE tasks SET state = 'Admitted' WHERE state = 'GatesPending'`
     //! and never emitted the corresponding `TaskStateChanged`
     //! audit row. The iter62 audit chain therefore showed

@@ -1,7 +1,6 @@
 // `<RetryValidationRejectCard>` —
 // `LifecycleAnnotation::RetryValidationReject`. Surfaces the
-// validator reason and structured detail. Wired but
-// dormant on the backend until Worker 1's C7 lands.
+// validator reason and structured detail.
 
 import { useState } from "react";
 

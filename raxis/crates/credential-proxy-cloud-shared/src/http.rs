@@ -81,7 +81,7 @@ impl CloudHttpClient {
     /// Returns the upstream status code + body bytes on any
     /// response (including 4xx / 5xx — those are not errors
     /// here; the caller classifies them via `UpstreamError::Upstream4xx`
-    /// / `Upstream5xx`).
+    /// `Upstream5xx`).
     pub async fn post_form_urlencoded(
         &self,
         url: &str,

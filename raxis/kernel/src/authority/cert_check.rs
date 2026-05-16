@@ -115,7 +115,7 @@ pub struct CertEnforcer {
     /// the epoch_id changes — old entries become unreachable.
     warned: Mutex<HashSet<(String, u64)>>,
 
-    /// V2_GAPS §D1 — revocation store. Loaded at kernel boot from
+    /// revocation store. Loaded at kernel boot from
     /// `<data_dir>/revocations/<pubkey_hex>.toml`; each record is
     /// the operator-signed revocation of a cert. The enforcer
     /// consults this BEFORE the four-zone state machine so a
@@ -140,7 +140,7 @@ impl CertEnforcer {
         }
     }
 
-    /// V2_GAPS §D1 — install a revocation store. Called once at
+    /// install a revocation store. Called once at
     /// kernel boot after the store loads `<data_dir>/revocations/`.
     /// Subsequent `enforce` calls will consult this store before
     /// computing the four-zone state.
@@ -303,7 +303,7 @@ impl CertEnforcer {
             }
 
             CertStatus::Revoked { reason, revoked_at } => {
-                // V2_GAPS §D1 — admission-time revocation gate.
+                // admission-time revocation gate.
                 // Every denied op is audited (NOT deduped) so a
                 // forensic timeline can reconstruct exactly when an
                 // attacker tried to reuse a revoked cert. Same

@@ -2,12 +2,11 @@
 //
 // Pin: per-turn cards render with usage + cache-hit ratio
 // colour coded by the FE-derived ratio. The empty state
-// surfaces a hint pointing operators at the kernel-side tap
-// once Worker 1 lands.
+// surfaces a hint pointing operators at the kernel-side tap.
 //
 // `INV-DASHBOARD-LLM-TURN-CAPTURED-01` (paired with kernel
 // tap), `INV-DASHBOARD-LLM-TURN-PANEL-WIRE-SHAPE-01`
-// (iter64 wire-shape contract).
+// (wire-shape contract).
 
 import React from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";

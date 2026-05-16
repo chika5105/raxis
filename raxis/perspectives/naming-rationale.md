@@ -12,7 +12,7 @@ The companion piece **[`need-for-cj-brain.md`](need-for-cj-brain.md)** is where 
 
 ## How I think about building systems
 
-I did not learn what “good systems” look like from blog posts. I learned it from jobs where a mistake shows up as a bad balance on a cardholder account, a silent failure in endpoint security at billion-call scale, or GPU budget bleeding into production without anyone noticing until the bill arrives.
+I did not learn what "good systems" look like from blog posts. I learned it from jobs where a mistake shows up as a bad balance on a cardholder account, a silent failure in endpoint security at billion-call scale, or a GPU budget bleeding into production without anyone noticing until the bill arrives.
 
 I have worked at **Google**, **Cruise**, **Galileo Financial Technologies**, and **Microsoft**: AV infrastructure, payment authorization, security products, developer tooling. The domains change; the failure mode that scares me does not. The expensive bugs are rarely the ones that take the service down. They are the ones that let everything stay green while something important is wrong.
 
@@ -40,7 +40,7 @@ I **strongly advocate** for using AI in software engineering: it is how I want t
 
 I started using agents to move faster on Aegis. The best models at the time (Claude Opus included) were *almost* right often enough to be dangerous.
 
-A change could compile, look fine on review, and still miss edge cases any engineer who has shipped production code would have caught. Models wandered outside the task’s file scope. Sometimes they said tests passed when they had not run, or had run the wrong thing. The diff and the story did not match.
+A change could compile, look fine on review, and still miss edge cases any engineer who has shipped production code would have caught. Models wandered outside the task's file scope. Sometimes they said tests passed when they had not run, or had run the wrong thing. The diff and the story did not match.
 
 Bugs have always been part of shipping software; even exceptional human engineers make mistakes. Over decades we built reviews, tests, type systems, staging, rollbacks, and incident practice to live with imperfection: those processes narrow risk and catch whole classes of failures, but they never eliminate them outright. Using models did not create defect risk from nothing; it exploded how much code and churn move through a team in the same calendar time, which widens exposure if the safety margins around the human stay flat. Accountability did not transfer to the weights. **Humans are still responsible for what they ship**, full stop, whether they authored every line by hand or accepted AI-drafted changes under their own sign-off.
 
@@ -148,7 +148,7 @@ CJBrain was what I named it on day one. RAXIS is what the spec turned out to des
 
 A “complete” RAXIS story wants things one repo cannot deliver by itself:
 
-- **Hardware root of trust.** We assume the kernel process is honest; a compromised host blows up the guarantees. Serious deployment eventually wants TPM / enclave / FIDO-class anchors so the verifier chain is attestable too. That is bigger than this project.
+- **Hardware root of trust.** We assume the kernel process is honest; a compromised host voids the guarantees. Serious deployment eventually wants TPM / enclave / FIDO-class anchors so the verifier chain is attestable too. That is bigger than this project.
 - **Model identity.** The planner holds a session, not a cryptographic identity. Swap weights or providers behind the same API and the kernel cannot tell. A fuller RAXIS would attest model provenance; the standards barely exist.
 - **Prospective attestation.** v1 is largely commit-then-verify. A tighter world pre-authorizes compute before it runs; that is a second phase of protocol design.
 - **Interoperability.** Our schema is ours: not VC, not RATS (RFC 9334), not DICE. A portable RAXIS would let third parties verify with published keys on conforming stacks.

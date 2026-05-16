@@ -380,7 +380,7 @@ pub fn advance_epoch(
     store: &Store,
     audit: &Arc<dyn AuditSink>,
     epoch_binding: &EpochBinding,
-    // V2_GAPS §C5 — content-addressed artifact store. `None` for
+    // content-addressed artifact store. `None` for
     // tests that don't exercise the persistent on-disk store; the
     // production callsite always passes `Some(&ctx.artifact_store)`.
     artifact_store: Option<&raxis_artifact_store::ArtifactStore>,
@@ -394,7 +394,7 @@ pub fn advance_epoch(
     let new_epoch_id = new_bundle.epoch();
 
     // ── Phase 0.5: content-address the verified policy bytes ─────────
-    // V2_GAPS §C5 — write the freshly-verified policy artifact to
+    // write the freshly-verified policy artifact to
     // `<data_dir>/artifacts/policy/<sha256>.toml` BEFORE the SQL
     // transaction so the on-disk artifact exists by the time
     // `PolicyEpochAdvanced` lands in the audit chain (the chain
@@ -1633,7 +1633,7 @@ mod tests {
         );
     }
 
-    /// V2_GAPS §C5 — `advance_epoch` MUST write the verified
+    /// `advance_epoch` MUST write the verified
     /// policy bytes to `Category::Policy` and the operator
     /// signature companion to the artifact store. Pin the SHA-256
     /// matches and the `.sig` companion is byte-identical.

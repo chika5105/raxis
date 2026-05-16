@@ -488,7 +488,7 @@ that legitimately edits `greet.py` to remove the defect).
 ## Constraints
 
 * Your `path_allowlist` is `py-pkg/` ONLY (narrowed from the
-  three-tree allowlist in pre-iter55 versions of this prompt).
+  three-tree allowlist in earlier versions of this prompt).
   You MUST NOT touch `rust-crate/`, `ts-pkg/`, `scripts/`,
   `fixtures/`, `.gitignore`, or `README.md`.
 * Do NOT run `scripts/check.sh` (or `python -m ruff check`)

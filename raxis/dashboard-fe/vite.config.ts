@@ -5,9 +5,9 @@ import react from "@vitejs/plugin-react";
 
 // Vite config for the Raxis operator dashboard.
 //
-// Spec: raxis/specs/v2/v2_extended_gaps.md §4.4 — production
-// build emits a static bundle into `dist/` which the Rust
-// dashboard server (raxis-dashboard) serves via `static_dir`.
+// Production build emits a static bundle into `dist/` which the
+// Rust dashboard server (raxis-dashboard) serves via
+// `static_dir`.
 //
 // In dev, requests to `/api/*` and `/sse/*` are proxied to the
 // kernel-hosted dashboard on `127.0.0.1:9820` (the spec default).

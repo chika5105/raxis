@@ -257,7 +257,7 @@ pub enum AuditEvent {
         request_sha256: String,
         /// Tenant ID associated with the proxy.
         tenant_id: String,
-        /// V2_GAPS §9 Phase 2 — operator-declared ARM action
+        /// operator-declared ARM action
         /// vocabulary for the requested resource (e.g.
         /// `["Microsoft.Storage/storageAccounts/read"]`). Empty
         /// when no per-resource action filter was declared. V2.3
@@ -710,7 +710,7 @@ async fn serve_one(
     let body = serde_json::to_vec(&body)
         .map_err(|e| std::io::Error::other(format!("json serialise: {e}")))?;
     let body_len = body.len();
-    // V2_GAPS §9 Phase 2 — surface the operator-declared per-resource
+    // surface the operator-declared per-resource
     // ARM action vocabulary as an `x-ms-allowed-actions` response
     // header so the V3 ARM-aware egress proxy (and any in-VM
     // tooling that wants to introspect the declared scope) can read

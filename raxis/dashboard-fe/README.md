@@ -1,9 +1,9 @@
 # Raxis Operator Dashboard — Frontend
 
-Vite + React + TypeScript + Tailwind app. Talks to the Raxis kernel
-dashboard server over the HTTP/SSE API documented in
-[`raxis/specs/v2/v2_extended_gaps.md §4`](../specs/v2/v2_extended_gaps.md). JWT auth via the
-challenge-response flow in `pages/Login.tsx`.
+Vite + React + TypeScript + Tailwind app. Talks to the RAXIS kernel
+dashboard server over the HTTP/SSE API. The server-side contract is
+described in [`specs/v2/dashboard-hardening.md`](../specs/v2/dashboard-hardening.md).
+JWT auth via the challenge-response flow in `pages/Login.tsx`.
 
 ## Development
 

@@ -1,17 +1,16 @@
 // raxis-cli::commands::setup — `raxis setup` interactive (and
 // non-interactive) first-run wizard.
 //
-// Normative reference: `specs/v2/operator-ergonomics.md §16` and
-// `V2_GAPS.md §C10` / `§12.6`. The wizard is the spec-recommended
-// onboarding path; without it new operators have to discover the
-// right ordering of `raxis cert mint` → `raxis genesis` →
-// `raxis policy sign` → `raxis plan init` → `raxis doctor` →
-// `raxis submit plan` from prose.
+// Normative reference: `specs/v2/operator-ergonomics.md §16`. The
+// wizard is the spec-recommended onboarding path; without it new
+// operators have to discover the right ordering of
+// `raxis cert mint` → `raxis genesis` → `raxis policy sign` →
+// `raxis plan init` → `raxis doctor` → `raxis submit plan` from
+// prose.
 //
 // V2.3 MVP scope
 // ──────────────
 // V2 ships a **non-interactive scaffolding** flow that:
-//
 //   1. Creates the `<data_dir>` skeleton (`runtime/`, `audit/`,
 //      `keys/`, `providers/`, `policy/`, `sockets/`,
 //      `revocations/`).
@@ -32,9 +31,7 @@
 //      remaining manual ceremony steps that V2 cannot automate
 //      (cert ceremony, `raxis genesis`, policy signing).
 //
-// What is intentionally **deferred to V3** (documented in
-// `V2_GAPS.md §12.6`):
-//
+// What is intentionally **deferred to V3**:
 //   * Phase 1 (key ceremony) — V2 stops short of running
 //     `raxis genesis` automatically because that command needs
 //     either an air-gapped operator cert (`--operator-cert`) or
@@ -48,10 +45,9 @@
 //     empty `[[tproxy_allowlist]]` and the operator pastes the
 //     hosts they need.
 //   * Phase 9 (`raxis submit plan --dry-run`) — handler is V3
-//     (no `DryRunAdmit` IPC type yet, see `V2_GAPS.md §11`).
+//     (no `DryRunAdmit` IPC type yet, see ).
 //   * Phase 10 (first launch) — operator runs
 //     `raxis submit plan` manually after the cert ceremony.
-//
 // Design constraints honoured by the V2 MVP
 // ──────────────────────────────────────────
 //   * **Non-interactive only.** Every input is a flag — no TTY
@@ -489,7 +485,7 @@ fn print_usage() {
     println!("(plan_template). Phases 1, 3, 4, 5, 7, 8, 9, 10 are printed");
     println!("as recipes the operator runs by hand. See");
     println!("`specs/v2/operator-ergonomics.md §16` and");
-    println!("`V2_GAPS.md §C10` for the full phase catalogue.");
+    println!(" for the full phase catalogue.");
 }
 
 // ---------------------------------------------------------------------------

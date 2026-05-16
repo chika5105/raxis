@@ -1,5 +1,4 @@
-//! V2_GAPS §C5 / `extensibility-traits.md §9A` — `SidecarModelClient`.
-//!
+//! / `extensibility-traits.md §9A` — `SidecarModelClient`.
 //! Implements the planner-side `ModelClient` impl that talks to an
 //! operator-run **HTTP sidecar process**. The sidecar translates
 //! between RAXIS's fixed JSON schema and the third-party provider's
@@ -7,30 +6,23 @@
 //! a separate process — *not* in the kernel address space — so a
 //! buggy or malicious sidecar cannot violate any R-* invariant
 //! (`extensibility-traits.md §9A.6`).
-//!
 //! ## Why the planner side ships this client (not the kernel)
-//!
 //! V2's actual integration point is the planner's `ModelClient`
 //! trait (defined in `crate::model`). The dispatch loop, retry
 //! shell (`crate::retry`), and circuit breaker (`crate::circuit`)
 //! all compose against `Arc<dyn ModelClient>`. Adding a sidecar
 //! provider is therefore one new `ModelClient` impl alongside
 //! `AnthropicClient`, `OpenAiClient`, `GeminiClient`, and
-//! `BedrockClient` — exactly the slot V2_GAPS.md §C5 anticipates.
-//!
+//! `BedrockClient` — exactly the slot anticipates.
 //! The original `extensibility-traits.md §9A` references a
 //! kernel-side `InferenceRouter` trait. V2 does not yet ship that
-//! trait — see V2_GAPS.md §C5 for the migration design. The
+//! trait — see for the migration design. The
 //! `ModelClient`-based shipping path lets V2.4 land sidecar
 //! support without requiring the `InferenceRouter` carve-out
 //! that's planned for V3.
-//!
 //! ## RAXIS Sidecar Protocol (extensibility-traits.md §9A.5)
-//!
 //! **Endpoint:** `POST <endpoint>/v1/complete`
-//!
 //! **Request (planner → sidecar):**
-//!
 //! ```json
 //! {
 //!   "request_id":     "<uuid>",
@@ -44,9 +36,7 @@
 //!   "temperature":    0.7
 //! }
 //! ```
-//!
 //! **Response (sidecar → planner):**
-//!
 //! ```json
 //! {
 //!   "response_text":         "I'll create the file now.",
@@ -58,19 +48,15 @@
 //!   "stop_reason":           "tool_use"
 //! }
 //! ```
-//!
 //! ## HMAC-SHA256 mutual authentication
 //! (`extensibility-traits.md §9A.7A`)
-//!
 //! Each request carries three headers stamped from a 32-byte hex
 //! shared secret:
-//!
 //! * `X-Raxis-Request-Id` — UUIDv4 mirroring `request_id` in the body.
 //! * `X-Raxis-Timestamp`  — milliseconds since the Unix epoch.
 //! * `X-Raxis-HMAC`       — `hex(HMAC-SHA256(secret,
 //!                          request_id || ":" || timestamp || ":" ||
 //!                          body_bytes))`.
-//!
 //! The sidecar MUST reject any request where the HMAC fails or the
 //! timestamp is more than 30 seconds stale (replay window). The
 //! sidecar's response carries the same triple — the planner verifies
@@ -79,32 +65,25 @@
 //! ([`crate::retry::is_retryable`]) treats them as transient (the
 //! sidecar may have crashed mid-handshake; a fresh attempt against a
 //! restarted sidecar may succeed).
-//!
 //! Per `extensibility-traits.md §9A.7A` the canonical signing input
 //! is **not** the raw body alone — that would let an attacker who
 //! intercepts a single request replay it indefinitely. Including
 //! `request_id` and `timestamp` in the signing input binds each
 //! signature to a specific request at a specific moment.
-//!
 //! ## Retry / circuit-breaker composition
-//!
 //! `SidecarModelClient` plugs into the existing dispatch chain
 //! identically to every other `ModelClient`:
-//!
 //! ```text
 //! FallbackModelClient[
 //!   CircuitBreakerModelClient(RetryingModelClient(AnthropicClient)),
 //!   CircuitBreakerModelClient(RetryingModelClient(SidecarModelClient)),
 //! ]
 //! ```
-//!
 //! HTTP 5xx / connection failures map to `ModelError::Upstream` /
 //! `ModelError::Transport` (retryable per the standard
 //! classifier). 4xx responses map to `ModelError::Upstream` and
 //! short-circuit the retry loop.
-//!
 //! ## Invariant safety (`extensibility-traits.md §9A.6`)
-//!
 //! - **R-1** Domain separation: the sidecar is a separate process,
 //!   *not* in the agent VM. The planner-VM connects out through the
 //!   gateway just like any other provider.
@@ -211,12 +190,10 @@ pub struct SidecarToolCall {
     pub input: serde_json::Value,
 }
 
-/// V2_GAPS / `v2_extended_gaps.md §2.6` — streaming SSE wire shapes.
-///
+/// Streaming SSE wire shapes.
 /// The sidecar's `POST /v1/stream` endpoint returns
 /// `text/event-stream` with the following events (W3C SSE plus
 /// `: heartbeat` comment lines every 15 seconds during silence):
-///
 /// | event             | data shape                                            |
 /// |-------------------|-------------------------------------------------------|
 /// | `message_start`   | [`SidecarStreamMessageStart`]                          |
@@ -226,7 +203,6 @@ pub struct SidecarToolCall {
 /// | `usage`           | [`Usage`]                                              |
 /// | `stop`            | [`SidecarStreamStop`]                                  |
 /// | `complete`        | [`SidecarStreamComplete`] (terminal)                   |
-///
 /// The terminal `complete` event carries (a) the same
 /// [`SidecarResponse`] payload a buffered `POST /v1/complete` would
 /// have returned and (b) an HMAC-SHA256 signature so the planner
@@ -296,7 +272,6 @@ pub struct SidecarStreamStop {
 }
 
 /// Wire shape of the terminal `complete` SSE event payload.
-///
 /// The `signature_hex` field carries an HMAC-SHA256 over
 /// `<request_id> ":" <timestamp_ms> ":" <canonical_json(response)>`
 /// computed with the same operator-shared secret as the buffered
@@ -349,7 +324,6 @@ pub struct SidecarResponse {
 
 /// Production sidecar client. Pings a sidecar HTTP endpoint with
 /// HMAC-authenticated `POST /v1/complete` calls.
-///
 /// The buffered `create_message` + `health_check` paths route
 /// through an [`crate::http_fetch::HttpFetch`] so the same client
 /// works in every substrate (direct egress and kernel-mediated).
@@ -423,7 +397,6 @@ impl SidecarModelClient {
     pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
     /// Construct a new sidecar client.
-    ///
     /// `secret_hex` MUST be a 64-character lowercase-hex string
     /// matching the secret the operator wrote into `policy.toml`'s
     /// `[providers.<id>] sidecar_hmac_secret` field. Decoding
@@ -704,7 +677,7 @@ impl ModelClient for SidecarModelClient {
 
         // Verify the response HMAC before parsing the body. A
         // mis-HMAC'd 200 OK is treated as a transport-class failure
-        // — the dispatch loop will retry against the same sidecar
+        // the dispatch loop will retry against the same sidecar
         // (a transient handshake glitch may recover) and the
         // circuit breaker will open after the configured threshold.
         if let Err(e) =
@@ -719,10 +692,9 @@ impl ModelClient for SidecarModelClient {
         Ok(sidecar_response_to_message_response(parsed, &request_id))
     }
 
-    /// V2 `v2_extended_gaps.md §2.6` — real SSE streaming against
+    /// Real SSE streaming against
     /// the sidecar's `POST /v1/stream` endpoint. The behaviour mirrors
     /// [`crate::model::AnthropicClient::create_message_stream`]:
-    ///
     ///   * Per-chunk idle timeout
     ///     ([`DEFAULT_STREAM_IDLE_TIMEOUT`], 30 s) catches a sidecar
     ///     that accepts the request but stalls mid-body. The
@@ -856,7 +828,7 @@ impl ModelClient for SidecarModelClient {
                                         if matches!(ev, StreamEvent::Stop { .. }) {
                                             saw_stop = true;
                                         }
-                                        let is_complete = matches!(ev, StreamEvent::Complete(_),);
+                                        let is_complete = matches!(ev, StreamEvent::Complete(_));
                                         if tx.send(ev).await.is_err() {
                                             return;
                                         }
@@ -1615,7 +1587,7 @@ mod tests {
 
     /// Negative path: a sidecar that responds 200 but signs the response
     /// with a different secret triggers `ModelError::Transport` (transient
-    /// — the dispatch loop's circuit breaker handles it).
+    /// the dispatch loop's circuit breaker handles it).
     #[tokio::test]
     async fn response_with_bogus_hmac_surfaces_transport_error() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1703,7 +1675,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // V2 `v2_extended_gaps.md §2.6` — streaming + heartbeat tests
+    // Streaming + heartbeat tests
     // ---------------------------------------------------------------------
 
     /// Read an HTTP request off `sock` and return
@@ -1791,7 +1763,7 @@ mod tests {
         }
     }
 
-    /// V2_GAPS / §2.6 — happy-path streaming round-trip:
+    /// Happy-path streaming round-trip:
     ///   * planner stamps HMAC on `POST /v1/stream`
     ///   * server emits message_start → content_block_start →
     ///     content_block_delta (×2) → content_block_stop → usage →
@@ -1931,7 +1903,7 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// V2_GAPS §2.6 / §C9 — heartbeat lines (`: heartbeat\n\n`)
+    /// §C9 — heartbeat lines (`: heartbeat\n\n`)
     /// keep the per-chunk idle deadline reset and are skipped by
     /// the SSE parser. The planner sees no extra events and the
     /// terminal `Complete` event is delivered as usual.
@@ -2011,7 +1983,7 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// V2_GAPS §2.6 — a sidecar that signs the terminal `complete`
+    /// a sidecar that signs the terminal `complete`
     /// event with a different secret triggers `ModelError::Transport`
     /// (transient — the dispatch loop's circuit breaker handles
     /// repeated failures). The signature mismatch is surfaced via a
@@ -2099,20 +2071,18 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// V2_GAPS §2.6 / §C9 — the per-chunk idle deadline catches a
+    /// §C9 — the per-chunk idle deadline catches a
     /// sidecar that opens a stream but stops emitting. Drives the
     /// real streaming path (no buffered fallback) against a server
     /// that opens the body, sends one frame, then sleeps forever.
     /// The reader task MUST emit a synthesized terminal `Stop`
     /// within `DEFAULT_STREAM_IDLE_TIMEOUT` (we override via a
     /// shorter test deadline by relying on tokio::time::pause).
-    ///
     /// We use real time here (not paused tokio time) because the
     /// reader spawns its own task and the timeout is a real
     /// `tokio::time::timeout` that observes the same clock.
     /// Verifying within ~ten seconds keeps the test fast enough
     /// for CI without touching `DEFAULT_STREAM_IDLE_TIMEOUT`.
-    ///
     /// To avoid waiting the full 30 s default in CI, this test
     /// spawns a server that closes the connection after a short
     /// delay (without ever sending a `complete` frame). The
@@ -2189,7 +2159,7 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// V2_GAPS §2.6 — a non-2xx response is surfaced synchronously
+    /// a non-2xx response is surfaced synchronously
     /// from `create_message_stream`. The consumer never sees a
     /// half-open receiver in that case (`INV-PROVIDER-04` for the
     /// streaming path: pre-stream errors are not silently swallowed
@@ -2235,7 +2205,7 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// V2_GAPS §2.6 — pin the helper used by the aggregator. A
+    /// pin the helper used by the aggregator. A
     /// regression in the canonicalisation (e.g. someone swapping
     /// `to_vec` for `to_value` then `to_string`) would break
     /// signature verification end-to-end. This pins the helper
@@ -2248,7 +2218,7 @@ mod tests {
         assert_eq!(h_helper, h_method);
     }
 
-    /// V2_GAPS §2.6 — pin the constant-time comparator. A regression
+    /// pin the constant-time comparator. A regression
     /// to short-circuit equality (which `==` on `&[u8]` does) would
     /// reintroduce a timing-side-channel in the streaming signature
     /// check.

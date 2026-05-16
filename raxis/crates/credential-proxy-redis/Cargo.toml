@@ -20,7 +20,7 @@ serde     = { workspace = true }
 thiserror = { workspace = true }
 tracing   = "0.1"
 
-# V2_GAPS §9 (Phase 2) — Redis TLS-to-upstream. Required by managed
+# (Phase 2) — Redis TLS-to-upstream. Required by managed
 # Redis offerings (AWS Elasticache, GCP Memorystore, Azure Cache).
 # Pinned to the same versions as the SMTP proxy so the workspace
 # uses one TLS implementation.

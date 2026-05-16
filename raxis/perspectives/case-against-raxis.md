@@ -60,7 +60,7 @@ The kernel—with its many SQLite tables, FSM transitions, IPC protocol, challen
 
 ## Conclusion: what a strong opponent would say
 
-RAXIS does not make models more capable. It makes them more auditable in a narrow, largely **syntactic** sense. The trade—flexibility, adaptability, development velocity, and system simplicity—for deterministic enforcement of pre-specified rules plus a cryptographic paper trail—is one many practitioners should decline.
+RAXIS does not make models more capable. It makes them more auditable in a narrow, largely **syntactic** sense. The trade — flexibility, adaptability, development velocity, and system simplicity in exchange for deterministic enforcement of pre-specified rules plus a cryptographic paper trail — is one many practitioners should decline.
 
 If you need that level of assurance, the objection continues, you do not need an LLM agent in the hot path; you need formal verification with a deterministic executor—which is neither what you built nor what LLMs are good at.
 

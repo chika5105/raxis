@@ -26,7 +26,7 @@
 //!     / `OperatorListedSystemCredentials` on every poll. The
 //!     reveal event records the security-relevant moment;
 //!     auditing the listing too was redundant pageview noise and
-//!     was retired in `worker/audit-noise-sweep-r2`. See
+//!     was retired in the second audit-noise sweep. See
 //!     signal-vs-noise policy in
 //!     `specs/v2/dashboard-operator-action-audit-coverage.md`.
 //!

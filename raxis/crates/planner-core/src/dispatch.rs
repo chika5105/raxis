@@ -1,11 +1,8 @@
 //! Dispatch loop — drives the
 //! `LLM → parse tool_use → execute → return result` cycle every
 //! planner-role binary runs at steady state.
-//!
-//! Closes V2_GAPS.md §B1 substep "Tool-dispatch loop".
-//!
+//!substep "Tool-dispatch loop".
 //! ## Loop shape
-//!
 //! ```text
 //!   1. Render the system prompt (KSB + role NNSP).         once-per-session
 //!   2. Append the role-specific seed user message.         once-per-session
@@ -24,7 +21,7 @@
 //!         conversation history.
 //!      d. If the model emitted no tool_use blocks AND
 //!         stop_reason ∉ {`tool_use`}, the turn is terminal
-//!         — return [`DispatchOutcome::Idle`] and let the
+//! return [`DispatchOutcome::Idle`] and let the
 //!         caller decide whether to re-run with a follow-up
 //!         user message or exit cleanly.
 //!      e. If a terminal-tool fired (e.g. `task_complete`,
@@ -32,9 +29,7 @@
 //!         output as the loop's final value.
 //!   4. Bound the loop by a max-iteration ceiling.
 //! ```
-//!
 //! ## V2 limits (declared so future work has a target)
-//!
 //! * **No streaming.** The dispatch loop reads one full
 //!   `MessageResponse` per turn before invoking tools. Streaming
 //!   tool-use events require a different parsing shape and is
@@ -61,20 +56,18 @@ use crate::tools::{ToolContext, ToolError, ToolOutput, ToolRegistry};
 // ---------------------------------------------------------------------------
 // `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — per-turn cache-token
 // telemetry emitter.
-//
 // iter62 forensics: kernel.stderr.log carried zero mentions of
 // `cache_creation_input_tokens` / `cache_read_input_tokens` even
 // though the dispatch loop reads both fields (folding them into
 // `cum_in` for ceiling enforcement). Anthropic's billing dashboard
 // reported "Prompt caching: Not enabled" — but with zero on-the-wire
 // telemetry we could neither confirm the report nor refute it.
-//
 // The wire shape is correct (see `MessageRequest::serialize` in
 // `crate::model` — it stamps `cache_control` per
 // `prompt-caching.md`); the bug was a pure observability gap.
 // `emit_turn_usage` closes it by writing one structured JSON line
 // per turn to `out` (`stderr` in production paths, a `Vec<u8>` in
-// tests). Pairs with Worker 1's
+// tests). Pairs with
 // `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01` which folds the same
 // per-turn counts into `tasks.cumulative_cache_creation_tokens` /
 // `cumulative_cache_read_tokens` at `CompleteTask` commit time.
@@ -86,13 +79,11 @@ use crate::tools::{ToolContext, ToolError, ToolOutput, ToolRegistry};
 /// the running `cum_in` / `cum_out` totals fold the new counts in,
 /// so the `cumulative_*` fields on the line carry the **post-fold**
 /// values (i.e. what the kernel would observe after this turn).
-///
 /// The line is intentionally formatted by hand with `writeln!`
 /// rather than via `serde_json::to_writer` so the emit path stays
 /// allocation-free on the hot loop and so the wire shape is
 /// trivially auditable from this one function (no serializer-level
 /// renames or skip_if_default surprises).
-///
 /// `cache_hit_ratio` is `cache_read / (cache_read + input + cache_creation)`.
 /// Returns `0.0` when the denominator is zero (no input charged
 /// at all on this turn — defensive against providers that emit a
@@ -193,14 +184,13 @@ pub struct DispatchConfig {
     /// Per-tool deadline. Planner-side bound; the kernel-side budget
     /// is enforced separately.
     pub tool_deadline: Option<Duration>,
-    /// V2_GAPS §C1 — coarse per-session cumulative *input* token
+    /// coarse per-session cumulative *input* token
     /// ceiling (counts every Anthropic `usage.input_tokens` +
     /// `cache_creation_input_tokens` + `cache_read_input_tokens`).
     /// `None` ⇒ uncapped (matches plan.toml default — strict-by-
     /// default policy emits `WARN_UNCAPPED_TOKEN_LIMIT` at
     /// `approve_plan`; the dispatch loop itself does not duplicate
     /// that warning here).
-    ///
     /// When the cumulative input-token total *after* a turn exceeds
     /// this ceiling, the loop terminates with
     /// [`DispatchOutcome::TokensExceeded`] before issuing the next
@@ -208,11 +198,11 @@ pub struct DispatchConfig {
     /// failure (`ReportFailure` on the executor; review-aborted on
     /// the reviewer).
     pub max_tokens_input_total: Option<u64>,
-    /// V2_GAPS §C1 — coarse per-session cumulative *output* token
+    /// coarse per-session cumulative *output* token
     /// ceiling (counts every Anthropic `usage.output_tokens`).
     /// `None` ⇒ uncapped.
     pub max_tokens_output_total: Option<u64>,
-    /// V2_GAPS §C1 — coarse per-session cumulative *combined* token
+    /// coarse per-session cumulative *combined* token
     /// ceiling (input + output). `None` ⇒ uncapped. Cheaper to set
     /// when an operator only cares about total spend rather than
     /// the input/output split.
@@ -240,7 +230,6 @@ pub struct DispatchConfig {
 impl DispatchConfig {
     /// Sensible default for production reviewer / executor. Callers
     /// override per role + per task.
-    ///
     /// `max_turns = 100` mirrors
     /// [`crate::driver::DEFAULT_PLANNER_MAX_TURNS`]. See that
     /// constant's doc-comment for the rationale (Live-e2e
@@ -289,11 +278,10 @@ impl DispatchConfig {
 }
 
 /// One dispatch-loop terminal outcome.
-///
 /// Every variant carries the cumulative `(input_tokens,
 /// output_tokens)` totals consumed by the loop so the role binary
 /// can stamp them onto its outbound `IntentRequest::tokens_used`
-/// per V2 `v2_extended_gaps.md §2.5` (per-intent token reporting).
+/// per V2 (per-intent token reporting).
 /// The `TokensExceeded` variant retains its dedicated counters for
 /// audit clarity (which ceiling tripped); they are identical in
 /// value to the `cum_*` pair on that variant.
@@ -344,7 +332,7 @@ pub enum DispatchOutcome {
         /// turn ceiling fired.
         cum_output_tokens: u64,
     },
-    /// V2_GAPS §C1 — cumulative session token total exceeded one of
+    /// cumulative session token total exceeded one of
     /// the configured per-session ceilings. The loop terminates
     /// post-turn (the model already returned the offending response;
     /// the loop just refuses to issue the next request). Role
@@ -369,7 +357,7 @@ pub enum DispatchOutcome {
 }
 
 impl DispatchOutcome {
-    /// V2 `v2_extended_gaps.md §2.5` — cumulative `(input_tokens,
+    /// Cumulative `(input_tokens,
     /// output_tokens)` projection across every variant. Used by the
     /// driver to stamp `IntentRequest::tokens_used` regardless of
     /// which terminal arm fired.
@@ -419,13 +407,11 @@ pub enum DispatchError {
 
 /// The per-session dispatch state. One per planner role binary
 /// instance. Holds:
-///
 /// * The model client (`Arc<dyn ModelClient>`) — swappable for
 ///   tests via [`crate::model::MockModelClient`].
 /// * The role-specific tool registry.
 /// * Static per-session config (model id, max_turns, ...).
 /// * The per-task tool context (workspace root, deadline).
-///
 /// Dispatch is started by [`DispatchLoop::run`] which takes the
 /// initial system prompt + initial user message and runs to a
 /// terminal outcome.
@@ -498,7 +484,6 @@ impl DispatchLoop {
 
     /// Declare which tool names short-circuit the loop. The role
     /// binary calls this once at construction:
-    ///
     /// * Executor:    `["task_complete", "report_failure"]`
     /// * Reviewer:    `["submit_review"]`
     /// * Orchestrator: `["activate_subtask", "integration_merge", "complete_initiative"]`
@@ -508,10 +493,8 @@ impl DispatchLoop {
     }
 
     /// Drive one dispatch session to a terminal outcome.
-    ///
     /// `system_prompt` is the rendered KSB + role NNSP (see
     /// [`raxis_ksb`] and `kernel-mechanics-prompt.md`).
-    ///
     /// `seed_user_text` is the role-specific seed message (e.g.
     /// "You are working on task task-42; the goal is …").
     pub async fn run(
@@ -558,7 +541,7 @@ impl DispatchLoop {
             cache_ttl: None, // 5-minute ephemeral, refreshed for free
         };
 
-        // V2_GAPS §C1 — cumulative session token totals. Updated
+        // cumulative session token totals. Updated
         // post-turn from `MessageResponse::usage` and checked against
         // the per-session ceilings before issuing the next request.
         let mut cum_in: u64 = 0;
@@ -573,7 +556,7 @@ impl DispatchLoop {
 
         for turn in 0..self.config.max_turns {
             let resp = self.model.create_message(&req).await?;
-            // V2_GAPS §C1 — fold this turn's `Usage` into the
+            // fold this turn's `Usage` into the
             // running totals before any other side effect, so a
             // ceiling that fires post-turn still records the call.
             let Usage {
@@ -624,7 +607,7 @@ impl DispatchLoop {
                 .cum_cache_read_input_tokens
                 .saturating_add(u64::from(cache_read_input_tokens));
 
-            // V2 `v2_extended_gaps.md §2.5` — enforce the per-session
+            // Enforce the per-session
             // token caps BEFORE inspecting the response for terminal
             // tools / Idle. The earlier version of this check sat
             // below the `Idle` and `TerminalTool` early returns,
@@ -725,7 +708,7 @@ impl DispatchLoop {
             });
             let _ = turn; // turn is implicit in the for-loop counter.
 
-            // V2 `v2_extended_gaps.md §2.5` — the post-turn ceiling
+            // The post-turn ceiling
             // check has already fired earlier in the loop (right after
             // `cum_in` / `cum_out` were updated), so reaching the next
             // iteration is the explicit "cap not yet hit" branch.
@@ -745,16 +728,13 @@ impl DispatchLoop {
     // -------------------------------------------------------------------
     // V2_EXTENDED_GAPS §2.6 / §2.5 — streaming dispatch with
     // mid-stream budget abort.
-    //
     // Same loop semantics as `run()` except:
-    //
     //   1. Uses `create_message_stream` instead of `create_message`.
     //   2. Monitors `StreamEvent::Usage` events *during* the stream
     //      and aborts (drops the `Receiver`, severing the upstream
     //      HTTP connection) if any cumulative ceiling is exceeded.
     //   3. Falls back to `create_message` if the provider's
     //      `create_message_stream` returns `ModelError::Unsupported`.
-    //
     // The tool-dispatch and terminal-tool logic is identical to
     // `run()` — only the model-call shape changes. This avoids
     // divergence: callers that don't need mid-stream abort keep
@@ -763,7 +743,6 @@ impl DispatchLoop {
 
     /// Drive one dispatch session using streaming model calls with
     /// **mid-stream budget enforcement**.
-    ///
     /// Behaves identically to [`Self::run`] in all outcomes but adds
     /// a real-time budget check on every `StreamEvent::Usage` the
     /// upstream emits. If a ceiling is hit mid-stream, the receiver
@@ -925,7 +904,7 @@ impl DispatchLoop {
                 .cum_cache_read_input_tokens
                 .saturating_add(u64::from(cache_read_input_tokens));
 
-            // V2 `v2_extended_gaps.md §2.5` — enforce per-session token
+            // Enforce per-session token
             // caps BEFORE inspecting the response for terminal tools /
             // Idle. The earlier version of this streaming path placed
             // the ceiling check at the BOTTOM of the loop iteration,
@@ -1099,7 +1078,7 @@ mod tests {
 
     /// Like `empty_response_end_turn` but with explicit usage so
     /// regression tests can pin the post-turn ceiling-check
-    /// behaviour (`v2_extended_gaps.md §2.5`).
+    /// behaviour.
     fn empty_response_end_turn_with_usage(
         text: &str,
         input_tokens: u32,
@@ -1350,7 +1329,7 @@ mod tests {
         }
     }
 
-    /// V2_GAPS §C1 — `max_tokens_input_total` ceiling fires post-turn
+    /// `max_tokens_input_total` ceiling fires post-turn
     /// and surfaces a structured `TokensExceeded` outcome with the
     /// `which = "input"` discriminant.
     #[tokio::test]
@@ -1386,7 +1365,7 @@ mod tests {
         }
     }
 
-    /// V2_GAPS §C1 — `max_tokens_total` (input + output) is checked
+    /// `max_tokens_total` (input + output) is checked
     /// FIRST so an operator-set overall budget always wins over the
     /// granular `input/output` ceilings.
     #[tokio::test]
@@ -1413,14 +1392,14 @@ mod tests {
             DispatchOutcome::TokensExceeded { which, .. } => {
                 assert_eq!(
                     which, "total",
-                    "total ceiling fires before input ceiling per V2_GAPS §C1"
+                    "total ceiling fires before input ceiling"
                 );
             }
             other => panic!("expected TokensExceeded(total), got {other:?}"),
         }
     }
 
-    /// V2 `v2_extended_gaps.md §2.5` — when the model returns
+    /// When the model returns
     /// `end_turn` with no tool_use blocks AND the cumulative input
     /// total has crossed the configured cap, the loop MUST surface
     /// `TokensExceeded` and NOT `Idle`. Earlier dispatch versions
@@ -1491,7 +1470,7 @@ mod tests {
         }
     }
 
-    /// V2_GAPS §C1 — None ceilings ⇒ uncapped; the loop must run to
+    /// None ceilings ⇒ uncapped; the loop must run to
     /// its natural terminal outcome with no token-related early exit.
     #[tokio::test]
     async fn no_ceiling_means_uncapped_dispatch_runs_to_natural_terminal() {
@@ -1511,7 +1490,7 @@ mod tests {
         );
     }
 
-    /// V2_GAPS §C1 — cumulative tracking must include cache-read +
+    /// cumulative tracking must include cache-read +
     /// cache-creation input tokens, not just `input_tokens`.
     #[tokio::test]
     async fn cumulative_input_includes_cache_tokens() {
@@ -1784,7 +1763,6 @@ mod tests {
     }
 
     // ── `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` witnesses ─────────
-    //
     // These tests exercise `emit_turn_usage` directly (writing into a
     // `Vec<u8>` so stderr capture is unnecessary) AND the production
     // dispatch loop (so the wire shape and the per-turn cardinality

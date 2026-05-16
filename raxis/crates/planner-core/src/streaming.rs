@@ -1,4 +1,4 @@
-//! V2_GAPS §C9 — streaming model dispatch.
+//! streaming model dispatch.
 //!
 //! ## Why this module exists
 //!
@@ -159,7 +159,7 @@ pub enum StreamEvent {
     /// Anthropic emits one of these inside `message_delta` near the
     /// end of the stream; OpenAI emits it via the `usage` field of
     /// the final SSE chunk. The dispatch loop's coarse C1 ceilings
-    /// (V2_GAPS §C1) consume this to drive incremental
+    /// consume this to drive incremental
     /// budget-abort logic in V3.
     Usage(Usage),
 

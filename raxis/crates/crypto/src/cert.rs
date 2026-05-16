@@ -400,7 +400,7 @@ pub enum CertStatus {
     /// will eventually expire". Carries no timestamp.
     AlwaysActiveEmergency,
 
-    /// V2_GAPS §D1 — the cert has been revoked. All ops denied
+    /// the cert has been revoked. All ops denied
     /// regardless of `not_before` / `not_after`. The operator
     /// must mint a new cert (and a new signing key) to resume.
     /// Carries the revocation reason (rotation vs compromise) and
@@ -498,7 +498,7 @@ pub fn cert_status(cert: &OperatorCert, now: i64) -> CertStatus {
 }
 
 // ---------------------------------------------------------------------------
-// V2_GAPS §D1 — Revocation: canonical signing input + verifier
+// Revocation: canonical signing input + verifier
 // ---------------------------------------------------------------------------
 //
 // The revocation record carries a self-contained Ed25519 signature
@@ -613,7 +613,7 @@ pub fn verify_revocation_signature(record: &RevocationRecord) -> Result<(), Cert
 /// the supplied closure returns `Some`; otherwise delegates to
 /// `cert_status`.
 ///
-/// V2_GAPS §D1 — admission-time revocation gate.
+/// admission-time revocation gate.
 pub fn cert_status_with_revocation<F>(
     cert: &OperatorCert,
     now: i64,
@@ -1184,7 +1184,7 @@ mod tests {
         );
     }
 
-    // ── V2_GAPS §D1 — revocation ──────────────────────────────────────
+    // ── revocation ──────────────────────────────────────
 
     #[test]
     fn revocation_canonical_signing_input_byte_layout_is_pinned() {

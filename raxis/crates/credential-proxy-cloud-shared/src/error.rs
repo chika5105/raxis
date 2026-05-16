@@ -112,7 +112,7 @@ impl UpstreamError {
 /// `reqwest::Error::to_string()` can include the URL (which is
 /// in the allowlist, so safe) but never the request body — so
 /// the redaction surface is small. We still match on `is_timeout`
-/// / `is_connect` to classify into the audit taxonomy correctly.
+/// `is_connect` to classify into the audit taxonomy correctly.
 pub fn classify_reqwest_error(err: reqwest::Error) -> UpstreamError {
     if err.is_timeout() {
         UpstreamError::Timeout

@@ -1,6 +1,6 @@
 //! `raxis-dashboard-kernel` — kernel-side glue for the dashboard.
 //!
-//! Normative reference: specs/v2/v2_extended_gaps.md §4.
+//! Normative reference:
 //!
 //! Lives in its own crate (rather than `kernel/src/dashboard.rs`)
 //! so the integration suite can link the production
@@ -274,7 +274,7 @@ pub struct KernelDashboardData {
     /// Optional per-session lifecycle capture. When set, the
     /// `GET /api/sessions/:session_id/capture` route reads from
     /// the session's bounded file ring; when `None` (older
-    /// test fixtures or pre-iter59 hosts) the route falls back
+    /// test fixtures or earlier hosts) the route falls back
     /// to the trait's default `Ok(vec![])` so the absent
     /// capability surfaces as an empty post-mortem list.
     /// `INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01`.
@@ -3191,7 +3191,7 @@ pub fn record_to_view(
                 .to_owned();
             let usage = response.get("usage").and_then(|v| v.as_object());
             // Anthropic uses `input_tokens` / `output_tokens`
-            // / `cache_creation_input_tokens` /
+            // `cache_creation_input_tokens` /
             // `cache_read_input_tokens`. OpenAI uses
             // `prompt_tokens` / `completion_tokens` and does
             // not expose cache-hit counts; map the

@@ -50,8 +50,7 @@ const CONTROL_KINDS = new Set<string>([
 /// Live SSE viewer for `/api/sessions/:id/stream`.
 ///
 /// Wire contract — `INV-DASHBOARD-STREAM-ENVELOPE-01` (also
-/// documented in `raxis/crates/dashboard/src/routes/sessions.rs`
-/// and §4.3 of `v2_extended_gaps.md`):
+/// documented in `raxis/crates/dashboard/src/routes/sessions.rs`):
 ///
 ///   * **Data frames** are emitted as default-`message` SSE
 ///     events with the **full envelope** in the `data:` field:

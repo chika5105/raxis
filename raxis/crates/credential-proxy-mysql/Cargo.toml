@@ -19,7 +19,7 @@ hex       = { workspace = true }
 serde     = { workspace = true }
 thiserror = { workspace = true }
 tracing   = "0.1"
-# V2 `v2_extended_gaps.md §2.3` — `caching_sha2_password` upstream
+# `caching_sha2_password` upstream
 # auth needs RSA-OAEP-SHA1 to encrypt the password against the
 # server's public key when the auth cache is cold. Pulled in via
 # the workspace pin so the version is centrally managed.

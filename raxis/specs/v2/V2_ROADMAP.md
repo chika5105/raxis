@@ -5,13 +5,11 @@
 > effort end-to-end — native planner, hardware-isolated VMs,
 > hierarchical multi-agent coordination, multi-provider routing, and
 > advanced quality gates.
->
-> **Status of this document:** historical roadmap, kept verbatim. For
-> the live implementation ledger see [`V2_STATUS.md`](V2_STATUS.md);
-> for the systematic spec-vs-code gap audit see
-> [`V2_GAPS.md`](V2_GAPS.md). Anything in this roadmap that has since
-> been refined, reshaped, or superseded is reflected in those two
-> files and in the per-feature specs alongside it in `raxis/specs/v2/`.
+
+> **Status of this document:** historical roadmap, kept verbatim.
+> Anything in this roadmap that has since been refined, reshaped, or
+> superseded is reflected in the per-feature specs alongside it in
+> `raxis/specs/v2/`.
 
 The v1 release of RAXIS serves as the foundational proof-of-concept for the "Separation of Authority" paradigm. It proves that a kernel can constrain an LLM agent using typed IPC, deterministic Git path enforcement, and an unforgeable audit chain.
 
@@ -23,8 +21,8 @@ Below is the step-by-step, detailed enumeration of what the v2 specification ent
 
 ## 1. The RAXIS-Native Planner (The Agent Loop)
 
-In v1, the planner was largely treated as a "black-box" client. 
-**What is the "Black-Box" Assumption?** In v1, the RAXIS architecture only defined the IPC interface. It assumed developers would bring their own planner scripts (written in Python, Node.js, etc.) and simply connect to the kernel socket. The kernel treated this planner as an opaque, untrusted black box—it didn't care how the planner managed LLM context, parsed tools, or handled retries, so long as it sent valid `IntentRequest` bytes. 
+In v1, the planner was largely treated as a "black-box" client.
+**What is the "Black-Box" Assumption?** In v1, the RAXIS architecture only defined the IPC interface. It assumed developers would bring their own planner scripts (written in Python, Node.js, etc.) and simply connect to the kernel socket. The kernel treated this planner as an opaque, untrusted black box—it didn't care how the planner managed LLM context, parsed tools, or handled retries, so long as it sent valid `IntentRequest` bytes.
 
 In v2, while the kernel *still* treats the planner as untrusted for security purposes, the project ships a first-class, statically compiled **RAXIS-Native Planner** (`raxis-planner`). This replaces the "bring your own script" approach with a rigorously engineered, `claw-code` inspired agent loop that runs seamlessly inside the new VM sandboxes.
 
@@ -53,8 +51,8 @@ Building a native planner is not just an infrastructure task; it is fundamentall
     *   **File Fences**: Active file contents explicitly fenced with strict delimiters (e.g., `<file path="src/main.rs">...` ) so the LLM understands exactly what code is in scope.
     *   **History Truncation**: Keeping the N most recent turns, but ruthlessly summarizing older turns to save context space.
 *   **Kernel Interception (The Non-Negotiable Prompt)**: When the `InferenceRequest` hits the kernel, the kernel *prepends* a non-negotiable policy block to the system prompt. This block contains the path allowlist, the remaining budget, and the available tools from `policy.toml`. The planner's prompt engineering must anticipate and harmoniously integrate with this kernel-injected block.
-*   **Structured Intent Coercion & Provider-Specific Parsers**: The prompt must coerce the LLM to output actions that explicitly map to RAXIS `IntentKind` requests. Because different models excel at different formats (e.g., Anthropic excels at XML `<intent kind="CommitRange">`, while OpenAI is highly optimized for strict JSON Schema), the `raxis-planner` implements **Provider-Specific Parsing Adapters**. 
-    *   Drawing heavily from how `claw-code` abstractly supports multiple providers, the planner adjusts its few-shot examples and active parser (XML vs JSON) based on which provider the Kernel/Gateway routed the task to. 
+*   **Structured Intent Coercion & Provider-Specific Parsers**: The prompt must coerce the LLM to output actions that explicitly map to RAXIS `IntentKind` requests. Because different models excel at different formats (e.g., Anthropic excels at XML `<intent kind="CommitRange">`, while OpenAI is highly optimized for strict JSON Schema), the `raxis-planner` implements **Provider-Specific Parsing Adapters**.
+    *   Drawing heavily from how `claw-code` abstractly supports multiple providers, the planner adjusts its few-shot examples and active parser (XML vs JSON) based on which provider the Kernel/Gateway routed the task to.
     *   If a model hallucinates an invalid format or an intent outside the tool manifest, the provider-specific parser catches it, emits a local parsing error, and appends the correction to the context window without ever sending a malformed IPC intent to the kernel.
 
 ### 1.3. The Core Execution Loop (`claw-code` pattern)
@@ -88,7 +86,7 @@ The `raxis-planner` and `raxis-verifier` are compiled to statically linked `musl
 *   **No Network Egress**: The hypervisor enforces strict network denial. The VM has no virtual NIC. The *only* way the agent can communicate with the outside world is via the Vsock IPC channel to the kernel.
 
 ### 2.3. Vsock Transport & VirtioFS
-*   **IPC via `AF_VSOCK`**: The exact same `bincode` message frames from v1 are routed over hypervisor vsock rather than Unix Domain Sockets. 
+*   **IPC via `AF_VSOCK`**: The exact same `bincode` message frames from v1 are routed over hypervisor vsock rather than Unix Domain Sockets.
 *   **Strict Worktree Mounts**: The agent does not have access to the whole repository. The kernel uses VirtioFS to mount *only* the specific `git worktree` assigned to the session. For Verifier VMs, this mount is strictly Read-Only.
 
 ---
@@ -98,25 +96,25 @@ The `raxis-planner` and `raxis-verifier` are compiled to statically linked `musl
 v2 introduces the ability for multiple agents to operate concurrently, but **strictly forbids conversational "agent-to-agent chatter."** Agents do not talk to each other; they communicate exclusively through structured deliverables (code commits and formal task completions).
 
 ### 3.1. `session_agent_type` and Hierarchical Delegation
-Agents are typed at spawn time (e.g., `Orchestrator`, `Executor`, `Reviewer`). 
+Agents are typed at spawn time (e.g., `Orchestrator`, `Executor`, `Reviewer`).
 *   An `Orchestrator` session can spawn sub-planners by submitting new Tasks to the Kernel.
-*   The Orchestrator defines the formal success criteria for the sub-task. 
+*   The Orchestrator defines the formal success criteria for the sub-task.
 *   The kernel enforces that an Orchestrator can only delegate a subset of its own path allowlists and budgets to its children (Hierarchical Scoping).
 
 **Critique on "Conversational" Orchestration:**
-If back-and-forth communication (e.g., a Coder seeking critique from a Reviewer) is required, it cannot be unstructured, real-time "chat". Unstructured chat is highly susceptible to prompt-injection and makes it impossible for the kernel to enforce structural authority boundaries. 
+If back-and-forth communication (e.g., a Coder seeking critique from a Reviewer) is required, it cannot be unstructured, real-time "chat". Unstructured chat is highly susceptible to prompt-injection and makes it impossible for the kernel to enforce structural authority boundaries.
 Therefore, if an Orchestrator requires conversation or orchestration, it must model it as **Asynchronous RPC (Remote Procedure Calls)** via the kernel:
 1.  The Orchestrator submits an `IntentKind::RequestSubTask` (e.g., "Review this commit").
 2.  The kernel spawns or routes this to a `Reviewer` sub-planner.
 3.  The `Reviewer` completes the task and submits a structured `TaskResult` (containing the critique) to the kernel.
-4.  The kernel returns the `TaskResult` payload to the Orchestrator. 
+4.  The kernel returns the `TaskResult` payload to the Orchestrator.
 
 This guarantees that all multi-agent "conversations" are actually discrete, kernel-audited, typed state transitions.
 
 ### 3.2. Complete Git-Level Isolation
 Using `git worktree` is insufficient because it shares the underlying `.git` object database (allowing one compromised agent to access unmerged objects from another).
 *   **Standalone Ephemeral Clones**: Each agent session is provisioned with a completely standalone, ephemeral `git clone` of the repository within its VirtioFS mount.
-*   **Air-Gapped Object Databases**: Agents share zero Git state. 
+*   **Air-Gapped Object Databases**: Agents share zero Git state.
 *   **Kernel-Mediated Merging**: When a sub-planner completes its task, it submits an `IntentKind::CommitRange`. The kernel extracts the commits as a patch or git-bundle and applies them back to the Orchestrator's worktree. The agents never cross-pollinate files directly.
 
 ### 3.3. Worktree Path Locks & Shared Artifacts
@@ -133,7 +131,7 @@ v2 breaks the hardcoded 1:1 relationship between a planner and an LLM provider.
 
 ### 4.1. Operator-Defined Provider Routing (Strict Fail-Closed)
 The planner does **not** decide which model or provider to use, nor does it request specific "capabilities". The mapping of task to model is explicitly and exclusively configured by the human operator in the signed `policy.toml`.
-*   **Kernel-Driven Routing**: When the planner sends an `InferenceRequest`, the kernel derives the correct provider based solely on the current `session_agent_type` or the active Lane/Task schema defined in the policy. 
+*   **Kernel-Driven Routing**: When the planner sends an `InferenceRequest`, the kernel derives the correct provider based solely on the current `session_agent_type` or the active Lane/Task schema defined in the policy.
 *   **Operator Default Provider**: The operator can optionally configure a global `default_provider` in the policy. If a specific task or agent type has no explicit routing mapping, the kernel routes the request to this default provider.
 *   **Configurable Fallback Behavior**: For explicitly mapped tasks, the operator specifies what happens if the provider is unavailable using the `on_unavailable` key (e.g., `on_unavailable = "fail"` or `on_unavailable = "fallback_to_default"`).
 *   **Strict Fail-Closed Default**: If the `on_unavailable` key is omitted from a route's configuration, its value **defaults to `"fail"`**. If an explicit mapping exists for Kombai but Kombai is offline, the kernel immediately rejects the intent and fails the task *unless* the operator explicitly opted-in to a fallback. The system strictly enforces the operator's routing graph without silent compromises.

@@ -117,12 +117,12 @@ pub struct LlmTurnRecord {
     /// gateway pump captures this from the
     /// `GatewayMessage::FetchRequest.body_bytes` it just sent so
     /// the operator's per-turn panel can surface BOTH sides of
-    /// the round-trip (the pre-iter64 wire only carried the
+    /// the round-trip (the earlier wire only carried the
     /// response, leaving operators staring at half-conversations
     /// in the LLM turns view). Truncated alongside
     /// [`Self::body`] when above
     /// [`TaskCaptureConfig::max_body_bytes`]; defaults to the
-    /// empty string for back-compat with pre-iter64 on-disk
+    /// empty string for back-compat with earlier on-disk
     /// records.
     #[serde(default)]
     pub request_body: String,
@@ -574,7 +574,7 @@ mod tests {
         );
     }
 
-    /// **Pre-iter64 on-disk records (no `request_body` key) still
+    /// **Previously on-disk records (no `request_body` key) still
     /// parse cleanly.** The on-disk file ring outlives any single
     /// kernel build (it survives VM teardown by design — see
     /// `INV-DASHBOARD-TASK-LLM-CAPTURE-03`); a fresh kernel after

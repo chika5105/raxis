@@ -12,10 +12,10 @@
 //! Linux Firecracker substrate needs the KVM probe NOW, not in V3,
 //! so we ship the canonical prereq probe as an `xtask` subcommand
 //! that an operator can run BEFORE the kernel even tries to boot.
-//! When Worker A's branch lands (`worker/dev-prereqs-and-intent-fixes-jw`)
-//! the `Doctor` module can call into [`probe_linux_prereqs`] directly
-//! without re-implementing any of the per-check logic — this module
-//! exposes the typed [`Report`] / [`Check`] / [`Outcome`] vocabulary
+//! When the doctor-wiring branch lands the `Doctor` module can call
+//! into [`probe_linux_prereqs`] directly without re-implementing
+//! any of the per-check logic — this module exposes the typed
+//! [`Report`] / [`Check`] / [`Outcome`] vocabulary
 //! that mirrors `cli/src/commands/doctor.rs`'s shapes so a future
 //! wiring is a one-line `r.checks.extend(linux_prereqs::probe(...).checks)`.
 //!
@@ -57,7 +57,7 @@ use anyhow::{bail, Result};
 
 // ---------------------------------------------------------------------------
 // Outcome model — kept structurally identical to
-// `cli/src/commands/doctor.rs` so a future Worker-A wiring is a
+// `cli/src/commands/doctor.rs` so a future Doctor wiring is a
 // straight `r.checks.extend(...)`.
 // ---------------------------------------------------------------------------
 
@@ -515,7 +515,7 @@ fn render_human(report: &Report) {
 
 fn render_json(report: &Report) {
     // Hand-rolled JSON emit — same shape as
-    // `cli/src/commands/doctor.rs::render_json` so a future Worker-A
+    // `cli/src/commands/doctor.rs::render_json` so a future Doctor
     // wiring can serialise both walks through one consumer. Avoids
     // a `serde_json` dep on `xtask`.
     let mut out = String::with_capacity(64 * report.checks.len());

@@ -147,7 +147,7 @@ hex         = "0.4"
 # match `sha2`.
 sha1        = "0.10"
 # Pure-Rust RSA used by the V2 MySQL `caching_sha2_password` upstream
-# auth path (`v2_extended_gaps.md §2.3` / RFC 8017 RSAES-OAEP) when
+# auth path ( / RFC 8017 RSAES-OAEP) when
 # the proxy needs to RSA-OAEP-encrypt the user's password against
 # the server's public key on a cold-cache full-auth handshake.
 # Default features pulled in (`std`, `pem`) so the proxy can parse
@@ -157,7 +157,7 @@ sha1        = "0.10"
 # RustCrypto-RSA version into the build graph.
 rsa         = "0.9"
 # PBKDF2-HMAC-SHA256 for the V2 MongoDB SCRAM-SHA-256 upstream auth
-# path (`v2_extended_gaps.md §2.2` / RFC 7677). Pinned to the
+# path ( / RFC 7677). Pinned to the
 # RustCrypto-aligned 0.12 line so the `Mac` trait surface matches
 # `hmac` 0.12. `default-features = false` keeps the dependency
 # surface small (no parallel rayon impl).

@@ -1,5 +1,5 @@
 # RAXIS: Runtime Attestation eXchange for Intelligent Systems
-## Conceptual Analysis, RAXIS as PoC, and Serious Counterarguments
+## Conceptual Analysis, the Reference Implementation as Proof of Concept, and Serious Counterarguments
 
 ---
 
@@ -41,9 +41,9 @@ A mature RAXIS implementation means: even if the model is adversarial, it cannot
 
 ---
 
-## Part 2 — How RAXIS Maps to RAXIS (Step by Step)
+## Part 2 — How the Reference Implementation Maps to RAXIS (Step by Step)
 
-RAXIS was designed to solve a specific engineering problem: how do you run an autonomous coding agent without losing control of what it does to your codebase? The answer it arrived at is, in retrospect, a concrete instantiation of RAXIS principles. Here is the mapping, component by component.
+The reference implementation was designed to solve a specific engineering problem: how do you run an autonomous coding agent without losing control of what it does to your codebase? The answer it arrived at is, in retrospect, a concrete instantiation of RAXIS principles. Here is the mapping, component by component.
 
 ### Step 1 — Intent Attestation: `IntentRequest`
 
@@ -120,45 +120,45 @@ RAXIS requires failure-closed semantics: a system that fails open (admits action
 
 ---
 
-## Part 3 — Serious Counterarguments: Why RAXIS Is Not RAXIS
+## Part 3 — Serious Counterarguments: Where the Reference Implementation Falls Short of RAXIS
 
-These are not polish issues. These are architectural gaps that distinguish RAXIS from a general RAXIS implementation.
+These are not polish issues. These are architectural gaps that distinguish this implementation from a full RAXIS realization.
 
 ### Counterargument 1 — The Attester Has No Identity
 
-RAXIS's planner holds a `session_token` — a kernel-issued credential. But the token attests to the *session*, not to the *model*. Two completely different LLMs (or a fine-tuned adversarial variant of the same model) are indistinguishable to the kernel. RAXIS requires that the intelligent system itself be an attested identity: model hash, provider attestation, runtime environment hash. Without this, the kernel is running a protocol with an anonymous party whose fundamental nature it cannot verify. The session token says "someone with this credential is acting here." RAXIS demands "this specific model, running in this specific environment, with this attestable computational identity, is acting here."
+The implementation's planner holds a `session_token` — a kernel-issued credential. But the token attests to the *session*, not to the *model*. Two completely different LLMs (or a fine-tuned adversarial variant of the same model) are indistinguishable to the kernel. RAXIS at full strength requires that the intelligent system itself be an attested identity: model hash, provider attestation, runtime environment hash. Without this, the kernel is running a protocol with an anonymous party whose fundamental nature it cannot verify. The session token says "someone with this credential is acting here." RAXIS demands "this specific model, running in this specific environment, with this attestable computational identity, is acting here."
 
 ### Counterargument 2 — No Hardware Root of Trust
 
-RAXIS at full strength requires hardware attestation: the verification kernel itself must be attested by a hardware trust anchor (TPM, SGX enclave, TrustZone, etc.) so that the attester can verify the verifier is running the correct, unmodified code. RAXIS is a Rust process. The OS can be compromised. The kernel binary can be replaced. A sufficiently privileged adversary can patch `kernel.db`. There is no attestation that the kernel is the kernel — its authority is assumed, not proven. This is the bootstrapping problem: *quis custodiet ipsos custodes?* RAXIS needs an answer. RAXIS does not have one.
+RAXIS at full strength requires hardware attestation: the verification kernel itself must be attested by a hardware trust anchor (TPM, SGX enclave, TrustZone, etc.) so that the attester can verify the verifier is running the correct, unmodified code. The reference implementation is a Rust process. The OS can be compromised. The kernel binary can be replaced. A sufficiently privileged adversary can patch `kernel.db`. There is no attestation that the kernel is the kernel — its authority is assumed, not proven. This is the bootstrapping problem: *quis custodiet ipsos custodes?* RAXIS needs an answer. The current implementation does not have one.
 
 ### Counterargument 3 — Retrospective, Not Prospective Attestation
 
-RAXIS's attestation model is retrospective: the planner commits code, then presents the commit SHA as the object of attestation. The kernel verifies what *happened*. True RAXIS would include prospective attestation: the planner attests to its *plan of action* before execution (a signed capability request), receives a pre-authorization, executes under that pre-authorization, and then provides completion evidence. The two-stage protocol (authorize-then-verify) is stronger than the one-stage protocol (verify-after-commit) because it prevents execution of unauthorized work even when the commit is clean-looking. RAXIS's model means work has already been done before attestation occurs — the kernel can reject it, but the compute (and any side effects not captured by VCS) has already happened.
+The implementation's attestation model is retrospective: the planner commits code, then presents the commit SHA as the object of attestation. The kernel verifies what *happened*. A full RAXIS would include prospective attestation: the planner attests to its *plan of action* before execution (a signed capability request), receives a pre-authorization, executes under that pre-authorization, and then provides completion evidence. The two-stage protocol (authorize-then-verify) is stronger than the one-stage protocol (verify-after-commit) because it prevents execution of unauthorized work even when the commit is clean-looking. The current model means work has already been done before attestation occurs — the kernel can reject it, but the compute (and any side effects not captured by VCS) has already happened.
 
 ### Counterargument 4 — No Multi-Agent Attestation Chains
 
-RAXIS v1 has one planner, one kernel, one operator. In a real RAXIS environment, Agent A's attested output becomes input to Agent B's attested task. B's `IntentRequest` should carry a reference to A's admitted `WitnessSubmission` as the authority for acting on A's work. RAXIS has no mechanism for this: `IntegrationMerge` handles the VCS merge case but does not link B's authority to A's prior attestation. If A's prior work was adversarially crafted to influence B, B's attestation exchange does not detect it — the kernel verifies B's scope against B's task, not against A's attested intent. This is the composition problem, and RAXIS does not solve it.
+The V1 implementation has one planner, one kernel, one operator. In a full RAXIS environment, Agent A's attested output becomes input to Agent B's attested task. B's `IntentRequest` should carry a reference to A's admitted `WitnessSubmission` as the authority for acting on A's work. The current implementation has no mechanism for this: `IntegrationMerge` handles the VCS merge case but does not link B's authority to A's prior attestation. If A's prior work was adversarially crafted to influence B, B's attestation exchange does not detect it — the kernel verifies B's scope against B's task, not against A's attested intent. This is the composition problem, and the current implementation does not solve it.
 
 ### Counterargument 5 — The Plan Must Be Fully Known Upfront
 
-RAXIS should handle emergent, adaptive behavior: an agent that discovers new tasks at runtime, discovers it needs different tools, discovers the scope of work was wrong. RAXIS requires the operator to sign a plan (`plan.toml`) before execution. New tasks cannot be added mid-initiative without a new plan and new operator signature. In a real RAXIS system, the attestation framework must accommodate dynamic task discovery with attestation keeping pace — perhaps through a structured escalation-and-re-planning protocol. RAXIS's escalation mechanism is a partial answer (it can request capability expansion) but it cannot add new tasks, cannot modify the signed plan structure, and cannot accommodate fundamentally changed scope without a new ceremony. This limits RAXIS to problems whose shape is fully known before execution.
+A full RAXIS should handle emergent, adaptive behavior: an agent that discovers new tasks at runtime, discovers it needs different tools, discovers the scope of work was wrong. The current implementation requires the operator to sign a plan (`plan.toml`) before execution. New tasks cannot be added mid-initiative without a new plan and new operator signature. In a full RAXIS system, the attestation framework must accommodate dynamic task discovery with attestation keeping pace — perhaps through a structured escalation-and-re-planning protocol. The implementation's escalation mechanism is a partial answer (it can request capability expansion) but it cannot add new tasks, cannot modify the signed plan structure, and cannot accommodate fundamentally changed scope without a new ceremony. This limits the implementation to problems whose shape is fully known before execution.
 
 ### Counterargument 6 — The Verifier Is Operator-Defined, Not Standardized
 
-RAXIS's verifier protocol (`WitnessSubmission`, `result_class: Pass|Fail|Error`, `body: GateType-specific`) is specified in `raxis-types`. But it is a closed system — verifiers are operator-written binaries, the body schema is defined per `GateType` in RAXIS's own types crate, and there is no interoperability standard. RAXIS at a paradigm level requires a standardized attestation schema: one that allows an attestation produced by RAXIS's verifier to be verified by a different RAXIS-compliant system, and vice versa. Without this, RAXIS is a per-system silo, not an exchangeable protocol. W3C Verifiable Credentials, RATS (IETF RFC 9334), and DICE are existing standards in this space. RAXIS does not speak any of them.
+The implementation's verifier protocol (`WitnessSubmission`, `result_class: Pass|Fail|Error`, `body: GateType-specific`) is specified in `raxis-types`. But it is a closed system — verifiers are operator-written binaries, the body schema is defined per `GateType` in the implementation's own types crate, and there is no interoperability standard. RAXIS at a paradigm level requires a standardized attestation schema: one that allows an attestation produced by one RAXIS verifier to be verified by a different RAXIS-compliant system, and vice versa. Without this, the current implementation is a per-system silo, not an exchangeable protocol. W3C Verifiable Credentials, RATS (IETF RFC 9334), and DICE are existing standards in this space. The current implementation does not speak any of them.
 
 ### Counterargument 7 — The Planner Controls Its Own Evidence
 
-The kernel independently verifies touched paths via `vcs::diff`. But the planner controls the VCS state that `vcs::diff` reads. A sophisticated planner that controls the worktree could construct commits that satisfy `path_allowlist` while concealing the actual effect of the code (e.g., a commit that touches only allowed paths but injects a backdoor that activates based on data not visible in the diff). The attestation exchange verifies *file scope*, not *semantic effect*. RAXIS would require semantic attestation — formal verification or semantic analysis of the action's effect relative to its claimed intent. RAXIS has no such mechanism. This is perhaps the deepest gap: the exchange proves the planner operated within a syntactic scope; it does not and cannot prove the planner's actions were semantically aligned with the task description.
+The kernel independently verifies touched paths via `vcs::diff`. But the planner controls the VCS state that `vcs::diff` reads. A sophisticated planner that controls the worktree could construct commits that satisfy `path_allowlist` while concealing the actual effect of the code (e.g., a commit that touches only allowed paths but injects a backdoor that activates based on data not visible in the diff). The attestation exchange verifies *file scope*, not *semantic effect*. A full RAXIS would require semantic attestation — formal verification or semantic analysis of the action's effect relative to its claimed intent. The current implementation has no such mechanism. This is perhaps the deepest gap: the exchange proves the planner operated within a syntactic scope; it does not and cannot prove the planner's actions were semantically aligned with the task description.
 
 ### Counterargument 8 — The Kernel Is a Trusted Third Party, Not a Neutral Protocol
 
-In RAXIS's strongest form, the attestation exchange is a protocol that does not require either party to trust a specific third-party implementation. The trust is in the cryptographic protocol, not in the kernel binary. RAXIS's kernel is a trusted third party: all attestation flows through it, it holds the authority keypair, it writes the audit ledger. If the kernel is compromised or malicious, the entire attestation scheme collapses without detection (see Counterargument 2). A true RAXIS protocol would be verifiable by any party holding the public keys and the audit log — even without the kernel being present or trustworthy. RAXIS's audit log is verifiable (chain integrity), but the log's completeness depends entirely on the kernel's honesty. A malicious kernel can simply not log a rejected intent.
+In RAXIS's strongest form, the attestation exchange is a protocol that does not require either party to trust a specific third-party implementation. The trust is in the cryptographic protocol, not in the kernel binary. The current implementation's kernel is a trusted third party: all attestation flows through it, it holds the authority keypair, it writes the audit ledger. If the kernel is compromised or malicious, the entire attestation scheme collapses without detection (see Counterargument 2). A full RAXIS protocol would be verifiable by any party holding the public keys and the audit log — even without the kernel being present or trustworthy. The implementation's audit log is verifiable (chain integrity), but the log's completeness depends entirely on the kernel's honesty. A malicious kernel can simply not log a rejected intent.
 
 ### Summary of the Gap
 
-| RAXIS property | RAXIS status |
+| RAXIS property | Status in this implementation |
 |---|---|
 | Intent must be explicitly declared before action | ✅ `IntentRequest` before admission |
 | Verification is independent of attester's claims | ✅ `vcs::diff` + `path_allowlist` |
@@ -179,8 +179,8 @@ In RAXIS's strongest form, the attestation exchange is a protocol that does not 
 
 ## Conclusion
 
-RAXIS is a rigorous, implementable, failure-closed proof of concept for the **lower half** of RAXIS: the runtime enforcement layer. It proves that you can enforce structured attestation exchanges between an LLM planner and a verification kernel, with full audit traceability and operator-anchored authority, in a working software system. That is not nothing — it is more than virtually any deployed AI agent system achieves today.
+The reference implementation is a rigorous, implementable, failure-closed proof of concept for the **lower half** of RAXIS: the runtime enforcement layer. It proves that you can enforce structured attestation exchanges between an LLM planner and a verification kernel, with full audit traceability and operator-anchored authority, in a working software system. That is not nothing — it is more than virtually any deployed AI agent system achieves today.
 
-What RAXIS does not prove is the **upper half** of RAXIS: the parts that require hardware attestation, model identity, standardized interoperability, semantic verification, and multi-agent chain-of-custody. These are not implementation gaps — they are open research and standardization problems.
+What it does not prove is the **upper half** of RAXIS: the parts that require hardware attestation, model identity, standardized interoperability, semantic verification, and multi-agent chain-of-custody. These are not implementation gaps — they are open research and standardization problems.
 
-The honest framing: **RAXIS is a single-domain, software-only, retrospective, closed-system instantiation of RAXIS principles.** It demonstrates that the RAXIS pattern is buildable and practical. It does not demonstrate that RAXIS is solved.
+The honest framing: **this implementation is a single-domain, software-only, retrospective, closed-system instantiation of RAXIS principles.** It demonstrates that the RAXIS pattern is buildable and practical. It does not demonstrate that the paradigm is solved.

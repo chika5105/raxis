@@ -1,11 +1,8 @@
 // raxis-kernel::scheduler::budget — Per-lane cost and concurrency enforcement.
-//
 // Normative reference: kernel-core.md §2.3 `src/scheduler/budget.rs`.
-//
 // Budget state is persisted in `lane_budget_reservations` (survives restarts).
 // Reservations are created on intent pickup (handlers/intent.rs, after gates pass).
 // Reservations are released on task terminal state.
-//
 // Continuation intents (already-Running task) do NOT re-insert a reservation
 // (PK (lane_id, task_id) prevents double-insertion).
 
@@ -26,13 +23,11 @@ const LANE_BUDGET_RESERVATIONS: &str = Table::LaneBudgetReservations.as_str();
 pub type LaneBudgetSnapshot = crate::scheduler::lane::LaneStatus;
 
 /// Check whether a lane has budget for `estimated_cost` more units.
-///
 /// Pure read. The canonical write path
 /// ([`reserve_budget_in_tx`]) folds an equivalent check and the
 /// `lane_budget_reservations` INSERT into a single transaction;
 /// this standalone variant is preserved as a diagnostic helper for
 /// dashboards / ad-hoc operator queries.
-///
 /// Returns `SchedulerError::BudgetExceeded { kind }` if over-limit.
 pub fn check_budget(
     lane_id: &str,
@@ -90,7 +85,6 @@ pub fn consume_budget_in_tx(
 }
 
 /// Atomically check budget and reserve in one transaction.
-///
 /// **INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern A):** this is the
 /// canonical write path that closes the budget TOCTOU. The pre-fix code
 /// called `check_budget` (acquired the mutex, computed `reserved_cost`,
@@ -98,13 +92,11 @@ pub fn consume_budget_in_tx(
 /// inserted). Two concurrent intents on the same lane could both pass
 /// the check before either inserted, over-committing the operator's
 /// `max_cost_per_epoch` cap.
-///
 /// This helper runs the SELECT-aggregate (`get_lane_status_in_tx`) and
 /// the `INSERT OR IGNORE` inside the **same** `conn.transaction()` (which
 /// the caller has already opened) so no other tokio task can interleave
 /// between them. The mutex is held continuously across both, satisfying
 /// INV-STORE-01.
-///
 /// Returns `BudgetExceeded { kind: "ConcurrencyLimit"|"CostLimit" }` if
 /// the lane cannot accommodate `estimated_cost`. Returns `NoLaneAssigned`
 /// if `lane_id` is not declared in the policy. Idempotent on `(lane_id,
@@ -146,11 +138,9 @@ pub fn current_budget(lane_id: &str, store: &Store) -> Result<LaneBudgetSnapshot
 }
 
 /// Release the budget reservation for a task.
-///
 /// Deletes from `lane_budget_reservations`. Safe to call multiple times
 /// (idempotent on 0 rows). Returns `SchedulerError::CorruptReservationState`
 /// if >1 row was deleted (schema invariant violation).
-///
 /// **Standalone variant** — opens its own mutex acquisition. The
 /// canonical write path is [`release_budget_in_tx`], which composes
 /// the DELETE into the same transaction as the terminal-state flip
@@ -169,33 +159,29 @@ pub fn release_budget(lane_id: &str, task_id: &str, store: &Store) -> Result<(),
 }
 
 /// Release the budget reservation for a task — transaction variant.
-///
 /// Composes the `DELETE FROM lane_budget_reservations` into the same
 /// SQLite transaction as the terminal-state flip on
 /// `tasks.state` (`Running → Completed` for `CompleteTask`,
 /// `Running → Failed` for `ReportFailure`, `Admitted → Aborted` /
 /// `Running → Aborted` for operator-driven aborts). This is the
 /// kernel-store.md §2.5.1 invariant for lane bookkeeping:
-///
 /// > Every terminal-state handler MUST call `release_budget` before
 /// > `reconcile_actual_cost`. … Reordering these calls would violate
 /// > the "reservation already released" invariant checked by
 /// > `rows_affected()`.
-///
-/// **Why in-tx, not standalone.** If the state flip and the
-/// reservation release commit independently, a crash between them
-/// leaves the lane over-committed forever (the recovery sweep would
-/// see a terminal task and skip it; the reservation row stays).
-/// Folding both into one tx makes the failure mode binary: either the
-/// task is terminal AND its reservation is gone, or the task is
-/// pre-terminal AND its reservation is still charged.
-///
-/// Same `rows_affected()` semantics as [`release_budget`]:
-/// `0` → idempotent (already released, e.g. a continuation intent
-/// that double-committed before the post-fix tx-fold landed); `1` →
-/// released; `>1` → `SchedulerError::CorruptReservationState`
-/// (schema invariant violation — the `(lane_id, task_id)` PK should
-/// make this unreachable, but we surface it for forensic value).
+/// > **Why in-tx, not standalone.** If the state flip and the
+/// > reservation release commit independently, a crash between them
+/// > leaves the lane over-committed forever (the recovery sweep would
+/// > see a terminal task and skip it; the reservation row stays).
+/// > Folding both into one tx makes the failure mode binary: either the
+/// > task is terminal AND its reservation is gone, or the task is
+/// > pre-terminal AND its reservation is still charged.
+/// > Same `rows_affected()` semantics as [`release_budget`]:
+/// > `0` → idempotent (already released, e.g. a continuation intent
+/// > that double-committed before the post-fix tx-fold landed); `1` →
+/// > released; `>1` → `SchedulerError::CorruptReservationState`
+/// > (schema invariant violation — the `(lane_id, task_id)` PK should
+/// > make this unreachable, but we surface it for forensic value).
 pub fn release_budget_in_tx(
     conn: &rusqlite::Connection,
     lane_id: &str,
@@ -215,13 +201,11 @@ pub fn release_budget_in_tx(
 }
 
 /// Compute the admission cost for an intent.
-///
 /// Formula (§2.3):
 ///   base_cost = policy.base_cost_for_intent_kind(intent_kind_str) → None = error
 ///   path_cost = touched_paths.len() * policy.cost_per_touched_path()
 ///   raw       = base_cost.saturating_add(path_cost)
 ///   result    = min(raw, policy.max_cost_per_task())
-///
 /// Pure function — no store access. Planner cannot influence the result.
 pub fn compute_admission_cost(
     touched_paths: &[PathBuf],
@@ -244,7 +228,6 @@ pub fn compute_admission_cost(
 }
 
 /// Map an IntentKind variant to the TOML key string used in the policy table.
-///
 /// V2 sub-task lifecycle kinds (`ActivateSubTask`, `RetrySubTask`,
 /// `SubmitReview`) reuse the same `IntentKind::as_str` projection so
 /// operators can configure per-kind costs in `[lanes.<name>.intent_costs]`
@@ -260,14 +243,14 @@ fn intent_kind_to_str(kind: &IntentKind) -> &'static str {
 // V2 §2.5 — per-task LLM token-cost admission gate
 // ---------------------------------------------------------------------------
 
-/// V2 `v2_extended_gaps.md §2.5` — number of micro-dollars in one
+/// Number of micro-dollars in one
 /// admission-units cent. The kernel treats `policy.max_cost_per_task`
 /// as a USD-cents ceiling; the per-task cumulative LLM cost is
 /// tracked in micro-dollars (`ProviderPricing::cost_micro_dollars`)
 /// for sub-cent precision. 1 ¢ = 10 000 µ$.
 pub const MICROS_PER_CENT: u64 = 10_000;
 
-/// V2 `v2_extended_gaps.md §2.5` — incremental dollar cost of one
+/// Incremental dollar cost of one
 /// planner-reported `TokensReport`. The kernel picks the
 /// **worst-of-N** LLM provider (the one whose
 /// [`raxis_policy::ProviderPricing::cost_micro_dollars`] is highest
@@ -277,7 +260,6 @@ pub const MICROS_PER_CENT: u64 = 10_000;
 /// a declared LLM provider with `pricing`, that provider's pricing is
 /// used directly (more accurate accounting for multi-provider
 /// deployments).
-///
 /// Returns `0` when the policy declares no LLM providers with
 /// pricing — degraded read-only deployments charge no LLM cost.
 pub fn cost_micros_for_tokens(report: &raxis_types::TokensReport, policy: &PolicyBundle) -> u64 {
@@ -315,7 +297,7 @@ fn worst_llm_pricing(policy: &PolicyBundle) -> Option<&raxis_policy::ProviderEnt
         })
 }
 
-/// V2 `v2_extended_gaps.md §2.5` — the per-task token-cost ceiling
+/// The per-task token-cost ceiling
 /// expressed in micro-dollars. Derived from
 /// `policy.max_cost_per_task()` (USD cents) by multiplying through
 /// `MICROS_PER_CENT`; saturating multiplication keeps a pathological
@@ -324,7 +306,7 @@ pub fn token_cost_ceiling_micros(policy: &PolicyBundle) -> u64 {
     policy.max_cost_per_task().saturating_mul(MICROS_PER_CENT)
 }
 
-/// V2 `v2_extended_gaps.md §2.5` — admission gate verdict. Used by
+/// Admission gate verdict. Used by
 /// `handlers::intent::run_phase_a` to fail-closed-reject any intent
 /// whose cumulative LLM token cost would push the task above
 /// `policy.max_cost_per_task` (treated as a USD-cents ceiling).
@@ -348,12 +330,11 @@ pub enum TokenBudgetVerdict {
     },
 }
 
-/// V2 `v2_extended_gaps.md §2.5` — evaluate the per-task token-cost
+/// Evaluate the per-task token-cost
 /// ceiling for an intent. Pure function: takes the planner-
 /// reported cumulative `TokensReport`, computes the dollar cost via
 /// [`cost_micros_for_tokens`], compares against
 /// [`token_cost_ceiling_micros`].
-///
 /// `previous_cost_micros` is the cumulative cost already persisted
 /// on the task row from prior accepted intents (V2.5 admission gate
 /// is monotonic — every intent reports the running total, not a
@@ -459,7 +440,6 @@ mod tests {
     /// the INSERT inside the same transaction; the second caller sees
     /// the first caller's reservation reflected in `get_lane_status_in_tx`
     /// and is rejected with `BudgetExceeded`.
-    ///
     /// We simulate the post-fix invariant by serially running two
     /// reservations inside the same connection: under the new helper,
     /// the second one MUST be rejected. (The pre-fix code, by splitting
@@ -522,7 +502,6 @@ mod tests {
 
     // ─────────────────────────────────────────────────────────────────
     // V2 §Step 28 — shared-lane budget invariant.
-    //
     // Pins the spec contract: every session inside one initiative
     // shares a single `[workspace] lane_id`, so the existing
     // `SUM(reserved_cost) FROM lane_budget_reservations WHERE lane_id`

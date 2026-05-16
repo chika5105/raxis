@@ -1,7 +1,5 @@
 //! Per-FetchRequest dispatch: validate → call backend → assemble response.
-//!
 //! Normative reference: `peripherals.md` §3.2.
-//!
 //! Why a free function rather than a method: every input the dispatcher
 //! needs is already a borrow on `PolicyView`, the `Backend`, and the
 //! request itself. Holding a "Dispatcher" struct would just bundle
@@ -19,9 +17,8 @@ use uuid::Uuid;
 use crate::backend::{Backend, BackendError, BackendRequest};
 use crate::policy_view::{PolicyView, ProviderEntryView};
 
-/// V2_GAPS §C9 / `provider-failure-handling.md §7.3` — default
+/// `provider-failure-handling.md §7.3` — default
 /// per-chunk idle deadline for streaming inference responses.
-///
 /// Used as the fallback when a provider's
 /// `stream_idle_timeout_ms` is `None` in policy.toml (the standard
 /// case for generation-tier providers like Claude / GPT-4). A
@@ -30,7 +27,6 @@ use crate::policy_view::{PolicyView, ProviderEntryView};
 /// `inference_timeout_ms` (often 5 min). The kernel surfaces the
 /// boundary as `BackendError::Timeout` → `error: "Timeout"` on the
 /// wire `FetchResponse`.
-///
 /// **Reasoning-tier override.** OpenAI o1/o3 emit no SSE chunks for
 /// the full chain-of-thought duration; the operator MUST widen
 /// `[providers.<id>].stream_idle_timeout_ms` to 60_000–120_000 in
@@ -50,7 +46,6 @@ pub enum DispatchError {
     /// This indicates either kernel/gateway desync or a hostile sender on
     /// the gateway socket. The gateway closes the connection after
     /// emitting one `FetchResponse { error: "InvalidToken" }`.
-    ///
     /// We deliberately do NOT carry any token-derived material in this
     /// variant. Even an 8-char prefix is observable credential leakage
     /// when the `Display` text lands in stderr / audit logs / shared
@@ -241,8 +236,7 @@ async fn dispatch(
 
     // 6. Backend call. Backend is responsible for credential injection
     //    and per-call enforcement of `provider.max_response_bytes`.
-    //
-    //    V2_GAPS §C9 — for `FetchKind::Inference`, attach a per-chunk
+    //    for `FetchKind::Inference`, attach a per-chunk
     //    idle timeout so a provider that accepts the request but
     //    stalls mid-body fails fast at the configured boundary
     //    rather than dragging the request out to the
@@ -251,8 +245,7 @@ async fn dispatch(
     //    set; otherwise the hard-coded `STREAM_IDLE_TIMEOUT_DEFAULT`
     //    (30 s) applies. Reasoning-tier providers (OpenAI o1/o3)
     //    must widen this to 60–120 s in policy.toml — see
-    //    `V2_GAPS.md §C9 "Per-provider stream_idle_timeout"`.
-    //
+    //    ` "Per-provider stream_idle_timeout"`.
     //    `FetchKind::DataFetch` (tools' bounded HTTP fetches) keeps
     //    the buffered shape because legitimate REST calls can pause
     //    briefly between a big `Content-Length` body's chunks and
@@ -328,13 +321,10 @@ fn host_of_url(url: &str) -> Option<String> {
 }
 
 /// Map a URL host to the matching `ProviderEntryView`, if any.
-///
 /// v1 mapping table:
-///
 /// - `kind = "Anthropic"` matches any host ending in `anthropic.com`.
 /// - `kind = "OpenAI"`    matches any host ending in `openai.com`.
 /// - All other kinds: no auto-match.
-///
 /// v2 will replace this with an explicit `url_match` field per
 /// `[[providers]]` entry. Until then, the auto-mapping covers the two
 /// providers the spec calls out by name; operators wanting other
@@ -410,7 +400,7 @@ mod tests {
         }
     }
 
-    /// V2_GAPS §C9 — pin the per-provider `stream_idle_timeout_ms`
+    /// pin the per-provider `stream_idle_timeout_ms`
     /// override path. A `Backend` that captures the inbound
     /// `BackendRequest::stream_idle_timeout` lets us prove that
     /// dispatch reads `provider.stream_idle_timeout_ms` and converts
@@ -468,7 +458,7 @@ mod tests {
         assert_eq!(
             observed,
             Some(Duration::from_secs(30)),
-            "default per-chunk idle MUST be 30s (V2_GAPS §C9 fallback)",
+            "default per-chunk idle MUST be 30s (fallback)",
         );
     }
 
@@ -522,7 +512,7 @@ mod tests {
         // `None` means "no per-chunk idle deadline attached".
         assert_eq!(
             observed, None,
-            "DataFetch MUST NOT carry a per-chunk idle timeout (V2_GAPS §C9)",
+            "DataFetch MUST NOT carry a per-chunk idle timeout",
         );
     }
 

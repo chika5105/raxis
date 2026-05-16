@@ -41,8 +41,8 @@
 //
 // Why this verifier wires into iter63's audit invariants
 // ──────────────────────────────────────────────────────
-// `kernel/src/scheduler/dag.rs::transition_to_admitted` (commit
-// 31177d5 on `worker/iter62-deep-sweep`) introduced a paired-write
+// `kernel/src/scheduler/dag.rs::transition_to_admitted` (landed
+// by the deep-sweep pass) introduced a paired-write
 // at the recheck-clear edge: when a witness Pass lands and the gate
 // re-evaluator clears `GatesPending → Admitted`, an audit row is
 // written in the same SQLite transaction as the FSM transition

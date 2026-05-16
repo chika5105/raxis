@@ -100,7 +100,7 @@ pub async fn spawn_and_supervise(
         }
     };
 
-    // V2_GAPS §10 — embedded gateway. When the kernel was built
+    // embedded gateway. When the kernel was built
     // with `--features embedded-gateway`, materialise the bytes
     // baked into the kernel binary to a kernel-private directory
     // and override `cfg.binary_path` so the spawn loop below

@@ -514,7 +514,7 @@ fn install_kernel(args: &BundleArgs) -> Result<()> {
 
 /// Step 2 (per role) — cross-compile the planner agent and stage it
 /// at `images/<role>-core/rootfs/init`. Delegates to `images
-/// dev-stage` so the Worker-B-owned recipe is single-source.
+/// dev-stage` so the recipe is single-source.
 fn stage_role(args: &BundleArgs, role: Role) -> Result<()> {
     let mut argv: Vec<String> = vec!["--role".to_owned(), role.cli_name().to_owned()];
     if let Some(triple) = &args.cargo_target {

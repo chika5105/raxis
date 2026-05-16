@@ -1,6 +1,5 @@
 //! Auth endpoints: challenge, verify, logout.
-//!
-//! Spec: `v2_extended_gaps.md §4.2`.
+
 
 use std::sync::Arc;
 

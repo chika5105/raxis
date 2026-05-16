@@ -47,12 +47,10 @@ flowchart TD
     Policy["<b>policy.toml</b><br/><hr/>[sessions] — TTL & concurrency caps<br/>[budget] — admission cost + LLM token caps<br/>[operators] — Ed25519 signing keys + permitted<br/>[[gates]] — verifier binaries per claim type<br/>[[lanes]] — budget lane definitions<br/>[claim_requirements] — path → required claim types<br/>[egress] — fetch proxy allow-list<br/>[[providers]] — LLM provider catalogue (optional)<br/>[delegations] — role ceilings + max TTL<br/>[gateway] — gateway proxy config (optional)"]
 ```
 
-**`[[custom_tools]]` does NOT live in `policy.toml`.** Earlier
-drafts of this guide put it here; it actually lives in
-`plan.toml` (see `specs/v2/custom-tools.md` §3 — declared inline
-in `plan.toml`, hard-capped by `policy.toml`'s
-`max_custom_tool_timeout_seconds` / `max_concurrent_custom_tool_invocations`
-fields).
+**`[[custom_tools]]` does NOT live in `policy.toml`.** It is
+declared inline in `plan.toml` (see `specs/v2/custom-tools.md` §3),
+hard-capped by `policy.toml`'s `max_custom_tool_timeout_seconds`
+and `max_concurrent_custom_tool_invocations` fields.
 
 ---
 

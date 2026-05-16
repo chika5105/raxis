@@ -33,8 +33,7 @@ import { taskDisplayId } from "@/lib/state-color";
 /// node in the side panel; double click (or Enter) opens the
 /// task page directly.
 ///
-/// Refreshes every 3 s — operator-facing pages must feel live;
-/// see `v2_extended_gaps.md §4.4` UI principle #3.
+/// Refreshes every 3 s — operator-facing pages must feel live.
 export function InitiativeDagPage() {
   const { id = "" } = useParams<{ id: string }>();
   const navigate = useNavigate();

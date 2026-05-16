@@ -1,30 +1,23 @@
 //! Kernel-side KSB (Kernel-State-Block) assembler.
-//!
-//! Closes V2 `v2_extended_gaps.md §2.4` by reading the live kernel
+//! Closes V2 by reading the live kernel
 //! state for an initiative + task at session-spawn time and projecting
 //! it into a [`raxis_ksb::KsbSnapshot`]. The result is JSON-serialized
 //! and stamped into the spawned planner binary's env at
 //! `RAXIS_PLANNER_KSB` (constant [`raxis_ksb::PLANNER_KSB_ENV`]).
-//!
 //! ## Why this lives in `initiatives/`
-//!
 //! The KSB is a per-initiative-and-per-task projection. Every input
 //! field comes from rows the lifecycle subsystem already owns
 //! (`plan_registry`, `tasks`, `escalations`, `task_credential_proxies`),
 //! so co-locating the assembler keeps the read paths in one module
 //! and avoids forcing every IPC handler to learn the schema.
-//!
 //! ## Trust + redaction boundary
-//!
 //! This is the **only** place where operator-supplied free-form text
 //! (task descriptions, reviewer critiques, escalation summaries) is
 //! projected into the LLM's system prompt. The
 //! [`TASK_DESCRIPTION_MAX_BYTES`] cap is the kernel-side defence; the
 //! `raxis-ksb` renderer additionally rejects any text containing the
 //! `KSB_DELIMITER_CLOSE` byte sequence (defense-in-depth INV-KSB-01).
-//!
 //! ## Failure model
-//!
 //! The assembler is fail-soft: it returns `Result<KsbSnapshot, …>`.
 //! A read failure on an optional field (e.g. `escalations` table
 //! query times out) returns the error to the caller; the caller (the
@@ -52,7 +45,7 @@ use raxis_types::intent_admit::{admit_retry_subtask_check, AdmitOutcome, RetryAd
 use crate::initiatives::plan_registry::{PlanRegistry, TaskKey};
 use crate::initiatives::review_aggregation::compute_aggregate_review_outcome_with_conn;
 
-/// V2 `v2_extended_gaps.md §2.4` — `task_description` cap. The kernel
+/// `task_description` cap. The kernel
 /// truncates `[[tasks]] description` (already capped at admission
 /// against an upstream limit; this is the projection-time backstop)
 /// to this size before stamping it into the rendered KSB. The model
@@ -98,7 +91,6 @@ impl KsbRole {
 }
 
 /// Assembled inputs the kernel passes to [`assemble_ksb_snapshot`].
-///
 /// Bundled into a struct so future fields (token-cost estimator,
 /// witness DAG snapshot, …) can be appended without breaking every
 /// call-site.
@@ -153,9 +145,7 @@ pub struct KsbInputs<'a> {
 
 /// Assemble the KSB snapshot the kernel will stamp into
 /// `RAXIS_PLANNER_KSB`.
-///
 /// **Reads.**
-///
 ///   * `tasks` — for the per-task `evaluation_sha` + per-initiative
 ///     DAG snapshot (every row of the initiative).
 ///   * `plan_registry` — for the `target_ref`, the per-task path
@@ -165,7 +155,6 @@ pub struct KsbInputs<'a> {
 ///     filter `Pending`, scoped to this initiative).
 ///   * `subtask_activations` (currently unused — reviewer verdicts
 ///     would be sourced here; placeholder for V3).
-///
 /// **Pure projection.** No mutations; safe to call from a
 /// `spawn_blocking` context with the sync `Connection` lock.
 pub fn assemble_ksb_snapshot(
@@ -231,7 +220,6 @@ pub fn assemble_ksb_snapshot(
     let pending_escalations = read_pending_escalations(conn, inputs.initiative_id)?;
 
     // ── Reviewer verdicts scoped to this initiative ──────────────
-    //
     // Closes `INV-PLANNER-ORCH-RETRY-ON-REJECT-01`
     // (`specs/invariants.md §10`): the orchestrator NNSP directs
     // the model to call `retry_subtask` whenever any
@@ -256,7 +244,6 @@ pub fn assemble_ksb_snapshot(
     };
 
     // ── Initiative anchor `base_sha` ─────────────────────────────
-    //
     // V2.5: every per-initiative session (orchestrator, executor,
     // reviewer) is anchored at the same base SHA — the SHA the
     // orchestrator's worktree was provisioned at by
@@ -266,7 +253,6 @@ pub fn assemble_ksb_snapshot(
     // orchestrator session row so a respawn re-attached to the
     // existing anchor surfaces the same SHA without reading the
     // on-disk worktree (which would race the spawn).
-    //
     // A miss surfaces as an empty string; the renderer emits the
     // literal `<unset>` and the agent fails-loud per
     // `kernel-mechanics-prompt.md` ("never invent a SHA").
@@ -280,14 +266,12 @@ pub fn assemble_ksb_snapshot(
     let capabilities = Some(assemble_capabilities(conn, registry, inputs)?);
 
     // ── iter62 — `INV-RETRY-LAST-CRITIQUE-IN-KSB-01` ─────────────
-    //
     // Surface the most-recent reviewer critique into the KSB so a
     // retried executor / reviewer can re-orient on the prior
-    // round's feedback. Pre-iter62 the persisted column was
+    // round's feedback. Previously the persisted column was
     // correct but never projected — the round-N+1 LLM produced
     // the same flawed diff because it never saw the round-N
     // reviewer feedback.
-    //
     // Project on retry rounds only: a task whose most-recent
     // activation row carries `crash_retry_count > 0`,
     // `review_reject_count > 0`, OR `validation_reject_count > 0`
@@ -371,7 +355,6 @@ fn read_last_critique_for_retry(
 /// orchestrator session row. The orchestrator session is the
 /// canonical source — every executor / reviewer session for the
 /// initiative was cloned from that anchor.
-///
 /// Returns `Ok(None)` when no orchestrator row exists yet (boot
 /// race) or the row's `base_sha` is `NULL` (the spawn path's
 /// post-provisioning UPDATE has not landed yet). The caller falls
@@ -533,7 +516,6 @@ fn read_dag_rows_for_initiative(
 /// Returned map only carries entries for tasks with at least one
 /// predecessor edge — the caller treats missing keys as
 /// `preds_ready=true` (the no-predecessor / root case).
-///
 /// The check intentionally pivots on `tasks.state = 'Completed'`
 /// rather than the unmaintained `task_dag_edges.predecessor_satisfied`
 /// column (the kernel never UPDATEs that column in v1, despite the
@@ -578,7 +560,6 @@ fn read_preds_ready_per_task(
 /// in the initiative. Used to populate `DagRow::reviewers` so the
 /// orchestrator can ground the `reviewer_verdicts=` block scan
 /// against the per-executor reviewer multiplicity.
-///
 /// The reviewer-vs-other classification is sourced from the plan
 /// registry (`session_agent_type` per `[[tasks]]`) — `task_dag_edges`
 /// alone does not encode role since executors can also depend on
@@ -615,15 +596,12 @@ fn read_reviewer_counts_per_executor(
 }
 
 /// Project the per-Reviewer verdict feed for the initiative.
-///
 /// Closes `INV-PLANNER-ORCH-RETRY-ON-REJECT-01` (the orchestrator
 /// NNSP scans `reviewer_verdicts=` for `approved=false`; that scan
 /// is meaningful only when the kernel populates the block from
 /// live `tasks.review_verdict` data).
-///
 /// **Source of truth.** `handle_submit_review`'s post-commit
 /// branch writes to two columns:
-///
 ///   * `tasks.review_verdict` on the **reviewer**'s row — the
 ///     per-Reviewer verdict (`Approved` / `Rejected`); written by
 ///     the `SubmitReview` handler. NULL until the reviewer votes.
@@ -631,14 +609,12 @@ fn read_reviewer_counts_per_executor(
 ///     row — the concatenated formatted critiques
 ///     (`[Reviewer <id>]: <text>\n\n` per submission, per Step 22
 ///     of the v2-deep-spec). Empty until at least one rejection.
-///
 /// The renderer joins these via `task_dag_edges` (reviewer →
 /// executor predecessor) so each rendered `reviewer_verdicts=`
 /// row carries the executor's `evaluation_sha` (the SHA the
 /// reviewer voted against). Reviewer rows whose `review_verdict`
 /// is still NULL are omitted (no signal yet) so the orchestrator
 /// does not over-trigger retry on stale state.
-///
 /// Critique extraction parses the executor's
 /// `last_critique` looking for the `[Reviewer <reviewer_task_id>]: `
 /// prefix — fail-soft (empty critique on parse miss) so a malformed
@@ -743,18 +719,15 @@ fn read_pending_escalations(
 // ---------------------------------------------------------------------------
 // Slice C — capabilities envelope assembly
 // ---------------------------------------------------------------------------
-//
 // `INV-KSB-CAPABILITIES-PARITY-01`  — the per-task `retry_admissible`
 //   boolean is computed via `intent_admit::admit_retry_subtask_check`,
 //   the SAME pub fn the `RetrySubTask` IPC handler routes its
 //   eligibility cascade through. Parity is mechanical: same inputs ⇒
 //   same answer.
-//
 // `INV-KSB-CAPABILITIES-ROLE-SCOPED-01` — enforced by the type system
 //   (orchestrator / executor / reviewer are distinct enum variants
 //   with disjoint field sets); the assembler picks the variant per
 //   `KsbRole` and cannot accidentally cross-pollinate.
-//
 // `INV-KSB-CAPABILITIES-TURN-COHERENT-01` — every read here uses the
 //   SAME `&Connection` the rest of `assemble_ksb_snapshot` uses; the
 //   single-connection serialisation guarantees a stable snapshot for
@@ -790,7 +763,7 @@ fn assemble_capabilities(
                 initiative,
                 tasks,
                 // V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`
-                // — orchestrator carries the scaling view so its
+                // orchestrator carries the scaling view so its
                 // NNSP can reason about retry economics (e.g. surface
                 // "this child task is on attempt 3/3 with a 3× scaled
                 // budget; further retries hit the ceiling" before
@@ -1006,7 +979,7 @@ fn read_reviewer_artifact_task_id(
     .optional()
 }
 
-/// V2 `v2_extended_gaps.md §2.4` — placeholder used by the spawn
+/// Placeholder used by the spawn
 /// paths when the assembler returns an error: a minimum-bootable
 /// snapshot whose required fields are populated and whose optional
 /// fields default to empty. The driver still gets a non-empty
@@ -1201,7 +1174,7 @@ mod tests {
         .expect("assemble snapshot");
         drop(conn);
 
-        // V2 `v2_extended_gaps.md §2.4` — JSON wire shape MUST
+        // JSON wire shape MUST
         // round-trip cleanly so the kernel-side serialise + the
         // driver-side deserialise pair produce a byte-identical
         // render. This is the load-bearing pin against schema

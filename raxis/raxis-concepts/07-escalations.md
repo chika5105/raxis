@@ -90,9 +90,9 @@ opening a duplicate row.
 
 ## Step 2 — Kernel admits or rejects (7-step pipeline)
 
-The handler is `kernel/src/handlers/escalation.rs::handle_inner` —
-verified against current HEAD. The 7-step contract documented at the
-top of that file (lines 13-38) is reproduced here verbatim:
+The handler is `kernel/src/handlers/escalation.rs::handle_inner`.
+The 7-step contract documented at the top of that file (lines 13-38)
+is reproduced here verbatim:
 
 | Step | What happens | Failure mode |
 |---|---|---|
@@ -161,14 +161,11 @@ A planner that hits the rate-limit can still submit valid escalations
 once the window rolls over (provided it does not also trip
 quarantine).
 
-> **Note on the older "cooldown" framing.** Earlier drafts of this
-> doc claimed the spec defines a per-session "cooldown timer" via a
-> `cooldown_until_at` column that the kernel does not yet enforce.
-> That framing is incorrect: the schema has no such column (the
-> column is `quarantined_at`), and the actual mechanism — a per-
-> lineage rate-limit window plus a quarantine threshold — is fully
+> **Note on terminology.** There is no per-session "cooldown timer"
+> column (`cooldown_until_at`) in this schema; the actual mechanism
+> is a per-lineage rate-limit window plus a quarantine threshold,
 > implemented in `handlers/escalation.rs::submit_escalation_blocking`
-> (verified against HEAD: `cargo test -p raxis-kernel --test
+> (test: `cargo test -p raxis-kernel --test
 > escalation_rate_limit`). What's still pending is operator-facing
 > ergonomics around quarantine *lift* (currently impossible in V1 —
 > a quarantined lineage cannot escalate again until a fresh
@@ -176,13 +173,11 @@ quarantine).
 
 ### What the task does while the escalation is pending
 
-**The task does not transition.** Earlier drafts of this doc claimed
-the kernel pushes the task to an `EscalationPending` state. There is
-no such state — the `TaskState` enum
-(`crates/types/src/initiative.rs`) is `Admitted | GatesPending |
-Running | Completed | Failed | Aborted | Cancelled |
-BlockedRecoveryPending`. The task stays in whatever state it was in
-when the escalation was submitted.
+**The task does not transition.** There is no `EscalationPending`
+state — the `TaskState` enum (`crates/types/src/initiative.rs`) is
+`Admitted | GatesPending | Running | Completed | Failed | Aborted |
+Cancelled | BlockedRecoveryPending`. The task stays in whatever
+state it was in when the escalation was submitted.
 
 What happens instead:
 
@@ -230,8 +225,8 @@ raxis escalation approve <escalation_id> \
 ```
 
 Verbatim from `cli/src/commands/escalation.rs::run_approve` (lines
-26-69) — the older `--ttl` / `--reason` flags shown in earlier drafts
-of this doc do not exist. The CLI:
+26-69). No `--ttl` or `--reason` flag exists on this subcommand. The
+CLI:
 
 1. Loads the operator's private Ed25519 key (`-k <path>` or
    `RAXIS_OPERATOR_KEY`).
@@ -343,7 +338,7 @@ sequenceDiagram
     Operator->>Kernel: raxis log --kind …
     Operator->>Kernel: raxis escalation approve<br/>--scope … --max-uses … --valid-for …
     Note over Kernel: validate operator cert<br/>verify Ed25519 sig<br/>INSERT approval_tokens<br/>UPDATE escalations<br/>emit EscalationApproved<br/>(optional) grant delegation
-    Kernel-->>Agent: KernelPush::Escalated Resolved{token}
+    Kernel-->>Agent: KernelPush::EscalationResolved{token}
     
     Agent->>Kernel: IntentRequest{…, approval_token: …}
     Note over Kernel: validate_approval_token<br/>(8 checks)<br/>consume nonce<br/>emit ApprovalConsumed<br/>UPDATE escalations<br/>(status='Consumed')<br/>→ normal admission
@@ -416,7 +411,7 @@ co-signing.
 
 ---
 
-## Key source files (verified against current HEAD)
+## Key source files
 
 | File | Role |
 |---|---|
@@ -430,10 +425,8 @@ co-signing.
 | `crates/store/src/migration.rs` | DDL for `escalations` (Table 9), `approval_tokens` (Table 10), `approval_token_nonces`, `approval_proofs`, `lineage_rate_limits` (Table 15) |
 | `dashboard-fe/src/pages/Escalations.tsx` | Operator-facing read-only UI |
 
-> **Path drift watch.** Older drafts cited
-> `kernel/src/ipc/handlers/escalation.rs` and
-> `kernel/src/scheduler/escalation.rs`. Neither path exists today —
-> the handler is at `kernel/src/handlers/escalation.rs`, and the
-> approval/deny logic is in `kernel/src/authority/escalation.rs`.
-> The scheduler does not own escalation state at all (escalations
-> never block scheduler decisions in V1).
+> **Path note.** The handler is at
+> `kernel/src/handlers/escalation.rs`, and the approval/deny logic
+> is in `kernel/src/authority/escalation.rs`. The scheduler does not
+> own escalation state — escalations never block scheduler decisions
+> in V1.

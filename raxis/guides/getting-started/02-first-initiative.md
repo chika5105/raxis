@@ -378,5 +378,5 @@ the invariant that pins the contract is `INV-EXEC-DISCOVERY-01`
   — the canonical bytes / signing contract behind `submit plan`.
 - [`specs/v2/integration-merge.md`](../../specs/v2/integration-merge.md)
   — the admission checks that gate the final `main` fast-forward.
-- [`specs/v2/V2_STATUS.md`](../../specs/v2/V2_STATUS.md) — what is
+- what is
   shipped on the V2 surface today.

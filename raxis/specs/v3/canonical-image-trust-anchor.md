@@ -1,6 +1,6 @@
 # Canonical Image Trust Anchor (V3)
 
-Status: V3 (iter60). Supersedes V2's "warn-only on unpopulated anchor"
+Status: V3. Supersedes V2's "warn-only on unpopulated anchor"
 boot posture (`specs/v2/planner-harness.md §14.4`,
 `specs/v2/release-and-distribution.md §8`). Cross-refs:
 
@@ -135,7 +135,7 @@ preflight's `TrustAnchorUnpopulated` outcome remains in the
 of which can encounter the placeholder anchor through paths that
 do not go through `main()` (e.g. activation-time defense-in-depth
 or the unverified-hint fallback). The variant is structurally
-unreachable from `main()` after iter60.
+unreachable from `main()` once the boot-time enforcement has fired.
 
 ## §4 — Dev workflow
 
@@ -193,7 +193,7 @@ Three reasons:
    `.git/info/` per checkout. Two checkouts of the same repo on
    the same host get distinct dev keypairs by construction — no
    risk of one worktree's key signing manifests that another
-   worktree's kernel verifies. (The pre-iter60 design used a
+   worktree's kernel verifies. (The earlier design used a
    per-user `~/.config/...` path that shared one key across every
    checkout; a stale key from a long-dead branch could re-sign
    manifests for a fresh kernel and create confusing trust

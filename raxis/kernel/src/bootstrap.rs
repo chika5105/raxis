@@ -1619,7 +1619,7 @@ mod edge_cases {
     fn operator_cert_is_persisted_to_keys_dir_after_bootstrap() {
         // The kernel must persist the supplied cert to
         // `keys/operator_<fp>.cert.toml` so a future `raxis cert show`
-        // / `raxis cert verify` against the data dir can find it
+        // `raxis cert verify` against the data dir can find it
         // without the operator having to retain their original cert
         // artefact. The on-disk bytes MUST round-trip back to the
         // same `OperatorCert` we passed in.

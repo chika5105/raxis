@@ -1,5 +1,4 @@
 // xtask/src/main.rs — workspace task runner.
-//
 // Invoked as `cargo xtask <target>` via the `.cargo/config.toml`
 // alias. Currently exposes a single target — `spec-graph` — that
 // implements the V2 cross-spec consistency checks specified in
@@ -36,8 +35,6 @@ fn main() -> anyhow::Result<()> {
     match target.as_deref() {
         Some("spec-graph") => spec_graph::run(spec_graph::RunMode::with_strict(strict))
             .context("spec-graph"),
-        Some("spec-graph-lint") => spec_graph::run(spec_graph::RunMode::with_strict(strict))
-            .context("spec-graph"),
         Some("license-check") => license_check::run(strict)
             .context("license-check"),
         Some("dev-keys") => {
@@ -52,7 +49,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some("dev-prereqs") => {
             // `cargo xtask dev-prereqs [--install] [--scope ...] [--arch ...]`
-            // — verify / install the AVF demo prerequisites
+            // verify / install the AVF demo prerequisites
             // (AVF_DEMO.md §0). Drop the leading subcommand so the
             // inner parser sees flag args at args[0].
             let tail: Vec<String> = args.into_iter().skip(1).collect();
@@ -60,50 +57,47 @@ fn main() -> anyhow::Result<()> {
         }
         Some("images") => {
             // `cargo xtask images <subcommand> [args...]`
+            // Three subcommands, each with a single, distinct purpose:
+            //   bake                 — the one-and-only baker. Runs
+            //                          the full per-role pipeline
+            //                          (rootfs build → planner
+            //                          cross-compile → signed
+            //                          initramfs) for every role and
+            //                          writes the resulting `.img`
+            //                          plus signed `manifest.toml`
+            //                          into `<install_dir>/images/`.
+            //   dev-kernel           — install / refresh the Linux
+            //                          guest-kernel binary
+            //                          (`<install_dir>/kernel/vmlinux`)
+            //                          that the microVM substrate
+            //                          boots into. Separate from
+            //                          `bake` because the guest
+            //                          kernel is an external pinned
+            //                          artefact, not a raxis output.
+            //   verify-trust-anchor  — read-only diagnostic that
+            //                          confirms a built raxis-kernel
+            //                          binary embeds the expected
+            //                          signing-key fingerprint as
+            //                          `EXPECTED_KERNEL_SIGNING_KEY_BYTES`.
+            // Earlier iterations exposed every intermediate step
+            // (`bake-rootfs`, `dev-stage`, `build-all`, `preflight`,
+            // a partially-wired `bake-release` variant). These were
+            // collapsed into `bake` to remove the "did I run the
+            // four sub-steps in the right order?" failure mode.
             let mut rest = args.into_iter().skip(1);
             let sub = rest.next().ok_or_else(|| anyhow::anyhow!(
-                "missing images subcommand; available: bake, bake-release, \
-                 preflight, dev-kernel, bake-rootfs, dev-stage, build-all, \
+                "missing images subcommand; available: bake, dev-kernel, \
                  verify-trust-anchor"
             ))?;
             let tail: Vec<String> = rest.collect();
             match sub.as_str() {
-                // `cargo xtask images bake` is the umbrella one-command
-                // pipeline: preflight + bake-rootfs + dev-stage +
-                // build-all + vmlinux stage + per-role integrity
-                // manifest. See `xtask/src/images.rs::run_bake`.
-                "bake"         => images::run_bake(&tail).context("images bake"),
-                // `cargo xtask images bake-release` is the
-                // CI / release-pipeline-targeted bake (iter62,
-                // INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01). It runs
-                // four refusal guards over the prod signing key and
-                // the kernel's compiled-in trust anchor BEFORE
-                // delegating to the inner bake logic, so a release
-                // can never be produced with the per-clone dev key.
-                "bake-release" => images::run_bake_release(&tail).context("images bake-release"),
-                // `cargo xtask images preflight` — read-only verifier
-                // of every input `bake` would need. Used by CI to
-                // surface missing-input failures before spending time
-                // on a bake that would later abort.
-                "preflight"    => images::run_preflight(&tail).context("images preflight"),
-                "dev-kernel"   => dev_kernel::run(&tail).context("images dev-kernel"),
-                "bake-rootfs"  => images::run_bake_rootfs(&tail).context("images bake-rootfs"),
-                "dev-stage"    => images::run_dev_stage(&tail).context("images dev-stage"),
-                "build-all"    => images::run_build_all(&tail).context("images build-all"),
-                // `cargo xtask images verify-trust-anchor` — read-only
-                // post-build verifier for the kernel binary's compile-time
-                // trust anchor. Reads the staged vmlinux off disk, scans
-                // for the expected public-key fingerprint AND rejects the
-                // all-zero placeholder shape. The bake's post-build step
-                // calls the same logic; this subcommand exposes it to
-                // operators for ad-hoc audits (iter66,
-                // INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01).
+                "bake"                => images::run_bake(&tail).context("images bake"),
+                "dev-kernel"          => dev_kernel::run(&tail).context("images dev-kernel"),
                 "verify-trust-anchor" => images::run_verify_trust_anchor(&tail)
                     .context("images verify-trust-anchor"),
-                other          => anyhow::bail!(
+                other                 => anyhow::bail!(
                     "unknown images subcommand: {other:?}; \
-                     available: bake, bake-release, preflight, dev-kernel, \
-                     bake-rootfs, dev-stage, build-all, verify-trust-anchor"
+                     available: bake, dev-kernel, verify-trust-anchor"
                 ),
             }
         }
@@ -157,7 +151,7 @@ fn main() -> anyhow::Result<()> {
         Some("hygiene") => {
             // `cargo xtask hygiene [--dry-run] [--max-age-days N]
             //                      [--keep BRANCH ...] [--main-ref REF]`
-            // — sweep `git worktree list` and prune parent-side
+            // sweep `git worktree list` and prune parent-side
             //   worktrees whose branch tip has landed to the
             //   resolved "main" ref AND whose files are not
             //   actively held open. The merge-base reference is
@@ -176,7 +170,7 @@ fn main() -> anyhow::Result<()> {
         Some("hygiene-install-timer") => {
             // `cargo xtask hygiene-install-timer
             //                 [--system] [--uninstall] [--dry-run]`
-            // — install the periodic hygiene-sweep timer.
+            // install the periodic hygiene-sweep timer.
             //   * macOS: per-user LaunchAgent at
             //     `~/Library/LaunchAgents/com.raxis.hygiene.plist`
             //     bootstrapped via `launchctl bootstrap gui/$UID`.
@@ -191,7 +185,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some("hygiene-check") => {
             // `cargo xtask hygiene-check [--threshold-pct N]`
-            // — read-only `df -P` probe across the repo volume,
+            // read-only `df -P` probe across the repo volume,
             //   `/private/tmp`, and `/var/folders/*` (AVF guest
             //   dir). Exits non-zero when ANY monitored volume is
             //   above `--threshold-pct` (default 85). The live-e2e
@@ -202,14 +196,14 @@ fn main() -> anyhow::Result<()> {
         }
         Some("dev-reset") => {
             // `cargo xtask dev-reset notifications [--data-dir <P>] [--dry-run]`
-            // — Phase 2 of dashboard-hardening §2 / INV-NOTIF-SCOPE-01.
+            // Phase 2 of dashboard-hardening §2 / INV-NOTIF-SCOPE-01.
             // Wipes the operator-notifications projection
             // (`<data_dir>/kernel.db::notifications` table +
             // `<data_dir>/notifications/inbox.jsonl`) so the next
             // kernel boot starts the inbox empty AFTER the
             // `notification_priority` filter took effect. The
             // audit chain at `<data_dir>/audit/` is NEVER touched
-            // — that's the whole point of the audit-vs-
+            // that's the whole point of the audit-vs-
             // notification separation.
             let tail: Vec<String> = args.into_iter().skip(1).collect();
             dev_reset::run(&tail).context("dev-reset")
@@ -240,7 +234,7 @@ fn main() -> anyhow::Result<()> {
              images dev-kernel                          — stage Linux guest-kernel binary at\n                 (--from-file <PATH> | --url <URL> --sha256 <HEX>) \n                 [--install-dir <PATH>] [--arch <ARCH>] [--force]\n                                                 <install_dir>/kernel/vmlinux\n                                                 (system-requirements.md §11)\n  \
              images bake-rootfs --role <ROLE>           — docker build per-role Containerfile\n                 [--builder docker|podman|buildah]         and extract OCI rootfs into\n                 [--platform <PLAT>] [--keep]              images/<role>/rootfs/. Auto-detects\n                                                           docker → podman → buildah on $PATH;\n                                                           --platform defaults to the OCI shape\n                                                           of `default_target_triple()`. Run\n                                                           BEFORE dev-stage; dev-stage overlays\n                                                           the planner binary on top.\n  \
              images dev-stage --role <ROLE>             — cross-compile raxis-planner-<role>\n                 [--target <TRIPLE>]                       and stage it into images/<role>/rootfs/init\n                                                 (planner-harness.md §14.4)\n  \
-             images build-all                           — pack staged rootfs into signed cpio.gz\n                 [--role <ROLE>] [--install-dir <P>]       initramfs and lay out under\n                 [--signing-key <PATH>]                    <install_dir>/images/raxis-<role>-<kver>.{{img,manifest.toml}}\n                                                 (planner-harness.md §14.4 + e2e-live-test-gap.md)\n  \
+             images build-all                           — pack staged rootfs into signed cpio.gz\n                 [--role <ROLE>] [--install-dir <P>]       initramfs and lay out under\n                 [--signing-key <PATH>]                    <install_dir>/images/raxis-<role>-<kver>.{{img,manifest.toml}}\n                                                 (planner-harness.md §14.4 + )\n  \
              linux-microvm bundle                       — one-shot Firecracker bundle:\n                 [--install-dir <PATH>] [--arch <ARCH>]      stage reference vmlinux + every\n                 [--kernel-from-file <PATH>]                 canonical role's signed initramfs\n                 [--kernel-url <URL>] [--kernel-sha256 <HEX>]   under <install_dir>/\n                 [--target <TRIPLE>] [--signing-key <PATH>]    (isolation-linux-microvm.md §9)\n                 [--role <ROLE>] [--skip-kernel] [--skip-stage] [--force]\n  \
              linux-prereqs                              — Linux substrate host preflight:\n                 [--json]                                  /dev/kvm, vhost_vsock, kvm group,\n                                                           kernel ≥ 5.10, cgroup v2, firecracker(1),\n                                                           virtiofsd(1) (V3 prereq, Warn-only)\n                                                           (isolation-linux-microvm.md §9)\n  \
              macos-firewall-prereq                      — one-time `socketfilterfw --add` /\n                 [--dry-run]                                `--unblockapp` of every raxis host\n                 [--release-only | --debug-only]            binary so the macOS firewall popup\n                                                           does not re-appear on every\n                                                           `cargo build`. Auto-runs as part of\n                                                           `dev-prereqs` on macOS.\n  \

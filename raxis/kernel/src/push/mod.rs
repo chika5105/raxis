@@ -1,4 +1,4 @@
-//! V2_GAPS §12.1 — Kernel-side `KernelPush` dispatcher (V2.3 MVP).
+//! Kernel-side `KernelPush` dispatcher (V2.3 MVP).
 //!
 //! Background
 //! ──────────

@@ -15,6 +15,12 @@
 //   15 BOOT_ERR_BOOTSTRAP_FAILED — genesis state machine failed
 //   16 BOOT_ERR_AUDIT_WRITE      — KernelStarted event write failed (fatal)
 //   17 BOOT_ERR_VCS_ROOT         — worktree root validation failed
+//   19 BOOT_ERR_RECOVERY_SWEEP   — one or more boot-time reconciliation
+//                                  sweeps (task / integration-merge /
+//                                  lane-reservation) hit a SQLite or
+//                                  transaction failure; kernel refuses
+//                                  to boot rather than serve IPC with a
+//                                  half-reconciled in-flight task graph.
 
 use thiserror::Error;
 
@@ -30,9 +36,18 @@ pub const BOOT_ERR_SOCKET_BIND: i32 = 14;
 pub const BOOT_ERR_BOOTSTRAP_FAILED: i32 = 15;
 pub const BOOT_ERR_AUDIT_WRITE: i32 = 16;
 pub const BOOT_ERR_VCS_ROOT: i32 = 17;
-/// V2_GAPS §D2 — kernel refuses to boot when the FD limit is below
+/// kernel refuses to boot when the FD limit is below
 /// `[host_capacity] required_min_fd_limit` (host-capacity.md §12.1).
 pub const BOOT_ERR_HOST_CAPACITY: i32 = 18;
+/// Step 6 sub-step failure: a boot-time reconciliation sweep
+/// (`reconcile_tasks`, `reconcile_integration_merge_attempts`,
+/// `reconcile_orphan_lane_reservations`) returned a SQLite or
+/// transaction error. Previously these failures only emitted a
+/// stderr line and the kernel proceeded to bind IPC while
+/// in-flight tasks may still be in `Running` / `GatesPending`,
+/// breaking the §2.2 contract that recovery completes before
+/// the kernel serves admissions. Now fatal.
+pub const BOOT_ERR_RECOVERY_SWEEP: i32 = 19;
 
 // ---------------------------------------------------------------------------
 // KernelError
@@ -76,12 +91,22 @@ pub enum KernelError {
     #[error("BOOT_ERR_VCS_ROOT: {reason}")]
     VcsRoot { reason: String },
 
-    /// V2_GAPS §D2 — host-capacity boot-time invariant violation
+    /// host-capacity boot-time invariant violation
     /// (`required_min_fd_limit` floor not met). The kernel refuses
     /// to boot rather than start with insufficient FDs and OOM
     /// later under per-VM growth.
     #[error("BOOT_ERR_HOST_CAPACITY: {reason}")]
     HostCapacity { reason: String },
+
+    /// Step 6 sub-step failure: one or more of `reconcile_tasks`,
+    /// `reconcile_integration_merge_attempts`, or
+    /// `reconcile_orphan_lane_reservations` could not complete its
+    /// SQLite transaction. The kernel refuses to boot rather than
+    /// bind IPC with an in-flight task graph that has not been
+    /// reconciled (§2.2 contract: recovery completes before the
+    /// kernel serves admissions).
+    #[error("BOOT_ERR_RECOVERY_SWEEP: {reason}")]
+    RecoverySweepFailed { reason: String },
 
     /// Generic I/O error (wraps std::io::Error variants not covered above).
     #[error("kernel I/O error: {0}")]
@@ -101,6 +126,7 @@ impl KernelError {
             Self::AuditWrite { .. } => BOOT_ERR_AUDIT_WRITE,
             Self::VcsRoot { .. } => BOOT_ERR_VCS_ROOT,
             Self::HostCapacity { .. } => BOOT_ERR_HOST_CAPACITY,
+            Self::RecoverySweepFailed { .. } => BOOT_ERR_RECOVERY_SWEEP,
             Self::Io(_) => 1,
         }
     }

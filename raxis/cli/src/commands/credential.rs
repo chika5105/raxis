@@ -8,7 +8,7 @@
 // V2 GA scope:
 //   - `list` (read-only, never reveals values).
 //   - `rotate <name>` (atomic replace through the file backend).
-//   - `add <name>`     — write a NEW credential file (V2_GAPS §C7).
+//   - `add <name>`     — write a NEW credential file.
 //   - `show <name>`    — print metadata for one credential.
 //   - `remove <name>`  — delete an existing credential file.
 //   - `verify <name>`  — V2 structural verification (mode/uid/parse).
@@ -650,10 +650,10 @@ The kernel does not need to be running.
 }
 
 // =========================================================================
-// V2_GAPS §C7 — `add`, `show`, `remove`, `verify`, `audit`
+// `add`, `show`, `remove`, `verify`, `audit`
 // =========================================================================
 //
-// Shape decisions (recorded in V2_GAPS §C7 closeout):
+// Shape decisions:
 //
 //   * `add` writes to `<data_dir>/credentials/<name>.env` (or
 //     `<data_dir>/providers/<id>.toml` when the operator passes a
@@ -681,7 +681,7 @@ const CRED_CLI_AUDIT_FILE: &str = "credential-cli.jsonl";
 
 /// `raxis credential add <name>`.
 ///
-/// Decisions (V2_GAPS §C7):
+/// Decisions:
 ///   * The credential MUST NOT already exist (operator uses
 ///     `rotate` to update an existing entry; `add` is for first
 ///     registration).
@@ -1561,7 +1561,7 @@ fn collect_audit_hits(data_dir: &Path, target_name: &str, out: &mut Vec<serde_js
 
 fn print_add_help() {
     println!(
-        r#"raxis credential add — register a NEW credential (V2_GAPS §C7).
+        r#"raxis credential add — register a NEW credential.
 
 USAGE:
     raxis [--data-dir <path>] [--operator-key <path>] credential add <name>

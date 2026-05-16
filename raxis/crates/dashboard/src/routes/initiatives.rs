@@ -9,7 +9,7 @@
 //! Audit discipline: every endpoint here is a read-only
 //! browser. The `OperatorViewedInitiative*` /
 //! `OperatorViewedPlanToml` emissions were retired in
-//! `worker/audit-tightening` per the signal-vs-noise policy in
+//! an earlier audit-noise sweep per the signal-vs-noise policy in
 //! `specs/v2/dashboard-operator-action-audit-coverage.md`. The
 //! audit chain is the system's forensic ledger for
 //! state-affecting actions; dashboard pageview metrics live in

@@ -1105,7 +1105,7 @@ so the old text was forward-looking. The new model is:
   no SMTP, no webhook, no daemon-sidecar ever needed.
 - **Email** is the operator-side SMTP handler (V2.3+).
 - **Sidecar** is the V2 HTTP-egress handler (concurrency cap +
-  3-state circuit breaker, V2_GAPS.md §C4).
+  3-state circuit breaker).
 - The V1-draft `Webhook` channel kind was removed in V2.5 — it
   duplicated `Sidecar` ("HTTP POST a JSON payload to a URL")
   without HMAC signing or backpressure controls.  Operators with an
@@ -1238,7 +1238,7 @@ notifications into a sidecar (`tail -f /var/log/raxis-notifications.jsonl
 V2 ships the operator notification surface as four kinds:
 `Shell | File | Email | Sidecar`.  The legacy V1-draft `Webhook`
 kind was folded into `Sidecar` in V2.5 (forward-only — see
-V2_GAPS.md §C4).  `Slack` / `PagerDuty` / `Teams` / `Discord` /
+ ).  `Slack` / `PagerDuty` / `Teams` / `Discord` /
 `Opsgenie` are not first-class kinds — they are operator-run
 sidecar processes that receive a structured `NotificationPayload`
 POST and translate to the target API.

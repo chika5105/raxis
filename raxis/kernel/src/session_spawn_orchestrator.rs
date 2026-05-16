@@ -20,7 +20,7 @@
 //! `spawn_session()` call per session — never shared across
 //! sessions), and the SpawnRequest's machine config never
 //! includes a `NetworkInterface` block (see `firecracker_config`
-//! / AVF substrate construction). V2_GAPS.md §13 Category 1 —
+//! / AVF substrate construction). Category 1 —
 //! annotation-only enforcement site.
 //!
 //! # Why a kernel-side bridge crate (not an IPC handler module)
@@ -79,7 +79,7 @@ use thiserror::Error;
 
 use crate::initiatives::lifecycle as kernel_lifecycle;
 
-/// V2 `v2_extended_gaps.md §1.1` — env-var name carrying the
+/// env-var name carrying the
 /// operator-authored seed prompt to the spawned planner binary.
 ///
 /// **Single source of truth.** This constant is referenced by:
@@ -179,7 +179,7 @@ pub struct OrchestratorSpawnContext {
     pub vcpu_count: u32,
     /// Memory ceiling in MiB. Same rationale as `vcpu_count`.
     pub mem_mib: u32,
-    /// V2_GAPS §B1 — kernel data-dir, used to derive the planner
+    /// kernel data-dir, used to derive the planner
     /// UDS socket path stamped into the guest env at spawn so
     /// `raxis-planner-core::run_role_session` can connect back via
     /// `RAXIS_KERNEL_PLANNER_SOCKET`. `None` ⇒ the env var is not
@@ -308,7 +308,7 @@ pub trait OrchestratorSpawn: Send + Sync {
     /// store; the test fake returns an empty list).
     ///
     /// `task_prompt` is the operator-authored seed prompt for the
-    /// orchestrator agent (V2 `v2_extended_gaps.md §1.1`). The plan
+    /// orchestrator agent. The plan
     /// validator (`parse_plan_orchestrator`) rejects any plan whose
     /// `[plan.initiative]` block omits or empty-strings
     /// `description` with `LifecycleError::PlanInvalid`, so by
@@ -386,7 +386,7 @@ impl OrchestratorSpawn for LiveOrchestratorSpawn {
     ) -> Pin<Box<dyn Future<Output = Result<SpawnHandle, OrchestratorSpawnError>> + Send + 'a>>
     {
         Box::pin(async move {
-            // V2 `v2_extended_gaps.md §2.5` — read the live policy
+            // read the live policy
             // snapshot once at the spawn boundary so token caps
             // honour the most recent operator-signed bundle.
             let policy_snapshot = self.policy.load_full();
@@ -439,7 +439,7 @@ impl OrchestratorSpawn for LiveOrchestratorSpawn {
 pub struct NoopOrchestratorSpawn {
     /// Sequence of `(session_id, initiative_id, task_prompt)` triples
     /// the kernel asked to spawn, in call order. The third element
-    /// lets V2 `v2_extended_gaps.md §1.1` tests assert that the
+    /// lets tests assert that the
     /// activation handler propagated the operator-authored seed
     /// prompt verbatim to the spawn callsite.
     spawn_calls: std::sync::Mutex<Vec<(String, String, String)>>,
@@ -461,7 +461,7 @@ impl NoopOrchestratorSpawn {
     /// triples the kernel has asked to spawn so far. Tests use
     /// this to assert that `handle_approve_plan` reached the
     /// orchestrator-spawn callsite AND that V2
-    /// `v2_extended_gaps.md §1.1` propagated the operator-authored
+    /// propagated the operator-authored
     /// seed prompt unchanged to the spawn boundary.
     pub fn spawn_calls(&self) -> Vec<(String, String, String)> {
         self.spawn_calls
@@ -825,14 +825,14 @@ async fn spawn_orchestrator_for_initiative(
     // `handlers::planner_fetch::handle` → gateway subprocess →
     // upstream (per `provider-failure-handling.md §2.1`).
     //
-    // V2_GAPS §B1 — stamp the planner UDS env contract into the
+    // stamp the planner UDS env contract into the
     // guest env so `raxis-planner-core::run_role_session` can
     // connect back. `RAXIS_KERNEL_PLANNER_SOCKET` is set when a
     // data_dir is configured. (The AVF substrate stamps
     // `RAXIS_KERNEL_VSOCK_LISTEN_PORT` instead via
     // `raxis-isolation-apple-vz::config::translate`.)
     //
-    // V2 `v2_extended_gaps.md §1.1` — additionally stamp
+    // additionally stamp
     // `RAXIS_PLANNER_TASK_PROMPT` unconditionally. The plan-side
     // validator (`parse_plan_orchestrator`) already rejected plans
     // whose `[plan.initiative]` table omits or empty-strings
@@ -860,7 +860,7 @@ async fn spawn_orchestrator_for_initiative(
     // here and stamp the right channel after the sidecar attempt.
     let task_prompt_for_sidecar = task_prompt;
 
-    // V2 `v2_extended_gaps.md §2.5` — stamp per-session LLM token
+    // stamp per-session LLM token
     // caps from `policy.budget.token_caps` into the guest env. The
     // in-VM dispatch loop reads them via `parse_u64_env` and folds
     // them into `DispatchConfig::max_tokens_*_total`. Absent caps
@@ -900,7 +900,7 @@ async fn spawn_orchestrator_for_initiative(
         initiative_id,
     );
 
-    // V2 `v2_extended_gaps.md §2.4` — stamp the KSB snapshot we
+    // stamp the KSB snapshot we
     // co-scheduled at the top of this function into
     // `RAXIS_PLANNER_KSB`. The driver reads the env var and renders
     // it via `raxis_ksb::assemble_system_prompt(NNSP, snap)` so the
@@ -1578,7 +1578,7 @@ pub fn spawn_planner_dispatcher(
             let terminal_tool = scrape_terminal_tool_from_console_log(&console_log_path);
 
             // `INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01`
-            // (iter65) — fold the planner-side
+            // — fold the planner-side
             // `PlannerExitOutcome` and the kernel-observed last
             // IntentRequest outcome into the effective exit
             // classification BEFORE the SessionRevoked emit. The
@@ -1587,7 +1587,7 @@ pub fn spawn_planner_dispatcher(
             // submission as `DriverOutcome::Completed` (which
             // wires through to `CleanCompletion` on the wire),
             // regardless of whether the kernel's response was
-            // `Accepted` or `Rejected`. The audit chain pre-iter65
+            // `Accepted` or `Rejected`. The audit chain earlier
             // carried the misclassification verbatim — a session
             // that observed
             // `intent_response.status="rejected"` with
@@ -1699,7 +1699,7 @@ pub fn spawn_planner_dispatcher(
         }
 
         // `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`
-        // (iter65) — surface the kernel-side cleanliness classification
+        // — surface the kernel-side cleanliness classification
         // computed inside the `revoke_committed` block above as a
         // boolean flag the Mode A respawn dispatch consumes verbatim.
         // We re-derive it here (rather than threading the variable
@@ -1733,7 +1733,7 @@ pub fn spawn_planner_dispatcher(
         // `retry_subtask` / `integration_merge`), and exits. The
         // EarlyResponse dispatch in `handlers/intent.rs` already
         // handles the respawn for `CompleteTask` / `SubmitReview`
-        // / `ReportFailure` (worker-tier intents that fire AFTER
+        // `ReportFailure` (worker-tier intents that fire AFTER
         // the prior orchestrator already exited). But
         // `RetrySubTask` is fired BY the orchestrator itself — it
         // mints a fresh `subtask_activations` row in
@@ -2499,7 +2499,7 @@ pub async fn respawn_orchestrator_for_initiative(
     // marker. A crash between either pair leaves the store internally
     // consistent — both rolled back, never half-applied.
     // `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`
-    // (iter65). When the predecessor session exited because the
+    //. When the predecessor session exited because the
     // kernel rejected its terminal intent with a capacity-pressure
     // error code (`FailVmConcurrencyAtCap` /
     // `FailAdmissionQueueFull`), the respawn is structurally
@@ -2574,7 +2574,7 @@ pub async fn respawn_orchestrator_for_initiative(
             // aggregate=Pending"); the audit chain immediately
             // preceding this event carries the wire-exact
             // `IntentRejected` rows for forensic readers.
-            // TODO(post-iter44): per-session "last rejected intent"
+            // TODO(later): per-session "last rejected intent"
             // tracking so we can fill these in at admission time
             // rather than relying on the audit-chain join.
             let now_secs = unix_now_secs();
@@ -2702,7 +2702,7 @@ pub async fn respawn_orchestrator_for_initiative(
                  \"max_attempts\":{max_attempts}}}",
             );
             // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01`
-            // (iter65) — paired chain-side audit emit for the
+            // — paired chain-side audit emit for the
             // kernel-initiated `LogicalDeadlock` escalation row
             // inserted in the spawn_blocking above. Emit BEFORE
             // the `OrchestratorRespawnCeilingExceeded` event so a
@@ -2717,7 +2717,7 @@ pub async fn respawn_orchestrator_for_initiative(
             // recovery sweep (`INV-AUDIT-PAIRED-06`) handles the
             // re-emit.
             //
-            // Pre-iter65 the emit was missing entirely — the
+            // Previously the emit was missing entirely — the
             // SQLite-side `INSERT INTO escalations` ran (when the
             // FK could resolve) but no `EscalationSubmitted` row
             // landed in the chain, breaking
@@ -3162,7 +3162,7 @@ fn provision_meta_sidecar(
 }
 
 // ---------------------------------------------------------------------------
-// V2 `v2_extended_gaps.md §2.5` — token-cap env stamping.
+// token-cap env stamping.
 // ---------------------------------------------------------------------------
 
 /// Stamp the per-session LLM token caps from `[budget.token_caps]`
@@ -3230,7 +3230,7 @@ fn populate_token_cap_env_or_insert(
 /// **base** `max_turns` for a planner session against the precedence
 /// chain and return both the resolved integer AND a stable `source`
 /// label that names the resolution arm verbatim (`"task"` / `"policy"`
-/// / `"compiled-default"`).
+/// `"compiled-default"`).
 ///
 /// This is the **base** value before progressive scaling. The full
 /// resolver [`resolve_planner_max_turns_for`] consumes this together
@@ -3589,7 +3589,7 @@ fn log_planner_max_turns_resolved(
     );
 }
 
-/// V2 `v2_extended_gaps.md §3.1` — stamp the `[budget.sleep_caps]`
+/// stamp the `[budget.sleep_caps]`
 /// per-call and cumulative ceilings into the spawned VM env.
 /// Absent ⇒ the in-VM `SleepTool::disabled()` refuses every
 /// invocation; opting in requires both keys to be present
@@ -4238,7 +4238,7 @@ pub struct ExecutorSpawnContext {
     pub reviewer_vcpu_count: u32,
     /// Memory ceiling in MiB for Reviewer VMs.
     pub reviewer_mem_mib: u32,
-    /// V2_GAPS §B1 — kernel data-dir, used to derive the planner
+    /// kernel data-dir, used to derive the planner
     /// UDS socket path stamped into the guest env so
     /// `raxis-planner-core::run_role_session` can connect back via
     /// `RAXIS_KERNEL_PLANNER_SOCKET`. `None` ⇒ env var not stamped.
@@ -4619,7 +4619,7 @@ pub async fn spawn_executor_for_task(
         ),
     };
 
-    // V2_GAPS §B1 — merge planner UDS env contract into `extra_env`
+    // merge planner UDS env contract into `extra_env`
     // so the spawned planner binary can reach the kernel. The call
     // site (`handlers/intent.rs::handle_activate_subtask`) passes
     // `BTreeMap::new()` today; this is the single chokepoint that
@@ -4637,7 +4637,7 @@ pub async fn spawn_executor_for_task(
             .or_insert(sock.display().to_string());
     }
 
-    // V2 `v2_extended_gaps.md §2.5` — stamp per-session LLM token
+    // stamp per-session LLM token
     // caps from `policy.budget.token_caps` into the guest env, same
     // contract as the orchestrator spawn path. `entry().or_insert`
     // semantics: an existing override stamped by the caller wins
@@ -4668,12 +4668,37 @@ pub async fn spawn_executor_for_task(
     let crash_retry_count_for_attempt = {
         let store_for_read = Arc::clone(store);
         let task_id_owned = task_id.to_owned();
-        tokio::task::spawn_blocking(move || {
+        match tokio::task::spawn_blocking(move || {
             let conn = store_for_read.lock_sync();
             read_crash_retry_count_for_task(&conn, &task_id_owned)
         })
         .await
-        .unwrap_or(0)
+        {
+            Ok(n) => n,
+            Err(join_err) => {
+                // A `spawn_blocking` join failure (panic or
+                // cancellation in the SQLite reader) used to be
+                // folded into `0`, which silently changed the
+                // `planner_max_turns` resolution to the
+                // "first-attempt" value even on a retry — masking
+                // real test/operator behaviour and making
+                // INV-PLANNER-MAX-TURNS-PRECEDENCE-01's per-attempt
+                // contract observably wrong without a diagnostic.
+                // Surface the failure loudly and fall back to 0 as
+                // a conservative default so the spawn proceeds but
+                // the operator/log scraper sees the misread.
+                eprintln!(
+                    "{{\"level\":\"error\",\
+                     \"event\":\"CrashRetryCountSpawnBlockingJoinFailed\",\
+                     \"task_id\":{task_json},\
+                     \"reason\":\"{join_err}\",\
+                     \"fallback_crash_retry_count\":0}}",
+                    task_json = serde_json::to_string(task_id)
+                        .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                );
+                0
+            }
+        }
     };
     let attempt_for_resolver = crash_retry_count_for_attempt.saturating_add(1);
     let planner_max_turns_resolved = resolve_planner_max_turns_for(
@@ -4696,7 +4721,7 @@ pub async fn spawn_executor_for_task(
         initiative_id,
     );
 
-    // V2 `v2_extended_gaps.md §2.4` — assemble the per-task KSB
+    // assemble the per-task KSB
     // and stamp into `RAXIS_PLANNER_KSB`. Same fallback policy as
     // the orchestrator path: if the SQLite read fails the spawn
     // proceeds with a minimum-bootable snapshot so a transient
@@ -4755,7 +4780,7 @@ pub async fn spawn_executor_for_task(
     // and the operator-authored task prompt the caller stamped
     // into `extra_env` under `RAXIS_PLANNER_TASK_PROMPT` (the
     // realistic-scenario `materializer.md` / `service_round_trip.md`
-    // / `transparent_proxy_real_scripts.md` are 2.7–6.9 KiB which
+    // `transparent_proxy_real_scripts.md` are 2.7–6.9 KiB which
     // after base64 (4/3) consistently truncates the
     // `-- --task-id <ID> --initiative-id <ID>` argv tail and
     // produces guest-side `bad-env-token` + `missing value for
@@ -5366,7 +5391,7 @@ mod tests {
         assert_eq!(fake.terminate_calls(), vec!["sess-A".to_owned()]);
     }
 
-    /// V2_GAPS §B1 — `with_data_dir` is the only path through which
+    /// `with_data_dir` is the only path through which
     /// the spawn helpers can derive the planner UDS env stamp. If
     /// the builder regresses (drops the path, ignores it, etc.) the
     /// guest binary loses its kernel transport and silently falls

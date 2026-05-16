@@ -2,7 +2,8 @@
 //
 // Normative reference: cli-ceremony.md §4.1 `initiative abort`,
 // §4.6 `initiative quarantine` (step-10 quarantine primitives),
-// `v2_extended_gaps.md §2.1 SubscribeInitiative` for `initiative watch`.
+// and the kernel push-protocol's `SubscribeInitiative` for
+// `initiative watch`.
 
 use raxis_types::operator_wire::OperatorRequest;
 
@@ -28,16 +29,13 @@ pub fn run_abort(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 
 // ---------------------------------------------------------------------------
 // initiative quarantine <initiative_id> [--reason <text>]
-//
 // Spec: cli-ceremony.md §4.6 (step-10), kernel-store.md §2.5.8 quarantine.
-//
 // Quarantine is a one-way curtain: every subsequent IntentRequest against
 // `initiative_id` will be rejected by the kernel with the terminal error
 // `FAIL_INITIATIVE_QUARANTINED` (see
 // `raxis-types::PlannerErrorCode::FailInitiativeQuarantined`). Existing
 // in-flight tasks remain in their current state — quarantine does not
 // abort, it freezes. Use `initiative abort` for the destructive path.
-//
 // `--reason` is optional and capped server-side at 512 bytes
 // (`kernel/src/ipc/operator.rs::cap_reason`). It is mirrored verbatim
 // into the `InitiativeQuarantined` audit event.
@@ -71,8 +69,7 @@ pub fn run_quarantine(flags: &GlobalFlags, args: &[String]) -> Result<(), CliErr
 
 /// `raxis initiative watch <initiative_id>` — subscribe to the
 /// realtime event stream for `initiative_id` and pretty-print
-/// each frame as it arrives. Implements `v2_extended_gaps.md §2.1`.
-///
+/// each frame as it arrives. Implements .
 /// Wire flow:
 ///   1. Send `OperatorRequest::SubscribeInitiative`.
 ///   2. Read the kernel's `OperatorResponse::InitiativeSubscribed`
@@ -82,7 +79,6 @@ pub fn run_quarantine(flags: &GlobalFlags, args: &[String]) -> Result<(), CliErr
 ///   4. Exit cleanly when the kernel writes a `Closed` frame
 ///      (initiative reached terminal state) or closes the
 ///      connection.
-///
 /// The CLI does NOT enforce a timeout — operators terminate the
 /// watch with Ctrl-C (the `read_frame` blocking call surfaces the
 /// closed connection on the next iteration).

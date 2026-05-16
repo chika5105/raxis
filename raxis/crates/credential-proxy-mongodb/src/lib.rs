@@ -1,40 +1,32 @@
 //! `raxis-credential-proxy-mongodb` — MongoDB OP_MSG credential
 //! proxy.
-//!
 //! Normative reference: `specs/v2/credential-proxy.md §4.4`
-//! (MongoDB) and `specs/v2/v2_extended_gaps.md §2.2`
+//! (MongoDB) and
 //! (SCRAM-SHA-256 upstream auth, V2.5).
-//!
 //! The proxy speaks the modern wire protocol (`OP_MSG`, op code
 //! 2013), terminates the agent-side `hello` / `isMaster` greeting
 //! locally, and routes every other command document through
 //! [`restriction::Restrictions::is_blocked`]. Blocked commands get
 //! `{ ok: 0, code: 13, codeName: "Unauthorized", errmsg: "..." }`
-//! — the canonical MongoDB authorization-error shape so drivers
+//! the canonical MongoDB authorization-error shape so drivers
 //! surface a clean `MongoServerError` with code 13 instead of
 //! a generic protocol error.
-//!
 //! # Auth shapes
-//!
 //! Both upstream auth shapes are supported:
-//!
 //! * `mongodb://host:port/db` (no userinfo) — pure plaintext +
 //!   `--noauth`. Useful for ephemeral CI containers.
 //! * `mongodb://user:pass@host:port/db?authSource=admin`
-//!   — drives SCRAM-SHA-256 SASL against `authSource` (default
+//! drives SCRAM-SHA-256 SASL against `authSource` (default
 //!   `admin`) before any data command. The proxy's SCRAM client
 //!   is RFC 5802 + 7677 compliant: nonce-prefix verified,
 //!   server-signature verified in constant time, iteration count
 //!   bounded ≥ 4096.
-//!
 //! In both cases the agent-side connection is no-auth from the
 //! agent's point of view (`mount_as` URI =
 //! `mongodb://127.0.0.1:PORT/db` with no credentials, hello
 //! response advertises an empty `saslSupportedMechs`). The proxy
 //! authenticates upstream with the kernel-resolved credential.
-//!
 //! # What this crate supports
-//!
 //!   * `OP_MSG` framing on inbound messages, with the 64 MiB hard
 //!     cap enforced before any allocation.
 //!   * `hello` / `isMaster` / `ismaster` / `ping` / `buildInfo`:
@@ -48,9 +40,7 @@
 //!     and never touch the upstream.
 //!   * Per-command audit emission with the command name and a
 //!     SHA-256 of the *full* OP_MSG body bytes for fingerprinting.
-//!
 //! # V2 restriction surface (`proxy-table-allowlists.md`)
-//!
 //! The BSON command walker resolves the primary collection +
 //! `$db` from `OP_MSG` bodies, runs `allowed_collections` /
 //! `forbidden_collections` allow/deny enforcement, and applies
@@ -61,9 +51,7 @@
 //! rewritten to 0 on overshoot (so the agent's driver sees a
 //! clean cursor-exhausted result instead of a wire error). The
 //! per-cursor counter accumulates across `find` + N `getMore`s.
-//!
 //! # What is still deferred (tracked under V3)
-//!
 //!   * Compressed `OP_COMPRESSED` envelopes.
 //!   * Per-pipeline allowlist coverage for `$lookup` /
 //!     `$graphLookup` — V2 rejects them when ANY allowlist is
@@ -476,7 +464,6 @@ async fn serve_one(
             .fetch_add(body_len as u64, Ordering::Relaxed);
 
         // ─── Legacy `OP_QUERY` initial-handshake handler ───
-        //
         // Pymongo 4.x, the Java driver, Node, Go, Rust, etc. all
         // send the **first** message of a session as `OP_QUERY`
         // (`op_code 2004`) targeting collection `admin.$cmd`
@@ -487,7 +474,6 @@ async fn serve_one(
         // path the driver's SDAM monitor reports
         // `ServerSelectionTimeoutError: connection closed`
         // (live-e2e iter33 root cause).
-        //
         // Subsequent messages from the same driver always switch
         // to `OP_MSG` once the negotiated `maxWireVersion` is
         // ≥ 6, so this branch is **only** the handshake hop —
@@ -519,7 +505,7 @@ async fn serve_one(
             }
             stats.commands_audited.fetch_add(1, Ordering::Relaxed);
             // Only `hello` / `isMaster` / `ismaster` / `ping`
-            // / `buildInfo` are accepted on the legacy channel —
+            // `buildInfo` are accepted on the legacy channel —
             // every other command must come over `OP_MSG`.
             let is_handshake = matches!(
                 command.as_str(),
@@ -828,7 +814,7 @@ fn build_blocked_doc(command: &str, decision: &RestrictionDecision) -> Vec<u8> {
         RestrictionDecision::Block { reason, .. } => reason.as_str(),
         _ => "policy_block",
     };
-    let errmsg = format!("command `{command}` blocked by RAXIS policy: {reason}",);
+    let errmsg = format!("command `{command}` blocked by RAXIS policy: {reason}");
     B::new()
         .double("ok", 0.0)
         .int32("code", 13)
@@ -1093,7 +1079,6 @@ fn build_reply_for(command: &str) -> Vec<u8> {
     match command {
         "hello" | "isMaster" | "ismaster" => {
             // V2 wire-protocol hello reply.
-            //
             // **`topologyVersion` is intentionally omitted.** The
             // MongoDB driver spec
             // (`drivers/server-discovery-and-monitoring.rst`)
@@ -1182,7 +1167,6 @@ mod tests {
     /// Regression test for Live-e2e iter32: `topologyVersion`
     /// MUST NOT appear as a BSON *string* (`type 0x02`) in the
     /// hello reply.
-    ///
     /// The MongoDB driver SDAM spec
     /// (`drivers/server-discovery-and-monitoring.rst §"Hello
     /// response"`) declares `topologyVersion` as
@@ -1195,7 +1179,6 @@ mod tests {
     /// the SDAM monitor thread, the driver flags the socket as
     /// stale, and the next user command surfaces as
     /// `ServerSelectionTimeoutError: connection closed`.
-    ///
     /// The contract this regression test pins is the simpler
     /// "omit `topologyVersion` entirely"; if a future revision
     /// emits it as a sub-document, expand this test to assert

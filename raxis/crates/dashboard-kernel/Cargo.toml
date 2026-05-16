@@ -3,7 +3,7 @@ name        = "raxis-dashboard-kernel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Kernel-side glue for the raxis-dashboard HTTP backend. Provides the `KernelDashboardData` impl that fans out to `raxis-store::ro` views, the audit `ChainReader`, and the live policy `ArcSwap`. Linked by the kernel binary; integration-tested independently. Spec: specs/v2/v2_extended_gaps.md §4."
+description = "Kernel-side glue for the raxis-dashboard HTTP backend. Provides the `KernelDashboardData` impl that fans out to `raxis-store::ro` views, the audit `ChainReader`, and the live policy `ArcSwap`. Linked by the kernel binary; integration-tested independently."
 
 [lib]
 path = "src/lib.rs"

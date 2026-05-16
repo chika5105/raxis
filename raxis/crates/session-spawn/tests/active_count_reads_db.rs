@@ -1,9 +1,9 @@
-//! `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65) regression
+//! `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` regression
 //! suite for [`raxis_session_spawn::SessionSpawnService::active_count`].
 //!
 //! ## Pathology this guards against
 //!
-//! Pre-iter65 `active_count` returned `self.sessions.lock().len()` —
+//! Previously `active_count` returned `self.sessions.lock().len()` —
 //! the in-memory live-handle map. The map was `insert`-ed at
 //! `spawn_session` time and `remove`-d at `terminate_session` time,
 //! but the production `planner_self_exit` revoke path (the dominant
@@ -22,7 +22,7 @@
 //!   regardless of how full the in-memory map happens to be.
 //! * `active_count_with_store_counts_unrevoked_rows` — the
 //!   audit-truth projection: N un-revoked rows ⇒ count = N.
-//! * `active_count_falls_back_to_in_memory_when_no_store` — pre-iter65
+//! * `active_count_falls_back_to_in_memory_when_no_store` — earlier
 //!   fallback for fixtures that never wire a store. Documents the
 //!   fallback behaviour; production main + `HandlerContext::new`
 //!   always call `with_store`.
@@ -149,7 +149,7 @@ async fn active_count_with_store_counts_unrevoked_rows() {
         count, 3,
         "INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01: 3 un-revoked \
          + 7 revoked rows ⇒ cap-admission count must be 3 (the \
-         pre-iter65 in-memory projection would have reported 0 \
+         earlier in-memory projection would have reported 0 \
          here because we never spawned via the service)",
     );
 }
@@ -193,7 +193,7 @@ async fn active_count_drops_after_planner_self_exit_revoke_sweep() {
     );
 }
 
-/// Pre-iter65 fallback: when no store is wired (legacy unit-test
+/// Previously fallback: when no store is wired (legacy unit-test
 /// fixtures), `active_count` falls back to `self.sessions.lock().len()`.
 /// Documents the fallback so a future refactor that drops the
 /// in-memory projection entirely doesn't silently break tests

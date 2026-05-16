@@ -3,7 +3,7 @@ name        = "raxis-dashboard"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Operator dashboard HTTP backend (axum). Read-only over kernel state with one carefully-scoped write surface (PUT /api/policy/toml). Spec: specs/v2/v2_extended_gaps.md §4."
+description = "Operator dashboard HTTP backend (axum). Read-only over kernel state with one carefully-scoped write surface (PUT /api/policy/toml)."
 
 [lib]
 path = "src/lib.rs"

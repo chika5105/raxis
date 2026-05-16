@@ -948,7 +948,7 @@ detached
 
     /// Fixture mirroring the live-host worktree list from the
     /// motivating disk-fill incident — main + six workers, with
-    /// only one (`worker/landed-empty`) merged AND idle.
+    /// only one (the `landed-empty` row) merged AND idle.
     #[test]
     fn live_host_fixture_classifies_correctly() {
         let porcelain = "\
@@ -980,7 +980,7 @@ branch refs/heads/worker/landed-empty
         let mut keep = HashSet::new();
         keep.insert("worker/keep-explicit".to_string());
         let self_dir = PathBuf::from("/private/tmp/raxis-self/raxis/xtask");
-        // Only `worker/landed-empty` has its tip in `origin/main`.
+        // Only the `landed-empty` row has its tip in `origin/main`.
         let landed: HashSet<&'static str> = ["66666666"].into_iter().collect();
         let ctx = ClassifyContext {
             keep_branches: &keep,

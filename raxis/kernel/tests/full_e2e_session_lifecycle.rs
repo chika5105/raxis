@@ -1,15 +1,11 @@
 //! Full RAXIS V2 end-to-end lifecycle smoke test —
 //! genesis → planner → reviewer → integration merge → DAG complete.
-//!
-//! Normative reference: `specs/v2/e2e-live-test-gap.md`.
-//!
+
 //! ## Why this file exists
-//!
 //! Every other `kernel/tests/*.rs` integration test pins a specific surface
 //! (operator handshake, planner framing, signal shutdown, audit chain
 //! across restart, integration-merge attribution, dashboard wiring). NONE
 //! of them drive the *whole* lifecycle the spec promises:
-//!
 //! ```text
 //!   bootstrap → operator approves plan → orchestrator spawns
 //!   → orchestrator activates executor sub-task → executor commits
@@ -17,110 +13,86 @@
 //!   → audit chain ends with `IntegrationMergeCompleted`
 //!   → kernel exits cleanly
 //! ```
-//!
 //! That chain crosses every V2 invariant boundary that ships in the kernel
 //! (cert gate, plan-bundle sealing, session-spawn substrate, planner UDS
 //! framing, KSB stamping, intent admission, FSM transitions, audit
 //! chaining). A regression in *any* of them surfaces here.
-//!
 //! ## Why this is gated by `RAXIS_LIVE_E2E=1`
-//!
 //! The full chain requires three out-of-tree dependencies:
-//!
 //!   1. **Real microVM substrate** — Apple-VZ on macOS or Firecracker on
 //!      Linux. Both require canonical `<role>-<kernel_version>.img` /
 //!      `<role>-<kernel_version>.manifest.toml` artefacts under
 //!      `$RAXIS_INSTALL_DIR` (or `<data_dir>` fallback). CI machines
 //!      and most dev workstations do not have these.
-//!
 //!   2. **Live LLM backend** — the in-VM `raxis-orchestrator` /
 //!      `raxis-executor` / `raxis-reviewer` planner binaries call
 //!      Anthropic over the in-VM tproxy → host gateway path. Real
 //!      tokens cost real money; CI must never bill an account.
-//!
 //!   3. **Database services for the credential proxies** — Postgres +
 //!      MongoDB containers per `live-e2e/docker-compose.e2e.yml`.
-//!
-//! Per `e2e-live-test-gap.md §7.1`, the test SKIPS (returns Ok without
+//!the test SKIPS (returns Ok without
 //! asserting) when `RAXIS_LIVE_E2E != "1"` so `cargo test --workspace`
 //! continues to pass on any developer's machine without those
 //! dependencies. The skip path emits a structured `Skipped:` line with
 //! the exact `docker compose` command the operator must run to gate
 //! the test back on.
-//!
 //! ## What the test actually does when gated ON
-//!
 //! The test exercises the production wire surface end-to-end:
-//!
 //!   * **Bootstrap**: spawns the production `raxis-kernel` binary in
 //!     bootstrap mode against a fresh `<data_dir>` with a custom
 //!     operator certificate that grants the full lifecycle ops the
 //!     test needs (`CreateInitiative`, `ApprovePlan`, `AbortInitiative`).
 //!     Then re-spawns it in normal mode.
-//!
 //!   * **Credential injection**: writes the three credential files the
 //!     spec's plan declares (`test-pg-dev.env`, `test-mongo-dev.env`,
 //!     `test-gcp-dev.json`) under `<data_dir>/credentials/` BEFORE the
 //!     plan is submitted, so admission-step credential resolution
 //!     succeeds.
-//!
 //!   * **Plan submission**: builds the spec's `[plan]` TOML in memory,
 //!     wraps it in a V2.1 plan-bundle (signed_at + nonce + ed25519
 //!     signature with the same operator key the cert advertised), and
 //!     submits it via the real operator UDS handshake +
 //!     `OperatorRequest::CreateInitiative` JSON IPC frame.
-//!
 //!   * **Approval**: submits `OperatorRequest::ApprovePlan` over the
 //!     same authenticated connection. The kernel's
 //!     `handle_approve_plan` handler triggers the orchestrator
 //!     auto-spawn callsite (`session_spawn_orchestrator::
 //!     LiveOrchestratorSpawn::spawn_for_initiative`), which boots a
 //!     real microVM running the canonical orchestrator image.
-//!
 //!   * **Polling**: waits up to a generous deadline for the audit
 //!     chain to grow past `IntegrationMergeCompleted` (the terminal
 //!     event for the success path). Fails-loud on:
 //!       - any `SecurityViolationDetected` event,
 //!       - any `KernelShutdownRequested` event before merge,
 //!       - the deadline elapsing without `IntegrationMergeCompleted`.
-//!
 //!   * **Post-mortem audit assertion**: verifies the chain integrity
 //!     with `raxis_audit_tools::verify_chain_full`, then walks the
 //!     decoded events and asserts the expected `kind` sequence is a
 //!     subset of what landed (the test does not over-pin per-event
 //!     positions because real LLM scheduling is non-deterministic).
-//!
 //!   * **Graceful shutdown**: SIGTERM, wait for clean exit, ensure
 //!     `KernelShutdown { exit: "graceful" }` is the last audit row.
-//!
 //! ## Invocation
-//!
 //! ```bash
 //! # 1. Stand up infra (Postgres + MongoDB tmpfs containers).
 //! docker compose -f live-e2e/docker-compose.e2e.yml up -d --wait
-//!
 //! # 2. Provide the LLM key (file is git-ignored).
 //! cat raxis/.env
 //! # ANTHROPIC-API-DEV-KEY=sk-ant-...
-//!
 //! # 3. Provide GCP application-default credentials (the GCP
 //! #    credential proxy reads these for upstream IAM tokens).
 //! gcloud auth application-default login
-//!
 //! # 4. Build the gateway binary and export its absolute path.
 //! cargo build -p raxis-gateway --release
 //! export RAXIS_GATEWAY_BINARY="$(pwd)/raxis/target/release/raxis-gateway"
-//!
 //! # 5. Point at the install root that holds canonical microVM images
 //! #    + signed manifests (orchestrator-core, executor-starter,
 //! #    reviewer-core, all stamped with the kernel build's signing
 //! #    key — see `system-requirements.md §3`).
 //! export RAXIS_INSTALL_DIR=/usr/local/lib/raxis    # or your local install root
-//!
 //! # 6. Run the test.
 //! RAXIS_LIVE_E2E=1 cargo test -p raxis-kernel \
 //!     --test full_e2e_session_lifecycle -- --nocapture
-//!
 //! # 7. Tear down.
 //! docker compose -f live-e2e/docker-compose.e2e.yml down -v
 //! ```
@@ -153,7 +125,7 @@ use common::tier3_artifacts::Tier3Reporter;
 // Constants — kept inline so the spec → code mapping is one file deep.
 // ---------------------------------------------------------------------------
 
-/// Toggle env var per `e2e-live-test-gap.md §7.1`. The test skips
+/// Toggle env var. The test skips
 /// (returns Ok without asserting) when this is unset or != "1" so
 /// `cargo test --workspace` continues to pass without the live
 /// infra. Operators flip it to "1" after standing up Docker
@@ -337,7 +309,6 @@ fn full_session_lifecycle() {
     // ── §7.13 — graceful shutdown. The kernel's signal handler must
     //    drain in-flight intents, terminate active sessions, and emit
     //    the final `KernelShutdown { exit: "graceful" }` audit row.
-    //
     //    Keep-alive opt-out: when `RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1`,
     //    a `KEEP_RUNNING` touch file in `<data_dir>`, or the
     //    `--keep-running-after-exit` CLI flag is set, skip both the
@@ -470,7 +441,6 @@ fn require_gcp_adc() {
 /// issues a `FetchRequest`. Without it the gateway supervisor will
 /// emit `GatewayQuarantined` after the back-off cap and the planner
 /// will hang on its first LLM call.
-///
 /// Why an env var rather than `cargo build -p raxis-gateway` from
 /// inside the test: spawning a recursive `cargo build` would
 /// contend with the parent `cargo test --workspace` build lock and
@@ -502,11 +472,9 @@ fn require_gateway_binary() -> PathBuf {
 
 /// `RAXIS_INSTALL_DIR/images/` must contain the three signed canonical
 /// .img + .manifest.toml pairs the kernel boots into microVMs:
-///
 ///   * `raxis-orchestrator-core-<kernel_version>.img(.manifest.toml)`
 ///   * `raxis-executor-starter-<kernel_version>.img(.manifest.toml)`
 ///   * `raxis-reviewer-core-<kernel_version>.img(.manifest.toml)`
-///
 /// Without these the orchestrator spawn fails with
 /// `CanonicalImageError::IoMissing` mid-lifecycle, which surfaces
 /// as a generic "session spawn failed" deep into the run. We
@@ -561,7 +529,7 @@ fn require_canonical_images() {
             _ => unreachable!("role list is closed-set"),
         };
         let entries = common::cpio_inspect::list_initramfs_paths(&img)
-            .unwrap_or_else(|e| panic!("failed to walk canonical image {}: {e}", img.display(),));
+            .unwrap_or_else(|e| panic!("failed to walk canonical image {}: {e}", img.display()));
         let missing: Vec<&&'static str> = required
             .iter()
             .filter(|b| !entries.contains_key(**b))
@@ -603,7 +571,6 @@ fn build_e2e_operator_key() -> (SigningKey, OperatorFingerprint) {
 /// Run `raxis-kernel` in bootstrap mode against a fresh tempdir
 /// using a custom operator cert that advertises the full lifecycle
 /// op set. Returns the (kernel_bin_path, data_dir).
-///
 /// We deliberately do NOT use [`KernelInstance::bootstrap_and_spawn`]
 /// because that helper hard-codes the harness cert with
 /// `permitted_ops = ["CreateInitiative"]`. The E2E test additionally
@@ -746,14 +713,12 @@ fn spawn_kernel_normal(kernel_bin: &Path, data_dir: PathBuf, install_dir: &Path)
 /// `crates/genesis-tools::render_genesis_policy_toml`) to enable the
 /// gateway against the just-built `raxis-gateway` binary and a
 /// single Anthropic provider.
-///
 /// The kernel's `load_policy` does NOT verify any signature on
 /// policy.toml at boot (signature verification only fires inside
 /// `policy_manager::advance_epoch`, the runtime epoch-rotation
 /// path), so post-bootstrap mutation is safe and persists across
 /// the second `Command::new(kernel_bin).spawn()` below.
 /// In-place mutation of the genesis-emitted `[dashboard]` block:
-///
 ///   * change `bind_port    = 9820` → `bind_port    = {test_port}`
 ///     so the test-managed dashboard does not collide with a
 ///     running developer daemon on the spec default 9820.
@@ -762,13 +727,11 @@ fn spawn_kernel_normal(kernel_bin: &Path, data_dir: PathBuf, install_dir: &Path)
 ///     been built — without it the kernel's dashboard server
 ///     serves the JSON API only (no UI), which defeats the
 ///     visual-debug purpose.
-///
 /// Genesis emits the block flush-left (Rust `\` line continuation
 /// in `genesis_tools::policy_toml::render_genesis_policy_toml`
 /// strips the source-file indentation), so each key sits at
 /// column 0. We preserve that shape so the rewritten file stays
 /// formatted the same way the genesis emitter would have written it.
-///
 /// Failure mode: if the genesis template is ever changed and the
 /// `bind_port    = 9820` literal disappears, this helper panics
 /// with a clear remediation — silently failing here would land
@@ -877,7 +840,6 @@ fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
     body.push_str(&injected);
 
     // ── iter62/iter63: real witness verifier (additive, FOLLOWUP-B) ────────
-    //
     // INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01: every live-e2e
     // run MUST drive at least one verifier-backed gate through
     // `kernel/src/scheduler/dag.rs::transition_to_admitted`. Mirror
@@ -984,7 +946,6 @@ fn write_credentials(data_dir: &Path) {
 /// `<data_dir>/worktrees/orch-<initiative_id>`. The executor then
 /// clones from that orchestrator worktree, edits its allow-listed
 /// path (`hello.txt` per the spec plan), and commits.
-///
 /// **Why `git init` and not `gix`.** This is test infrastructure;
 /// shelling out to the host's git CLI is the most readable wire
 /// shape and matches the operator's real install procedure
@@ -992,7 +953,6 @@ fn write_credentials(data_dir: &Path) {
 /// repository because `gix::clone` reaches into the source's
 /// working tree via the `file://` transport, which is the path
 /// the production orchestrator-clone exercises.
-///
 /// **Author identity.** We stamp explicit author + committer
 /// env vars so the seed commit's hash is reproducible across
 /// developer machines (no `~/.gitconfig` dependency).
@@ -1085,14 +1045,28 @@ fn seed_main_repository(data_dir: &Path) {
 }
 
 /// Per `credential-proxy.md §6.1` credential files MUST be 0600 so
-/// only the kernel UID can read them. We hand-set the mode after
-/// `std::fs::write` because `write` honours umask and a permissive
-/// umask would leave the file world-readable.
+/// only the kernel UID can read them. Open with `O_CREAT` + mode
+/// 0600 so a brand-new file is created at 0600, chmod 0600 BEFORE
+/// the body bytes are written so an existing file at a wider mode
+/// is tightened before exposing the credential bytes, then write
+/// + fsync.
 fn write_with_mode_0600(path: &Path, body: &[u8]) {
-    std::fs::write(path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap_or_else(|e| panic!("open {} O_CREAT|0600: {e}", path.display()));
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))
         .unwrap_or_else(|e| panic!("chmod 0600 {}: {e}", path.display()));
+    f.write_all(body)
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    f.sync_all()
+        .unwrap_or_else(|e| panic!("fsync {}: {e}", path.display()));
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,12 +1077,10 @@ fn write_with_mode_0600(path: &Path, body: &[u8]) {
 /// credentials file the gateway resolves through
 /// `FileCredentialBackend` for the `[[providers]]` entry whose
 /// `credentials_file = "anthropic-e2e.toml"`.
-///
 /// Wire shape (`raxis/gateway/src/policy_view.rs::load_provider_
 /// credentials`): a flat TOML with `api_key`, optional `auth_header`
 /// (default `"Authorization"`), optional `auth_prefix` (default
 /// `"Bearer "`). Anthropic uses `x-api-key` with no prefix.
-///
 /// Mode 0600 because `peripherals.md §3.2` mandates kernel-uid-only
 /// readability for provider credential files.
 fn write_provider_credentials(data_dir: &Path) {
@@ -1168,7 +1140,6 @@ impl OperatorIpc {
         let sig = signing_key.sign(&challenge_bytes);
 
         // Step 3: send response.
-        //
         // The IPC handshake fingerprint is the **policy** form
         // (`raxis_policy::loader::operator_pubkey_fingerprint`,
         // SHA-256[:16] = 32 hex chars). It is a different value
@@ -1244,7 +1215,6 @@ impl OperatorIpc {
     /// auto-spawn callsite in `kernel/src/initiatives/lifecycle.rs::
     /// approve_plan` (post-commit `OrchestratorSpawn::spawn_for_
     /// initiative` fires here).
-    ///
     /// `approving_operator` MUST be the **policy** 32-char form
     /// (= `policy_fingerprint_32(pubkey)`) because
     /// `handle_approve_plan` cross-checks it against the
@@ -1285,25 +1255,22 @@ fn read_json_blocking(stream: &mut UnixStream) -> Value {
 
 /// The `[plan]` body the test submits. Aligned to the actual
 /// `parse_plan_*` shape in `kernel/src/initiatives/lifecycle.rs`:
-///
 ///   * `[plan.initiative].description` — operator-facing summary.
 ///   * `[workspace].lane_id` — REQUIRED (`validate_single_lane_
 ///     propagation` rejects missing/empty). Single-lane propagation
 ///     fans this id out to every task / session / budget reservation.
 ///   * `[[tasks]]` — each entry MUST carry `task_id` and a non-empty
-///     `description` (`v2_extended_gaps.md §1.1`).
+///     `description`.
 ///   * `[[tasks.credentials]]` — `proxy_type` (NOT `kind`) selects the
 ///     proxy; `name` resolves against `<data_dir>/credentials/`;
 ///     `mount_as` is the env-var injected into the guest VM.
-///
-/// **Spec drift note.** `e2e-live-test-gap.md §4` originally cited
+/// **Spec drift note.** originally cited
 /// `[plan].name` / `[plan.gateway]` blocks — those keys are NOT
 /// part of the kernel's plan parser surface (they are inert if
 /// included). The provider/model pinning happens via the policy
 /// `[gateway]` + `[[providers]]` blocks (`peripherals.md §3.2`),
 /// which the test injects in `enable_gateway_in_policy` below. The
 /// spec is updated alongside this test to reflect the parser shape.
-///
 /// The verifier section is intentionally omitted in this iteration:
 /// V2 verifier dispatch is exercised by per-proxy `live-e2e` slices;
 /// folding it in here would gate the test on yet another canonical
@@ -1403,7 +1370,6 @@ fn build_plan_bundle(plan_toml: &str) -> PlanBundle {
 /// effort: panics with a clear remediation if `codesign` is
 /// unavailable, no-ops when the entitlements file cannot be
 /// located (e.g. someone moved the workspace).
-///
 /// Mirrors `cargo xtask dev-codesign` exactly so the production
 /// recipe and the test recipe never drift.
 #[cfg(target_os = "macos")]
@@ -1512,7 +1478,6 @@ fn policy_fingerprint_32(pubkey: &[u8; 32]) -> String {
 ///     surface the kind so the operator can correlate),
 ///   - the deadline elapsing without a terminal event,
 ///   - any chain-integrity break detected by `verify_chain_full`.
-///
 /// We intentionally do NOT pin per-step intermediate events here.
 /// The chain ordering is non-deterministic across runs because the
 /// real LLM may pick different intermediate tool calls (read_file,
@@ -1643,7 +1608,6 @@ fn summarize_chain_for_panic(audit_dir: &Path) -> String {
 /// enumerate every record and decode the parsed JSON body into
 /// `AuditEvent`. Panics with a friendly diagnostic on any chain
 /// break or row that fails the typed deserialise.
-///
 /// Note: the genesis row (`seq=0`, `event_kind="GenesisRecord"`) is
 /// written by `raxis-genesis-tools` and uses a different on-wire
 /// shape than `AuditEvent` — it lacks `payload` / `session_id` /
@@ -1694,7 +1658,6 @@ fn walk_chain_or_panic(data_dir: &Path) -> Vec<AuditEvent> {
 
 /// Verify the audit chain meets the spec's *invariants* without
 /// over-pinning per-row positions. We assert:
-///
 ///   1. The first row is `KernelBootCompleted` (boot ordering).
 ///   2. The last row is `KernelShutdown` (graceful shutdown ran
 ///      to completion).
@@ -1732,7 +1695,6 @@ fn assert_audit_invariants(chain: &[AuditEvent], initiative_id: &str) {
     // Required lifecycle events. Missing any one indicates a chain-
     // wiring regression in the kernel — the test fails loud rather
     // than silently passing on a half-completed run.
-    //
     // Note: `IntentAdmitted` is named in the spec
     // (`audit-paired-writes.md` §intent-flow) but the current kernel
     // emits per-intent admission as plain stderr (`eprintln!
@@ -1800,12 +1762,10 @@ fn assert_audit_invariants(chain: &[AuditEvent], initiative_id: &str) {
 // ---------------------------------------------------------------------------
 // Operator dashboard — visual debugging hook
 // ---------------------------------------------------------------------------
-//
 // The kernel boots its dashboard HTTP server when `policy.toml`
 // carries an `[dashboard].enabled = true` block (see
 // `enable_gateway_in_policy` for the injected block). After the
 // daemon is up, this section:
-//
 //   1. Polls the bound port until the kernel's
 //      `start_dashboard_with_advancer` call has returned (so the
 //      `/api/auth/challenge` endpoint is wired).
@@ -1817,14 +1777,12 @@ fn assert_audit_invariants(chain: &[AuditEvent], initiative_id: &str) {
 //      a URL-fragment autologin payload (`Login.tsx` parses
 //      `#autologin=1&token=…` on mount and writes the JWT into
 //      `localStorage`, then redirects to `/`).
-//
 // **Best-effort.** Every failure mode (build skipped, FE bundle
 // absent, JWT mint failed, `open(1)` missing, etc.) is logged
 // and ignored — the lifecycle test must still pass on headless
 // CI runners that have no browser and no FE bundle. The
 // developer running the test interactively gets the visual
 // payoff without affecting the assertion path.
-//
 // **Why a URL fragment instead of a query parameter.** The hash
 // is not transmitted to the server, never appears in HTTP access
 // logs, and is scrubbed by `Login.tsx`'s `replaceState` after
@@ -1932,17 +1890,14 @@ fn mint_dashboard_jwt(signing_key: &SigningKey, port: u16) -> Option<DashboardSe
     let pubkey_hex = hex::encode(pubkey);
 
     // ── Paste-fallback for the operator ─────────────────────────
-    //
     // If the autologin redirect ever fails (stale FE bundle,
     // hash-routing quirk, browser strips fragments, …) the
     // operator can still log in by pasting the values below into
     // the dashboard's manual challenge-response form. We emit:
-    //
     //   1. The exact `raxis auth sign <challenge>` command that
     //      the dashboard's "Step 1" code-block displays.
     //   2. The 128-hex-char signature (Step 2 input).
     //   3. The 64-hex-char public key (Step 3 input).
-    //
     // The challenge is a one-time nonce (32 random bytes minted
     // by `/api/auth/challenge`, single-use, ~5 min TTL), so the
     // signature has no value beyond this single mint attempt.

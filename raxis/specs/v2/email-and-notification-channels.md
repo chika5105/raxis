@@ -8,7 +8,7 @@
 > `Webhook` ≡ "HTTP POST a JSON payload to a URL" was a strict
 > subset of `Sidecar`, shipped without HMAC signing in the kernel
 > path, and lacked the per-channel concurrency cap + 3-state
-> circuit breaker (V2_GAPS.md §C4) that `Sidecar` provides.  Read
+> circuit breaker that `Sidecar` provides.  Read
 > every reference to `WebhookChannel` / "Webhook kind" / `crates/
 > raxis-notification-webhook/` below as historical context for the
 > `Sidecar` surface.  HMAC signing is the sidecar process's
@@ -94,15 +94,12 @@ Substituting a channel impl preserves every `R-*`: the dispatcher still emits th
 
 ```rust
 //! crates/raxis-notification/src/lib.rs
-//!
 //! Operator-attributed outbound notification transport.
-//!
 //! V2 ships four impls (in separate crates per the §1.2 separation rule):
 //!   - `crates/raxis-notification-shell/`       ShellChannel  (default; v1 carryover)
 //!   - `crates/raxis-notification-file/`        FileChannel   (v1 carryover)
 //!   - `crates/raxis-notification-email/`       EmailChannel  (NEW v2)
 //!   - `crates/raxis-notification-webhook/`     WebhookChannel (NEW v2)
-//!
 //! V3+ adds `SlackChannel`, `PagerDutyChannel`, `TeamsChannel`, etc.
 //! without touching the kernel.
 
@@ -118,13 +115,11 @@ pub trait OperatorNotificationChannel: Send + Sync + 'static {
     fn kind(&self) -> ChannelKind;
 
     /// Deliver one notification.
-    ///
     /// **Idempotency:** the dispatcher MAY call `deliver` more than once for
     /// the same `(payload.event_seq, channel_id)` pair after a transient
     /// failure. The impl MUST be idempotent. For `EmailChannel`, this means
     /// reusing `Message-Id: <event_seq.event_id@raxis.kernel>` so SMTP relays
     /// can dedupe.
-    ///
     /// **Latency budget:** 30 s soft, 60 s hard. The dispatcher cancels the
     /// `tokio::Future` at the hard deadline and emits
     /// `NotificationDeliveryFailed { reason: Timeout }`.
@@ -134,20 +129,17 @@ pub trait OperatorNotificationChannel: Send + Sync + 'static {
     ) -> Result<DeliveryReceipt, ChannelError>;
 
     /// Pre-flight liveness probe.
-    ///
     /// Used at boot (every channel is probed once before the kernel opens
     /// the operator transport) and on demand by `raxis notify test`. For
     /// `EmailChannel`, this is `EHLO` + STARTTLS + AUTH (without sending
     /// mail). For `WebhookChannel`, an `OPTIONS` request to the configured
     /// URL.
-    ///
     /// Probe failure does NOT abort kernel boot — the channel is marked
     /// `Degraded` and a `NotificationChannelDegraded { id, reason }` audit
     /// event is emitted; routes targeting it continue to attempt delivery.
     async fn probe(&self) -> Result<ProbeOutcome, ChannelError>;
 
     /// Concurrency class for the dispatcher's per-channel scheduler.
-    ///
     /// `Fast` channels (Shell, File) can run unbounded-parallel; the
     /// dispatcher fans out one task per event. `Slow` channels (Email,
     /// Webhook, Slack) are serialised per-channel-id with a small worker
@@ -528,7 +520,7 @@ The kernel allocates a port from the credential-proxy reserved range ([`credenti
 ```text
 Agent (in VM)                    SMTP proxy (kernel-side)              Real upstream relay
   -- TCP connect localhost:2525 --→
-                                    (open upstream conn)               
+                                    (open upstream conn)
                                     -- TCP --→
                                                                         ←-- 220 smtp.example.com ESMTP
                                     -- EHLO --→
@@ -542,7 +534,7 @@ Agent (in VM)                    SMTP proxy (kernel-side)              Real upst
                                                                         ←-- 235 Authenticated
   ←-- 220 RAXIS SMTP proxy --
   -- EHLO agent.local --→
-  ←-- 250-PIPELINING\n250-8BITMIME\n250 SIZE 524288 -- 
+  ←-- 250-PIPELINING\n250-8BITMIME\n250 SIZE 524288 --
        (no AUTH offered to agent; SIZE = max_message_bytes)
   -- MAIL FROM:<agent-anything@x> --→
        (proxy: discard agent value, substitute policy from_address upstream)

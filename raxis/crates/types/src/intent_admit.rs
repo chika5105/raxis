@@ -234,13 +234,13 @@ pub struct RetryAdmitInputs<'a> {
 ///      call (per `v2-deep-spec.md §Step 12 V2.5b`) BEFORE issuing
 ///      the follow-up `ActivateSubTask`. The post-exit hook
 ///      respawns a fresh orchestrator.
-///   4. Pre-iter54: the fresh orchestrator's KSB read
+///   4. Previously: the fresh orchestrator's KSB read
 ///      `retry_admissible=true`, the NNSP rule 3a said "MUST call
 ///      `retry_subtask`", the LLM did, the kernel admitted, the
 ///      orchestrator exited, the cycle repeated until
 ///      `orchestrator_no_progress_respawn` exceeded its ceiling and
 ///      the initiative deadlocked to `Failed`.
-///   5. Post-iter54 (this predicate): the
+///   5. Currently (this predicate): the
 ///      `(PendingActivation + review_reject_count > 0)` branch
 ///      falls through to [`RetryInadmissibleReason::NotRetryable`].
 ///      The KSB now stamps `retry_admissible=false reason="prior

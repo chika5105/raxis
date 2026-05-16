@@ -1,15 +1,13 @@
 # RAXIS V2 — Extended E2E Scenario (real DBs · concurrency · enforcement · witnesses)
 
-> **Status:** Gap document — extends [`e2e-live-test-gap.md`](e2e-live-test-gap.md).
 > **Deliverable:** `kernel/tests/extended_e2e_concurrent_lifecycle.rs`
 > **Gate:** `RAXIS_LIVE_E2E=1` — **never runs in CI/CD**.
-> **Last updated:** 2026-05-11
 
 ---
 
 ## §1 — Objective
 
-`full_e2e_session_lifecycle.rs` (per [`e2e-live-test-gap.md`](e2e-live-test-gap.md)) drives the
+`full_e2e_session_lifecycle.rs` drives the
 **single happy-path lifecycle**: one Executor, one Reviewer, one
 trivial `hello.txt` write. That test pins the wire surface
 end-to-end but says nothing about (a) concurrent agents, (b) real
@@ -275,7 +273,7 @@ kernel emits a terminal `orchestrator_spawn_failed` JSON line
 for either watched initiative,
 `poll_for_dual_lifecycle_completion` surfaces the kernel's own
 `error` + `hint` and panics — rather than wait the full
-`realistic_lifecycle_deadline` (60 min default; iter31 sized
+`realistic_lifecycle_deadline` (60 min default; sized
 this up from 30 min after empirically observing 9-task primary
 lane × ~4 min/task linear-extrapolated to ~40 min + 1-task
 sibling + integration-merge overhead) for an
@@ -662,9 +660,8 @@ the same paths are unaffected.
 * The witness for the postgres `INSERT` deny (§5 row "Postgres
   credential restriction") depends on whether the kernel emits
   `DatabaseQueryExecuted { blocked: true }` or only
-  `DatabaseQueryCompleted` with an error code. Worker C's
-  bug-hunt may settle this; if both paths are present the witness
-  matches either.
+  `DatabaseQueryCompleted` with an error code. If both paths are
+  present the witness matches either.
 * The `ResolveSubEscalation` Orchestrator surface
   ([`agent-disagreement.md §6.3`](agent-disagreement.md)) is not exercised in V2.0 — the
   injection-escalation in §6.2 is a routing-only assertion. A

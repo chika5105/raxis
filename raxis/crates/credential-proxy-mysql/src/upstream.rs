@@ -1,11 +1,8 @@
 //! Upstream MySQL connection driver.
-//!
 //! Normative reference: `credential-proxy.md §14.3` (lazy connect on
 //! first allowed query) and `§14.8.2` (per-proxy implementation matrix
 //! for MySQL).
-//!
 //! # What this module owns
-//!
 //! * Parsing the **credential value** as a libmysql / DBI-style URL
 //!   like `mysql://user:pass@host:3306/db?ssl-mode=DISABLED`.
 //! * Opening a real `tokio::net::TcpStream` to the upstream and
@@ -19,37 +16,28 @@
 //! * Surfacing structured errors at every failure point so the proxy
 //!   can map them to the three V2.1 audit events
 //!   (`UpstreamConnected`, `UpstreamFailed`, `DatabaseQueryCompleted`).
-//!
 //! # Design choices
-//!
 //! ## Why we hand-roll the upstream wire instead of pulling `mysql_async`
-//!
 //! `tokio-postgres` already exists in the workspace because the
 //! Postgres proxy needs SCRAM-SHA-256, MD5, and cleartext password
 //! plumbing — implementing those by hand would be ~150 lines of
 //! cryptographic code that has been audited in `tokio-postgres` for
 //! years.
-//!
 //! MySQL is different: the auth surface we need to support for V2 is
 //! `mysql_native_password` (legacy 4.1+) and `caching_sha2_password`
 //! (MySQL 8.0+ default). Both are short, well-specified algorithms.
 //! `caching_sha2_password` adds an RSA-OAEP-SHA1 leg for the cold-cache
 //! "perform full auth" path, which we drive against the server-supplied
 //! public key using the workspace-pinned `rsa` crate.
-//!
-//! ## `caching_sha2_password` (V2 / `v2_extended_gaps.md §2.3`)
-//!
+//! ## `caching_sha2_password` (V2 / )
 //! The kernel-resolved credential URL is the same shape as for
 //! `mysql_native_password`; the proxy detects the plugin from the
 //! server's greeting (or `AuthSwitchRequest`) and selects the
 //! handshake algorithm at runtime. No operator-side `my.cnf` change
 //! is required for MySQL 8.x.
-//!
 //! Algorithm reference:
 //! [MySQL 8 source](https://github.com/mysql/mysql-server/blob/8.0/plugin/auth/sha256_password_common.cc).
-//!
 //! ## Why we relay packets verbatim instead of re-encoding
-//!
 //! The MySQL proxy already does per-statement classification +
 //! restriction enforcement on the agent's `COM_QUERY` BEFORE it
 //! forwards to the upstream. After that gate, the proxy is a pure
@@ -57,7 +45,6 @@
 //! the agent. This avoids the type-aware re-encode pass that
 //! Postgres needs (where `tokio-postgres::SimpleQueryMessage::Row`
 //! returns `Option<&str>` per column instead of the wire bytes).
-//!
 //! The cost: the proxy must understand the result-set framing well
 //! enough to know when one query's response is finished. That logic
 //! is small (six packet shapes; see `read_query_response`) and is
@@ -304,7 +291,6 @@ pub struct ParsedUpstreamUrl {
 
 impl ParsedUpstreamUrl {
     /// Parse a libmysql URL out of a resolved credential value.
-    ///
     /// Accepted schemes: `mysql://` and `mysql+native://`. The
     /// `+native` suffix is a RAXIS-private hint that operators
     /// can use to make the `mysql_native_password` requirement
@@ -494,16 +480,13 @@ pub struct UpstreamSession {
 
 impl UpstreamSession {
     /// Open a new upstream session against the parsed URL.
-    ///
     /// V2 supports plaintext upstream connections with two auth plugins:
-    ///
     /// * `mysql_native_password` (legacy, MySQL 4.1+) — single-round
     ///   SHA-1 XOR scramble.
     /// * `caching_sha2_password` (MySQL 8.0 default) — SHA-256 XOR
     ///   scramble fast-path; full-auth path encrypts the password
     ///   with the server's RSA public key (RSA-OAEP-SHA1) when the
-    ///   server's auth cache is cold (`v2_extended_gaps.md §2.3`).
-    ///
+    ///   server's auth cache is cold.
     /// `?ssl-mode=REQUIRED` is not yet supported and returns
     /// `UpstreamError::Handshake`; operators that need TLS to the
     /// upstream should set up host-side TLS termination via stunnel
@@ -775,7 +758,6 @@ impl UpstreamSession {
     /// `COM_STMT_PREPARE_OK` (or ERR), then `num_params` ParamDef
     /// packets + EOF (if `num_params > 0`), then `num_columns`
     /// ColumnDef packets + EOF (if `num_columns > 0`).
-    ///
     /// V2.4 ORM blocker — the SQL has already been classified +
     /// restriction-checked + audit-emitted by `serve_one`; this
     /// function is the byte-relay leg.
@@ -907,11 +889,9 @@ impl UpstreamSession {
     /// Forward a `COM_STMT_EXECUTE` body to the upstream and collect
     /// the matched response packets. The response shape mirrors a
     /// `COM_QUERY` response:
-    ///
     /// * ERR_Packet (terminal),
     /// * OK_Packet (terminal — no result set),
     /// * binary-format ResultSetHeader + ColumnDef* + EOF + Row* + EOF.
-    ///
     /// V2.4 byte-relays the binary-row payloads verbatim; the proxy
     /// does not introspect the row contents (the type metadata in
     /// the ColumnDef packets is enough for the agent's driver to
@@ -1251,14 +1231,11 @@ const _: () = {
 };
 
 /// Capability flags the proxy advertises to the upstream.
-///
 /// Reference: <https://dev.mysql.com/doc/dev/mysql-server/latest/group__group__cs__capabilities__flags.html>.
-///
 /// Bits (ALL fields are by **bit number**, not by their `1 << n`
 /// expansion — every comment below is double-checked against the
 /// spec to defend against a re-occurrence of the V2.1 mis-numbering
 /// bug that landed `CLIENT_SSL` in place of `CLIENT_IGNORE_SIGPIPE`):
-///
 /// * bit 0 — `CLIENT_LONG_PASSWORD`
 /// * bit 1 — `CLIENT_FOUND_ROWS`
 /// * bit 2 — `CLIENT_LONG_FLAG`
@@ -1272,9 +1249,7 @@ const _: () = {
 /// * bit 18 — `CLIENT_PS_MULTI_RESULTS`
 /// * bit 19 — `CLIENT_PLUGIN_AUTH`        (REQUIRED for the plugin
 ///   string in the response)
-///
 /// We deliberately do NOT advertise:
-///
 /// * bit 5 (`CLIENT_COMPRESS`) — would require a zlib framing layer.
 /// * bit 6 (`CLIENT_ODBC`) — has no effect; just noise.
 /// * bit 7 (`CLIENT_LOCAL_FILES`) — would let the upstream issue
@@ -1564,11 +1539,9 @@ fn sha1_hash(bytes: &[u8]) -> [u8; 20] {
 }
 
 /// `caching_sha2_password` fast-path scramble:
-///
 /// ```text
 /// token = SHA256(pwd) XOR SHA256( SHA256(SHA256(pwd)) || scramble )
 /// ```
-///
 /// 32 bytes (SHA-256 output width).  The server XOR-folds the same
 /// triple with its cached `SHA256(SHA256(pwd))` to recover `SHA256(pwd)`
 /// and compare against its `mysql.user` row.
@@ -1596,7 +1569,6 @@ fn sha256_hash(bytes: &[u8]) -> [u8; 32] {
 }
 
 /// Drive the auth-result phase of a native-plugin handshake.
-///
 /// On entry, `payload` is the body of the packet received after the
 /// proxy's `HandshakeResponse41`. The server can respond with:
 ///   * OK_Packet (0x00) — auth succeeded.
@@ -1677,11 +1649,9 @@ fn take_scramble(plugin_data: &[u8]) -> &[u8] {
 }
 
 /// Drive the `caching_sha2_password` auth state machine.
-///
 /// On entry the proxy has already written the SHA-256 fast-path
 /// scramble to `stream` at sequence `next_seq - 1` (so the next
 /// packet read is at `next_seq`).  Possible server responses:
-///
 /// * `OK_Packet` (`0x00`) — auth succeeded (rare; usually arrives
 ///   AFTER a `0x01 0x03` "fast auth success" indicator).
 /// * `ERR_Packet` (`0xff`) — auth rejected.
@@ -1758,7 +1728,6 @@ async fn drive_caching_sha2_auth(
 /// full-auth path.  Equivalent of `mysql_clear_password` over
 /// plaintext, but bound to the server's per-connection RSA key
 /// rather than sent in the clear.
-///
 /// Sequence:
 ///   1. Send `0x02` (request public key) at `request_seq`.
 ///   2. Read the public-key reply (PEM bytes prefixed with `0x01`).
@@ -1912,7 +1881,6 @@ fn decode_lenenc_int(buf: &[u8]) -> Option<(u64, usize)> {
 }
 
 /// True if `payload` is an `EOF_Packet`.
-///
 /// EOF: header byte `0xfe` AND payload length < 9. (>=9 bytes with
 /// header 0xfe is a length-encoded integer for a row count, not an
 /// EOF — but in our row-loop we ALSO never see a row that starts
@@ -2125,7 +2093,7 @@ mod tests {
         assert!(tail.starts_with("mysql_native_password"));
     }
 
-    /// V2 `v2_extended_gaps.md §2.3` — pin the
+    /// Pin the
     /// `caching_sha2_password` HandshakeResponse41 shape. The
     /// auth-response is 32 bytes (SHA-256 width) and the trailing
     /// plugin name is `caching_sha2_password\0`.
@@ -2144,7 +2112,7 @@ mod tests {
         assert!(tail.starts_with("caching_sha2_password"));
     }
 
-    /// V2 `v2_extended_gaps.md §2.3` — pin the SHA-256 fast-path
+    /// Pin the SHA-256 fast-path
     /// scramble algorithm. Determinism + length + scramble
     /// sensitivity, mirroring the matching `mysql_native_password`
     /// pin above.
@@ -2165,7 +2133,7 @@ mod tests {
         );
     }
 
-    /// V2 `v2_extended_gaps.md §2.3` — pin the SHA-256 fast-path
+    /// Pin the SHA-256 fast-path
     /// against a known triple so a regression in the digest
     /// configuration would surface here. Computed once with the
     /// real `Sha256` engine; the assertion below freezes the
@@ -2190,7 +2158,7 @@ mod tests {
         assert_eq!(token, expected);
     }
 
-    /// V2 `v2_extended_gaps.md §2.3` — pin the helper that drives
+    /// Pin the helper that drives
     /// the terminal-packet classifier. Same behaviour for both the
     /// native-password leg and the caching_sha2 fast-path /
     /// RSA-leg final reads.
@@ -2215,7 +2183,7 @@ mod tests {
         }
     }
 
-    /// V2 `v2_extended_gaps.md §2.3` — pin the scramble extractor.
+    /// Pin the scramble extractor.
     /// MySQL servers send 21 bytes (20 scramble + NUL) in the
     /// HandshakeV10 / AuthSwitchRequest payload; we take the first 20.
     #[test]
@@ -2238,7 +2206,7 @@ mod tests {
         assert_eq!(s.len(), 5);
     }
 
-    /// V2 `v2_extended_gaps.md §2.3` — drive the `caching_sha2_password`
+    /// Drive the `caching_sha2_password`
     /// fast-path end-to-end against a local TCP server that emits the
     /// real wire shape:
     ///   1. HandshakeV10 with `auth_plugin_name = caching_sha2_password`
@@ -2317,7 +2285,7 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// V2 `v2_extended_gaps.md §2.3` — when the password is wrong,
+    /// When the password is wrong,
     /// the fast-path server replies with an `ERR_Packet` rather than
     /// the `0x01 0x03` indicator. The proxy MUST surface
     /// `UpstreamError::AuthRejected` so the operator audit trail is
@@ -2370,7 +2338,7 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// V2 `v2_extended_gaps.md §2.3` — drive the `caching_sha2_password`
+    /// Drive the `caching_sha2_password`
     /// AuthSwitchRequest path. The server greets with
     /// `mysql_native_password` but switches to `caching_sha2_password`
     /// after the proxy's HandshakeResponse41. The proxy MUST recompute
@@ -2507,7 +2475,6 @@ mod tests {
     /// Client Hello, hanging the connection until `net_read_timeout`
     /// fires. Setting `CLIENT_COMPRESS` commits the proxy to
     /// zlib-framed packets, which it does not implement.
-    ///
     /// Pinned against MySQL 8.0.36 reproducer; the V2.1 caps mask
     /// had bit 11 set with a comment claiming `CLIENT_IGNORE_SIGPIPE`
     /// (which is bit 12), and bit 5 set with a comment claiming

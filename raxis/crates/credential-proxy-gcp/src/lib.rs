@@ -255,7 +255,7 @@ pub enum AuditEvent {
         path_sha256: String,
         /// GCP project ID associated with the proxy.
         project_id: String,
-        /// V2_GAPS §9 Phase 2 — operator-declared OAuth scopes
+        /// operator-declared OAuth scopes
         /// (e.g. `["https://www.googleapis.com/auth/devstorage.read_only"]`).
         /// Echoed in audit so reviewers can confirm the scope
         /// narrowing the proxy applied to the token response.

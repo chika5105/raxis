@@ -64,7 +64,7 @@ pub struct SentinelView {
     /// `kernel/src/main.rs` to compute the
     /// `KernelRespawnDuration` histogram observation
     /// (supervisor-decision → kernel-up). `serde(default)` keeps
-    /// older sentinels (pre-iter44 supervisors that don't write the
+    /// older sentinels (earlier supervisors that don't write the
     /// field) working — the metric falls back to the kernel-side
     /// boot-recovery sweep approximation in that case.
     #[serde(default)]
@@ -184,6 +184,15 @@ pub fn rehydrate_restart_context(
     for dump_path in &pending_dumps {
         let dump_path_str = dump_path.display().to_string();
         outcome.dumps_processed = outcome.dumps_processed.saturating_add(1);
+        // Track whether the chain successfully recorded this dump
+        // before moving the on-disk file to the consumed directory.
+        // If the audit chain did NOT capture it (e.g. the writer
+        // was rotating and the emit raced its swap), leave the
+        // forensic file in `<data_dir>/` so the next kernel boot
+        // can retry the emit — moving it out of the hot directory
+        // would silently delete the only on-disk evidence of the
+        // deadlock.
+        let mut emitted_to_chain = false;
         match deadlock_dump::read_dump(dump_path) {
             Ok(dump) => match audit.emit(
                 AuditEventKind::KernelDeadlockDetected {
@@ -200,6 +209,7 @@ pub fn rehydrate_restart_context(
                     outcome.kernel_deadlock_detected_emits =
                         outcome.kernel_deadlock_detected_emits.saturating_add(1);
                     last_dump_path = Some(dump_path_str.clone());
+                    emitted_to_chain = true;
                 }
                 Err(e) => eprintln!(
                     "{{\"level\":\"error\",\
@@ -235,14 +245,28 @@ pub fn rehydrate_restart_context(
                 {
                     outcome.kernel_deadlock_detected_emits =
                         outcome.kernel_deadlock_detected_emits.saturating_add(1);
+                    emitted_to_chain = true;
                 }
             }
         }
-        if let Err(e) = deadlock_dump::move_to_consumed(data_dir, dump_path) {
+        if emitted_to_chain {
+            if let Err(e) = deadlock_dump::move_to_consumed(data_dir, dump_path) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                     \"event\":\"deadlock_dump_move_to_consumed_failed\",\
+                     \"reason\":\"{e}\"}}"
+                );
+            }
+        } else {
             eprintln!(
                 "{{\"level\":\"warn\",\
-                 \"event\":\"deadlock_dump_move_to_consumed_failed\",\
-                 \"reason\":\"{e}\"}}"
+                 \"event\":\"deadlock_dump_retained_audit_emit_failed\",\
+                 \"path\":{path_json},\
+                 \"reason\":\"audit emit did not succeed; dump file kept \
+                             in <data_dir>/ for next-boot retry rather than \
+                             moved to <data_dir>/deadlock_dumps_consumed/\"}}",
+                path_json = serde_json::to_string(&dump_path_str)
+                    .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
             );
         }
     }
@@ -265,49 +289,64 @@ pub fn rehydrate_restart_context(
         } else {
             sup_reason
         };
-        if audit
-            .emit(
-                AuditEventKind::KernelRestartInitiated {
-                    reason: reason.clone(),
-                    prev_run_exit_code: prev_exit,
-                    attempt_n,
-                    max_attempts,
-                },
-                None,
-                None,
-                None,
-            )
-            .map_err(|e| {
+        // INV-SUPERVISOR-RESTART-AUDIT-01 — the
+        // `KernelRestartInitiated` + `KernelRestartCompleted`
+        // pair MUST land together. Pre-fix, an `Initiated` emit
+        // failure would log and still attempt the `Completed`
+        // emit, leaving the chain with a lone `Completed` whose
+        // `prev_run_exit_code` etc. has no matching `Initiated`
+        // — auditors would correctly read that as "the kernel
+        // restarted but never declared why". Short-circuit on
+        // `Initiated` failure: a lone `Initiated` (Completed
+        // emit fails after a successful Initiated) is still
+        // possible but is the strictly less-bad half of the
+        // pair (auditors see the cause, lose the completion
+        // metric).
+        let initiated_ok = match audit.emit(
+            AuditEventKind::KernelRestartInitiated {
+                reason: reason.clone(),
+                prev_run_exit_code: prev_exit,
+                attempt_n,
+                max_attempts,
+            },
+            None,
+            None,
+            None,
+        ) {
+            Ok(_) => {
+                outcome.kernel_restart_initiated_emits =
+                    outcome.kernel_restart_initiated_emits.saturating_add(1);
+                true
+            }
+            Err(e) => {
                 eprintln!(
                     "{{\"level\":\"error\",\
                      \"event\":\"KernelRestartInitiated\",\
                      \"audit_emit_failed\":\"{e}\"}}"
                 );
-            })
-            .is_ok()
-        {
-            outcome.kernel_restart_initiated_emits =
-                outcome.kernel_restart_initiated_emits.saturating_add(1);
-        }
-        if audit
-            .emit(
-                AuditEventKind::KernelRestartCompleted {
-                    prev_run_exit_code: prev_exit,
-                    recovery_sweep_ms,
-                    dump_path: last_dump_path.clone(),
-                },
-                None,
-                None,
-                None,
-            )
-            .map_err(|e| {
-                eprintln!(
-                    "{{\"level\":\"error\",\
-                     \"event\":\"KernelRestartCompleted\",\
-                     \"audit_emit_failed\":\"{e}\"}}"
-                );
-            })
-            .is_ok()
+                false
+            }
+        };
+        if initiated_ok
+            && audit
+                .emit(
+                    AuditEventKind::KernelRestartCompleted {
+                        prev_run_exit_code: prev_exit,
+                        recovery_sweep_ms,
+                        dump_path: last_dump_path.clone(),
+                    },
+                    None,
+                    None,
+                    None,
+                )
+                .map_err(|e| {
+                    eprintln!(
+                        "{{\"level\":\"error\",\
+                         \"event\":\"KernelRestartCompleted\",\
+                         \"audit_emit_failed\":\"{e}\"}}"
+                    );
+                })
+                .is_ok()
         {
             outcome.kernel_restart_completed_emits =
                 outcome.kernel_restart_completed_emits.saturating_add(1);

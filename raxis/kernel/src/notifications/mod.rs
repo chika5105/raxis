@@ -1,16 +1,12 @@
 // raxis-kernel::notifications — per-event notification dispatch.
-//
 // Normative reference: cli-readonly.md §5.6.
-//
 // What this module does
 // ─────────────────────
-//
 // When the kernel emits an `AuditEvent` that the operator wants
 // surfaced (escalation submitted, escalation approved/denied, policy
 // epoch advanced, ...), `notifications::dispatch(event, ...)` looks up
 // the route for that event-kind in the active `PolicyBundle` and writes
 // one record per declared channel.
-//
 // Channel kinds (V2 surface — forward-only, no Webhook backward-compat)
 // ──────────────────────────────────────────────────────────────────────
 //   - `Shell`   → appends one JSON line to `<data_dir>/notifications/inbox.jsonl`.
@@ -20,8 +16,7 @@
 //   - `Sidecar` → HTTP POST a structured payload to an operator-run sidecar
 //                 process that translates to the target platform's API
 //                 (Slack, PagerDuty, Teams, ...).  Wrapped in a per-channel
-//                 semaphore + 3-state circuit breaker (V2_GAPS.md §C4).
-//
+//                 semaphore + 3-state circuit breaker.
 // Routing model
 // ─────────────
 // `PolicyBundle::notification_route(event_kind)` returns one of:
@@ -29,7 +24,6 @@
 //   - `Some(&[ids])`  → Explicit route. Dispatch to these channels.
 //   - `None`          → No explicit route. Use `default_notification_channels()`
 //                       (always at least `["shell"]`).
-//
 // Failure model (best-effort, never blocks parent commit)
 // ──────────────────────────────────────────────────────
 // Per spec §5.6.3, every per-channel handler runs in its own
@@ -61,13 +55,11 @@ pub use sink::NotifyingAuditSink;
 /// configured channel. Each channel handler runs in its own
 /// `tokio::spawn` so a slow or failing handler does not block the
 /// caller. Returns immediately after fanout.
-///
 /// Caller convention (from kernel handlers like
 /// `ipc::operator::handle_approve_escalation`): invoke this AFTER
 /// the audit emit succeeds, with the SAME `AuditEvent` you just wrote
 /// to the audit chain. The notification record's `event_seq` matches
 /// the audit chain's `seq` so a downstream tail can correlate the two.
-///
 /// `sidecar_registry` is the per-kernel registry of `Sidecar` channel
 /// runtime state (per-channel `Semaphore` + circuit breaker). It is
 /// `Option` so legacy callers (file-only test fixtures) can pass
@@ -90,7 +82,6 @@ pub fn dispatch(
     // string-discriminator variant so a future direct caller (or a
     // refactor that bypasses the wrapper) cannot accidentally route
     // operator-passive / routine-volume events into the inbox.
-    //
     // Drift safety: if a brand-new audit kind lands without a string
     // arm in `notification_priority_for_kind_str`, the fallback is
     // `None` — the SAFER default (drop OUT of the inbox rather than
@@ -136,7 +127,6 @@ pub fn dispatch(
     }
 
     // 2. Write to SQLite notifications table.
-    //
     // **Invariant relationship.** This insert is a post-commit
     // side-effect — it runs AFTER the parent handler's transaction
     // committed and AFTER the audit event landed in the chain. It is
@@ -146,7 +136,6 @@ pub fn dispatch(
     // consistent with §5.6.3 ("handler failure NEVER aborts the
     // parent transaction"). The inbox.jsonl append above provides a
     // durable fallback even if this SQLite write fails.
-    //
     // Uses its own `BEGIN IMMEDIATE` transaction for atomicity parity
     // with all other kernel writes to kernel.db.
     if let Some(ref store) = store {
@@ -351,7 +340,7 @@ pub async fn dispatch_blocking_for_tests_with_registry(
 /// translated to `NotificationDeliveryFailed` audit events; this fn
 /// does not bubble errors. Successful Sidecar deliveries also emit
 /// a `NotificationDelivered` audit event carrying the upstream
-/// trace id (Slack `ts`, PagerDuty `dedup_key`, etc.) — V2_GAPS §C4.
+/// trace id (Slack `ts`, PagerDuty `dedup_key`, etc.).
 async fn dispatch_one(
     channel_id: &str,
     event: AuditEvent,
@@ -392,7 +381,7 @@ async fn dispatch_one(
             handle_simple_outcome(audit.as_ref(), channel, &event, outcome, started_at);
         }
         NotificationChannelKind::Sidecar => {
-            // V2_GAPS §C4 — Sidecar handler with concurrency cap +
+            // Sidecar handler with concurrency cap +
             // circuit breaker. Emits `NotificationDelivered` on
             // success (carrying upstream trace id) and
             // `NotificationDeliveryFailed` on Backpressure /
@@ -622,7 +611,6 @@ fn emit_delivered(
 
 // ---------------------------------------------------------------------------
 // Tests — dispatcher routing semantics.
-//
 // These cover the routing decisions inside `dispatch_blocking_for_tests`
 // (the production `dispatch` is a thin tokio::spawn wrapper around the
 // same `dispatch_one` callee, so dispatcher contract tests target the
@@ -693,7 +681,6 @@ mod tests {
         // fields are public-within-crate. Since we're in another
         // crate (the kernel), we can't poke directly — instead we
         // use a small helper exposed for tests.
-        //
         // Workaround: we ARE inside the kernel crate, but PolicyBundle
         // is in the `raxis-policy` crate. The fields are private. So
         // we pass `extra_channels`/`extra_routes` to a setter the

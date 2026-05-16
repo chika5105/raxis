@@ -62,17 +62,17 @@ predecessors       = ["implement"]
 
 ## Step 2: Kernel Enforces DAG Dependencies
 
-When the Orchestrator submits `ActivateSubTask { task_id: "implement" }`:
+When the Orchestrator submits `ActivateSubTask { task_id: "review" }`:
 
-1. The kernel checks: is `"orchestrate"` (the predecessor) in `Completed` state?
+1. The kernel checks: are all declared `predecessors` (here, `"implement"`) in the `Completed` state?
 2. If not → `DEPENDENCY_NOT_MET` → the Orchestrator must wait
-3. If yes → the kernel spawns a session for the Executor
+3. If yes → the kernel spawns a session for the Reviewer
 
 ```mermaid
 flowchart LR
-    Orchestrate["orchestrate<br/>(orch)"]
-    Implement["implement<br/>(exec)"]
-    Review["review<br/>(rev)"]
+    Orchestrate["orchestrator<br/>(auto-spawned)"]
+    Implement["implement<br/>(executor)"]
+    Review["review<br/>(reviewer)"]
 
     Orchestrate --> Implement
     Implement --> Review
@@ -197,9 +197,9 @@ The Orchestrator's `RetrySubTask` is rejected with `FAIL_INVALID_REQUEST`. The O
 | `kernel/src/initiatives/lifecycle.rs`     | DAG admission, sub-task spawn, completion fan-out |
 | `kernel/src/initiatives/review_aggregation.rs` | `compute_aggregate_review_outcome` (logical-AND across reviewers) |
 | `kernel/src/session_spawn_orchestrator.rs` | V2 orchestrator-driven sub-task session spawning |
-| `kernel/src/push/mod.rs`                  | `KernelPushDispatcher` — V2.3 in-memory broadcast + audit mirror (V3 transport deferred per V2_GAPS §12.1) |
+| `kernel/src/push/mod.rs`                  | `KernelPushDispatcher` — V2.3 in-memory broadcast + audit mirror (V3 transport deferred) |
 | `crates/store/src/migration.rs` Table 22  | `subtask_activations` DDL — `crash_retry_count`, `review_reject_count`, FSM states |
 | `crates/planner-core/src/driver.rs`       | Role-specific prompt assembly + planner main loop |
 | `specs/v2/v2-deep-spec.md`                | V2 formal specification (Steps 1-30+) |
 | `specs/v2/intent-admission.md`            | V2 admission pipeline reference |
-| `specs/v2/V2_GAPS.md`                     | Implementation status by tier |
+| | Implementation status by tier |

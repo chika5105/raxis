@@ -78,7 +78,7 @@ pub(crate) async fn stream_blob_to_staging(
     if let Some(token) = bearer_token {
         // Header value: `Bearer <token>`. We use `header()` so we
         // never log the token even at trace level (`tracing::warn!`
-        // / `tracing::error!` calls in the surrounding code use the
+        // `tracing::error!` calls in the surrounding code use the
         // url, not the headers).
         req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
     }

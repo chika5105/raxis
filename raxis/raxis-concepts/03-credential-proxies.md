@@ -70,9 +70,8 @@ CLI surface (verified against `cli/src/main.rs:319-333` and `cli/src/commands/cr
 | `raxis credential verify` | Connect once and validate the upstream is reachable |
 | `raxis credential audit`  | Replay the audit chain rows for a credential name |
 
-There is **no** `raxis credential set` subcommand; earlier drafts of
-this guide used it. Use `add` for a new entry and `rotate` to update
-an existing one.
+There is **no** `raxis credential set` subcommand. Use `add` for a
+new entry and `rotate` to update an existing one.
 
 ---
 

@@ -1381,7 +1381,7 @@ materializer-Executor (~150 turns) tasks in one initiative. See
 `guides/recipes/env/11-planner-env-vars.md` for the operator
 recipe.
 
-**Sizing per-task `max_turns` for retry repair (iter54 → iter55).**
+**Sizing per-task `max_turns` for retry repair.**
 The plan author MUST size each per-task `max_turns` for the
 **worst-case** activation, not the original. The most common
 under-sizing trap is a review-rejection retry path that must
@@ -1394,14 +1394,14 @@ bump the per-task ceiling on its own — every fresh VM hits the
 same `dispatch loop exceeded max_turns: N` wall (exit code 4)
 with zero forward progress.
 
-The iter54 case study (`lint-runner` task in `plan_realistic.rs`,
+The case study (`lint-runner` task in `plan_realistic.rs`,
 mirrored at `live-e2e/examples/plan_primary.toml`) tracked two
 mitigations:
 
-* **Iter54 one-shot bump** — `30 → 90` on the monolithic
+* **One-shot bump** — `30 → 90` on the monolithic
   `lint-runner` (3× headroom over the introduce path; superseded
-  by the iter55 split below).
-* **Iter55 structural split** — the monolithic task is gone; the
+  by the split below).
+* **Structural split** — the monolithic task is gone; the
   realistic plan now ships per-language children
   (`lint-runner-python`, `lint-runner-rust`, `lint-runner-js`),
   each scoped to ONE language tree and sized at `max_turns = 60`
@@ -1422,11 +1422,11 @@ mitigations:
   for the full resolver semantics.
 
 See `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` rationale-section note
-for the full iter54 + iter55 sizing narrative.
+for the full sizing narrative.
 ### 5.9.1 Progressive scaling on crash retry (V3, `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`)
 
 The base `max_turns` resolution above gives EVERY attempt of a
-task the SAME budget. Production telemetry from iter54/iter55
+task the SAME budget. Production telemetry from
 showed this is structurally wrong: the dominant crash-retry
 failure mode is "executor ran out of turns mid-edit on attempt 2
 with the same budget that failed on attempt 1". A fixed-budget
@@ -2182,7 +2182,7 @@ the LLM consults.
 Rust toolchain (rustup-installed `cargo` + `rustfmt` + `clippy`),
 the starter image pre-bakes the Python and JavaScript / TypeScript
 lint stacks the realistic-scenario per-language
-`lint-runner-{python,rust,js}` tasks (iter55 split) drive:
+`lint-runner-{python,rust,js}` tasks drive:
 
 | Language   | Tool                  | Pinned version | Resolved via                              |
 | ---------- | --------------------- | -------------- | ----------------------------------------- |
@@ -2680,7 +2680,7 @@ elsewhere:
   `PlannerExitOutcome` enum (see §13.1 below) so the Mode-B
   premature-exit synthesiser in
   `session_spawn_orchestrator::build_worker_post_exit_failure_reason`
-  produces concrete operator-facing reasons instead of the iter56
+  produces concrete operator-facing reasons instead of the
   multi-option umbrella.
 
 ### §13.1 `PlannerExitOutcome` — Wire-Level Driver Exit Shape
@@ -2990,39 +2990,37 @@ Kernel boot-time admission:
 
 - `kernel/src/main.rs` calls `raxis_image_manifest::verify(&embedded_reviewer_manifest, &kernel_signing_pubkey)?` and `verify(&embedded_orchestrator_manifest, ...)?` immediately after `IsolationBackend::verify_isolation_guarantee` (boot-order step 6a per [`extensibility-traits.md §9.1`](extensibility-traits.md)). A signature failure aborts boot with `BootError::ImageManifestSignatureMismatch { role }`.
 
-### §14.4a Dev-host bake / stage / build pipeline (macOS-hermetic)
+### §14.4a Dev-host bake pipeline (macOS-hermetic)
 
 The production EROFS pipeline (§14.4) requires `mkfs.erofs`, which is
-not available on macOS dev hosts (per [`e2e-live-test-gap.md`](e2e-live-test-gap.md)). To
-unblock local AVF demos and the realistic-scenario live-e2e harness,
-`cargo xtask images` exposes a **three-step dev-host pipeline** that
+not available on macOS dev hosts. To unblock local AVF demos and the
+realistic-scenario live-e2e harness, `cargo xtask images bake`
 emits the same signed-manifest shape but with
 `image_format = RootfsInitramfsCpio` instead of `Erofs`. The kernel
 boot path verifies both shapes via the same
 `read_verified_image_format` helper, so dev-built images and
 prod-built images cannot be confused at boot.
 
-The three steps land separately so an operator can rebuild only the
-layer that changed:
+`cargo xtask images bake [--role <ROLE>]... [--install-dir <PATH>]
+[--signing-key <PATH>] [--builder <B>] [--kernel-from-file <PATH>]
+[--no-auto-stage] [--force]` runs the full per-role pipeline in
+canonical order:
 
-1. **`cargo xtask images bake-rootfs --role <ROLE> [--builder <B>]
-   [--platform <PLAT>] [--keep]`** (`4860c1b`).
-   Executes `images/<role>/Containerfile` against a container builder
-   (auto-detect order `docker → podman → buildah`; override with
-   `--builder`), exports the resulting OCI image's filesystem, and
-   unpacks it into `images/<role>/rootfs/`. The Containerfile IS the
-   source of truth for the rootfs content; this subcommand is what
-   `images/README.md` calls "populates `rootfs/`". Without this step,
-   the staging tree would contain only the cross-compiled planner
-   binary — every `BashTool` invocation inside the executor VM would
-   return ENOENT (iter-12's storm).
+1. **Rootfs bake.** Executes `images/<role>/Containerfile` against
+   a container builder (auto-detect order `docker → podman →
+   buildah`; override with `--builder`), exports the resulting OCI
+   image's filesystem, and unpacks it into
+   `images/<role>/rootfs/`. The Containerfile IS the source of
+   truth for the rootfs content. Without this step the staging
+   tree would contain only the cross-compiled planner binary —
+   every `BashTool` invocation inside the executor VM would
+   return ENOENT.
 
-2. **`cargo xtask images dev-stage --role <ROLE> [--target <TRIPLE>]
-   [--allow-stub]`** (`50537a5` fail-fast guard).
-   Cross-compiles `raxis-planner-<role>` for the guest target and
-   overlays it at `images/<role>-core/rootfs/init`. After the
-   cross-compile lands, the **stub-detection guard** walks a
-   per-role `required_os_binaries` allowlist and fails with a clear
+2. **Planner cross-compile + stage.** Cross-compiles
+   `raxis-planner-<role>` for the guest target and overlays it at
+   `images/<role>-core/rootfs/init`. After the cross-compile
+   lands, the **stub-detection guard** walks a per-role
+   `required_os_binaries` allowlist and fails with a clear
    remediation hint if any are missing:
 
    | Role               | Required binaries                                  |
@@ -3033,15 +3031,10 @@ layer that changed:
 
    The guard treats both regular files and symlinks-to-files as
    satisfied (real Linux rootfs trees use both:
-   `/usr/bin/python3 → python3.11`). The escape hatch
-   `--allow-stub` exists for intentional binary-only debug builds
-   (e.g., the post-`8a26540` AVF demo path) but is forbidden for
-   live-e2e runs because the iter-12 stub-rootfs regression is
-   exactly the failure mode the guard catches.
+   `/usr/bin/python3 → python3.11`).
 
-3. **`cargo xtask images build-all [--role <ROLE>] [--install-dir
-   <PATH>] [--no-auto-stage]`**.
-   Walks `images/<role>-core/rootfs/`, packs it into cpio.gz via
+3. **Initramfs pack + manifest sign.** Walks
+   `images/<role>-core/rootfs/`, packs it into cpio.gz via
    `raxis-initramfs-builder`, and calls `raxis-image-builder` to
    emit the signed manifest with `image_format =
    RootfsInitramfsCpio`. Drops:
@@ -3050,47 +3043,43 @@ layer that changed:
    $RAXIS_INSTALL_DIR/images/raxis-<role>-core-<kver>.manifest.toml
    ```
 
-   Before packing each role, build-all runs the **stale-cache
+   Before packing each role, the bake runs the **stale-cache
    freshness check** (`INV-IMAGE-BAKE-NO-STALE-CACHE-01`): it
    compares the staged planner binary's mtime against the newest
    regular-file mtime under both `crates/planner-<role>/src/**`
    and `crates/planner-core/src/**`. If a source file is newer,
-   build-all auto-invokes `dev-stage` for that role (emitting a
-   structured `build_all_auto_stage_invoked` warn line with the
-   exact file pair) and then proceeds with the freshly-staged
-   binary. The `--no-auto-stage` flag flips this to fail-closed:
-   build-all bails with `INV-IMAGE-BAKE-NO-STALE-CACHE-01
-   VIOLATED` and the per-role `dev-stage` remediation command.
-   This guard closes the iter53 reviewer-VM spawn failure shape
-   (operator ran `dev-stage` for orchestrator + executor but not
-   reviewer after a `planner-core` edit; build-all then packed
-   the stale reviewer binary into a signed cpio.gz; the guest
-   planner dropped into scaffold mode because its env-contract
-   surface was behind the kernel's).
+   the bake auto-rebakes that role (emitting a structured
+   `build_all_auto_stage_invoked` warn line with the exact file
+   pair) and then proceeds with the freshly-staged binary. The
+   `--no-auto-stage` flag flips this to fail-closed: the bake
+   bails with `INV-IMAGE-BAKE-NO-STALE-CACHE-01 VIOLATED` and
+   names the precise file pair (staged path, newest source path,
+   both mtimes). This guard closes the reviewer-VM spawn failure
+   shape (a partial bake had staged orchestrator + executor fresh
+   but skipped reviewer after a `planner-core` edit; the next
+   pack step packed the stale reviewer binary into a signed
+   cpio.gz; the guest planner dropped into scaffold mode because
+   its env-contract surface was behind the kernel's).
 
-**Live-e2e auto-bake (`7fbd2e1`).** The `extended_e2e_*`
-realistic-scenario harnesses call `require_canonical_images()` before
-the kernel boots; if any required image is missing OR is detected as
-a stub via the cpio-walk preflight (next bullet), the harness
-automatically runs the three-step pipeline before proceeding. This
-removes the manual `cargo xtask images …` step from the live-e2e
-contributor workflow.
+**Live-e2e auto-bake.** The `extended_e2e_*` realistic-scenario
+harnesses call `require_canonical_images()` before the kernel
+boots; if any required image is missing OR is detected as a stub
+via the cpio-walk preflight (next bullet), the harness
+automatically runs `cargo xtask images bake` before proceeding.
 
-**Per-role required-binary cpio-walk preflight (`680ea62` +
-`da6e8de`).** The live-e2e support code
-(`kernel/tests/extended_e2e_support/cpio_inspect.rs` +
-`kernel_driver::required_binaries_for_canonical_role`) walks the
-resulting cpio.gz archive entries before the kernel mounts the image
-and asserts a per-role required-binary list. The preflight runs every
-time a live-e2e test calls `require_canonical_images`, so a stub
-rootfs that slipped past the dev-stage guard (e.g., via
-`--allow-stub`) is caught at test-harness layer rather than at
-ENOENT-storm time inside the booted VM. Mismatches surface a
-deterministic remediation hint pointing the developer at
-`cargo xtask images bake-rootfs --role <ROLE>`.
+**Per-role required-binary cpio-walk preflight.** The live-e2e
+support code (`kernel/tests/extended_e2e_support/cpio_inspect.rs`
++ `kernel_driver::required_binaries_for_canonical_role`) walks
+the resulting cpio.gz archive entries before the kernel mounts
+the image and asserts a per-role required-binary list. The
+preflight runs every time a live-e2e test calls
+`require_canonical_images`, so a stub rootfs is caught at
+test-harness layer rather than at ENOENT-storm time inside the
+booted VM. Mismatches surface a deterministic remediation hint
+pointing the developer at `cargo xtask images bake --role <ROLE>`.
 
 **Path-shape divergence between the two preflights (see L-3 in
-[`known-latent-issues.md`](known-latent-issues.md)).** The dev-stage guard runs against the
+ ).** The dev-stage guard runs against the
 staging tree on the host filesystem and uses `Path::exists()`, which
 follows symlinks; on a `usrmerge` tree (`bin -> usr/bin`) the staging
 guard's `bin/bash` lookup resolves through the symlink. The cpio
@@ -3115,7 +3104,7 @@ cpio-walk preflight are all load-bearing.** The dev-stage guard
 runs against the **staging tree** (post-bake, pre-cpio) and asserts
 the Containerfile-promised OS binaries (`bin/bash`, `usr/bin/git`,
 `usr/bin/python3` for executor-starter) are present. The build-all
-freshness check (`INV-IMAGE-BAKE-NO-STALE-CACHE-01`, iter53) runs
+freshness check (`INV-IMAGE-BAKE-NO-STALE-CACHE-01`,) runs
 against the **staged planner binary's mtime** (pre-cpio) and
 asserts the binary is at least as new as the role's planner
 source tree, auto-rebaking by default or failing closed under
@@ -3127,7 +3116,7 @@ The three layers catch different regressions:
 * dev-stage catches "the operator skipped `bake-rootfs`" (missing
   OS tooling in the staging tree).
 * build-all freshness catches "the operator skipped `dev-stage`
-  after a `planner-core` edit" (iter53 reviewer skew).
+  after a `planner-core` edit".
 * cpio-walk catches "the operator ran `build-all` with a stale
   staging tree or `--allow-stub`" (post-pack invariant).
 
@@ -3143,7 +3132,7 @@ required-binary cpio walk), `raxis/kernel/tests/extended_e2e_support/
 kernel_driver.rs::require_canonical_images` (auto-bake call site),
 `raxis/images/executor-starter/Containerfile` (the source of truth
 for executor-starter rootfs content; cross-arch + ca-certificates +
-build-essential per L-2 in [`known-latent-issues.md`](known-latent-issues.md); pinned
+build-essential per L-2 in ; pinned
 `ruff==0.7.4` Python lint and `eslint@9.15.0` / `prettier@3.3.3` /
 `typescript@5.6.3` / `tsx@4.19.2` / `@types/node@20.17.6` JS lint
 per `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01` +

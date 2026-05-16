@@ -6,7 +6,7 @@
 // terminated). Render in the `ok`-tinted card so the
 // operator's eye treats it as expected.
 //
-// Populated once Worker 1's C1 marker pattern lands —
+// Populated by the kernel-side C1 marker pattern —
 // `SessionRevoked.revoked_by` starting with `kernel://`
 // classifies as self-exit; everything else is operator-
 // revoke.

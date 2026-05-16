@@ -1,25 +1,21 @@
 // raxis-types::operator_wire — JSON-shape operator IPC types.
-//
 // Why a second module alongside `operator.rs`?
 // --------------------------------------------
 // `raxis_types::operator::OperatorRequest` is the **bincode + typed-IDs**
 // canonical design — it uses newtype wrappers (`InitiativeId`, `SessionId`,
 // `Role`), references plan/sig blobs by `PathBuf`, and assumes the kernel
 // reads them locally.
-//
 // The actual operator UDS protocol shipped in v1 is **JSON + plain
 // strings**, defined here. The CLI hand-builds JSON frames (or, after
 // PR-2c, constructs typed values from this module and serialises them);
 // the kernel deserialises into the same types. The two protocols are
 // genuinely different — `operator.rs` is the v2 destination, this module
 // is the v1 contract.
-//
 // Single source of truth: this file is the ONLY place either the kernel
 // or the CLI may define wire-shape variants for the operator socket.
 // Adding a new operator op MUST start here. Wire-shape contract tests in
 // `raxis_types::operator_wire::tests` pin the exact JSON byte layout for
 // every variant — any drift breaks compilation or tests.
-//
 // Framing
 // -------
 // Every frame is a 4-byte little-endian length prefix followed by a
@@ -36,7 +32,6 @@ use serde::{Deserialize, Serialize};
 /// JSON-shape operator request. Tagged on the wire as
 /// `{"op": "<Variant>", "payload": {...}}`. The empty-payload variants
 /// emit `{"op":"<Variant>","payload":{}}` for byte-shape consistency.
-///
 /// `Clone` is intentional — both the dispatcher and the audit emit may
 /// hold references; cloning costs are dominated by the embedded plan
 /// blob (`CreateInitiative.plan_bundle_hex`), which the dispatcher
@@ -72,7 +67,6 @@ pub enum OperatorRequest {
     /// Plan-bundle-sealed initiative creation. Normative reference:
     /// `specs/v2/plan-bundle-sealing.md` §3.4 (IPC envelope) and §4.2
     /// step 10 (CLI submit phase).
-    ///
     /// Historical note: an earlier, V1 path-based variant carried
     /// `{plan_toml, plan_sig_hex, submitted_by}` and shared the
     /// `CreateInitiative` discriminant on the wire. V2.5 deletes
@@ -82,9 +76,7 @@ pub enum OperatorRequest {
     /// at decode with `FAIL_PLAN_BUNDLE_DECODE_FAILED` (serde
     /// rejects the unknown fields), which is the intended forcing
     /// function for the upgrade.
-    ///
     /// The wire fields:
-    ///
     /// * `initiative_id` is **CLI-chosen** (UUIDv7). V1 had the kernel
     ///   assign one server-side; V2 hands authority for the id to the
     ///   operator so the audit chain can correlate the operator's
@@ -108,7 +100,6 @@ pub enum OperatorRequest {
     ///   (`SHA-256[:16]` of the operator's Ed25519 public key) used
     ///   to look up the operator entry in `policy.operators` at
     ///   admission step 8.
-    ///
     /// **Hex-encoding choice (best-judgment, documented in spec):**
     /// the V2 spec lists raw Rust types (`Vec<u8>`, `[u8; 32]`,
     /// `[u8; 64]`, `OperatorFingerprint`). The actual JSON wire format
@@ -166,12 +157,10 @@ pub enum OperatorRequest {
     },
 
     // ── escalation review ─────────────────────────────────────────────
-    //
     // Operator approves or denies a planner-submitted escalation.
     // Spec: kernel-store.md §2.5.5 "Escalation approval on the
     // operator socket" + cli-ceremony.md §"Approve / deny escalation"
     // + planner-api.md §"Escalating for higher authority".
-    //
     // The signing input for ApproveEscalation is canonical:
     //   "approval|<escalation_id>|<capability_class>|<max_uses>|<valid_for_seconds>"
     // (see authority::escalation::approval_signing_input — the kernel
@@ -190,7 +179,6 @@ pub enum OperatorRequest {
     },
 
     // ── policy epoch advance ──────────────────────────────────────────
-    //
     // Operator rotates the active policy artifact in-process. The
     // kernel verifies the new artifact (signature, monotonic epoch,
     // path containment under <data_dir>/policy/), runs the four-phase
@@ -209,7 +197,6 @@ pub enum OperatorRequest {
     },
 
     // ── initiative quarantine (kernel-store.md §2.5.8) ────────────────
-    //
     // Operator marks an initiative (or every initiative whose plan
     // was approved by a named operator) as frozen. The kernel inserts
     // the quarantine row(s) atomically with the
@@ -240,12 +227,12 @@ pub enum OperatorRequest {
     },
 
     // -----------------------------------------------------------------
-    // V2_GAPS §12.4 — Operator-ergonomics IPC. The wire shape is
+    // Operator-ergonomics IPC. The wire shape is
     // pinned in V2.3 so the CLI can be written against the final
     // contract; the kernel-side handlers fail closed with
     // `FAIL_NOT_YET_IMPLEMENTED` until V3 lands the concrete logic.
     // Defined in `operator-ergonomics.md` §5.3, §11.3, §12.3, §13.4,
-    // §14.3 (linked from `V2_GAPS.md §12.4`).
+    // §14.3.
     // -----------------------------------------------------------------
     /// `operator-ergonomics.md §5.3` (`raxis plan prepare`).
     /// Returns the kernel-recommended defaults (token budget,
@@ -279,7 +266,7 @@ pub enum OperatorRequest {
     /// `operator-ergonomics.md §13.4` (`raxis initiative watch`).
     /// Subscribes to `KernelPush` events for one initiative.
     /// V2 stub — depends on the V3 KernelPush transport
-    /// (`V2_GAPS.md §12.1`).
+    ///.
     SubscribeInitiative {
         initiative_id: String,
     },
@@ -291,9 +278,8 @@ pub enum OperatorRequest {
         initiative_id: String,
     },
 
-    /// `v2_extended_gaps.md §3.2 StructuredOutput tool`
+    /// ` StructuredOutput tool`
     /// (`raxis task outputs <task_id>`).
-    ///
     /// Lists every typed structured output emitted under
     /// `task_id`, ordered by `emitted_at` ascending. Read-only;
     /// upholds `INV-OPERATOR-ERG-01`.
@@ -303,10 +289,8 @@ pub enum OperatorRequest {
 }
 
 /// Scope of an approval token issued for a `Pending` escalation.
-///
 /// Kernel-store.md §2.5.5 wire format:
 ///   `approval_scope: { capability_class, max_uses, valid_for_seconds }`
-///
 /// `capability_class` is the string discriminant of `CapabilityClass`
 /// (e.g. `"WriteSecrets"`, `"WriteCode"`). The kernel parses it back
 /// into the typed enum at validation time.
@@ -323,7 +307,6 @@ pub struct ApprovalScopeWire {
 
 /// Wire-shape of a single row of the `structured_outputs`
 /// table, surfaced through `OperatorResponse::TaskOutputsListed`.
-///
 /// `kind` is one of `progress_report` / `diagnostic_flag` /
 /// `task_summary` (the same string used by the executor's
 /// `structured_output` tool). `severity` is `Some(...)` only
@@ -355,7 +338,6 @@ pub struct TaskOutputWire {
 
 /// JSON-shape operator response. Tagged on the wire as
 /// `{"status": "<Variant>", "payload": {...}}`.
-///
 /// The `Error` variant is the SOLE error envelope — every per-handler
 /// failure path collapses to `{ code, detail }` here (peripherals.md §3
 /// "Operator socket"). The CLI's pattern-matching layer keys off `code`
@@ -387,7 +369,6 @@ pub enum OperatorResponse {
         tasks_admitted: usize,
     },
     /// Issued by the kernel after a successful `ApproveEscalation`.
-    ///
     /// `approval_token_raw` is the high-entropy secret the operator
     /// must hand to the planner out-of-band; the kernel only stores
     /// `sha256(approval_token_raw)` in the `approval_tokens` table
@@ -410,14 +391,12 @@ pub enum OperatorResponse {
         denied_at: i64,
     },
     /// Issued by the kernel after a successful `RotateEpoch`.
-    ///
     /// Carries forensic-grade detail: the new epoch id, the SHA-256
     /// of the artifact bytes (so the operator can confirm the kernel
     /// loaded the file they intended), the authority fingerprint that
     /// signed it, and the sweep counts from Phase 1. The CLI prints
     /// every field so a deployment audit trail can be reconstructed
     /// from operator shell history alone.
-    ///
     /// Note: `new_epoch_id` is explicitly typed as a monotonic `u64` rather than
     /// a UUID to strictly enforce linear time (preventing replay attacks with old
     /// policies) and to provide human-readable sequence numbers for operators.
@@ -457,7 +436,7 @@ pub enum OperatorResponse {
         quarantined_at: i64,
     },
     // -----------------------------------------------------------------
-    // V2_GAPS §12.4 — Operator-ergonomics IPC success envelopes. Wire
+    // Operator-ergonomics IPC success envelopes. Wire
     // shape pinned for V3 forward compatibility; V2 dispatchers always
     // emit `Error { code: "FAIL_NOT_YET_IMPLEMENTED", ... }` so these
     // variants are never produced today. CLI consumers may still
@@ -487,7 +466,7 @@ pub enum OperatorResponse {
     },
     /// Response to `SubscribeInitiative`. The kernel ack'd the
     /// subscription; subsequent `KernelPush` frames flow over the
-    /// same socket per `V2_GAPS.md §12.1`.
+    /// same socket.
     InitiativeSubscribed {
         initiative_id: String,
     },
@@ -502,7 +481,6 @@ pub enum OperatorResponse {
     /// Response to `ListTaskOutputs`. Each entry is the
     /// canonical wire shape for a single row of the
     /// `structured_outputs` table.
-    ///
     /// `payload_json` is the verbatim JSON string the kernel
     /// stored in `structured_outputs.payload_json`; the CLI is
     /// responsible for pretty-printing or filtering it. The
@@ -524,7 +502,6 @@ pub enum OperatorResponse {
 
 // ---------------------------------------------------------------------------
 // Tests — wire-shape contract pins.
-//
 // These tests are the contract between the kernel-side dispatcher and
 // every CLI command's JSON construction site. A change to a serialised
 // shape breaks one of these tests, forcing the implementer to look at
@@ -636,7 +613,6 @@ mod tests {
         // stops talking — treat the field set/order/encoding as a
         // forever-stable wire contract. Spec: plan-bundle-sealing.md
         // §3.4 + §11.1 "CLI workflow" landing.
-        //
         // V2.5 collapses the previous V1 `{plan_toml, plan_sig_hex,
         // submitted_by}` shape under the same `CreateInitiative`
         // discriminant — the V1 byte shape is now a hard decode
@@ -1035,7 +1011,6 @@ mod tests {
     }
 
     // ── Quarantine wire shapes (step-10) ──────────────────────────────────
-    //
     // These pin the wire shape exactly as the CLI emits and the kernel
     // dispatcher decodes, mirroring the rest of this test module.
 
@@ -1109,8 +1084,7 @@ mod tests {
         );
     }
 
-    // ── V2_GAPS §12.4 — Operator-ergonomics IPC stubs ─────────────────
-    //
+    // ── Operator-ergonomics IPC stubs ─────────────────
     // Wire-shape pinning for the five V2.3 stubs. Locking the byte
     // layout in V2 means the V3 patch that lands real handlers cannot
     // accidentally re-shape the JSON envelope and break operator CLIs

@@ -71,7 +71,7 @@ pub struct ProviderEntryView {
     pub inference_timeout_ms: u32,
     pub data_fetch_timeout_ms: u32,
     pub max_response_bytes: u64,
-    /// V2_GAPS §C9 — per-provider streaming idle timeout (ms).
+    /// per-provider streaming idle timeout (ms).
     /// `None` means the gateway falls back to its hard-coded
     /// 30-second `STREAM_IDLE_TIMEOUT` default. Operators using
     /// reasoning-tier models (OpenAI o1/o3) widen this to 60–120 s
@@ -144,7 +144,7 @@ pub struct BackendRequest<'a> {
     pub headers: &'a [(String, String)],
     pub body: &'a [u8],
     pub timeout: Duration,
-    /// V2_GAPS §C9 — per-chunk idle timeout for streaming responses.
+    /// per-chunk idle timeout for streaming responses.
     ///
     /// When `Some(d)`, the gateway's chunk-read loop wraps each
     /// `Response::chunk()` await in `tokio::time::timeout(d, …)`.

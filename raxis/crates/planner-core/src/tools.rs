@@ -1,11 +1,8 @@
 //! `Tool` trait + `ToolRegistry` + base tools.
-//!
-//! Closes V2_GAPS.md §B1 substep "Base tool registry
+//!substep "Base tool registry
 //! (read_file/bash/edit_file/grep_search/git_commit)" by giving each
 //! planner role binary a typed, registry-driven dispatch surface.
-//!
 //! ## Why a trait + registry, not free functions
-//!
 //! Per `planner-harness.md §14.3`, role-asymmetric capabilities
 //! ("the reviewer MUST NOT have `git_commit`") are a **build-time**
 //! correctness property, not a runtime check. Each role binary
@@ -17,9 +14,7 @@
 //! that imports `build_executor_registry` will compile, but the
 //! `executor` Cargo feature this crate ships is mutually exclusive
 //! with `reviewer` so the per-binary `Cargo.toml` cannot link both.
-//!
 //! ## V2 limits (declared so future work has a target)
-//!
 //! * **No streaming tool output.** Every tool returns a single
 //!   `ToolOutput` value; long-running tools (a multi-MB `bash`
 //!   command) buffer their full stdout/stderr before returning.
@@ -195,7 +190,6 @@ impl ToolContext {
 // ---------------------------------------------------------------------------
 
 /// Registry of tools, keyed by name.
-///
 /// `BTreeMap` rather than `HashMap` so the iteration order is
 /// deterministic — the dispatch loop's `MessageRequest::tools`
 /// array, the role's `system` prompt, and the audit-emitted
@@ -258,13 +252,10 @@ impl ToolRegistry {
 /// Resolve `input_path` relative to `workspace_root`, rejecting any
 /// path that escapes the workspace via `..` segments or absolute
 /// paths.
-///
 /// This is the **only** path resolution the base tools below
 /// perform — every tool that touches the filesystem MUST call this
 /// first so the workspace boundary is enforced uniformly.
-///
 /// ## Why a hand-rolled component check
-///
 /// `Path::canonicalize` on macOS/Linux follows symlinks, which is
 /// not what we want — a symlink inside the workspace pointing at
 /// `/etc/passwd` would let the model exfiltrate. We compare path
@@ -314,7 +305,6 @@ pub fn resolve_workspace_path(
 // ---------------------------------------------------------------------------
 
 /// `read_file` — read the contents of a workspace-relative file.
-///
 /// Schema: `{ path: string }`. Returns the file's UTF-8 contents
 /// (with a `... <truncated N bytes>` tail if the file exceeds 1 MiB
 /// to keep the per-turn token budget under control).
@@ -382,7 +372,6 @@ impl Tool for ReadFileTool {
 
 /// `edit_file` — overwrite a workspace file with the supplied
 /// contents. Creates parent directories as needed.
-///
 /// Schema: `{ path: string, contents: string }`.
 pub struct EditFileTool;
 
@@ -470,11 +459,9 @@ impl Tool for EditFileTool {
 }
 
 /// `bash` — run a shell command in the workspace.
-///
 /// Schema: `{ command: string }`. Stdout + stderr are concatenated
 /// into the response (with a 64 KiB cap per stream); the exit code
 /// is reported in the trailing line.
-///
 /// **Hardening note.** The reviewer role does NOT include this
 /// tool — see [`build_reviewer_registry`].
 pub struct BashTool;
@@ -576,7 +563,6 @@ impl Tool for BashTool {
 }
 
 /// `grep_search` — `grep -rn` over the workspace.
-///
 /// Schema: `{ pattern: string, path: string? }`. Uses `grep -rn` so
 /// the binary is universal (every supported VM image ships `grep`);
 /// future versions will switch to `ripgrep` when the canonical
@@ -669,7 +655,6 @@ impl Tool for GrepSearchTool {
 /// `git_commit` — `git add` + `git commit -m <message>` in the
 /// workspace. **Executor-only.** The reviewer role registry omits
 /// this tool — see [`build_reviewer_registry`].
-///
 /// Schema: `{ message: string }`.
 pub struct GitCommitTool;
 
@@ -808,8 +793,7 @@ impl Tool for GitCommitTool {
 
 // ---------------------------------------------------------------------------
 // V2 §3.1 — Sleep tool
-//
-// `v2_extended_gaps.md §3.1` token-budget-preserving wait. Lets an
+// token-budget-preserving wait. Lets an
 // agent block on an external process (CI, deploy rollout) without
 // burning model turns on a polling loop. Available to executor and
 // orchestrator only — NOT to the reviewer (the Pure-Static Reviewer
@@ -822,21 +806,18 @@ impl Tool for GitCommitTool {
 /// `policy.toml` cannot pin a VM slot for hours.
 pub const SLEEP_TOOL_HARD_MAX_SECONDS: u32 = 600;
 
-/// V2 `v2_extended_gaps.md §3.1` Sleep tool. Carries its own
+/// V2 Sleep tool. Carries its own
 /// per-call ceiling, cumulative ceiling, and rolling cumulative
 /// counter (shared between every Tool::execute call inside one
 /// dispatch loop). Construct with [`SleepTool::new`] from the
 /// dispatch loop's policy snapshot.
-///
 /// Rate-limit semantics:
-///
 /// * `seconds == 0` → success, nothing to sleep.
 /// * `seconds > max_per_call` → `FAIL_SLEEP_PER_CALL_EXCEEDED`.
 /// * `seconds > SLEEP_TOOL_HARD_MAX_SECONDS` → `FAIL_SLEEP_HARD_MAX_EXCEEDED`.
 /// * `cumulative + seconds > max_cumulative` → `FAIL_SLEEP_BUDGET_EXCEEDED`.
 /// * `max_per_call == 0` → tool disabled, every call returns
 ///   `FAIL_SLEEP_DISABLED`.
-///
 /// All errors are STRUCTURED (returned as `ToolOutput::err`) so the
 /// model can recover; `Tool::execute` itself returns `Ok` in every
 /// case (matches the dispatch loop's error contract — see `BashTool`).
@@ -986,23 +967,19 @@ impl Tool for SleepTool {
 // StructuredOutputTool — V2 §3.2 typed mid-session output.
 // ---------------------------------------------------------------------------
 
-/// **`v2_extended_gaps.md §3.2` typed mid-session communication.**
-///
+/// ** typed mid-session communication.**
 /// The `structured_output` tool ships a closed-enum payload to the
 /// kernel via the planner UDS (R-2 — Mediated I/O). Three variants:
-///
 ///   * `progress_report` — files modified, tests passing/failing,
 ///     confidence in `[0.0, 1.0]`.
 ///   * `diagnostic_flag` — severity (`info` / `warning` / `critical`),
 ///     operator-facing message, optional source-location evidence.
 ///   * `task_summary`    — final commit SHA, changed paths,
 ///     one-paragraph approach.
-///
 /// **Authority.** Registered in the executor + orchestrator
 /// registries only; the reviewer registry never has it
 /// (INV-PLANNER-HARNESS-02). NOT a terminal tool — the dispatch
 /// loop keeps running after a successful submission.
-///
 /// **Wire shape.** The model invokes the tool with
 /// `{ "kind": "progress_report", "files_modified": [...], ... }`
 /// (snake-case `kind` discriminator + variant fields). The tool
@@ -1244,7 +1221,6 @@ fn parse_structured_output_input(
 // ---------------------------------------------------------------------------
 // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3)
 // ---------------------------------------------------------------------------
-//
 // These tools are declared so the LLM advertises them in
 // `MessageRequest::tools` and knows their argument shape, but their
 // `execute` is a no-op: the dispatch loop intercepts every name in
@@ -1253,7 +1229,6 @@ fn parse_structured_output_input(
 // `DispatchOutcome::TerminalTool`. The driver's `submit_terminal`
 // function then translates the captured `input` JSON into the matching
 // `IntentKind` and ships it through the kernel IPC.
-//
 // Without these declarations the Anthropic API never tells the model
 // these tools exist, the model just emits free-form text describing
 // what it would do, and the dispatch loop times out with
@@ -1438,7 +1413,6 @@ impl Tool for SubmitReviewTool {
 /// in `pending` state with no incomplete predecessors). The kernel
 /// promotes the row from `PendingActivation → Active` and spawns
 /// the corresponding executor / reviewer session.
-///
 /// IMPORTANT for the model: the task ids you can pass live in the
 /// KSB `dag=` block — every row's first column is a task id.
 struct ActivateSubtaskTool;
@@ -1677,7 +1651,7 @@ pub fn build_orchestrator_registry() -> ToolRegistry {
     r
 }
 
-/// V2 `v2_extended_gaps.md §3.1` — executor registry with the
+/// Executor registry with the
 /// `sleep` tool wired to the operator-declared policy ceilings.
 /// Construct from the dispatch-loop boot env (the kernel projects
 /// `policy.sleep_caps()` into `RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL`
@@ -1707,7 +1681,7 @@ pub fn build_executor_registry_with_sleep(
     r
 }
 
-/// V2 `v2_extended_gaps.md §3.1` — orchestrator registry with the
+/// Orchestrator registry with the
 /// `sleep` tool wired to the operator-declared policy ceilings.
 /// Includes the three orchestrator terminal-tool declarations.
 pub fn build_orchestrator_registry_with_sleep(
@@ -1730,11 +1704,10 @@ pub fn build_orchestrator_registry_with_sleep(
     r
 }
 
-/// **V2 `v2_extended_gaps.md §3.1 + §3.2`** — full executor registry
+/// **V2 ** — full executor registry
 /// wired to the operator-declared policy ceilings AND the
 /// session-scoped `IntentSubmitter`. Use from the executor binary's
 /// `main.rs` once the submitter is constructed.
-///
 /// The §3.2 `structured_output` tool requires an `IntentSubmitter`
 /// (it ships its payload via the planner UDS); supplying it here
 /// keeps the registry constructors purely declarative — the
@@ -1749,7 +1722,7 @@ pub fn build_executor_registry_full(
     r
 }
 
-/// **V2 `v2_extended_gaps.md §3.1 + §3.2`** — full orchestrator
+/// **V2 ** — full orchestrator
 /// registry wired to the operator-declared policy ceilings AND the
 /// session-scoped `IntentSubmitter`. Mirror of
 /// [`build_executor_registry_full`] for the orchestrator role.
@@ -1822,7 +1795,7 @@ mod tests {
         assert!(r.get("grep_search").is_some());
     }
 
-    /// V2 `v2_extended_gaps.md §3.1` — `seconds = 0` is a fast path:
+    /// `seconds = 0` is a fast path:
     /// success, no actual sleep, no cumulative charge.
     #[tokio::test]
     async fn sleep_zero_is_fast_path_no_charge() {

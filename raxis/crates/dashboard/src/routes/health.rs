@@ -9,7 +9,7 @@
 //!
 //! Audit discipline: every health surface here is a read-only
 //! browse. The `OperatorHealthQueried` emission was retired in
-//! `worker/audit-noise-sweep-r2` per the signal-vs-noise policy
+//! the second audit-noise sweep per the signal-vs-noise policy
 //! in `specs/v2/dashboard-operator-action-audit-coverage.md` —
 //! per-poll health pings are dashboard heartbeat telemetry, not
 //! forensic events, and observability infrastructure (Prom /
@@ -145,7 +145,7 @@ pub struct KernelLifecycleResponse {
     /// `Healthy` / `Restarting` / `Halted`. Always set.
     pub status: String,
     /// Sub-state for `Halted` (`CircuitOpen` / `OperatorStop`
-    /// / `OperatorStopForced` / `SupervisorGone`).
+    /// `OperatorStopForced` / `SupervisorGone`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub_state: Option<String>,
     /// 1-indexed restart attempt within the current window.

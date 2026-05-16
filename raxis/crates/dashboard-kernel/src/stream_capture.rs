@@ -1,8 +1,6 @@
-//! Per-session agent-output capture (`v2_extended_gaps.md §4.3`
+//! Per-session agent-output capture (
 //! "Agent stream capture").
-//!
 //! # What this module owns
-//!
 //! 1. A bounded **on-disk file ring** at
 //!    `<data_dir>/streams/<session_id>.jsonl`. Each line is a
 //!    JSON-serialised [`StreamEvent`]. When a file would exceed
@@ -10,21 +8,17 @@
 //!    keeping only the most recent ~50 % of lines (see
 //!    `SessionStreamCapture::compact_locked`). One compaction
 //!    per overflow — not per append — keeps amortised cost flat.
-//!
 //! 2. A per-session **broadcast channel** sized at
 //!    [`CaptureConfig::broadcast_capacity`]. The dashboard's SSE
 //!    handler subscribes here for live frames; lagged subscribers
 //!    receive a `RecvError::Lagged(n)` and continue (the
 //!    handler's `lagged` SSE frame surfaces the lag count to the
 //!    operator).
-//!
 //! 3. A **tail loader** ([`SessionStreamCapture::tail`]) that
 //!    reads the last `n` events from disk for a session. The SSE
 //!    handler calls this before attaching the live subscriber so
 //!    a freshly-connected operator sees recent context.
-//!
 //! # Invariants
-//!
 //! * **No data loss between fsyncs.** Every successful
 //!   [`SessionStreamCapture::append`] flushes the writer before
 //!   returning; on overflow the compaction is `fsync`-ed before
@@ -48,7 +42,7 @@ use raxis_dashboard::stream::{StreamEvent, StreamSubscription};
 use tokio::sync::broadcast;
 
 /// Tunables for the capture. Defaults match
-/// `v2_extended_gaps.md §4.3`.
+/// .
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
     /// Per-session file ring max size (bytes). 10 MB by default.
@@ -99,7 +93,6 @@ impl SessionStreamCapture {
     }
 
     /// Append `evt` to the session's ring + broadcast it.
-    ///
     /// On disk-full or other I/O errors the broadcast still
     /// fires (so live SSE subscribers do not lose the event)
     /// but the function returns `Err` so the caller can decide

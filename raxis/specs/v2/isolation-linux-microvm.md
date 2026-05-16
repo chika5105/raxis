@@ -226,9 +226,9 @@ The kernel's `kernel/src/isolation_select.rs::build_platform_backend` instantiat
 The substrate consumes two artefacts at spawn time:
 
 1. **Kernel binary** — staged at `<install_dir>/kernel/vmlinux` by `cargo xtask images dev-kernel` (existing). Operators in the demo flow run `cargo xtask images dev-kernel --url <fc-reference-kernel-url> --sha256 <hex>`; air-gapped operators run `cargo xtask images dev-kernel --from-file vmlinux.bin`.
-2. **Rootfs image** — staged by `cargo xtask images build-all` (existing). Produces a signed `cpio.gz` initramfs per role (Reviewer, Orchestrator, Executor-starter), packaged with a sibling `*.manifest.toml` that the kernel verifies against its compile-time trust anchor.
+2. **Rootfs image** — staged by `cargo xtask images bake` (existing). Produces a signed `cpio.gz` initramfs per role (Reviewer, Orchestrator, Executor-starter), packaged with a sibling `*.manifest.toml` that the kernel verifies against its compile-time trust anchor.
 
-**New for V2** (this spec): `cargo xtask linux-microvm bundle` — a one-shot orchestrator that runs `dev-kernel` (from a known-good Firecracker reference URL pin) followed by `build-all` for every role, producing a complete demo-ready bundle under `<install_dir>/`. See `xtask/src/linux_microvm.rs`.
+**New for V2** (this spec): `cargo xtask linux-microvm bundle` — a one-shot orchestrator that runs `dev-kernel` (from a known-good Firecracker reference URL pin) followed by the bake's stage + pack steps for every role, producing a complete demo-ready bundle under `<install_dir>/`. See `xtask/src/linux_microvm.rs`.
 
 **New for V2** (this spec): `cargo xtask linux-prereqs` — host preflight that probes:
 
@@ -238,7 +238,7 @@ The substrate consumes two artefacts at spawn time:
 * Host kernel version ≥ 5.10 (parses `/proc/sys/kernel/osrelease`)
 * `firecracker` binary on PATH (best-effort `which` shellout)
 
-The same checks are mirrored into `raxis doctor host` (Worker A's surface) once Worker A's branch lands; the `xtask` entry point is the operator's pre-doctor probe.
+The same checks are mirrored into `raxis doctor host`; the `xtask` entry point is the operator's pre-doctor probe.
 
 ---
 

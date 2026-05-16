@@ -1,7 +1,7 @@
 # RAXIS V2 — Per-Capability Policy Epoch Staleness Diffing
 
-> **Status:** V2 Specified  
-> **Promoted from:** `design-decisions.md §A.18` (deferred in V1)  
+> **Status:** V2 Specified
+> **Promoted from:** `design-decisions.md §A.18` (deferred in V1)
 > **Scope:** Policy engine only. Does not interact with the orchestration architecture
 > in [`v2-deep-spec.md`](v2-deep-spec.md). Can be implemented and shipped independently of the
 > Orchestrator/Executor/Reviewer machinery.

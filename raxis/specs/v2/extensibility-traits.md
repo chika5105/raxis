@@ -104,7 +104,6 @@ The trait is split into three coherent surface areas:
 
 ```rust
 //! crates/raxis-domain/src/lib.rs
-//!
 //! The single seam between RAXIS's domain-agnostic Kernel core and the
 //! implementation-specific state primitives that vary per problem domain.
 //! The Kernel binary is compiled against this trait; concrete impls (e.g.
@@ -144,7 +143,6 @@ pub trait DomainAdapter: Send + Sync + 'static {
     /// inside its isolated VM. The kernel calls this exactly once per
     /// session, after the planner VM has been spawned but before
     /// `KernelPush` is allowed to deliver any intent.
-    ///
     /// SE impl:        `git clone --no-hardlinks` of main_repo into
     ///                 `/var/raxis/sessions/<session_id>/work`,
     ///                 returned as a VirtioFS host-path; mounted
@@ -155,7 +153,6 @@ pub trait DomainAdapter: Send + Sync + 'static {
     /// Healthcare:     export the patient's FHIR bundle into a
     ///                 session-scoped staging dir; mount read-only at
     ///                 `/patient`, read-write at `/proposed`.
-    ///
     /// MUST be deterministic given `(session.id, session.parent_state_ref)`:
     /// re-invocation MUST yield byte-identical contents at the returned
     /// path (modulo timestamps that the impl SHOULD canonicalise).
@@ -169,7 +166,6 @@ pub trait DomainAdapter: Send + Sync + 'static {
     /// a `CompleteTask`-equivalent intent, *before* admission gates run
     /// (because the touched-set has to be derived from the snapshot,
     /// per `R-9`).
-    ///
     /// SE impl:        `git add -A && git commit -m "<task_id>"` into
     ///                 the session worktree, returning the commit SHA
     ///                 and the head-tree sha256 (so the kernel can
@@ -179,7 +175,6 @@ pub trait DomainAdapter: Send + Sync + 'static {
     ///                 manifest_signature)` into the staging dir.
     /// Healthcare:     canonicalise the proposed clinical-action set,
     ///                 sha256 it, sign with session-bound key.
-    ///
     /// MUST be **idempotent**: calling twice on a workspace that has
     /// not changed MUST return the same `Snapshot` (same `content_hash`).
     fn snapshot(
@@ -195,7 +190,6 @@ pub trait DomainAdapter: Send + Sync + 'static {
     /// directly from the source. This call materialises a transferable
     /// `Bundle` in a kernel-controlled staging directory; the kernel
     /// then mounts that directory read-only into the destination VM.
-    ///
     /// SE impl:        `git bundle create` of the snapshot commit +
     ///                 its base, dropped at
     ///                 `/var/raxis/transfer/<bundle_id>.bundle`.
@@ -204,7 +198,6 @@ pub trait DomainAdapter: Send + Sync + 'static {
     ///                 sealed JSON envelope.
     /// Healthcare:     serialise the diagnostic bundle (FHIR
     ///                 DiagnosticReport + supporting Observations).
-    ///
     /// MUST be idempotent on `(snapshot.content_hash, dst.session_id)`.
     fn transfer(
         &self,
@@ -217,7 +210,6 @@ pub trait DomainAdapter: Send + Sync + 'static {
     /// record. This is the *only* method that contacts the outside
     /// world; it MUST go through the Credential Proxy (`INV-VM-CAP-04`)
     /// when external credentials are required.
-    ///
     /// SE impl:        cherry-pick `snapshot.commit_sha` into the
     ///                 main worktree (the IntegrationMerge ceremony
     ///                 of `integration-merge.md`); on protected paths
@@ -227,7 +219,6 @@ pub trait DomainAdapter: Send + Sync + 'static {
     ///                 broker FIX connection.
     /// Healthcare:     POST the approved clinical-action set to the
     ///                 EHR's FHIR endpoint via the credential proxy.
-    ///
     /// MUST be idempotent on `snapshot.content_hash`: a re-invocation
     /// after a successful commit MUST return `Err(DomainError::AlreadyApplied
     /// { receipt })` carrying the original receipt — the kernel relies
@@ -247,7 +238,6 @@ pub trait DomainAdapter: Send + Sync + 'static {
     /// manifests. This is the domain-specific generalisation of
     /// `kernel::vcs::diff(base, head)`; the kernel runs this *before*
     /// the path-allowlist gate (`INV-TASK-PATH-01`, `R-9`).
-    ///
     /// SE impl:        `gix::diff` on `base..head` → list of paths.
     /// Trading impl:   list of `(account_id, instrument)` pairs the
     ///                 order would touch.
@@ -271,7 +261,7 @@ pub trait DomainAdapter: Send + Sync + 'static {
     /// Called when a session ends (terminal `CompleteTask`, abandoned
     /// after agent-disagreement, or operator-killed). Releases
     /// VM-mounted resources but does NOT delete the underlying state
-    /// — the audit-retention window of `agent-disagreement.md §7` may
+    /// the audit-retention window of `agent-disagreement.md §7` may
     /// require it for forensic replay.
     fn teardown_workspace(
         &self,
@@ -527,7 +517,6 @@ This split mirrors the lifecycle. The kernel calls `IsolationBackend::spawn` onc
 
 ```rust
 //! crates/raxis-isolation/src/lib.rs
-//!
 //! The single seam for `R-1 Domain Separation`'s implementation choice.
 //! The kernel binary is compiled against these two traits; concrete
 //! backends (Firecracker, Apple-VZ, SGX, SEV-SNP, Wasm, Mock) are
@@ -537,7 +526,6 @@ use raxis_types::{IpcMessage, KernelPush, IntentFrame};
 use std::time::Duration;
 
 /// The factory that boots an isolated execution environment.
-///
 /// `R-1` requires distinct address spaces, no shared memory, and
 /// authority-mediated I/O only. An impl is conformant iff
 /// `verify_isolation_guarantee()` returns
@@ -546,11 +534,9 @@ use std::time::Duration;
 pub trait IsolationBackend: Send + Sync + 'static {
     /// Boot an isolated execution environment with the given verified
     /// image and workspace mount. Returns a live session handle.
-    ///
     /// MUST NOT return until the guest is reachable on its primary
     /// IPC transport (VSock CID, ring buffer, host-call channel,
     /// pipe — whichever the impl uses).
-    ///
     /// MUST refuse a spawn if `image.verify_signature()` is not
     /// already `Ok` — the image-verification responsibility lives in
     /// the kernel's image-resolver, but the backend re-checks at
@@ -565,7 +551,6 @@ pub trait IsolationBackend: Send + Sync + 'static {
     /// Verify that this backend satisfies `R-1` at the host-hardware
     /// level. Called once at kernel startup by `raxis doctor`
     /// (`system-requirements.md §11`).
-    ///
     /// Returns:
     ///   - `IsolationLevel::R1Conformant`         — full hw isolation
     ///   - `IsolationLevel::R1Conformant_Strong`  — enclave/SEV-SNP +
@@ -634,7 +619,6 @@ pub trait IsolatedSession: Send + 'static {
     /// in-guest forwarder reads its env-stamped plan
     /// (`RAXIS_VSOCK_LOOPBACK_PLAN`). The kernel-side composer is
     /// the only call-site; planners cannot reach this method.
-    ///
     /// Implements the substrate half of
     /// `INV-CRED-PROXY-VM-REACHABILITY-01` (`invariants.md`) and
     /// `credential-proxy.md §12a.3`. Per-VM device boundary IS the
@@ -643,7 +627,6 @@ pub trait IsolatedSession: Send + 'static {
     /// guest in a different session that dials
     /// `(VMADDR_CID_HOST, vsock_port)` reaches its own VM's
     /// listener (or none), never another session's.
-    ///
     /// **Default impl returns `Err(IsolationError::BackendInternal)`**.
     /// Substrates that don't run the agent in a VM (`SubprocessIsolation`,
     /// `MockIsolation`) cannot satisfy the invariant; the kernel must
@@ -652,7 +635,6 @@ pub trait IsolatedSession: Send + 'static {
     /// `INV-CRED-PROXY-VM-REACHABILITY-01` mechanical: a substrate
     /// silently lacking the implementation cannot ship a session
     /// whose agent would not be able to reach its credentials.
-    ///
     /// **Conformance test (`R-cred-proxy-reachability`).** Spawn a
     /// VM with one credential proxy, register a listener, and dial
     /// `(VMADDR_CID_HOST, vsock_port)` from inside the guest. The
@@ -1020,14 +1002,12 @@ That triplet is preserved across every conformant backend.
 
 ```rust
 /// Pluggable seam for credential storage and resolution.
-///
 /// `R-2 Mediated I/O` requires intelligence to never see credential
 /// material directly. This trait does not weaken that — every impl
 /// returns the value into the kernel's address space, never into a
 /// VM-readable surface. The credential-proxy and the gateway are the
 /// only two consumers (per the two-credential-system architecture in
 /// `paradigm.md §5.1`).
-///
 /// Implementations:
 /// - [`FileCredentialBackend`] — plaintext files under `<data_dir>/`
 ///   (V2 default).
@@ -1127,13 +1107,11 @@ The `AuditSink` trait already exists in `crates/audit/src/sink.rs` (today: `File
 
 ```rust
 /// Pluggable seam for sealed-audit-event persistence.
-///
 /// `R-7 Cryptographic Audit Chain` requires audit-log modifications
 /// to be detectable by an independent verifier with public keys only.
 /// The HASH CHAIN is computed by the kernel (`crates/audit/src/writer.rs`)
-/// — it is paradigm-load-bearing and stays in concrete kernel code.
+/// it is paradigm-load-bearing and stays in concrete kernel code.
 /// This trait is **only** the storage backend underneath the writer.
-///
 /// Implementations:
 /// - [`FileAuditSink`] — JSONL segments under `<data_dir>/audit/`
 ///   (V2 default).
@@ -1175,7 +1153,6 @@ pub trait AuditSink: Send + Sync + 'static {
     fn highest_durable_seq(&self) -> Result<Option<u64>, AuditWriterError>;
 
     // === V2.1 paired-write extensions ===
-    //
     // The methods below extend the trait with the three-event paired
     // protocol defined in `audit-paired-writes.md §2`. Phase B0 calls
     // `emit_pending`; Phase B2 calls `emit_confirmed_for` (or
@@ -1185,7 +1162,6 @@ pub trait AuditSink: Send + Sync + 'static {
     // future verifications. The conformance kit in
     // `crates/audit/tests/conformance.rs` enforces the orderings and
     // fsync semantics (per `audit-paired-writes.md §15`).
-    //
     // Default-impl note. The trait provides default implementations
     // for the V2.1 methods that route through `emit` so legacy sinks
     // (`FakeAuditSink` in V1 tests, `FileAuditSink` for pre-V2.1
@@ -1356,13 +1332,11 @@ The challenge-response auth ceremony (`cli/src/conn.rs::handshake`) is **identic
 
 ```rust
 /// Pluggable seam for the operator CLI ↔ kernel wire.
-///
 /// `R-9 Attributable Intent` and `R-12 Out-of-Band Escalation`
 /// require this channel to (a) be unforgeable by intelligence and
 /// (b) authenticate to a human principal. The Ed25519
 /// challenge-response handshake stays the same across every wire.
 /// Only the byte transport changes.
-///
 /// Implementations:
 /// - [`UnixSocketTransport`] — `<data_dir>/operator.sock` (V2 default).
 /// - Future: `MtlsGrpcTransport`, `WebsocketOverHttpsTransport`,
@@ -1569,14 +1543,12 @@ What changes: the bytes between the gateway worker and the actual LLM endpoint. 
 
 ```rust
 /// Pluggable seam for LLM inference routing.
-///
 /// `R-2 Mediated I/O` requires the planner to never see provider
 /// credentials, never have direct egress, and never decide which
 /// model is called (per `provider-model-selection.md`). Those
 /// invariants are preserved by the kernel — the router only
 /// consumes a *resolved* `(provider_id, model_id)` and dispatches
 /// the call. Where the dispatched call goes is the trait's job.
-///
 /// Implementations:
 /// - [`HttpsGatewayRouter`] — kernel-spawned `raxis-gateway` worker
 ///   pool calling Anthropic / OpenAI / Gemini over HTTPS (V2 default).
@@ -1923,7 +1895,7 @@ If the response does not match this schema →
 INV-08, never the malformed bytes.
 
 ### §9A.5A RAXIS Sidecar Streaming Protocol (V2.5, optional)
-*(Closes [`v2_extended_gaps.md §2.6`](v2_extended_gaps.md) — sidecar streaming + heartbeat
+*(— sidecar streaming + heartbeat
 + mid-stream budget abort.)*
 
 A sidecar that wants to stream tokens incrementally exposes a

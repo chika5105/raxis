@@ -1,6 +1,5 @@
 //! Uniform JSON error envelope for the dashboard HTTP surface.
-//!
-//! Spec: `v2_extended_gaps.md §4.7` — `R-10 (Opaque rejection)`.
+//! `R-10 (Opaque rejection)`.
 //! API errors do NOT leak internal kernel state (no stack traces,
 //! no internal paths). Each error carries a stable `code` string
 //! (e.g. `FAIL_DASHBOARD_AUTH`) plus a short human-readable

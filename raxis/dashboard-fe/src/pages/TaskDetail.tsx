@@ -196,9 +196,8 @@ export function TaskDetailPage() {
           `GET /api/tasks/:task_id/llm-turns` and renders one
           collapsible card per turn with usage + cache-hit
           ratio colour coding. The endpoint exists today;
-          rows arrive once Worker 1 wires the kernel-side tap
-          to pass `Some(task_id)` to `gateway.fetch(...)`
-          (see RETURN_NOTE_TO_PARENT.md §1). */}
+          rows arrive once the kernel-side tap is wired to
+          pass `Some(task_id)` to `gateway.fetch(...)`. */}
       <TaskLlmTurns taskId={t.task_id} />
 
       <section className="card p-4">

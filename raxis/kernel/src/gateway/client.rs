@@ -120,7 +120,7 @@ struct Pending {
     /// Request body bytes, cloned from the outbound
     /// `FetchRequest` so the response-side observer fan-out can
     /// surface BOTH sides of the upstream round-trip. The
-    /// pre-iter64 capture only carried the response, leaving
+    /// earlier capture only carried the response, leaving
     /// the dashboard's per-turn panel rendering half-conversations
     /// (operators couldn't see what the planner asked for —
     /// crucial when debugging a malformed prompt or a stale
@@ -233,7 +233,7 @@ struct Inner {
     /// `FetchResponse` so per-task capture (the dashboard's
     /// `TaskLlmCapture` file ring) can record raw LLM turns
     /// for operator-side debugging. `None` ⇒ no observer
-    /// installed (matches every pre-iter58 deployment); the
+    /// installed (matches every earlier deployment); the
     /// pump's hot path stays branch-light when absent.
     observer: Mutex<Option<Arc<dyn LlmTurnObserver>>>,
 }

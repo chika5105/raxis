@@ -1,10 +1,8 @@
 //! High-level driver — promotes the three role binaries' `main()`
 //! from "boot, log, park on SIGTERM" scaffolds to a real agent
 //! loop end-to-end.
-//!
-//! Closes V2_GAPS.md §B1 substep `gap-b1-planner-binary-wiring` by
+//!`gap-b1-planner-binary-wiring` by
 //! giving each binary a single entry point that:
-//!
 //! 1. Parses the env-contract the kernel stamps at spawn time
 //!    (`RAXIS_KERNEL_PLANNER_SOCKET`, `RAXIS_PLANNER_TASK_PROMPT`,
 //!    optional `RAXIS_MODEL_ID`, etc.).
@@ -26,11 +24,8 @@
 //!    `integration_merge` / `activate_subtask` / `retry_subtask`).
 //! 7. Returns a structured [`DriverOutcome`] the binary's `main`
 //!    folds into a process exit code.
-//!
 //! ## Why a separate module rather than three forked `main`s
-//!
 //! The three role binaries differ only in:
-//!
 //! * Argv shape (orchestrator: no `--task-id`).
 //! * Tool registry (executor has write tools; reviewer is
 //!   read-only; orchestrator is read-only + DAG).
@@ -40,16 +35,13 @@
 //!   `retry_subtask`).
 //! * Seed prompt language ("you are an executor for task X" vs
 //!   "you are a reviewer of evaluation_sha Y").
-//!
 //! Everything else — env parsing, transport setup, loop driver,
 //! intent submission, error conversion — is identical. The driver
 //! concentrates the shared logic and exposes one
 //! [`run_role_session`] entry point each binary calls; the result
 //! is three role mains of < 30 lines each instead of three
 //! 200-line copies.
-//!
 //! ## Live-mode env contract (kernel-stamped)
-//!
 //! | Variable                       | Required for live mode? | Default                              | Purpose                                    |
 //! |--------------------------------|-------------------------|--------------------------------------|--------------------------------------------|
 //! | `RAXIS_SESSION_TOKEN`          | yes (already in [`crate::BootEnv`]) | —                          | Session-auth token for the kernel UDS      |
@@ -61,21 +53,17 @@
 //! | `RAXIS_WORKSPACE_PATH`         | no                      | `/workspace`                         | Tool sandbox root                           |
 //! | `RAXIS_PLANNER_MAX_TURNS`      | no                      | `50`                                 | Hard turn ceiling per session               |
 //! | `RAXIS_PLANNER_MAX_TOKENS`     | no                      | `4096`                               | Per-request `max_tokens`                    |
-//!
 //! When `RAXIS_PLANNER_TASK_PROMPT` is **absent or empty**, the
 //! driver returns [`DriverOutcome::Scaffold`] without contacting
 //! the kernel. The binary's `main` then parks on Ctrl-C/SIGTERM
 //! exactly as the V2.3 scaffold did. This means:
-//!
 //! * Existing kernel integration tests (mock-planner harness, the
 //!   `kernel/tests/mock_planner_end_to_end.rs` battery, the
 //!   `live-e2e` slices that don't yet stamp the contract) keep
 //!   passing without any changes.
 //! * The kernel can flip a session into live mode on a per-spawn
 //!   basis by populating `extra_env` — no rebuild required.
-//!
 //! ## Why the driver makes direct HTTPS calls (not gateway IPC)
-//!
 //! Per `peripherals.md §3.2` the planner role binary's
 //! `AnthropicClient` makes an *unauthenticated* HTTPS call against
 //! its base URL. In production the in-VM tproxy redirects that
@@ -117,9 +105,8 @@ use crate::tools::{
 use crate::transport::{KernelTransport, KernelTransportConfig, TransportError};
 use crate::{BootArgs, BootEnv, Role};
 
-/// V2_GAPS §C5 sidecar env vars (kernel-stamped per
+/// sidecar env vars (kernel-stamped per
 /// `extensibility-traits.md §9A.5`).
-///
 /// The kernel resolves the operator-supplied
 /// `policy.toml [[providers]] kind = "http_sidecar"` row and stamps
 /// these three vars into the spawn envelope when the resolved
@@ -127,7 +114,6 @@ use crate::{BootArgs, BootEnv, Role};
 /// build a [`SidecarModelClient`] that signs every outbound body
 /// with `HMAC-SHA256(secret, …)` per
 /// `extensibility-traits.md §9A.7A`.
-///
 /// Re-exports of the canonical declarations in
 /// [`raxis_types::planner_env`] so the kernel (writer) and the
 /// planner-core driver (reader) stay in lock-step on the same set
@@ -144,7 +130,6 @@ pub const DEFAULT_WORKSPACE_PATH: &str = "/workspace";
 /// Default per-session max turns. Mirrors
 /// [`DispatchConfig::new`] so the driver and the dispatch loop
 /// share one source of truth.
-///
 /// **Rationale for `100`.** The dispatch loop counts one *turn* per
 /// `(model_request, tool_calls_batch)` cycle. The original ceiling
 /// of `20` was chosen against the V2.3 unit-test fixtures — those
@@ -169,7 +154,6 @@ pub const DEFAULT_WORKSPACE_PATH: &str = "/workspace";
 /// (`RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL` /
 /// `…_OUTPUT_TOTAL`) remains the cost-side bound, so raising the
 /// turn ceiling does not unbound LLM spend.
-///
 /// Operators who want a tighter ceiling (e.g. CI runs against
 /// known-easy tasks) set `RAXIS_PLANNER_MAX_TURNS=<n>` per-spawn
 /// or `[gateway].planner_max_turns_default = <n>` in policy.
@@ -183,18 +167,18 @@ pub const DEFAULT_PLANNER_MAX_TURNS: u32 = 100;
 /// [`DispatchConfig::new`].
 pub const DEFAULT_PLANNER_MAX_TOKENS: u32 = 4096;
 
-/// V2 `v2_extended_gaps.md §2.5` — env var carrying the per-session
+/// Env var carrying the per-session
 /// cumulative *input* token cap. Re-export of the canonical
 /// declaration in [`raxis_types::planner_env`]; both crates need
 /// the constant and `raxis-types` is the only one both depend on
 /// without dragging the planner HTTP path into the kernel.
 pub use raxis_types::planner_env::PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV;
 
-/// V2 `v2_extended_gaps.md §2.5` — env var carrying the per-session
+/// Env var carrying the per-session
 /// cumulative *output* token cap.
 pub use raxis_types::planner_env::PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV;
 
-/// V2 `v2_extended_gaps.md §2.5` — env var carrying the per-session
+/// Env var carrying the per-session
 /// cumulative *combined* (input + output) token cap.
 pub use raxis_types::planner_env::PLANNER_MAX_TOKENS_TOTAL_ENV;
 
@@ -298,7 +282,7 @@ pub enum DriverError {
     #[error("invalid task id: {0}")]
     InvalidTaskId(String),
 
-    /// V2 `v2_extended_gaps.md §2.4` — `raxis_ksb::assemble_system_prompt`
+    /// `raxis_ksb::assemble_system_prompt`
     /// rejected the kernel-projected snapshot. Practically only
     /// fires on `INV-KSB-01` violations (the kernel let through a
     /// field containing the close delimiter) or on an empty NNSP
@@ -336,9 +320,7 @@ pub enum DriverError {
 /// **Per-role driver entry point.** Called from the role binary's
 /// `main()` after it has parsed argv + env into a
 /// [`crate::BootContext`].
-///
 /// Behaviour matrix:
-///
 /// 1. If `RAXIS_PLANNER_TASK_PROMPT` is **unset or empty**, returns
 ///    `Ok(`[`DriverOutcome::Scaffold`]`)` immediately. The role
 ///    binary's `main` parks on signal.
@@ -374,7 +356,7 @@ where
     F: Fn(&str) -> Option<String>,
 {
     let var = |k: &str| f(k).filter(|v| !v.is_empty());
-    // V2 `v2_extended_gaps.md §1.1` — resolve the task prompt from
+    // Resolve the task prompt from
     // either the virtiofs sidecar file
     // (`RAXIS_PLANNER_TASK_PROMPT_PATH`, preferred) or the legacy
     // inline env (`RAXIS_PLANNER_TASK_PROMPT`). The sidecar exists
@@ -385,7 +367,6 @@ where
     // `missing value for flag: --initiative-id` boot failures.
     // See `raxis_types::planner_env::PLANNER_TASK_PROMPT_PATH_ENV`
     // for the full rationale.
-    //
     // INV-DRIVER-01: scaffold/park is the *only* behaviour for a
     // session whose seed prompt was not stamped via either channel.
     // We MUST NOT synthesise a default prompt here — that would let
@@ -439,7 +420,7 @@ where
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(DEFAULT_PLANNER_MAX_TOKENS);
 
-    // V2 `v2_extended_gaps.md §2.5` — read the kernel-stamped
+    // Read the kernel-stamped
     // per-session token caps. Absent / unparseable → `None`, which
     // leaves the corresponding `DispatchConfig` ceiling uncapped
     // (matches today's behaviour for unmigrated policies).
@@ -447,12 +428,10 @@ where
     let max_tokens_output_total = parse_u64_env(&f, PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV);
     let max_tokens_total = parse_u64_env(&f, PLANNER_MAX_TOKENS_TOTAL_ENV);
 
-    // V2 `v2_extended_gaps.md §2.4` — read the kernel-stamped KSB
+    // Read the kernel-stamped KSB
     // snapshot.
-    //
     // Two delivery channels are supported. The kernel chooses one
     // per spawn; the driver tries them in this order:
-    //
     //   1. **Sidecar file.** When `RAXIS_PLANNER_KSB_PATH` is set
     //      the driver reads the JSON bytes from that guest-visible
     //      path (the kernel mounts a per-session virtiofs share at
@@ -461,12 +440,10 @@ where
     //      channel that survives the Apple-VZ substrate's
     //      `COMMAND_LINE_SIZE` ceiling once the KSB grows past
     //      ~1 KiB (e.g. the reviewer's per-initiative DAG snapshot).
-    //
     //   2. **Inline env var.** When `RAXIS_PLANNER_KSB` is set the
     //      driver parses the value verbatim. Used by
     //      subprocess-isolation tests and the legacy
     //      pre-sidecar kernel path.
-    //
     // Absent / unparseable on both channels → `None`, which the
     // dispatch-loop seam uses to fall back to the NNSP-only system
     // prompt (test-only fallback; in production every
@@ -480,12 +457,10 @@ where
     let transport: Arc<dyn KernelTransport> = crate::transport::connect(&transport_cfg).await?;
 
     // ── Choose HTTP transport based on the kernel transport variant.
-    //
     // Subprocess substrates dial the kernel over UDS and have full
     // host network access — direct egress is the right answer
     // (it matches the existing behaviour and lets the planner
     // exploit reqwest's HTTP/2 connection pooling).
-    //
     // VM substrates (`Vsock` dial / `VsockListen`) run the planner
     // in an `EgressTier::None` (Orchestrator, Reviewer) or
     // `Tier1Tproxy` (Executor) guest. The kernel-mediated path is
@@ -508,7 +483,7 @@ where
 
     // ── Construct the model client by dispatching on the resolved
     //    provider (`provider-model-selection.md §4` +
-    //    `v2_extended_gaps.md §C5`). All five client impls accept
+    // ). All five client impls accept
     //    `Arc<dyn HttpFetch>` so the kernel-mediated transport flows
     //    through identically for every provider — the planner never
     //    holds a credential, the gateway injects per
@@ -537,7 +512,7 @@ where
     .await
 }
 
-/// V2 `v2_extended_gaps.md §2.5` — bundle of optional per-session
+/// Bundle of optional per-session
 /// LLM token ceilings. Each axis is independently optional; absent
 /// fields leave the corresponding `DispatchConfig` cap unbounded
 /// (the in-VM dispatch loop only enforces present caps).
@@ -554,17 +529,14 @@ pub struct TokenCaps {
     pub total: Option<u64>,
 }
 
-/// **`v2_extended_gaps.md §C5` — multi-provider model client
+/// **multi-provider model client
 /// router.**
-///
 /// Picks the right [`ModelClient`] impl for the resolved provider
 /// and threads the shared [`crate::http_fetch::HttpFetch`] through
 /// its `with_http_fetch` constructor. Each variant returns an
 /// `Arc<dyn ModelClient>` so the dispatch loop stays
 /// provider-agnostic.
-///
 /// Provider routing rules:
-///
 /// * **Anthropic** — wraps [`AnthropicClient`] against the resolved
 ///   `base_url` (defaults to `https://api.anthropic.com`). The
 ///   gateway injects `x-api-key` per `peripherals.md §3.2` so the
@@ -636,9 +608,7 @@ where
 /// Helper for `run_role_session_with_env_fn` — read the
 /// kernel-stamped task prompt using whichever delivery channel the
 /// kernel chose for this spawn.
-///
 /// Channel priority:
-///
 ///   1. **`RAXIS_PLANNER_TASK_PROMPT_PATH` (sidecar file).** When
 ///      set, read the bytes from the path as a UTF-8 string. The
 ///      path resolves under the per-session `/raxis-meta` virtiofs
@@ -648,13 +618,11 @@ where
 ///      a structured-log warn and returns `None` — the driver
 ///      falls back to scaffold/park rather than booting against an
 ///      empty / inconsistent prompt.
-///
 ///   2. **`RAXIS_PLANNER_TASK_PROMPT` (inline env).** Legacy
 ///      in-process delivery, used by subprocess-isolation tests
 ///      and pre-V2.6 kernel revisions. Empty → `None` (treated
 ///      same as unset per pre-existing
 ///      `var = |k| f(k).filter(|v| !v.is_empty())` semantics).
-///
 ///   3. Neither set → `None` (driver returns
 ///      [`DriverOutcome::Scaffold`] without contacting the kernel).
 fn read_task_prompt<F: Fn(&str) -> Option<String>>(f: &F) -> Option<String> {
@@ -699,21 +667,17 @@ fn read_task_prompt<F: Fn(&str) -> Option<String>>(f: &F) -> Option<String> {
 /// Helper for `run_role_session_with_env_fn` — read the
 /// kernel-stamped KSB snapshot using whichever delivery channel the
 /// kernel chose for this spawn.
-///
 /// Channel priority:
-///
 ///   1. **`RAXIS_PLANNER_KSB_PATH` (sidecar file).** When set, read
 ///      the JSON bytes from the path and deserialise. A non-empty
 ///      value but a missing / unreadable / unparseable file
 ///      surfaces a structured-log warn and returns `None` — the
 ///      driver falls back to the NNSP-only prompt rather than
 ///      booting against an inconsistent KSB.
-///
 ///   2. **`RAXIS_PLANNER_KSB` (inline env).** Legacy in-process
 ///      delivery, used by subprocess-isolation tests and pre-V2.6
 ///      kernel revisions. Empty / unparseable → `None` with a
 ///      structured-log warn.
-///
 ///   3. Neither set → `None` (driver falls back to NNSP-only
 ///      system prompt).
 fn read_ksb_snapshot<F: Fn(&str) -> Option<String>>(f: &F) -> Option<raxis_ksb::KsbSnapshot> {
@@ -781,11 +745,9 @@ fn parse_u64_env<F: Fn(&str) -> Option<String>>(f: &F, name: &str) -> Option<u64
 /// `Arc<dyn ModelClient>` so unit / integration tests can pin a
 /// [`crate::model::MockModelClient`] without touching the live
 /// `AnthropicClient` HTTP path.
-///
 /// All other inputs are pre-resolved (no further env reads), so
 /// this entry point is fully deterministic.
-///
-/// V2 `v2_extended_gaps.md §2.4` — `ksb_snapshot` carries the
+/// `ksb_snapshot` carries the
 /// kernel-projected per-turn KSB. When `Some(snap)`, the system
 /// prompt is composed by `raxis_ksb::assemble_system_prompt(NNSP,
 /// snap)` so the model sees authoritative kernel state inside the
@@ -830,7 +792,6 @@ pub async fn run_role_session_with_model(
 /// [`KernelTransportConfig`]. The env-fn entry point uses this
 /// variant so the model's `KernelMediatedHttpFetch` can share the
 /// connection with the dispatch loop's `IntentSubmitter`.
-///
 /// Sharing the transport is mandatory under the `VsockListen`
 /// substrate where the in-guest listener accepts exactly one
 /// host-side connection (`tokio_vsock::VsockListener` with
@@ -853,7 +814,6 @@ pub async fn run_role_session_with_connected_transport(
     ksb_snapshot: Option<raxis_ksb::KsbSnapshot>,
 ) -> Result<DriverOutcome, DriverError> {
     // ── Step 1b: construct the session-scoped IntentSubmitter ──────
-    //
     // V2 §3.2 wires the `structured_output` tool to the submitter so
     // it can ship typed mid-session payloads through the kernel UDS.
     // The submitter must therefore exist BEFORE the registry is
@@ -882,7 +842,7 @@ pub async fn run_role_session_with_connected_transport(
     let mut config = DispatchConfig::new(model_id);
     config.max_turns = max_turns;
     config.max_tokens = max_tokens;
-    // V2 `v2_extended_gaps.md §2.5` — fold the per-session token caps
+    // Fold the per-session token caps
     // into the dispatch config. The dispatch loop already enforces
     // these via `check_ceilings` → `DispatchOutcome::TokensExceeded`;
     // we just thread the kernel-stamped values through.
@@ -911,7 +871,6 @@ pub async fn run_role_session_with_connected_transport(
     //    the role-specific NNSP via `assemble_system_prompt` when
     //    the kernel stamped a snapshot. Falls back to NNSP-only when
     //    the env var is absent or failed to parse (logged upstream).
-    //
     //    V2 `INV-EXEC-DISCOVERY-01` — also stamp the in-VM
     //    capability hint so the LLM sees what binaries / language
     //    runtimes / pre-installed packages / credential-proxy env
@@ -945,7 +904,7 @@ pub async fn run_role_session_with_connected_transport(
     // submitter was constructed at Step 1b alongside the registry
     // (V2 §3.2 wires the `structured_output` tool to it directly).
 
-    // V2 `v2_extended_gaps.md §2.5` — relay the dispatch loop's
+    // Relay the dispatch loop's
     // cumulative `(input, output)` totals into the submitter BEFORE
     // any submit fires, so every outbound `IntentRequest::tokens_used`
     // carries the truthful end-of-loop count. Provider id is left
@@ -999,7 +958,6 @@ pub async fn run_role_session_with_connected_transport(
     // max_turns budget (60 used / 60 limit) without submitting a
     // terminal intent"`) instead of falling back to the multi-
     // option umbrella that the invariant forbids.
-    //
     // Best-effort: ack failures are logged and swallowed. The
     // kernel's EOF-driven Mode-B synthesis still fires even if
     // the notice never lands (SIGKILL / OOM / panic before exit
@@ -1027,12 +985,10 @@ pub async fn run_role_session_with_connected_transport(
 /// (the driver-side terminal shape) onto a `PlannerExitOutcome`
 /// (the wire-level structured exit cause shipped to the kernel
 /// over `IpcMessage::PlannerExitNotice`).
-///
 /// Pure mapping, no I/O — exposed as a free function so the
 /// per-outcome unit tests in
 /// `crates/planner-core/src/driver.rs#tests::exit_outcome_*`
 /// can pin the wire shape without booting a full dispatch loop.
-///
 /// `max_turns` is the configured ceiling; the driver does not
 /// retain it on the `MaxTurnsExceeded` variant (only the count
 /// of turns ACTUALLY used is stamped). We thread the limit
@@ -1075,7 +1031,6 @@ pub fn driver_outcome_to_exit_outcome(
             // stderr line carries the exact count for the audit
             // trail, and the dashboard `FailureReasonPanel` shows
             // both fields verbatim so the gap is visible.
-            //
             // A follow-up commit can plumb the exact `used`
             // count through `DriverOutcome::TokensExceeded`; for
             // now `used = limit` gives the operator the same
@@ -1091,8 +1046,7 @@ pub fn driver_outcome_to_exit_outcome(
 }
 
 /// Build the role-specific tool registry + terminal-tool name list.
-///
-/// V2 `v2_extended_gaps.md §3.1` — when the spawn env declares
+/// When the spawn env declares
 /// `RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL` and
 /// `RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS`, the executor and
 /// orchestrator registries are constructed via
@@ -1100,8 +1054,7 @@ pub fn driver_outcome_to_exit_outcome(
 /// the operator-declared ceilings. Absent ⇒ the disabled SleepTool
 /// (refuses every invocation with `FAIL_SLEEP_DISABLED`) is
 /// registered.
-///
-/// V2 `v2_extended_gaps.md §3.2` — the executor and orchestrator
+/// The executor and orchestrator
 /// registries always receive the `structured_output` tool wired
 /// to the session-scoped [`crate::intent::IntentSubmitter`].
 /// Reviewer NEVER receives `structured_output` or `sleep`
@@ -1156,7 +1109,7 @@ fn build_role(
 /// (eventually) the [`crate::render_ksb`] block. The V2.4
 /// driver ships the NNSP-only first leg; the in-VM KSB renderer
 /// runs on the live KSB once the orchestrator-side push transport
-/// (V3, V2_GAPS §12.1) lands.
+/// (V3, ) lands.
 fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
     let role_blurb = match role {
         Role::Executor => {
@@ -1726,7 +1679,6 @@ mod tests {
     /// hits (`/v1/messages` for Anthropic, `/v1/chat/completions`
     /// for OpenAI, `/v1beta/models/...` for Gemini, `/model/.../invoke`
     /// for Bedrock, `/inference/messages` for Sidecar).
-    ///
     /// `Debug` is required by `#[async_trait]` + the trait bound on
     /// the model clients' `http_fetch` field but contains no state
     /// worth printing.
@@ -2319,7 +2271,7 @@ mod tests {
         assert_eq!(pick_str(&nested, "k"), None); // not a string
     }
 
-    /// V2 `v2_extended_gaps.md §2.4` — when the kernel stamps
+    /// When the kernel stamps
     /// `RAXIS_PLANNER_KSB`, the driver folds the snapshot into the
     /// system prompt via `assemble_system_prompt`. The recorded
     /// `MockModelClient` request MUST contain the
@@ -2447,7 +2399,7 @@ mod tests {
         );
     }
 
-    /// V2 `v2_extended_gaps.md §2.4` — when no KSB snapshot is
+    /// When no KSB snapshot is
     /// supplied (test fixtures, legacy boot path), the driver falls
     /// back to the NNSP-only system prompt. The KSB delimiters MUST
     /// NOT appear, otherwise downstream parsers would mistake an
@@ -2701,7 +2653,7 @@ mod tests {
         assert!(matches!(res, Err(DriverError::BadBaseUrl { .. })));
     }
 
-    /// V2 `v2_extended_gaps.md §2.5` — `parse_u64_env` returns `None`
+    /// `parse_u64_env` returns `None`
     /// for absent or unparseable values. Pinning the silent-skip
     /// contract: a kernel that fails to stamp the env var (because
     /// the operator omitted `[budget.token_caps]`) MUST leave the
@@ -2728,7 +2680,7 @@ mod tests {
         assert_eq!(parse_u64_env(&valid, "X"), Some(12345));
     }
 
-    /// V2 `v2_extended_gaps.md §2.5` — when the kernel stamps a
+    /// When the kernel stamps a
     /// per-session input-token cap into the planner env, the
     /// dispatch loop's `check_ceilings` MUST observe it and
     /// terminate post-turn with `DispatchOutcome::TokensExceeded`

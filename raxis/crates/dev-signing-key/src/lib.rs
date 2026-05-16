@@ -6,7 +6,7 @@
 //! * `specs/invariants.md::INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01`
 //!   (release-profile fail-loud contract).
 //! * `specs/invariants.md::INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01`
-//!   (xtask seam — pre-iter62 the FIRST autogen entry point).
+//!   (xtask seam — historically the FIRST autogen entry point).
 //! * `specs/invariants.md::INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01`
 //!   (iter62 — `crates/canonical-images/build.rs` is the SECOND
 //!   autogen entry point; both write to `.git/info/raxis-signing-key/`
@@ -21,9 +21,9 @@
 //!    `cargo xtask images bake` driver. Mints + persists the keypair
 //!    on first run, then exports the public half into the
 //!    `RAXIS_KERNEL_SIGNING_KEY_HEX` env var for every cargo
-//!    subprocess `bake` spawns. Pre-iter61, this was the ONLY
+//!    subprocess `bake` spawns. Previously, this was the ONLY
 //!    autogen entry point.
-//! 2. `crates/canonical-images/build.rs` (iter62) — the kernel-side
+//! 2. `crates/canonical-images/build.rs` — the kernel-side
 //!    seam that bakes the public half into the kernel binary at
 //!    compile time. After the env-var resolution chain (steps 1+2 of
 //!    `resolve_trust_anchor_bytes`) misses, the build script reads

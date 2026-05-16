@@ -1,26 +1,22 @@
 // raxis-cli::commands::plan_validate — `raxis plan validate <plan.toml>`.
-//
 // Normative reference: `specs/v2/operator-ergonomics.md §6` (the
 // CLI surface for plan iteration). This command is the local-only
 // pre-flight: it catches the operator's common mistakes before the
 // signed-bundle round-trip to the kernel admission handler.
-//
 // The check set deliberately mirrors the kernel's `approve_plan`
 // validators in `kernel/src/initiatives/lifecycle.rs` so an operator
 // who runs `plan validate` cleanly can rely on `submit plan` not
 // rejecting on the same grounds. The kernel remains the source of
 // truth — anything the CLI misses is still caught at admission.
-//
 // Coverage (in evaluation order, deterministic):
-//
 //   1. TOML parse              — operator-typed syntax errors
 //   2. Required sections       — `[plan.initiative]`, `[workspace]`, `[[tasks]]`
-//   3. `[plan.initiative] description` (V2 v2_extended_gaps.md §1.1) —
+//   3. `[plan.initiative] description` —
 //      present + non-empty + ≤ 64 KiB
 //   4. `[workspace] lane_id`   — present + non-empty
 //   5. Per-task fields:
 //        - `task_id` required
-//        - `description` (V2 v2_extended_gaps.md §1.1) — present +
+//        - `description` — present +
 //          non-empty + ≤ 64 KiB
 //        - no `lane_id` override (single-lane propagation per V2 §28)
 //        - no `session_agent_type = "Orchestrator"` (V2 §27 rule 1)
@@ -36,14 +32,11 @@
 //   7. Cross-cutting artifacts (`[orchestrator] cross_cutting_artifacts`):
 //        - empty entry, leading `!`, leading or trailing `/`,
 //          `..` segments, embedded `/`, glob characters
-//
 // Output format (stable wire shape; tests pin the leading line):
-//
 //   Plan validation: ./plan.toml
 //     [OK] TOML parses
 //     [OK] required sections present
 //     ...
-//
 // On success the command exits 0. On any failure it exits 2 (CLI usage)
 // and writes the offending line to stderr in the same operator-facing
 // format the kernel returns.
@@ -235,7 +228,7 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
             }
         };
 
-        // V2 v2_extended_gaps.md §1.1 — every `[[tasks]]` block must
+        // Every `[[tasks]]` block must
         // declare a non-empty `description`. Mirrors the kernel
         // `parse_plan_tasks` validator. Catches operator typos before
         // the signed-bundle round-trip.
@@ -850,7 +843,7 @@ description = "do thing"
         assert!(r.first_error.is_none(), "report: {:#?}", r.lines);
     }
 
-    // ── V2 v2_extended_gaps.md §1.1 — description checks ────────────────
+    // ── description checks ────────────────
 
     #[test]
     fn missing_plan_initiative_section_is_rejected() {

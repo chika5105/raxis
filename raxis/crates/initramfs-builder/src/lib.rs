@@ -1,13 +1,11 @@
 //! Pure-Rust deterministic cpio.gz (newc) writer for V2 initramfs
 //! rootfs assembly.
-//!
 //! Normative references:
-//!
 //! * `raxis/specs/v2/extensibility-traits.md §3.4` — `VmSpec.linux_kernel_path`
 //!   contract and the `raxis_isolation::ImageKind::RootfsInitramfsCpio`
 //!   variant the substrates dispatch on. This crate produces the bytes
 //!   that variant points at.
-//! * `raxis/specs/v2/e2e-live-test-gap.md` — the `mkfs.erofs`-on-macOS
+//! * the `mkfs.erofs`-on-macOS
 //!   blocker. EROFS assembly requires the `mkfs.erofs` userspace tool,
 //!   which is GPL Linux-side code without a hermetic macOS port; that
 //!   broke the "open Cursor on macOS, get a planner running on real AVF"
@@ -20,16 +18,12 @@
 //!   gzip and `thiserror` for the error type), both pure-Rust under the
 //!   `rust_backend` feature, so the builder runs on a fresh macOS dev
 //!   box without `brew install` or `xcode-select` plumbing.
-//!
 //! ## What this crate is
-//!
 //! A zero-shellout, deterministic cpio newc + gzip writer that can be
 //! driven by `raxis-image-builder` to emit the initramfs rootfs blob the
 //! kernel hands to AVF (`VZLinuxBootLoader.initialRamdiskURL`) or
 //! Firecracker (`PUT /boot-source { initrd_path }`).
-//!
 //! ## What this crate is NOT
-//!
 //! * **Not a general-purpose cpio library.** We implement only the
 //!   newc (`070701`) format the Linux kernel's `init/initramfs.c`
 //!   speaks. We do not parse cpio archives, we do not handle the
@@ -41,18 +35,14 @@
 //!   chase library deps, or mint `/init` shell scripts. The caller
 //!   names every entry that goes into the archive; this crate's
 //!   surface is intentionally that thin.
-//!
 //! ## Determinism contract
-//!
 //! Two invocations of [`InitramfsBuilder::finalise_to_cpio_gz`] with
 //! the same logical contents (same paths, same modes, same data,
 //! same `source_date_epoch`, same uid/gid) MUST produce byte-for-byte
 //! identical output. This is what makes the V2 manifest-trust model
 //! work: `image_artefact_sha256` is a deterministic function of
 //! `(rootfs source tree, source_date_epoch)`.
-//!
 //! Concretely:
-//!
 //! 1. Entries are sorted by path (ASCII byte order) before writing.
 //! 2. `c_mtime` is `source_date_epoch` for every entry.
 //! 3. `c_uid` / `c_gid` are caller-supplied per entry but default to
@@ -66,9 +56,7 @@
 //! 6. The gzip stream uses the deterministic header fields the
 //!    `flate2`/`miniz_oxide` writer emits with `mtime=0`, `os=0xFF`,
 //!    `xfl=0` — see `InitramfsBuilder::write_gzip_deterministic_header`.
-//!
 //! ## Module layout
-//!
 //! * [`InitramfsBuilder`] — the public surface.
 //! * `CpioEntry` — what the builder owns internally; not part of the
 //!   public API but exposed via `pub(crate)` for tests.
@@ -138,7 +126,6 @@ pub(crate) struct CpioEntry {
 }
 
 /// Builder for one cpio.gz initramfs archive.
-///
 /// See module docs for the determinism contract and the API
 /// boundaries.
 #[derive(Debug, Clone)]
@@ -277,7 +264,6 @@ impl InitramfsBuilder {
     /// initramfs entry is owned by root; this method exists so the
     /// (rare) `add_file_owned_by(uid, gid, ...)` use case has a path
     /// that doesn't widen the API.
-    ///
     /// Returns `true` if the path existed and was patched; `false` if
     /// the caller passed a path they never `add_*`'d.
     pub fn set_owner(&mut self, path: &str, uid: u32, gid: u32) -> Result<bool, InitramfsError> {
@@ -295,7 +281,6 @@ impl InitramfsBuilder {
     /// Walk a host directory and add every regular file / dir /
     /// symlink it contains under `archive_prefix`. Refuses any entry
     /// kind we don't model.
-    ///
     /// Modes are taken from the host (`metadata.permissions().mode()`).
     /// uid/gid are forced to `0` — caller can [`Self::set_owner`]
     /// individual entries afterwards if needed.
@@ -450,7 +435,6 @@ impl InitramfsBuilder {
 }
 
 /// Normalise an archive path:
-///
 /// * Strip leading slashes.
 /// * Reject `..` and empty components.
 /// * Collapse `./` segments.

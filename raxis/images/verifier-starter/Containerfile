@@ -4,7 +4,7 @@
 #   - peripherals.md §3.3 (verifier spawn envelope)
 #   - verifier-processes.md §6 (exit-code → WitnessResultClass mapping)
 #   - release-and-distribution.md §4.2 (PID-1 binary overlay path)
-#   - V2_GAPS.md A8 (verifier runtime — partial → shipped, iter62)
+#   - A8 (verifier runtime — partial → shipped, iter62)
 #
 # Shape
 # ─────

@@ -713,16 +713,16 @@ so a manual `cat` is instructive. Example:
 }
 ```
 
-### §7.3 — Preflight surface (`cargo xtask images preflight`)
+### §7.3 — Preflight
 
-`cargo xtask images preflight [--role <ROLE>]... [--install-dir
-<P>] [--signing-key <P>] [--builder <B>] [--kernel-from-file
-<P>]` is the read-only verifier of every input the bake step
-would need. Useful in CI to surface missing-input failures
-before spending time on a bake that would later abort. Returns
-non-zero with the same `INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01`
-remediation messages the bake driver would surface; never
-mutates the filesystem.
+The bake driver runs the same `preflight_bake_inputs` host-tool
+check before producing any artefact (container builder + daemon,
+Rust musl cross-target + linker, signing key, vmlinux). On a
+missing input it exits non-zero with the
+`INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01` remediation text
+*before* touching the filesystem. There is no standalone
+`preflight` subcommand any more; the check is structurally part
+of `bake`.
 
 ### §7.4 — Containerfile dependency graph
 
@@ -766,16 +766,12 @@ witness tests.
 The live-e2e harness's
 `extended_e2e_support/kernel_driver.rs::require_canonical_images`
 asserts every input it needs is present at test-start time. The
-legacy three-step auto-bake (`bake-rootfs → dev-stage →
-build-all` per role) remains available for operators on the
-legacy flow; the harness's old `ensure_canonical_kernel_binary_staged`
-copy-from-canonical-location logic has been collapsed to a
-single existence assertion that points the operator at
-`cargo xtask images bake --kernel-from-file <PATH>` when
-vmlinux is missing. The bake driver itself is the canonical
-producer of vmlinux + every role image, so an operator who runs
-`bake` upstream of the harness gets a self-contained install
-dir.
+harness does not bake on the operator's behalf; if an input is
+missing it points the operator at
+`cargo xtask images bake --kernel-from-file <PATH>`. The bake
+driver is the canonical producer of vmlinux + every role image,
+so an operator who runs `bake` upstream of the harness gets a
+self-contained install dir.
 
 ---
 

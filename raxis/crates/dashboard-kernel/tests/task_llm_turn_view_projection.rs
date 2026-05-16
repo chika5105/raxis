@@ -167,7 +167,7 @@ fn projection_falls_back_to_value_string_on_response_parse_failure() {
     assert_eq!(view.cache_read_input_tokens, None);
 
     // Empty request_body → request = Value::Null. Also pins the
-    // pre-iter64-on-disk-records back-compat path: legacy lines
+    // earlier-on-disk-records back-compat path: legacy lines
     // missing `request_body` deserialize via serde_default to
     // empty string, then project to Null here.
     assert_eq!(view.request, serde_json::Value::Null);

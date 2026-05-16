@@ -5,7 +5,7 @@
 //! Audit discipline: these handlers are read-only forensics
 //! browsers. Per `specs/v2/dashboard-operator-action-audit-
 //! coverage.md §signal-vs-noise`, read-only `OperatorViewed*`
-//! emissions were retired in `worker/audit-tightening` because
+//! emissions were retired in an earlier audit-noise sweep because
 //! they drowned out actual state-affecting events in the chain
 //! (iter48 saw 1258/1260 chain rows be `OperatorViewed*`
 //! dashboard pageviews). The audit chain is the system's

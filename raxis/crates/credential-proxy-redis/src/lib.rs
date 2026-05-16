@@ -1,12 +1,9 @@
 //! `raxis-credential-proxy-redis` — Redis credential proxy.
-//!
 //! Normative reference: `specs/v2/credential-proxy.md §1` (core
 //! principle: the agent never sees the secret) and `§3` (concrete
 //! proxy types — Redis is the simplest TCP proxy because RESP is
 //! human-readable and AUTH is one command).
-//!
 //! # What this MVP supports
-//!
 //!   * **Inbound RESP-shaped accept.** The agent VM connects to a
 //!     localhost listener that speaks Redis Serialization Protocol
 //!     v2 (RESP2; the same wire format every Redis client speaks
@@ -37,9 +34,7 @@
 //!     SHA-256 of the rendered RESP frame the upstream would
 //!     have seen. The kernel translates these into
 //!     `AuditEventKind::RedisCommandExecuted`.
-//!
 //! # What is deferred
-//!
 //!   * **`MULTI/EXEC` transactional grouping for the audit
 //!     trail.** Each command in the transaction is audited as a
 //!     standalone row; the audit chain is byte-stable but
@@ -56,9 +51,7 @@
 //!   * **`AUTH SCAN`**: subscribe-and-scan workflows; the proxy
 //!     forwards the underlying primitive commands so this works
 //!     end-to-end.
-//!
 //! # Redis TLS-to-upstream
-//!
 //! Managed Redis offerings (AWS Elasticache for Redis, GCP
 //! Memorystore for Redis, Azure Cache for Redis) terminate TLS
 //! at the cluster front-door and refuse cleartext connections.
@@ -71,7 +64,6 @@
 //! authenticates / forwards every subsequent frame over the TLS
 //! tunnel. The agent VM still speaks plaintext RESP to the
 //! loopback listener; only the kernel↔upstream hop is encrypted.
-//!
 //! When `upstream_tls = false` (the historical default) the
 //! proxy speaks cleartext RESP to the upstream — preserving
 //! byte-identical behaviour for self-hosted deployments where
@@ -79,15 +71,12 @@
 //! network. The audit envelope's `tls` field reflects the
 //! actual transport so dashboards can confirm the policy
 //! decision was honoured.
-//!
 //! # Redis ACL-form AUTH (Redis 6+)
-//!
 //! Per `credential-proxy.md §4.5`, Redis ACL adds usernames so
 //! the same upstream serves multiple distinct identities (a
 //! pattern adopted by Elasticache, Memorystore, and Azure Cache
 //! for Redis when "users" are configured). The proxy supports
 //! both forms transparently by parsing the credential bytes:
-//!
 //!   * **Single-line**: a credential file whose first non-empty
 //!     line does NOT contain an `=` sign is treated as the raw
 //!     password (Redis ≤ 5 / Redis 6+ default `default` user).
@@ -97,15 +86,12 @@
 //!     `RAXIS_REDIS_PASSWORD=<password>` (one per line; quotes
 //!     and inline comments stripped) emits the ACL form.
 //!     Wire form: `AUTH <user> <password>`.
-//!
 //! Both shapes share the same `CredentialBackend::resolve()`
 //! return type — no trait change is needed (per the V2.3 design
-//! decision logged in `V2_GAPS.md §12.10`). Operators select the
+//! decision logged in ). Operators select the
 //! ACL form by adding the second key=value line to
 //! `<data_dir>/credentials/<name>.env`.
-//!
 //! # Threat model
-//!
 //! Identical to the postgres / smtp / http proxies: a fully-
 //! compromised agent process cannot exfiltrate the upstream
 //! credential because the proxy is the only entity with access
@@ -692,7 +678,7 @@ fn default_client_config() -> Arc<ClientConfig> {
 /// Parsed shape of the bytes returned by `CredentialBackend::resolve`
 /// for a Redis credential. The proxy deliberately keeps both shapes
 /// behind the same `CredentialValue` so the trait stays
-/// pre-V3-stable (`V2_GAPS.md §12.10`). The selection rule lives in
+/// pre-V3-stable. The selection rule lives in
 /// `parse_redis_credential` below.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AuthCredentials {
@@ -707,7 +693,6 @@ enum AuthCredentials {
 /// either a single-secret password or an ACL `(user, password)`
 /// pair. The parsing rule is documented in the crate-root
 /// `# Redis ACL-form AUTH` section.
-///
 /// Behaviour, in order of precedence:
 ///   1. If the trimmed input contains BOTH `RAXIS_REDIS_USER=...`
 ///      and `RAXIS_REDIS_PASSWORD=...` lines, return ACL form.
@@ -867,7 +852,6 @@ fn is_ok_or_unauth_already(resp: &[u8]) -> bool {
 /// Read one inbound RESP request frame. Handles inline form
 /// (`PING\r\n`) and array form
 /// (`*N\r\n$M\r\nVERB\r\n...`).
-///
 /// Returns `Ok(None)` on clean EOF; `Err(...)` on malformed
 /// bytes or short read mid-frame.
 async fn read_one_request_frame(

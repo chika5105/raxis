@@ -1,6 +1,6 @@
 # Per-session lifecycle capture
 
-**Status.** Implemented (iter59). Spec parity with
+**Status.** Implemented. Spec parity with
 `raxis/crates/dashboard-kernel/src/session_capture.rs`,
 `raxis/kernel/src/main.rs` (observer wiring),
 `raxis/crates/dashboard/src/routes/sessions.rs` (post-mortem

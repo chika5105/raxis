@@ -38,7 +38,7 @@
 | 1.1 | **Production resilience.** | A deadlock during long-running ops doesn't permanently brick the kernel — the supervisor restarts within ~3 s of the watcher's `process::exit(70)`. |
 | 1.2 | **Operator visibility.** | Dashboard shows `Restarting (attempt N/3)` instead of an opaque hang; the operator's mental model matches the kernel's actual state. |
 | 1.3 | **Mechanical audit trail.** | Every restart emits `KernelDeadlockDetected` (or matching crash-class event) → `KernelRestartInitiated` → `KernelRestartCompleted` (or `KernelRestartHaltedCircuitOpen`). The pair is hash-chain continuous across the restart boundary. |
-| 1.4 | **Fewer 2 a.m. pages.** | Transient deadlocks observed in iter15 / iter16 were single-shot; circuit-breaker-bounded auto-restart absorbs them without an operator page while still flagging the underlying bug for next-day forensics. |
+| 1.4 | **Fewer 2 a.m. pages.** | Observed transient deadlocks were single-shot; circuit-breaker-bounded auto-restart absorbs them without an operator page while still flagging the underlying bug for next-day forensics. |
 | 1.5 | **Composable with existing host-supervisor patterns.** | Same approach as `cargo xtask hygiene-check` / disk-pressure preflight: opt-in, audited, structured failure surface. Future `system-daemon` work composes via launchd / systemd. |
 | 1.6 | **Uniform handling for all unclean exits.** | Deadlock (exit 70), panic (exit ≠ 0), OOM-kill (signaled), SIGSEGV / SIGBUS / SIGABRT all flow through the same supervisor decision path; one code surface, not four. |
 
@@ -534,7 +534,7 @@ raxis-supervisor reset-circuit-breaker [--yes]
 
 ### §4.9 Opt-in (`INV-SUPERVISOR-OPT-IN-01`)
 
-Phase 1 (this PR): default behaviour unchanged. Without `RAXIS_SUPERVISOR_AUTO_RESTART=1`, the supervisor binary refuses to enter the §4.2 spawn-and-watch loop, exits `0`, and the operator's existing `raxis-kernel` invocation runs unchanged. Live-e2e (`raxis/live-e2e/...`) does NOT set the env var; iter41+ behaviour is bit-identical.
+Phase 1 (this PR): default behaviour unchanged. Without `RAXIS_SUPERVISOR_AUTO_RESTART=1`, the supervisor binary refuses to enter the §4.2 spawn-and-watch loop, exits `0`, and the operator's existing `raxis-kernel` invocation runs unchanged. Live-e2e (`raxis/live-e2e/...`) does NOT set the env var;  behaviour is bit-identical.
 
 Phase 2 (post-working live-e2e, separate PR): flip default-on for production deployments (launchd plist, systemd unit).
 
@@ -673,7 +673,7 @@ Launchd / systemd spawns `raxis-kernel` directly; the in-kernel deadlock detecto
 | Persistent JWT secret | `raxis/crates/dashboard/src/jwt_secret.rs` |
 | `JwtSigner::load_or_mint` + `gen` claim | `raxis/crates/dashboard/src/auth.rs` |
 | Rotation CLI | `raxis/cli/src/commands/dashboard.rs::run_rotate_jwt_secret` |
-| Self-healing kernel respawn metrics (iter44 / `INV-OBS-KERNEL-RESPAWN-COVERAGE-01`) | `raxis/kernel/src/observability.rs::record_kernel_respawn` + `record_supervisor_refused_restart` (kernel-boot rehydration emit; supervisor crate intentionally observability-isolated). Spec rows: `v3/otel-observability.md §8` (`KernelRespawn{Total,Duration}`, `SupervisorRefusedRestartTotal`). |
+| Self-healing kernel respawn metrics (`INV-OBS-KERNEL-RESPAWN-COVERAGE-01`) | `raxis/kernel/src/observability.rs::record_kernel_respawn` + `record_supervisor_refused_restart` (kernel-boot rehydration emit; supervisor crate intentionally observability-isolated). Spec rows: `v3/otel-observability.md §8` (`KernelRespawn{Total,Duration}`, `SupervisorRefusedRestartTotal`). |
 
 ---
 
@@ -889,22 +889,22 @@ raxis-kernel: dashboard JWT secret minted (generation=1) at
 
 ### §10.8 Coordination with the orchestrator respawn-ceiling worker
 
-A complementary in-flight workstream (`worker/fix-loop-respawn2`)
+A complementary in-flight workstream
 is adding an `OrchestratorRespawnCeilingExceeded` kernel audit
 event for the *logical* respawn-loop case the supervisor cannot
 catch: kernel is alive, audit chain is growing, no
 `parking_lot` deadlock — but the orchestrator is stuck issuing
 rejected `RetrySubTask` intents in a tight respawn loop (e.g.
-iter42 saw 45 `SessionVmSpawned` rows in 18 minutes with zero
+saw 45 `SessionVmSpawned` rows in 18 minutes with zero
 task FSM advance). The kernel-side invariant for that case
-(`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) is owned by the
-fix-loop worker, NOT this spec — the supervisor's exit-code
+(`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) is enforced
+elsewhere, NOT in this spec — the supervisor's exit-code
 classifier (`§4.4`) and the kernel's `parking_lot::deadlock`
 watcher (`§3.2`) only react to *process-level* failure; a
 process that is producing audit rows but no useful work is, by
 construction, healthy at the supervisor's layer.
 
-**Surface coordination.** When the fix-loop worker's invariant
+**Surface coordination.** When the orchestrator-respawn-ceiling invariant
 ships:
 
 1. The kernel adds a new audit-event variant
@@ -931,12 +931,12 @@ This composition keeps the operator's mental model simple:
 "the dashboard's red banner means SOMETHING in the recovery
 machinery surfaced, click for the audit-chain link". They do
 not need to know whether the trigger was a process-level
-deadlock (this spec) or a logic-level ceiling (the fix-loop
-worker's invariant) — both flavours render in the same panel,
+deadlock (this spec) or a logic-level ceiling (the
+orchestrator-respawn-ceiling invariant) — both flavours render in the same panel,
 both link to the same audit chain, both unblock via the same
 operator action (click through to the relevant initiative or
 restart the supervisor).
 
-Cross-reference: `worker/fix-loop-respawn2`,
-`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01` (when shipped),
+Cross-reference:
+`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`,
 `specs/v2/dashboard-hardening.md §5.9`.

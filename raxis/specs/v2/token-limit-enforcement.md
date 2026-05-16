@@ -480,7 +480,7 @@ financial ceiling**. The two systems now govern genuinely different dimensions:
 
 - **Token limits** = technical constraint: "this call/session can only use X tokens"
   (regardless of what they cost)
-- **Budget lanes** = financial constraint: "this lane can only spend $Y equivalent"
+- **budget lanes** = financial constraint: "this lane can only spend $Y equivalent"
   (regardless of how the tokens were used)
 
 This is the cloud quota vs. cloud budget model. Both can bind simultaneously for

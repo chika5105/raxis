@@ -1452,7 +1452,7 @@ permitted_ops      = ["AbortTask"]
 }
 
 // ---------------------------------------------------------------------------
-// V2_GAPS §D1 — `raxis cert revoke` / `raxis cert list-revocations`
+// `raxis cert revoke` / `raxis cert list-revocations`
 // ---------------------------------------------------------------------------
 //
 // `revoke <cert>` writes a signed `RevocationRecord` to
@@ -1642,7 +1642,7 @@ mod revoke {
             source: e,
         })?;
 
-        // V2_GAPS §D1 — operator-local audit trail. The CLI cannot
+        // operator-local audit trail. The CLI cannot
         // append to the kernel's hash-chained audit segments
         // (single-writer invariant), so a parallel `cert-cli.jsonl`
         // is written under `<data_dir>/audit/`. `raxis verify-chain`
@@ -1875,7 +1875,7 @@ mod revoke {
 
     fn print_help() {
         println!(
-            r#"raxis cert revoke — revoke an operator certificate (V2_GAPS §D1).
+            r#"raxis cert revoke — revoke an operator certificate.
 
 USAGE:
     raxis [--data-dir <path>] [--operator-key <path>] cert revoke <cert>

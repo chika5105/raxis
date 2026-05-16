@@ -1,5 +1,5 @@
 //! `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`
-//! (iter65) — schema-level witness that the orchestrator
+//! — schema-level witness that the orchestrator
 //! no-progress respawn counter stays at zero when the kernel
 //! skips the increment due to a predecessor capacity-pressure
 //! rejection.
@@ -153,7 +153,7 @@ fn capacity_pressure_no_increment(_conn: &mut Connection, _initiative_id: &str) 
 /// `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`
 /// — the iter64 pathology negated. Four respawns with predecessor
 /// = capacity-pressure leave the counter at 0 and the initiative
-/// `Executing`. Pre-iter65, this same trace tripped the ceiling
+/// `Executing`. Previously, this same trace tripped the ceiling
 /// on respawn 4.
 #[test]
 fn four_capacity_pressure_respawns_do_not_increment_counter() {

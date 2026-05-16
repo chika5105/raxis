@@ -1,12 +1,10 @@
 //! Kernel-side `PolicyAdvancer` impl for `PUT /api/policy/toml`.
-//!
 //! Lives inside the kernel binary (rather than `raxis-dashboard-kernel`)
 //! because it depends on `policy_manager::advance_epoch` —
 //! which is internal to the kernel. The trait that bridges
 //! the dashboard surface to this impl is defined in
 //! `raxis-dashboard-kernel::PolicyAdvancer`.
-//!
-//! Spec contract (specs/v2/v2_extended_gaps.md §4.5):
+//! Spec contract:
 //!   * The dashboard accepts the new policy.toml + a detached
 //!     Ed25519 signature over those bytes (the operator signs
 //!     offline with the air-gapped authority key — the
@@ -289,7 +287,6 @@ mod tests {
     }
 
     // --- Real-pipeline tests -------------------------------------------
-    //
     // The helpers below exercise the full advancer pipeline (Phase A
     // stage → Phase D advance_epoch → Phase E audit emit) against
     // a real on-disk store + audit chain. The `policy_manager`

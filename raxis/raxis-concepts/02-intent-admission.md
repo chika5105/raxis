@@ -103,8 +103,7 @@ The detailed step numbers and their canonical homes:
 | 13 | Audit emit + (IntegrationMerge) host-side fast-forward + clear pending | `commit_merge_to_target_ref` + post-commit emit | `integration-merge.md §11.1` |
 
 That is fourteen ordered checks (Steps 2-12B, plus 13 in two
-sub-steps), not 13. Earlier drafts of this doc claimed "13 steps" and
-listed only 9 — both numbers were wrong; this doc supersedes them.
+sub-steps).
 
 ---
 
@@ -438,7 +437,7 @@ fresh witness (re-run) or transitions to
 
 ---
 
-## Key source files (verified against current HEAD)
+## Key source files
 
 | File | Role |
 |---|---|
@@ -457,10 +456,8 @@ fresh witness (re-run) or transitions to
 | `crates/policy/src/bundle.rs` | `PolicyBundle::worktree_root_allowed`, `claim_requirements`, gates |
 | `crates/domain-git/src/lib.rs` | Default `DomainAdapter`: `is_ancestor`, `topology_check`, `compute_touched_paths` |
 
-> **Path drift watch.** Older drafts of this doc cited
-> `kernel/src/ipc/handlers/intent.rs`. The current source tree has
-> the `ipc/` prefix collapsed away — the IPC dispatcher
+> **Path note.** The IPC dispatcher
 > (`kernel/src/ipc/server.rs::accept_planner_loop`) lives under
-> `ipc/`, but the per-message handlers (`intent.rs`,
-> `witness.rs`, `escalation.rs`) are at the top of `kernel/src/`. If
-> a citation still says `kernel/src/ipc/handlers/...`, it is stale.
+> `ipc/`, but the per-message handlers (`intent.rs`, `witness.rs`,
+> `escalation.rs`) sit at the top of `kernel/src/`. Older citations
+> using `kernel/src/ipc/handlers/...` are stale.

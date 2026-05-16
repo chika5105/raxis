@@ -217,7 +217,7 @@ fn npm_build_timeout() -> Duration {
 ///
 /// `inherit_io = true` streams the npm output to the harness's
 /// stderr so the operator sees the real `tsc: command not found`
-/// / `EACCES` / `network unreachable` reason; `false` swallows
+/// `EACCES` / `network unreachable` reason; `false` swallows
 /// for the witness tests that don't want stderr clutter.
 fn run_npm_bounded(
     fe_root: &Path,

@@ -1,8 +1,6 @@
 //! `[dashboard]` policy section parsing.
-//!
-//! Spec: `v2_extended_gaps.md §4.3` — kernel-launched HTTP server
+//! kernel-launched HTTP server
 //! configurable via `policy.toml`:
-//!
 //! ```toml
 //! [dashboard]
 //! enabled       = true
@@ -14,9 +12,7 @@
 //! max_pending_challenges = 100
 //! max_revoked_jwts = 1000
 //! ```
-//!
 //! ### JWT TTL rationale (`INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01`)
-//!
 //! The default TTL is **24 hours** rather than the original 1 hour
 //! because the autologin URL printed at kernel boot must remain
 //! valid for the kernel's process lifetime — and a long-running
@@ -45,7 +41,6 @@ pub const DEFAULT_DASHBOARD_ADDR: &str = "127.0.0.1";
 pub const DEFAULT_DASHBOARD_PORT: u16 = 9820;
 
 /// Default JWT TTL (24 hours).
-///
 /// `INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01`: the autologin URL
 /// printed at kernel boot MUST remain valid for the kernel's
 /// process lifetime. Realistic-scenario live-e2e runs cap at ~24

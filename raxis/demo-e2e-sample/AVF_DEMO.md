@@ -109,50 +109,28 @@ target/release/raxis-gateway
 
 ---
 
-## Section 3 — Cross-compile the planner binaries for the guest
+## Section 3 — Bake the canonical images
 
-`cargo xtask images dev-stage` cross-compiles `raxis-planner-<role>` for
-the guest target and stages the binary at
-`raxis/images/<role>-core/rootfs/init`. The cpio writer in §4 walks that
-tree to build the initramfs, and Linux execs `/init` as PID 1 inside
-the AVF guest.
+`cargo xtask images bake` is the single end-to-end image-bake driver.
+It cross-compiles `raxis-planner-<role>` for the guest target, stages
+each binary under `raxis/images/<role>-core/rootfs/`, packs the tree
+into a deterministic cpio.gz initramfs via the in-repo
+`raxis-initramfs-builder`, calls `raxis-image-builder` to emit a
+manifest stamped with `image_format = RootfsInitramfsCpio`, signs the
+manifest with the `dev-keys`-minted private key, and lays the pair
+out under `$RAXIS_INSTALL_DIR/images/`:
 
 ```bash
-cargo xtask images dev-stage --role orchestrator
-cargo xtask images dev-stage --role reviewer
-cargo xtask images dev-stage --role executor-starter
+export RAXIS_INSTALL_DIR="$HOME/.raxis-demo-install"
+cargo xtask images bake                          # bakes every role
 ```
 
-Each invocation prints:
-
-```json
-{"level":"info","event":"dev_stage_begin","role":"raxis-planner-orchestrator", ... }
-{"level":"info","event":"dev_stage_ok","role":"raxis-planner-orchestrator","binary":"...","staged_at":".../images/orchestrator-core/rootfs/init"}
-```
+You can also bake a single role: `cargo xtask images bake --role orchestrator`.
 
 > If `cargo build --target aarch64-unknown-linux-musl` fails with
 > `error: linker "aarch64-linux-musl-gcc" not found`, you missed the
 > `musl-cross` step in §0 or the `~/.cargo/config.toml` snippet. The
-> `dev-stage` error message reproduces the install hint inline.
-
----
-
-## Section 4 — Pack and sign the canonical images
-
-`cargo xtask images build-all` walks each
-`raxis/images/<role>-core/rootfs/` tree, packs it into a deterministic
-cpio.gz initramfs blob via the in-repo `raxis-initramfs-builder`, calls
-`raxis-image-builder` to emit a manifest stamped with
-`image_format = RootfsInitramfsCpio`, signs the manifest with the
-`dev-keys`-minted private key, and lays the pair out under
-`$RAXIS_INSTALL_DIR/images/`:
-
-```bash
-export RAXIS_INSTALL_DIR="$HOME/.raxis-demo-install"
-cargo xtask images build-all                    # builds every staged role
-```
-
-You can also build a single role: `cargo xtask images build-all --role orchestrator`.
+> bake's error message reproduces the install hint inline.
 
 After the run:
 
@@ -175,8 +153,16 @@ and routes the rootfs into the AVF substrate accordingly.
 > The on-disk `manifest.toml` fixtures (e.g.
 > `raxis/images/orchestrator-core/manifest.toml`) declare
 > `image_format = "RootfsErofs"` so a production EROFS run still emits
-> the right shape. `cargo xtask images build-all` overrides the
-> in-tree value to `RootfsInitramfsCpio` for the dev pipeline only.
+> the right shape. `cargo xtask images bake` overrides the in-tree
+> value to `RootfsInitramfsCpio` for the dev pipeline only.
+
+---
+
+## Section 4 — (merged into Section 3)
+
+The bake step above is the single step that produces all per-role
+images. There is no separate "pack" sub-step the operator runs by
+hand.
 
 ---
 
@@ -380,7 +366,7 @@ notarized.
 | §0 dev-prereqs | `xtask/src/dev_prereqs.rs` | `demo-e2e-sample/AVF_DEMO.md §0` |
 | §1 dev-keys | `xtask/src/dev_keys.rs` | `release-and-distribution.md §8` |
 | §3 dev-stage | `xtask/src/images.rs` | `planner-harness.md §14.4` |
-| §4 build-all | `xtask/src/images.rs` + `crates/initramfs-builder/` + `crates/image-builder/` | `e2e-live-test-gap.md §3 (a)` |
+| §4 build-all | `xtask/src/images.rs` + `crates/initramfs-builder/` + `crates/image-builder/` | ` (a)` |
 | §4 image_format | `crates/image-manifest/src/lib.rs` (`SCHEMA_VERSION = 3`) | `extensibility-traits.md §3.4.1` |
 | §5 dev-kernel | `xtask/src/dev_kernel.rs` | `system-requirements.md §11` |
 | §6 dev-codesign | `xtask/src/dev_codesign.rs` + `release/raxis.entitlements` | `system-requirements.md §5.2` |
@@ -414,7 +400,7 @@ rm -rf "$HOME/.config/raxis/keys"
 | `errSecInternalError (-67050)` at AVF startup | Kernel binary not codesigned, or signed without entitlements | Re-run `cargo xtask dev-codesign`; verify with `codesign --display --entitlements -` |
 | `KernelPathMissing` at session spawn | `$RAXIS_INSTALL_DIR/kernel/vmlinux` absent | Run §5 (`cargo xtask images dev-kernel`) |
 | `manifest signature does not verify` at boot | `RAXIS_KERNEL_SIGNING_KEY_HEX` not exported when `cargo build` ran | Re-`cargo build --release -p raxis-kernel` with the env var live (§2). The kernel's trust anchor is build-pinned. |
-| `canonical image not found` at boot | `cargo xtask images build-all` not run, or `RAXIS_INSTALL_DIR` mismatched | Re-run §4 with the same `RAXIS_INSTALL_DIR` value used in §7 |
+| `canonical image not found` at boot | `cargo xtask images bake` not run, or `RAXIS_INSTALL_DIR` mismatched | Re-run §3 with the same `RAXIS_INSTALL_DIR` value used in §7 |
 | `avf_vm_started` immediately followed by `avf_console_pump_eof` and a `vsock CONNECT 1024 … Connection reset by peer` failure | Kernel at `$RAXIS_INSTALL_DIR/kernel/vmlinux` does not have `CONFIG_VIRTIO_PCI` / `CONFIG_VIRTIO_FS` / `CONFIG_FUSE_FS` compiled in — typically because it is a Firecracker reference kernel. AVF advertises virtio over PCI; the guest enumerates nothing on the MMIO bus, the console never receives any printk, and the VM exits before binding `AF_VSOCK`. | Re-stage a kernel built per §5.1 (Apple's recommended Fedora pxeboot kernel, a Cloud Hypervisor `ch_defconfig`-built upstream kernel, or restore from `~/.raxis-install/kernel/vmlinux` if you have a historical working install). |
 | `Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)` in the guest console.log, immediately after `tmpfs: incomplete write (-28 != …)` | Executor-starter VM was spawned with too little memory; the initramfs unpacker ran out of tmpfs budget partway through `unpack_to_rootfs`. The ~560 MiB dev-host cpio.gz needs ≥ 6 GiB to unpack cleanly. | The kernel-internal default (`ExecutorSpawnContext::executor_mem_mib`) is 6 GiB as of `host-capacity.md §5.1`. If a plan overrode `vm_memory_mb` to a smaller value, restore the per-task default or pin a production EROFS image (which skips the unpacker entirely). |
 
@@ -424,7 +410,7 @@ rm -rf "$HOME/.config/raxis/keys"
 
 - [`raxis/specs/v2/extensibility-traits.md §3.4`](../specs/v2/extensibility-traits.md) — `VmSpec.linux_kernel_path` + the architectural decision keeping rootfs on `VerifiedImage.body`.
 - [`raxis/specs/v2/planner-harness.md §14.4`](../specs/v2/planner-harness.md) — production EROFS image-build pipeline (this demo is the macOS-hermetic dev companion).
-- [`raxis/specs/v2/e2e-live-test-gap.md`](../specs/v2/e2e-live-test-gap.md) — gaps the demo closes (mkfs.erofs-on-macOS, image_format declaration, host trust anchor).
+- gaps the demo closes (mkfs.erofs-on-macOS, image_format declaration, host trust anchor).
 - [`raxis/specs/v2/release-and-distribution.md §6.3 + §8`](../specs/v2/release-and-distribution.md) — entitlements, dev-keys layout.
 - [`raxis/specs/v2/system-requirements.md §5.2 + §11`](../specs/v2/system-requirements.md) — codesign + kernel binary install layout.
 - [`raxis/kernel/tests/full_e2e_session_lifecycle.rs`](../kernel/tests/full_e2e_session_lifecycle.rs) — the docker-gated full E2E (real Anthropic + Postgres + MongoDB).

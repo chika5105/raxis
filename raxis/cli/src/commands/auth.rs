@@ -1,12 +1,12 @@
 // raxis-cli::commands::auth — Operator authentication helpers.
 //
-// Spec: raxis/specs/v2/v2_extended_gaps.md §4.2 — operator dashboard
-// challenge-response auth. The dashboard's `Login` page asks the
-// operator to run `raxis auth sign <challenge>` from their terminal,
-// then paste the resulting signature + public key back into the
-// browser. The private key NEVER enters the browser; this command is
-// the bridge that lets the operator sign a kernel-issued challenge
-// without uploading the key to a remote service.
+// Implements the operator-dashboard challenge-response auth flow:
+// the dashboard's `Login` page asks the operator to run `raxis auth
+// sign <challenge>` from their terminal, then paste the resulting
+// signature + public key back into the browser. The private key
+// NEVER enters the browser; this command is the bridge that lets the
+// operator sign a kernel-issued challenge without uploading the key
+// to a remote service.
 //
 // Wire shape:
 //

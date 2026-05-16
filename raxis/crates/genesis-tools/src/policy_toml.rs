@@ -1,5 +1,4 @@
 // raxis-genesis-tools::policy_toml — render the epoch-1 policy artifact.
-//
 // One canonical emitter for the genesis policy.toml. Both `raxis genesis`
 // (CLI) and `RAXIS_BOOTSTRAP=1 raxis-kernel` (kernel self-bootstrap) call
 // `render_genesis_policy_toml`; neither does its own `format!`. See the
@@ -14,7 +13,6 @@ use raxis_types::operator_cert::OperatorCert;
 // ---------------------------------------------------------------------------
 
 /// Every variable input the genesis policy.toml depends on.
-///
 /// Holding a struct (rather than a long positional argument list) means
 /// (a) callers cannot accidentally swap `authority_pubkey_hex` and
 /// `quality_pubkey_hex` at the call site, and (b) when a future spec
@@ -114,14 +112,13 @@ const DEFAULT_LANE_MAX_COST_PER_EPOCH: u64 = 10_000;
 const DEFAULT_LANE_PRIORITY: u8 = 100;
 
 /// Default `[dashboard]` values shipped at genesis (per
-/// `v2_extended_gaps.md §4.3` and the field defaults in
+/// and the field defaults in
 /// `raxis_dashboard::config::DashboardConfig`). The dashboard is
 /// emitted with `enabled = true` so a fresh operator gets a
 /// working dashboard out of the box on loopback; binding stays on
 /// `127.0.0.1` and port `9820` is the documented spec default
 /// (well above the privileged-port ceiling). Operators who want
 /// the dashboard off explicitly set `enabled = false` in epoch 2.
-///
 /// **Why enabled by default (vs. `[gateway]` which is commented):**
 /// the dashboard's authentication is challenge-response over the
 /// kernel's existing operator key, so it carries no out-of-band
@@ -160,12 +157,9 @@ fn escape_toml_basic_string(s: &str) -> String {
 /// Build the epoch-1 policy.toml as a `String`. Pure function — caller is
 /// responsible for writing the bytes to disk (kernel uses
 /// `write_file_0644`; CLI uses `fs::write`).
-///
 /// Output shape matches `raxis_policy::PolicyBundle` parser exactly. The
 /// round-trip is asserted by the test at the bottom of this file.
-///
 /// # Panics
-///
 /// Panics if `inputs.allowed_worktree_roots` is empty. The validator in
 /// `raxis_policy::PolicyBundle::validate` rejects empty allowlists, so a
 /// caller passing an empty slice would produce an unloadable artifact;
@@ -348,7 +342,7 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
     .expect("String write_fmt is infallible");
 
     // [dashboard] — operator dashboard HTTP server (per
-    // `v2_extended_gaps.md §4.3`). Emitted with `enabled = true` so
+    // ). Emitted with `enabled = true` so
     // a fresh operator gets a working dashboard immediately on
     // loopback. The kernel boot path
     // (`raxis_dashboard_kernel::load_dashboard_config` →
@@ -375,7 +369,6 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
     // genesis policy with no `[gateway]` boots cleanly; it just cannot
     // dispatch FetchRequests until the operator advances the policy with
     // a real `[gateway]` and at least one `[[providers]]`.
-    //
     // **Why commented vs. omitted entirely?** A commented template is
     // self-documenting: an operator running `cat policy.toml` sees the
     // full schema in front of them. Omitting the section would force them
@@ -402,7 +395,7 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
          # inference_timeout_ms  = 30000\n\
          # data_fetch_timeout_ms = 10000\n\
          # max_response_bytes    = 16777216\n\
-         # # v2_extended_gaps.md §2.5 — pricing is REQUIRED for every\n\
+         # # pricing is REQUIRED for every\n\
          # # model-bearing provider kind (Anthropic, OpenAI, Gemini,\n\
          # # Bedrock, http_sidecar). Operators declare the inverse of\n\
          # # the published per-million price (tokens per US dollar) so\n\

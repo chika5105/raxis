@@ -2165,10 +2165,9 @@ Total budget: ~13 engineer-days. Phase 1 + Phase 2 are independently mergeable (
 
 ---
 
-## §20 iter63 — Operator-authored hints + bounded-runtime guard
+## §20 Operator-authored hints + bounded-runtime guard
 
-iter63 closed two queued items from
-[`specs/iter63-followups.md`](../iter63-followups.md):
+This section closes two previously-queued follow-up items:
 
 ### §20.1 Operator hints
 
@@ -2223,7 +2222,7 @@ the verifier is never trusted to echo hints back faithfully.
 Pinned by `INV-WITNESS-OPERATOR-HINTS-ECHOED-01` and
 `INV-WITNESS-OPERATOR-HINT-SPOOFING-REJECTED-01`.
 
-TODO(iter64): per-gate-type rich hint schema layer; operator-hint
+Deferred: per-gate-type rich hint schema layer; operator-hint
 surfacing for non-Object witness bodies.
 
 ### §20.2 Bounded-runtime guard
@@ -2264,7 +2263,7 @@ Six guards land alongside the new fields:
    emits `WitnessHandlerTimeout` + returns `HandlerError::HandlerTimedOut`.
    INV-WITNESS-HANDLER-BOUNDED-01.
 6. **Audit emission** — every kill path emits exactly one of the
-   five iter63 audit variants (`VerifierWallClockTimeout`,
+   five audit variants (`VerifierWallClockTimeout`,
    `VerifierIdleTimeout`, `VerifierBudgetExhausted`,
    `VerifierVmForcedShutdown`, `WitnessHandlerTimeout`) +
    `WitnessOperatorHintSpoofingDetected` for the operator-hint

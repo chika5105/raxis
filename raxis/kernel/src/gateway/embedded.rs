@@ -1,4 +1,4 @@
-//! V2_GAPS §10 — Embedded-gateway feature flag.
+//! Embedded-gateway feature flag.
 //!
 //! When the `embedded-gateway` Cargo feature is enabled (release
 //! builds; CI configures `RAXIS_GATEWAY_BINARY=...` at compile

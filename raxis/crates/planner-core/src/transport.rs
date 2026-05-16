@@ -1,19 +1,15 @@
 //! `KernelTransport` — guest-side IPC client to the kernel
 //! (planner socket / VSock).
-//!
-//! Closes V2_GAPS.md §B1 / §12.7 substep
+
 //! "VSock frame reader/writer guest-side" + "Intent submission" +
 //! "Witness/verdict submission" by giving each planner role binary
 //! a single, transport-agnostic surface for sending
 //! [`raxis_ipc::IpcMessage`] frames to the kernel and reading the
 //! kernel's reply (always exactly one reply per request, per
 //! `peripherals.md §3.1`).
-//!
 //! ## Why a trait, not just a UDS connector
-//!
 //! The planner-harness binaries are spawned in three different host
 //! environments depending on the active substrate:
-//!
 //! 1. **Subprocess isolation** (the default for the
 //!    `raxis-live-e2e` test harness; pinned by the
 //!    `raxis-isolation` `Subprocess` backend). The planner binary
@@ -33,30 +29,23 @@
 //!    `tokio::io::duplex` pair stands in for the UDS / VSock socket
 //!    so tests can pin frame round-trips without standing up the
 //!    full kernel.
-//!
 //! A trait-based design lets the dispatch loop and intent-submission
 //! helpers stay transport-agnostic: any binary that accepts
 //! `KernelTransport: KernelTransport` (the marker bound, see below)
 //! works the same way under all three substrates.
-//!
 //! ## Wire shape
-//!
 //! Every frame is `[u32 LE body_len][bincode body]` per
 //! `raxis-ipc::frame` (`peripherals.md §3` opening normative note).
 //! The planner side serialises [`raxis_ipc::IpcMessage`] variants:
-//!
 //! * Outbound: `IntentRequest` / `EscalationRequest`
 //! * Inbound:  `KernelIntentResponse` / `KernelEscalationResponse`
-//!
 //! The kernel always responds with exactly one frame per request;
 //! [`KernelTransport::request`] therefore writes one outbound frame
 //! and reads one inbound frame in a single round-trip. Multiplexed
 //! request streams are out of scope for V2 — the kernel's planner
 //! handler is sequential per session, so a single in-flight request
 //! per connection is the contract.
-//!
 //! ## V2 limits
-//!
 //! * **TLS / mTLS over the transport.** The UDS socket relies on
 //!   filesystem permissions (`0660`, operator group) for auth; the
 //!   VSock socket relies on the substrate-side CID enforcement.
@@ -85,7 +74,6 @@ use tokio::sync::Mutex;
 // ---------------------------------------------------------------------------
 
 /// Errors that can surface from the [`KernelTransport`] surface.
-///
 /// The variant set is deliberately small: the planner-harness binary
 /// converts any [`TransportError`] to a structured-log line + exit
 /// code per its role's escalation policy.
@@ -133,7 +121,6 @@ pub enum TransportError {
 /// **Guest-side IPC client surface.** Every planner-role binary
 /// holds one [`KernelTransport`] and uses it for the lifetime of the
 /// session.
-///
 /// Synchronisation: implementations MUST be `Send + Sync`; the
 /// dispatch loop awaits requests from a single task, but
 /// long-running roles (the orchestrator) hand the transport into a
@@ -143,7 +130,6 @@ pub enum TransportError {
 /// `request(…)` calls serialise on the wire (the kernel's planner
 /// handler is sequential per session anyway, so this just mirrors
 /// the protocol contract on the client side).
-///
 /// Lifetime: `request(…)` is `&self` so a planner can construct one
 /// `Arc<dyn KernelTransport>` and clone it across tasks. Closing
 /// the connection happens implicitly on `Drop`.
@@ -152,7 +138,6 @@ pub trait KernelTransport: Send + Sync {
     /// Send `outbound` and read exactly one reply frame from the
     /// kernel. Caller is responsible for matching the reply variant
     /// against the request kind.
-    ///
     /// **Connection survival.** On `Err`, the implementation MAY
     /// have already torn down the underlying socket — the caller
     /// MUST treat the transport as poisoned and either reconnect or
@@ -170,9 +155,8 @@ pub trait KernelTransport: Send + Sync {
 
 /// Where the kernel told this planner to connect, parsed from the
 /// boot environment.
-///
 /// Pinned by `planner-harness.md §14.5` (the env-var contract);
-/// extended by V2_GAPS.md §B1 to cover the VSock CID/port pair the
+/// extended by to cover the VSock CID/port pair the
 /// production VM substrate stamps.
 #[derive(Debug, Clone)]
 pub enum KernelTransportConfig {
@@ -186,7 +170,6 @@ pub enum KernelTransportConfig {
     /// dials the host kernel). The planner binary reaches the
     /// kernel through the guest's `vsock` virtio device by
     /// **connecting outbound** to `(cid, port)`.
-    ///
     /// Concrete connect logic lives behind the `vsock-transport`
     /// Cargo feature; the variant is always present so callers can
     /// pattern-match without `cfg`-gating, but constructing a
@@ -207,7 +190,6 @@ pub enum KernelTransportConfig {
     /// socket is wrapped in the same `StreamTransport` the
     /// `Vsock` and `Uds` variants use, so the framing protocol on
     /// top is identical.
-    ///
     /// The asymmetry vs the Firecracker `Vsock` variant exists
     /// because Apple-VZ's `VZVirtioSocketDevice` supports the
     /// host-dials-guest direction natively but requires an
@@ -215,7 +197,6 @@ pub enum KernelTransportConfig {
     /// inverse. Pinning the guest as the listener keeps the
     /// substrate's vsock wiring symmetric with what AVF already
     /// exposes from `connect_vsock`.
-    ///
     /// Behind the same `vsock-transport` feature gate as `Vsock`.
     VsockListen {
         /// AF_VSOCK port the planner binds. Always `1024` in the
@@ -227,16 +208,13 @@ pub enum KernelTransportConfig {
 
 impl KernelTransportConfig {
     /// Read the kernel-stamped env vars and pick a transport.
-    ///
     /// Precedence (matches the kernel-side spawn path):
     /// 1. `RAXIS_KERNEL_PLANNER_SOCKET` → [`KernelTransportConfig::Uds`]
     /// 2. `RAXIS_KERNEL_VSOCK_LISTEN_PORT` →
     ///    [`KernelTransportConfig::VsockListen`] (Apple-VZ guest)
     /// 3. `RAXIS_KERNEL_VSOCK_CID` + `RAXIS_KERNEL_VSOCK_PORT` →
     ///    [`KernelTransportConfig::Vsock`] (Firecracker / dial-out)
-    ///
     /// All missing ⇒ [`TransportError::NotConfigured`].
-    ///
     /// The closure shape `&str -> Option<String>` mirrors
     /// `std::env::var(_).ok()` so tests can inject a hermetic env.
     pub fn from_env_fn<F>(f: F) -> Result<Self, TransportError>
@@ -283,18 +261,15 @@ impl KernelTransportConfig {
 // ---------------------------------------------------------------------------
 
 /// Build a [`KernelTransport`] from a [`KernelTransportConfig`].
-///
 /// **UDS path.** Direct `tokio::net::UnixStream::connect`. The
 /// kernel's `accept_planner_loop` spawns a per-connection task on
 /// the other side. Returns the trait object boxed for type-erasure
 /// so the caller can hold an `Arc<dyn KernelTransport>` regardless
 /// of substrate.
-///
 /// **VSock dial path.** Behind the `vsock-transport` feature only.
 /// Without the feature we surface [`TransportError::VsockUnavailable`]
 /// so the planner role binary fails fast with a structured exit
 /// code rather than silently ignoring the kernel-stamped CID.
-///
 /// **VSock listen path (Apple-VZ guest).** Same feature gate. The
 /// planner binds an AF_VSOCK listener on `(VMADDR_CID_ANY, port)`,
 /// accepts exactly one connection from the host kernel, and wraps
@@ -441,7 +416,6 @@ where
 // ---------------------------------------------------------------------------
 // async-trait
 // ---------------------------------------------------------------------------
-//
 // `async-trait` 0.1 is brought in transitively via raxis-types →
 // raxis-ipc → tokio. We add a direct dep below to make the import
 // here self-evident; the macro re-export is what the trait uses
@@ -609,7 +583,6 @@ mod tests {
     /// `connect` on a `Vsock` config without the feature surfaces
     /// `VsockUnavailable` so the planner role binary can structured-
     /// log + exit. Pins the fail-closed posture.
-    ///
     /// Runs only on builds that *don't* enable the feature
     /// (e.g. macOS, or Linux with the feature off). On Linux+feature,
     /// hitting this path would actually try to dial a vsock — so we

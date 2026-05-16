@@ -93,10 +93,8 @@ Phase 2 in-memory `ArcSwap` + Phase 3 best-effort gateway signal —
 The agent edits `migrations/0042_add_users.sql` and submits an
 `IntentRequest { intent_kind: SingleCommit, base_sha, head_sha, … }`
 to `planner.sock`. The connection arrives at
-`kernel/src/handlers/intent.rs::handle` (the V1 spec named this file
-`kernel/src/ipc/handlers/intent.rs`; in the current source tree the
-`ipc/` prefix has been collapsed away — the `ipc::` module owns
-*transport* and the `handlers::` module owns *intent semantics*).
+`kernel/src/handlers/intent.rs::handle`. The `ipc::` module owns
+*transport* and the `handlers::` module owns *intent semantics*.
 
 ---
 
@@ -182,12 +180,11 @@ for req in &required_claims {
 
 > **Important.** Planner-submitted claims are **intentionally
 > discarded.** The kernel is the sole claim source — the agent has
-> zero influence on the claim pipeline. Earlier drafts of this doc
-> said "auto-derived **and** planner-submitted claims become
-> effective_claims." That is wrong; only the auto-derived synthetic
-> claims are passed to `claim::evaluate`. The wire field exists for
-> back-compat and is silently ignored. Pin: `kernel/src/gates/mod.rs`
-> test `planner_submitted_claims_are_discarded` (line 462).
+> zero influence on the claim pipeline. Only the auto-derived
+> synthetic claims are passed to `claim::evaluate`; the wire field
+> exists for back-compat and is silently ignored. Pin:
+> `kernel/src/gates/mod.rs` test
+> `planner_submitted_claims_are_discarded` (line 462).
 
 This is strictly more secure than planner-submitted claims:
 
@@ -413,7 +410,7 @@ but never re-considered.
 ### 7. Break-glass
 
 `kernel/src/gates/mod.rs` Step 1 checks for an active break-glass
-record. **As of HEAD this branch is hardcoded to `false`**:
+record. **Today this branch is hardcoded to `false`**:
 
 ```rust
 // kernel/src/gates/mod.rs:111-115 — verbatim
@@ -449,7 +446,7 @@ loosened policy or `raxis escalation approve`.
 
 ---
 
-## Key source files (verified against current HEAD)
+## Key source files
 
 | File | Role |
 |---|---|
@@ -465,12 +462,9 @@ loosened policy or `raxis escalation approve`.
 | `crates/policy/src/bundle.rs` | `PolicyBundle::claim_requirements`, `PolicyBundle::gates`, `PolicyBundle::path_match` |
 | `crates/types/src/intent.rs` | `SubmittedClaim`, `IntentRequest` (note: `submitted_claims` is on the wire but discarded by the kernel) |
 
-> **Path drift watch.** Older drafts of this doc cited
-> `kernel/src/ipc/handlers/intent.rs` and `kernel/src/ipc/handlers/witness.rs`.
-> The current source tree has the `ipc/` prefix collapsed away — the
-> dispatcher (`kernel/src/ipc/server.rs::accept_planner_loop`) lives
-> under `ipc/`, but the per-message handlers
-> (`kernel/src/handlers/{intent,witness,escalation}.rs`) are at the
-> top level of `kernel/src/`. If you find yourself reading a doc that
-> still cites `kernel/src/ipc/handlers/...`, it's stale; treat the
-> path here as authoritative.
+> **Path note.** The dispatcher
+> (`kernel/src/ipc/server.rs::accept_planner_loop`) lives under
+> `ipc/`, but the per-message handlers
+> (`kernel/src/handlers/{intent,witness,escalation}.rs`) sit at the
+> top level of `kernel/src/`. Older citations may use
+> `kernel/src/ipc/handlers/...`; the paths above are authoritative.

@@ -1,16 +1,11 @@
 //! Read-only view over the `structured_outputs` table
-//! (`v2_extended_gaps.md §3.2 StructuredOutput tool`).
-//!
+//! (` StructuredOutput tool`).
 //! # Scope
-//!
 //! Powers two surfaces today:
-//!
 //! * `OperatorRequest::ListTaskOutputs` → `raxis task outputs <task_id>`
 //!   (operator IPC; see `kernel/src/ipc/operator_ergonomics.rs::handle_list_task_outputs`).
 //! * Future dashboard read paths (`raxis-dashboard` crate, V2 §4.4).
-//!
 //! # Hard rules (inherited from `views/mod.rs`)
-//!
 //! 1. No raw SQL leaks past this module.
 //! 2. Reader functions take `&RoConn` — write attempts are a type
 //!    error.
@@ -33,7 +28,6 @@ use crate::Table;
 
 /// One row of the `structured_outputs` table. Mirrors the
 /// migration-13 column shape exactly.
-///
 /// `payload_json` is the verbatim JSON the kernel persisted at
 /// `IntentKind::StructuredOutput` admission time, AFTER
 /// `StructuredOutputKind::validate_and_normalise` has clamped /
@@ -49,7 +43,7 @@ pub struct StructuredOutputRow {
     /// (FK-enforced by the migration-18 schema). `None` for
     /// **Orchestrator-emitted outputs** which are scoped to the
     /// initiative but are NOT bound to any single sub-task —
-    /// see `v2_extended_gaps.md §3.2`.
+    /// see .
     pub task_id: Option<String>,
     pub session_id: String,
     /// `progress_report` | `diagnostic_flag` | `task_summary`.

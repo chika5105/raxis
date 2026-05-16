@@ -117,9 +117,9 @@ pub const TRUST_ANCHOR_FAIL_LOUD_MESSAGE: &str =
 /// `verify_canonical_image_via_manifest()` call would short-circuit
 /// with `SigningKeyFpNotPopulated` and the kernel would silently
 /// degrade onto the manifest-unverified hint path
-/// (`read_unverified_image_format_hint`). Pre-iter60 this surface
+/// (`read_unverified_image_format_hint`). Previously this surface
 /// was a `warn` log at boot followed by a fully-functional kernel;
-/// post-iter60 we refuse to start.
+/// later we refuse to start.
 ///
 /// The dev round-trip is `cargo xtask images bake-all`, which
 /// generates a dev signing keypair on first run, writes the

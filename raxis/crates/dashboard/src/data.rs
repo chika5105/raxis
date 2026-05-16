@@ -1,10 +1,10 @@
 //! Read-only data trait the kernel implements + an in-process
 //! [`InMemoryDashboardData`] fixture for tests.
 //!
-//! Spec: `v2_extended_gaps.md §4.3` — every dashboard endpoint
-//! is a pure read except `PUT /api/policy/toml`. The kernel owns
-//! the SQLite store + audit chain + plan registry; this trait is
-//! the seam through which those reads flow into the HTTP handler
+//! Every dashboard endpoint is a pure read except
+//! `PUT /api/policy/toml`. The kernel owns the SQLite store +
+//! audit chain + plan registry; this trait is the seam through
+//! which those reads flow into the HTTP handler
 //! without binding the dashboard crate to the kernel binary.
 //!
 //! Production wires `KernelDashboardData` (defined in
@@ -49,7 +49,7 @@ use crate::stream::{SimpleStreamSource, StreamEvent, StreamSubscription};
 pub enum LifecycleAnnotation {
     /// A retry triggered by a reviewer-panel rejection — paired
     /// `ReviewAggregationCompleted{verdict=AtLeastOneRejected}`
-    /// / `ExecutorRespawnFromReviewRejection` audit rows.
+    /// `ExecutorRespawnFromReviewRejection` audit rows.
     RetryReviewReject {
         /// One-based retry number (the first retry is `1`).
         retry_number: u32,
@@ -649,11 +649,11 @@ pub struct TaskView {
 ///
 /// Iter64 wire shape — matches `dashboard-fe/src/types/api.ts ::
 /// TaskLlmTurnView` field-for-field so the dashboard's per-task
-/// LLM turns panel renders without an FE-side mapper. Pre-iter64
+/// LLM turns panel renders without an FE-side mapper. Previously
 /// the wire emitted `at_ms` + `body: String` + no
 /// `model`/`role`/`request`/usage breakdown, which left every
 /// FE field except `latency_ms` rendering empty / `undefined`
-/// / `0` even though the kernel was capturing real data on
+/// `0` even though the kernel was capturing real data on
 /// disk.
 ///
 /// `INV-DASHBOARD-TASK-LLM-CAPTURE-01`,
@@ -678,7 +678,7 @@ pub struct TaskLlmTurnView {
     /// Fully-parsed REQUEST payload as a `serde_json::Value`.
     /// `Value::Null` when the kernel-side tap could not parse
     /// the bytes (or when no request was captured for this
-    /// record — e.g. pre-iter64 records reloaded from disk).
+    /// record — e.g. earlier records reloaded from disk).
     pub request: serde_json::Value,
     /// Fully-parsed RESPONSE payload as a `serde_json::Value`.
     /// On parse failure the projection falls back to
@@ -1219,7 +1219,7 @@ pub struct SubsystemHealthCard {
     /// Human-readable card title (e.g. `"Kernel main loop"`).
     pub label: String,
     /// Status discriminant — `"ok"` / `"degraded"` / `"failing"`
-    /// / `"unknown"`.
+    /// `"unknown"`.
     pub status: String,
     /// One-line operator-safe summary surfaced on the card.
     pub summary: String,
@@ -1285,7 +1285,7 @@ pub const SUBSYSTEM_CATALOG: &[(&str, &str)] = &[
 #[derive(Debug, Clone, Serialize)]
 pub struct SubsystemHealthResponse {
     /// Aggregate status across all cards (`ok` / `degraded`
-    /// / `failing` / `unknown`).
+    /// `failing` / `unknown`).
     pub aggregate_status: String,
     /// One card per kernel subsystem the dashboard enumerates.
     pub cards: Vec<SubsystemHealthCard>,
@@ -2847,9 +2847,8 @@ fn hex_sha256_prefix(bytes: &[u8]) -> String {
 /// decisions about which audit events "matter". The kernel owns
 /// the forensic chain and the kernel owns the curated feed.
 ///
-/// **Signal vs noise.** After
-/// `worker/audit-tightening` retired the read-only
-/// `OperatorViewed*` emissions (see
+/// **Signal vs noise.** After an earlier audit-noise sweep
+/// retired the read-only `OperatorViewed*` emissions (see
 /// `specs/v2/dashboard-operator-action-audit-coverage.md
 /// §signal-vs-noise`), the chain still carries plenty of
 /// per-operator clicks (mark-read, credential-list, health-
@@ -3021,7 +3020,7 @@ pub mod recent_activity_filter {
         #[test]
         fn allow_list_excludes_operator_pageview_class_events() {
             // Per-click read-only events that the dashboard used
-            // to mirror onto the chain. `worker/audit-noise-sweep-r2`
+            // to mirror onto the chain. The second audit-noise sweep
             // stops emitting these entirely; the Overview filter
             // remains a defensive backstop against any stray
             // already-persisted row (or replay harness) that

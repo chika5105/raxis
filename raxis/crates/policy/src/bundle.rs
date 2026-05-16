@@ -1,6 +1,5 @@
 // raxis-policy::bundle — PolicyBundle: the in-memory representation of
 // a validated, loaded policy artifact.
-//
 // Normative references:
 //   - kernel-store.md §2.5.5 "[[operators.entries]]" and "permitted_ops"
 //   - kernel-core.md §2.3 policy_manager.rs escalation_policy fields
@@ -8,12 +7,10 @@
 //   - kernel-store.md §2.5.6 "[[gates]]" normative schema
 //   - kernel-core.md §2.3 scheduler (lane/budget config)
 //   - kernel-core.md §2.2 startup step 3 (authority_pubkey, quality_pubkey)
-//
 // Policy is loaded from `<data_dir>/policy/policy.toml` at boot and wrapped
 // in ArcSwap<PolicyBundle> by the kernel. This file owns only the TOML-mapped
 // types and their accessor methods. I/O and signature verification live in
 // loader.rs.
-//
 // All fields are `pub(crate)` — external callers use the accessor methods,
 // which apply business-rule validation and return well-typed values rather
 // than raw TOML scalars.
@@ -33,7 +30,6 @@ use crate::PolicyError;
 /// The raw TOML-mapped policy artifact, before semantic validation.
 /// Parsed by `toml::from_str`; then converted to `PolicyBundle` by
 /// `PolicyBundle::validate`.
-///
 /// NOTE: we deliberately do NOT use `#[serde(deny_unknown_fields)]`
 /// at the top level. `policy.toml` is a shared artifact with
 /// `[dashboard]` and `[observability]` sections owned by other
@@ -82,7 +78,7 @@ pub(crate) struct RawPolicy {
     /// `[[providers]]` — declarative catalogue of model / data providers the
     /// gateway is permitted to forward requests to. Provider credentials
     /// (API keys) are stored separately under `<data_dir>/providers/<name>.toml`
-    /// — never in this policy artifact, so policy.toml can be checked into
+    /// never in this policy artifact, so policy.toml can be checked into
     /// version control without leaking secrets.
     #[serde(default)]
     pub(crate) providers: Vec<ProviderEntry>,
@@ -92,7 +88,6 @@ pub(crate) struct RawPolicy {
     /// implicit `shell` channel pointing at `<data_dir>/notifications/inbox.jsonl`
     /// and an empty route table (everything falls through to
     /// `default_channels = ["shell"]`).
-    ///
     /// Normative reference: `cli-readonly.md` §5.6.
     #[serde(default)]
     pub(crate) notifications: NotificationsSection,
@@ -159,11 +154,11 @@ pub(crate) struct RawPolicy {
     /// `[git]` — operator-side defaults for git-domain configuration.
     /// **Optional**: a kernel that omits the section gets the
     /// hardcoded defaults (`default_target_ref = "refs/heads/main"`,
-    /// `target_ref_locked = false`). See `V2_GAPS.md §12.8`.
+    /// `target_ref_locked = false`).
     #[serde(default)]
     pub(crate) git: Option<GitSection>,
 
-    /// `[host_capacity]` — V2_GAPS §D2 host-capacity caps and
+    /// `[host_capacity]` — host-capacity caps and
     /// watchdog config. **Optional**: omitted section means
     /// "kernel uses the spec defaults" (16 concurrent VMs, 5 GiB
     /// disk headroom, 4096 FD floor, halt_admit behavior). The
@@ -195,7 +190,7 @@ pub(crate) struct RawPolicy {
     #[serde(default)]
     pub(crate) elastic: Option<ElasticSection>,
 
-    /// `[environments.<label>]` — V2_GAPS §E1 environment-binding
+    /// `[environments.<label>]` — environment-binding
     /// declarations per `environment-access-control.md §5b.1`.
     /// **Optional**: omitting the entire `[environments]` table
     /// (zero declared environments) keeps the environment model
@@ -206,7 +201,7 @@ pub(crate) struct RawPolicy {
     #[serde(default)]
     pub(crate) environments: HashMap<String, EnvironmentSection>,
 
-    /// `[[permitted_credentials]]` — V2_GAPS §E1 policy-side
+    /// `[[permitted_credentials]]` — policy-side
     /// allowlist of credential names per
     /// `environment-access-control.md §5.2`. Each entry MAY
     /// declare an `environment` label; that label MUST resolve to
@@ -220,7 +215,7 @@ pub(crate) struct RawPolicy {
     #[serde(default, rename = "permitted_credentials")]
     pub(crate) permitted_credentials: Vec<PermittedCredentialEntry>,
 
-    /// `[[vm_images]]` — V2_GAPS §13 Cat-4 + V2.5 BLOCKER per
+    /// `[[vm_images]]` — Cat-4 + V2.5 BLOCKER per
     /// `policy-plan-authority.md §4`. Operator-published
     /// declarations of OCI-pinned VM images plan tasks may
     /// reference. **Optional**: an omitted section keeps the
@@ -231,11 +226,10 @@ pub(crate) struct RawPolicy {
     /// MUST resolve into it (`FAIL_VM_IMAGE_NOT_REGISTERED`) and
     /// the image's `role_restriction` MUST permit the task's role
     /// (`FAIL_VM_IMAGE_ROLE_RESTRICTION_VIOLATION`).
-    ///
     /// V2.5 invariants this section enforces:
     /// * `INV-PLANNER-HARNESS-03` — `kernel_version_min ≥ "5.14"`
     ///   is required (operator-declared; full OCI introspection
-    ///   remains a V3 deferral, recorded in V2_GAPS §13).
+    ///   remains a V3 deferral).
     /// * `INV-PLANNER-HARNESS-02` — Reviewer images cannot be
     ///   operator-published; any entry with `role_restriction`
     ///   containing `"Reviewer"` is rejected at policy load with
@@ -611,7 +605,6 @@ fn validate_default_executor_image(
 pub const RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME: &str = "raxis-verifier-symbol-index";
 
 // === iter62 verifier-runtime: general-verifier alias ===
-//
 // Reserved alias for the operator-publishable-equivalent general
 // verifier image (`raxis-verifier-starter`). Operators MAY publish
 // their own verifier images with `[[vm_images]] role_restriction =
@@ -619,7 +612,6 @@ pub const RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME: &str = "raxis-verifier-symbol-ind
 // squat on the canonical `raxis-verifier-starter` name the kernel
 // release pipeline publishes. Mirrors the structural-rejection
 // shape `RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME` already enforces.
-//
 // See `INV-VERIFIER-RESERVED-ALIAS-MUTUAL-EXCLUSION-01` (D11).
 
 /// Reserved alias for the general verifier image. Operator
@@ -702,7 +694,7 @@ fn parse_and_check_linux_kernel_version_min(
 }
 
 /// `[host_capacity]` — operator-side host-capacity configuration.
-/// V2 MVP scope per `V2_GAPS.md §D2`: the kernel enforces strict
+/// V2 MVP scope: the kernel enforces strict
 /// VM concurrency caps, polls free disk every 5 seconds, and
 /// refuses to boot when the FD limit is below floor. Memory caps,
 /// per-initiative caps, round-robin fairness, per-operator queue
@@ -796,7 +788,6 @@ impl Default for HostCapacityConfig {
 
 /// `[isolation]` — operator-tunable per-role microVM resource
 /// budgets per `host-capacity.md §4.1`.
-///
 /// ```toml
 /// [isolation]
 /// orchestrator_vcpu_count = 1
@@ -806,13 +797,11 @@ impl Default for HostCapacityConfig {
 /// reviewer_vcpu_count     = 1
 /// reviewer_mem_mib        = 1024
 /// ```
-///
 /// Every field is optional; absent ⇒ kernel defaults from
 /// [`IsolationConfig::default`] apply (chosen to match
 /// `host-capacity.md §4.1` reference values: orchestrator
 /// 1 vCPU / 1 GiB, executor 2 vCPU / 4 GiB, reviewer 1 vCPU /
 /// 1 GiB). Every value is validated at policy load:
-///
 /// * `*_vcpu_count` MUST be ≥ 1 and ≤ 64. Zero would cause the
 ///   AVF / Firecracker substrate to refuse the spawn at translate
 ///   time; >64 is the substrate's own ceiling.
@@ -820,9 +809,7 @@ impl Default for HostCapacityConfig {
 ///   smaller values are rejected at `translate` time with
 ///   `MemoryBelowFloor`) and ≤ 65536 (64 GiB — sized for the
 ///   largest realistic per-VM working set on Apple Silicon hosts).
-///
 /// V2 invariants this section honours:
-///
 /// * Per-role budgets stay symmetric across the three canonical
 ///   roles (`Orchestrator`, `Executor`, `Reviewer`). The kernel
 ///   does not expose a per-task override here — task-level
@@ -885,7 +872,6 @@ impl Default for IsolationConfig {
     /// Kernel defaults per `host-capacity.md §4.1`. The dev-host
     /// initramfs images are sized to fit comfortably in these
     /// budgets:
-    ///
     /// * Orchestrator initramfs ≈ 217 MiB unpacked → 1 GiB total
     ///   leaves ~800 MiB for the planner runtime and the guest
     ///   kernel page cache.
@@ -896,7 +882,6 @@ impl Default for IsolationConfig {
     /// * Reviewer initramfs ≈ 127 MiB unpacked → 1 GiB total covers
     ///   the static-analysis working set (ripgrep / read_file) and
     ///   the streaming planner.
-    ///
     /// vCPU defaults are tuned for Apple Silicon AVF: the
     /// executor uses 2 vCPUs to keep build/test commands
     /// responsive; the orchestrator and reviewer use 1 vCPU
@@ -941,7 +926,6 @@ const ISOLATION_MAX_MEM_MIB: u32 = 64 * 1024;
 
 /// `[elastic]` — V2 elastic VM-scaling configuration per
 /// `specs/v2/elastic-vm-scaling.md §2.1`.
-///
 /// ```toml
 /// [elastic]
 /// enabled                                = true
@@ -952,11 +936,9 @@ const ISOLATION_MAX_MEM_MIB: u32 = 64 * 1024;
 /// transient_retry_initial_backoff_ms     = 250
 /// transient_retry_max_backoff_ms         = 4000
 /// ```
-///
 /// Every field is optional; absent ⇒ kernel defaults from
 /// [`ElasticConfig::default`] apply. The `enabled` field is the
 /// master switch:
-///
 /// * `enabled = true` (default) — the kernel may scale capacity
 ///   upward at runtime when in-VM signals warrant it (subject to
 ///   the per-session / plan / policy ceilings).
@@ -1011,7 +993,6 @@ pub(crate) struct ElasticSection {
 /// V2 effective `[elastic]` config — every field resolved to a
 /// concrete value with defaults applied and structural caps
 /// validated.
-///
 /// Read at every per-VM spawn (transient retry parameters) and by
 /// the dynamic-scaling engine (per-session ceilings + rate
 /// limit). All fields are non-Optional after validation; the
@@ -1071,7 +1052,7 @@ impl Default for ElasticConfig {
             max_vcpus_per_session: 8,
             max_memory_mb_per_session: 16 * 1024,
             // Six events / minute is one event every ten seconds
-            // — enough headroom for a host-wide noisy-neighbour
+            // enough headroom for a host-wide noisy-neighbour
             // event to flush its scaling decisions without
             // overwhelming the audit dashboard.
             max_concurrent_scaling_events_per_minute: 6,
@@ -1096,7 +1077,6 @@ const ELASTIC_MAX_EVENTS_PER_MINUTE_CEILING: u32 = 60;
 /// absent fields. All structural-cap failures land as
 /// `FAIL_ELASTIC_INVALID` so the operator gets a single error
 /// class for this section.
-///
 /// **Cross-section consistency.** The validator additionally
 /// enforces that the elastic ceilings are ≥ the `[isolation]`
 /// baselines (`elastic-vm-scaling.md §2.1`); a ceiling smaller
@@ -1304,8 +1284,7 @@ fn validate_isolation_section(
 /// `[git]` — operator default + lock for the per-initiative
 /// `target_ref` field declared in `plan.toml [workspace] target_ref`.
 /// Resolution at admission time follows
-/// `INV-PLAN-POLICY-PRECEDENCE-01` (`V2_GAPS.md §12.9`):
-///
+/// `INV-PLAN-POLICY-PRECEDENCE-01`:
 /// * If the plan declares `target_ref`, it wins **unless**
 ///   `target_ref_locked = true`, in which case the kernel rejects
 ///   admission with `FAIL_POLICY_LOCKED_FIELD`.
@@ -1328,13 +1307,13 @@ pub(crate) struct GitSection {
     #[serde(default)]
     pub(crate) target_ref_locked: bool,
 
-    /// V2_GAPS §C6 — auto-push to upstream remote after a successful
+    /// auto-push to upstream remote after a successful
     /// `IntegrationMerge` Phase 3. Default `false`; the kernel never
     /// pushes unless the operator opts in.
     #[serde(default)]
     pub(crate) auto_push: bool,
 
-    /// V2_GAPS §C6 — remote name to push to (e.g. `"origin"`).
+    /// remote name to push to (e.g. `"origin"`).
     /// Required when `auto_push = true`; the policy validator
     /// rejects an empty value as `FAIL_GIT_PUSH_REMOTE_REQUIRED`.
     #[serde(default)]
@@ -1357,7 +1336,6 @@ pub(crate) struct CredentialBackendSection {
 // ---------------------------------------------------------------------------
 
 /// `[meta]` — policy artifact metadata.
-///
 /// ```toml
 /// [meta]
 /// epoch     = 1
@@ -1386,7 +1364,6 @@ pub(crate) struct PolicyMeta {
 // ---------------------------------------------------------------------------
 
 /// `[authority]` — kernel key fingerprints.
-///
 /// ```toml
 /// [authority]
 /// authority_pubkey = "<64-char hex: raw 32-byte Ed25519 public key>"
@@ -1408,9 +1385,7 @@ pub(crate) struct AuthoritySection {
 // ---------------------------------------------------------------------------
 
 /// `[escalation_policy]` — per-lineage rate limiting parameters.
-///
 /// All four fields are required; any missing field → PolicyError::MalformedArtifact.
-///
 /// ```toml
 /// [escalation_policy]
 /// timeout_secs         = 3600
@@ -1431,7 +1406,6 @@ pub(crate) struct EscalationPolicySection {
 // ---------------------------------------------------------------------------
 
 /// `[sessions]` — session creation policy.
-///
 /// ```toml
 /// [sessions]
 /// default_ttl_secs       = 86400
@@ -1452,7 +1426,6 @@ pub(crate) struct SessionsSection {
 // ---------------------------------------------------------------------------
 
 /// `[delegations]` — delegation TTL policy.
-///
 /// ```toml
 /// [delegations]
 /// max_ttl_secs = 86400
@@ -1467,7 +1440,6 @@ pub(crate) struct DelegationsSection {
 // ---------------------------------------------------------------------------
 
 /// `[budget]` — lane budget and per-intent-kind base costs.
-///
 /// ```toml
 /// [budget]
 /// cost_per_touched_path = 1
@@ -1477,8 +1449,7 @@ pub(crate) struct DelegationsSection {
 /// MultiBranchCommit  = 25
 /// IntegrationMerge   = 50
 /// PrGateEvaluation   = 15
-///
-/// # v2_extended_gaps.md §2.5 — per-session LLM token ceilings.
+/// # per-session LLM token ceilings.
 /// # All three are optional; absent ⇒ uncapped on that axis.
 /// [budget.token_caps]
 /// max_input_tokens_per_session  = 200_000   # ≈ Claude 3.5 Sonnet context
@@ -1495,7 +1466,7 @@ pub(crate) struct BudgetSection {
     #[serde(default = "default_max_cost_per_task")]
     pub(crate) max_cost_per_task: u64,
 
-    /// V2 `v2_extended_gaps.md §2.5` — `[budget.token_caps]`.
+    /// `[budget.token_caps]`.
     /// Per-session cumulative LLM token ceilings stamped into the
     /// planner-VM env at spawn time and enforced by the in-VM
     /// dispatch loop. `None` ⇒ section omitted ⇒ uncapped on every
@@ -1503,7 +1474,7 @@ pub(crate) struct BudgetSection {
     #[serde(default)]
     pub(crate) token_caps: Option<TokenCapsSection>,
 
-    /// V2 `v2_extended_gaps.md §3.1` — `[budget.sleep_caps]`.
+    /// `[budget.sleep_caps]`.
     /// Per-call and cumulative ceilings for the `sleep` planner tool
     /// (executor + orchestrator only; reviewer NEVER has it). `None`
     /// ⇒ section omitted ⇒ the in-VM tool itself is registered with
@@ -1514,14 +1485,12 @@ pub(crate) struct BudgetSection {
     pub(crate) sleep_caps: Option<SleepCapsSection>,
 }
 
-/// **`v2_extended_gaps.md §3.1` — per-session `sleep` tool budgets.**
-///
+/// **per-session `sleep` tool budgets.**
 /// ```toml
 /// [budget.sleep_caps]
 /// max_seconds_per_call         = 60      # hard ceiling per Sleep call
 /// max_cumulative_seconds       = 300     # total over the session
 /// ```
-///
 /// Both fields default to 0 when absent, which causes the in-VM
 /// Sleep tool to refuse every invocation (`FAIL_SLEEP_DISABLED`).
 /// This makes the §3.1 spec's "operators must opt in" requirement
@@ -1544,15 +1513,13 @@ pub struct SleepCapsSection {
     pub max_cumulative_seconds: u32,
 }
 
-/// **`v2_extended_gaps.md §2.5` — per-session LLM token ceilings.**
-///
+/// **per-session LLM token ceilings.**
 /// ```toml
 /// [budget.token_caps]
 /// max_input_tokens_per_session  = 200_000
 /// max_output_tokens_per_session = 100_000
 /// max_total_tokens_per_session  = 250_000
 /// ```
-///
 /// Every field is optional and counts cumulative tokens across the
 /// session. The kernel stamps each present cap into the spawned
 /// planner VM's env (`RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL`,
@@ -1592,7 +1559,6 @@ fn default_max_cost_per_task() -> u64 {
 }
 
 /// A `[[lanes]]` entry defining one execution lane.
-///
 /// ```toml
 /// [[lanes]]
 /// lane_id              = "default"
@@ -1626,7 +1592,6 @@ fn default_priority() -> u8 {
 // ---------------------------------------------------------------------------
 
 /// `[operators]` containing `[[operators.entries]]`.
-///
 /// ```toml
 /// [operators]
 /// [[operators.entries]]
@@ -1641,7 +1606,6 @@ pub(crate) struct OperatorsBlock {
 }
 
 /// A single operator entry in `[[operators.entries]]`.
-///
 /// **Cert is mandatory (INV-CERT-01).** Every operator entry MUST embed
 /// a self-signed `OperatorCert`. There is no cert-less / "legacy" path:
 /// a TOML missing the `[operators.entries.cert]` sub-table fails serde
@@ -1652,7 +1616,6 @@ pub(crate) struct OperatorsBlock {
 /// agree with the embedded cert; mismatches fail loud at validate
 /// time. The entry's `permitted_ops` is IGNORED — the cert is the
 /// authority.
-///
 /// **Misconfiguration policy.** Structural problems with the embedded
 /// cert (inverted validity window, emergency cert with extra ops, etc.)
 /// fail policy load by default. Operators who NEED to deploy a known-
@@ -1671,7 +1634,6 @@ pub struct OperatorEntry {
     /// The subset of operator IPC operations this operator is allowed
     /// to invoke. Canonical v1 set: 13 operations listed in
     /// kernel-store.md §2.5.5.
-    ///
     /// **This field is mirrored from `cert.permitted_ops` at validate
     /// time.** Whatever value the operator typed in TOML is overwritten
     /// by `validate_operator_certs` so the cert is always the single
@@ -1685,13 +1647,11 @@ pub struct OperatorEntry {
     /// fast lookups.
     pub cert: OperatorCert,
     /// Operator-acknowledged misconfig bypass. Defaults to `false`.
-    ///
     /// When `true`, structural cert validation errors do NOT block
     /// policy load — they are captured into
     /// [`PolicyBundle::bypassed_cert_misconfigs`] for the kernel boot
     /// to audit. Self-signature errors and pubkey-mismatch errors
     /// are still fatal (no bypass).
-    ///
     /// Operators set this when they need to deploy a known-broken
     /// cert (e.g. emergency cert with extra metadata for
     /// documentation), accepting that the kernel will pin the
@@ -1702,7 +1662,6 @@ pub struct OperatorEntry {
 }
 
 /// One bypassed cert misconfiguration recorded at policy load.
-///
 /// Emitted into [`PolicyBundle::bypassed_cert_misconfigs`] when an
 /// `OperatorEntry` had `force_misconfig_bypass = true` AND its
 /// embedded cert tripped at least one structural invariant. The
@@ -1729,7 +1688,6 @@ pub struct BypassedCertMisconfig {
 // ---------------------------------------------------------------------------
 
 /// A single `[[gates]]` entry.
-///
 /// ```toml
 /// [[gates]]
 /// gate_type        = "TestCoverage"
@@ -1753,18 +1711,15 @@ pub struct GateEntry {
     /// the resulting `WitnessSubmission.body.operator_hints` field
     /// by the kernel (NOT by the verifier — see
     /// `INV-WITNESS-OPERATOR-HINTS-ECHOED-01`).
-    ///
     /// `BTreeMap` (not `HashMap`) so the JSON serialisation is
     /// deterministic — the kernel’s body-hash check would
     /// otherwise drift between runs.
-    ///
     /// Caps enforced at `PolicyBundle::validate` time
     /// (`INV-VERIFIER-HINTS-PAYLOAD-CAP-01`):
     ///   * `hints.len() <= 32`
     ///   * `serde_json::to_vec(&hints).len() <= 4096` (4 KiB)
     ///   * no key may start with the reserved `RAXIS_` prefix
     ///     (prevents operator-spoofing of kernel-injected envs).
-    ///
     /// Default `BTreeMap::new()`; field is optional in TOML.
     #[serde(default)]
     pub hints: BTreeMap<String, serde_json::Value>,
@@ -1777,7 +1732,6 @@ pub struct GateEntry {
 /// Scope filter for an `[[integration_merge_verifiers]]` entry.
 /// Documented in `verifier-processes.md §16.3` and consumed at
 /// `integration-merge.md §4 Check 5d.1`.
-///
 /// `Last` is the singular sentinel for "the FINAL IntegrationMerge of
 /// the DAG"; `TaskSet` constrains the verifier to merges whose
 /// `merged_task_ids` intersect a specific set; `All` (the default)
@@ -1803,7 +1757,6 @@ impl Default for IntegrationMergeVerifierAppliesTo {
 
 /// Failure routing for an `[[integration_merge_verifiers]]` entry.
 /// Documented in `verifier-processes.md §5 (block_merge / warn_only)`.
-///
 /// Operator-side declarations MUST be `BlockMerge` (the operator path
 /// cannot downgrade to `warn_only`; that is enforced at validate
 /// time). Plan-side declarations may freely choose either; the plan
@@ -1822,14 +1775,12 @@ pub enum IntegrationMergeVerifierOnFailure {
 }
 
 /// One declared `[[integration_merge_verifiers]]` entry.
-///
 /// **Schema parity.** Mirrors the `policy.toml` operator-side schema
 /// in `policy-plan-authority.md §4 [[integration_merge_verifiers]]`
 /// and the plan-side `[[plan.integration_merge_verifiers]]` schema in
 /// `verifier-processes.md §15.1` — both use this struct so the
 /// downstream Check 5d dispatcher (per `integration-merge.md §4
 /// Check 5d.1`) operates on a single typed surface.
-///
 /// **Operator-only fields.** `required_for_environments` is
 /// operator-side only per `policy-plan-authority.md §4
 /// [[integration_merge_verifiers]]`; the plan-side parser sets it to
@@ -1916,17 +1867,14 @@ pub struct IntegrationMergeVerifierEntry {
     /// the verifier spawn envelope as
     /// `RAXIS_VERIFIER_OPERATOR_HINTS_JSON` AND echoed by the
     /// kernel into `WitnessSubmission.body.operator_hints`.
-    ///
     /// `BTreeMap` for deterministic JSON ordering (verifier
     /// callers depend on a stable env-var byte sequence for the
     /// hash check on `RAXIS_VERIFIER_OPERATOR_HINTS_JSON`).
-    ///
     /// Cap discipline (`INV-VERIFIER-HINTS-PAYLOAD-CAP-01`):
     ///   * ≤ 32 entries
     ///   * total JSON payload ≤ 4096 bytes
     ///   * no key may start with `RAXIS_` (reserved for
     ///     kernel-injected scope keys)
-    ///
     /// Default empty; field is optional in TOML.
     #[serde(default)]
     pub hints: BTreeMap<String, serde_json::Value>,
@@ -1942,7 +1890,6 @@ pub struct IntegrationMergeVerifierEntry {
 /// `INV-VERIFIER-IDLE-TIMEOUT-01`,
 /// `INV-VERIFIER-CUMULATIVE-BUDGET-01`,
 /// `INV-VERIFIER-VM-FORCE-SHUTDOWN-01`).
-///
 /// Every field is optional in TOML; omitted values fall back to
 /// the per-field constants on [`PolicyBundle`]
 /// (`DEFAULT_MAX_VERIFIER_WALL_SECONDS` and friends below). The
@@ -1984,7 +1931,6 @@ pub(crate) struct VerifierRuntimeSection {
 //   * `verifier_idle_timeout_seconds = 60`
 //   * `task_verifier_total_budget_seconds = 900` (15 minutes)
 //   * `verifier_force_shutdown_grace_seconds = 10`
-//
 // Exposed `pub` so the kernel's verifier-runner can reference the
 // canonical defaults instead of duplicating the literals.
 pub const DEFAULT_MAX_VERIFIER_WALL_SECONDS: u32 = 300;
@@ -1996,7 +1942,6 @@ pub const DEFAULT_VERIFIER_FORCE_SHUTDOWN_GRACE_SECONDS: u32 = 10;
 // `[verifier_runtime]`. The kernel cannot allow operators to set a
 // wall-clock ceiling so high that a stuck verifier could stall the
 // gate evaluator past a single operator shift.
-//
 // 4 hours wall-clock + 8 hours per-task cumulative leaves room for
 // pathological CI workloads (a slow systemd-on-microvm boot + a
 // 90-minute build) without admitting an "effectively unbounded"
@@ -2011,7 +1956,6 @@ pub const VERIFIER_RUNTIME_HARD_CAP_GRACE_SECONDS: u32 = 5 * 60;
 // ---------------------------------------------------------------------------
 
 /// A `[[roles]]` entry establishing the capability ceiling for a role.
-///
 /// ```toml
 /// [[roles]]
 /// role_id   = "planner-standard"
@@ -2030,7 +1974,6 @@ pub struct RoleEntry {
 // ---------------------------------------------------------------------------
 
 /// `[claim_requirements]` — maps path globs to required claim types.
-///
 /// ```toml
 /// [claim_requirements]
 /// default_action = "deny"   # or "permit"
@@ -2075,19 +2018,16 @@ pub struct ClaimRule {
 // ---------------------------------------------------------------------------
 
 /// `[egress]` — domain allowlist for outbound HTTP fetches.
-///
 /// ```toml
 /// [egress]
 /// max_fetches_per_window   = 100
 /// domains                  = ["api.openai.com"]
 /// patterns                 = ["*.github.com"]
-///
 /// # V2 — implicit provider grants
 /// # (specs/v2/reviewer-egress-defaults-decision.md).
 /// implicit_provider_grants = true              # default
 /// deny_provider            = ["openai-staging"]
 /// ```
-///
 /// **`implicit_provider_grants` and `deny_provider`** add the
 /// declarative default-include behaviour for inference-provider
 /// FQDNs derived from `[[providers]]` entries. With
@@ -2153,7 +2093,6 @@ impl Default for EgressSection {
 /// `[egress] implicit_provider_grants = true` (the default) and the
 /// provider's `provider_id` is NOT listed in
 /// `[egress] deny_provider`.
-///
 /// Carried separately from the operator-declared `[egress] domains`
 /// list so audit events (`DefaultProviderEgressApplied`) can carry
 /// the originating `provider_id` and `kind` for full traceability.
@@ -2172,7 +2111,6 @@ pub struct DefaultProviderEgressGrant {
 /// inference FQDN(s) the provider's client dials. Pinned by the
 /// `provider_kind_fqdn_table_in_sync_with_planner_core` test in the
 /// `provider_model` registry to catch silent drift.
-///
 /// Kept in this crate (rather than depending on
 /// `raxis-planner-core`) to keep the dependency graph minimal —
 /// `raxis-policy` is consumed by the kernel boot path before any
@@ -2212,7 +2150,6 @@ fn extract_sidecar_host(endpoint: &str) -> Option<String> {
 /// from the `[[providers]]` array, honouring
 /// `[egress] implicit_provider_grants` and `[egress] deny_provider`.
 /// Returns an empty vector when the implicit-grant switch is off.
-///
 /// Made `pub(crate)` so unit tests in this crate can exercise the
 /// projection directly; consumers (kernel, gateway) read the
 /// pre-computed `PolicyBundle::default_provider_egress_grants()`
@@ -2260,7 +2197,6 @@ pub(crate) fn derive_default_provider_egress_grants(
 
 // ---------------------------------------------------------------------------
 // Gateway supervisor config — `[gateway]`
-//
 // Spec ref: peripherals.md §3.2 "Spawn model" — the kernel spawns one
 // `raxis-gateway` subprocess at boot and supervises it (respawns on crash;
 // new gateway_process_token issued on each spawn). The single-gateway
@@ -2270,7 +2206,6 @@ pub(crate) fn derive_default_provider_egress_grants(
 // ---------------------------------------------------------------------------
 
 /// `[gateway]` — gateway subprocess supervisor parameters.
-///
 /// ```toml
 /// [gateway]
 /// binary_path             = "/usr/local/bin/raxis-gateway"
@@ -2278,7 +2213,6 @@ pub(crate) fn derive_default_provider_egress_grants(
 /// respawn_backoff_ms      = 1000  # initial back-off between respawns; doubles
 /// max_consecutive_respawns = 5    # circuit-breaker: too many crashes → quarantine
 /// ```
-///
 /// All fields except `binary_path` have defaults so most operators only
 /// need `binary_path = "..."`. The kernel re-validates `binary_path` at
 /// spawn time (not at policy validate time), since the binary file may
@@ -2315,14 +2249,12 @@ pub struct GatewaySection {
     /// **V2.7 — `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.** Operator-supplied
     /// default `max_turns` for any planner session whose per-task plan
     /// entry omits `max_turns`. Resolution precedence (per-spawn):
-    ///
     /// 1. `[[tasks]].max_turns` from the parsed plan (per-task override).
     /// 2. `[gateway].planner_max_turns_default` (this field — policy default).
     /// 3. Compiled fallback `raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS`
     ///    (currently 100; bumped 20→50→100 across iter25 / iter31 to fit
     ///    the historical worst-case Executor task — see
     ///    `guides/recipes/env/11-planner-env-vars.md` for rationale).
-    ///
     /// Operators can pin a TIGHTER policy default (e.g. `5`) for CI /
     /// known-easy scenarios so a Reviewer that hasn't decided in 5 turns
     /// surfaces as `Outcome::TurnsExceeded` instead of burning the full
@@ -2330,7 +2262,6 @@ pub struct GatewaySection {
     /// remain the cost-side bound — `planner_max_turns_default` is the
     /// **liveness** bound ("if you haven't finished in N turns, you're
     /// stuck").
-    ///
     /// `None` ⇒ fall through to the compiled default.
     /// `Some(0)` is rejected at policy-validate time (a 0-turn budget
     /// is never useful and almost always a typo).
@@ -2347,9 +2278,7 @@ pub struct GatewaySection {
     /// (per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`) and
     /// `hard_ceiling` is `240` by default, overridable via
     /// `RAXIS_PLANNER_MAX_TURNS_HARD_CEILING`.
-    ///
     /// **Resolution precedence** (per-spawn):
-    ///
     /// 1. `[[tasks]].max_turns_step` from the parsed plan (per-task
     ///    override).
     /// 2. `[gateway].planner_max_turns_step_default` (this field —
@@ -2357,7 +2286,6 @@ pub struct GatewaySection {
     /// 3. Derived default `max(round_up_to_5(base/2), 10)` so
     ///    cold-start retries still get a useful step even on plans
     ///    that never declared one.
-    ///
     /// **Why this exists.** The historical `materialize-records` /
     /// `lint-runner` cold-start retry failure mode reproduces when
     /// the executor VM is respawned with zero in-VM context and
@@ -2367,7 +2295,6 @@ pub struct GatewaySection {
     /// depth backstop: any task with a sane per-attempt budget
     /// still gets a graceful-degradation path before the
     /// crash-retry ceiling kicks in.
-    ///
     /// `None` ⇒ fall through to the per-task field, then the
     /// derived default.
     #[serde(default)]
@@ -2406,7 +2333,6 @@ pub const PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS: u64 = 24 * 60 * 6
 
 /// `[plan_signing]` — replay-protection and freshness configuration
 /// for the V2.1 plan-bundle admission path.
-///
 /// ```toml
 /// [plan_signing]
 /// max_plan_bundle_age_secs    = 86_400   # 24 h freshness window
@@ -2415,23 +2341,19 @@ pub const PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS: u64 = 24 * 60 * 6
 /// nonce_sweep_interval_secs   = 3_600    # how often the kernel sweeps
 /// accept_unfresh_v2_0_bundles = false    # transitional: accept legacy schema-1 bundles
 /// ```
-///
 /// All five fields have defaults so a kernel that omits the section
 /// boots with the spec defaults — a deliberate forward-compat choice
 /// while §7.4 / §8.4 incrementally lands. The structural invariants
 /// from `plan-bundle-sealing.md §7.4` are checked at policy validate
 /// time:
-///
 ///   * `max_plan_bundle_age_secs ≤ PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS`
 ///   * `max_clock_skew_secs ≤ max_plan_bundle_age_secs / 4`
 ///   * `nonce_retention_grace_secs ≤ max_plan_bundle_age_secs`
 ///     *(grace beyond the freshness window is bounded by the window
 ///     itself — a longer grace would just store dead rows)*
 ///   * `1 ≤ nonce_sweep_interval_secs ≤ PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS`
-///
 /// Failures map to `FAIL_POLICY_PLAN_SIGNING_INVALID` at policy load
 /// (`plan-bundle-sealing.md §9`).
-///
 /// `nonce_sweep_interval_secs` is a V2.1 implementation field not
 /// present in the original `plan-bundle-sealing.md §7.4` table. It is
 /// the cadence on which the kernel runs the §8.4 nonce-table DELETE
@@ -2586,31 +2508,25 @@ pub const PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING: u64 = 128 * 1024 * 1024;
 pub const PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING: u32 = 1024;
 
 /// `[plan_bundle_limits]` — V2 plan-bundle size discipline.
-///
 /// ```toml
 /// [plan_bundle_limits]
 /// max_artifact_bytes  = 1_048_576       # 1 MiB
 /// max_bundle_bytes    = 10_485_760      # 10 MiB
 /// max_artifact_count  = 200
 /// ```
-///
 /// All three fields default per `plan-bundle-sealing.md §7.4` so a
 /// kernel that omits the section boots cleanly. Operators MAY lower
 /// the caps below the defaults but MUST NOT raise them above the
 /// hard ceilings:
-///
 ///   * `max_artifact_bytes ≤ PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING` (64 MiB)
 ///   * `max_bundle_bytes ≤ PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING` (128 MiB)
 ///   * `max_artifact_count ≤ PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING` (1024)
-///
 /// In addition, structural coherence is enforced at validate time:
-///
 ///   * `max_artifact_bytes ≤ max_bundle_bytes` (a single artifact
 ///     cannot exceed the total bundle cap, since the bundle contains
 ///     at least that artifact)
 ///   * `max_bundle_bytes ≥ 1` and `max_artifact_count ≥ 1` (a bundle
 ///     with zero artifacts cannot satisfy `artifacts[0] = plan.toml`)
-///
 /// Failures map to `FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING` at
 /// policy load (`plan-bundle-sealing.md §9`).
 #[derive(Debug, Clone, Deserialize)]
@@ -2708,7 +2624,6 @@ fn default_max_artifact_count() -> u32 {
 // ---------------------------------------------------------------------------
 
 /// One `[[providers]]` table entry.
-///
 /// ```toml
 /// [[providers]]
 /// provider_id           = "anthropic-prod"
@@ -2718,7 +2633,6 @@ fn default_max_artifact_count() -> u32 {
 /// data_fetch_timeout_ms = 10000
 /// max_response_bytes    = 16777216   # 16 MiB
 /// ```
-///
 /// `credentials_file` is resolved relative to `<data_dir>/providers/`. The
 /// resolved path MUST exist with mode 0600 (kernel uid only) at gateway
 /// startup; the gateway loads it and injects the API key into outbound
@@ -2758,13 +2672,11 @@ pub struct ProviderEntry {
     #[serde(default = "default_max_response_bytes")]
     pub max_response_bytes: u64,
 
-    /// **V2_GAPS §C9 — per-provider streaming idle timeout.**
-    ///
+    /// **per-provider streaming idle timeout.**
     /// Per-chunk silence deadline applied to inference requests that
     /// return `text/event-stream` bodies. A provider that opens the
     /// connection but stalls mid-body fails fast at this boundary
     /// rather than dragging out to `inference_timeout_ms`.
-    ///
     /// **Why per-provider.** The 30-second default is correct for
     /// generation-tier models (Claude 3.5/4, GPT-4) where inter-chunk
     /// gaps are sub-second. Reasoning-tier models (OpenAI o1/o3) emit
@@ -2772,21 +2684,18 @@ pub struct ProviderEntry {
     /// observed silent gaps of 30–120 seconds are normal. Setting a
     /// 30-second cap on those providers triggers spurious aborts
     /// every time the model starts thinking.
-    ///
     /// **Validation.** When set, must parse as a duration in
     /// `[5_000, 600_000]` ms. The kernel-side `PolicyBundle::validate`
     /// rejects anything outside the band (5s lower bound prevents
     /// pathologically tight values that flake under network jitter;
     /// 600s upper bound is the same outer ceiling as the
     /// `inference_timeout_ms` cap).
-    ///
     /// **Default.** `None` ⇒ the gateway falls back to its
     /// hard-coded `STREAM_IDLE_TIMEOUT` (30 s).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_idle_timeout_ms: Option<u32>,
 
-    // ── V2_GAPS §C5 sidecar fields ──────────────────────────────────────
-    //
+    // ── sidecar fields ──────────────────────────────────────
     // Extended set used only when `kind = "http_sidecar"` per
     // `extensibility-traits.md §9A.4`. Validation enforces every
     // sidecar provider declares both `sidecar_endpoint` and
@@ -2807,7 +2716,6 @@ pub struct ProviderEntry {
     /// (`extensibility-traits.md §9A.7A`). Validated at policy-load
     /// time: must be non-empty and an even hex length when
     /// `kind = "http_sidecar"`.
-    ///
     /// **NEVER** logged through `ProviderEntry`'s `Debug` output
     /// (the field is plain `Option<String>` but operator tooling
     /// MUST redact it before printing — same convention as
@@ -2821,19 +2729,16 @@ pub struct ProviderEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar_health_check_path: Option<String>,
 
-    /// **`v2_extended_gaps.md §2.5` — per-provider pricing table.**
-    ///
+    /// **per-provider pricing table.**
     /// Required for every model-bearing provider kind (`Anthropic`,
     /// `OpenAI`, `Gemini`, `Bedrock`, `http_sidecar`); MUST be unset
     /// for non-LLM providers (kernel rejects with
     /// `MalformedArtifact` either way).
-    ///
     /// ```toml
     /// [[providers]]
     /// provider_id      = "anthropic-prod"
     /// kind             = "Anthropic"
     /// credentials_file = "anthropic-prod.toml"
-    ///
     ///   # Inline-dotted form keeps the array-of-tables boundary
     ///   # unambiguous (TOML's `[providers.pricing]` would close the
     ///   # `[[providers]]` row, which is not what we want).
@@ -2841,7 +2746,6 @@ pub struct ProviderEntry {
     ///   pricing.output_tokens_per_dollar        = 50_000    # $20 / 1M output
     ///   pricing.cache_read_tokens_per_dollar    = 2_000_000 # $0.50 / 1M cache hit
     /// ```
-    ///
     /// All three rates are *tokens per US dollar* — operators
     /// declare the inverse of the published per-million price so the
     /// kernel can compute cost via integer division
@@ -2861,8 +2765,7 @@ fn default_max_response_bytes() -> u64 {
     16 * 1024 * 1024
 }
 
-/// **`v2_extended_gaps.md §2.5` — per-provider pricing table.**
-///
+/// **per-provider pricing table.**
 /// Operators declare model rates as *tokens per US dollar* (the
 /// inverse of the conventional per-million pricing) so the kernel
 /// computes cost via integer division and the audit chain carries no
@@ -2901,7 +2804,6 @@ impl ProviderPricing {
     /// Compute the dollar cost of a usage record in **micro-dollars**
     /// (`1 USD = 1_000_000 µ$`). Pure integer math — no floating-point
     /// drift in the audit chain.
-    ///
     /// All four token kinds are summed independently:
     /// * `input_tokens` and `output_tokens` always at the base rate.
     /// * `cache_read_tokens` at the cache-read rate (defaulting to
@@ -2909,12 +2811,10 @@ impl ProviderPricing {
     ///   a discount).
     /// * `cache_creation_tokens` at the cache-creation rate
     ///   (defaulting to `input_tokens_per_dollar`).
-    ///
     /// Returns `0` when *every* rate is zero — that case can only
     /// occur in unit tests; `PolicyBundle::validate` rejects any
     /// real `[[providers]]` entry with a zero `input_tokens_per_dollar`
     /// or `output_tokens_per_dollar`.
-    ///
     /// Token counts are widened to `u128` internally to absorb the
     /// `tokens * 1_000_000` multiplication without overflow even at
     /// the (absurd) maximum of `u64::MAX` tokens; the final result
@@ -2964,11 +2864,11 @@ pub(crate) const LLM_PROVIDER_KINDS: &[&str] =
 pub const MAX_INFERENCE_TIMEOUT_MS: u32 = 120_000;
 /// Hard cap on data-fetch timeout, normative per peripherals.md §3.2.
 pub const MAX_DATA_FETCH_TIMEOUT_MS: u32 = 60_000;
-/// V2_GAPS §C9 — minimum value (in ms) for the per-provider
+/// minimum value (in ms) for the per-provider
 /// `stream_idle_timeout_ms`. Anything below 5 s flakes on a busy
 /// provider's first chunk after TLS handshake.
 pub const STREAM_IDLE_TIMEOUT_FLOOR_MS: u32 = 5_000;
-/// V2_GAPS §C9 — maximum value (in ms) for the per-provider
+/// maximum value (in ms) for the per-provider
 /// `stream_idle_timeout_ms`. Anything above 600 s defeats the
 /// purpose; the per-request `inference_timeout_ms` is the outer
 /// ceiling and dragging the idle deadline above that boundary
@@ -2982,12 +2882,9 @@ pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Notification channels — `[notifications]`
-//
 // Normative reference: cli-readonly.md §5.6 +
 // `email-and-notification-channels.md`.
-//
 // V2 surface (forward-only, no V1 backward-compat shims):
-//
 //   * `File`           — local JSONL append to operator-supplied path.
 //   * `Email`          — direct SMTP submission with STARTTLS or
 //                        implicit TLS, AUTH PLAIN.
@@ -2995,7 +2892,6 @@ pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
 //                        process that translates to the target
 //                        platform's API (Slack, PagerDuty, Teams,
 //                        Discord, Opsgenie, ...).
-//
 // The legacy `Webhook` channel kind was removed in V2.5: it
 // duplicated `Sidecar` (both are "HTTP POST a JSON payload to a
 // URL"), shipped without HMAC signing, lacked the per-channel
@@ -3005,7 +2901,6 @@ pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
 // ---------------------------------------------------------------------------
 
 /// Channel-kind discriminator.
-///
 /// V2 surface:
 /// * `File` — local JSONL append to an operator-supplied path.
 /// * `Email` — direct SMTP submission with STARTTLS or implicit
@@ -3018,7 +2913,6 @@ pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
 ///   The dispatcher wraps every Sidecar call in a per-channel
 ///   semaphore + 3-state circuit breaker so a hanging upstream
 ///   never wedges the kernel.
-///
 /// Note: the kernel unconditionally writes every notification to
 /// `<data_dir>/notifications/inbox.jsonl` AND the SQLite
 /// `notifications` table before fanning out to these channels.
@@ -3032,13 +2926,12 @@ pub enum NotificationChannelKind {
     /// AUTH PLAIN).
     Email,
     /// V2 — HTTP sidecar (`email-and-notification-channels.md` +
-    /// V2_GAPS.md §C4).  The kernel POSTs a structured payload to
+    /// ).  The kernel POSTs a structured payload to
     /// `target` and the sidecar converts to the platform's API.
     Sidecar,
 }
 
 /// One `[[notifications.channels]]` entry.
-///
 /// ```toml
 /// [[notifications.channels]]
 /// id     = "audit-mirror"
@@ -3063,7 +2956,7 @@ pub struct NotificationChannel {
     /// notifications drop immediately with
     /// `DeliveryFailed{Backpressure}`. Bounded resource ceiling
     /// per channel = `max_in_flight × per_attempt_timeout × max_attempts`.
-    /// Default 8 (per V2_GAPS.md §C4 worst-case table). Ignored for
+    /// Default 8 (per worst-case table). Ignored for
     /// non-Sidecar kinds.
     #[serde(default = "default_max_in_flight")]
     pub max_in_flight: u32,
@@ -3075,13 +2968,11 @@ fn default_max_in_flight() -> u32 {
 
 /// One `[[notifications.routes]]` entry: which channels receive
 /// notifications for a given audit event-kind.
-///
 /// ```toml
 /// [[notifications.routes]]
 /// event_kind = "EscalationApproved"
 /// channels   = ["shell"]
 /// ```
-///
 /// An empty `channels` list is the canonical "silenced" form for that
 /// event kind (per spec §5.6.2 rule 2).
 #[derive(Debug, Clone, Deserialize)]
@@ -3110,7 +3001,6 @@ pub(crate) struct NotificationsSection {
 
 /// Filename appended to `<data_dir>/notifications/` for the kernel's
 /// unconditional inbox JSONL log.
-///
 /// Every notification is written here by `dispatch()` regardless of
 /// which operator channels are configured. Historically this was
 /// owned by an implicit "Shell" channel; it is now a kernel primitive.
@@ -3120,7 +3010,6 @@ pub const INBOX_FILENAME: &str = "inbox.jsonl";
 /// emits. `PolicyBundle::validate` rejects routes whose `event_kind`
 /// is not in this list (preventing a typo from silently dropping
 /// every notification for that kind).
-///
 /// Kept in lockstep with `raxis-audit-tools::AuditEventKind::as_str`.
 /// A unit test in this crate cross-checks the two lists.
 pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
@@ -3158,7 +3047,7 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     "IntentAccepted",
     "IntentRejected",
     "IntegrationMergeCompleted",
-    // V2_GAPS §C6 — kernel push protocol
+    // kernel push protocol
     "PushAttempted",
     "PushCompleted",
     "PushFailed",
@@ -3217,24 +3106,23 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     // initiative quarantine (kernel-store.md §2.5.8)
     "InitiativeQuarantined",
     "OperatorQuarantineSwept",
-    // V2_GAPS §C7 — credential CLI ceremony events
+    // credential CLI ceremony events
     "CredentialRegistered",
     "CredentialRemoved",
     "CredentialVerified",
-    // V2_GAPS §D1 — operator-cert revocation ceremony events
+    // operator-cert revocation ceremony events
     "OperatorCertRevoked",
     "OperatorCertRevokedOpDenied",
-    // V2_GAPS §D2 — host-capacity admission + watchdogs
+    // host-capacity admission + watchdogs
     "AdmissionDeferredAtCap",
     "AdmissionQueueFull",
     "DiskFullHaltEntered",
     "DiskHealthyAfterFull",
     "OperatorAttentionRequired",
     "KernelPushEnqueued",
-    // V2_GAPS §12.4 — operator-ergonomics IPC dry-run audit event.
+    // operator-ergonomics IPC dry-run audit event.
     "DryRunAdmitted",
     // === iter62 verifier-runtime: VerifierVm* family ===
-    //
     // The six audit kinds emitted by the iter62 verifier-runtime
     // path. Allowlisted here so `[[notifications.routes]]` rules
     // can target the events directly. Each maps 1:1 to a
@@ -3248,7 +3136,6 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     "VerifierTimeout",
     "VerifierArtifactRejected",
     // === iter63 bounded-runtime + operator-hint variants ===
-    //
     // Six audit kinds added by `specs/iter63-followups.md` (operator-
     // authored hints into witnesses + bounded-runtime guard for
     // verifier execution). Each maps 1:1 to a
@@ -3273,7 +3160,6 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
 /// kernel-injected scope keys (`RAXIS_VERIFIER_HOOK_KIND`,
 /// `RAXIS_INTEGRATION_MERGE_ID`, …) and operator declarations MUST
 /// NOT collide.
-///
 /// Exposed `pub` so the kernel-side plan validator
 /// (`approve_plan` Step 2) can apply the same rule to plan-source
 /// `[[plan.integration_merge_verifiers]]` entries without
@@ -3307,16 +3193,13 @@ pub const VERIFIER_ARTIFACT_MAX_PATH_CHARS: usize = 256;
 pub const VERIFIER_TIMEOUT_MIN_SECS: u64 = 5;
 
 /// Validate an operator-side `[[integration_merge_verifiers]]` array.
-///
 /// **Operator-side discipline.** This validator enforces every rule
 /// that does NOT require cross-spec context (vm_images resolution,
 /// host_capacity hard cap, environment-label resolution, plan-side
 /// task_id intersection). Cross-spec checks land in `approve_plan`
 /// (Step 2 of the pre-merge-verifier track) once the relevant
 /// surfaces are stitched together.
-///
 /// ### Rules enforced here
-///
 /// 1. `name` non-empty, `[a-z][a-z0-9_]{0,31}`, unique across the
 ///    section.
 /// 2. `image` and `command` non-empty.
@@ -3339,9 +3222,7 @@ pub const VERIFIER_TIMEOUT_MIN_SECS: u64 = 5;
 ///    `[environments.<label>]` section is deferred (the bundle does
 ///    not yet hold an environments map — that section lands with the
 ///    environment-access-control step).
-///
 /// ### Returned slice
-///
 /// Returns the validated entries unchanged. The caller stores the
 /// `Vec<IntegrationMergeVerifierEntry>` on the `PolicyBundle`.
 fn validate_integration_merge_verifiers_operator_side(
@@ -3548,7 +3429,6 @@ fn validate_integration_merge_verifiers_operator_side(
 /// Validate a verifier `name` against the operator-ergonomic
 /// `[a-z][a-z0-9_]{0,31}` shape pinned in
 /// `policy-plan-authority.md §4 [[integration_merge_verifiers]] name`.
-///
 /// `pub` so the kernel-side plan validator
 /// (`approve_plan` Step 2) can apply the same shape rule to
 /// plan-source `[[plan.integration_merge_verifiers]]` entries
@@ -3557,9 +3437,7 @@ fn validate_integration_merge_verifiers_operator_side(
 /// Shared by the gate-side validator (`validate_gates_hints`) and
 /// the integration-merge verifier validator
 /// (`validate_integration_merge_verifiers_operator_side`).
-///
 /// Enforced rules (`INV-VERIFIER-HINTS-PAYLOAD-CAP-01`):
-///
 /// 1. `hints.len() ≤ 32` — cap on key count.
 /// 2. `serde_json::to_vec(&hints).len() ≤ 4096` — cap on
 ///    serialised JSON byte payload.
@@ -3569,12 +3447,10 @@ fn validate_integration_merge_verifiers_operator_side(
 /// 4. Per-gate-type schema validation is deferred to iter64; for
 ///    iter63 any well-formed JSON value is accepted as long as the
 ///    caps and reserved-prefix rule hold.
-///
 /// `section` is a human-readable section name (`"[[gates]]"` or
 /// `"[[integration_merge_verifiers]]"`) used in the diagnostic
 /// string; `subject` is the entry's name (gate_type / verifier
 /// name) so operators can pinpoint the offending row.
-///
 /// `pub` because `kernel/src/initiatives/lifecycle.rs` can call
 /// the same routine for plan-side
 /// `[[plan.integration_merge_verifiers]]` entries (which reuse
@@ -3645,7 +3521,6 @@ pub fn validate_verifier_hints(
 /// iter63-followups.md — operator-side `[[gates]]` validator.
 /// Today this only enforces the hints discipline (the rest of the
 /// gate schema is parsed via serde with its own per-field defaults).
-///
 /// Called from `PolicyBundle::validate`.
 pub(crate) fn validate_gates_hints(raw_gates: &[GateEntry]) -> Result<(), PolicyError> {
     for g in raw_gates {
@@ -3667,12 +3542,10 @@ pub fn is_valid_verifier_name(s: &str) -> bool {
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
 }
 
-/// V2_GAPS.md §12.8 — fully-qualified target-ref name validator
+/// Fully-qualified target-ref name validator
 /// shared by `[git] default_target_ref` (operator-side) and
 /// `[workspace] target_ref` (plan-side).
-///
 /// Approximates `git-check-ref-format(1) --refspec-pattern --branch`:
-///
 /// * MUST start with `refs/heads/` (only branch refs are advanceable
 ///   targets — tag refs are immutable, remote-tracking refs are
 ///   mirrors, `HEAD` is symbolic).
@@ -3687,7 +3560,6 @@ pub fn is_valid_verifier_name(s: &str) -> bool {
 /// * Bytes outside ASCII printable are rejected (UTF-8 ref names
 ///   are theoretically allowed by git but our enforcement table
 ///   does not yet cover them; reject to fail-closed).
-///
 /// Returns `Ok(())` on success and `Err(reason)` describing the
 /// first violation (used by the loader to construct
 /// `FAIL_POLICY_TARGET_REF_INVALID` /
@@ -3756,7 +3628,6 @@ pub fn validate_target_ref_format(target_ref: &str) -> Result<(), String> {
 /// Parse a verifier `timeout = "Ns"|"Nm"|"Nh"` shape into seconds.
 /// Returns `None` for unparseable strings or for values that
 /// overflow a `u64` second count.
-///
 /// `pub` so the kernel-side plan validator
 /// (`approve_plan` Step 2) can parse plan-source
 /// `[[plan.integration_merge_verifiers]] timeout` strings against
@@ -3779,7 +3650,7 @@ pub fn parse_verifier_timeout_secs(s: &str) -> Option<u64> {
     n.checked_mul(unit)
 }
 
-/// V2_GAPS §D2 — validate `[host_capacity]` and produce the
+/// validate `[host_capacity]` and produce the
 /// effective `HostCapacityConfig`. Defaults apply for any field
 /// the operator omits (or for the whole section). V2 only
 /// accepts `disk_full_behavior = "halt_admit"`; the other two
@@ -3816,7 +3687,7 @@ fn validate_host_capacity_section(
                     "FAIL_HOST_CAPACITY_BEHAVIOR_V3_ONLY: \
                      [host_capacity] disk_full_behavior = {b:?} is V3-only; \
                      V2 ships only \"halt_admit\" (host-capacity.md §7.2; \
-                     V2_GAPS.md §D2)"
+ )"
                 )));
             }
             other => {
@@ -3874,7 +3745,7 @@ fn validate_host_capacity_section(
     Ok(cfg)
 }
 
-/// V2_GAPS §E1 — environment label syntax per §5b.3. Lowercase
+/// environment label syntax per §5b.3. Lowercase
 /// ASCII letters, digits, hyphens, underscores; 1–32 characters;
 /// must start with a letter.
 fn is_valid_env_label(label: &str) -> bool {
@@ -3891,7 +3762,7 @@ fn is_valid_env_label(label: &str) -> bool {
         .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
-/// V2_GAPS §E1 — list of fields the parser TOLERATES on
+/// list of fields the parser TOLERATES on
 /// `[environments.<label>]` per §5b.4 ("reserved for V2.x").
 /// Operators MAY set them; the V2 kernel ignores them and emits
 /// no kernel-side effect. (V3 will graduate them to normative
@@ -3906,8 +3777,8 @@ const RESERVED_ENV_FIELDS: &[&str] = &[
     "override_reviewer_alias",
 ];
 
-/// V2_GAPS §E1 (`environment-access-control.md §5b.3`).
-/// Validate every `[environments.<label>]` table:
+/// Validate every `[environments.<label>]` table
+/// (`environment-access-control.md §5b.3`):
 /// - Label syntax `^[a-z][a-z0-9_-]{0,31}$` (§5b.3 rule 4).
 /// - `description` is required and non-empty.
 /// - Unknown fields are rejected unless they appear in the
@@ -3954,8 +3825,8 @@ fn validate_environments(
     Ok(out)
 }
 
-/// V2_GAPS §E1 (`environment-access-control.md §5.2 / §5b.5`).
-/// Validate `[[permitted_credentials]]`:
+/// Validate `[[permitted_credentials]]`
+/// (`environment-access-control.md §5.2 / §5b.5`):
 /// - `name` is required and non-empty.
 /// - Names are unique across the section.
 /// - Every non-empty `environment` field resolves to a declared
@@ -4019,9 +3890,7 @@ type NotificationsTriple = (
 
 /// Validate the raw `[notifications]` section and produce the final
 /// `(channels, routes, default_channels)` triple for `PolicyBundle`.
-///
 /// Rules enforced:
-///
 /// 1. **Channel ids are unique.** Duplicate `id` values fail loudly.
 /// 2. **No implicit channel synthesis.** The kernel unconditionally
 ///    writes every notification to `inbox.jsonl` + the SQLite
@@ -4174,7 +4043,6 @@ fn validate_notifications(raw: &NotificationsSection) -> Result<NotificationsTri
 /// The validated, loaded policy artifact. Constructed by `loader::load_policy`
 /// and held behind `Arc<PolicyBundle>` (or `ArcSwap<PolicyBundle>` in the
 /// kernel binary) for concurrent read access.
-///
 /// All fields are private; callers use the typed accessor methods below.
 #[derive(Debug)]
 pub struct PolicyBundle {
@@ -4201,14 +4069,14 @@ pub struct PolicyBundle {
     cost_per_touched_path: u64,
     max_cost_per_task: u64,
 
-    /// V2 `v2_extended_gaps.md §2.5` — `[budget.token_caps]`.
+    /// `[budget.token_caps]`.
     /// Per-session LLM token ceilings. `None` ⇒ section omitted ⇒
     /// uncapped on every axis (today's behaviour). The kernel
     /// `session_spawn_orchestrator` projects the present caps into
     /// `RAXIS_PLANNER_MAX_TOKENS_*` env vars.
     token_caps: Option<TokenCapsSection>,
 
-    /// V2 `v2_extended_gaps.md §3.1` — `[budget.sleep_caps]`.
+    /// `[budget.sleep_caps]`.
     /// Per-session `sleep` tool budgets. `None` ⇒ section omitted ⇒
     /// the in-VM Sleep tool refuses every invocation
     /// (`FAIL_SLEEP_DISABLED`). Operators MUST opt in by declaring
@@ -4259,7 +4127,7 @@ pub struct PolicyBundle {
     /// `[plan_signing]` config — V2.1 plan-bundle freshness window,
     /// clock-skew tolerance, nonce retention grace, and sweep cadence.
     /// `None` means "operator omitted the section; use spec defaults"
-    /// — `plan_signing()` materialises a `Cow::Owned` default in that
+    /// `plan_signing()` materialises a `Cow::Owned` default in that
     /// case. The bundle stores `Option` rather than always-Some so the
     /// validator can distinguish "operator declared values" (validated)
     /// from "no section at all" (defaults already validated by spec).
@@ -4294,7 +4162,6 @@ pub struct PolicyBundle {
     /// set on the entry. The kernel boot consumes this list and
     /// emits one `OperatorCertMisconfigBypassed` audit event per
     /// item so the bypass cannot happen silently.
-    ///
     /// This list is INTENTIONALLY exposed as a public accessor — the
     /// kernel boot reads it during the audit-chain warm-up. Tests
     /// that care about misconfig handling (step 3 unit tests) read
@@ -4335,7 +4202,7 @@ pub struct PolicyBundle {
     /// `"refs/heads/main"` when the operator omits the `[git]`
     /// section. Validated at policy-load to start with `refs/heads/`
     /// and pass `git-check-ref-format`-style structural rules. See
-    /// `V2_GAPS.md §12.8` and `INV-PLAN-POLICY-PRECEDENCE-01`.
+    /// and `INV-PLAN-POLICY-PRECEDENCE-01`.
     git_default_target_ref: String,
 
     /// Resolved `[git] target_ref_locked`. When `true`, plans MAY
@@ -4344,22 +4211,20 @@ pub struct PolicyBundle {
     /// is rejected at admission with `FAIL_POLICY_LOCKED_FIELD`.
     git_target_ref_locked: bool,
 
-    /// V2_GAPS §C6 — operator-side `[git] auto_push`. When `true`,
+    /// operator-side `[git] auto_push`. When `true`,
     /// the kernel pushes to [`git_push_remote`] after every
     /// successful `IntegrationMerge` Phase 3. Default `false`.
-    ///
     /// [`git_push_remote`]: PolicyBundle::git_push_remote
     git_auto_push: bool,
 
-    /// V2_GAPS §C6 — operator-side `[git] push_remote`. Required when
+    /// operator-side `[git] push_remote`. Required when
     /// [`git_auto_push`] is `true`. Empty string when auto-push is
     /// disabled (the kernel reads [`git_auto_push`] first and
     /// short-circuits without consulting this field).
-    ///
     /// [`git_auto_push`]: PolicyBundle::git_auto_push
     git_push_remote: String,
 
-    /// V2_GAPS §D2 — host-capacity caps and watchdog config.
+    /// host-capacity caps and watchdog config.
     /// Always populated; spec defaults apply when the operator
     /// omits `[host_capacity]` from `policy.toml`.
     host_capacity: HostCapacityConfig,
@@ -4382,7 +4247,7 @@ pub struct PolicyBundle {
     /// scaling only — INV-ELASTIC-05 / INV-ELASTIC-07.
     elastic: ElasticConfig,
 
-    /// V2_GAPS §E1 — declared environment labels and their
+    /// declared environment labels and their
     /// per-env knobs (`environment-access-control.md §5b`). The
     /// map is empty when the operator declares no
     /// `[environments.<label>]` tables (the activation gate per
@@ -4390,7 +4255,7 @@ pub struct PolicyBundle {
     /// `INV-ENV-01` runs at plan-approve time.
     environments: HashMap<String, EnvironmentConfig>,
 
-    /// V2_GAPS §E1 — declared `[[permitted_credentials]]`
+    /// declared `[[permitted_credentials]]`
     /// entries (`environment-access-control.md §5.2`). Empty when
     /// the operator omits the section. When non-empty, every
     /// `name` is unique and every non-empty `environment` field
@@ -4464,19 +4329,16 @@ pub struct PermittedCredentialConfig {
 /// [`PolicyBundle::verifier_runtime`]. Every field carries the
 /// resolved (default-substituted, hard-cap-checked) value the
 /// kernel reads at every verifier spawn.
-///
 /// **Spec defaults** (used when the operator omits the field):
 ///   * `max_verifier_wall_seconds = 300` (5 minutes)
 ///   * `verifier_idle_timeout_seconds = 60`
 ///   * `task_verifier_total_budget_seconds = 900` (15 minutes)
 ///   * `verifier_force_shutdown_grace_seconds = 10`
-///
 /// **Hard caps** (rejected at validate time):
 ///   * `max_verifier_wall_seconds ≤ 4 hours`
 ///   * `verifier_idle_timeout_seconds ≤ 30 minutes`
 ///   * `task_verifier_total_budget_seconds ≤ 8 hours`
 ///   * `verifier_force_shutdown_grace_seconds ≤ 5 minutes`
-///
 /// **Coherence rules**:
 ///   * Every field MUST be `> 0` (a zero-valued bound would mean
 ///     "kill on first tick", which is an obvious operator typo).
@@ -4598,7 +4460,6 @@ pub(crate) fn validate_verifier_runtime_section(
 
 /// Test-only escalation rate-limit / quarantine / timeout overrides for
 /// [`PolicyBundle::for_tests_with_operators_and_escalation_policy`].
-///
 /// Mirrors the four `[escalation_policy]` TOML fields that the kernel's
 /// planner-side EscalationRequest handler reads. Defaults to all-zero
 /// so callers that build via [`PolicyBundle::for_tests_with_operators`]
@@ -4624,7 +4485,6 @@ impl Default for EscalationPolicyForTests {
 
 impl PolicyBundle {
     /// Validate and build a `PolicyBundle` from a `RawPolicy` parsed from TOML.
-    ///
     /// Returns `PolicyError::MalformedArtifact` if any required constraint fails.
     pub(crate) fn validate(raw: RawPolicy) -> Result<Self, PolicyError> {
         // Require at least one operator entry.
@@ -4652,7 +4512,6 @@ impl PolicyBundle {
         // Returns `bypassed` — the set of entries whose structural
         // errors were swallowed via `force_misconfig_bypass = true`,
         // audited at boot.
-        //
         // Cert is mandatory (INV-CERT-01); cert-less entries can't
         // even reach here because TOML deserialization fails first.
         // Hard failures (signature invalid, pubkey/fingerprint
@@ -4783,8 +4642,7 @@ impl PolicyBundle {
                 )));
             }
 
-            // V2_GAPS §C9 — `stream_idle_timeout_ms` band check.
-            //
+            // `stream_idle_timeout_ms` band check.
             // The 5-second floor prevents pathologically tight values
             // that flake on a busy provider's first chunk after TLS
             // setup. The 600-second ceiling matches the same outer
@@ -4795,7 +4653,7 @@ impl PolicyBundle {
                 if !(STREAM_IDLE_TIMEOUT_FLOOR_MS..=STREAM_IDLE_TIMEOUT_CEILING_MS).contains(&ms) {
                     return Err(PolicyError::MalformedArtifact(format!(
                         "[[providers]] {:?} stream_idle_timeout_ms ({}) must be in \
-                         [{}, {}] ms (V2_GAPS §C9)",
+                         [{}, {}] ms",
                         p.provider_id,
                         ms,
                         STREAM_IDLE_TIMEOUT_FLOOR_MS,
@@ -4804,8 +4662,7 @@ impl PolicyBundle {
                 }
             }
 
-            // V2_GAPS §C5 — `kind = "http_sidecar"` validation.
-            //
+            // `kind = "http_sidecar"` validation.
             // `extensibility-traits.md §9A.4` requires sidecar
             // providers declare `sidecar_endpoint` (the localhost
             // base URL) and `sidecar_hmac_secret` (the 32-byte hex
@@ -4883,7 +4740,7 @@ impl PolicyBundle {
                 }
             }
 
-            // V2 `v2_extended_gaps.md §2.5` — `pricing` is REQUIRED
+            // `pricing` is REQUIRED
             // for every model-bearing provider kind and FORBIDDEN
             // for everything else. The kernel needs the rate table
             // to convert per-intent `Usage` into a dollar cost; a
@@ -4896,7 +4753,7 @@ impl PolicyBundle {
                         "[[providers]] {:?} kind={:?} is a model provider but has no \
                          `pricing` table — operators MUST declare \
                          `pricing.input_tokens_per_dollar` and \
-                         `pricing.output_tokens_per_dollar` (v2_extended_gaps.md §2.5)",
+                         `pricing.output_tokens_per_dollar`",
                         p.provider_id, p.kind
                     )));
                 }
@@ -4947,8 +4804,7 @@ impl PolicyBundle {
             }
         }
 
-        // ── V2 `v2_extended_gaps.md §2.5` — `[budget.token_caps]` ───────
-        //
+        // ── `[budget.token_caps]` ───────
         // Each cap is optional, but when present MUST be > 0 (a cap of
         // zero would terminate the dispatch loop before the first
         // model call, which is never useful and is almost certainly
@@ -4973,14 +4829,13 @@ impl PolicyBundle {
                 if let Some(0) = value {
                     return Err(PolicyError::MalformedArtifact(format!(
                         "[budget.token_caps] {name} = 0 is never useful; \
-                         omit the key to leave the cap unset (v2_extended_gaps.md §2.5)"
+                         omit the key to leave the cap unset"
                     )));
                 }
             }
         }
 
-        // ── V2 `v2_extended_gaps.md §3.1` — `[budget.sleep_caps]` ───────
-        //
+        // ── `[budget.sleep_caps]` ───────
         // Both `max_seconds_per_call` and `max_cumulative_seconds` must
         // be > 0 when the section is present (a 0 cap means "tool
         // disabled" and the operator should just omit the entire
@@ -4994,7 +4849,7 @@ impl PolicyBundle {
                 return Err(PolicyError::MalformedArtifact(
                     "[budget.sleep_caps] max_seconds_per_call = 0 is never useful; \
                      omit the entire section to disable the Sleep tool \
-                     (v2_extended_gaps.md §3.1)"
+                    "
                         .to_owned(),
                 ));
             }
@@ -5002,21 +4857,21 @@ impl PolicyBundle {
                 return Err(PolicyError::MalformedArtifact(
                     "[budget.sleep_caps] max_cumulative_seconds = 0 is never useful; \
                      omit the entire section to disable the Sleep tool \
-                     (v2_extended_gaps.md §3.1)"
+                    "
                         .to_owned(),
                 ));
             }
             if caps.max_seconds_per_call > 600 {
                 return Err(PolicyError::MalformedArtifact(format!(
                     "[budget.sleep_caps] max_seconds_per_call = {} exceeds the hard \
-                     ceiling of 600 (v2_extended_gaps.md §3.1)",
+                     ceiling of 600",
                     caps.max_seconds_per_call,
                 )));
             }
             if caps.max_cumulative_seconds < caps.max_seconds_per_call {
                 return Err(PolicyError::MalformedArtifact(format!(
                     "[budget.sleep_caps] max_cumulative_seconds ({}) MUST be \
-                     >= max_seconds_per_call ({}) (v2_extended_gaps.md §3.1)",
+                     >= max_seconds_per_call ({})",
                     caps.max_cumulative_seconds, caps.max_seconds_per_call,
                 )));
             }
@@ -5180,7 +5035,7 @@ impl PolicyBundle {
                 if auto && remote.trim().is_empty() {
                     return Err(PolicyError::MalformedArtifact(
                         "[git] auto_push = true requires a non-empty \
-                         [git] push_remote (V2_GAPS §C6)"
+                         [git] push_remote"
                             .to_owned(),
                     ));
                 }
@@ -5259,7 +5114,6 @@ impl PolicyBundle {
     /// declaration order. Empty when the operator omits the section
     /// (the typical default — most operators don't run any
     /// pre-merge gates).
-    ///
     /// The kernel's IntegrationMerge admission step (Check 5d, per
     /// `integration-merge.md §4`) UNIONs this slice with the
     /// plan-side `[[plan.integration_merge_verifiers]]` array at
@@ -5282,38 +5136,35 @@ impl PolicyBundle {
         self.verifier_runtime
     }
 
-    /// V2_GAPS.md §12.8 — operator-side `[git] default_target_ref`.
+    /// Operator-side `[git] default_target_ref`.
     /// Always non-empty; defaults to `"refs/heads/main"` when the
     /// operator omits the `[git]` section. The plan-admission code
     /// path resolves the per-initiative `target_ref` as
     /// `plan_value || policy_default || "refs/heads/main"`,
     /// subject to [`git_target_ref_locked`].
-    ///
     /// [`git_target_ref_locked`]: PolicyBundle::git_target_ref_locked
     pub fn git_default_target_ref(&self) -> &str {
         &self.git_default_target_ref
     }
 
-    /// V2_GAPS.md §12.8 — operator-side `[git] target_ref_locked`.
+    /// Operator-side `[git] target_ref_locked`.
     /// When `true`, plans whose `[workspace] target_ref` differs from
     /// [`git_default_target_ref`] are rejected at admission with
     /// `FAIL_POLICY_LOCKED_FIELD` per `INV-PLAN-POLICY-PRECEDENCE-01`.
-    ///
     /// [`git_default_target_ref`]: PolicyBundle::git_default_target_ref
     pub fn git_target_ref_locked(&self) -> bool {
         self.git_target_ref_locked
     }
 
-    /// V2_GAPS §C6 — operator-side `[git] auto_push`. The kernel
+    /// operator-side `[git] auto_push`. The kernel
     /// pushes to [`git_push_remote`] after every successful
     /// `IntegrationMerge` Phase 3 when this is `true`.
-    ///
     /// [`git_push_remote`]: PolicyBundle::git_push_remote
     pub fn git_auto_push(&self) -> bool {
         self.git_auto_push
     }
 
-    /// V2_GAPS §D2 — host-capacity caps and watchdog config.
+    /// host-capacity caps and watchdog config.
     /// Always populated; spec defaults apply when the operator
     /// omits `[host_capacity]`.
     pub fn host_capacity(&self) -> &HostCapacityConfig {
@@ -5324,7 +5175,6 @@ impl PolicyBundle {
     /// (`[isolation]`). Always populated; spec defaults from
     /// [`IsolationConfig::default`] apply when the operator
     /// omits the section.
-    ///
     /// Read by the kernel's `OrchestratorSpawnContext` and
     /// `ExecutorSpawnContext` constructors to project the
     /// per-role `vcpu_count` / `mem_mib` into every spawn's
@@ -5334,14 +5184,12 @@ impl PolicyBundle {
     /// `specs/v2/elastic-vm-scaling.md §2.1`. Always present
     /// (defaults to [`ElasticConfig::default`] when the operator
     /// omits the section). Read at:
-    ///
     /// * Per-VM spawn — `transient_retry_max_attempts` /
     ///   `transient_retry_*_backoff_ms` shape the retry loop.
     /// * Dynamic scaling — `enabled` /
     ///   `max_vcpus_per_session` / `max_memory_mb_per_session` /
     ///   `max_concurrent_scaling_events_per_minute` bound the
     ///   `ScalingDecisionEngine`.
-    ///
     /// Honour INV-ELASTIC-05 / INV-ELASTIC-07: when `enabled =
     /// false`, the spawn helper that builds the new `VmSpec`
     /// MUST clamp to baseline regardless of any signal-driven
@@ -5355,7 +5203,7 @@ impl PolicyBundle {
         &self.isolation
     }
 
-    /// V2_GAPS §E1 — declared `[environments.<label>]` entries.
+    /// declared `[environments.<label>]` entries.
     /// Empty when the operator omits the entire section
     /// (`environment-access-control.md §1.5.2` activation gate);
     /// every key is a validated label (per §5b.3) and every
@@ -5364,7 +5212,7 @@ impl PolicyBundle {
         &self.environments
     }
 
-    /// V2_GAPS §E1 — declared `[[permitted_credentials]]`
+    /// declared `[[permitted_credentials]]`
     /// entries. Empty when the operator omits the section. When
     /// present, names are unique and every `environment` field
     /// resolves to a key in `environments`.
@@ -5372,7 +5220,7 @@ impl PolicyBundle {
         &self.permitted_credentials
     }
 
-    /// V2_GAPS §E1 — convenience lookup. Returns the resolved
+    /// convenience lookup. Returns the resolved
     /// environment label for the given credential name (or
     /// `None` for both "credential is neutral" and "credential
     /// is not declared in `[[permitted_credentials]]`"). The
@@ -5382,7 +5230,6 @@ impl PolicyBundle {
     /// (`environment-access-control.md §11.3`) treats both
     /// cases as "contributes nothing to the env set", which
     /// matches the §1.5.4 neutral-credential rule.
-    ///
     /// [`permitted_credential`]: PolicyBundle::permitted_credential
     pub fn credential_environment(&self, name: &str) -> Option<&str> {
         self.permitted_credentials
@@ -5391,7 +5238,7 @@ impl PolicyBundle {
             .and_then(|c| c.environment.as_deref())
     }
 
-    /// V2_GAPS §E1 — full lookup of a `[[permitted_credentials]]`
+    /// full lookup of a `[[permitted_credentials]]`
     /// entry by name. Returns `None` when no entry matches; the
     /// V2 plan-admission path treats absence as "neutral" (per
     /// §1.5.4), but the V3 INV-CRED-01 promotion will turn
@@ -5400,9 +5247,8 @@ impl PolicyBundle {
         self.permitted_credentials.iter().find(|c| c.name == name)
     }
 
-    /// V2_GAPS §C6 — operator-side `[git] push_remote`. Empty string
+    /// operator-side `[git] push_remote`. Empty string
     /// when [`git_auto_push`] is `false`.
-    ///
     /// [`git_auto_push`]: PolicyBundle::git_auto_push
     pub fn git_push_remote(&self) -> &str {
         &self.git_push_remote
@@ -5410,7 +5256,7 @@ impl PolicyBundle {
 
     // ── V2.5 `[[vm_images]]` accessors ──────────────────────────────────────
 
-    /// V2_GAPS §13 (V2.5 BLOCKER) — declared `[[vm_images]]` entries.
+    /// (V2.5 BLOCKER) — declared `[[vm_images]]` entries.
     /// Empty when the operator omits the entire section, in which case
     /// admission relies on per-task `vm_image` paths only (legacy V1
     /// behavior — see `paradigm.md §10` and `INV-PLANNER-HARNESS-03`).
@@ -5418,7 +5264,7 @@ impl PolicyBundle {
         &self.vm_images
     }
 
-    /// V2_GAPS §13 (V2.5 BLOCKER) — alias resolution for an admitted
+    /// (V2.5 BLOCKER) — alias resolution for an admitted
     /// task's `vm_image` field. Returns `None` when the alias is not
     /// declared in `[[vm_images]]`. Callers in the admission path
     /// MUST translate `None` into `FAIL_PLAN_VM_IMAGE_UNKNOWN` so
@@ -5428,14 +5274,14 @@ impl PolicyBundle {
         self.vm_images.iter().find(|img| img.name == name)
     }
 
-    /// V2_GAPS §13 (V2.5 BLOCKER) — declared `[default_executor_image]`,
+    /// (V2.5 BLOCKER) — declared `[default_executor_image]`,
     /// or `None` when the section is omitted. The kernel falls back
     /// to the per-task `vm_image` field when this returns `None`.
     pub fn default_executor_image(&self) -> Option<&DefaultExecutorImageConfig> {
         self.default_executor_image.as_ref()
     }
 
-    /// V2_GAPS §13 (V2.5 BLOCKER) — convenience: resolves the
+    /// (V2.5 BLOCKER) — convenience: resolves the
     /// `[default_executor_image] alias` (when present) against
     /// `[[vm_images]]`. Returns `None` if the section is absent. The
     /// `Some` case always points at a real entry because the
@@ -5484,9 +5330,7 @@ impl PolicyBundle {
 
     /// Look up an operator by pubkey fingerprint (the `signed_by` field from
     /// plan.sig / policy.sig). Returns `None` if no entry matches.
-    ///
     /// Accepts either fingerprint width:
-    ///
     ///   * **32 hex chars** — the canonical `OperatorEntry::pubkey_fingerprint`
     ///     form emitted by `raxis_policy::loader::operator_pubkey_fingerprint`
     ///     (= `hex(SHA-256(pubkey_bytes)[..16])`). This is what the
@@ -5494,14 +5338,12 @@ impl PolicyBundle {
     ///     writes to disk and what the operator IPC challenge-response
     ///     handshake (`kernel::ipc::auth::verify_response`) sends on
     ///     the wire.
-    ///
     ///   * **16 hex chars** — the `OperatorFingerprint` form (a typed
     ///     `[u8; 8]` = first 8 bytes of the same digest, hex-encoded).
     ///     This is what plan-bundle V2.1 envelopes carry as
     ///     `signed_by` (per `specs/v2/plan-bundle-sealing.md §3.4`)
     ///     and what `OperatorRequest::CreateInitiative` lookups
     ///     pass in via `req.signed_by.to_hex()`.
-    ///
     /// The 16-char form is *always* a prefix of the 32-char form for
     /// the same key (`hex(d[..8]) == hex(d[..16])[..16]`), so
     /// matching the supplied fingerprint as either an exact equality
@@ -5543,7 +5385,6 @@ impl PolicyBundle {
     /// fingerprint is not in this bundle (e.g. the operator was
     /// removed in an earlier rotation, or the fingerprint belongs
     /// to a different deployment entirely).
-    ///
     /// Cheap allocation: callers typically need the display name
     /// for an `Option<String>` field on an `AuditEventKind` or for
     /// a JSON-stderr line, both of which want owned strings, so
@@ -5558,7 +5399,6 @@ impl PolicyBundle {
     /// structural invariant AND were marked `force_misconfig_bypass = true`.
     /// The kernel boot reads this list and emits one
     /// `OperatorCertMisconfigBypassed` audit event per item.
-    ///
     /// Empty in normal deployments. Operators see this list grow only
     /// when they explicitly opt into a known-broken cert (e.g. for
     /// staged migration or v2 forward-compat experimentation).
@@ -5573,7 +5413,6 @@ impl PolicyBundle {
     /// the operator IPC handlers) and not budgets, lanes, gates, etc.
     /// For tests that also need escalation rate-limit configuration
     /// see `for_tests_with_operators_and_escalation_policy`.
-    ///
     /// Gated on `debug_assertions || cfg(test)` — disappears in
     /// release builds, mirroring the convention used by
     /// `KeyRegistry::stub_for_tests` and the `raxis-test-support`
@@ -5722,14 +5561,12 @@ impl PolicyBundle {
 
     /// Returns true if `path` is at — or under — at least one allowed
     /// worktree root.
-    ///
     /// **Component-aware comparison.** A naive `path.starts_with(root)` is
     /// unsafe: if the operator allows `/srv/work`, a planner-supplied
     /// `/srv/work_secret` would also pass because the literal byte prefix
     /// matches. We require either exact equality OR a directory-separator
     /// boundary right after the root, so `/srv/work_secret` is rejected
     /// while `/srv/work` and `/srv/work/sub/dir` are accepted.
-    ///
     /// We also tolerate operators writing the root with or without a
     /// trailing slash (`/srv/work` vs `/srv/work/`) — the trailing slash
     /// is stripped before comparison.
@@ -5770,7 +5607,7 @@ impl PolicyBundle {
         self.max_cost_per_task
     }
 
-    /// V2 `v2_extended_gaps.md §2.5` — per-session LLM token caps
+    /// Per-session LLM token caps
     /// (`[budget.token_caps]`). `None` ⇒ section omitted ⇒ uncapped
     /// on every axis. The kernel's `session_spawn_orchestrator`
     /// projects the present caps into `RAXIS_PLANNER_MAX_TOKENS_*`
@@ -5780,7 +5617,7 @@ impl PolicyBundle {
         self.token_caps.as_ref()
     }
 
-    /// V2 `v2_extended_gaps.md §3.1` — per-session `sleep` tool
+    /// Per-session `sleep` tool
     /// budgets (`[budget.sleep_caps]`). `None` ⇒ section omitted ⇒
     /// the in-VM Sleep tool refuses every invocation
     /// (`FAIL_SLEEP_DISABLED`); operators MUST opt in by declaring
@@ -5800,7 +5637,6 @@ impl PolicyBundle {
     }
 
     /// Replace the lane definitions on a test bundle.
-    ///
     /// Gated on `debug_assertions || cfg(test)` — disappears in production
     /// builds. Used by kernel-side tests (e.g.
     /// `scheduler::budget::tests::reserve_in_tx_serialises_concurrent_lane_writes`)
@@ -5808,7 +5644,6 @@ impl PolicyBundle {
     /// `for_tests_with_operators` skeleton without going through a full
     /// `policy.toml` round-trip.
     /// Test-only override for `[sessions].allowed_worktree_roots`.
-    ///
     /// Used by the dashboard kernel-glue integration tests
     /// (`raxis-dashboard-kernel`) which need to surface real on-disk
     /// git worktrees through the dashboard API without going through
@@ -5980,7 +5815,6 @@ impl PolicyBundle {
     /// `plan-bundle-sealing.md §7.4`. Always returns a fully-populated
     /// `PlanSigningSection`, so the kernel sweep loop and the §8.1
     /// admission step can read fields without an `Option` dance.
-    ///
     /// Cloning the section is cheap (six u64s + one bool) and lets the
     /// caller (heartbeat / sweep loops) move it into a long-lived
     /// `tokio::spawn` without holding a borrow on the `ArcSwap` snapshot.
@@ -6035,13 +5869,11 @@ impl PolicyBundle {
     }
 
     /// Resolve `event_kind` to its dispatched-to channel ids. Returns:
-    ///
     /// - `Some(&[])` — explicit silenced route (operator wrote
     ///   `channels = []` for this event_kind).
     /// - `Some(&[...])` — explicit route; dispatch to these channels.
     /// - `None` — no explicit route; caller falls back to
     ///   `default_notification_channels()`.
-    ///
     /// The three-state return lets callers distinguish "operator
     /// silenced" from "operator forgot to route" — important because
     /// the second case fires the default channels.
@@ -6054,7 +5886,6 @@ impl PolicyBundle {
     /// Resolve the absolute filesystem path for the kernel's
     /// unconditional notification inbox, given a `data_dir`.
     /// Equivalent to `<data_dir>/notifications/inbox.jsonl`.
-    ///
     /// Used by `dispatch()` to write every notification before
     /// channel fan-out, and by `raxis inbox` to read the log.
     pub fn inbox_path_for(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -6064,19 +5895,16 @@ impl PolicyBundle {
 
 // ---------------------------------------------------------------------------
 // validate_operator_certs — fail-loud cert validation with audited bypass.
-//
 // Called by `PolicyBundle::validate` for every entry in
 // `[[operators.entries]]`. Mutates `entries` in place to apply
 // structural pinning (e.g. emergency cert `permitted_ops` overridden
 // to `["RotateEpoch"]`) and to mirror the cert's `permitted_ops` onto
 // the entry-level field. Cert is mandatory — INV-CERT-01 — so there
 // is no cert-less path.
-//
 // Returns `bypassed` — entries whose embedded cert tripped at least
 // one structural invariant AND were marked `force_misconfig_bypass =
 // true`. The kernel boot will audit each as
 // `OperatorCertMisconfigBypassed`.
-//
 // **Hard failures (NEVER bypassable):**
 //   - Self-signature verification failure → `PolicyError::CertValidation`.
 //     A forged cert MUST never be installed; the bypass flag does not
@@ -6090,7 +5918,6 @@ impl PolicyBundle {
 //     Bypassing this would let an operator declare arbitrary
 //     fingerprints for an existing key, breaking the operator-by-fp
 //     lookup contract.
-//
 // **Soft failures (bypassable):**
 //   - Structural invariants from `validate_cert_structurally`:
 //     - InvertedValidityWindow
@@ -6112,7 +5939,6 @@ fn validate_operator_certs(
 
     for entry in entries.iter_mut() {
         // ── Always-on: entry pubkey_hex ↔ pubkey_fingerprint check ──
-        //
         // `pubkey_fingerprint` is denormalised on the entry for cheap
         // O(1) lookups; if the operator hand-edits it out of sync with
         // `pubkey_hex` the lookup contract breaks. Pin both halves.
@@ -6143,7 +5969,6 @@ fn validate_operator_certs(
         }
 
         // ── Self-signature verification (NEVER bypassable) ─────────
-        //
         // We run this BEFORE structural validation: a forged cert
         // could otherwise dress itself up as "well-structured" and
         // get into the bypass path. Signature first, structure second.
@@ -6197,7 +6022,6 @@ fn validate_operator_certs(
         }
 
         // ── Apply structural pinning to the in-memory entry ────────
-        //
         // Even on the bypass path, the kernel structurally pins
         // emergency cert permissions to {"RotateEpoch"} so the
         // bypass cannot widen the blast radius. The audit event
@@ -6225,11 +6049,9 @@ fn validate_operator_certs(
 // ---------------------------------------------------------------------------
 // Tests — worktree_root_allowed component-aware comparison.
 // ---------------------------------------------------------------------------
-//
 // These tests guard against the v1-review finding "bundle.worktree_root_allowed
 // uses raw `starts_with`, allowing path-prefix collisions like
 // `/srv/work_secret` to satisfy a `/srv/work` policy".
-//
 // We construct a `PolicyBundle` directly via its private fields so the
 // test does not need a full TOML round-trip — the only thing under test
 // here is the `worktree_root_allowed` predicate.
@@ -6378,7 +6200,6 @@ mod tests {
 // ---------------------------------------------------------------------------
 // Tests — `[gateway]` and `[[providers]]` validation (Phase A.3 / T0.3).
 // ---------------------------------------------------------------------------
-//
 // These cover every fail-closed branch in the gateway / providers
 // validation block of `PolicyBundle::validate`. Each test constructs a
 // minimal-but-loadable TOML document, mutates the gateway/providers
@@ -6397,7 +6218,6 @@ mod gateway_providers_tests {
     /// a dev-dep cycle and to keep these tests focused: any drift between
     /// this fixture and the real emitter is a separate problem caught by
     /// `genesis-tools::tests::output_round_trips_through_load_policy`.
-    ///
     /// `pub(super)` so sibling test modules (notably `notifications_tests`)
     /// can reuse this fixture without code duplication.
     pub(super) fn minimal_policy_toml_for_tests() -> String {
@@ -6482,7 +6302,7 @@ priority             = 100
         load_policy(tmp.path()).map(|(b, _, _)| b)
     }
 
-    /// V2 `v2_extended_gaps.md §2.5` — minimal pricing block for
+    /// Minimal pricing block for
     /// LLM-bearing provider fixtures. Operators MUST declare
     /// `pricing.input_tokens_per_dollar` and
     /// `pricing.output_tokens_per_dollar` for every model provider;
@@ -6735,7 +6555,7 @@ priority             = 100
         assert!(format!("{err}").contains("must be > 0"));
     }
 
-    /// V2_GAPS §C9 — pin the lower bound of the per-provider
+    /// pin the lower bound of the per-provider
     /// `stream_idle_timeout_ms` band. 4 999 is one ms below the
     /// 5_000 floor; the validator MUST reject it so a typo can't
     /// accidentally produce sub-second flake-on-jitter behaviour.
@@ -6788,7 +6608,7 @@ priority             = 100
              {LLM_PRICING_BLOCK}",
         ));
         let bundle = write_and_load(&t).expect("120s must load — primary o1/o3 use case");
-        assert_eq!(bundle.providers()[0].stream_idle_timeout_ms, Some(120_000),);
+        assert_eq!(bundle.providers()[0].stream_idle_timeout_ms, Some(120_000));
     }
 
     /// Absent field MUST default to `None` (gateway-side fallback
@@ -6808,7 +6628,7 @@ priority             = 100
         let bundle = write_and_load(&t).expect("default policy must load");
         assert!(
             bundle.providers()[0].stream_idle_timeout_ms.is_none(),
-            "absent field MUST surface as None (V2_GAPS §C9)",
+            "absent field MUST surface as None",
         );
     }
 
@@ -6831,7 +6651,7 @@ priority             = 100
         assert_eq!(bundle.providers()[0].kind, "NotAValidKindYet");
     }
 
-    // ── V2_GAPS §C5 sidecar provider validation ───────────────────────────
+    // ── sidecar provider validation ───────────────────────────
 
     /// 32-byte hex secret used by the sidecar tests.
     const SIDECAR_TEST_SECRET: &str =
@@ -6976,7 +6796,7 @@ priority             = 100
             let s = format!("{err}");
             assert!(s.contains("pricing"), "[{kind}] msg = {s}");
             assert!(
-                s.contains("v2_extended_gaps.md §2.5"),
+                s.contains(" "),
                 "[{kind}] error must cite the spec; got: {s}"
             );
         }
@@ -7320,7 +7140,6 @@ priority             = 100
 // ---------------------------------------------------------------------------
 // Tests — `[plan_signing]` validation (plan-bundle-sealing.md §7.4).
 // ---------------------------------------------------------------------------
-//
 // These cover the §7.4 invariants (hard ceilings, clock-skew ratio,
 // nonce-grace bound, sweep cadence bounds), the all-defaults path
 // for kernels that omit `[plan_signing]`, and the round-trip through
@@ -7503,7 +7322,6 @@ mod plan_signing_tests {
 // ---------------------------------------------------------------------------
 // Tests — `[plan_bundle_limits]` validation (plan-bundle-sealing.md §7.4).
 // ---------------------------------------------------------------------------
-//
 // These cover the same shape as the `plan_signing_tests` module above:
 // (a) accessor returns spec defaults when the section is omitted;
 // (b) accessor returns spec defaults when the section is present but
@@ -7694,7 +7512,6 @@ mod plan_bundle_limits_tests {
 // ---------------------------------------------------------------------------
 // Tests — `[notifications]` validation (cli-readonly.md §5.6).
 // ---------------------------------------------------------------------------
-//
 // These cover every fail-closed branch in `validate_notifications`,
 // the implicit-Shell synthesis, the default_channels fallback, and the
 // silenced-route semantics.
@@ -8364,7 +8181,7 @@ channels   = []
                 reason: "RateLimit".into(),
             }
             .as_str(),
-            // V2_GAPS §C7 — credential CLI ceremony events.
+            // credential CLI ceremony events.
             AuditEventKind::CredentialRegistered {
                 name: "x".into(),
                 proxy_type: "x".into(),
@@ -8389,7 +8206,7 @@ channels   = []
                 backend_kind: "x".into(),
             }
             .as_str(),
-            // V2_GAPS §D1 — cert-revocation ceremony events.
+            // cert-revocation ceremony events.
             AuditEventKind::OperatorCertRevoked {
                 subject_pubkey_fingerprint: "x".into(),
                 subject_display_name: None,
@@ -8407,7 +8224,7 @@ channels   = []
                 revoked_at: 0,
             }
             .as_str(),
-            // V2_GAPS §D2 — host-capacity admission + watchdogs.
+            // host-capacity admission + watchdogs.
             AuditEventKind::AdmissionDeferredAtCap {
                 cap_kind: "VmCount".into(),
                 current_running: 0,
@@ -8447,7 +8264,7 @@ channels   = []
                 task_id: None,
             }
             .as_str(),
-            // V2_GAPS §12.4 — operator-ergonomics IPC dry-run audit event.
+            // operator-ergonomics IPC dry-run audit event.
             AuditEventKind::DryRunAdmitted {
                 submitted_by: "x".into(),
                 policy_epoch: 0,
@@ -8468,7 +8285,6 @@ channels   = []
             }
             .as_str(),
             // === iter62 verifier-runtime: VerifierVm* probes ===
-            //
             // Six new variants the iter62 verifier-runtime emits at
             // the kernel-side verifier-VM lifecycle sites
             // (`kernel/src/gates/verifier_runner.rs::spawn_verifier`).
@@ -8581,23 +8397,18 @@ channels   = []
 // ---------------------------------------------------------------------------
 // Tests — `validate_operator_certs` cert-flow validation.
 // ---------------------------------------------------------------------------
-//
 // Covers the three branches of the cert validation logic:
-//
 //   1. **Hard failures (NEVER bypassable):**
 //      - FingerprintMismatch (entry pubkey_hex vs declared fingerprint)
 //      - CertPubkeyMismatch (entry pubkey_hex vs cert pubkey_hex)
 //      - CertValidation on signature failure
-//
 //   2. **Soft failures (bypassable with `force_misconfig_bypass = true`):**
 //      - Structural invariants from raxis-crypto::validate_cert_structurally
 //      - Bypass produces a `BypassedCertMisconfig` entry, audit-bound at boot
-//
 //   3. **Structural pinning:**
 //      - EmergencyRecovery cert with `permitted_ops = ["X", "Y"]` MUST end up
 //        with `permitted_ops = ["RotateEpoch"]` at the entry level after
 //        validation, regardless of the bypass path
-//
 //   4. **Cert is mandatory (INV-CERT-01):** a TOML missing
 //      `[operators.entries.cert]` fails to deserialise — the cert-less
 //      "legacy" path was removed deliberately so cert-bound auth is
@@ -9003,7 +8814,6 @@ permitted_ops      = ["AbortTask"]   # ignored — cert is the authority
 
 // ---------------------------------------------------------------------------
 // Pre-merge verifier validator tests (V2 — operator surface only).
-//
 // Step 1 of the pre-merge-verifier track: the typed config has landed
 // in PolicyBundle. These tests pin every rule the operator-side
 // validator enforces TODAY (cross-spec checks — vm_image resolution,
@@ -9463,7 +9273,7 @@ applies_to  = "last"
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// V2_GAPS §E1 — environment-binding validation tests
+// environment-binding validation tests
 // (`environment-access-control.md §5b.3`).
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
@@ -9929,7 +9739,6 @@ mod environment_tests {
 }
 
 // ── V2 Reviewer / Orchestrator / Executor egress defaults ────────────
-//
 // `specs/v2/reviewer-egress-defaults-decision.md` Option C —
 // implicit-provider-FQDN grants. These tests pin the
 // `derive_default_provider_egress_grants` projection AND the

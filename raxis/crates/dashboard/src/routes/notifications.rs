@@ -40,7 +40,7 @@ fn default_limit() -> u32 {
 ///
 /// Audit discipline: pure read-only browse. The
 /// `OperatorViewedNotifications` emission was retired in
-/// `worker/audit-tightening` per the signal-vs-noise policy in
+/// an earlier audit-noise sweep per the signal-vs-noise policy in
 /// `specs/v2/dashboard-operator-action-audit-coverage.md`. The
 /// state-mutating mark-read and mark-all-read endpoints below
 /// continue to emit `OperatorNotificationMarkedRead` /

@@ -5,7 +5,7 @@
 #   - verifier-processes.md §6 (witness body shape)
 #   - INV-VERIFIER-12 (reserved alias `raxis-verifier-symbol-index`)
 #   - INV-VERIFIER-CANONICAL-SYMBOL-INDEX-DIGEST-PINNED-01 (D11)
-#   - V2_GAPS.md A8 (verifier runtime — shipped, iter62)
+#   - A8 (verifier runtime — shipped, iter62)
 #
 # Shape
 # ─────
@@ -79,7 +79,7 @@ RUN rm -f \
 
 # raxis-verifier (PID 1) overlaid by the bake step at
 # /usr/bin/raxis-verifier. Cf. `images/verifier-starter/Containerfile`
-# — same overlay shape, smaller surface. The kernel-canonical posture
+# same overlay shape, smaller surface. The kernel-canonical posture
 # is enforced at the trust-anchor layer
 # (`crates/canonical-images::CanonicalImageKind::VerifierSymbolIndex`)
 # rather than by anything in this Containerfile.

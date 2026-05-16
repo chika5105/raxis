@@ -132,6 +132,14 @@ pub struct ReconciliationReport {
     /// fuel). One entry per row touched by the bulk UPDATE, including
     /// rows that were already `BlockedRecoveryPending`.
     pub swept_tasks_detail: Vec<SweptTaskRecord>,
+    /// Non-empty when the sweep aborted on a SQLite / transaction
+    /// failure (BEGIN, prepare, execute, or COMMIT). The boot
+    /// driver in [`reconcile`] folds any non-empty `failures` into
+    /// [`KernelError::RecoverySweepFailed`] so the kernel refuses
+    /// to bind IPC with a half-reconciled task graph (BOOT_ERR_19,
+    /// §2.2). Strings are pre-formatted with the action that
+    /// failed so the operator sees what sub-step blew up.
+    pub failures: Vec<String>,
 }
 
 /// A lightweight report from reconcile_integration_merge_attempts.
@@ -141,6 +149,8 @@ pub struct IntegrationMergeReconciliationReport {
     /// `PreMergeVerifiersPassed` to `DiscardedCrashRecovery`
     /// (`integration-merge.md §11.10.4`).
     pub folded_attempts: usize,
+    /// See [`ReconciliationReport::failures`].
+    pub failures: Vec<String>,
 }
 
 /// Report from [`reconcile_orphan_lane_reservations`]. The single
@@ -155,6 +165,8 @@ pub struct OrphanLaneReservationReport {
     /// in-tx INV-STORE-02 paired write missed its DELETE before
     /// the previous kernel exited.
     pub freed: usize,
+    /// See [`ReconciliationReport::failures`].
+    pub failures: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -182,9 +194,18 @@ pub struct OrphanLaneReservationReport {
 /// `GitStateInconsistent`) and this entry point does not have an
 /// `AuditSink` available yet.
 ///
-/// Returns ReconciliationResult on success. Propagates KernelError on
-/// audit chain failure (step 1 only; task sweep failures are non-fatal and
-/// logged).
+/// Returns `ReconciliationResult` on success. Propagates
+/// `KernelError::AuditChainBroken` on audit chain corruption (step
+/// 1). Propagates `KernelError::RecoverySweepFailed` if any of the
+/// three SQLite sweeps (`reconcile_tasks`,
+/// `reconcile_integration_merge_attempts`,
+/// `reconcile_orphan_lane_reservations`) returned a transaction-
+/// level error: the kernel must not bind IPC with a half-
+/// reconciled in-flight task graph because the scheduler would
+/// see inconsistent state on the very next admission decision.
+/// All three sweeps run before the error is folded so the
+/// operator sees every failing sub-step in one boot log, not just
+/// the first.
 pub fn reconcile(store: &Store, audit_dir: &Path) -> Result<ReconciliationResult, KernelError> {
     let chain_ok = verify_audit_chain(audit_dir)?;
 
@@ -215,6 +236,16 @@ pub fn reconcile(store: &Store, audit_dir: &Path) -> Result<ReconciliationResult
         lane_res_report.freed,
         chain_ok,
     );
+
+    let mut all_failures: Vec<String> = Vec::new();
+    all_failures.extend(task_report.failures.iter().cloned());
+    all_failures.extend(imerge_report.failures.iter().cloned());
+    all_failures.extend(lane_res_report.failures.iter().cloned());
+    if !all_failures.is_empty() {
+        return Err(KernelError::RecoverySweepFailed {
+            reason: all_failures.join("; "),
+        });
+    }
 
     Ok(ReconciliationResult {
         swept_tasks: task_report.swept_tasks,
@@ -370,9 +401,11 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
     let tx = match conn.transaction() {
         Ok(t) => t,
         Err(e) => {
+            let msg = format!("reconcile_tasks: BEGIN transaction failed: {e}");
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"recovery\",\"message\":\"cannot BEGIN reconcile transaction\",\"error\":\"{e}\"}}",
             );
+            report.failures.push(msg);
             return report;
         }
     };
@@ -399,9 +432,11 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
         )) {
             Ok(s) => s,
             Err(e) => {
+                let msg = format!("reconcile_tasks: prepare pre-sweep SELECT failed: {e}");
                 eprintln!(
                     "{{\"level\":\"error\",\"step\":\"recovery\",\"action\":\"prepare_pre_sweep_select_failed\",\"error\":\"{e}\"}}",
                 );
+                report.failures.push(msg);
                 return report;
             }
         };
@@ -414,9 +449,11 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
         }) {
             Ok(rows) => rows,
             Err(e) => {
+                let msg = format!("reconcile_tasks: pre-sweep SELECT execute failed: {e}");
                 eprintln!(
                     "{{\"level\":\"error\",\"step\":\"recovery\",\"action\":\"pre_sweep_select_failed\",\"error\":\"{e}\"}}",
                 );
+                report.failures.push(msg);
                 return report;
             }
         };
@@ -425,9 +462,11 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
             match row {
                 Ok(rec) => out.push(rec),
                 Err(e) => {
+                    let msg = format!("reconcile_tasks: pre-sweep row decode failed: {e}");
                     eprintln!(
                         "{{\"level\":\"error\",\"step\":\"recovery\",\"action\":\"pre_sweep_row_decode_failed\",\"error\":\"{e}\"}}",
                     );
+                    report.failures.push(msg);
                     return report;
                 }
             }
@@ -475,10 +514,12 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
     ) {
         Ok(rows) => rows,
         Err(e) => {
+            let msg = format!("reconcile_tasks: bulk sweep UPDATE failed: {e}");
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"recovery\",\"action\":\"bulk_sweep_failed\",\"error\":\"{e}\"}}",
             );
             // Tx drop → rollback. Report stays at 0/0.
+            report.failures.push(msg);
             return report;
         }
     };
@@ -498,17 +539,21 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
     ) {
         Ok(rows) => rows,
         Err(e) => {
+            let msg = format!("reconcile_tasks: bulk verifier-token expire UPDATE failed: {e}");
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"recovery\",\"action\":\"bulk_expire_failed\",\"error\":\"{e}\"}}",
             );
+            report.failures.push(msg);
             return report;
         }
     };
 
     if let Err(e) = tx.commit() {
+        let msg = format!("reconcile_tasks: COMMIT failed: {e}");
         eprintln!(
             "{{\"level\":\"error\",\"step\":\"recovery\",\"action\":\"commit_failed\",\"error\":\"{e}\"}}",
         );
+        report.failures.push(msg);
         return report;
     }
 
@@ -731,20 +776,68 @@ pub fn reconcile_after_supervisor_restart(
             store,
         );
 
-        if let Ok(rec) = &transition_outcome {
-            crate::initiatives::task_transitions::emit_task_state_changed_audit(audit, rec, None);
-        }
+        let transition_rec = match transition_outcome {
+            Ok(rec) => rec,
+            Err(e) => {
+                let reason = e.to_string();
+                eprintln!(
+                    "{{\"level\":\"warn\",\"step\":\"supervisor_auto_resume\",\
+                     \"action\":\"transition_failed\",\"task_id\":{},\
+                     \"prior_state\":\"{}\",\"reason\":{}}}",
+                    serde_json::to_string(&record.task_id)
+                        .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                    record.prior_state,
+                    serde_json::to_string(&reason)
+                        .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                );
+                report.transition_failed += 1;
+                report
+                    .outcomes
+                    .push(AutoResumeOutcome::SkippedTransitionFailed {
+                        task_id: record.task_id.clone(),
+                        initiative_id: record.initiative_id.clone(),
+                        reason,
+                    });
+                continue;
+            }
+        };
 
-        if let Err(e) = transition_outcome {
-            let reason = e.to_string();
+        // INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01 — emit the
+        // generic `TaskStateChanged` paired-write for the resumed
+        // transition. Unlike the rest of the kernel where this
+        // helper is best-effort (the dashboard recovers from a
+        // missed push on its next subscribe), the auto-resume
+        // sweep is the ONLY surface that observes these transitions
+        // — there is no operator IPC frame to mirror, no follow-up
+        // handler that re-emits. If we lose the `TaskStateChanged`
+        // event here the dashboard will surface the task as
+        // permanently `BlockedRecoveryPending` even though the FSM
+        // has already advanced to `Admitted`. Inline the emit + Err
+        // handling so a chain-write failure downgrades this task
+        // to `transition_failed` rather than silently appearing as
+        // resumed.
+        if let Err(e) = audit.emit(
+            AuditEventKind::TaskStateChanged {
+                task_id: transition_rec.task_id.clone(),
+                from_state: transition_rec.from_state.as_sql_str().to_owned(),
+                to_state: transition_rec.to_state.as_sql_str().to_owned(),
+                actor: transition_rec.actor.as_audit_string(),
+                policy_epoch: transition_rec.policy_epoch,
+            },
+            None,
+            Some(transition_rec.task_id.as_str()),
+            Some(transition_rec.initiative_id.as_str()),
+        ) {
+            let reason = format!(
+                "TaskStateChanged audit emit failed after FSM advance: {e}"
+            );
             eprintln!(
-                "{{\"level\":\"warn\",\"step\":\"supervisor_auto_resume\",\
-                 \"action\":\"transition_failed\",\"task_id\":{},\
-                 \"prior_state\":\"{}\",\"reason\":{}}}",
+                "{{\"level\":\"error\",\"step\":\"supervisor_auto_resume\",\
+                 \"event\":\"TaskStateChanged\",\"audit_emit_failed\":\"{e}\",\
+                 \"task_id\":{},\"initiative_id\":{}}}",
                 serde_json::to_string(&record.task_id)
                     .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
-                record.prior_state,
-                serde_json::to_string(&reason)
+                serde_json::to_string(&record.initiative_id)
                     .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
             );
             report.transition_failed += 1;
@@ -901,10 +994,14 @@ fn reconcile_integration_merge_attempts(store: &Store) -> IntegrationMergeReconc
     let tx = match conn.transaction() {
         Ok(t) => t,
         Err(e) => {
+            let msg = format!(
+                "reconcile_integration_merge_attempts: BEGIN transaction failed: {e}"
+            );
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"recovery\",\
                  \"action\":\"begin_imerge_tx_failed\",\"error\":\"{e}\"}}",
             );
+            report.failures.push(msg);
             return report;
         }
     };
@@ -926,19 +1023,25 @@ fn reconcile_integration_merge_attempts(store: &Store) -> IntegrationMergeReconc
     ) {
         Ok(rows) => rows,
         Err(e) => {
+            let msg = format!(
+                "reconcile_integration_merge_attempts: bulk fold UPDATE failed: {e}"
+            );
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"recovery\",\
                  \"action\":\"bulk_fold_imerge_failed\",\"error\":\"{e}\"}}",
             );
+            report.failures.push(msg);
             return report;
         }
     };
 
     if let Err(e) = tx.commit() {
+        let msg = format!("reconcile_integration_merge_attempts: COMMIT failed: {e}");
         eprintln!(
             "{{\"level\":\"error\",\"step\":\"recovery\",\
              \"action\":\"commit_imerge_failed\",\"error\":\"{e}\"}}",
         );
+        report.failures.push(msg);
         return report;
     }
 
@@ -1004,10 +1107,14 @@ fn reconcile_orphan_lane_reservations(store: &Store) -> OrphanLaneReservationRep
     let tx = match conn.transaction() {
         Ok(t) => t,
         Err(e) => {
+            let msg = format!(
+                "reconcile_orphan_lane_reservations: BEGIN transaction failed: {e}"
+            );
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"recovery\",\
                  \"action\":\"begin_lane_reservation_tx_failed\",\"error\":\"{e}\"}}",
             );
+            report.failures.push(msg);
             return report;
         }
     };
@@ -1023,19 +1130,25 @@ fn reconcile_orphan_lane_reservations(store: &Store) -> OrphanLaneReservationRep
     ) {
         Ok(rows) => rows,
         Err(e) => {
+            let msg = format!(
+                "reconcile_orphan_lane_reservations: bulk DELETE failed: {e}"
+            );
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"recovery\",\
                  \"action\":\"bulk_free_orphan_lane_reservations_failed\",\"error\":\"{e}\"}}",
             );
+            report.failures.push(msg);
             return report;
         }
     };
 
     if let Err(e) = tx.commit() {
+        let msg = format!("reconcile_orphan_lane_reservations: COMMIT failed: {e}");
         eprintln!(
             "{{\"level\":\"error\",\"step\":\"recovery\",\
              \"action\":\"commit_lane_reservation_failed\",\"error\":\"{e}\"}}",
         );
+        report.failures.push(msg);
         return report;
     }
 
@@ -1453,11 +1566,17 @@ fn find_last_integration_merge(
     let mut best: Option<(u64, LastIntegrationMerge)> = None;
 
     for record in reader.records() {
-        let record = match record {
-            Ok(r) => r,
-            Err(_) => continue, // skip malformed lines; they are surfaced
-                                // by the dedicated chain-walker, not here
-        };
+        // Propagate read errors. A malformed line in the audit
+        // chain is structurally fatal for recovery purposes —
+        // the previously-tolerant "skip and continue" path would
+        // silently mask a later `IntegrationMergeCompleted` event
+        // hidden behind the corrupt line and let the caller
+        // re-apply a stale merge as if it were current. The
+        // caller (`recover_one_initiative`) already turns
+        // `Err(_)` into an `Inconsistent` outcome with the
+        // operator-visible reason, which is the correct
+        // disposition for a corrupt chain at recovery time.
+        let record = record?;
         if record.event_kind != "IntegrationMergeCompleted" {
             continue;
         }

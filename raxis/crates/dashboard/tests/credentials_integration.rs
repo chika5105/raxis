@@ -181,7 +181,7 @@ async fn list_initiative_credentials_returns_metadata_only_no_plaintext_field() 
     handle.shutdown().await.expect("shutdown");
 }
 
-/// `worker/audit-noise-sweep-r2` retired the
+/// The second audit-noise sweep retired the
 /// `OperatorListedCredentials` emission: the listing is a
 /// read-only browse of metadata-only rows, and the security-
 /// relevant moment is the per-credential `OperatorRevealedCredential`
@@ -664,7 +664,7 @@ async fn reveal_credential_without_auth_yields_401_not_500() {
 // Audit-tightening — read-only endpoints do NOT emit Operator* events
 // ---------------------------------------------------------------------------
 
-/// `worker/audit-tightening` retired the read-only
+/// An earlier audit-noise sweep retired the read-only
 /// `OperatorViewed*` emissions because they drowned the chain
 /// in dashboard pageview noise (iter48 saw 1258 / 1260 chain
 /// rows be `OperatorViewed*` rows). This test pins the new

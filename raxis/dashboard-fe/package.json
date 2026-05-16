@@ -1,7 +1,7 @@
 {
   "name": "raxis-dashboard-fe",
   "version": "0.1.0",
-  "description": "Raxis operator dashboard React frontend. Spec: raxis/specs/v2/v2_extended_gaps.md §4.4.",
+  "description": "Raxis operator dashboard React frontend.",
   "private": true,
   "type": "module",
   "//tanstack-advisory": "CVE-2026-45321 — supply-chain attack on @tanstack/* (2026-05-11). Do NOT update these packages until TanStack publishes verified-clean releases. See: https://tanstack.com",

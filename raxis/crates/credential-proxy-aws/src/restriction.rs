@@ -1,29 +1,23 @@
 //! Restriction set + path-allowlist checks for the AWS proxy.
-//!
 //! Reference: `specs/v2/credential-proxy.md §3.2`. The IMDS surface
 //! is a single endpoint (`GET /creds`) so the restriction set is
 //! deliberately narrow — operators tighten the path allowlist when
 //! they want defence-in-depth against stray SDK paths the agent
 //! might explore.
-//!
 //! # `allowed_services` / `allowed_regions` enforcement model (V2.3)
-//!
-//! Per `V2_GAPS.md §9 Phase 2` the AWS restriction set acquires two
+//!the AWS restriction set acquires two
 //! new declarative scoping fields:
-//!
 //!   * `allowed_services`: e.g. `["s3", "sqs"]` — operator-declared
 //!     intent that the agent only call these AWS services. Stored
 //!     verbatim, normalised to lowercase, validated for non-empty
 //!     ASCII at load time.
 //!   * `allowed_regions`: e.g. `["us-east-1"]` — same shape, scoping
 //!     by AWS region.
-//!
 //! Both restrictions are **declarative-with-audit** in V2.3: the
 //! IMDS proxy serves credentials but does NOT see the actual API
 //! request the SDK subsequently issues to AWS — those flow direct
 //! from the agent VM to AWS over the kernel-managed egress allowlist
 //! (TProxy). The restrictions are therefore:
-//!
 //!   1. **Validated** at policy load time so a malformed list (e.g.
 //!      empty strings, non-ASCII chars) fails the operator's `raxis
 //!      policy load` step rather than appearing as a silent
@@ -38,7 +32,6 @@
 //!      declare `allowed_services` / `allowed_regions` here MUST
 //!      mirror them in the egress allowlist; `raxis doctor`
 //!      surfaces declarations without a matching egress entry.
-//!
 //! V3 adds the SigV4-aware egress proxy (`raxis-egress-aws`) which
 //! parses the SDK's `Authorization: AWS4-HMAC-SHA256 Credential=
 //! AKIA.../<region>/<service>/aws4_request` header and rejects
@@ -65,7 +58,6 @@ pub struct Restrictions {
     /// declared" — `raxis doctor` warns when this is empty for a
     /// credential whose role ARN scopes services more tightly than
     /// the operator's egress allowlist.
-    ///
     /// V2.3 enforcement: declarative + audit echo + `raxis doctor`
     /// cross-check. Runtime enforcement happens at the egress
     /// allowlist (V3 lands the SigV4 inspector — see the module
@@ -76,7 +68,6 @@ pub struct Restrictions {
     /// AWS region IDs (e.g. `"us-east-1"`, `"eu-west-2"`) the
     /// agent's tasks are intended to use. Empty means "no region
     /// scoping declared".
-    ///
     /// V2.3 enforcement: declarative + audit echo + `raxis doctor`
     /// cross-check.
     #[serde(default)]

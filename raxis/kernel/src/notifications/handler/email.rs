@@ -1,17 +1,12 @@
 // raxis-kernel::notifications::handler::email — Email channel
 // handler.
-//
-// Closes V2_GAPS.md §C4 (gap-c4-email).
-//
+//(gap-c4-email).
 // ## V2 scope
-//
 // This is the **minimum-viable** SMTP submission handler. The full
 // vision in `email-and-notification-channels.md` (persistent SMTP
 // connections, AUTH XOAUTH2, idempotent `Message-Id` reuse via the
 // `notification_dispatch` table, conformance kit) is V3-grade.
-//
 // The V2 handler:
-//
 // * Parses `channel.target` as an SMTP submission URL of the shape
 //   `smtp://<user>@<host>:<port>?from=<addr>&to=<addr1,addr2,...>`
 //   or `smtps://...` for implicit-TLS submission on port 465.
@@ -30,9 +25,7 @@
 //   wrapper containing `text/plain` (the human summary plus the
 //   pretty-printed JSON payload) and `application/json` (the raw
 //   audit event for sidecar consumers).
-//
 // ## Failure mapping
-//
 // * Sidecar missing / unreadable    → `CredentialUnavailable(_)`
 // * URL parse failure                → `TargetInvalid`
 // * TCP connect / TLS / EHLO failed  → `Network(_)`
@@ -465,7 +458,7 @@ where
                 )));
             }
             let parsed: u16 = line[..3].parse().map_err(|e| {
-                DeliveryError::Network(format!("smtp response code parse: {line:?}: {e}",))
+                DeliveryError::Network(format!("smtp response code parse: {line:?}: {e}"))
             })?;
             let sep = line.as_bytes()[3];
             text.push_str(line[4..].trim_end());

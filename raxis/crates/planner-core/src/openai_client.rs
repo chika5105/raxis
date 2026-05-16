@@ -1,4 +1,4 @@
-//! V2_GAPS §C2/C3 — `OpenAiClient`: OpenAI Chat Completions API.
+//! `OpenAiClient`: OpenAI Chat Completions API.
 //!
 //! Translates the canonical Anthropic-flavoured [`MessageRequest`] /
 //! [`MessageResponse`] types (defined in `crate::model`) into the

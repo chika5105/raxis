@@ -2,7 +2,7 @@
 
 **Image alias:** `raxis-verifier-symbol-index` (reserved, kernel-canonical)
 **Role:** `VerifierSymbolIndex`
-**Status:** iter62 — V2_GAPS A8 (verifier runtime) — **shipped**
+**Status:** verifier-runtime — **shipped**
 
 ## What it does
 

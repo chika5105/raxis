@@ -15,8 +15,8 @@
 //     behaviour out of a long-running task.
 //   * Latency (when the kernel-side tap recorded one).
 //
-// `INV-DASHBOARD-LLM-TURN-CAPTURED-01` (paired with Worker
-// 1's kernel-side tap).
+// `INV-DASHBOARD-LLM-TURN-CAPTURED-01` (paired with the
+// kernel-side tap).
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";

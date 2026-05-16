@@ -107,7 +107,7 @@ pub enum OperatorRequest {
     },
 
     // -----------------------------------------------------------------
-    // V2_GAPS §12.4 — Operator-ergonomics IPC. Wire shape is stable
+    // Operator-ergonomics IPC. Wire shape is stable
     // for V2; handlers fail closed with FailNotYetImplemented until
     // V3 lands the concrete logic. Documented in
     // `specs/v2/operator-ergonomics.md` §5.3, §11.3, §12.3, §13.4,
@@ -147,7 +147,7 @@ pub enum OperatorRequest {
     /// a single initiative back to the requesting operator over the
     /// existing operator socket. V2 returns
     /// `FAIL_NOT_YET_IMPLEMENTED` because the `KernelPush` transport
-    /// is itself V3 (V2_GAPS §12.1). The shape lives here so the
+    /// is itself V3. The shape lives here so the
     /// CLI's `raxis initiative watch` command can be written against
     /// the final wire form ahead of time.
     SubscribeInitiative {
@@ -252,7 +252,7 @@ pub enum OperatorResponse {
     },
 
     // -----------------------------------------------------------------
-    // V2_GAPS §12.4 — Operator-ergonomics IPC success envelopes. Each
+    // Operator-ergonomics IPC success envelopes. Each
     // matches a request variant 1:1; V2 handlers always emit
     // `Error { code: FailNotYetImplemented, ... }` on the operator
     // socket so the success variants are wired but not yet reached.
@@ -385,7 +385,7 @@ pub enum OperatorErrorDetail {
         current_status: String,
     },
 
-    /// V2_GAPS §12.4 — wire-stub for the operator-ergonomics IPC
+    /// wire-stub for the operator-ergonomics IPC
     /// handlers (`ProposeDefaults`, `EstimateCost`, `DryRunAdmit`,
     /// `SubscribeInitiative`, `DescribeInitiativePause`). Carries the
     /// human-readable feature label and the target release the
