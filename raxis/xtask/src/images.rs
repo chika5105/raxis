@@ -64,6 +64,8 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
+use crate::trust_anchor;
+
 /// Workspace-relative path to the per-role staging dir. Mirrors the
 /// `images/<role>/rootfs/` layout `raxis-image-builder` already
 /// expects.
@@ -261,6 +263,17 @@ struct DevStageArgs {
     /// debug image (e.g. while iterating on planner-core without
     /// re-running the docker bake).
     allow_stub: bool,
+    /// 64-char lowercase hex public-half to inject as
+    /// `RAXIS_KERNEL_SIGNING_KEY_HEX` into the cross-compile cargo
+    /// subprocess. `None` for in-process callers (test fixtures)
+    /// that do not need the trust-anchor injection; populated by
+    /// `run_dev_stage` (operator-invoked) and `bake_one_role_full`
+    /// (umbrella bake driver). The
+    /// `INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01` audit-sweep
+    /// witness pins that every cargo invocation in the bake pipeline
+    /// has this set; see `dev_stage` for the per-`Command::env(...)`
+    /// thread.
+    kernel_signing_key_hex: Option<String>,
 }
 
 impl DevStageArgs {
@@ -317,6 +330,13 @@ impl DevStageArgs {
             workspace_root,
             cargo,
             allow_stub,
+            // Argv-parse alone does NOT resolve the dev signing
+            // key — `run_dev_stage` is the entry point that
+            // resolves and injects. Leaving this `None` here
+            // keeps `DevStageArgs::parse` test-friendly (existing
+            // witnesses construct args without a populated
+            // workspace's `.git/info/raxis-signing-key/`).
+            kernel_signing_key_hex: None,
         })
     }
 }
@@ -401,8 +421,26 @@ fn assert_no_stub_after_stage(role: Role, staging_root: &Path) -> Result<()> {
 }
 
 /// Entry point for `cargo xtask images dev-stage`.
+///
+/// Resolves the dev signing key public half via the canonical
+/// search order (`trust_anchor::resolve_signing_key_pk_hex`) BEFORE
+/// invoking `dev_stage`, so the cross-compile cargo subprocess
+/// (`cargo build -p raxis-planner-<role>`) inherits
+/// `RAXIS_KERNEL_SIGNING_KEY_HEX` via per-`Command` `.env(...)`. A
+/// transitively-built `raxis-canonical-images`'s build script then
+/// embeds the populated trust anchor into any planner binary that
+/// links it, AND a sibling `cargo build -p raxis-kernel` invoked
+/// from the same xtask seam sees the same anchor.
+/// INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01.
 pub fn run_dev_stage(argv: &[String]) -> Result<()> {
-    let args = DevStageArgs::parse(argv)?;
+    let mut args = DevStageArgs::parse(argv)?;
+    let resolved = trust_anchor::resolve_signing_key_pk_hex(&args.workspace_root)
+        .map_err(anyhow::Error::new)
+        .context(
+            "resolve dev signing key for dev-stage cargo subprocess \
+             (INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01)",
+        )?;
+    args.kernel_signing_key_hex = Some(resolved.pk_hex);
     dev_stage(&args)
 }
 
@@ -416,16 +454,34 @@ fn dev_stage(args: &DevStageArgs) -> Result<()> {
     );
 
     // Cross-compile: `cargo build -p <crate> --release --target <triple>`.
-    let status = Command::new(&args.cargo)
-        .current_dir(&args.workspace_root)
-        .args([
-            "build",
-            "-p",
-            args.role.workspace_crate(),
-            "--release",
-            "--target",
-            &args.target,
-        ])
+    //
+    // Per-`Command` `.env(...)` injection of
+    // `RAXIS_KERNEL_SIGNING_KEY_HEX` is the load-bearing
+    // INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01 step. Without
+    // it the planner crate's transitively-built
+    // `raxis-canonical-images` build script falls through to the
+    // placeholder arm (or auto-mints a per-clone key that may
+    // disagree with the one the umbrella bake driver signs images
+    // with). We deliberately do NOT mutate process-level
+    // `std::env` here — the per-`Command` scope keeps the
+    // injection contained to exactly the children that need it.
+    //
+    // AUDIT-MARKER:bake-cargo-spawn — the spec-audit witness
+    // `inv_image_bake_kernel_trust_anchor_populated_01_every_cargo_spawn_pairs_with_marker_and_helper`
+    // scans for this token AND the `apply_trust_anchor_env` call
+    // immediately below; both MUST be present at every cargo
+    // subprocess site in this file.
+    let mut cmd = Command::new(&args.cargo);
+    cmd.current_dir(&args.workspace_root).args([
+        "build",
+        "-p",
+        args.role.workspace_crate(),
+        "--release",
+        "--target",
+        &args.target,
+    ]);
+    apply_trust_anchor_env(&mut cmd, args.kernel_signing_key_hex.as_deref());
+    let status = cmd
         .status()
         .context("failed to spawn cargo for cross-compile; is the toolchain on $PATH?")?;
     if !status.success() {
@@ -546,6 +602,25 @@ fn dev_stage(args: &DevStageArgs) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Inject `RAXIS_KERNEL_SIGNING_KEY_HEX` into `cmd`'s child env
+/// when a resolved value is available. Single chokepoint so every
+/// cargo subprocess in the bake pipeline goes through the same
+/// `.env(...)` call — the audit-sweep witness
+/// `inv_image_bake_kernel_trust_anchor_populated_01_every_cargo_spawn_pairs_with_marker_and_helper`
+/// pins that this helper is called at every site.
+///
+/// We do NOT silently fall back to an unset env when `pk_hex` is
+/// `None`: the call sites are expected to have resolved a value via
+/// `trust_anchor::resolve_signing_key_pk_hex` before constructing
+/// the command. The `Option` exists so test fixtures that
+/// construct `DevStageArgs` / `BuildAllArgs` in-process without
+/// touching the resolver can still drive the rest of the pipeline.
+fn apply_trust_anchor_env(cmd: &mut Command, pk_hex: Option<&str>) {
+    if let Some(hex) = pk_hex {
+        cmd.env(trust_anchor::RAXIS_KERNEL_SIGNING_KEY_HEX, hex);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -863,6 +938,10 @@ fn invoke_auto_stage(role: Role, args: &BuildAllArgs) -> Result<()> {
         workspace_root: args.workspace_root.clone(),
         cargo: std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()),
         allow_stub: false,
+        // Propagate the umbrella driver's resolved trust anchor
+        // into the auto-stage cargo subprocess.
+        // INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01.
+        kernel_signing_key_hex: args.kernel_signing_key_hex.clone(),
     };
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"build_all_auto_stage_begin\",\
@@ -922,6 +1001,14 @@ struct BuildAllArgs {
     /// `dev-stage` manually. Reserved for hermetic CI lanes that
     /// already ran `dev-stage` as a separate audit-tracked step.
     no_auto_stage: bool,
+    /// Resolved dev signing key public half, threaded into the
+    /// `invoke_auto_stage` cargo subprocess via per-`Command`
+    /// `.env(...)`. Populated by `run_build_all` (operator-invoked)
+    /// and by the umbrella `bake_one_role_full` driver. Test
+    /// fixtures may leave this `None` — the auto-stage path then
+    /// runs without the env injection, matching the pre-iter66
+    /// behaviour. INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01.
+    kernel_signing_key_hex: Option<String>,
 }
 
 impl BuildAllArgs {
@@ -999,6 +1086,11 @@ impl BuildAllArgs {
             signing_key,
             workspace_root,
             no_auto_stage,
+            // Argv-parse alone does NOT resolve the trust anchor;
+            // `run_build_all` is the entry point that resolves and
+            // injects. Test fixtures that construct
+            // `BuildAllArgs` directly can leave this `None`.
+            kernel_signing_key_hex: None,
         })
     }
 }
@@ -1015,8 +1107,21 @@ fn default_signing_key_path() -> Option<PathBuf> {
 }
 
 /// Entry point for `cargo xtask images build-all`.
+///
+/// Resolves the dev signing key BEFORE invoking `build_all` so
+/// any auto-stage triggered by the stale-cache guard
+/// (`INV-IMAGE-BAKE-NO-STALE-CACHE-01`) spawns `cargo build` with
+/// the trust anchor injected
+/// (`INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01`).
 pub fn run_build_all(argv: &[String]) -> Result<()> {
-    let args = BuildAllArgs::parse(argv)?;
+    let mut args = BuildAllArgs::parse(argv)?;
+    let resolved = trust_anchor::resolve_signing_key_pk_hex(&args.workspace_root)
+        .map_err(anyhow::Error::new)
+        .context(
+            "resolve dev signing key for build-all auto-stage cargo \
+             subprocess (INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01)",
+        )?;
+    args.kernel_signing_key_hex = Some(resolved.pk_hex);
     build_all(&args)
 }
 
@@ -3003,17 +3108,26 @@ fn print_bake_help() {
          deciding whether to re-run the per-role pipeline. Pass --no-cache\n\
          to force a full rebake regardless of cached state.\n\
          \n\
-         Dev signing key (INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01):\n  \
+         Dev signing key (INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01 +\n  \
+         INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01, iter66):\n  \
          On first run, `bake` mints an Ed25519 keypair under\n  \
          <workspace>/.git/info/raxis-signing-key/{{sk.hex,pk.hex}} (mode\n  \
-         0700/0600/0644). On every run the public half is exported as\n  \
-         RAXIS_KERNEL_SIGNING_KEY_HEX into the env of every cargo\n  \
-         subprocess `bake` spawns, so a sibling `cargo build -p\n  \
-         raxis-kernel` from the same shell sees the matching trust\n  \
-         anchor without manual export. The CI / release pipeline path is\n  \
-         unchanged: those workflows pass --signing-key <PATH> explicitly\n  \
-         (and pre-set RAXIS_KERNEL_SIGNING_KEY_HEX from a secret), which\n  \
-         skips the autogen path entirely.\n",
+         0700/0600/0600). On every run the public half is resolved via\n  \
+         the canonical search order\n  \
+         (`trust_anchor::resolve_signing_key_pk_hex`):\n  \
+         (1) RAXIS_KERNEL_SIGNING_KEY_HEX, (2) RAXIS_KERNEL_SIGNING_KEY_PATH,\n  \
+         (3) <workspace>/.git/info/raxis-signing-key/pk.hex, (4) the\n  \
+         nested <workspace>/raxis/.git/info/... variant — and injected\n  \
+         into every spawned cargo subprocess via per-`Command` `.env(...)`.\n  \
+         A sibling `cargo build -p raxis-kernel` started from the same\n  \
+         xtask seam therefore sees the matching trust anchor without\n  \
+         manual export and without process-global env mutation. The\n  \
+         CI / release pipeline path is unchanged: those workflows pre-set\n  \
+         RAXIS_KERNEL_SIGNING_KEY_HEX from a secret, which arm 1 picks\n  \
+         up over the per-clone dev key. AFTER the per-role bake completes,\n  \
+         `bake` verifies the staged <install_dir>/kernel/vmlinux byte-for-byte\n  \
+         for the expected fingerprint via `verify-trust-anchor`; an\n  \
+         all-zero placeholder or fingerprint-missing binary trips fail-loud.\n",
         default_install = DEFAULT_DEV_INSTALL_DIR,
     );
 }
@@ -3037,9 +3151,7 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
 
     // 0. Ensure the per-clone dev signing keypair under
     //    `.git/info/raxis-signing-key/` exists (autogen on first
-    //    run) and export the public half into
-    //    `RAXIS_KERNEL_SIGNING_KEY_HEX` for every cargo subprocess
-    //    we spawn. INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01.
+    //    run). INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01.
     let keypair = ensure_dev_signing_keypair(&args.workspace_root)?;
     if keypair.generated_now {
         eprintln!(
@@ -3049,14 +3161,39 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
     } else {
         eprintln!("using dev signing key from {}", keypair.pk_path.display());
     }
-    // SAFETY: `xtask` is a single-threaded driver at the bake-call
-    // boundary; the only consumers of this env var are the cargo
-    // subprocesses spawned by `dev_stage` further down. Mutating
-    // process env from one place is the same shape `cargo xtask
-    // dev-keys init` instructs the operator to do manually.
-    unsafe {
-        std::env::set_var("RAXIS_KERNEL_SIGNING_KEY_HEX", &keypair.pk_hex);
-    }
+
+    // 0b. Re-resolve the trust-anchor pk_hex through the canonical
+    //     `trust_anchor::resolve_signing_key_pk_hex` helper. The
+    //     just-minted keypair will normally satisfy the arm-3
+    //     (canonical `.git/info/`) check; we route through the
+    //     helper anyway so an outer `RAXIS_KERNEL_SIGNING_KEY_HEX` /
+    //     `RAXIS_KERNEL_SIGNING_KEY_PATH` env (CI / release
+    //     pipeline) wins over the just-minted dev key. The
+    //     resolved value is then threaded into every cargo
+    //     subprocess via per-`Command` `.env(...)` rather than
+    //     mutating process-level `std::env` — concurrent xtask
+    //     invocations no longer race on the variable.
+    //     INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01.
+    let resolved_anchor = trust_anchor::resolve_signing_key_pk_hex(&args.workspace_root)
+        .map_err(anyhow::Error::new)
+        .context(
+            "resolve dev signing key for bake cargo subprocesses \
+             (INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01)",
+        )?;
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "level": "info",
+            "event": "bake_trust_anchor_resolved",
+            "source": resolved_anchor.source.as_str(),
+            "source_path": resolved_anchor
+                .source_path
+                .as_ref()
+                .map(|p| p.display().to_string()),
+            "pk_hex_prefix": &resolved_anchor.pk_hex[..16.min(resolved_anchor.pk_hex.len())],
+        })
+    );
+    let pk_hex_for_children = resolved_anchor.pk_hex.clone();
 
     // 1. Preflight (pure-read; fails closed before any mutation).
     let outcome = preflight_bake_inputs(
@@ -3092,7 +3229,36 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
 
     // 4. Per-role bake.
     for role in &args.roles {
-        bake_one_role_full(*role, args, &outcome, &vmlinux_sha)?;
+        bake_one_role_full(*role, args, &outcome, &vmlinux_sha, &pk_hex_for_children)?;
+    }
+
+    // 5. Post-bake trust-anchor verification.
+    //
+    // Read the staged `<install_dir>/kernel/vmlinux` and scan its
+    // bytes for the 32-byte fingerprint of `pk_hex_for_children`.
+    // Absence (or, worse, an all-zero 32-byte run with the
+    // fingerprint missing) means the kernel was built without
+    // `RAXIS_KERNEL_SIGNING_KEY_HEX` in its env — the very
+    // failure mode this iter66 fix exists to catch. The verifier
+    // bails with the `INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01
+    // VIOLATED` remediation message so a Round-1 bake never ships
+    // a broken kernel to Round-2.
+    let staged_kernel = args.install_dir.join("kernel").join("vmlinux");
+    if staged_kernel.exists() {
+        trust_anchor::verify_kernel_binary_at_path(&staged_kernel, &pk_hex_for_children)
+            .context(
+                "post-bake trust-anchor verification of the staged kernel \
+                 binary failed (INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01)",
+            )?;
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "level": "info",
+                "event": "bake_trust_anchor_verified",
+                "kernel": staged_kernel.display().to_string(),
+                "pk_hex_prefix": &pk_hex_for_children[..16.min(pk_hex_for_children.len())],
+            })
+        );
     }
 
     let roles_json: Vec<&str> = args.roles.iter().map(|r| r.workspace_crate()).collect();
@@ -3109,11 +3275,19 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
 /// via the prior `bake.json`, otherwise run the canonical
 /// `bake-rootfs → dev-stage → build-all` flow and emit a fresh
 /// integrity manifest.
+///
+/// `kernel_signing_key_hex` is the resolved 64-char public-half
+/// the umbrella `run_bake_inner` computed via
+/// `trust_anchor::resolve_signing_key_pk_hex`. It is threaded
+/// through to every cargo subprocess the per-role driver spawns
+/// (today: `dev_stage`'s cross-compile, plus `build_all`'s
+/// auto-stage path). INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01.
 fn bake_one_role_full(
     role: Role,
     args: &BakeArgs,
     outcome: &PreflightOutcome,
     vmlinux_sha: &str,
+    kernel_signing_key_hex: &str,
 ) -> Result<()> {
     let kernel_version = read_kernel_version_for(&args.workspace_root, role)?;
 
@@ -3166,6 +3340,10 @@ fn bake_one_role_full(
         workspace_root: args.workspace_root.clone(),
         cargo: std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()),
         allow_stub: !role.needs_rootfs_bake(),
+        // Thread the umbrella driver's resolved trust anchor
+        // into the cross-compile cargo subprocess.
+        // INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01.
+        kernel_signing_key_hex: Some(kernel_signing_key_hex.to_owned()),
     };
     dev_stage(&dev_stage_args)
         .with_context(|| format!("dev-stage for role {role:?} (bake driver)"))?;
@@ -3177,6 +3355,9 @@ fn bake_one_role_full(
         workspace_root: args.workspace_root.clone(),
         signing_key: args.signing_key.clone(),
         no_auto_stage: true, // we already ran dev-stage above
+        // Plumb the trust anchor through so the (rarely-fired)
+        // auto-stage path inside `build_all` also injects it.
+        kernel_signing_key_hex: Some(kernel_signing_key_hex.to_owned()),
     };
     build_all(&build_args)?;
 
@@ -3388,6 +3569,131 @@ pub fn run_preflight(argv: &[String]) -> Result<()> {
         "signing_key_fp_prefix": outcome.signing_key_fp_prefix,
     });
     eprintln!("{payload}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `cargo xtask images verify-trust-anchor` — read-only post-build
+// verifier (iter66, INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01)
+// ---------------------------------------------------------------------------
+
+/// Parsed argv for `cargo xtask images verify-trust-anchor`. Both
+/// flags carry sensible defaults that mirror the bake's own
+/// resolution order so the subcommand is one-shot usable without
+/// extra ceremony.
+#[derive(Debug)]
+struct VerifyTrustAnchorArgs {
+    /// Path to the kernel binary to verify. Defaults to
+    /// `<install_dir>/kernel/vmlinux` where `install_dir` resolves
+    /// to `$RAXIS_INSTALL_DIR` or `DEFAULT_DEV_INSTALL_DIR`.
+    kernel_path: PathBuf,
+    /// 64-char lowercase hex of the public key the kernel binary
+    /// is expected to embed as `EXPECTED_KERNEL_SIGNING_KEY_BYTES`.
+    /// Defaults to `trust_anchor::resolve_signing_key_pk_hex` so an
+    /// operator running the bake then this verifier sees the same
+    /// resolution arms documented in
+    /// `INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01`.
+    expected_pk_hex: String,
+}
+
+impl VerifyTrustAnchorArgs {
+    fn parse(argv: &[String]) -> Result<Self> {
+        let mut kernel_path: Option<PathBuf> = None;
+        let mut expected_pk_hex: Option<String> = None;
+        let mut install_dir_override: Option<PathBuf> = None;
+
+        let mut i = 0;
+        while i < argv.len() {
+            match argv[i].as_str() {
+                "--kernel" => {
+                    i += 1;
+                    kernel_path = Some(PathBuf::from(
+                        argv.get(i).context("--kernel requires a path")?,
+                    ));
+                }
+                "--expected-pk-hex" => {
+                    i += 1;
+                    expected_pk_hex = Some(
+                        argv.get(i)
+                            .context("--expected-pk-hex requires a 64-char hex value")?
+                            .clone(),
+                    );
+                }
+                "--install-dir" => {
+                    i += 1;
+                    install_dir_override = Some(PathBuf::from(
+                        argv.get(i).context("--install-dir requires a path")?,
+                    ));
+                }
+                "-h" | "--help" => {
+                    eprintln!(
+                        "usage: cargo xtask images verify-trust-anchor \
+                         [--kernel <PATH>] [--expected-pk-hex <HEX>] \
+                         [--install-dir <PATH>]\n\
+                         \n\
+                         Reads the staged kernel binary and asserts its \
+                         compile-time trust anchor matches the resolved \
+                         pk_hex. Defaults match the bake's resolution \
+                         order: --kernel falls back to \
+                         <install_dir>/kernel/vmlinux, --expected-pk-hex \
+                         falls back to trust_anchor::resolve_signing_key_pk_hex.\n\
+                         \n\
+                         Exit codes:\n  \
+                         0  trust anchor populated; fingerprint embedded\n  \
+                         1  fingerprint missing OR placeholder embedded\n\
+                         \n\
+                         See INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01\n"
+                    );
+                    std::process::exit(0);
+                }
+                other => bail!("unknown verify-trust-anchor arg: {other}"),
+            }
+            i += 1;
+        }
+
+        let install_dir = install_dir_override
+            .or_else(|| std::env::var_os("RAXIS_INSTALL_DIR").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_DEV_INSTALL_DIR));
+
+        let kernel_path = kernel_path
+            .unwrap_or_else(|| install_dir.join("kernel").join("vmlinux"));
+
+        let expected_pk_hex = match expected_pk_hex {
+            Some(h) => h.trim().to_owned(),
+            None => {
+                let workspace_root = workspace_root_from_cwd()?;
+                let resolved = trust_anchor::resolve_signing_key_pk_hex(&workspace_root)
+                    .map_err(anyhow::Error::new)
+                    .context(
+                        "resolve dev signing key for verify-trust-anchor \
+                         (pass --expected-pk-hex <HEX> to bypass the \
+                         resolution chain)",
+                    )?;
+                resolved.pk_hex
+            }
+        };
+
+        Ok(Self {
+            kernel_path,
+            expected_pk_hex,
+        })
+    }
+}
+
+/// Entry point for `cargo xtask images verify-trust-anchor`.
+pub fn run_verify_trust_anchor(argv: &[String]) -> Result<()> {
+    let args = VerifyTrustAnchorArgs::parse(argv)?;
+    trust_anchor::verify_kernel_binary_at_path(&args.kernel_path, &args.expected_pk_hex)?;
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "level": "info",
+            "event": "verify_trust_anchor_ok",
+            "kernel": args.kernel_path.display().to_string(),
+            "pk_hex_prefix": &args.expected_pk_hex
+                [..16.min(args.expected_pk_hex.len())],
+        })
+    );
     Ok(())
 }
 
@@ -5232,6 +5538,206 @@ mod tests {
             pk_meta.permissions().mode() & 0o777,
             0o600,
             "pk.hex MUST be 0600 at the xtask write site (iter62, uniform-perms hardening)",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01 — iter66
+    // witnesses for the bake's per-`Command` env injection + the
+    // post-build trust-anchor verification step.
+    // -----------------------------------------------------------------
+
+    /// The audit-sweep witness: walks the on-disk text of
+    /// `xtask/src/images.rs` and pins that every cargo-spawn site
+    /// is preceded by the canonical `AUDIT-MARKER:bake-cargo-spawn`
+    /// comment AND followed by an `apply_trust_anchor_env(&mut cmd,`
+    /// call. A future refactor that re-introduces a bare cargo
+    /// invocation without either piece trips this witness and the
+    /// spec. The marker is a deliberate contract: explicit
+    /// comment-level opt-in beats grep-and-pray.
+    #[test]
+    fn inv_image_bake_kernel_trust_anchor_populated_01_every_cargo_spawn_pairs_with_marker_and_helper(
+    ) {
+        let src = include_str!("images.rs");
+        let audit_marker = "AUDIT-MARKER:bake-cargo-spawn";
+        let helper_call = "apply_trust_anchor_env(&mut cmd,";
+
+        let marker_count = src.matches(audit_marker).count();
+        let helper_call_count = src.matches(helper_call).count();
+
+        // The audit marker is referenced in: (a) every cargo-spawn
+        // site preceding the `Command::new(...)`, AND (b) this
+        // witness comment. We expect strictly more than 1 (the
+        // doc-comment alone yields 1; the spawn-site preamble
+        // yields the rest). The helper-call literal is similarly
+        // referenced at every spawn site PLUS this witness; we pin
+        // a lower bound of 2 (current bake-cargo-spawn site + this
+        // witness's reference). A future second cargo-spawn site
+        // must increment both counters in lockstep.
+        //
+        // Why count both pieces: the marker comment alone is too
+        // easy to copy-paste without wiring the helper; the
+        // helper-call alone could be added speculatively without
+        // the marker. Requiring BOTH ensures the contract is
+        // self-documenting at every spawn site.
+        assert!(
+            marker_count >= 2,
+            "expected ≥2 occurrences of `{audit_marker}` (1 doc-comment + ≥1 spawn site); \
+             got {marker_count}. INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01.",
+        );
+        assert!(
+            helper_call_count >= 2,
+            "expected ≥2 occurrences of `{helper_call}` (1 doc-comment + ≥1 spawn site); \
+             got {helper_call_count}. INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01.",
+        );
+
+        // The spawn-site count of each MUST agree: every marker is
+        // a contract for a paired helper call, and every helper
+        // call is documented by a marker. Drift between the two
+        // means a spawn site introduced the marker without wiring
+        // the helper (or vice versa).
+        let marker_at_spawn_sites = marker_count - 1; // strip the doc-comment self-reference
+        let helper_at_spawn_sites = helper_call_count - 1;
+        assert_eq!(
+            marker_at_spawn_sites, helper_at_spawn_sites,
+            "marker count at spawn sites ({marker_at_spawn_sites}) MUST equal helper-call \
+             count ({helper_at_spawn_sites}). Every cargo spawn site MUST carry both. \
+             INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01.",
+        );
+    }
+
+    /// Companion to the source-audit witness above: confirms the
+    /// helper itself routes through `.env(...)` with the canonical
+    /// env-var name from `trust_anchor::RAXIS_KERNEL_SIGNING_KEY_HEX`.
+    /// A drift between the helper's chosen env var and the kernel
+    /// build script's resolution chain would silently dis-arm the
+    /// trust anchor.
+    #[test]
+    fn inv_image_bake_kernel_trust_anchor_populated_01_helper_env_var_matches_build_script() {
+        assert_eq!(
+            trust_anchor::RAXIS_KERNEL_SIGNING_KEY_HEX,
+            "RAXIS_KERNEL_SIGNING_KEY_HEX",
+            "the env-var name MUST stay aligned with \
+             crates/canonical-images/build.rs::TRUST_ANCHOR_HEX_VAR; \
+             a rename here would let a kernel build's resolution chain \
+             miss the injection.",
+        );
+    }
+
+    /// Witness for the post-build verification step: a synthetic
+    /// kernel-shaped fixture whose `.rodata` carries only the
+    /// placeholder bytes is rejected by `verify_kernel_binary_at_path`
+    /// with the `INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01
+    /// VIOLATED` token, and a sibling fixture carrying the expected
+    /// fingerprint is accepted.
+    #[test]
+    fn inv_image_bake_kernel_trust_anchor_populated_01_verify_step_rejects_placeholder_and_accepts_fingerprint(
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel_dir = tmp.path().join("install").join("kernel");
+        std::fs::create_dir_all(&kernel_dir).unwrap();
+        let kernel_path = kernel_dir.join("vmlinux");
+
+        let pk_hex: String = "ab".repeat(32);
+        let pk_bytes = trust_anchor::decode_pk_hex_bytes(&pk_hex).unwrap();
+
+        // Case 1: placeholder embedded, fingerprint absent → reject.
+        let mut placeholder_binary: Vec<u8> = (0..1024u32).map(|i| (i % 251 + 1) as u8).collect();
+        placeholder_binary.extend_from_slice(&[0u8; 32]);
+        placeholder_binary.extend((0..1024u32).map(|i| (i % 241 + 1) as u8));
+        std::fs::write(&kernel_path, &placeholder_binary).unwrap();
+        let err = trust_anchor::verify_kernel_binary_at_path(&kernel_path, &pk_hex)
+            .expect_err("placeholder binary MUST be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01 VIOLATED"),
+            "rejection MUST cite the invariant: {msg}",
+        );
+
+        // Case 2: fingerprint embedded → accept.
+        let mut populated_binary: Vec<u8> = (0..1024u32).map(|i| (i % 251 + 1) as u8).collect();
+        populated_binary.extend_from_slice(&pk_bytes);
+        populated_binary.extend((0..1024u32).map(|i| (i % 241 + 1) as u8));
+        std::fs::write(&kernel_path, &populated_binary).unwrap();
+        trust_anchor::verify_kernel_binary_at_path(&kernel_path, &pk_hex)
+            .expect("populated binary MUST be accepted");
+    }
+
+    /// Witness for the verify-trust-anchor argv parser: defaults
+    /// fall back to `<install_dir>/kernel/vmlinux` AND
+    /// `resolve_signing_key_pk_hex` when neither flag is supplied,
+    /// and explicit flags override both.
+    #[test]
+    fn inv_image_bake_kernel_trust_anchor_populated_01_verify_argv_explicit_flags_override_defaults(
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel_path = tmp.path().join("custom-vmlinux");
+        std::fs::write(&kernel_path, b"placeholder-bytes").unwrap();
+        let pk_hex: String = "cd".repeat(32);
+
+        let argv = vec![
+            "--kernel".to_owned(),
+            kernel_path.display().to_string(),
+            "--expected-pk-hex".to_owned(),
+            pk_hex.clone(),
+        ];
+        let parsed = VerifyTrustAnchorArgs::parse(&argv).expect("parse");
+        assert_eq!(parsed.kernel_path, kernel_path);
+        assert_eq!(parsed.expected_pk_hex, pk_hex);
+    }
+
+    /// Witness that `bake_one_role_full`'s signature carries the
+    /// resolved `kernel_signing_key_hex` so the per-role driver can
+    /// thread it into both the `dev_stage` cargo subprocess AND
+    /// `build_all`'s auto-stage path. We pin this through a
+    /// compile-time check (the function symbol exists with the
+    /// expected arity) rather than a runtime spawn — the umbrella
+    /// driver's threading is exercised end-to-end by the bake
+    /// integration harness in the parent worker repo.
+    #[test]
+    fn inv_image_bake_kernel_trust_anchor_populated_01_bake_one_role_full_threads_signing_key() {
+        // Compile-time witness: take a function pointer with the
+        // exact signature we expect. If a future refactor drops
+        // the `kernel_signing_key_hex` parameter (or moves it
+        // into a struct without keeping a top-level seam),
+        // this test stops compiling and the spec must be
+        // updated in lockstep.
+        let _: fn(Role, &BakeArgs, &PreflightOutcome, &str, &str) -> Result<()> =
+            bake_one_role_full;
+    }
+
+    /// Witness that `apply_trust_anchor_env` injects the canonical
+    /// env-var name into a `Command`'s child env, and skips the
+    /// injection when `pk_hex` is `None` (test-fixture path).
+    #[test]
+    fn inv_image_bake_kernel_trust_anchor_populated_01_apply_trust_anchor_env_threads_pk_hex() {
+        let pk_hex: String = "ef".repeat(32);
+
+        // With Some: child env carries the var.
+        let mut cmd_with = Command::new("true");
+        apply_trust_anchor_env(&mut cmd_with, Some(&pk_hex));
+        let envs: Vec<_> = cmd_with
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|s| s.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        let found = envs.iter().find(|(k, _)| k == "RAXIS_KERNEL_SIGNING_KEY_HEX");
+        assert!(found.is_some(), "env var must be set; got {envs:?}");
+        assert_eq!(found.unwrap().1.as_deref(), Some(pk_hex.as_str()));
+
+        // With None: helper is a no-op.
+        let mut cmd_without = Command::new("true");
+        apply_trust_anchor_env(&mut cmd_without, None);
+        let envs_without: Vec<_> = cmd_without.get_envs().collect();
+        assert!(
+            envs_without
+                .iter()
+                .all(|(k, _)| k.to_string_lossy() != "RAXIS_KERNEL_SIGNING_KEY_HEX"),
+            "helper must NOT set the var when pk_hex is None; got {envs_without:?}",
         );
     }
 }

@@ -21,6 +21,7 @@ mod macos_firewall;
 mod observability;
 mod perf;
 mod spec_graph;
+mod trust_anchor;
 
 use anyhow::Context;
 
@@ -62,7 +63,8 @@ fn main() -> anyhow::Result<()> {
             let mut rest = args.into_iter().skip(1);
             let sub = rest.next().ok_or_else(|| anyhow::anyhow!(
                 "missing images subcommand; available: bake, bake-release, \
-                 preflight, dev-kernel, bake-rootfs, dev-stage, build-all"
+                 preflight, dev-kernel, bake-rootfs, dev-stage, build-all, \
+                 verify-trust-anchor"
             ))?;
             let tail: Vec<String> = rest.collect();
             match sub.as_str() {
@@ -88,10 +90,20 @@ fn main() -> anyhow::Result<()> {
                 "bake-rootfs"  => images::run_bake_rootfs(&tail).context("images bake-rootfs"),
                 "dev-stage"    => images::run_dev_stage(&tail).context("images dev-stage"),
                 "build-all"    => images::run_build_all(&tail).context("images build-all"),
+                // `cargo xtask images verify-trust-anchor` — read-only
+                // post-build verifier for the kernel binary's compile-time
+                // trust anchor. Reads the staged vmlinux off disk, scans
+                // for the expected public-key fingerprint AND rejects the
+                // all-zero placeholder shape. The bake's post-build step
+                // calls the same logic; this subcommand exposes it to
+                // operators for ad-hoc audits (iter66,
+                // INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01).
+                "verify-trust-anchor" => images::run_verify_trust_anchor(&tail)
+                    .context("images verify-trust-anchor"),
                 other          => anyhow::bail!(
                     "unknown images subcommand: {other:?}; \
                      available: bake, bake-release, preflight, dev-kernel, \
-                     bake-rootfs, dev-stage, build-all"
+                     bake-rootfs, dev-stage, build-all, verify-trust-anchor"
                 ),
             }
         }
