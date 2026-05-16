@@ -1,0 +1,72 @@
+# RAXIS kernel-canonical symbol-index verifier image inputs
+# (iter62 D5).
+#
+# Normative references:
+#   - verifier-processes.md §6 (witness body shape)
+#   - INV-VERIFIER-12 (reserved alias `raxis-verifier-symbol-index`)
+#   - INV-VERIFIER-CANONICAL-SYMBOL-INDEX-DIGEST-PINNED-01 (D11)
+#   - V2_GAPS.md A8 (verifier runtime — shipped, iter62)
+#
+# Trust model
+# ───────────
+# This image is **kernel-canonical** in the same sense as
+# Reviewer / Orchestrator: the digest is the SOLE truth at spawn
+# time (operators CANNOT override via policy), and the alias
+# `raxis-verifier-symbol-index` is reserved by
+# `RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME` so any operator
+# `[[vm_images]]` entry attempting to claim it is rejected at
+# policy load with `FAIL_POLICY_RESERVED_VM_IMAGE_NAME`. The
+# kernel-binary-embedded digest lives in
+# `crates/canonical-images::EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST`
+# (added in D6); the build script populates it from
+# `RAXIS_EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST_HEX` so a
+# release pipeline pins it as part of every kernel rebuild.
+
+role              = "VerifierSymbolIndex"
+kernel_version    = "0.1.0"
+kernel_canonical  = true
+reserved_alias    = "raxis-verifier-symbol-index"
+
+source_date_epoch = 1700000000
+erofs_version     = "1.7.1"
+tar_version       = "1.34"
+zstd_version      = "1.5.5"
+
+# `image_format` selects the on-disk shape; defaults to
+# `RootfsErofs`. `cargo xtask images build-all` overrides to
+# `RootfsInitramfsCpio` for the dev-host pipeline.
+image_format      = "RootfsErofs"
+
+# Runtime defaults — these are documentary fields injected via the
+# kernel's spawn envelope. The symbol-index verifier's budget is
+# tighter than the general verifier (single-purpose; no operator-
+# supplied shell line, just `raxis-verifier` running the built-in
+# symbol-index orchestration from the D7 code path).
+[runtime_defaults]
+verifier_timeout_seconds = 30
+verifier_artifact_max_bytes = 4194304  # 4 MiB; large enough for a
+                                       # 10k-file repo's ctags JSON
+                                       # output once compressed.
+verifier_stdout_max_bytes = 65536      # 64 KiB; the verifier
+                                       # streams the index to the
+                                       # artefact path, not stdout.
+verifier_stderr_max_bytes = 65536      # same as stdout
+
+[verifier_toolchain]
+universal_ctags_version = "5.9.20220403.0"
+
+# D7 perf-budget pins. These are operator-visible budgets the
+# verifier promises to honour on the configured hardware shape;
+# `INV-VERIFIER-SYMBOL-INDEX-PERF-CEILING-01` (D11) is the
+# normative ceiling.
+[perf_budget]
+warm_index_no_change_ms = 200    # ≤ 200ms wall-clock on a no-change
+                                 # diff (verifier reads BASE index,
+                                 # observes empty diff, emits cached
+                                 # witness).
+warm_index_50_file_diff_ms = 1000 # ≤ 1s wall-clock on a 50-file
+                                  # diff in a 10k-file repo with
+                                  # a warm BASE_SYMBOL_INDEX.
+cold_index_full_repo_ms = 5000   # ≤ 5s wall-clock for a full repo
+                                 # rebuild (cold base index, no
+                                 # cache hits) on a 10k-file repo.
