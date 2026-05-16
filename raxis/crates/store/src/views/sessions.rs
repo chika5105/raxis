@@ -98,6 +98,43 @@ pub fn active_counts(conn: &RoConn) -> Result<SessionStateCounts, SessionViewErr
     active_counts_at(conn, unix_now_secs())
 }
 
+/// Count the un-revoked rows in `sessions`. Distinct from
+/// [`active_counts_at`] in two ways:
+///   1. Takes a `&rusqlite::Connection` so the kernel-side write
+///      handle (`Store::lock_sync` / `Store::lock`) can call it
+///      from within a write transaction without first opening a
+///      separate read-only handle.
+///   2. Ignores `expires_at` — for VM-concurrency cap admission
+///      the kernel cares about live sessions whose revoke-on-exit
+///      hook has not yet fired, regardless of the policy-level
+///      session-token expiry. A revoked-but-unexpired row never
+///      holds a live VM (the `SessionSpawnService::terminate_session`
+///      path has run); an unrevoked-but-expired row may still
+///      hold a live VM (the planner has not yet self-disconnected
+///      and the kernel has not yet reaped it). The cap MUST count
+///      the latter.
+///
+/// Pinned by `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` as the
+/// canonical "alive sessions" projection consumed by
+/// [`raxis_session_spawn::SessionSpawnService::active_count`].
+/// Adding any other `WHERE` clause here is a wire-shape change
+/// that requires updating the matching invariant + the cap-
+/// admission test in
+/// `kernel/tests/session_spawn_cap_uses_db_truth.rs`.
+pub fn count_unrevoked_sessions(
+    conn: &rusqlite::Connection,
+) -> Result<u64, SessionViewError> {
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM {} WHERE revoked = 0",
+            Table::Sessions.as_str(),
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(count.max(0) as u64)
+}
+
 /// Count active sessions split by `session_agent_type` (Orchestrator /
 /// Executor / Reviewer). Returns one entry per agent type that has at
 /// least one row in the `sessions` table whose `revoked = 0 AND
@@ -447,6 +484,48 @@ mod tests {
         let tmp = fresh_store_with_seed_sessions();
         let conn = open_ro(tmp.path()).unwrap();
         assert!(by_id(&conn, "no-such-session").unwrap().is_none());
+    }
+
+    /// `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01`. The seed has
+    /// three sessions (active, expired, revoked). The DB-side
+    /// "alive" predicate keyed on `revoked = 0` returns 2 (active +
+    /// expired), NOT 1 (`active_counts_at` minus revoked) and NOT
+    /// 3 (every row). The cap-admission gate calls THIS helper.
+    #[test]
+    fn count_unrevoked_sessions_excludes_only_revoked_rows() {
+        let tmp = fresh_store_with_seed_sessions();
+        let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
+        let g = store.lock_sync();
+        let count = count_unrevoked_sessions(&g).unwrap();
+        assert_eq!(
+            count, 2,
+            "INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01: \
+             cap-admission counts every un-revoked row \
+             regardless of expires_at (the policy-level token \
+             expiry is independent of whether the substrate \
+             still holds a live VM for that session)"
+        );
+    }
+
+    /// `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01`. After every
+    /// row has been revoked the count goes to zero; this is the
+    /// regression witness for the iter65 root cause where the
+    /// in-memory ledger leaked entries on `planner_self_exit` so
+    /// the cap pinned at `cap=N` indefinitely.
+    #[test]
+    fn count_unrevoked_sessions_drops_to_zero_after_revoke_sweep() {
+        const SESSIONS: &str = Table::Sessions.as_str();
+        let tmp = fresh_store_with_seed_sessions();
+        let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
+        let g = store.lock_sync();
+        g.execute(&format!("UPDATE {SESSIONS} SET revoked = 1"), [])
+            .unwrap();
+        let count = count_unrevoked_sessions(&g).unwrap();
+        assert_eq!(
+            count, 0,
+            "every row revoked ⇒ cap-admission projection MUST \
+             collapse to zero (regression for the iter65 leak)"
+        );
     }
 
     // ── Worktree-GC helper tests (V2.5 §11.4) ─────────────────────

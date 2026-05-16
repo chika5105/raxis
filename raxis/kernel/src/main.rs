@@ -1763,7 +1763,17 @@ async fn main() {
                 // session admission loop emits
                 // `SessionEgressStallDetected` against one
                 // shared sliding-window state.
-                .with_egress_stall_tracker(Arc::clone(&egress_stall_tracker)),
+                .with_egress_stall_tracker(Arc::clone(&egress_stall_tracker))
+                // `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01`
+                // (iter65) — the cap-admission gate
+                // (`crate::capacity::check_vm_concurrency_cap`)
+                // reads `active_count` which now derives its
+                // value from `SELECT COUNT(*) FROM sessions
+                // WHERE revoked = 0` instead of the in-memory
+                // live-handle map. Without this wire the
+                // cap-admission gate falls back to the leaky
+                // pre-iter65 in-memory projection.
+                .with_store(Arc::clone(&store)),
             );
             // V2 `elastic-vm-scaling.md §4.4` — fresh scale-down
             // tracker for the orchestrator-spawn context. The

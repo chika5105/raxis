@@ -61,6 +61,27 @@
 //!   abort → credential-proxies-shutdown. This matches the
 //!   audit-after-state-mutation discipline (the audit event for
 //!   each tier lands AFTER the state mutation it describes).
+//! * **`INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65).** The
+//!   VM-concurrency cap consumer ([`SessionSpawnService::active_count`])
+//!   reads `SELECT COUNT(*) FROM sessions WHERE revoked = 0` from
+//!   the durable `Store` injected via [`SessionSpawnService::with_store`],
+//!   NOT the in-memory `sessions` map. The map is the kernel-side
+//!   owner of the substrate handles (`Box<dyn IsolationSession>`,
+//!   the per-session admission `JoinHandle`, the credential-proxy
+//!   handles); it is NOT the source of truth for cap admission.
+//!   The pre-iter65 in-memory projection leaked entries on every
+//!   `planner_self_exit` revoke (which bypasses
+//!   `terminate_session`), pinning `current_running` at the cap
+//!   forever and rejecting every subsequent admission with
+//!   `FailVmConcurrencyAtCap` against an empty audit-truth state.
+//! * **`INV-SESSION-SPAWN-LEDGER-MIRRORS-AUDIT-01` (iter65).** At
+//!   every kernel state-emit point the count of un-revoked rows in
+//!   the `sessions` table equals
+//!   `count(SessionVmSpawned) − count(SessionVmExited)` for sessions
+//!   whose `SessionVmSpawned` audit has been emitted. Pinned in
+//!   `specs/invariants.md`; the regression test in
+//!   `crates/session-spawn/tests/active_count_reads_db.rs::active_count_drops_after_planner_self_exit_revoke_sweep`
+//!   exercises the canonical leak path the invariant rules out.
 //!
 //! # What this crate does NOT do
 //!
@@ -278,13 +299,40 @@ pub enum SpawnError {
 ///
 /// One instance per kernel boot. Threaded into `HandlerContext` and
 /// shared across every IPC handler that needs to spawn or terminate
-/// a session. The internal session table is behind a
-/// `parking_lot::Mutex` — every callsite acquires the lock, mutates
-/// the map (`insert` / `remove` / `contains_key` / `len`), and
-/// drops the guard within a single synchronous block. None of the
-/// callsites await while holding the lock, so the async runtime
-/// would gain nothing from `tokio::sync::Mutex` and pay the
-/// async-state-machine overhead for every short critical section.
+/// a session.
+///
+/// **`INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65).** The
+/// in-memory `sessions` map below is NOT the source of truth for
+/// the VM-concurrency cap admission gate. It is the kernel-side
+/// owner of the substrate handles (`Box<dyn IsolationSession>`,
+/// the admission-loop `JoinHandle`, the credential-proxy handles)
+/// — these are values the kernel mints AT spawn time and consumes
+/// AT terminate time, with no canonical SQLite projection that
+/// would let us re-acquire them after a kernel restart. They live
+/// in this map for the lifetime of one kernel-process boot and are
+/// dropped on `terminate_session`.
+///
+/// The cap-admission consumer ([`Self::active_count`]) instead
+/// queries `SELECT COUNT(*) FROM sessions WHERE revoked = 0`
+/// against the durable store via the optional `Arc<Store>` wired
+/// in by [`Self::with_store`]. The DB is the audit-equivalent
+/// projection: every `SessionVmSpawned` writes a row, every
+/// `SessionVmExited` flips `revoked = 1`. Pre-iter65 the cap
+/// gate read `self.sessions.lock().len()`, which leaked entries
+/// on the `planner_self_exit` revoke path (the revoke handler
+/// in `kernel/src/session_spawn_orchestrator.rs::spawn_planner_dispatcher`
+/// flips the DB row but never calls `terminate_session`, leaving
+/// the in-memory map at `len = N` even though the audit chain
+/// said zero VMs were alive). The cap pinned at the ceiling and
+/// every subsequent admission rejected with `FailVmConcurrencyAtCap`
+/// against an empty audit-truth state — the iter65-investigation
+/// failure mode.
+///
+/// **Concurrency.** The `sessions` map sits behind a
+/// `parking_lot::Mutex`. Every callsite acquires the lock,
+/// mutates the map (`insert` / `remove` / `contains_key`), and
+/// drops the guard within a single synchronous block. None of
+/// the callsites await while holding the lock.
 pub struct SessionSpawnService {
     isolation: Arc<dyn IsolationBackend>,
     proxies: Arc<CredentialProxyManager>,
@@ -305,12 +353,30 @@ pub struct SessionSpawnService {
     /// `with_egress_stall_tracker` before the orchestrator-spawn
     /// service is constructed (see `kernel/src/main.rs`).
     egress_stall_tracker: Option<Arc<EgressStallTracker>>,
-    /// Per-session live state. Populated by `spawn_session`,
-    /// drained by `terminate_session`. Synchronously serialised
-    /// because every critical section is map-mutation only — the
-    /// VM-shutdown / audit-emit / loop-abort work in
-    /// `terminate_session` runs AFTER the guard has been dropped
-    /// (`drop(table)` immediately after `remove`).
+    /// **`INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65).**
+    /// The durable store handle the cap-admission consumer
+    /// ([`Self::active_count`]) queries. Optional so legacy
+    /// fixtures that exercise spawn / terminate in isolation
+    /// without booting a `Store` keep compiling against the
+    /// in-memory fallback documented on [`Self::active_count`].
+    /// Production wires this via [`Self::with_store`] in
+    /// `kernel::main` and `kernel::ipc::context` so every
+    /// `current_running` read consulted by
+    /// `crate::capacity::check_vm_concurrency_cap` agrees with
+    /// the audit chain's `SessionVmSpawned − SessionVmExited`
+    /// projection by construction.
+    store: Option<Arc<raxis_store::Store>>,
+    /// Per-session live state owner. **NOT the source of truth for
+    /// the cap-admission gate** — see the type-level doc above
+    /// and [`Self::active_count`] for the audit-truth projection
+    /// that `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` pins.
+    /// This map only owns the substrate handles the kernel needs
+    /// to drive `terminate_session`; it is dropped on every
+    /// terminate and refilled on every spawn, with no expectation
+    /// that its `len()` matches the audit count for the entire
+    /// kernel-process lifetime (it doesn't, by construction —
+    /// the planner-self-exit path bypasses `terminate_session`
+    /// entirely; see iter65 forensics).
     sessions: Mutex<HashMap<String, ActiveSession>>,
 }
 
@@ -340,8 +406,27 @@ impl SessionSpawnService {
             audit,
             observability: None,
             egress_stall_tracker: None,
+            store: None,
             sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// **`INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65).**
+    /// Inject the durable [`raxis_store::Store`] handle the
+    /// cap-admission consumer reads. Production boot
+    /// (`kernel::main`, `kernel::ipc::context::HandlerContext::new`)
+    /// MUST call this before the service is wrapped in an `Arc`
+    /// and threaded into the IPC handler tree — without it
+    /// [`Self::active_count`] falls back to the in-memory
+    /// `sessions.lock().len()` projection that leaked entries on
+    /// `planner_self_exit` and pinned the VM-concurrency cap at
+    /// `current_running == cap` indefinitely (the iter64 forensic
+    /// surface). Builder-shaped to keep the existing 3-arg `new`
+    /// constructor source-compatible with unit-test fixtures that
+    /// exercise spawn / terminate without a backing `Store`.
+    pub fn with_store(mut self, store: Arc<raxis_store::Store>) -> Self {
+        self.store = Some(store);
+        self
     }
 
     /// V3 perf-telemetry. Inject the kernel-wide `ObservabilityHub`
@@ -949,11 +1034,71 @@ impl SessionSpawnService {
         self.sessions.lock().contains_key(session_id)
     }
 
-    /// Number of currently-active sessions. Useful for kernel boot
-    /// admission tier checks (`MaxConcurrentVms`) and for the
-    /// `raxis status` operator command. See [`Self::is_active`] for
-    /// the async-signature note.
+    /// Number of currently-active VM sessions consulted by the
+    /// kernel's `[host_capacity] max_concurrent_vms` admission
+    /// gate. **`INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01`
+    /// (iter65)** pins this projection to the durable `sessions`
+    /// table — the same row the substrate-spawn handler insert at
+    /// VM-spawn time and the planner-self-exit hook flips to
+    /// `revoked = 1` at VM-exit time. The previous in-memory
+    /// `self.sessions.lock().len()` projection leaked entries on
+    /// the `planner_self_exit` path (which bypasses
+    /// `terminate_session` entirely) and pinned `current_running`
+    /// at the cap forever once a few sessions leaked, blocking
+    /// every subsequent admission with `FailVmConcurrencyAtCap`
+    /// against an empty audit-truth state.
+    ///
+    /// **Fallback behaviour.** When [`Self::with_store`] has not
+    /// been called (legacy unit-test fixtures that spawn / terminate
+    /// against an `Arc<dyn Backend>` without booting a real
+    /// `Store`), the method falls back to the in-memory map. The
+    /// fallback is documented as such — production boot in
+    /// `kernel::main` and `kernel::ipc::context::HandlerContext::new`
+    /// MUST wire a store via [`Self::with_store`].
     pub async fn active_count(&self) -> usize {
+        if let Some(store) = self.store.as_ref() {
+            let store = Arc::clone(store);
+            // Hop onto the blocking pool because `Store::lock_sync`
+            // blocks the current thread on the underlying tokio
+            // mutex; doing it inline would stall the executor for
+            // the duration of the SQL query (typically
+            // sub-millisecond, but the handler hot-path is too
+            // sensitive to take chances).
+            let count = tokio::task::spawn_blocking(move || {
+                let conn = store.lock_sync();
+                raxis_store::views::sessions::count_unrevoked_sessions(&conn)
+            })
+            .await;
+            return match count {
+                Ok(Ok(n)) => n as usize,
+                Ok(Err(e)) => {
+                    // Audit-grade visibility for the fail-closed
+                    // path: the SQL query failed (DB locked,
+                    // schema-version skew, …). Surface the error
+                    // with a structured log line and report
+                    // `usize::MAX` so the cap-admission gate
+                    // refuses every new spawn until the operator
+                    // notices. A return of zero would silently
+                    // re-admit beyond the cap.
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"session_spawn_active_count_db_query_failed\",\
+                         \"error\":\"{e}\",\"invariant\":\"INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01\"}}",
+                    );
+                    usize::MAX
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"session_spawn_active_count_join_failed\",\
+                         \"error\":\"{e}\",\"invariant\":\"INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01\"}}",
+                    );
+                    usize::MAX
+                }
+            };
+        }
+        // Pre-iter65 fallback for unit-test fixtures that never
+        // wire a store. NOT used on the production cap-admission
+        // path — production main / `HandlerContext::new` always
+        // call `with_store`.
         self.sessions.lock().len()
     }
 }

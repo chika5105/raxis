@@ -41,6 +41,17 @@ raxis-credentials       = { workspace = true }
 # integration tests) and is a no-op when no hub is wired in.
 raxis-observability     = { path = "../observability" }
 
+# `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65). The
+# `active_count` helper consulted by the kernel's VM-concurrency
+# cap-admission gate now derives its value from the durable
+# `sessions` table rather than from the in-memory live-handle map
+# (which leaked entries on the `planner_self_exit` revoke path,
+# pinning `current_running` at the cap forever once a few sessions
+# leaked). The store handle is optional on `SessionSpawnService`
+# so legacy unit-test fixtures that never wire a store keep
+# compiling against the pre-iter65 in-memory fallback.
+raxis-store             = { path = "../store" }
+
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 tokio       = { workspace = true }
@@ -52,5 +63,10 @@ parking_lot = "0.12"
 raxis-test-support      = { path = "../test-support" }
 raxis-credentials-file  = { workspace = true }
 raxis-tproxy-protocol   = { path = "../tproxy-protocol" }
+# iter65 stateless-cap regression suite (`INV-KERNEL-STATELESS-VM-
+# CONCURRENCY-CAP-01`). The `active_count_reads_db_*.rs` tests seed
+# `sessions` rows directly via raw SQL to drive the cap-admission
+# gate without booting a substrate VM.
+rusqlite                = { workspace = true }
 tempfile                = "3"
 tokio                   = { workspace = true, features = ["full"] }

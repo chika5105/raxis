@@ -543,7 +543,11 @@ impl HandlerContext {
                 Arc::clone(&proxy_manager),
                 Arc::clone(&audit),
             )
-            .with_egress_stall_tracker(Arc::clone(&egress_stall_tracker)),
+            .with_egress_stall_tracker(Arc::clone(&egress_stall_tracker))
+            // `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65)
+            // — derive `active_count` from the `sessions` table,
+            // not the leaky in-memory live-handle map.
+            .with_store(Arc::clone(&store)),
         );
         // Default `image_resolver` is the offline-friendly
         // `PrePopulatedResolver` rooted at `<data_dir>/oci-cache/`.
@@ -665,7 +669,11 @@ impl HandlerContext {
             self.audit.clone(),
         )
         .with_observability(hub_for_spawn)
-        .with_egress_stall_tracker(Arc::clone(&self.egress_stall_tracker));
+        .with_egress_stall_tracker(Arc::clone(&self.egress_stall_tracker))
+        // `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65) —
+        // preserve the store handle so the cap-admission gate
+        // keeps reading audit-truth after a hub install.
+        .with_store(Arc::clone(&self.store));
         self.session_spawn = Arc::new(new_spawn);
         self
     }
@@ -697,7 +705,10 @@ impl HandlerContext {
                 Arc::clone(&self.proxy_manager),
                 Arc::clone(&self.audit),
             )
-            .with_egress_stall_tracker(tracker),
+            .with_egress_stall_tracker(tracker)
+            // `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65)
+            // — preserve the store handle on rebuild.
+            .with_store(Arc::clone(&self.store)),
         );
         self
     }
@@ -776,7 +787,12 @@ impl HandlerContext {
                 Arc::clone(&self.proxy_manager),
                 Arc::clone(&self.audit),
             )
-            .with_egress_stall_tracker(Arc::clone(&self.egress_stall_tracker)),
+            .with_egress_stall_tracker(Arc::clone(&self.egress_stall_tracker))
+            // `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01` (iter65)
+            // — preserve the store handle across credential-backend
+            // swaps so the cap-admission gate keeps reading
+            // audit-truth.
+            .with_store(Arc::clone(&self.store)),
         );
         self
     }
