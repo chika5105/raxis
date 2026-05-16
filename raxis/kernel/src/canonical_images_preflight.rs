@@ -722,6 +722,30 @@ fn run_one(
                     kind.audit_kind(),
                 );
             }
+
+            // FOLLOWUP-F — for the iter62 verifier roles, also emit the
+            // verifier-specific `VerifierImageDigestMismatch` audit row
+            // alongside the canonical `SecurityViolationDetected` above.
+            // Lets the dashboard's verifier panel pivot on
+            // `image_alias` without joining the
+            // `SecurityViolationDetected.violation_kind` string family.
+            // Pinned by `INV-VERIFIER-CANONICAL-SYMBOL-INDEX-DIGEST-PINNED-01`.
+            let verifier_alias = match kind {
+                CanonicalImageKind::Verifier => Some("raxis-verifier-starter"),
+                CanonicalImageKind::VerifierSymbolIndex => Some("raxis-verifier-symbol-index"),
+                _ => None,
+            };
+            if let Some(alias) = verifier_alias {
+                crate::gates::verifier_audit::emit_image_digest_mismatch(
+                    audit,
+                    alias,
+                    &expected,
+                    &actual,
+                    &image_path.display().to_string(),
+                    None,
+                    None,
+                );
+            }
             PreflightOutcome::Tampered {
                 path: image_path.to_owned(),
                 expected,
