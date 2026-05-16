@@ -3106,6 +3106,20 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     "VerifierImageDigestMismatch",
     "VerifierTimeout",
     "VerifierArtifactRejected",
+    // === iter63 bounded-runtime + operator-hint variants ===
+    //
+    // Six audit kinds added by `specs/iter63-followups.md` (operator-
+    // authored hints into witnesses + bounded-runtime guard for
+    // verifier execution). Each maps 1:1 to a
+    // `AuditEventKind::Verifier* | Witness*` variant in
+    // `crates/audit/src/event.rs`; the lockstep is enforced by the
+    // `KNOWN_AUDIT_EVENT_KINDS` drift-guard test in this crate.
+    "VerifierWallClockTimeout",
+    "VerifierIdleTimeout",
+    "VerifierBudgetExhausted",
+    "VerifierVmForcedShutdown",
+    "WitnessHandlerTimeout",
+    "WitnessOperatorHintSpoofingDetected",
 ];
 
 // ---------------------------------------------------------------------------
@@ -8087,6 +8101,41 @@ channels   = []
             AuditEventKind::VerifierArtifactRejected {
                 verifier_run_id: "x".into(),
                 reason: "x".into(),
+            }
+            .as_str(),
+            // === iter63 bounded-runtime + operator-hint variants ===
+            AuditEventKind::VerifierWallClockTimeout {
+                verifier_run_id: "x".into(),
+                task_id: "x".into(),
+                budget_seconds: 0,
+                elapsed_ms: 0,
+            }
+            .as_str(),
+            AuditEventKind::VerifierIdleTimeout {
+                verifier_run_id: "x".into(),
+                task_id: "x".into(),
+                idle_seconds: 0,
+            }
+            .as_str(),
+            AuditEventKind::VerifierBudgetExhausted {
+                task_id: "x".into(),
+                cumulative_seconds: 0,
+                budget_seconds: 0,
+            }
+            .as_str(),
+            AuditEventKind::VerifierVmForcedShutdown {
+                verifier_run_id: "x".into(),
+                grace_seconds: 0,
+            }
+            .as_str(),
+            AuditEventKind::WitnessHandlerTimeout {
+                task_id: None,
+                budget_seconds: 0,
+            }
+            .as_str(),
+            AuditEventKind::WitnessOperatorHintSpoofingDetected {
+                task_id: "x".into(),
+                gate_type: "x".into(),
             }
             .as_str(),
         ];

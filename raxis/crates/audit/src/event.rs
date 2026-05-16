@@ -4205,6 +4205,102 @@ pub enum AuditEventKind {
         /// (`size_cap`, `path_escape`, `sha_mismatch`).
         reason: String,
     },
+
+    // === iter63 bounded-runtime + operator-hint variants ==============
+    //
+    // The six variants below close the `iter63-followups.md` queued
+    // items (operator-authored hints into witnesses + bounded-runtime
+    // guard for verifier execution). Each one short-circuits the
+    // `INV-VERIFIER-AUDIT-PAIRED-WRITE-01` pair in the same way the
+    // iter62 `VerifierTimeout` variant does: when emitted, the
+    // verifier lifecycle is terminated and no `VerifierWitnessReceived`
+    // will follow for the same `verifier_run_id`.
+    //
+    // Pinned by `INV-VERIFIER-WALL-CLOCK-KILL-01`,
+    // `INV-VERIFIER-IDLE-TIMEOUT-01`,
+    // `INV-VERIFIER-CUMULATIVE-BUDGET-01`,
+    // `INV-VERIFIER-VM-FORCE-SHUTDOWN-01`,
+    // `INV-WITNESS-HANDLER-BOUNDED-01`,
+    // `INV-WITNESS-OPERATOR-HINT-SPOOFING-REJECTED-01`.
+    /// The verifier exceeded the policy-bounded wall-clock budget
+    /// (`min(declared_timeout, policy_max_verifier_wall_seconds)`).
+    /// The kernel reaped the subprocess/VM via SIGTERM-then-SIGKILL
+    /// (subprocess) or
+    /// [`shutdown_grace_then_force`](https://docs.rs/raxis-isolation-apple-vz)
+    /// (VM). Short-circuits the
+    /// `INV-VERIFIER-AUDIT-PAIRED-WRITE-01` pair: no
+    /// `VerifierWitnessReceived` will follow.
+    VerifierWallClockTimeout {
+        /// Stable per-VM identifier the kernel minted at spawn.
+        verifier_run_id: String,
+        /// Task whose verifier this is.
+        task_id: String,
+        /// Resolved wall-clock budget seconds (the `min(...)` value
+        /// the kernel actually enforced).
+        budget_seconds: u64,
+        /// Best-effort milliseconds the verifier ran before reap.
+        elapsed_ms: u64,
+    },
+    /// The verifier's UDS connection went idle for longer than
+    /// `verifier_idle_timeout_seconds`. The kernel killed the verifier
+    /// via the same reap path as `VerifierWallClockTimeout`.
+    /// Short-circuits the `INV-VERIFIER-AUDIT-PAIRED-WRITE-01` pair.
+    VerifierIdleTimeout {
+        /// Stable per-VM identifier the kernel minted at spawn.
+        verifier_run_id: String,
+        /// Task whose verifier this is.
+        task_id: String,
+        /// Resolved idle-timeout seconds.
+        idle_seconds: u64,
+    },
+    /// Cumulative verifier wall-time on this task exceeded
+    /// `task_verifier_total_budget_seconds`. The gate fails with
+    /// `WitnessRejected { reason: TimeBudgetExhausted }` and any
+    /// in-flight verifier is reaped. Short-circuits the
+    /// `INV-VERIFIER-AUDIT-PAIRED-WRITE-01` pair.
+    VerifierBudgetExhausted {
+        /// Task whose verifier budget was blown.
+        task_id: String,
+        /// Cumulative seconds the kernel observed before this spawn.
+        cumulative_seconds: u64,
+        /// Policy-configured ceiling.
+        budget_seconds: u64,
+    },
+    /// The kernel ran `vmm.shutdown(graceful)`; the VM failed to
+    /// exit within `verifier_force_shutdown_grace_seconds`, so the
+    /// kernel issued the forced-kill API call. Emitted from the
+    /// `shutdown_grace_then_force` path in `isolation-apple-vz`.
+    /// Pairs with whichever Verifier*Timeout / Budget* variant
+    /// triggered the kill.
+    VerifierVmForcedShutdown {
+        /// Stable per-VM identifier the kernel minted at spawn.
+        verifier_run_id: String,
+        /// Policy-configured grace seconds.
+        grace_seconds: u64,
+    },
+    /// The witness-handler took longer than the bounded 5s limit
+    /// (`INV-WITNESS-HANDLER-BOUNDED-01`). The kernel returned a
+    /// typed error to the caller so other gate-evaluations are
+    /// not blocked. No witness was written.
+    WitnessHandlerTimeout {
+        /// Task whose witness handling timed out (when known —
+        /// transport-only timeouts may not know the task).
+        task_id: Option<String>,
+        /// Bounded budget seconds (always `5` today; stable for
+        /// forward-compat).
+        budget_seconds: u64,
+    },
+    /// The verifier's claimed `WitnessSubmission.body` already
+    /// contained an `operator_hints` key — a spoofing attempt
+    /// against the kernel's policy-driven hint echo
+    /// (`INV-WITNESS-OPERATOR-HINTS-ECHOED-01`). The submission
+    /// was rejected and the token NOT consumed.
+    WitnessOperatorHintSpoofingDetected {
+        /// Task whose witness submission was rejected.
+        task_id: String,
+        /// Gate type for the offending submission.
+        gate_type: String,
+    },
 }
 
 impl AuditEventKind {
@@ -4390,6 +4486,15 @@ impl AuditEventKind {
             Self::VerifierImageDigestMismatch { .. } => "VerifierImageDigestMismatch",
             Self::VerifierTimeout { .. } => "VerifierTimeout",
             Self::VerifierArtifactRejected { .. } => "VerifierArtifactRejected",
+            // === iter63 bounded-runtime + operator-hint variants ===
+            Self::VerifierWallClockTimeout { .. } => "VerifierWallClockTimeout",
+            Self::VerifierIdleTimeout { .. } => "VerifierIdleTimeout",
+            Self::VerifierBudgetExhausted { .. } => "VerifierBudgetExhausted",
+            Self::VerifierVmForcedShutdown { .. } => "VerifierVmForcedShutdown",
+            Self::WitnessHandlerTimeout { .. } => "WitnessHandlerTimeout",
+            Self::WitnessOperatorHintSpoofingDetected { .. } => {
+                "WitnessOperatorHintSpoofingDetected"
+            }
         }
     }
 }
@@ -5430,5 +5535,110 @@ mod credential_proxy_kind_tests {
         let v = serde_json::to_value(&kind).expect("serialises");
         assert_eq!(v["kind"], serde_json::json!("VerifierArtifactRejected"));
         assert_eq!(v["reason"], serde_json::json!("size_cap"));
+    }
+
+    // === iter63 bounded-runtime + operator-hint variant witnesses =====
+    //
+    // Each test below pins:
+    //   * `as_str()` wire string (matched by the kernel's
+    //     `KNOWN_AUDIT_EVENT_KINDS` drift-guard test in
+    //     `crates/policy/src/bundle.rs`).
+    //   * Serde-JSON shape (every field reflects under its declared
+    //     name; `kind` discriminant is the variant name).
+    //
+    // Witnesses for `INV-VERIFIER-WALL-CLOCK-KILL-01`,
+    // `INV-VERIFIER-IDLE-TIMEOUT-01`,
+    // `INV-VERIFIER-CUMULATIVE-BUDGET-01`,
+    // `INV-VERIFIER-VM-FORCE-SHUTDOWN-01`,
+    // `INV-WITNESS-HANDLER-BOUNDED-01`,
+    // `INV-WITNESS-OPERATOR-HINT-SPOOFING-REJECTED-01`.
+
+    #[test]
+    fn iter63_verifier_wall_clock_timeout_kind_and_fields_pinned() {
+        let kind = AuditEventKind::VerifierWallClockTimeout {
+            verifier_run_id: "vrun-7".to_owned(),
+            task_id: "task-2".to_owned(),
+            budget_seconds: 300,
+            elapsed_ms: 300_000,
+        };
+        assert_eq!(kind.as_str(), "VerifierWallClockTimeout");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"], serde_json::json!("VerifierWallClockTimeout"));
+        assert_eq!(v["verifier_run_id"], serde_json::json!("vrun-7"));
+        assert_eq!(v["task_id"], serde_json::json!("task-2"));
+        assert_eq!(v["budget_seconds"], serde_json::json!(300));
+        assert_eq!(v["elapsed_ms"], serde_json::json!(300_000));
+    }
+
+    #[test]
+    fn iter63_verifier_idle_timeout_kind_and_fields_pinned() {
+        let kind = AuditEventKind::VerifierIdleTimeout {
+            verifier_run_id: "vrun-7".to_owned(),
+            task_id: "task-2".to_owned(),
+            idle_seconds: 60,
+        };
+        assert_eq!(kind.as_str(), "VerifierIdleTimeout");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"], serde_json::json!("VerifierIdleTimeout"));
+        assert_eq!(v["verifier_run_id"], serde_json::json!("vrun-7"));
+        assert_eq!(v["task_id"], serde_json::json!("task-2"));
+        assert_eq!(v["idle_seconds"], serde_json::json!(60));
+    }
+
+    #[test]
+    fn iter63_verifier_budget_exhausted_kind_and_fields_pinned() {
+        let kind = AuditEventKind::VerifierBudgetExhausted {
+            task_id: "task-2".to_owned(),
+            cumulative_seconds: 900,
+            budget_seconds: 900,
+        };
+        assert_eq!(kind.as_str(), "VerifierBudgetExhausted");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"], serde_json::json!("VerifierBudgetExhausted"));
+        assert_eq!(v["task_id"], serde_json::json!("task-2"));
+        assert_eq!(v["cumulative_seconds"], serde_json::json!(900));
+        assert_eq!(v["budget_seconds"], serde_json::json!(900));
+    }
+
+    #[test]
+    fn iter63_verifier_vm_forced_shutdown_kind_and_fields_pinned() {
+        let kind = AuditEventKind::VerifierVmForcedShutdown {
+            verifier_run_id: "vrun-7".to_owned(),
+            grace_seconds: 10,
+        };
+        assert_eq!(kind.as_str(), "VerifierVmForcedShutdown");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"], serde_json::json!("VerifierVmForcedShutdown"));
+        assert_eq!(v["verifier_run_id"], serde_json::json!("vrun-7"));
+        assert_eq!(v["grace_seconds"], serde_json::json!(10));
+    }
+
+    #[test]
+    fn iter63_witness_handler_timeout_kind_and_fields_pinned() {
+        let kind = AuditEventKind::WitnessHandlerTimeout {
+            task_id: Some("task-9".to_owned()),
+            budget_seconds: 5,
+        };
+        assert_eq!(kind.as_str(), "WitnessHandlerTimeout");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"], serde_json::json!("WitnessHandlerTimeout"));
+        assert_eq!(v["task_id"], serde_json::json!("task-9"));
+        assert_eq!(v["budget_seconds"], serde_json::json!(5));
+    }
+
+    #[test]
+    fn iter63_witness_operator_hint_spoofing_detected_kind_and_fields_pinned() {
+        let kind = AuditEventKind::WitnessOperatorHintSpoofingDetected {
+            task_id: "task-3".to_owned(),
+            gate_type: "TestCoverage".to_owned(),
+        };
+        assert_eq!(kind.as_str(), "WitnessOperatorHintSpoofingDetected");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(
+            v["kind"],
+            serde_json::json!("WitnessOperatorHintSpoofingDetected")
+        );
+        assert_eq!(v["task_id"], serde_json::json!("task-3"));
+        assert_eq!(v["gate_type"], serde_json::json!("TestCoverage"));
     }
 }
