@@ -158,7 +158,13 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
         // the dashboard `notifications` projection both consult the
         // string surface; without parity, Critical-only filters
         // missed the iter64 ceiling event entirely.
-        | "OrchestratorRespawnCeilingExceeded" => Some(Critical),
+        | "OrchestratorRespawnCeilingExceeded"
+        // `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
+        // (iter65-review) — generalised permanent-failure anchor.
+        // Mirror of the typed `K::InitiativePermanentFailureEscalated`
+        // arm in `notification_priority`; both surfaces MUST classify
+        // it as `Critical` per `INV-NOTIFICATION-PRIORITY-PARITY-01`.
+        | "InitiativePermanentFailureEscalated" => Some(Critical),
 
         // High
         "EscalationSubmitted"
@@ -647,6 +653,21 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         K::WitnessHandlerTimeout { .. } => Some(High),
         K::WitnessOperatorHintSpoofingDetected { .. } => Some(Critical),
         K::PlannerMaxTurnsProgressivelyScaled { .. } => None,
+        // `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
+        // (iter65-review) — every emit of this anchor means an
+        // initiative just transitioned to terminal-`Failed` because
+        // a permanent-stall audit event landed; the operator MUST
+        // intervene (approve a recovery retry, deny + audit the
+        // permanent failure, or open a fresh plan). Critical priority
+        // ensures a Critical-only filter on the kernel's
+        // `notifications::dispatch` gate or the dashboard
+        // `notifications` projection still surfaces the event
+        // regardless of how the underlying cause_kind is classified
+        // individually (PlanRejected → High, EscalationTimedOut →
+        // High, etc.). Mirror arm in
+        // `notification_priority_for_kind_str` keeps the surfaces
+        // in lockstep per `INV-NOTIFICATION-PRIORITY-PARITY-01`.
+        K::InitiativePermanentFailureEscalated { .. } => Some(Critical),
     }
 }
 
@@ -1192,6 +1213,18 @@ mod tests {
                 attempts: 4,
                 max_attempts: 3,
             },
+            // `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
+            // (iter65-review). Pin parity for the generalised
+            // permanent-failure anchor so a future drift between the
+            // typed and string classifiers fails this test rather
+            // than silently dropping the Critical signal.
+            AuditEventKind::InitiativePermanentFailureEscalated {
+                initiative_id: "init".into(),
+                cause_kind: "SessionVmFailedFinal".into(),
+                cause_summary: "kvm_oom (3 retries)".into(),
+                escalation_id: Some("esc-1".into()),
+                recoverable_via_approve: true,
+            },
         ];
         for kind in cases {
             let typed = notification_priority(&kind);
@@ -1262,6 +1295,7 @@ mod tests {
             ("KernelDeadlockDetected", Critical),
             ("KernelRestartHaltedCircuitOpen", Critical),
             ("OrchestratorRespawnCeilingExceeded", Critical),
+            ("InitiativePermanentFailureEscalated", Critical),
             // High
             ("EscalationSubmitted", High),
             ("EscalationRateLimitExceeded", High),

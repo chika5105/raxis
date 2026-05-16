@@ -4301,6 +4301,74 @@ pub enum AuditEventKind {
         /// Gate type for the offending submission.
         gate_type: String,
     },
+
+    /// **`INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`**
+    /// (iter65-review). The kernel observed a permanent-stall
+    /// audit event on an initiative whose state was non-terminal
+    /// AND inserted a paired-write `LogicalDeadlock` escalation
+    /// row + transitioned the initiative to `Failed` so the
+    /// operator can either approve a recovery retry or deny and
+    /// preserve the terminal state. Distinct from
+    /// `OrchestratorRespawnCeilingExceeded` (which carries the
+    /// orch-respawn-ceiling-specific payload): this variant is the
+    /// generalised "permanent failure detected" anchor that
+    /// covers every other kind in the in-scope coverage set
+    /// (`SessionVmFailedFinal`, `PlanRejected`, `EscalationTimedOut`,
+    /// `EscalationRateLimitExceeded`, `SessionEgressStallDetected`,
+    /// `MergeFastForwardFailed`, `PushFailed`, the
+    /// `InitiativeStateChanged → Failed` catch-all). Operators
+    /// pivot the inbox by `cause_kind` for triage; `cause_seq`
+    /// distinguishes successive permanent-failure events on the
+    /// same initiative across operator retry rounds.
+    ///
+    /// Notification priority is `Critical` per
+    /// `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`:
+    /// any event that triggers this anchor is by definition
+    /// initiative-terminal and operator-actionable; promoting it
+    /// to `Critical` ensures a Critical-only filter on the
+    /// dispatch gate or the dashboard projection still surfaces
+    /// the permanent-stall signal regardless of how the
+    /// underlying cause_kind is classified individually.
+    InitiativePermanentFailureEscalated {
+        /// The initiative whose state was just transitioned to
+        /// `Failed`. Cross-references `initiatives.initiative_id`.
+        initiative_id: String,
+        /// The `AuditEventKind::as_str()` of the underlying audit
+        /// event that the helper observed as a permanent stall
+        /// (e.g. `"SessionVmFailedFinal"`, `"PlanRejected"`,
+        /// `"EscalationTimedOut"`). Stamped verbatim so the
+        /// dashboard's permanent-failure pivot does not need to
+        /// reverse-engineer the cause from the justification text.
+        cause_kind: String,
+        /// Operator-authored short-form rendering of the cause
+        /// (e.g. `"FAIL_VM_CONCURRENCY_AT_CAP"`,
+        /// `"plan rejected: malformed [[tasks]] block"`). Truncated
+        /// to 1 KiB by the helper. Surfaces in the inbox tooltip
+        /// and the escalation justification so the operator does
+        /// not have to chain-walk to find the trigger.
+        cause_summary: String,
+        /// The auto-created `LogicalDeadlock` escalation row id.
+        /// `None` when the helper's FK-anchor lookup failed (every
+        /// tier of the worker / orchestrator session join returned
+        /// no match) and the escalation row was therefore not
+        /// inserted. Pairing remains chain-side via this audit
+        /// event so an operator forensic reader still sees the
+        /// permanent-failure signal even on the rare anchor-less
+        /// path. `LogicalDeadlockEscalationSkippedNoFkAnchor` log
+        /// line is the structured-log counterpart.
+        escalation_id: Option<String>,
+        /// Whether the underlying `cause_kind` is documented as
+        /// recoverable by an operator-approve action. `false` for
+        /// causes whose underlying condition the operator cannot
+        /// clear via the kernel (e.g. plan schema errors); the
+        /// approve handler still resets the orch-respawn counter
+        /// + transitions Failed → Executing, but the documented
+        /// expectation is that the next orchestrator decision
+        /// cycle will hit the same condition and trip a fresh
+        /// permanent failure. Surfaced in the inbox so operators
+        /// can prefer Deny on non-recoverable causes.
+        recoverable_via_approve: bool,
+    },
 }
 
 impl AuditEventKind {
@@ -4494,6 +4562,9 @@ impl AuditEventKind {
             Self::WitnessHandlerTimeout { .. } => "WitnessHandlerTimeout",
             Self::WitnessOperatorHintSpoofingDetected { .. } => {
                 "WitnessOperatorHintSpoofingDetected"
+            }
+            Self::InitiativePermanentFailureEscalated { .. } => {
+                "InitiativePermanentFailureEscalated"
             }
         }
     }
