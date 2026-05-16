@@ -889,6 +889,20 @@ pub async fn run_role_session_with_connected_transport(
     config.max_tokens_input_total = token_caps.input_total;
     config.max_tokens_output_total = token_caps.output_total;
     config.max_tokens_total = token_caps.total;
+    // `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — stamp the
+    // task / session / role identity onto the dispatch config so
+    // each `planner_turn_usage` stderr line carries the
+    // correlation tuple the kernel needs to fold per-turn cache
+    // telemetry back onto the right `tasks` row. Orchestrator
+    // sessions (no `--task-id`) fall back to the initiative id —
+    // the kernel-side scraper already coalesces per-initiative
+    // counts when `task_id` is absent.
+    config.task_id_for_logs = args
+        .task_id
+        .clone()
+        .unwrap_or_else(|| args.initiative_id.clone());
+    config.session_id_for_logs = env.session_token.clone();
+    config.role_for_logs = role.shortname().to_owned();
     let ctx = ToolContext::for_workspace(workspace);
     let mut loop_ = DispatchLoop::new(model, Arc::clone(&registry), config, ctx)
         .with_terminal_tools(terminal_tools.clone());
@@ -939,11 +953,23 @@ pub async fn run_role_session_with_connected_transport(
     // (worst-of-N over LLM providers with pricing) at admission
     // time, which matches the `EstimateCost` upper-bound contract.
     let (cum_in, cum_out) = outcome.cumulative_tokens();
+    // `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01` — the dispatch
+    // loop now tracks the per-turn cache-only counts separately
+    // from `cum_in` (which folds cache + non-cache for ceiling
+    // enforcement). Pull the cache-only fold off the loop so
+    // `TokensReport.cache_*_tokens` carries the unmuddied counts
+    // the kernel persists into `tasks.cumulative_cache_*` at
+    // `CompleteTask` commit time. Provider id is left empty: the
+    // kernel resolves the billing provider via policy at
+    // admission time (matches the `EstimateCost` upper-bound
+    // contract).
+    let cache_creation_tokens = loop_.last_cumulative_cache_creation_tokens();
+    let cache_read_tokens = loop_.last_cumulative_cache_read_tokens();
     submitter.report_tokens(raxis_types::TokensReport {
         input_tokens: cum_in,
         output_tokens: cum_out,
-        cache_read_tokens: 0,
-        cache_creation_tokens: 0,
+        cache_read_tokens,
+        cache_creation_tokens,
         provider_id: String::new(),
     });
 
