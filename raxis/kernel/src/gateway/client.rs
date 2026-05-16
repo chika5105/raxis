@@ -117,6 +117,18 @@ struct Pending {
     /// The observer uses this to attribute one task's records
     /// to the specific VM that produced them.
     session_id: Option<Uuid>,
+    /// Request body bytes, cloned from the outbound
+    /// `FetchRequest` so the response-side observer fan-out can
+    /// surface BOTH sides of the upstream round-trip. The
+    /// pre-iter64 capture only carried the response, leaving
+    /// the dashboard's per-turn panel rendering half-conversations
+    /// (operators couldn't see what the planner asked for —
+    /// crucial when debugging a malformed prompt or a stale
+    /// system message). Kept on the inflight slot so the
+    /// observer fan-out path doesn't have to re-deserialize the
+    /// outbound frame; cost is one `Vec<u8>` clone per fetch
+    /// (bounded by the gateway's per-request cap).
+    request_body: Vec<u8>,
 }
 
 /// Hook invoked by the gateway pump for every successful
@@ -144,6 +156,12 @@ struct Pending {
 pub trait LlmTurnObserver: Send + Sync {
     /// Record one upstream LLM turn.
     ///
+    /// `request_body_bytes` is the raw upstream REQUEST body
+    /// the gateway just wrote on the kernel's behalf — captured
+    /// so the per-turn dashboard panel can surface both sides
+    /// of the round-trip (iter64 wire-shape fix). Always
+    /// `Some(slice)` (possibly empty) for valid `FetchRequest`s.
+    ///
     /// `body_bytes` is the raw response body the gateway
     /// received from the upstream (or `None` on error). The
     /// observer is responsible for any size capping / UTF-8
@@ -156,6 +174,7 @@ pub trait LlmTurnObserver: Send + Sync {
         fetch_id: Uuid,
         status_code: Option<u16>,
         latency_ms: u32,
+        request_body_bytes: Option<&[u8]>,
         body_bytes: Option<&[u8]>,
         error: Option<&str>,
     );
@@ -310,6 +329,12 @@ impl GatewayClient {
         // response → task).
         let task_id_for_inflight = task_id.clone();
         let session_id_for_inflight = session_id;
+        // iter64 — capture the request body for the
+        // observer fan-out so the per-turn dashboard panel can
+        // render BOTH sides of the upstream round-trip. One
+        // Vec<u8> clone per fetch; bounded by the gateway's
+        // per-request body cap.
+        let request_body_for_inflight = body_bytes.clone();
         let payload = GatewayMessage::FetchRequest {
             gateway_token,
             fetch_id,
@@ -339,6 +364,7 @@ impl GatewayClient {
                 reply_tx,
                 task_id: task_id_for_inflight,
                 session_id: session_id_for_inflight,
+                request_body: request_body_for_inflight,
             }))
             .map_err(|_| GatewayCallError::Unavailable)?;
         }
@@ -411,15 +437,19 @@ async fn pump(
     observer: Option<Arc<dyn LlmTurnObserver>>,
 ) {
     /// Per-fetch slot we keep across the request → response round trip.
-    /// Carries `(reply_tx, task_id, session_id)` so the response-side
-    /// handler can both unblock the dispatch caller AND fan a record
-    /// to the observer keyed by task. Pulling these into a small
-    /// struct (instead of a tuple) keeps the pump's bookkeeping
+    /// Carries `(reply_tx, task_id, session_id, request_body)` so the
+    /// response-side handler can both unblock the dispatch caller AND
+    /// fan a record to the observer keyed by task. Pulling these into
+    /// a small struct (instead of a tuple) keeps the pump's bookkeeping
     /// self-documenting.
     struct InflightSlot {
         reply_tx: oneshot::Sender<Result<FetchResult, GatewayCallError>>,
         task_id: Option<String>,
         session_id: Option<Uuid>,
+        /// iter64 — request body cloned from the outbound
+        /// `FetchRequest` so the observer fan-out at response
+        /// time can record BOTH sides of the round-trip.
+        request_body: Vec<u8>,
     }
 
     let mut inflight: HashMap<Uuid, InflightSlot> = HashMap::new();
@@ -440,9 +470,10 @@ async fn pump(
                         // the write succeeds and the gateway races us
                         // with a response, we MUST already be in the map.
                         inflight.insert(pending.fetch_id, InflightSlot {
-                            reply_tx:   pending.reply_tx,
-                            task_id:    pending.task_id,
-                            session_id: pending.session_id,
+                            reply_tx:     pending.reply_tx,
+                            task_id:      pending.task_id,
+                            session_id:   pending.session_id,
+                            request_body: pending.request_body,
                         });
                         if let Err(e) = write_frame(&mut stream, &pending.payload).await {
                             eprintln!(
@@ -513,6 +544,7 @@ async fn pump(
                                 fetch_id,
                                 status_code,
                                 latency_ms,
+                                Some(slot.request_body.as_slice()),
                                 body_bytes.as_deref(),
                                 error.as_deref(),
                             );
@@ -623,9 +655,10 @@ mod tests {
     /// Recording observer used by the
     /// `pump_fans_observer_for_every_response_with_task_id` and
     /// `pump_skips_observer_when_no_task_id` tests below.
-    /// Captures every `(task_id, fetch_id, status, body_str, error)`
-    /// tuple it sees so the test can assert on order + content.
-    type RecordingRow = (String, Uuid, Option<u16>, String, Option<String>);
+    /// Captures every `(task_id, fetch_id, status, request_body_str,
+    /// body_str, error)` tuple it sees so the test can assert on
+    /// order + content.
+    type RecordingRow = (String, Uuid, Option<u16>, String, String, Option<String>);
 
     #[derive(Default)]
     struct RecordingObserver {
@@ -640,9 +673,13 @@ mod tests {
             fetch_id: Uuid,
             status_code: Option<u16>,
             _latency_ms: u32,
+            request_body_bytes: Option<&[u8]>,
             body_bytes: Option<&[u8]>,
             error: Option<&str>,
         ) {
+            let request_body = request_body_bytes
+                .map(|b| String::from_utf8_lossy(b).to_string())
+                .unwrap_or_default();
             let body = body_bytes
                 .map(|b| String::from_utf8_lossy(b).to_string())
                 .unwrap_or_default();
@@ -650,6 +687,7 @@ mod tests {
                 task_id.to_owned(),
                 fetch_id,
                 status_code,
+                request_body,
                 body,
                 error.map(str::to_owned),
             ));
@@ -676,7 +714,7 @@ mod tests {
                 "https://api.anthropic.com/v1/messages".into(),
                 "POST".into(),
                 vec![],
-                vec![],
+                br#"{"model":"claude","messages":[]}"#.to_vec(),
                 5_000,
                 None,
                 Some("task-cap-1".into()),
@@ -689,8 +727,11 @@ mod tests {
         assert_eq!(seen.len(), 1, "observer MUST receive exactly one record");
         assert_eq!(seen[0].0, "task-cap-1");
         assert_eq!(seen[0].2, Some(200));
-        assert_eq!(seen[0].3, "OK");
-        assert!(seen[0].4.is_none());
+        // iter64 — request body now flows through to the observer
+        // alongside the response body.
+        assert_eq!(seen[0].3, r#"{"model":"claude","messages":[]}"#);
+        assert_eq!(seen[0].4, "OK");
+        assert!(seen[0].5.is_none());
     }
 
     /// Fetches without a `task_id` (e.g. early gateway warm-up

@@ -113,6 +113,19 @@ pub struct LlmTurnRecord {
     /// Observed end-to-end latency in milliseconds (gateway
     /// outbound write → first response byte received).
     pub latency_ms: u32,
+    /// Raw upstream REQUEST body, decoded as UTF-8. The kernel
+    /// gateway pump captures this from the
+    /// `GatewayMessage::FetchRequest.body_bytes` it just sent so
+    /// the operator's per-turn panel can surface BOTH sides of
+    /// the round-trip (the pre-iter64 wire only carried the
+    /// response, leaving operators staring at half-conversations
+    /// in the LLM turns view). Truncated alongside
+    /// [`Self::body`] when above
+    /// [`TaskCaptureConfig::max_body_bytes`]; defaults to the
+    /// empty string for back-compat with pre-iter64 on-disk
+    /// records.
+    #[serde(default)]
+    pub request_body: String,
     /// Raw response body, decoded as UTF-8 (LLM provider responses
     /// are always JSON or SSE text). Bodies above
     /// [`TaskCaptureConfig::max_body_bytes`] are truncated with a
@@ -451,6 +464,7 @@ mod tests {
             fetch_id: format!("fetch-{at_ms}"),
             status_code: Some(200),
             latency_ms: 42,
+            request_body: String::new(),
             body: body.into(),
             body_truncated: false,
             original_body_bytes: body.len() as u64,
@@ -489,6 +503,47 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cap = TaskLlmCapture::new(tmp.path(), TaskCaptureConfig::default()).unwrap();
         assert!(cap.tail("never-existed", 10).is_empty());
+    }
+
+    /// **Request body round-trips through append + tail.** Iter64
+    /// added `LlmTurnRecord::request_body` so the operator-facing
+    /// per-turn panel can surface both sides of the upstream
+    /// round-trip. The kernel gateway pump fills this from the
+    /// `GatewayMessage::FetchRequest.body_bytes` it just wrote.
+    /// This test pins the on-disk + serde-default contract so a
+    /// future refactor cannot accidentally drop the field.
+    #[test]
+    fn request_body_round_trips_through_append_and_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap = TaskLlmCapture::new(tmp.path(), TaskCaptureConfig::default()).unwrap();
+        let mut r = rec(1, "{\"role\":\"assistant\"}");
+        r.request_body = "{\"model\":\"claude-sonnet-4-5\",\"messages\":[]}".into();
+        cap.append("task-req", r).unwrap();
+        let tail = cap.tail("task-req", 10);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(
+            tail[0].request_body,
+            "{\"model\":\"claude-sonnet-4-5\",\"messages\":[]}"
+        );
+    }
+
+    /// **Pre-iter64 on-disk records (no `request_body` key) still
+    /// parse cleanly.** The on-disk file ring outlives any single
+    /// kernel build (it survives VM teardown by design — see
+    /// `INV-DASHBOARD-TASK-LLM-CAPTURE-03`); a fresh kernel after
+    /// an upgrade MUST be able to tail records that were written
+    /// before iter64 added the field.
+    #[test]
+    fn pre_iter64_lines_without_request_body_parse_via_serde_default() {
+        let pre_iter64 = "{\"at_ms\":7,\"task_id\":\"t\",\"session_id\":null,\
+                          \"fetch_id\":\"f\",\"status_code\":200,\"latency_ms\":42,\
+                          \"body\":\"x\",\"body_truncated\":false,\
+                          \"original_body_bytes\":1}";
+        let parsed: LlmTurnRecord =
+            serde_json::from_str(pre_iter64).expect("legacy line MUST parse");
+        assert_eq!(parsed.request_body, "", "missing field MUST default to empty string");
+        assert_eq!(parsed.body, "x");
+        assert_eq!(parsed.at_ms, 7);
     }
 
     #[test]

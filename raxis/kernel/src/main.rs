@@ -1502,9 +1502,16 @@ async fn main() {
             fetch_id: uuid::Uuid,
             status_code: Option<u16>,
             latency_ms: u32,
+            request_body_bytes: Option<&[u8]>,
             body_bytes: Option<&[u8]>,
             error: Option<&str>,
         ) {
+            // iter64 — capture the upstream REQUEST body alongside
+            // the response so the dashboard's per-turn panel can
+            // surface BOTH sides of the round-trip.
+            let request_body = request_body_bytes
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .unwrap_or_default();
             let body = body_bytes
                 .map(|b| String::from_utf8_lossy(b).into_owned())
                 .unwrap_or_default();
@@ -1519,6 +1526,7 @@ async fn main() {
                 fetch_id: fetch_id.to_string(),
                 status_code,
                 latency_ms,
+                request_body,
                 body,
                 body_truncated: false,
                 original_body_bytes: 0,
