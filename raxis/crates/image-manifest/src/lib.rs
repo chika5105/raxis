@@ -1098,15 +1098,31 @@ mod tests {
     fn verifier_role_variants_serde_round_trip_through_toml() {
         // Round-trip through TOML so a malformed serde tag would
         // surface (the spawn-time manifest load uses the same path).
-        let s = toml::to_string(&Role::Verifier).unwrap();
-        let back: Role = toml::from_str(&s).unwrap();
-        assert_eq!(back, Role::Verifier, "Verifier must round-trip");
+        // TOML rejects top-level scalars, so wrap the role in a
+        // newtype struct that mirrors the manifest table shape.
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq, Eq)]
+        struct Wrapper {
+            role: Role,
+        }
 
-        let s = toml::to_string(&Role::VerifierSymbolIndex).unwrap();
-        let back: Role = toml::from_str(&s).unwrap();
+        let s = toml::to_string(&Wrapper { role: Role::Verifier }).unwrap();
+        let back: Wrapper = toml::from_str(&s).unwrap();
         assert_eq!(
             back,
-            Role::VerifierSymbolIndex,
+            Wrapper { role: Role::Verifier },
+            "Verifier must round-trip"
+        );
+
+        let s = toml::to_string(&Wrapper {
+            role: Role::VerifierSymbolIndex,
+        })
+        .unwrap();
+        let back: Wrapper = toml::from_str(&s).unwrap();
+        assert_eq!(
+            back,
+            Wrapper {
+                role: Role::VerifierSymbolIndex,
+            },
             "VerifierSymbolIndex must round-trip"
         );
     }

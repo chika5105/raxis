@@ -660,14 +660,10 @@ mod tests {
              VALUES ('{task_id}', 'init-c5', 'default', 'Running', \
                      'kernel', 1, 1, 1, 0); \
              INSERT INTO sessions \
-                (session_id, planner_pubkey, planner_kind, \
-                 admission_token, capability_url, capability_signature, \
-                 monotonic_uuid, created_at, expires_at, revoked, \
-                 session_agent_type, can_delegate) \
-             VALUES ('{session_id}', 'pk', 'rust-test', \
-                     'tok', 'urn:c5', 'sig', \
-                     '00000000-0000-4000-8000-000000000001', \
-                     1, 9999999999, 0, 'Executor', 0); \
+                (session_id, role_id, session_token, lineage_id, \
+                 fetch_quota, created_at, expires_at, revoked) \
+             VALUES ('{session_id}', 'Executor', 'tok-c5-{session_id}', \
+                     'lin-c5', 1000, 1, 9999999999, 0); \
              INSERT INTO subtask_activations \
                 (activation_id, task_id, initiative_id, \
                  activation_state, session_id, created_at, activated_at) \
@@ -725,14 +721,10 @@ mod tests {
              VALUES ('task-completed', 'init-c5b', 'default', \
                      'Completed', 'kernel', 1, 1, 2, 0); \
              INSERT INTO sessions \
-                (session_id, planner_pubkey, planner_kind, \
-                 admission_token, capability_url, capability_signature, \
-                 monotonic_uuid, created_at, expires_at, revoked, \
-                 session_agent_type, can_delegate) \
-             VALUES ('sess-c5b', 'pk', 'rust-test', \
-                     'tok', 'urn:c5b', 'sig', \
-                     '00000000-0000-4000-8000-000000000002', \
-                     1, 9999999999, 0, 'Executor', 0); \
+                (session_id, role_id, session_token, lineage_id, \
+                 fetch_quota, created_at, expires_at, revoked) \
+             VALUES ('sess-c5b', 'Executor', 'tok-c5b', 'lin-c5b', \
+                     1000, 1, 9999999999, 0); \
              INSERT INTO subtask_activations \
                 (activation_id, task_id, initiative_id, \
                  activation_state, session_id, created_at, \

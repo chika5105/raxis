@@ -5919,7 +5919,7 @@ async fn handle_retry_sub_task(
                             crash_retry_count, review_reject_count
                        FROM {SUBTASK_ACTIVATIONS}
                       WHERE task_id = ?1
-                      ORDER BY created_at DESC
+                      ORDER BY created_at DESC, rowid DESC
                       LIMIT 1"
                 ),
                 rusqlite::params![&task_id_clone],
@@ -11148,7 +11148,7 @@ mod tests {
                             crash_retry_count, review_reject_count
                        FROM {SUBTASK_ACTIVATIONS}
                       WHERE task_id = ?1
-                      ORDER BY created_at ASC, activation_id ASC"
+                      ORDER BY created_at ASC, rowid ASC"
                 ))
                 .unwrap();
             stmt.query_map(rusqlite::params![&task_id], |r| {
@@ -12282,6 +12282,7 @@ mod tests {
                 &format!(
                     "UPDATE {SUBTASK_ACTIVATIONS}
                         SET activation_state = 'Completed',
+                            activated_at     = ?1,
                             terminated_at    = ?1
                       WHERE task_id = 'exe-monotonic'
                         AND activation_state = 'PendingActivation'"
@@ -12330,6 +12331,7 @@ mod tests {
                 &format!(
                     "UPDATE {SUBTASK_ACTIVATIONS}
                         SET activation_state = 'Completed',
+                            activated_at     = ?1,
                             terminated_at    = ?1
                       WHERE task_id = 'exe-monotonic'
                         AND activation_state = 'PendingActivation'"

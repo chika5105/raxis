@@ -174,7 +174,27 @@ pub fn classify_for_task(
     let activation_for =
         |id: &str| -> Option<&ActivationRow> { activations.iter().find(|a| a.activation_id == id) };
 
-    let mut last_review_reject_seq: u64 = 0;
+    // Pre-compute the last (most recent) `ReviewAggregationCompleted` row
+    // whose verdict was `AtLeastOneRejected`. The `is_latest` test in the
+    // critique-excerpt branch below MUST compare against the LAST reject
+    // in the entire chain, NOT against the running max — incrementally
+    // updating the seq within the loop made every retry look like the
+    // latest, populating earlier retries' critique excerpts in
+    // violation of the singleton-column contract documented next to
+    // `tasks.last_critique` (migration 6).
+    let last_review_reject_seq: u64 = chain
+        .iter()
+        .filter(|r| r.event_kind == "ReviewAggregationCompleted")
+        .filter(|r| {
+            r.payload
+                .get("verdict")
+                .and_then(|v| v.as_str())
+                .map(|v| v == "AtLeastOneRejected")
+                .unwrap_or(false)
+        })
+        .map(|r| r.seq)
+        .max()
+        .unwrap_or(0);
 
     for row in chain.iter() {
         match row.event_kind.as_str() {
@@ -186,7 +206,6 @@ pub fn classify_for_task(
                     .unwrap_or("");
                 if verdict == "AtLeastOneRejected" {
                     pending_review_reject = Some(row);
-                    last_review_reject_seq = row.seq;
                 }
             }
             "ExecutorRespawnFromReviewRejection" => {

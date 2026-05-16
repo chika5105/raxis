@@ -1852,6 +1852,19 @@ mod tests {
     fn last_critique_projection_returns_none_on_round_1() {
         let (store, _td) = fresh_store();
         let conn = store.lock_sync();
+        // Seed the session row FIRST so the subtask_activations FK
+        // (session_id) resolves at INSERT time. PRAGMA foreign_keys
+        // is ON in `Store::open`, and `execute_batch` auto-commits
+        // each statement so deferred-FK semantics do not apply.
+        conn.execute(
+            "INSERT INTO sessions \
+                (session_id, role_id, session_token, lineage_id, \
+                 fetch_quota, created_at, expires_at, revoked) \
+             VALUES ('11111111-1111-1111-1111-111111111111', 'Executor', \
+                     'tok-c7r1', 'lin-c7r1', 1000, 1, 9999999999, 0)",
+            [],
+        )
+        .unwrap();
         // Seed a task with last_critique populated but ZERO retry
         // counters on the most-recent activation row.
         conn.execute_batch(
@@ -1876,20 +1889,6 @@ mod tests {
                      'Active', \
                      '11111111-1111-1111-1111-111111111111', \
                      0, 0, 0, 1, 2);",
-        )
-        .unwrap();
-        // Seed the matching session row (FK).
-        conn.execute(
-            "INSERT INTO sessions \
-                (session_id, planner_pubkey, planner_kind, \
-                 admission_token, capability_url, capability_signature, \
-                 monotonic_uuid, created_at, expires_at, revoked, \
-                 session_agent_type, can_delegate) \
-             VALUES ('11111111-1111-1111-1111-111111111111', 'pk', \
-                     'rust-test', 'tok', 'urn:c7', 'sig', \
-                     '00000000-0000-4000-8000-000000000003', \
-                     1, 9999999999, 0, 'Executor', 0)",
-            [],
         )
         .unwrap();
 
