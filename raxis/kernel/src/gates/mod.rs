@@ -28,7 +28,10 @@ pub mod verifier_audit;
 pub mod witness;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use raxis_policy::PolicyBundle;
+use raxis_store::Store;
 use raxis_types::{SessionId, SubmittedClaim};
 
 use crate::authority::delegation;
@@ -115,15 +118,15 @@ pub async fn evaluate_claims(
     evaluation_sha: &str,
     task_id: &str,
     touched_paths: &[PathBuf],
-    // Intentionally unused — see Step 2.5 below. The kernel auto-
-    // derives claims from its own witness records; planner-submitted
-    // claims are discarded as a security property (the untrusted
-    // agent has zero influence on the claim pipeline). The parameter
-    // is kept on the signature so the caller's wire shape does not
-    // bifurcate between the kernel-auto-derived path and a
-    // hypothetical V3 mode where the planner regains submission
-    // rights — a contract change of that scope deserves a real PR
-    // rather than a silent restoration.
+    // Intentionally unused — see `evaluate_pre_spawn` Step 2.5 below. The
+    // kernel auto-derives claims from its own witness records;
+    // planner-submitted claims are discarded as a security property (the
+    // untrusted agent has zero influence on the claim pipeline). The
+    // parameter is kept on the signature so the caller's wire shape does
+    // not bifurcate between the kernel-auto-derived path and a
+    // hypothetical V3 mode where the planner regains submission rights —
+    // a contract change of that scope deserves a real PR rather than a
+    // silent restoration.
     _submitted_claims_discarded: &[SubmittedClaim],
     worktree_root: &Path,
     ctx: &HandlerContext,
@@ -134,16 +137,19 @@ pub async fn evaluate_claims(
     // §INV-POLICY-01); binding to a single `Arc<PolicyBundle>` keeps
     // every claim/witness/proof check on the same epoch.
     let policy_snapshot = ctx.policy.load_full();
-    let policy: &raxis_policy::PolicyBundle = &policy_snapshot;
-    let store = ctx.store.as_ref();
 
-    // ── Step 1: Break-glass ────────────────────────────────────────────────
+    // ── Step 1: Break-glass ───────────────────────────────────────────────
+    //
     // V1 Tier 4 — emergency operator override (kernel-core.md §2.3
-    // src/breakglass.rs). When an unexpired two-operator activation
-    // is on disk, gate enforcement is bypassed and the caller
+    // src/breakglass.rs). When an unexpired two-operator activation is
+    // on disk, gate enforcement is bypassed and the caller
     // (handlers/intent.rs) is expected to emit a `BreakglassAction`
     // audit event for every admission carried under that activation
     // (see `breakglass::log_action`).
+    //
+    // Kept on the async path because `Breakglass::check()` is pure
+    // in-memory (`Arc<RwLock<...>>` read with a timestamp compare) and
+    // does NOT touch SQLite — it is async-runtime-safe by construction.
     if let crate::breakglass::BreakglassStatus::Active { activation_id, .. } =
         ctx.breakglass.check()
     {
@@ -152,153 +158,87 @@ pub async fn evaluate_claims(
         });
     }
 
-    // ── Step 2: Policy lookup ─────────────────────────────────────────────
-    let required_claims = policy_lookup::required_claims(touched_paths, policy)?;
-
-    // Fast path: no claims required and no gates configured.
-    if required_claims.is_empty() && policy.gates().is_empty() {
-        return Ok(GateEvalResult::Pass {
-            delegate_renewal_required: false,
-        });
-    }
-
-    // ── Step 2.5: Auto-derive claims from witness records ───────────────
+    // ── Steps 2 + 2.5 + 3 + 4 — `evaluate_pre_spawn` on the blocking pool ─
     //
-    // Gap fix (claims_explained.md §"Current Implementation Gap"):
+    // INV-GATES-EVALUATE-CLAIMS-ASYNC-SAFE-01.
     //
-    // The spec assumed the planner would actively populate
-    // `submitted_claims` referencing witness blobs. The planner driver
-    // hardcodes `submitted_claims: vec![]` and has no mechanism to
-    // discover which claims are required or which witnesses have landed.
-    //
-    // Rather than wiring planner-side claim awareness (which would ask
-    // the untrusted agent to self-report), the kernel auto-synthesises
-    // claims from its own witness records. For each required claim type
-    // that maps to a gate type with a passing witness for this
-    // (task_id, evaluation_sha), the kernel injects a synthetic
-    // `SubmittedClaim` with `evidence_ref` pointing to the witness
-    // blob hash.
-    //
-    // This is strictly more secure than planner-submitted claims:
-    //   - The witness is kernel-verified (verifier token + blob hash)
-    //   - The planner cannot fabricate a passing witness
-    //   - The kernel already has the data; asking the planner is redundant
-    //
-    // Planner-submitted claims are intentionally discarded. The kernel
-    // is the sole claim source — the agent has zero influence on the
-    // claim pipeline. All claims are auto-derived from kernel-verified
-    // witness records below.
-    let mut effective_claims: Vec<SubmittedClaim> = Vec::new();
+    // Every sync `Store::lock_sync()` site reached transitively from
+    // here — `witness::lookup` (Step 2.5 + Step 4),
+    // `claim::evaluate` → `authority::delegation::check_capability`
+    // (Step 3), `authority::delegation::record_capability_use`
+    // (Step 4, on terminal Pass) — would panic with "Cannot block the
+    // current thread from within a runtime" if invoked directly from
+    // this async fn (it runs on a tokio runtime worker, called from
+    // `handlers::intent::handle_inner`). iter63
+    // `extended_e2e_realistic_scenario` hit the panic on the first
+    // `IntegrationMerge` planner intent (`witness_index::lookup` →
+    // `Store::lock_sync` → `tokio::sync::Mutex::blocking_lock`); the
+    // kernel daemon crashed mid-stream, plans never completed, and the
+    // dashboard at `:19820` went unreachable. Wrapping the entire sync
+    // pre-spawn block in a single `spawn_blocking` (a) makes every
+    // transitive `lock_sync` call legal, (b) keeps the runtime worker
+    // free to drive other tasks while the SQLite work runs on the
+    // blocking pool, and (c) matches the Phase-A pattern already
+    // established in `handlers::intent::handle_inner` (one hop, not
+    // N).
+    let session_id_owned = session_id.clone();
+    let evaluation_sha_owned = evaluation_sha.to_owned();
+    let task_id_owned = task_id.to_owned();
+    let touched_paths_owned: Vec<PathBuf> = touched_paths.to_vec();
+    let policy_arc: Arc<PolicyBundle> = Arc::clone(&policy_snapshot);
+    let store_arc: Arc<Store> = Arc::clone(&ctx.store);
+    let pre_spawn = tokio::task::spawn_blocking(move || {
+        evaluate_pre_spawn(
+            &session_id_owned,
+            &evaluation_sha_owned,
+            &task_id_owned,
+            &touched_paths_owned,
+            &policy_arc,
+            &store_arc,
+        )
+    })
+    .await
+    .map_err(|e| GateError::Store(format!("evaluate_pre_spawn join failed: {e}")))??;
 
-    for req in &required_claims {
-        let claim_type_str = req.as_str();
-        if claim_type_str == "StrictDefault" {
-            continue; // No witness can satisfy StrictDefault — handled by claim::evaluate
-        }
-
-        // Check if a passing witness exists for this gate type + task + sha.
-        let witness = witness::lookup(evaluation_sha, task_id, claim_type_str, None, store)?;
-        if let Some(ref rec) = witness {
-            if rec.result_class == ResultClass::Pass {
-                effective_claims.push(SubmittedClaim {
-                    claim_type: claim_type_str.to_owned(),
-                    evidence_ref: Some(rec.blob_sha256.clone()),
-                });
-            }
-        }
-    }
-
-    // ── Step 3: Claim evaluation ──────────────────────────────────────────
-    let claim_result = claim::evaluate(
-        session_id,
-        &required_claims,
-        &effective_claims,
-        touched_paths,
-        policy,
-        store,
-    )?;
-
-    let stale_capabilities: Vec<raxis_types::CapabilityClass>;
-    let delegate_renewal_required: bool;
-
-    use claim::ClaimCheckResult;
-    match claim_result {
-        ClaimCheckResult::Sufficient => {
-            stale_capabilities = vec![];
-            delegate_renewal_required = false;
-        }
-        ClaimCheckResult::SufficientStale {
-            stale_capabilities: caps,
-        } => {
-            stale_capabilities = caps;
-            delegate_renewal_required = true;
-        }
-        ClaimCheckResult::Insufficient { failing_claims } => {
-            return Ok(GateEvalResult::ClaimInsufficient {
-                reason: format!("missing submitted claims: {}", failing_claims.join(", ")),
-            });
-        }
-        ClaimCheckResult::DelegationInsufficient { claim_type } => {
-            return Ok(GateEvalResult::ClaimInsufficient {
-                reason: format!("delegation insufficient for claim type: {claim_type}"),
-            });
-        }
-        ClaimCheckResult::ScopeInsufficient {
-            claim_type,
-            uncovered_paths,
-        } => {
-            return Ok(GateEvalResult::ClaimInsufficient {
-                reason: format!(
-                    "scope insufficient for {claim_type}: {} path(s) uncovered",
-                    uncovered_paths.len()
-                ),
-            });
-        }
-    }
-
-    // ── Step 4: Witness check per gate type ───────────────────────────────
-    let gate_types: Vec<String> = policy.gates().iter().map(|g| g.gate_type.clone()).collect();
-    let mut missing_gates: Vec<String> = Vec::new();
-
-    for gate_type in &gate_types {
-        let record = witness::lookup(evaluation_sha, task_id, gate_type, None, store)?;
-        let satisfied = matches!(record, Some(r) if r.result_class == ResultClass::Pass);
-        if !satisfied {
-            missing_gates.push(gate_type.clone());
-        }
-    }
-
-    // All gates satisfied → record_capability_use for each stale cap (sole call site).
-    if missing_gates.is_empty() {
-        if delegate_renewal_required {
-            for cap in &stale_capabilities {
-                delegation::record_capability_use(session_id, cap, store)
-                    .map_err(|e| GateError::AuthorityError(e.to_string()))?;
-            }
-        }
-        return Ok(GateEvalResult::Pass {
+    let missing_gates = match pre_spawn {
+        PreSpawnDecision::Pass {
             delegate_renewal_required,
-        });
-    }
+        } => {
+            return Ok(GateEvalResult::Pass {
+                delegate_renewal_required,
+            });
+        }
+        PreSpawnDecision::ClaimInsufficient { reason } => {
+            return Ok(GateEvalResult::ClaimInsufficient { reason });
+        }
+        PreSpawnDecision::NeedsVerifierSpawn { missing_gates } => missing_gates,
+    };
 
     // ── Step 5: Spawn verifiers for missing gates ─────────────────────────
     //
-    // Per kernel-core.md §2.3 `verifier_runner.rs`, spawn errors are
-    // intentionally non-fatal at this point — the missing gate stays in
-    // `missing_gates` and the planner is told to wait. But "non-fatal"
-    // does NOT mean "silently swallowed": each error variant carries
-    // different operational meaning, and operators need to see them in
-    // structured logs so a permanently-broken verifier binary or an
-    // exhausted concurrent-verifier cap surfaces at telemetry time
-    // instead of being invisible.
+    // Genuinely async — `tokio::process::Command` spawn. MUST run on the
+    // tokio runtime worker, not on the blocking pool (a blocking-pool
+    // thread cannot drive child-process I/O readiness). Per
+    // kernel-core.md §2.3 `verifier_runner.rs`, spawn errors are
+    // intentionally non-fatal at this point — the missing gate stays
+    // in `missing_gates` and the planner is told to wait. But
+    // "non-fatal" does NOT mean "silently swallowed": each error
+    // variant carries different operational meaning, and operators
+    // need to see them in structured logs so a permanently-broken
+    // verifier binary or an exhausted concurrent-verifier cap surfaces
+    // at telemetry time instead of being invisible.
     //
     //   - `Ok(_)`                    → verifier spawned, run_id reserved.
     //   - `Err(VerifierCapExceeded)` → backpressure, expected under load.
+    //   - `Err(VerifierBudgetExhausted)` → cumulative-budget refusal
+    //                                      (INV-VERIFIER-CUMULATIVE-BUDGET-01).
     //   - `Err(SpawnFailed)`         → the verifier binary is missing or
     //                                  unexecutable — operator action.
     //   - `Err(AuthorityError)`      → token issuance failed — likely a
     //                                  store-level fault.
     //   - `Err(_other)`              → defensive catch-all.
+    let policy: &raxis_policy::PolicyBundle = &policy_snapshot;
+    let store = ctx.store.as_ref();
     for gate_type in &missing_gates {
         let vconfig =
             verifier_runner::VerifierConfig::from_policy(policy, gate_type, &ctx.data_dir);
@@ -364,6 +304,176 @@ pub async fn evaluate_claims(
     }
 
     Ok(GateEvalResult::PendingWitness { missing_gates })
+}
+
+// ---------------------------------------------------------------------------
+// evaluate_pre_spawn — sync DB-touching block of `evaluate_claims`.
+// ---------------------------------------------------------------------------
+
+/// Outcome of `evaluate_pre_spawn` — the sync DB-touching pre-Step-5
+/// portion of `evaluate_claims`. Sits between `gates::evaluate_claims`
+/// (async, runs Steps 1 + 5) and the per-step facades
+/// (`witness::lookup`, `claim::evaluate`, `delegation::*`).
+#[derive(Debug)]
+enum PreSpawnDecision {
+    /// All gates satisfied; verifier spawn not needed.
+    Pass { delegate_renewal_required: bool },
+    /// Claims insufficient; caller turns this into
+    /// `GateEvalResult::ClaimInsufficient` and returns to the planner
+    /// without spawning verifiers.
+    ClaimInsufficient { reason: String },
+    /// One or more gates lack a passing witness; caller runs Step 5
+    /// (spawn_verifier) for each `missing_gates` entry on the async
+    /// runtime.
+    NeedsVerifierSpawn { missing_gates: Vec<String> },
+}
+
+/// Synchronous pre-Step-5 portion of `evaluate_claims`. Encapsulates
+/// Steps 2 (policy lookup), 2.5 (witness-backed claim auto-derivation),
+/// 3 (claim evaluation), and 4 (per-gate witness check +
+/// `record_capability_use` on terminal Pass).
+///
+/// **INV-GATES-EVALUATE-CLAIMS-ASYNC-SAFE-01.** Every Store-touching
+/// callee here (`witness::lookup`,
+/// `claim::evaluate → delegation::check_capability`,
+/// `delegation::record_capability_use`) acquires the store mutex via
+/// `Store::lock_sync()`. Calling this fn from a tokio runtime worker
+/// would panic; it is therefore **only ever invoked inside
+/// `tokio::task::spawn_blocking`** from `evaluate_claims`. The
+/// blocking-pool worker is allowed to `blocking_lock` the tokio mutex
+/// because it is not driving async tasks. Do NOT call this fn from any
+/// async context directly — add a `spawn_blocking` hop instead.
+fn evaluate_pre_spawn(
+    session_id: &SessionId,
+    evaluation_sha: &str,
+    task_id: &str,
+    touched_paths: &[PathBuf],
+    policy: &PolicyBundle,
+    store: &Store,
+) -> Result<PreSpawnDecision, GateError> {
+    // ── Step 2: Policy lookup ─────────────────────────────────────────────
+    let required_claims = policy_lookup::required_claims(touched_paths, policy)?;
+
+    // Fast path: no claims required and no gates configured.
+    if required_claims.is_empty() && policy.gates().is_empty() {
+        return Ok(PreSpawnDecision::Pass {
+            delegate_renewal_required: false,
+        });
+    }
+
+    // ── Step 2.5: Auto-derive claims from witness records ────────────────
+    //
+    // Gap fix (claims_explained.md §"Current Implementation Gap").
+    // The spec assumed the planner would actively populate
+    // `submitted_claims` referencing witness blobs. The planner driver
+    // hardcodes `submitted_claims: vec![]` and has no mechanism to
+    // discover which claims are required or which witnesses have
+    // landed. Rather than wiring planner-side claim awareness (which
+    // would ask the untrusted agent to self-report), the kernel
+    // auto-synthesises claims from its own witness records. For each
+    // required claim type that maps to a gate type with a passing
+    // witness for this (task_id, evaluation_sha), the kernel injects a
+    // synthetic `SubmittedClaim` with `evidence_ref` pointing to the
+    // witness blob hash.
+    //
+    // This is strictly more secure than planner-submitted claims:
+    //   - The witness is kernel-verified (verifier token + blob hash)
+    //   - The planner cannot fabricate a passing witness
+    //   - The kernel already has the data; asking the planner is redundant
+    let mut effective_claims: Vec<SubmittedClaim> = Vec::new();
+
+    for req in &required_claims {
+        let claim_type_str = req.as_str();
+        if claim_type_str == "StrictDefault" {
+            continue; // No witness can satisfy StrictDefault — handled by claim::evaluate
+        }
+
+        // Check if a passing witness exists for this gate type + task + sha.
+        let witness = witness::lookup(evaluation_sha, task_id, claim_type_str, None, store)?;
+        if let Some(ref rec) = witness {
+            if rec.result_class == ResultClass::Pass {
+                effective_claims.push(SubmittedClaim {
+                    claim_type: claim_type_str.to_owned(),
+                    evidence_ref: Some(rec.blob_sha256.clone()),
+                });
+            }
+        }
+    }
+
+    // ── Step 3: Claim evaluation ──────────────────────────────────────────
+    let claim_result = claim::evaluate(
+        session_id,
+        &required_claims,
+        &effective_claims,
+        touched_paths,
+        policy,
+        store,
+    )?;
+
+    let stale_capabilities: Vec<raxis_types::CapabilityClass>;
+    let delegate_renewal_required: bool;
+
+    use claim::ClaimCheckResult;
+    match claim_result {
+        ClaimCheckResult::Sufficient => {
+            stale_capabilities = vec![];
+            delegate_renewal_required = false;
+        }
+        ClaimCheckResult::SufficientStale {
+            stale_capabilities: caps,
+        } => {
+            stale_capabilities = caps;
+            delegate_renewal_required = true;
+        }
+        ClaimCheckResult::Insufficient { failing_claims } => {
+            return Ok(PreSpawnDecision::ClaimInsufficient {
+                reason: format!("missing submitted claims: {}", failing_claims.join(", ")),
+            });
+        }
+        ClaimCheckResult::DelegationInsufficient { claim_type } => {
+            return Ok(PreSpawnDecision::ClaimInsufficient {
+                reason: format!("delegation insufficient for claim type: {claim_type}"),
+            });
+        }
+        ClaimCheckResult::ScopeInsufficient {
+            claim_type,
+            uncovered_paths,
+        } => {
+            return Ok(PreSpawnDecision::ClaimInsufficient {
+                reason: format!(
+                    "scope insufficient for {claim_type}: {} path(s) uncovered",
+                    uncovered_paths.len()
+                ),
+            });
+        }
+    }
+
+    // ── Step 4: Witness check per gate type ───────────────────────────────
+    let gate_types: Vec<String> = policy.gates().iter().map(|g| g.gate_type.clone()).collect();
+    let mut missing_gates: Vec<String> = Vec::new();
+
+    for gate_type in &gate_types {
+        let record = witness::lookup(evaluation_sha, task_id, gate_type, None, store)?;
+        let satisfied = matches!(record, Some(r) if r.result_class == ResultClass::Pass);
+        if !satisfied {
+            missing_gates.push(gate_type.clone());
+        }
+    }
+
+    // All gates satisfied → record_capability_use for each stale cap (sole call site).
+    if missing_gates.is_empty() {
+        if delegate_renewal_required {
+            for cap in &stale_capabilities {
+                delegation::record_capability_use(session_id, cap, store)
+                    .map_err(|e| GateError::AuthorityError(e.to_string()))?;
+            }
+        }
+        return Ok(PreSpawnDecision::Pass {
+            delegate_renewal_required,
+        });
+    }
+
+    Ok(PreSpawnDecision::NeedsVerifierSpawn { missing_gates })
 }
 
 // ---------------------------------------------------------------------------
