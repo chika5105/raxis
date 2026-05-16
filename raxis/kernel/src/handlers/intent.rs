@@ -341,7 +341,50 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     };
 
     let pre_state = match pre_gate {
-        PreGateOutcome::Reject(code, state) => return Err((code, state)),
+        PreGateOutcome::Reject(code, state) => {
+            // iter62 — `INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01`.
+            //
+            // FailInvalidDiff is a *validation* rejection (empty
+            // diff, unchanged head_sha, malformed format, path-
+            // scope violation, non-ancestor base/head, …) — NOT
+            // a substrate / VM crash. Pre-iter62 the rejection
+            // returned to the planner, the planner exited
+            // because its terminal intent was rejected, the
+            // post-exit hook in
+            // `kernel/src/session_spawn_orchestrator.rs`
+            // synthesised `TaskFailedOnWorkerPrematureExit` and
+            // bumped `crash_retry_count`, and
+            // `PlannerMaxTurnsProgressivelyScaled` (60 → 90 →
+            // 120) fired on the next round — wrong budget, wrong
+            // remediation.
+            //
+            // We bump the new `validation_reject_count` counter
+            // on the most-recent `subtask_activations` row and
+            // emit the `IntentValidationRejected` audit anchor
+            // BEFORE returning the rejection to the planner, so
+            // the budget is charged synchronously with the
+            // rejection. The post-exit hook still fires on
+            // session disconnect, but the audit chain now
+            // unambiguously shows the validation-class anchor
+            // landed first; downstream retry-admission logic
+            // consults `validation_reject_count` against
+            // `max_validation_rejections` (default 2) and the
+            // ceiling-exceeded path emits a separate Failed
+            // transition without scaling `max_turns`.
+            if code == PlannerErrorCode::FailInvalidDiff {
+                let validator_reason = classify_validation_reason(&req);
+                emit_intent_validation_rejected_and_bump_count(
+                    ctx,
+                    session_id.as_str(),
+                    req.task_id.as_str(),
+                    req.intent_kind.as_str(),
+                    &validator_reason,
+                    &req,
+                )
+                .await;
+            }
+            return Err((code, state));
+        }
         PreGateOutcome::EarlyResponse(resp) => {
             // ── V2 Step 6 — Orchestrator continuation re-spawn ────────────
             //
@@ -2937,6 +2980,148 @@ fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<Strin
 /// per round (when the last Pending vote becomes non-Pending),
 /// and `handle_submit_review` itself is serialised by the
 /// per-session sequence-number gate (INV-01).
+/// iter62 — `INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01`.
+///
+/// Classify the kernel's FailInvalidDiff rejection branch to a
+/// stable short lexeme for the `IntentValidationRejected` audit
+/// event's `validator_reason` field. The lexeme set is the wire
+/// surface for dashboards / forensic queries; new reason variants
+/// require both a kernel-side string + a dashboard-side label
+/// addition.
+///
+/// The current implementation is heuristic — `IntentRequest`
+/// alone does not carry the kernel's actual rejection branch, so
+/// we infer the most-likely class from the intent shape. A
+/// follow-up could plumb the structured reason through
+/// `PreGateOutcome::Reject` itself; for now the audit event
+/// captures the intent_kind + the structural snapshot, which is
+/// enough for the operator to reconstruct.
+fn classify_validation_reason(req: &IntentRequest) -> String {
+    // `head_sha` / `base_sha` are operator-relevant fields; their
+    // emptiness or equality is the most common FailInvalidDiff
+    // root cause. Distinct lexemes per branch let the dashboard
+    // count separately.
+    match (req.base_sha.as_ref(), req.head_sha.as_ref()) {
+        (_, None) => "empty_head_sha".to_owned(),
+        (Some(b), Some(h)) if b.as_str() == h.as_str() => "unchanged_head_sha".to_owned(),
+        _ => "diff_validation_failed".to_owned(),
+    }
+}
+
+/// iter62 — `INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01`. Bump
+/// the new `validation_reject_count` column on the most-recent
+/// `subtask_activations` row for `executor_task_id`, then emit
+/// the chain-side `IntentValidationRejected` audit anchor.
+///
+/// Mirrors the shape of `increment_executor_review_reject_count`
+/// for monotonicity and audit-paired-write (per
+/// `audit-paired-writes.md §4`): the SQL UPDATE commits first,
+/// then the audit emit fires. A crash between the two leaves the
+/// counter advanced with no audit anchor; the recovery sweep
+/// observes the gap per `INV-AUDIT-PAIRED-06`.
+async fn emit_intent_validation_rejected_and_bump_count(
+    ctx: &Arc<HandlerContext>,
+    session_id: &str,
+    task_id: &str,
+    intent_kind: &str,
+    validator_reason: &str,
+    req: &IntentRequest,
+) {
+    let validator_detail = serde_json::json!({
+        "intent_kind": intent_kind,
+        "task_id": task_id,
+        "base_sha": req.base_sha.as_ref().map(|s| s.as_str()),
+        "head_sha": req.head_sha.as_ref().map(|s| s.as_str()),
+    });
+
+    // Bump the counter on the spawn_blocking pool — `Store::lock_sync`
+    // panics on the tokio worker.
+    let store = Arc::clone(&ctx.store);
+    let task_id_owned = task_id.to_owned();
+    let bumped = tokio::task::spawn_blocking(move || -> Result<usize, rusqlite::Error> {
+        let conn = store.lock_sync();
+        conn.execute(
+            &format!(
+                "UPDATE {SUBTASK_ACTIVATIONS}
+                    SET validation_reject_count = validation_reject_count + 1
+                  WHERE activation_id = (
+                      SELECT activation_id FROM {SUBTASK_ACTIVATIONS}
+                       WHERE task_id = ?1
+                       ORDER BY created_at DESC
+                       LIMIT 1
+                  )"
+            ),
+            rusqlite::params![&task_id_owned],
+        )
+    })
+    .await;
+
+    match bumped {
+        Ok(Ok(n)) if n > 0 => {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"validation_reject_count_bumped\",\
+                 \"task_id\":\"{task_id}\",\"validator_reason\":\"{validator_reason}\",\
+                 \"rows\":{n}}}",
+            );
+        }
+        Ok(Ok(_)) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"validation_reject_count_bump_no_row\",\
+                 \"task_id\":\"{task_id}\",\"validator_reason\":\"{validator_reason}\"}}",
+            );
+        }
+        Ok(Err(e)) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"validation_reject_count_bump_sql_failed\",\
+                 \"task_id\":\"{task_id}\",\"reason\":\"{e}\"}}",
+            );
+        }
+        Err(_) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"validation_reject_count_bump_join_failed\",\
+                 \"task_id\":\"{task_id}\"}}",
+            );
+        }
+    }
+
+    // Look up initiative_id for the audit-emit context (paired-
+    // writes contract requires the audit row to carry initiative
+    // alongside session + task).
+    let store2 = Arc::clone(&ctx.store);
+    let task_id_for_init = task_id.to_owned();
+    let initiative_id_opt = tokio::task::spawn_blocking(move || -> Option<String> {
+        let conn = store2.lock_sync();
+        conn.query_row(
+            &format!("SELECT initiative_id FROM {TASKS} WHERE task_id = ?1"),
+            rusqlite::params![&task_id_for_init],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    })
+    .await
+    .ok()
+    .flatten();
+
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::IntentValidationRejected {
+            task_id: task_id.to_owned(),
+            intent_kind: intent_kind.to_owned(),
+            validator_reason: validator_reason.to_owned(),
+            validator_detail,
+        },
+        Some(session_id),
+        Some(task_id),
+        initiative_id_opt.as_deref(),
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\
+             \"event\":\"IntentValidationRejectedAuditEmitFailed\",\
+             \"task_id\":\"{task_id}\",\"validator_reason\":\"{validator_reason}\",\
+             \"error\":\"{e}\"}}",
+        );
+    }
+}
+
 fn increment_executor_review_reject_count(
     executor_task_id: &str,
     store: &Store,
@@ -7100,6 +7285,81 @@ mod tests {
     fn parse_unknown_defaults_to_admitted() {
         // Defensive: unknown DB value should not panic; treated as non-runnable.
         assert_eq!(parse_task_state("CorruptValue"), TaskState::Admitted);
+    }
+
+    // ─── iter62 — INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01 ────────────
+
+    /// `classify_validation_reason` returns a stable closed-set of
+    /// short lexemes for the `IntentValidationRejected` audit event's
+    /// `validator_reason` field. Each test below pins one branch of
+    /// the classifier so a future drift detector / dashboard label
+    /// regression surfaces a witness failure (and not a silent
+    /// re-classification of one operator-visible reason as another).
+    fn make_intent_for_classify(
+        base_sha: Option<&str>,
+        head_sha: Option<&str>,
+    ) -> IntentRequest {
+        IntentRequest {
+            session_token: "tok".into(),
+            sequence_number: 1,
+            envelope_nonce: "0".repeat(32),
+            intent_kind: IntentKind::CompleteTask,
+            task_id: raxis_types::TaskId::parse("task-c7-cls").unwrap(),
+            base_sha: base_sha.map(|s| raxis_types::CommitSha::parse(s).unwrap()),
+            head_sha: head_sha.map(|s| raxis_types::CommitSha::parse(s).unwrap()),
+            submitted_claims: vec![],
+            justification: None,
+            idempotency_key: None,
+            approval_token: None,
+            approved: None,
+            critique: None,
+            resolved_via_escalation: None,
+            tokens_used: None,
+            structured_output: None,
+        }
+    }
+
+    /// Wire surface: a `CompleteTask` whose `head_sha` is None
+    /// (planner exited without ever populating a head) classifies
+    /// as `empty_head_sha`.
+    #[test]
+    fn classify_validation_reason_empty_head_sha() {
+        let req = make_intent_for_classify(
+            Some("aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11"),
+            None,
+        );
+        assert_eq!(classify_validation_reason(&req), "empty_head_sha");
+    }
+
+    /// `head_sha == base_sha` means the planner produced a
+    /// no-op diff; classifies as `unchanged_head_sha`.
+    #[test]
+    fn classify_validation_reason_unchanged_head_sha() {
+        let same = "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22";
+        let req = make_intent_for_classify(Some(same), Some(same));
+        assert_eq!(classify_validation_reason(&req), "unchanged_head_sha");
+    }
+
+    /// Generic catch-all: structurally distinct base / head shas,
+    /// kernel still rejected the diff for some other reason
+    /// (path scope violation, malformed format, …).
+    #[test]
+    fn classify_validation_reason_generic_diff_failure() {
+        let req = make_intent_for_classify(
+            Some("cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33"),
+            Some("dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44"),
+        );
+        assert_eq!(classify_validation_reason(&req), "diff_validation_failed");
+    }
+
+    /// No `base_sha` populated either — the classifier still
+    /// surfaces a stable lexeme (`empty_head_sha` because head is
+    /// None — the empty-head branch wins over the structurally-
+    /// distinct branch).
+    #[test]
+    fn classify_validation_reason_both_shas_missing() {
+        let req = make_intent_for_classify(None, None);
+        assert_eq!(classify_validation_reason(&req), "empty_head_sha");
     }
 
     // ── wait_for_git_apply_pending_clear (V2.5 §11.5 push wait) ───────────

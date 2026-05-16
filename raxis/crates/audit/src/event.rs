@@ -1432,6 +1432,76 @@ pub enum AuditEventKind {
         review_reject_count: u32,
     },
 
+    /// iter62 — `INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01`.
+    ///
+    /// Emitted when the kernel rejects a planner's terminal
+    /// `IntentKind::CompleteTask` (or any other workspace-mutating
+    /// intent) with `error_code = PlannerErrorCode::FailInvalidDiff`
+    /// — i.e. a *validation* failure, NOT a substrate / VM crash.
+    /// Pre-iter62 the rejection was misclassified: the FailInvalidDiff
+    /// rejection caused the planner to exit, the post-exit hook in
+    /// `kernel/src/session_spawn_orchestrator.rs` synthesised
+    /// `TaskFailedOnWorkerPrematureExit` and bumped
+    /// `subtask_activations.crash_retry_count`, and
+    /// `PlannerMaxTurnsProgressivelyScaled` (60 → 90 → 120) fired
+    /// on the next round. None of those remediations matched the
+    /// failure mode (the worker had plenty of `max_turns`; it
+    /// produced a malformed terminal intent).
+    ///
+    /// The new event variant is the audit-chain anchor for the
+    /// dedicated `validation_reject_count` budget:
+    ///
+    ///   * `validator_reason` — short stable lexeme keyed by the
+    ///     specific kernel rejection branch (e.g.
+    ///     `"empty_diff"`, `"unchanged_head_sha"`,
+    ///     `"non_ancestor_base_head"`, `"path_scope_violation"`,
+    ///     `"diff_compute_error"`). The lexeme set is the wire
+    ///     surface for dashboards and forensic queries.
+    ///   * `validator_detail` — a free-form structured payload
+    ///     (kernel-supplied; redacted before audit emission per
+    ///     `redact.rs`) carrying any operator-relevant context
+    ///     (the offending head_sha, the base_sha, the rejected
+    ///     path, etc). Operators reading the audit chain can
+    ///     reconstruct the rejection without reading the raw
+    ///     intent.
+    ///
+    /// **Paired with what.** Per `audit-paired-writes.md §4`, this
+    /// event is the chain-side half of the SQLite-side state
+    /// mutation in `kernel/src/handlers/intent.rs`'s FailInvalidDiff
+    /// branch (the `validation_reject_count + 1` UPDATE on the
+    /// most-recent `subtask_activations` row). Pairing is
+    /// post-commit: the UPDATE commits first, then the audit
+    /// event is emitted in the same handler frame. A crash
+    /// between the two leaves a consistent SQLite state
+    /// (counter advanced, ready for the next admission gate
+    /// check) with a missing audit anchor; the recovery sweep
+    /// observes the counter advance with no matching event and
+    /// re-emits per `INV-AUDIT-PAIRED-06`.
+    IntentValidationRejected {
+        /// Sub-task whose terminal intent was rejected. Cross-
+        /// references `tasks.task_id`. Distinct from the
+        /// session_id (which is the per-spawn handle) so a
+        /// forensic operator querying audit by task gets all
+        /// validation-rejection rounds across N session
+        /// respawns.
+        task_id: String,
+        /// Kind of intent that was rejected, e.g.
+        /// `"CompleteTask"` / `"SingleCommit"` /
+        /// `"IntegrationMerge"`. Stable lexeme matching
+        /// `IntentKind::as_str()`.
+        intent_kind: String,
+        /// Stable short lexeme classifying the rejection branch
+        /// (see variant doc). Closed-set per kernel branch; new
+        /// branches require both a kernel-side string + a
+        /// dashboard-side label addition.
+        validator_reason: String,
+        /// Structured operator-relevant context for the rejection.
+        /// Free-form JSON, redacted via the standard
+        /// `redact.rs` ALLOW_LIST before audit emission. Empty
+        /// object `{}` when no kernel-side context is available.
+        validator_detail: serde_json::Value,
+    },
+
     /// Emitted when the per-initiative
     /// `orchestrator_no_progress_respawn_count` counter exceeds
     /// `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3) in
@@ -4070,6 +4140,7 @@ impl AuditEventKind {
             Self::VerifierProcessFailed { .. } => "VerifierProcessFailed",
             Self::ReviewAggregationCompleted { .. } => "ReviewAggregationCompleted",
             Self::ExecutorRespawnFromReviewRejection { .. } => "ExecutorRespawnFromReviewRejection",
+            Self::IntentValidationRejected { .. } => "IntentValidationRejected",
             Self::OrchestratorRespawnCeilingExceeded { .. } => "OrchestratorRespawnCeilingExceeded",
             Self::OperatorApprovedRespawnEscalation { .. } => "OperatorApprovedRespawnEscalation",
             Self::OperatorDeniedRespawnEscalation { .. } => "OperatorDeniedRespawnEscalation",

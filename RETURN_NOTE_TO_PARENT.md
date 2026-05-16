@@ -44,6 +44,30 @@ what this worker will write when assigned the follow-up; the
 orchestrator-side variant is what Worker 2 should write when
 landing the planner-orchestrator change.
 
+## C7 — KsbSnapshot field addition forces cross-worker compile fixes
+
+I added the `last_critique: Option<String>` field to
+`crates/ksb/src/lib.rs::KsbSnapshot` (per
+`INV-RETRY-LAST-CRITIQUE-IN-KSB-01`). Both struct-literal sites
+in **my** scope (`crates/ksb/src/lib.rs::fixture_snapshot` and
+`kernel/src/initiatives/ksb_assembly.rs::fallback_snapshot`) are
+updated. The field is `#[serde(default, skip_serializing_if =
+"Option::is_none")]` and `Option<String>` so wire/disk
+serialisation stays backward-compatible.
+
+The following struct-literal sites fall outside my file
+ownership and will fail to compile until updated to add
+`last_critique: None`:
+
+  * `kernel/tests/ksb_capabilities_role_scoped.rs:249` — Worker 4
+  * `kernel/tests/ksb_capabilities_role_scoped.rs:361` — Worker 4
+  * `kernel/tests/ksb_capabilities_role_scoped.rs:562` — Worker 4
+  * `crates/planner-core/src/driver.rs:2329` — Worker 2
+
+All four are mechanical: just append `last_critique: None,`
+inside each `KsbSnapshot { ... }` literal. None of the call sites
+reference the field semantically, so no test logic changes.
+
 ## C5 — diagnosed kernel-side; fix landed in this branch
 
 The empty `<data_dir>/llm-turns/` directory was caused by
