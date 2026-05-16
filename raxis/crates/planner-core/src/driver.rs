@@ -2369,6 +2369,7 @@ mod tests {
             pending_escalations: vec![],
             credential_ports: vec![],
             capabilities: None,
+            last_critique: None,
         };
 
         let _ = run_role_session_with_model(
