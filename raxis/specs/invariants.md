@@ -106,7 +106,8 @@
 | Release-bake rejects dev key — V3 (iter62) | INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01 | 1 |
 | iter65 fail-closed VM cap + planner clean-completion + auto-LogicalDeadlock + notification parity — V3 (iter65) | INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01, INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01, INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01, INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01, INV-NOTIFICATION-PRIORITY-PARITY-01 | 5 |
 | iter65-review generalised permanent-failure escalation + recovery semantics — V3 (iter65-review) | INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01, INV-OPERATOR-APPROVE-RECOVERY-SEMANTICS-01 | 2 |
-| **Total** | | **153** |
+| Bake-pipeline kernel trust anchor injection + post-build verification — V3 (iter66) | INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01 | 1 |
+| **Total** | | **154** |
 
 ---
 
@@ -11106,6 +11107,146 @@ private half, byte collision in the kernel-side public half.
 `bake-release` block comment + the `BakeReleaseArgs` struct
 doc + `specs/v3/canonical-image-trust-anchor.md` §6 (release
 pipeline; future spec home).
+
+---
+
+### INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01 — `cargo xtask images bake` (and every sibling subcommand that spawns cargo) MUST inject `RAXIS_KERNEL_SIGNING_KEY_HEX` per-`Command` AND verify the resulting kernel binary's trust anchor is non-zero
+
+**Statement.** The umbrella `cargo xtask images bake` driver (and
+every sibling subcommand that builds the kernel or any of its
+trust-anchor-dependent crates — `images bake-release`,
+`images dev-stage`, `images build-all`, plus the auto-stage path
+inside `build_all`) MUST:
+
+1. **Resolve the trust-anchor public-half** through the canonical
+   search order implemented in
+   `xtask::trust_anchor::resolve_signing_key_pk_hex` BEFORE
+   spawning any cargo subprocess:
+
+   1. `RAXIS_KERNEL_SIGNING_KEY_HEX` env var (already set by an
+      outer caller — CI / release pipeline / operator shell rc).
+   2. `RAXIS_KERNEL_SIGNING_KEY_PATH` env var (path to a `pk.hex`
+      file).
+   3. `<workspace_root>/.git/info/raxis-signing-key/pk.hex` — the
+      canonical per-clone dev path written by
+      `raxis_dev_signing_key::ensure_dev_signing_keypair`
+      (`INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01`).
+   4. `<workspace_root>/raxis/.git/info/raxis-signing-key/pk.hex`
+      — the nested-`.git` variant, accepted for back-compat with
+      a one-line stderr warning naming the unusual location.
+
+   On miss, the resolver returns a structured
+   `MissingSigningKeyError` whose Display names every input it
+   tried AND the canonical autogen entry point (`cargo xtask
+   images bake`).
+
+2. **Inject the resolved value per-`Command`.** Every
+   `Command::new("cargo")` (or `Command::new(&args.cargo)`) site
+   that drives a kernel build or a trust-anchor-dependent crate
+   MUST go through `xtask::images::apply_trust_anchor_env` to
+   thread `RAXIS_KERNEL_SIGNING_KEY_HEX` via `.env(...)` onto
+   the child's environment. The bake driver MUST NOT mutate
+   process-level `std::env` for this purpose — that races
+   concurrent xtask invocations and leaks the value into
+   unrelated subprocesses spawned later in the same xtask run.
+
+3. **Verify the staged kernel binary's trust anchor.** After
+   `apply_vmlinux_resolution` lands the kernel binary at
+   `<install_dir>/kernel/vmlinux`, the bake driver MUST call
+   `xtask::trust_anchor::verify_kernel_binary_at_path` against
+   the resolved `pk_hex`. The verifier:
+
+   * Scans the kernel binary for the 32-byte raw value of the
+     expected public key (the linker emits
+     `EXPECTED_KERNEL_SIGNING_KEY_BYTES: [u8; 32]` verbatim into
+     `.rodata`).
+   * On absence, rejects with `FingerprintMissing` (the kernel
+     was built against a different key).
+   * On absence-AND-a-32-byte-zero-run-present, rejects with
+     `PlaceholderEmbedded` (the build script's placeholder arm
+     fired — the very failure mode this invariant exists to
+     catch).
+
+   Both rejection paths bail with a message containing the
+   literal token `INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01
+   VIOLATED` and the `cargo xtask images bake` remediation
+   command.
+
+4. **Expose the verifier as a standalone subcommand.**
+   `cargo xtask images verify-trust-anchor [--kernel <PATH>]
+   [--expected-pk-hex <HEX>] [--install-dir <PATH>]` MUST surface
+   the same verification logic to operators for ad-hoc audits.
+   Defaults fall back to `<install_dir>/kernel/vmlinux` and to
+   `resolve_signing_key_pk_hex` respectively, so a typical
+   `bake → verify-trust-anchor` follow-up is a single-argument
+   invocation.
+
+**Justification.** Round-1 of the iter66 image bake produced a
+kernel binary with `EXPECTED_KERNEL_SIGNING_KEY_BYTES`
+unpopulated — the kernel would have aborted at boot with the
+fail-loud panic `INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01`. Root cause:
+`cargo xtask images bake` did not export
+`RAXIS_KERNEL_SIGNING_KEY_HEX` for the cargo subprocess that
+built the kernel. The pre-iter66 implementation mutated
+process-level `std::env::set_var` once at the bake entry point —
+which works for the bake's own subprocesses, but races concurrent
+invocations and does not propagate into a parent's separately
+spawned `cargo build -p raxis-kernel` started outside the bake.
+
+This invariant codifies the fix on three axes:
+
+* **Per-`Command` injection** scopes the env to exactly the
+  children that need it. The audit-sweep witness pins that
+  every cargo-spawn site in `xtask/src/images.rs` carries both
+  the `AUDIT-MARKER:bake-cargo-spawn` comment AND the matching
+  `apply_trust_anchor_env(&mut cmd, ...)` call.
+* **Post-build verification** turns a silent regression
+  (kernel ships with placeholder, panics at boot in Round-2)
+  into a fail-loud immediately after the bake. The verifier
+  reads the staged binary off disk and surfaces the precise
+  remediation in the bake's own exit code.
+* **Standalone verifier subcommand** gives operators a
+  one-shot probe (`cargo xtask images verify-trust-anchor`)
+  for post-mortem audits of a binary they did not bake
+  themselves.
+
+**Witness.** Six tests in `xtask/src/trust_anchor.rs::tests` pin
+the resolver's search order (`resolve_arm{1,2,3,4}_*` plus the
+miss-error and trim-trailing-newline witnesses), three pin the
+verifier's verdict shape (`verify_accepts_*`, `verify_rejects_*`,
+`verify_at_path_returns_actionable_error_*`), plus five tests in
+`xtask/src/images.rs::tests::inv_image_bake_kernel_trust_anchor_populated_01_*`:
+
+* `_every_cargo_spawn_pairs_with_marker_and_helper` — the
+  source-text audit-sweep witness: scans `images.rs` for
+  `AUDIT-MARKER:bake-cargo-spawn` and `apply_trust_anchor_env(&mut cmd,`
+  occurrences and asserts both counts agree. A future cargo-spawn
+  site that adds the marker without wiring the helper trips this
+  witness AND the spec.
+* `_helper_env_var_matches_build_script` — pins the env-var
+  name agreement between `trust_anchor::RAXIS_KERNEL_SIGNING_KEY_HEX`
+  and `crates/canonical-images/build.rs::TRUST_ANCHOR_HEX_VAR`.
+* `_verify_step_rejects_placeholder_and_accepts_fingerprint` —
+  end-to-end witness with a synthetic fixture binary; the
+  placeholder-embedded case rejects with the invariant token,
+  the fingerprint-embedded case accepts.
+* `_verify_argv_explicit_flags_override_defaults` — pins the
+  `verify-trust-anchor` argv parser shape.
+* `_bake_one_role_full_threads_signing_key` — compile-time
+  witness for the `bake_one_role_full` signature; a future
+  refactor that drops the `kernel_signing_key_hex` parameter
+  stops compiling and the spec must be updated in lockstep.
+* `_apply_trust_anchor_env_threads_pk_hex` — pins the helper's
+  `.env(...)` semantics for both the `Some(hex)` and `None`
+  cases.
+
+**Canonical home.** `xtask/src/trust_anchor.rs` (the resolver +
+verifier helpers), `xtask/src/images.rs::run_bake_inner` (the
+bake-side wiring), `xtask/src/images.rs::run_verify_trust_anchor`
+(the operator-facing audit surface), and
+`specs/v3/canonical-image-trust-anchor.md` §4 (paired with
+`INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01` and
+`INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01`).
 
 ---
 
