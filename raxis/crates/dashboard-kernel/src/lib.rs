@@ -51,11 +51,13 @@ use raxis_audit_tools::reader::ChainReader;
 use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
-    AuditEntryView, ChainStatusView, CredentialMetadata, CredentialReveal, DagEdge, DashboardData,
-    EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry, InitiativePlanView,
-    InitiativeView, NotificationView, OperatorAuthResolution, PolicyAdvancement,
-    PolicyOperatorView, PolicySnapshotView, ReviewerVerdictView, SessionView, StructuredOutputView,
-    SubsystemDetailRow, SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail,
+    AuditEntryView, ChainStatusView, CredentialMetadata, CredentialReveal, DagEdge,
+    DashboardData, EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry,
+    InitiativePlanView, InitiativeView, LifecycleAnnotation, NotificationView,
+    OperatorAuthResolution, OrchestratorGapsResponse, PolicyAdvancement,
+    PolicyOperatorView, PolicySnapshotView, RecentSessionEntry, ReviewerPanelEntry,
+    ReviewerVerdictView, SessionView, StructuredOutputView, SubsystemDetailRow,
+    SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail,
     WorktreeDiff, WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree,
     WorktreeTreeEntry, SUBSYSTEM_CATALOG,
 };
@@ -66,12 +68,17 @@ use raxis_policy::PolicyBundle;
 use raxis_store::Store;
 
 mod git;
+pub mod lifecycle;
 pub mod notification_filter;
 pub mod session_capture;
 pub mod stream_capture;
 pub mod streaming_audit;
 pub mod task_llm_capture;
 
+pub use lifecycle::{
+    classify_for_session, classify_for_task, classify_orchestrator_gaps, ActivationRow,
+    AuditRow as LifecycleAuditRow, TaskRow as LifecycleTaskRow,
+};
 pub use notification_filter::{
     notification_priority, notification_priority_for_kind_str, NotificationPriority,
 };
@@ -827,6 +834,9 @@ impl DashboardData for KernelDashboardData {
             .unwrap_or(row.created_at);
         let mut tasks = Vec::with_capacity(task_rows.len());
         let mut edges: Vec<DagEdge> = Vec::new();
+        // Pre-load the audit chain ONCE for the whole initiative
+        // so per-task classification doesn't re-walk per row.
+        let audit_chain = collect_lifecycle_audit_rows(&self.audit_dir);
         for t in &task_rows {
             // Pull DAG edges (downstream) for the edge list.
             if let Ok(downstream) = raxis_store::views::tasks::dag_edges_for_task(
@@ -841,7 +851,7 @@ impl DashboardData for KernelDashboardData {
                     });
                 }
             }
-            tasks.push(task_row_to_view(&conn, t));
+            tasks.push(task_row_to_view_with_lifecycle(&conn, &audit_chain, t));
         }
         let title =
             raxis_store::views::plan_fields::reveal_initiative_meta(&conn, &row.initiative_id)
@@ -883,6 +893,11 @@ impl DashboardData for KernelDashboardData {
 
     fn list_tasks(&self, initiative_id: &str) -> Result<Vec<TaskView>, ApiError> {
         let conn = self.open_ro()?;
+        // Pre-load the audit chain ONCE per request so the
+        // per-row classifier can pick out task-scoped slices
+        // without re-walking the chain per task.
+        // `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`.
+        let audit_chain = collect_lifecycle_audit_rows(&self.audit_dir);
         // INV-OBSERVABILITY-DATAPLANE-LATENCY-01.
         let rows = raxis_store::observability::time_query_result(
             self.observability_hub.as_ref(),
@@ -892,7 +907,10 @@ impl DashboardData for KernelDashboardData {
         .map_err(|e| ApiError::Internal {
             log_only: format!("tasks::list_by_initiative: {e}"),
         })?;
-        Ok(rows.iter().map(|t| task_row_to_view(&conn, t)).collect())
+        Ok(rows
+            .iter()
+            .map(|t| task_row_to_view_with_lifecycle(&conn, &audit_chain, t))
+            .collect())
     }
 
     /// `GET /api/initiatives/:id/plan` —
@@ -1019,6 +1037,12 @@ impl DashboardData for KernelDashboardData {
 
     fn get_task(&self, task_id: &str) -> Result<TaskView, ApiError> {
         let conn = self.open_ro()?;
+        // Pull the audit chain once + classify into structured
+        // annotations so `<LifecycleTimeline>` and
+        // `<ReviewerVerdictPanel>` on TaskDetail render without
+        // a second round-trip.
+        // `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`.
+        let audit_chain = collect_lifecycle_audit_rows(&self.audit_dir);
         // INV-OBSERVABILITY-DATAPLANE-LATENCY-07.
         let row = raxis_store::observability::time_query_result(
             self.observability_hub.as_ref(),
@@ -1031,7 +1055,7 @@ impl DashboardData for KernelDashboardData {
         .ok_or(ApiError::NotFound {
             kind: "task".into(),
         })?;
-        Ok(task_row_to_view(&conn, &row))
+        Ok(task_row_to_view_with_lifecycle(&conn, &audit_chain, &row))
     }
 
     /// `INV-DASHBOARD-TASK-LLM-CAPTURE-01`. Tail the per-task
@@ -1080,6 +1104,62 @@ impl DashboardData for KernelDashboardData {
         Ok(records.into_iter().map(session_record_to_view).collect())
     }
 
+    /// `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`. Walk the
+    /// `subtask_activations` table for every row in
+    /// `PendingActivation` whose `created_at` is older than
+    /// the 120-second cutoff AND every predecessor task is
+    /// `Completed`. The pure
+    /// [`lifecycle::classify_orchestrator_gaps`] classifier
+    /// owns the policy.
+    fn list_orchestrator_gaps(&self) -> Result<OrchestratorGapsResponse, ApiError> {
+        let conn = self.open_ro()?;
+        let activations = read_activations_all(&conn);
+        let tasks = read_tasks_with_predecessors(&conn);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let gaps = lifecycle::classify_orchestrator_gaps(&activations, &tasks, now);
+        Ok(OrchestratorGapsResponse {
+            gaps,
+            generated_at: now,
+        })
+    }
+
+    /// `INV-DASHBOARD-RECENT-SESSIONS-RING-01`. Surface the
+    /// dashboard-kernel `SessionStreamCapture` ring contents so
+    /// the FE's RecentSessions view sees ended sessions that
+    /// the active-list filter dropped on revoke.
+    fn list_recent_sessions(&self, limit: u32) -> Result<Vec<RecentSessionEntry>, ApiError> {
+        let conn = self.open_ro()?;
+        let cap = limit.min(200) as usize;
+        // Walk every session row regardless of `revoked` so the
+        // recent-list page surfaces revoked + expired alongside
+        // active. `active_list` filters to `revoked = 0`; we
+        // need the wider set here.
+        let mut rows = read_sessions_all_for_recent(&conn, cap);
+        // Sort newest by either `revoked_at` (when set) or
+        // `created_at` so the most recently terminated rows
+        // appear at the top.
+        rows.sort_by(|a, b| {
+            let a_at = a.terminated_at.unwrap_or(a.created_at);
+            let b_at = b.terminated_at.unwrap_or(b.created_at);
+            b_at.cmp(&a_at)
+        });
+        rows.truncate(cap);
+        // Annotate every row with the session's final lifecycle
+        // event from the audit chain.
+        let audit_chain = collect_lifecycle_audit_rows(&self.audit_dir);
+        for row in rows.iter_mut() {
+            let anns = lifecycle::classify_for_session(&audit_chain, &row.session_id);
+            row.final_annotation = anns.into_iter().last();
+            // Capture-bytes from the file ring on disk.
+            let path = self.stream_capture.session_path(&row.session_id);
+            row.capture_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        }
+        Ok(rows)
+    }
+
     fn list_sessions(
         &self,
         limit: u32,
@@ -1102,17 +1182,25 @@ impl DashboardData for KernelDashboardData {
         // itself does not carry an initiative FK — tasks own
         // the link — so this is the only consistent way to
         // narrow without a schema change.
-        let allowed: Option<std::collections::HashSet<String>> =
-            match initiative_id {
-                None => None,
-                Some(i) => {
-                    let tasks = raxis_store::views::tasks::list_by_initiative(&conn, i, 500)
-                        .map_err(|e| ApiError::Internal {
-                            log_only: format!("tasks::list_by_initiative: {e}"),
-                        })?;
-                    Some(tasks.into_iter().filter_map(|t| t.session_id).collect())
-                }
-            };
+        let allowed: Option<std::collections::HashSet<String>> = match initiative_id {
+            None => None,
+            Some(i) => {
+                let tasks = raxis_store::views::tasks::list_by_initiative(&conn, i, 500)
+                    .map_err(|e| ApiError::Internal {
+                        log_only: format!("tasks::list_by_initiative: {e}"),
+                    })?;
+                Some(
+                    tasks
+                        .into_iter()
+                        .filter_map(|t| t.session_id)
+                        .collect(),
+                )
+            }
+        };
+        // Pre-load the audit chain so the per-session
+        // classifier sees the SessionRevoked rows without a
+        // re-walk per response.
+        let audit_chain = collect_lifecycle_audit_rows(&self.audit_dir);
         Ok(rows
             .into_iter()
             .filter(|s| match &allowed {
@@ -1121,7 +1209,7 @@ impl DashboardData for KernelDashboardData {
             })
             .map(|s| {
                 let state = session_row_state(&s);
-                SessionView {
+                let view = SessionView {
                     session_id: s.session_id,
                     role: s.role_id,
                     initiative_id: None,
@@ -1143,7 +1231,10 @@ impl DashboardData for KernelDashboardData {
                     // chain for the matching `SessionRevoked` /
                     // `SessionVmFailedFinal` row.
                     failure: None,
-                }
+                    annotations:       Vec::new(),
+                    latest_annotation: None,
+                };
+                enrich_session_view_with_lifecycle(&audit_chain, view)
             })
             .collect())
     }
@@ -1179,7 +1270,8 @@ impl DashboardData for KernelDashboardData {
             kind: "session".into(),
         })?;
         let state = session_row_state(&s);
-        Ok(SessionView {
+        let audit_chain = collect_lifecycle_audit_rows(&self.audit_dir);
+        let view = SessionView {
             session_id: s.session_id,
             role: s.role_id,
             initiative_id: None,
@@ -1200,7 +1292,10 @@ impl DashboardData for KernelDashboardData {
             // rationale. V3 promotes this to a real audit
             // chain walk.
             failure: None,
-        })
+            annotations:       Vec::new(),
+            latest_annotation: None,
+        };
+        Ok(enrich_session_view_with_lifecycle(&audit_chain, view))
     }
 
     fn list_escalations(&self) -> Result<Vec<EscalationView>, ApiError> {
@@ -3104,7 +3199,403 @@ fn task_row_to_view(
         // "No reason supplied — kernel bug" so the gap is visible.
         failure: None,
         blocked_downstream: Vec::new(),
+        // Lifecycle annotations are populated lazily by the
+        // detail / list paths that own the audit chain handle.
+        // The list-of-tasks under an initiative populates them
+        // via `task_row_to_view_with_lifecycle` so the global
+        // index gets `latest_annotation` without re-reading
+        // audit per row.
+        annotations:            Vec::new(),
+        latest_annotation:      None,
+        review_verdict:         None,
+        last_critique:          None,
+        reviewer_panel_results: Vec::new(),
     }
+}
+
+/// Lifecycle-aware projection used by `get_task` /
+/// `list_tasks` / `get_initiative` so the FE renders structured
+/// retry / revoke / block cards without making the operator
+/// hand-correlate audit seq numbers.
+///
+/// The audit chain `audit_chain` is shared across calls in the
+/// same HTTP request — the caller pre-loads it via
+/// [`collect_lifecycle_audit_rows`] so a multi-task initiative
+/// page does not re-walk the chain per row.
+fn task_row_to_view_with_lifecycle(
+    conn:        &raxis_store::ro::RoConn,
+    audit_chain: &[lifecycle::AuditRow],
+    t:           &raxis_store::views::tasks::TaskRow,
+) -> TaskView {
+    let mut view = task_row_to_view(conn, t);
+    let activations = read_activations_for_task(conn, &t.task_id);
+    let (review_verdict, last_critique) = read_review_state(conn, &t.task_id);
+    let annotations = lifecycle::classify_for_task(
+        audit_chain,
+        &t.task_id,
+        &activations,
+        last_critique.as_deref(),
+    );
+    let latest = annotations.last().cloned();
+    let panel = extract_reviewer_panel_results(audit_chain, &t.task_id);
+    view.annotations            = annotations;
+    view.latest_annotation      = latest;
+    view.review_verdict         = review_verdict;
+    view.last_critique          = last_critique;
+    view.reviewer_panel_results = panel;
+    view
+}
+
+/// Lifecycle-aware projection for [`SessionView`]. Mirrors
+/// [`task_row_to_view_with_lifecycle`] for the per-session
+/// timeline (operator-revoke vs self-exit, initiative-block).
+fn enrich_session_view_with_lifecycle(
+    audit_chain: &[lifecycle::AuditRow],
+    mut view:    SessionView,
+) -> SessionView {
+    let annotations = lifecycle::classify_for_session(audit_chain, &view.session_id);
+    view.latest_annotation = annotations.last().cloned();
+    view.annotations       = annotations;
+    view
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle annotation helpers
+// (INV-DASHBOARD-LIFECYCLE-CAUSALITY-01 — paired with Worker 1)
+// ---------------------------------------------------------------------------
+
+/// Walk every audit chain segment and project rows into the
+/// classifier-friendly [`lifecycle::AuditRow`] shape, capped at
+/// `MAX_AUDIT_WALK_RECORDS` so a runaway chain cannot pin a
+/// request thread. The walker returns rows in chain `seq`
+/// order — the classifier resorts as needed.
+///
+/// The walk is deliberately not filtered at the I/O layer: the
+/// classifier expects a session-or-task-scoped slice, but a
+/// `task_id` filter at the segment-iterator level would scan the
+/// chain twice for `(get_task, get_session)` co-renders. We pull
+/// once per HTTP request and let the (cheap) Rust-side filter on
+/// `task_id` / `session_id` do the narrowing.
+fn collect_lifecycle_audit_rows(audit_dir: &Path) -> Vec<lifecycle::AuditRow> {
+    const MAX_AUDIT_WALK_RECORDS: usize = 200_000;
+    let Ok(reader) = ChainReader::open(audit_dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<lifecycle::AuditRow> = Vec::new();
+    let mut walked: usize = 0;
+    for rec in reader.records() {
+        walked += 1;
+        if walked > MAX_AUDIT_WALK_RECORDS {
+            eprintln!(
+                "{{\"level\":\"warn\",\
+                  \"event\":\"dashboard_lifecycle_audit_walk_capped\",\
+                  \"limit_records\":{MAX_AUDIT_WALK_RECORDS}}}"
+            );
+            break;
+        }
+        let Ok(rec) = rec else { continue };
+        let payload = rec
+            .parsed_value
+            .as_ref()
+            .and_then(|v| v.get("payload").cloned())
+            .unwrap_or(serde_json::Value::Null);
+        out.push(lifecycle::AuditRow {
+            seq:           rec.seq,
+            event_kind:    rec.event_kind,
+            initiative_id: rec.initiative_id,
+            task_id:       rec.task_id,
+            session_id:    rec.session_id,
+            at:            rec.emitted_at.unwrap_or(0),
+            payload,
+        });
+    }
+    out
+}
+
+/// Read `tasks.review_verdict` and `tasks.last_critique` for the
+/// given task id. Both columns are migration-6/-7 additions; an
+/// older DB silently returns `(None, None)`.
+fn read_review_state(
+    conn: &raxis_store::ro::RoConn,
+    task_id: &str,
+) -> (Option<String>, Option<String>) {
+    let row = conn.query_row(
+        "SELECT review_verdict, last_critique FROM tasks WHERE task_id = ?1",
+        [task_id],
+        |r| {
+            let v: Option<String> = r.get(0)?;
+            let c: Option<String> = r.get(1)?;
+            Ok((v, c))
+        },
+    );
+    row.unwrap_or((None, None))
+}
+
+/// Read every `subtask_activations` row for `task_id` and
+/// project to the classifier's [`lifecycle::ActivationRow`].
+fn read_activations_for_task(
+    conn: &raxis_store::ro::RoConn,
+    task_id: &str,
+) -> Vec<lifecycle::ActivationRow> {
+    let mut out: Vec<lifecycle::ActivationRow> = Vec::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT activation_id, task_id, activation_state, created_at \
+         FROM subtask_activations WHERE task_id = ?1 ORDER BY created_at ASC",
+    ) else {
+        return out;
+    };
+    let rows = stmt.query_map([task_id], |r| {
+        Ok(lifecycle::ActivationRow {
+            activation_id:    r.get(0)?,
+            task_id:          r.get(1)?,
+            activation_state: r.get(2)?,
+            created_at:       r.get::<_, i64>(3)?,
+        })
+    });
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            out.push(row);
+        }
+    }
+    out
+}
+
+/// Read every `subtask_activations` row across the database and
+/// project to the classifier's shape. Used by
+/// `list_orchestrator_gaps` where the gap detector needs the
+/// global `PendingActivation` set.
+fn read_activations_all(
+    conn: &raxis_store::ro::RoConn,
+) -> Vec<lifecycle::ActivationRow> {
+    let mut out: Vec<lifecycle::ActivationRow> = Vec::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT activation_id, task_id, activation_state, created_at \
+         FROM subtask_activations ORDER BY created_at ASC",
+    ) else {
+        return out;
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok(lifecycle::ActivationRow {
+            activation_id:    r.get(0)?,
+            task_id:          r.get(1)?,
+            activation_state: r.get(2)?,
+            created_at:       r.get::<_, i64>(3)?,
+        })
+    });
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            out.push(row);
+        }
+    }
+    out
+}
+
+/// Project every `tasks` row into the classifier's
+/// [`lifecycle::TaskRow`]. The DAG edges are read via
+/// `task_dag_edges` joined into `predecessors`. `completed_at`
+/// is populated from `tasks.transitioned_at` when the task is in
+/// a `Completed` state.
+fn read_tasks_with_predecessors(
+    conn: &raxis_store::ro::RoConn,
+) -> Vec<lifecycle::TaskRow> {
+    let mut out: Vec<lifecycle::TaskRow> = Vec::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT task_id, state, transitioned_at FROM tasks",
+    ) else {
+        return out;
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    });
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            let (task_id, state, transitioned_at) = row;
+            let completed_at = if state == "Completed" {
+                Some(transitioned_at)
+            } else {
+                None
+            };
+            // Predecessor edges per task — we issue one prepared
+            // statement per task to keep the per-row work
+            // bounded. The DAG fanout is small (≤10s of edges
+            // per task in practice) so this is cheap.
+            let preds = read_predecessors_for_task(conn, &task_id);
+            out.push(lifecycle::TaskRow {
+                task_id,
+                state,
+                predecessors: preds,
+                completed_at,
+            });
+        }
+    }
+    out
+}
+
+/// Read predecessor task ids for `successor_task_id` from the
+/// `task_dag_edges` table.
+fn read_predecessors_for_task(
+    conn: &raxis_store::ro::RoConn,
+    successor_task_id: &str,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT predecessor_task_id FROM task_dag_edges WHERE successor_task_id = ?1",
+    ) else {
+        return out;
+    };
+    let rows = stmt.query_map([successor_task_id], |r| r.get::<_, String>(0));
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            out.push(row);
+        }
+    }
+    out
+}
+
+/// Read every `sessions` row regardless of `revoked` so the
+/// recent-list page surfaces revoked + expired alongside active.
+/// `session_agent_type` is the migration-5 addition (nullable on
+/// V1 rows). The `task_id` / `initiative_id` are populated from
+/// `tasks.session_id` if available, otherwise NULL.
+///
+/// Returns a partly-populated [`RecentSessionEntry`] — fields
+/// that depend on the audit chain (`final_annotation`) and the
+/// stream-capture ring (`capture_bytes`) are filled by the
+/// caller.
+fn read_sessions_all_for_recent(
+    conn: &raxis_store::ro::RoConn,
+    limit: usize,
+) -> Vec<RecentSessionEntry> {
+    let mut out: Vec<RecentSessionEntry> = Vec::new();
+    // Sub-select avoids LEFT JOIN multi-row ambiguity when one
+    // session backs multiple tasks. We pick the lowest task_id
+    // alphabetically — deterministic for the FE.
+    let sql = "SELECT s.session_id, \
+                       COALESCE(s.session_agent_type, ''), \
+                       s.created_at, \
+                       s.revoked_at, \
+                       (SELECT t.task_id FROM tasks t \
+                          WHERE t.session_id = s.session_id \
+                          ORDER BY t.task_id ASC LIMIT 1) AS task_id, \
+                       (SELECT t.initiative_id FROM tasks t \
+                          WHERE t.session_id = s.session_id \
+                          ORDER BY t.task_id ASC LIMIT 1) AS initiative_id \
+                FROM sessions s \
+                ORDER BY COALESCE(s.revoked_at, s.created_at) DESC \
+                LIMIT ?1";
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return out;
+    };
+    let rows = stmt.query_map([limit as i64], |r| {
+        let session_id: String       = r.get(0)?;
+        let agent_type: String       = r.get(1)?;
+        let created_at: i64          = r.get(2)?;
+        let revoked_at: Option<i64>  = r.get(3)?;
+        let task_id: Option<String>  = r.get(4)?;
+        let init_id: Option<String>  = r.get(5)?;
+        Ok(RecentSessionEntry {
+            session_id,
+            agent_type,
+            task_id,
+            initiative_id:     init_id,
+            created_at:        created_at.max(0) as u64,
+            terminated_at:     revoked_at.map(|v| v.max(0) as u64),
+            terminated_reason: None,
+            final_annotation:  None,
+            capture_bytes:     0,
+        })
+    });
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            out.push(row);
+        }
+    }
+    out
+}
+
+/// Build the per-reviewer panel results table for one executor
+/// task by projecting every `SubmitReview`-shaped audit row
+/// downstream of `executor_task_id` (`reviewer_count` + verdict
+/// + critique excerpt). This is the structured surface that
+/// powers `<ReviewerVerdictPanel>` on the FE.
+///
+/// We accept payload kinds named `SubmitReview`,
+/// `ReviewerSubmittedVerdict`, and the existing
+/// `ReviewAggregationCompleted` row whose payload carries each
+/// reviewer's verdict — different kernel revisions emit
+/// different shapes; we tolerate all three.
+fn extract_reviewer_panel_results(
+    audit_chain:       &[lifecycle::AuditRow],
+    executor_task_id:  &str,
+) -> Vec<ReviewerPanelEntry> {
+    let mut out: Vec<ReviewerPanelEntry> = Vec::new();
+    for row in audit_chain.iter() {
+        match row.event_kind.as_str() {
+            "ReviewAggregationCompleted" => {
+                // Inspect every "reviewer_results" entry for
+                // this executor's aggregation row.
+                let exec_target = row.payload.get("executor_task_id")
+                    .and_then(|v| v.as_str()).unwrap_or("");
+                if exec_target != executor_task_id { continue; }
+                if let Some(arr) = row.payload.get("reviewer_results")
+                    .and_then(|v| v.as_array())
+                {
+                    for r in arr {
+                        let reviewer_task_id = r.get("reviewer_task_id")
+                            .and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                        let verdict = r.get("verdict")
+                            .and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                        let critique = r.get("critique")
+                            .and_then(|v| v.as_str()).unwrap_or("");
+                        out.push(ReviewerPanelEntry {
+                            reviewer_task_id,
+                            verdict,
+                            critique_excerpt: first_n_lines_helper(critique, 3),
+                            completed_at:     row.at,
+                        });
+                    }
+                }
+            }
+            "SubmitReview" | "ReviewerSubmittedVerdict" => {
+                let exec_target = row.payload.get("executor_task_id")
+                    .and_then(|v| v.as_str()).unwrap_or("");
+                if exec_target != executor_task_id { continue; }
+                let reviewer_task_id = row.task_id.clone()
+                    .or_else(|| row.payload.get("reviewer_task_id")
+                        .and_then(|v| v.as_str()).map(str::to_owned))
+                    .unwrap_or_default();
+                let verdict = row.payload.get("verdict")
+                    .and_then(|v| v.as_str()).unwrap_or("").to_owned();
+                let critique = row.payload.get("critique")
+                    .and_then(|v| v.as_str()).unwrap_or("");
+                out.push(ReviewerPanelEntry {
+                    reviewer_task_id,
+                    verdict,
+                    critique_excerpt: first_n_lines_helper(critique, 3),
+                    completed_at:     row.at,
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Local copy of the lifecycle-internal `first_n_lines` helper
+/// (the lifecycle module's helper is private). Inlined here to
+/// avoid re-exporting an internal helper.
+fn first_n_lines_helper(s: &str, n: usize) -> String {
+    let mut acc = String::new();
+    for (i, line) in s.lines().enumerate() {
+        if i >= n { break; }
+        if i > 0 { acc.push('\n'); }
+        acc.push_str(line);
+    }
+    acc
 }
 
 /// Map an escalation `class` discriminator to a coarse

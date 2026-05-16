@@ -6,6 +6,7 @@ import { ApiError, dashboardApi } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
 import { ErrorBox } from "@/components/ErrorBox";
 import { FailureReasonPanel } from "@/components/FailureReasonPanel";
+import { LifecycleTimeline } from "@/components/lifecycle/LifecycleTimeline";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { SessionStream } from "@/components/SessionStream";
@@ -146,6 +147,13 @@ export function SessionDetailPage() {
           heading="Session failure reason"
         />
       )}
+
+      {/* `<LifecycleTimeline>` rendered above the tabs as a
+          header band so the operator sees self-exit /
+          operator-revoke / initiative-block context before
+          drilling into the live stream or post-mortem.
+          `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`. */}
+      <LifecycleTimeline annotations={s.annotations ?? []} />
 
       <SessionDetailTabs sessionId={s.session_id} />
     </div>

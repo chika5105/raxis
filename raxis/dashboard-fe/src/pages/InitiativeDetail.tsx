@@ -15,6 +15,10 @@ import {
   FailureReasonPanel,
 } from "@/components/FailureReasonPanel";
 import { InitiativePlanView } from "@/components/InitiativePlanView";
+import {
+  lifecycleDotClass,
+  lifecycleSummary,
+} from "@/components/lifecycle/LifecycleAnnotation";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
@@ -251,6 +255,10 @@ export function InitiativeDetailPage() {
                   <th className="text-left px-4 py-2 font-medium">Task</th>
                   <th className="text-left px-4 py-2 font-medium">State</th>
                   <th className="text-left px-4 py-2 font-medium">Session</th>
+                  {/* Lifecycle column rendered from
+                      `task.latest_annotation` —
+                      `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`. */}
+                  <th className="text-left px-4 py-2 font-medium">Lifecycle</th>
                   <th className="text-right px-4 py-2 font-medium">Updated</th>
                 </tr>
               </thead>
@@ -323,6 +331,17 @@ export function InitiativeDetailPage() {
                       ) : (
                         <span className="text-ink-subtle">—</span>
                       )}
+                    </td>
+                    <td className="px-4 py-2 text-xs text-ink-muted">
+                      <span className="inline-flex items-center gap-2">
+                        <span
+                          className={`inline-block w-2 h-2 rounded-full ${lifecycleDotClass(
+                            t.latest_annotation ?? null,
+                          )}`}
+                          aria-hidden="true"
+                        />
+                        <span>{lifecycleSummary(t.latest_annotation ?? null)}</span>
+                      </span>
                     </td>
                     <td className="px-4 py-2 text-right text-xs text-ink-muted">
                       {fmtRelative(t.updated_at)}

@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { LifecycleAnnotation } from "@/components/lifecycle/LifecycleAnnotation";
 import { getStoredToken } from "@/lib/auth-store";
-import type { StreamEventEnvelope } from "@/types/api";
+import type {
+  LifecycleAnnotation as LA,
+  StreamEventEnvelope,
+} from "@/types/api";
 import { Mono } from "@/components/Mono";
 
 interface SessionStreamProps {
@@ -15,6 +19,13 @@ interface SessionStreamProps {
   /// Default 80 ms — fast enough to feel live, slow enough to
   /// give React time to commit each render.
   flushIntervalMs?: number;
+  /// Lifecycle annotations to interleave with the live stream.
+  /// Annotations are sorted by `ts_unix` and rendered as cards
+  /// at the matching position in the stream (the closest
+  /// stream row by `at_ms`), so an operator scrolling a long
+  /// session sees retries / revokes inline rather than only at
+  /// the top of the page. `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`.
+  annotations?: LA[];
 }
 
 type StreamStatus =
@@ -76,6 +87,7 @@ export function SessionStream({
   sessionId,
   bufferSize = 1_000,
   flushIntervalMs = 80,
+  annotations = [],
 }: SessionStreamProps) {
   const [events, setEvents] = useState<StreamEventEnvelope[]>([]);
   const [status, setStatus] = useState<StreamStatus>("connecting");
@@ -269,6 +281,38 @@ export function SessionStream({
     [events],
   );
 
+  /// Merge stream events and lifecycle annotations into a
+  /// single chronologically-sorted timeline. Stream events
+  /// carry `at_ms` (unix milliseconds); annotations carry
+  /// `ts_unix` (unix seconds) — orchestrator-gap rows have no
+  /// timestamp and pin to the top so an operator's eye finds
+  /// them first.
+  type Row =
+    | { kind: "event"; key: string; at_ms: number; event: StreamEventEnvelope }
+    | { kind: "annotation"; key: string; at_ms: number; annotation: LA };
+  const merged = useMemo<Row[]>(() => {
+    const rows: Row[] = visibleEvents.map((e, i) => ({
+      kind: "event",
+      key: `e-${e.at_ms}-${i}`,
+      at_ms: e.at_ms,
+      event: e,
+    }));
+    annotations.forEach((a, i) => {
+      const at_ms =
+        "ts_unix" in a && typeof a.ts_unix === "number"
+          ? a.ts_unix * 1000
+          : 0;
+      rows.push({
+        kind: "annotation",
+        key: `a-${a.kind}-${i}`,
+        at_ms,
+        annotation: a,
+      });
+    });
+    rows.sort((x, y) => x.at_ms - y.at_ms);
+    return rows;
+  }, [visibleEvents, annotations]);
+
   return (
     <div className="card p-0 overflow-hidden flex flex-col">
       <header className="px-3 py-2 border-b border-edge bg-panel-high flex items-center gap-2 text-xs">
@@ -315,7 +359,7 @@ export function SessionStream({
         onScroll={onScroll}
         className="overflow-y-auto scroll-thin font-mono text-[12px] leading-relaxed bg-black/40 p-3 h-[60vh]"
       >
-        {visibleEvents.length === 0 ? (
+        {merged.length === 0 ? (
           <div className="text-ink-subtle italic">
             {status === "missing" ? (
               <>Not authenticated — sign in to view the live stream.</>
@@ -331,9 +375,19 @@ export function SessionStream({
             )}
           </div>
         ) : (
-          visibleEvents.map((e, i) => (
-            <StreamLine key={`${e.at_ms}-${i}`} event={e} />
-          ))
+          merged.map((row) =>
+            row.kind === "annotation" ? (
+              <div
+                key={row.key}
+                className="my-1 rounded border border-info/30 bg-info/5 p-2 font-sans text-[12px]"
+                data-testid="session-stream-annotation"
+              >
+                <LifecycleAnnotation annotation={row.annotation} />
+              </div>
+            ) : (
+              <StreamLine key={row.key} event={row.event} />
+            ),
+          )
         )}
       </div>
     </div>
@@ -377,6 +431,7 @@ function StatusDot({ status }: { status: StreamStatus }) {
 }
 
 function StreamLine({ event }: { event: StreamEventEnvelope }) {
+  const [expanded, setExpanded] = useState(false);
   const ts = formatTimeMs(event.at_ms);
   const tone =
     event.kind === "terminal" || event.kind === "complete"
@@ -386,17 +441,36 @@ function StreamLine({ event }: { event: StreamEventEnvelope }) {
         : event.kind === "error"
           ? "text-bad"
           : "text-ink";
+  const onClick = useCallback(() => setExpanded((v) => !v), []);
   return (
-    <div className="grid grid-cols-[80px_110px_1fr] gap-2 hover:bg-white/5 px-1 py-0.5">
+    <div
+      className="grid grid-cols-[80px_110px_1fr] gap-2 hover:bg-white/5 px-1 py-0.5 cursor-pointer"
+      onClick={onClick}
+      data-testid="session-stream-row"
+    >
       <span className="text-ink-subtle">{ts}</span>
       <span className={`uppercase text-[10px] font-bold ${tone}`}>
         {event.kind}
       </span>
       <span className="whitespace-pre-wrap break-words">
-        <PayloadView payload={event.payload} />
+        {expanded ? (
+          <pre className="text-[11px] text-ink-muted whitespace-pre-wrap">
+            {safeStringifyPayload(event.payload)}
+          </pre>
+        ) : (
+          <PayloadView payload={event.payload} />
+        )}
       </span>
     </div>
   );
+}
+
+function safeStringifyPayload(p: unknown): string {
+  try {
+    return JSON.stringify(p, null, 2);
+  } catch {
+    return String(p);
+  }
 }
 
 function PayloadView({ payload }: { payload: unknown }) {

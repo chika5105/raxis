@@ -29,11 +29,14 @@ import type {
   MarkAllReadResponse,
   MarkReadResponse,
   NotificationView,
+  OrchestratorGapsResponse,
   PolicyAdvancement,
   PolicySnapshotView,
+  RecentSessionEntry,
   SessionCaptureView,
   SessionView,
   SubsystemHealthResponse,
+  TaskLlmTurnView,
   TaskView,
   UnreadCountResponse,
   UpdatePolicyResponse,
@@ -312,6 +315,22 @@ export const dashboardApi = {
       apiFetch<TaskView>(`/api/tasks/${encodeURIComponent(id)}`, signal ? { signal } : {}),
     outputs: (id: string, signal?: AbortSignal): Promise<TaskView["structured_outputs"]> =>
       apiFetch(`/api/tasks/${encodeURIComponent(id)}/outputs`, signal ? { signal } : {}),
+    /// `GET /api/tasks/:task_id/llm-turns?n=…` — tail of LLM
+    /// turns the kernel-side tap recorded for this task.
+    /// Powers `<TaskLlmTurns>` on TaskDetail. The endpoint is
+    /// always ndjson-tail style; current default `n=100`.
+    llmTurns: (
+      id: string,
+      n: number = 100,
+      signal?: AbortSignal,
+    ): Promise<TaskLlmTurnView[]> => {
+      const qs = new URLSearchParams();
+      qs.set("n", String(n));
+      return apiFetch<TaskLlmTurnView[]>(
+        `/api/tasks/${encodeURIComponent(id)}/llm-turns?${qs}`,
+        signal ? { signal } : {},
+      );
+    },
   },
 
   sessions: {
@@ -353,7 +372,35 @@ export const dashboardApi = {
         signal ? { signal } : {},
       );
     },
+    /// `GET /api/recent-sessions?limit=…` — bounded ring of
+    /// the last N sessions regardless of their `revoked` flag,
+    /// each row carrying its final `LifecycleAnnotation` so
+    /// the FE renders self-exit vs operator-revoke without a
+    /// per-row drill-down.
+    recent: (
+      limit: number = 50,
+      signal?: AbortSignal,
+    ): Promise<RecentSessionEntry[]> => {
+      const qs = new URLSearchParams();
+      qs.set("limit", String(limit));
+      return apiFetch<RecentSessionEntry[]>(
+        `/api/recent-sessions?${qs}`,
+        signal ? { signal } : {},
+      );
+    },
   },
+
+  /// `GET /api/orchestrator-gaps` — every
+  /// `subtask_activations` row stuck in `PendingActivation`
+  /// past the gap threshold whose predecessors all completed.
+  /// Powers the home-view "Warnings" pane.
+  orchestratorGaps: (
+    signal?: AbortSignal,
+  ): Promise<OrchestratorGapsResponse> =>
+    apiFetch<OrchestratorGapsResponse>(
+      "/api/orchestrator-gaps",
+      signal ? { signal } : {},
+    ),
 
   escalations: {
     list: (signal?: AbortSignal): Promise<EscalationView[]> =>
