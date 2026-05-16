@@ -8,6 +8,7 @@ import { DocsSidebar } from "@/components/DocsSidebar";
 import { TomlFileViewer } from "@/components/TomlFileViewer";
 import { ResizableSidebar } from "@/components/ResizableSidebar";
 import { MermaidHydrator } from "@/components/MermaidHydrator";
+import { OnThisPage } from "@/components/OnThisPage";
 
 interface Params {
   params: Promise<{ slug: string[] }>;
@@ -118,11 +119,14 @@ export default async function DocPage({ params }: Params) {
           <PrevNext prev={prev ?? undefined} next={next ?? undefined} />
         </article>
 
-        <aside className="hidden xl:block shrink-0 w-[200px]">
-          <div className="sticky top-24 max-h-[calc(100dvh-7rem)] overflow-y-auto">
-            <OnThisPage headings={meta.headings} />
-          </div>
+        <aside className="hidden xl:flex shrink-0">
+          <ResizableSidebar side="right">
+            <div className="sticky top-24 max-h-[calc(100dvh-7rem)] overflow-y-auto w-full">
+              <OnThisPage headings={meta.headings} />
+            </div>
+          </ResizableSidebar>
         </aside>
+
       </div>
     </div>
   );
@@ -146,32 +150,7 @@ function Breadcrumb({ meta }: { meta: import("@/lib/docs").DocMeta }) {
   );
 }
 
-function OnThisPage({ headings }: { headings: Array<{ depth: 2 | 3; text: string; id: string }> }) {
-  if (!headings.length) return null;
-  return (
-    <nav aria-label="On this page" className="text-sm">
-      <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)] mb-3">
-        On this page
-      </h4>
-      <ul className="space-y-1.5 border-l border-[var(--rule)]">
-        {headings.map((h, i) => (
-          <li
-            key={`${i}-${h.id}`}
-            style={{ paddingLeft: h.depth === 2 ? "0.75rem" : "1.5rem" }}
-          >
-            <a
-              href={`#${h.id}`}
-              className="block text-[13px] leading-tight text-[var(--muted)] hover:text-[var(--fg)] truncate"
-              title={h.text}
-            >
-              {h.text}
-            </a>
-          </li>
-        ))}
-      </ul>
-    </nav>
-  );
-}
+
 
 function PrevNext({
   prev,

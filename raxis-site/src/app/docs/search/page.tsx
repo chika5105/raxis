@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { DocsSidebar } from "@/components/DocsSidebar";
+import { ResizableSidebar } from "@/components/ResizableSidebar";
 import { SearchClient } from "@/components/SearchClient";
 
 export const metadata: Metadata = {
@@ -10,13 +11,15 @@ export const metadata: Metadata = {
 
 export default function SearchPage() {
   return (
-    <div className="mx-auto max-w-7xl px-4 sm:px-6 py-12 lg:py-16 grid gap-12 lg:grid-cols-[240px_minmax(0,1fr)]">
-      <aside className="hidden lg:block">
-        <div className="sticky top-24 max-h-[calc(100dvh-7rem)] overflow-y-auto pr-3">
-          <DocsSidebar />
-        </div>
+    <div className="w-full px-6 xl:px-12 py-10 lg:py-14 flex gap-8 xl:gap-12">
+      <aside className="hidden lg:flex shrink-0">
+        <ResizableSidebar>
+          <div className="sticky top-24 max-h-[calc(100dvh-7rem)] overflow-y-auto pr-3 w-full">
+            <DocsSidebar />
+          </div>
+        </ResizableSidebar>
       </aside>
-      <div className="min-w-0">
+      <div className="flex-1 min-w-0">
         <header className="mb-10">
           <p className="eyebrow">Search</p>
           <h1 className="h-section mt-4">Search the documentation</h1>
