@@ -13599,3 +13599,122 @@ the work).
 `kernel/src/orch_respawn_ceiling.rs::approve_logical_deadlock_escalation_in_tx`
 + `kernel/src/ipc/operator.rs::handle_approve_logical_deadlock`
 + `specs/v2/dashboard-hardening.md` (per-class approve table).
+
+---
+
+## Iter66 — data-dir per-handler subdirectory bootstrap
+
+The iter66 realistic E2E surfaced a fresh-genesis kernel that
+panicked the first `IntegrationMerge` gate evaluation with
+`No such file or directory (os error 2)` on
+`<data_dir>/witness/<sha>` — `kernel::witness_index::write_blob_to_disk`
+calls `std::fs::write` without `create_dir_all` of its own and
+genesis (`bootstrap.rs`) never mkdir'd `witness/`. The gate stayed
+`GatesPending`, the planner self-exited Dirty, the orchestrator
+no-progress respawn counter walked to its ceiling, the
+`OrchestratorRespawnCeilingExceeded` paired-write fired, and the
+harness panicked five layers downstream. The cascade after the
+first witness write was correct iter65 behaviour; only the missing
+directory was the root cause.
+
+### `INV-DATA-DIR-WITNESS-SUBDIR-BOOTSTRAPPED-01`
+
+**Statement.** The kernel daemon MUST, on every boot, ensure that
+`<data_dir>/witness/` exists before any task-state machine accepts
+an intent that could trigger a witness write. The check is
+idempotent and runs whether or not genesis has been performed
+against the data dir.
+
+**Justification.** The witness blob writer is content-addressed and
+SHA-256-keyed, but its on-disk write
+(`kernel::witness_index::write_blob_to_disk`) does a raw
+`std::fs::write(<witness_dir>/<sha>, blob)` — no
+`create_dir_all`. A fresh-genesis data dir that never created
+`<data_dir>/witness/` therefore makes the very first
+`IntegrationMerge` gate evaluation panic on the missing parent
+directory. The panic leaves the gate permanently `GatesPending`
+because the SQL index row is never written, so the gate evaluator
+re-enters the same path on every dispatch and never makes
+progress. iter65's downstream cascade (planner self-exit Dirty,
+no-progress respawn ceiling, escalation paired-write) is correct
+behaviour given a wedged `IntegrationMerge` gate — but the wedge
+itself is a missing directory, not an FSM bug, and is best
+corrected by a single boot-time gate rather than per-handler
+defensive `create_dir_all` everywhere.
+
+**Scenario.** An operator runs
+`RAXIS_BOOTSTRAP=1 raxis-kernel < cert.toml`, the genesis emits
+keys/policy/audit/providers/runtime/sockets/notifications, and
+the operator immediately submits an initiative whose first task
+fires an `IntegrationMerge` gate. The gate evaluator computes a
+witness blob, calls `write_blob_to_disk`, and the
+`std::fs::write` returns `ENOENT` because `witness/` was never
+created. The kernel turns the IO into a panic / `Result::Err`, the
+gate's SQL index row is never inserted, and the planner waits
+forever for a result that will never come.
+
+**Canonical home.**
+`kernel/src/data_dir_layout.rs` (`ensure_data_dir_layout`,
+`DATA_DIR_SUBDIRS`) +
+`kernel/src/main.rs` Step 2.5 (boot-time invocation) +
+`kernel/src/witness_index.rs` (consumer module).
+
+### `INV-DATA-DIR-LAYOUT-COMPLETE-ON-BOOT-01`
+
+**Statement.** Every per-handler subdirectory under `<data_dir>/`
+that the kernel binary can ever write to MUST be enumerated in
+`kernel/src/data_dir_layout.rs::DATA_DIR_SUBDIRS`. The kernel
+daemon MUST `create_dir_all` every entry on every boot before
+accepting any IPC intent. Adding a new per-handler write surface
+to the kernel binary REQUIRES adding the directory name to
+`DATA_DIR_SUBDIRS` in the same PR; the regression net is the
+`canonical_layout_complete_on_boot` test in
+`kernel/tests/data_dir_bootstrap.rs`, which asserts every entry
+exists post-`ensure_data_dir_layout`.
+
+**Justification.** iter66's witness/ bug is a class, not an
+incident: every per-handler subdirectory writer that does not
+itself `create_dir_all(parent)` before its first write is one
+missing-genesis-step away from the same wedge. Centralising the
+enumeration into a single canonical list makes the contract
+explicit (operators can `ls` the data dir post-boot and see every
+expected subdir), the regression test mechanical (the next handler
+that adds a subdir without listing it here will trip the test),
+and the audit-truth concrete (the spec → code → test triangle is
+closed, no ambient knowledge required).
+
+**Closed in-scope list (alphabetically sorted, see
+`DATA_DIR_SUBDIRS`).** `artifacts/`, `audit/`, `keys/`,
+`llm-turns/`, `notifications/`, `oci-cache/`, `policy/`,
+`providers/`, `repositories/`, `runtime/`, `session-capture/`,
+`sockets/`, `streams/`, `transfer/`, `witness/`, `worktrees/`.
+
+**Out-of-scope by design.** `escalations/` (escalation rows live
+in SQLite, not the filesystem; pinned by
+`kernel/tests/extended_e2e_concurrent_lifecycle.rs::
+assert_no_forged_approvals_on_disk`), `guests/<session_id>/`
+(per-session, dynamic, created by `session_spawn_orchestrator`
+when the first session spawns), `revocations/` (lazy via
+`RevocationStore::open`; missing-dir means empty store, which is
+the correct semantics for a non-revoked installation),
+`breakglass/`, `credentials/` (lazy via the credentials backend;
+not all configurations have one). Future contributors who need to
+promote any of these into eager-bootstrap territory MUST add the
+name to `DATA_DIR_SUBDIRS` and update this spec section in the
+same PR.
+
+**Mode-bit authority.** `ensure_data_dir_layout` does NOT chmod;
+it is purely an "exists before write" gate. `bootstrap.rs`
+remains the owner of mode 0o700 on `keys/` and `providers/`
+(per `kernel-store.md §2.5.1` and `peripherals.md §3.2`), and
+`raxis doctor`'s `EXPECTED_MODES` is the operator-facing audit
+of the resulting bits (with `witness/` pinned at 0o755 to mirror
+the audit-chain directory; witness blobs are content-addressed
+and not secret material).
+
+**Canonical home.**
+`kernel/src/data_dir_layout.rs` +
+`kernel/src/main.rs` Step 2.5 (boot-time invocation) +
+`cli/src/commands/doctor.rs::EXPECTED_MODES` (operator-visible audit) +
+`kernel/tests/data_dir_bootstrap.rs::canonical_layout_complete_on_boot`
+(regression net).

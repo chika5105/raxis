@@ -116,6 +116,12 @@ const EXPECTED_MODES: &[(&str, u32)] = &[
     ("runtime", 0o755),
     ("sockets", 0o755),
     ("notifications", 0o755),
+    // `INV-DATA-DIR-WITNESS-SUBDIR-BOOTSTRAPPED-01` — the kernel
+    // daemon ensures `<data_dir>/witness/` exists on every boot
+    // (`kernel/src/data_dir_layout.rs`). Witness blobs are
+    // content-addressed (SHA-256) and not secret material; mode
+    // 0o755 mirrors the audit-chain directory.
+    ("witness", 0o755),
 ];
 
 // ────────────────────────────────────────────────────────────────────

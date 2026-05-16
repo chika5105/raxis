@@ -29,6 +29,12 @@ mod bootstrap;
 mod canonical_images_preflight;
 mod capacity;
 mod dashboard_glue;
+// `specs/invariants.md §INV-DATA-DIR-LAYOUT-COMPLETE-ON-BOOT-01` —
+// canonical list of per-handler subdirectories the kernel daemon
+// MUST ensure exist before accepting any IPC intent. Lives in its
+// own module so `kernel/tests/data_dir_bootstrap.rs` can import the
+// list directly and assert every entry is on disk post-boot.
+mod data_dir_layout;
 mod errors;
 // `concurrency-and-locking.md §INV-LOCK-07` /
 // `self-healing-supervisor.md §3.1` — forensic-dump writer the
@@ -308,6 +314,39 @@ async fn main() {
                 reason: format!("bootstrap spawn_blocking join failed: {join_err}"),
             }),
         }
+    }
+
+    // Step 2.5 (`INV-DATA-DIR-WITNESS-SUBDIR-BOOTSTRAPPED-01` /
+    // `INV-DATA-DIR-LAYOUT-COMPLETE-ON-BOOT-01`): ensure every
+    // per-handler subdirectory exists before any subsystem can
+    // attempt a write.
+    //
+    // The iter66 motivation: `kernel::witness_index::write_blob_to_disk`
+    // does a raw `std::fs::write(<witness_dir>/<sha>, blob)` with no
+    // `create_dir_all` of its own. A fresh-genesis kernel that never
+    // mkdir'd `<data_dir>/witness/` therefore panicked the first
+    // `IntegrationMerge` gate evaluation with `No such file or
+    // directory (os error 2)`, leaving the gate permanently
+    // `GatesPending`. Genesis (`bootstrap.rs`) creates most subdirs
+    // already; we lift the contract from "every individual handler
+    // creates its own dir" into a single boot-time gate so the next
+    // missing-dir bug fails the kernel cleanly at boot rather than
+    // five layers deep in a cascading orchestrator-respawn loop.
+    //
+    // Idempotent — runs every boot, no-op on the steady-state case
+    // where genesis already created everything. Failures here are
+    // fatal: a kernel that cannot create its own write surfaces
+    // cannot honour any IPC intent. Reuses the
+    // `BOOT_ERR_BOOTSTRAP_FAILED` code (15) because the failure
+    // mode is in the same family — kernel cannot stand up its own
+    // on-disk layout.
+    if let Err(e) = data_dir_layout::ensure_data_dir_layout(&data_dir) {
+        exit_with_code(KernelError::BootstrapFailed {
+            reason: format!(
+                "cannot create per-handler subdirectory under {}: {e}",
+                data_dir.display(),
+            ),
+        });
     }
 
     // Step 3: Load and verify signed policy artifact.
