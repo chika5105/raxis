@@ -783,7 +783,7 @@ async fn handle_request(
             .await
         }
         OperatorRequest::RevokeSession { session_id } => {
-            handle_revoke_session(session_id, ctx).await
+            handle_revoke_session(session_id, operator, ctx).await
         }
         OperatorRequest::GrantDelegation {
             session_id,
@@ -1104,7 +1104,11 @@ async fn handle_create_session(
     }
 }
 
-async fn handle_revoke_session(session_id_str: String, ctx: &HandlerContext) -> OperatorResponse {
+async fn handle_revoke_session(
+    session_id_str: String,
+    operator: &AuthenticatedOperator,
+    ctx: &HandlerContext,
+) -> OperatorResponse {
     use raxis_types::SessionId;
     let session_id = match SessionId::parse(&session_id_str) {
         Ok(id) => id,
@@ -1135,6 +1139,32 @@ async fn handle_revoke_session(session_id_str: String, ctx: &HandlerContext) -> 
     match revoke_outcome {
         Ok(()) => {
             let revoked_at = raxis_types::unix_now_secs();
+            // INV-AUDIT-OPERATOR-REVOKE-SESSION-PAIRED-WRITE-01 — emit
+            // the SessionRevoked audit row after the SQL state change
+            // commits, mirroring the canonical paired-write contract on
+            // every other kernel-driven `sessions.revoked` mutation
+            // (`authority::session::revoke_session` is the SQL writer;
+            // the paired-write was missing on the operator-driven seam
+            // pre-iter63 — see deep-sweep-2 D9 RETURN_NOTE).
+            let operator_display_name = ctx
+                .policy
+                .load()
+                .operator_display_name(&operator.fingerprint);
+            if let Err(e) = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::SessionRevoked {
+                    session_id: session_id_str.clone(),
+                    revoked_by: operator.fingerprint.clone(),
+                    revoked_by_display_name: operator_display_name,
+                },
+                Some(session_id_str.as_str()),
+                None,
+                None,
+            ) {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"SessionRevoked\",\
+                     \"audit_emit_failed\":\"{e}\",\"session_id\":\"{session_id_str}\"}}",
+                );
+            }
             OperatorResponse::SessionRevoked {
                 session_id: session_id_str,
                 revoked_at,
@@ -2285,23 +2315,27 @@ async fn handle_approve_logical_deadlock(
 ) -> OperatorResponse {
     let store_for_blocking = Arc::clone(&ctx.store);
     let escalation_id_blocking = escalation_id.clone();
-    let join_result =
-        tokio::task::spawn_blocking(move || -> Result<Option<String>, rusqlite::Error> {
+    let join_result = tokio::task::spawn_blocking(
+        move || -> Result<
+            Option<crate::orch_respawn_ceiling::ApproveLogicalDeadlockOutcome>,
+            rusqlite::Error,
+        > {
             let mut conn = store_for_blocking.lock_sync();
             let tx = conn.transaction()?;
-            let initiative_id =
+            let outcome =
                 crate::orch_respawn_ceiling::approve_logical_deadlock_escalation_in_tx(
                     &tx,
                     &escalation_id_blocking,
                     raxis_types::unix_now_secs(),
                 )?;
             tx.commit()?;
-            Ok(initiative_id)
-        })
-        .await;
+            Ok(outcome)
+        },
+    )
+    .await;
 
-    let initiative_id = match join_result {
-        Ok(Ok(Some(id))) => id,
+    let (initiative_id, transitioned_from_failed) = match join_result {
+        Ok(Ok(Some(outcome))) => (outcome.initiative_id, outcome.transitioned_from_failed),
         Ok(Ok(None)) => {
             return OperatorResponse::Error {
                 code:   "FAIL_APPROVE_ESCALATION".to_owned(),
@@ -2338,6 +2372,33 @@ async fn handle_approve_logical_deadlock(
             "{{\"level\":\"error\",\"event\":\"OperatorApprovedRespawnEscalation\",\
              \"audit_emit_failed\":\"{e}\",\"escalation_id\":\"{escalation_id}\"}}",
         );
+    }
+
+    // INV-AUDIT-OPERATOR-APPROVE-DEADLOCK-PAIRED-WRITE-01 — emit the
+    // `InitiativeStateChanged` paired-write whenever the operator's
+    // approval drove a real `Failed → Executing` FSM transition.
+    // `transitioned_from_failed` is the row-count signal returned by
+    // `approve_logical_deadlock_escalation_in_tx`; a `false` value
+    // means the SQL UPDATE matched no row (rare race) and we MUST
+    // skip the audit emit to keep the chain truthful per
+    // `INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01`'s sibling rule
+    // for initiatives.
+    if transitioned_from_failed {
+        if let Err(e) = ctx.audit.emit(
+            raxis_audit_tools::AuditEventKind::InitiativeStateChanged {
+                initiative_id: initiative_id.clone(),
+                from_state: "Failed".to_owned(),
+                to_state: "Executing".to_owned(),
+            },
+            None,
+            None,
+            Some(&initiative_id),
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"InitiativeStateChanged\",\
+                 \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id}\"}}",
+            );
+        }
     }
 
     // Schedule the orchestrator respawn so the operator's "approve
@@ -3336,7 +3397,16 @@ mod escalation_dispatch_tests {
         let sink = Arc::new(FakeAuditSink::new());
         let ctx = build_ctx(store, sink, &fixture_keypair());
 
-        let resp = handle_revoke_session("00000000-0000-4000-8000-000000000000".into(), &ctx).await;
+        let operator = AuthenticatedOperator {
+            fingerprint: "test-revoke-fp".to_owned(),
+            permitted_ops: vec!["RevokeSession".into()],
+        };
+        let resp = handle_revoke_session(
+            "00000000-0000-4000-8000-000000000000".into(),
+            &operator,
+            &ctx,
+        )
+        .await;
 
         // Whatever the outcome, the test passing means the runtime did
         // not panic. The exact code is FAIL_REVOKE_SESSION because the

@@ -452,7 +452,7 @@ pub fn approve_logical_deadlock_escalation_in_tx(
     tx: &Connection,
     escalation_id: &str,
     now_unix: i64,
-) -> Result<Option<String>, rusqlite::Error> {
+) -> Result<Option<ApproveLogicalDeadlockOutcome>, rusqlite::Error> {
     let escalations = Table::Escalations.as_str();
     let initiatives = Table::Initiatives.as_str();
 
@@ -507,7 +507,14 @@ pub fn approve_logical_deadlock_escalation_in_tx(
         rusqlite::params![&initiative_id],
     )?;
 
-    tx.execute(
+    // Capture whether the Failed → Executing UPDATE actually fired.
+    // The WHERE clause `state = 'Failed'` may be a no-op if the
+    // initiative is in a different state (rare race where another
+    // transition landed between the SELECT above and this UPDATE).
+    // FOLLOWUP-C / INV-AUDIT-OPERATOR-APPROVE-DEADLOCK-PAIRED-WRITE-01
+    // pins that the operator handler emits `InitiativeStateChanged`
+    // ONLY when the row count is 1.
+    let state_change_rows = tx.execute(
         &format!(
             "UPDATE {initiatives}
                 SET state = 'Executing', completed_at = NULL
@@ -515,8 +522,31 @@ pub fn approve_logical_deadlock_escalation_in_tx(
         ),
         rusqlite::params![&initiative_id],
     )?;
+    let transitioned_from_failed = state_change_rows == 1;
 
-    Ok(Some(initiative_id))
+    Ok(Some(ApproveLogicalDeadlockOutcome {
+        initiative_id,
+        transitioned_from_failed,
+    }))
+}
+
+/// Outcome of [`approve_logical_deadlock_escalation_in_tx`].
+///
+/// `transitioned_from_failed` reflects whether the
+/// `initiatives.state` UPDATE that flips `Failed → Executing`
+/// actually changed any rows. `false` means the initiative was
+/// already in some other state by the time the operator approved
+/// (e.g. a competing operator hand-aborted between the SELECT and
+/// the UPDATE in this transaction); the caller then MUST NOT emit
+/// `InitiativeStateChanged` because no transition occurred.
+#[derive(Debug, Clone)]
+pub struct ApproveLogicalDeadlockOutcome {
+    /// The initiative whose escalation was approved.
+    pub initiative_id: String,
+    /// `true` iff the `Failed → Executing` UPDATE matched the
+    /// initiative row (i.e. the FSM transition actually happened
+    /// in this transaction).
+    pub transitioned_from_failed: bool,
 }
 
 /// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — operator-deny path

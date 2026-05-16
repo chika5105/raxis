@@ -12742,3 +12742,61 @@ Removing the `[[gates]]` block entirely while leaving live-e2e
 "green" would be an
 `INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01` violation; no
 short-cut is provided.
+
+### INV-AUDIT-OPERATOR-REVOKE-SESSION-PAIRED-WRITE-01 — `handle_revoke_session` MUST emit `SessionRevoked`
+
+**Statement.** Every successful `OperatorRequest::RevokeSession`
+SQL commit (`authority::session::revoke_session` returning
+`Ok(())`) MUST emit exactly one
+`AuditEventKind::SessionRevoked` audit row carrying the offending
+`session_id`, the operator's `revoked_by` fingerprint, and the
+operator's `revoked_by_display_name` resolved against the active
+policy bundle.
+
+**Why structural.** Pre-iter63 the operator-driven revoke seam
+(`kernel/src/ipc/operator.rs::handle_revoke_session`) flipped the
+SQL `sessions.revoked` column without emitting the canonical
+paired-write audit row. The dashboard's per-session activity
+timeline therefore showed the prior state forever even after the
+SQLite-side state had flipped, and operator forensics required
+parsing kernel stderr instead of the audit chain. Pinning the
+paired-write rule closes the chain hole and lets the
+`<RecentSessionsRing>` panel reach 100% coverage of operator
+revoke transitions.
+
+**Witness.** Drafted in `kernel/src/ipc/operator.rs` directly after
+the `Ok(())` arm of `handle_revoke_session`. Iter63 will land a
+witness test in `kernel/tests/full_e2e_session_lifecycle.rs` (Worker
+4 territory) asserting that an operator-driven revoke produces
+exactly one `SessionRevoked` audit row.
+
+### INV-AUDIT-OPERATOR-APPROVE-DEADLOCK-PAIRED-WRITE-01 — `handle_approve_logical_deadlock` MUST emit `InitiativeStateChanged` on Failed → Executing
+
+**Statement.** Every operator-approved
+`LogicalDeadlock` escalation whose
+`approve_logical_deadlock_escalation_in_tx` returns
+`transitioned_from_failed = true` MUST emit exactly one
+`AuditEventKind::InitiativeStateChanged` audit row with
+`from_state = "Failed"` and `to_state = "Executing"`. When the
+helper reports `transitioned_from_failed = false` (rare race
+where a competing transition landed between the SELECT and the
+`Failed → Executing` UPDATE), no `InitiativeStateChanged` event
+SHALL be emitted — the audit chain stays truthful.
+
+**Why structural.** Pre-iter63 the approve-deadlock path emitted
+`OperatorApprovedRespawnEscalation` but silently flipped the
+initiative FSM `Failed → Executing` without emitting
+`InitiativeStateChanged`. Dashboards that build the initiative-
+state timeline from `InitiativeStateChanged` saw an unexplained
+"still Failed" reading until the next task transition landed.
+
+**Witness.** Drafted in
+`kernel/src/orch_respawn_ceiling.rs::ApproveLogicalDeadlockOutcome`
+(the per-transaction row-count signal) and
+`kernel/src/ipc/operator.rs::handle_approve_logical_deadlock`
+(the conditional emit). Iter63 will land a witness test
+asserting the cardinality property: exactly one
+`InitiativeStateChanged { from_state = "Failed", to_state = "Executing" }`
+per operator-approved deadlock escalation that actually flipped
+the FSM.
+
