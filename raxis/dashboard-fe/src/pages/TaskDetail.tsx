@@ -60,7 +60,12 @@ export function TaskDetailPage() {
             {t.title}
           </h1>
           <div className="mt-2 flex items-center gap-2">
-            <StateBadge state={t.state} pulse={t.state === "Running"} />
+            <StateBadge
+              state={
+                t.is_active && t.state === "Admitted" ? "Running" : t.state
+              }
+              pulse={t.is_active || t.state === "Running"}
+            />
             <span className="text-xs text-ink-subtle">
               created {fmtRelative(t.created_at)}
               {" · "}updated {fmtRelative(t.updated_at)}

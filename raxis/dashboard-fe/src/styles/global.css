@@ -2,9 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
  * Operator-tooling base layer: dense, dark-first, calm.
  *
- *— UI design
+ * — UI design
  * principle #1 (dark mode default), #2 (information density).
  *
  * Theming model — see dashboard-fe/README.md §"Theme system":
@@ -26,6 +27,7 @@
  *     `localStorage.theme`; when no explicit preference is stored,
  *     the system `prefers-color-scheme` media query wins on first
  *     load and live updates are honoured.
+ */
 
 @layer base {
   :root {
@@ -145,6 +147,7 @@
 }
 
 @layer components {
+  /*
    * Buttons. focus-visible (not focus) keeps the ring out of
    * mouse-only flows but ALWAYS shows it for keyboard users —
    * non-negotiable for an operator dashboard whose target users
@@ -152,6 +155,7 @@
    * keyboard. The ring uses the existing `accent` color token
    * so it adapts automatically when the theming worker swaps
    * dark/light palettes.
+   */
   .btn {
     @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md
            text-sm font-medium border border-edge-strong bg-panel-raised

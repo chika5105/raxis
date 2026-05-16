@@ -149,6 +149,16 @@ export interface TaskView {
   /// parsed from the audit chain's `SubmitReview` /
   /// `ReviewAggregationCompleted` events.
   reviewer_panel_results?: ReviewerPanelEntry[];
+  /// True when the task currently holds an `Active`
+  /// `subtask_activations` row — i.e. an executor / reviewer
+  /// VM is bound to the task in this very moment.
+  ///
+  /// The dashboard uses this as the "really running" signal
+  /// because `tasks.state` flickers between `Running` and
+  /// `Admitted` faster than the polling interval can observe.
+  /// Render the task as Running whenever this is true, even
+  /// if `state === "Admitted"`.
+  is_active?: boolean;
 }
 
 /// One reviewer's result against an executor task, surfaced

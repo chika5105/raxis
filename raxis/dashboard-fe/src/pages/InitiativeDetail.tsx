@@ -306,9 +306,21 @@ export function InitiativeDetailPage() {
                     </td>
                     <td className="px-4 py-2 align-top">
                       <div className="flex flex-col items-start gap-1">
+                        {/* `is_active` overrides the literal FSM
+                            state for display purposes: the task has
+                            an `Active` subtask_activations row, so it
+                            IS running right now, even if `state` has
+                            flickered to `Admitted` between VM hops.
+                            Without this, the polling-resolution gap
+                            hides every executor "Running" period
+                            from the dashboard index. */}
                         <StateBadge
-                          state={t.state}
-                          pulse={t.state === "Running"}
+                          state={
+                            t.is_active && t.state === "Admitted"
+                              ? "Running"
+                              : t.state
+                          }
+                          pulse={t.is_active || t.state === "Running"}
                         />
                         {isTerminalFailureState(t.state) && (
                           <FailurePill

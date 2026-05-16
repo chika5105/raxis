@@ -363,6 +363,18 @@ export function toneClasses(tone: StateBadgeTone): string {
 /// terminal-failure classifier used when projecting
 /// `FailureInfo` onto entity view shapes.
 ///
+/// `Revoked` is intentionally NOT in this set: a revoked session
+/// is a clean operator-driven terminal (`SessionRevoked` audit
+/// event carries `revoked_by` + optional display name; the
+/// reason for revocation lives on the operator action, not on a
+/// kernel-emitted `block_reason`). Including `Revoked` previously
+/// fired `INV-FAILURE-REASON-MANDATORY-01` "No reason supplied"
+/// kernel-bug badges on every revoked session because the
+/// dashboard-kernel data layer correctly emits `failure: None`
+/// for them. Revoked sessions are surfaced via lifecycle
+/// timeline + the audit-chain `SessionRevoked` row, not via
+/// `<FailureReasonPanel>`.
+///
 /// Anchors: `INV-DASHBOARD-FAILURE-VISIBILITY-01`.
 export function isTerminalFailureState(
   state: string | null | undefined,
@@ -377,7 +389,6 @@ export function isTerminalFailureState(
     "Failed",
     "Aborted",
     "Cancelled",
-    "Revoked",
     "Errored",
     "BlockedRecoveryPending",
     "VmFailedFinal",

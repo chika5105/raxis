@@ -23,9 +23,17 @@ interface Props {
 }
 
 export function OrchestratorGapWarningCard({ a }: Props) {
-  const minutes = Math.round(a.wait_seconds / 60);
+  // Threshold the unit choice on the raw seconds so a 45s gap
+  // never rounds up to "1min" — the operator needs the precise
+  // sub-minute reading to discriminate "just stalled" from
+  // "long stalled". For ≥ 60s we floor instead of round so a
+  // 4020s gap reads as "67min" exactly (rounding would have
+  // shown 67 here anyway; floor keeps the contract stable for
+  // edge values like 4050s → still 67min, not 68min).
   const waitLabel =
-    minutes >= 1 ? `${minutes}min` : `${a.wait_seconds}s`;
+    a.wait_seconds >= 60
+      ? `${Math.floor(a.wait_seconds / 60)}min`
+      : `${a.wait_seconds}s`;
   return (
     <div
       data-testid="lifecycle-orchestrator-gap"

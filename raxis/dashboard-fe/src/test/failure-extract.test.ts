@@ -28,6 +28,19 @@ describe("isFailureAuditKind", () => {
     expect(isFailureAuditKind("PolicyEpochAdvanced")).toBe(false);
     expect(isFailureAuditKind("CredentialProxySubstituted")).toBe(false);
   });
+
+  it("does NOT treat clean revocation kinds as failures", () => {
+    // SessionRevoked is a clean operator-driven terminal; the kernel
+    // event carries `revoked_by` + display name, not a kernel-bug
+    // block_reason. Treating it as a failure flooded the dashboard
+    // "Failure events" feed and tripped the missing-reason
+    // INV-FAILURE-REASON-MANDATORY-01 badge for every revoked
+    // session.
+    expect(isFailureAuditKind("SessionRevoked")).toBe(false);
+    // OperatorCertRevoked is a deliberate admin action with a
+    // populated `reason` — also not a kernel failure.
+    expect(isFailureAuditKind("OperatorCertRevoked")).toBe(false);
+  });
 });
 
 describe("isFailureAuditEvent (payload-aware)", () => {
@@ -57,6 +70,54 @@ describe("isFailureAuditEvent (payload-aware)", () => {
 
   it("returns false for Operator* events with no outcome field", () => {
     expect(isFailureAuditEvent("OperatorApproveRequested", {})).toBe(false);
+  });
+
+  it("treats SessionVmExited with GracefulExit + exit_code 0 as non-failure", () => {
+    // The single most common executor terminal: kernel emits
+    // SessionVmExited for every VM exit (clean OR signaled); the
+    // payload's `signal_class` + `exit_code` discriminate. A
+    // clean exit (`GracefulExit`, code 0) is the success path
+    // and must not appear in the failure feed.
+    expect(
+      isFailureAuditEvent("SessionVmExited", {
+        signal_class: "GracefulExit",
+        exit_code: 0,
+        session_id: "sess_abc",
+      }),
+    ).toBe(false);
+  });
+
+  it("treats SessionVmExited with non-graceful payload as a failure", () => {
+    expect(
+      isFailureAuditEvent("SessionVmExited", {
+        signal_class: "SignalKilled",
+        exit_code: -9,
+        session_id: "sess_abc",
+      }),
+    ).toBe(true);
+    expect(
+      isFailureAuditEvent("SessionVmExited", {
+        signal_class: "BackendError",
+        exit_code: -2,
+        session_id: "sess_abc",
+      }),
+    ).toBe(true);
+    expect(
+      isFailureAuditEvent("SessionVmExited", {
+        signal_class: "GracefulExit",
+        exit_code: 1,
+        session_id: "sess_abc",
+      }),
+    ).toBe(true);
+  });
+
+  it("treats SessionRevoked as a non-failure regardless of payload", () => {
+    expect(
+      isFailureAuditEvent("SessionRevoked", {
+        session_id: "sess_abc",
+        revoked_by: "operator:alice",
+      }),
+    ).toBe(false);
   });
 });
 

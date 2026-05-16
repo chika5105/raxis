@@ -642,6 +642,27 @@ pub struct TaskView {
     /// chain's `SubmitReview` events.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewer_panel_results: Vec<ReviewerPanelEntry>,
+    /// True when the task currently holds an `Active`
+    /// `subtask_activations` row — i.e. an executor / reviewer
+    /// VM is actively bound to the task in this very moment.
+    ///
+    /// The dashboard uses this as the "really running" signal
+    /// because `tasks.state` flickers between `Running` and
+    /// `Admitted` faster than the polling interval can observe
+    /// (the FSM may transition through `Admitted` between VM
+    /// hops while the activation row stays `Active` the whole
+    /// time). Without this field operators see "Admitted" tasks
+    /// in the dashboard for executors that ARE in fact running —
+    /// the per-task lifecycle timeline shows the `SessionVmSpawned`
+    /// row, but the index pages don't.
+    ///
+    /// `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` covers the audit-
+    /// emit completeness; this field covers the polling-resolution
+    /// gap on the read side. Both are necessary because the
+    /// dashboard polls at ~2s intervals while FSM hops can land
+    /// in <100ms.
+    #[serde(default)]
+    pub is_active: bool,
 }
 
 /// One captured raw LLM turn surfaced via
@@ -3151,6 +3172,7 @@ mod tests {
                     review_verdict: None,
                     last_critique: None,
                     reviewer_panel_results: vec![],
+                    is_active: false,
                 },
                 TaskView {
                     task_id: format!("{id}-t2"),
@@ -3170,6 +3192,7 @@ mod tests {
                     review_verdict: None,
                     last_critique: None,
                     reviewer_panel_results: vec![],
+                    is_active: true,
                 },
             ],
             edges: vec![DagEdge {
@@ -3263,6 +3286,7 @@ mod tests {
             review_verdict: None,
             last_critique: None,
             reviewer_panel_results: vec![],
+            is_active: false,
         };
         let s = serde_json::to_string(&t).expect("serialises");
         assert!(!s.contains("\"failure\""));
@@ -3301,6 +3325,7 @@ mod tests {
             review_verdict: None,
             last_critique: None,
             reviewer_panel_results: vec![],
+            is_active: false,
         };
         let v = serde_json::to_value(&t).expect("serialises");
         assert_eq!(v["failure"]["kind"], "WitnessRejected");

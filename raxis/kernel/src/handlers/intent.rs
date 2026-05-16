@@ -1838,26 +1838,6 @@ fn run_phase_c(
             }
         };
 
-        if let Err(e) = ctx.audit.emit(
-            raxis_audit_tools::AuditEventKind::IntegrationMergeCompleted {
-                initiative_id: initiative_id_owned.clone(),
-                session_id: session_id_str.clone(),
-                commit_sha: pre_state.head_sha_raw.clone(),
-                previous_sha: pre_state.base_sha_raw.clone(),
-                operator_assisted,
-                escalation_id,
-                target_ref: initiative_target_ref.clone(),
-            },
-            Some(session_id_str.as_str()),
-            Some(task_id_owned.as_str()),
-            Some(initiative_id_owned.as_str()),
-        ) {
-            eprintln!(
-                "{{\"level\":\"error\",\"event\":\"IntegrationMergeCompleted\",\
-                 \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
-            );
-        }
-
         // ── Synthetic coordinator + initiative completion cascade ──────────
         //
         // INV-INTEGRATION-MERGE-COMPLETES-SYNTHETIC-TASK-01
@@ -1875,6 +1855,19 @@ fn run_phase_c(
         // perpetually `Running` even though all useful work has already
         // merged into `target_ref` — the operator-visible UX bug
         // observed during iter54.
+        //
+        // Ordering note (2026-05-16 fix): the `IntegrationMergeCompleted`
+        // audit emit happens INSIDE the `Ok(Some(...))` arm below, AFTER
+        // `finalize_integration_merge_completion` confirms both the
+        // synthetic-task FSM cascade AND the initiative-state cascade
+        // committed. Previously the emit ran unconditionally before
+        // `finalize_*` was called, which (a) produced ghost
+        // `IntegrationMergeCompleted` audit rows when the FSM cascade
+        // silently failed (primary stranded in `GatesPending`) and
+        // (b) produced duplicate rows when a retry submission re-entered
+        // the handler on an already-merged ref (sibling's two emits for
+        // the same `commit_sha`). Gating the emit on the success arm
+        // makes audit emission and FSM cascade observably paired.
         //
         // The push step below is best-effort and runs AFTER the cascade
         // — push failure does not regress the now-Completed initiative.
@@ -1894,14 +1887,47 @@ fn run_phase_c(
                     // immediately, not Running.
                     task_state = TaskState::Completed;
 
+                    // Paired-write `IntegrationMergeCompleted` audit emit.
+                    // Gated on the FSM cascade succeeding so the audit
+                    // chain never carries a `IntegrationMergeCompleted`
+                    // record that lacks a paired
+                    // `TaskStateChanged(coordinator → Completed)`.
+                    if let Err(e) = ctx.audit.emit(
+                        raxis_audit_tools::AuditEventKind::IntegrationMergeCompleted {
+                            initiative_id: initiative_id_owned.clone(),
+                            session_id: session_id_str.clone(),
+                            commit_sha: pre_state.head_sha_raw.clone(),
+                            previous_sha: pre_state.base_sha_raw.clone(),
+                            operator_assisted,
+                            escalation_id,
+                            target_ref: initiative_target_ref.clone(),
+                        },
+                        Some(session_id_str.as_str()),
+                        Some(task_id_owned.as_str()),
+                        Some(initiative_id_owned.as_str()),
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"IntegrationMergeCompleted\",\
+                             \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
+                        );
+                    }
+
                     // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` —
-                    // post-commit `TaskStateChanged` emit for the
-                    // synthetic coordinator's Running → Completed.
-                    // Without this the dashboard's
-                    // `«integration-merge»` row appears to stall
-                    // in `Running` forever (until it was the
-                    // notification_filter's only path to surface
-                    // the completion).
+                    // post-commit `TaskStateChanged` emits for every
+                    // FSM hop the coordinator took to reach Completed.
+                    // When the coordinator was already `Running` this
+                    // is just the terminal edge; when it had to
+                    // normalize from `GatesPending` / `Admitted` the
+                    // intermediate hops are emitted first so the
+                    // dashboard observes a contiguous path instead of
+                    // a sudden `GatesPending → Completed` jump.
+                    for rec in &outcome.normalization_records {
+                        emit_task_state_changed_audit(
+                            ctx.audit.as_ref(),
+                            rec,
+                            Some(session_id_str.as_str()),
+                        );
+                    }
                     emit_task_state_changed_audit(
                         ctx.audit.as_ref(),
                         &outcome.task_record,
@@ -2785,7 +2811,7 @@ fn handle_complete_task(
     // INV-STORE-02 atomicity: a crash between the status flip
     // and the SHA stamp is impossible.
     let head_sha_for_eval = req.head_sha.as_ref().map(|s| s.as_str().to_owned());
-    commit_task_completion(
+    let completion_record = commit_task_completion(
         req.task_id.as_str(),
         &task.lane_id,
         &export_paths,
@@ -2793,6 +2819,21 @@ fn handle_complete_task(
         store,
     )
     .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+
+    // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — post-commit emit of the
+    // Running → Completed `TaskStateChanged`. Without this the audit chain
+    // would carry only the `IntentAccepted{intent_kind:"CompleteTask"}`
+    // record below and the dashboard's per-task FSM stream would never
+    // observe the terminal edge for executor leaf tasks. Verified in the
+    // 2026-05-16 live e2e: ~8 executor tasks reached `state=Completed` in
+    // the `tasks` table with NO corresponding `TaskStateChanged` audit row,
+    // because `commit_task_completion` previously flipped state via raw
+    // SQL and never produced a `TaskTransitionRecord`.
+    emit_task_state_changed_audit(
+        ctx.audit.as_ref(),
+        &completion_record,
+        Some(session_id.as_str()),
+    );
 
     // ── 7b. V2 §Step 24 — copy executor commit closure into the
     //         per-initiative orchestrator ODB so:
@@ -6852,49 +6893,52 @@ async fn handle_retry_sub_task(
 /// `INSERT OR IGNORE` on the snapshot rows handles the idempotent-retry
 /// case (`PRIMARY KEY (task_id, path)` — same path inserted twice is a
 /// no-op, matching the spec's "ignore" rule).
+///
+/// Returns the [`TaskTransitionRecord`] for the now-committed Running→Completed
+/// transition so the caller can emit `TaskStateChanged` post-commit.
+/// `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` requires that emit — without it
+/// the dashboard never observes the executor leaf transitioning to Completed
+/// and the audit chain has a gap at the terminal edge.
 fn commit_task_completion(
     task_id: &str,
     lane_id: &str,
     export_paths: &[String],
     evaluation_sha: Option<&str>,
     store: &Store,
-) -> Result<(), ()> {
+) -> Result<TaskTransitionRecord, ()> {
     let mut conn = store.lock_sync();
     let tx = conn.transaction().map_err(|_| ())?;
 
-    // 1. Status update — guarded by `state = 'Running'` so a concurrent
-    //    abort or duplicate completion silently no-ops (rows == 0 →
-    //    transition rejected). The `tasks` DDL has no `completed_at`
-    //    column (kernel-store.md §2.5.1 Table 5); `transitioned_at` is
-    //    the canonical timestamp for the Running → Completed edge.
-    //
-    //    V2 §Step 24-adjacent — when the planner submitted a
-    //    `head_sha`, stamp it onto `tasks.evaluation_sha` in the
-    //    same row update so the KSB / Reviewer-clone / IM-fetch
-    //    paths can read it immediately. `COALESCE(?, evaluation_sha)`
-    //    preserves the column on a vacuous CompleteTask
-    //    (head_sha=None per §2.5.8 edge-case): the kernel never
-    //    overwrites a previously-stamped SHA with NULL.
-    let now = unix_now_secs();
-    let completed_state = TaskState::Completed.as_sql_str();
-    let running_state = TaskState::Running.as_sql_str();
-    let rows = tx
-        .execute(
+    // 1. Drive the Running → Completed transition through the canonical
+    //    `transition_task_in_tx` so the audit chain captures the edge AND
+    //    the `subtask_activations` cascade fires (INV-ACT-01 enforced by
+    //    `task_transitions.rs`). A `Running` precondition mismatch surfaces
+    //    as `LifecycleError::TaskNotAbortable`, which we collapse to the
+    //    historical `Err(())` so the caller's PlannerErrorCode mapping
+    //    (`FailTaskNotRunning`) stays unchanged.
+    let record =
+        transition_task_in_tx(&tx, task_id, TaskState::Completed, None, TransitionActor::Kernel)
+            .map_err(|_| ())?;
+
+    // 2. Stamp `tasks.evaluation_sha` with the head SHA submitted by the
+    //    planner. Done as a follow-up UPDATE in the same tx because
+    //    `transition_task_in_tx` is FSM-only and intentionally does not
+    //    touch domain columns. `COALESCE(?, evaluation_sha)` preserves the
+    //    existing SHA on a vacuous CompleteTask (head_sha=None per §2.5.8
+    //    edge case): the kernel never overwrites a previously-stamped SHA
+    //    with NULL.
+    if evaluation_sha.is_some() {
+        tx.execute(
             &format!(
-                "UPDATE {TASKS}
-                SET state           = ?1,
-                    transitioned_at = ?2,
-                    evaluation_sha  = COALESCE(?5, evaluation_sha)
-              WHERE task_id = ?3 AND state = ?4",
+                "UPDATE {TASKS} SET evaluation_sha = COALESCE(?1, evaluation_sha) \
+                 WHERE task_id = ?2",
             ),
-            rusqlite::params![completed_state, now, task_id, running_state, evaluation_sha,],
+            rusqlite::params![evaluation_sha, task_id],
         )
         .map_err(|_| ())?;
-    if rows == 0 {
-        return Err(());
     }
 
-    // 2. Insert export snapshot rows (idempotent on PK).
+    // 3. Insert export snapshot rows (idempotent on PK).
     if !export_paths.is_empty() {
         let mut stmt = tx
             .prepare_cached(&format!(
@@ -6906,92 +6950,6 @@ fn commit_task_completion(
             stmt.execute(rusqlite::params![task_id, p])
                 .map_err(|_| ())?;
         }
-    }
-
-    // 3. Cascade-terminate the matching `subtask_activations` row.
-    //
-    // INV-ACT-01 mirror: every `tasks.state` transition into a terminal
-    // state must close out the bound `Active` activation row in the
-    // SAME transaction. `transition_task_in_tx` already enforces this
-    // for the `Failed` / `Aborted` / `Cancelled` edges (see
-    // `kernel/src/initiatives/task_transitions.rs §"INV-ACT-01"`),
-    // but `commit_task_completion` flips `Running → Completed` via raw
-    // SQL inside its own tx (kernel-store.md §2.5.8 line 2014 single-
-    // tx contract) and previously bypassed the cascade — `c986e6d`
-    // explicitly noted this gap as deferred ("Closing that gap is a
-    // separate cleanup tracked at the call-site").
-    //
-    // ## Why the gap became a hard blocker
-    //
-    // Live e2e iter 9 (artifact `.tmpP4B3jk`, 2026-05-12 22:28Z UTC)
-    // exposed the consequence end-to-end. Sequence (timestamps from
-    // the iter-9 audit chain):
-    //
-    //   1. ts=…198  `allowlist-positive-codegen` executor reports
-    //               `CompleteTask` → task transitions
-    //               `Running → Completed` via this function. Task
-    //               row is correct; activation row is left in
-    //               `Active` (the gap).
-    //   2. ts=…297  primary orchestrator submits `RetrySubTask
-    //               credential-substitution-canary` and exits cleanly.
-    //   3. ts=…306  `spawn_planner_dispatcher`'s post-exit hook runs
-    //               for the orchestrator session. Preflight reads
-    //               `(pending_exists, active_exists)` for the
-    //               primary initiative and finds `active_exists =
-    //               true` because of the stale `allowlist-positive-
-    //               codegen` row. The `aafd4f2` storm-guard
-    //               (`pending_exists && !active_exists`) fires and
-    //               skips respawn.
-    //   4. ts=…306..…650+  no further orchestrator for the primary
-    //               initiative. 7 `Admitted` tasks + 1
-    //               `PendingActivation` (the just-retried canary)
-    //               stranded with no dispatcher. Kernel CPU 0%
-    //               for ~4 minutes until manual termination.
-    //
-    // The post-exit hook's correctness assumption ("activation FSM
-    // mirrors task lifecycle") was ALREADY violated for completed
-    // tasks before iter 9; the symptom only surfaced once Option 2
-    // (`6237618`) made `RetrySubTask` viable for executors that
-    // would never make progress, which in turn put us into the
-    // post-ceiling state where the orchestrator's exit was the
-    // ONLY path that could revive the DAG.
-    //
-    // ## Fix shape
-    //
-    // The cascade is identical to `transition_task_in_tx`'s INV-ACT-01
-    // block, parameterised on the terminal mapping
-    // `TaskState::Completed → 'Completed'`. The WHERE filter
-    // (`activation_state = 'Active'`) is the idempotency guard: a
-    // recovery-sweep re-emit on top of an already-terminal row is a
-    // no-op. PendingActivation rows (NULL `activated_at`) are
-    // intentionally untouched; the Migration 5 CHECK forbids stamping
-    // them as terminal directly, and `CompleteTask` only flips
-    // `Running → Completed` for tasks whose activation has already
-    // been bound (`Active`) anyway.
-    //
-    // The cascade lives INSIDE the existing transaction so the
-    // §2.5.8 single-tx contract is preserved end-to-end: the task
-    // status, the export snapshots, AND the activation closure all
-    // commit together or all roll back. A crash mid-cascade is
-    // impossible.
-    let activation_rows = tx
-        .execute(
-            &format!(
-                "UPDATE {SUBTASK_ACTIVATIONS}
-                SET activation_state = 'Completed',
-                    terminated_at    = ?1
-              WHERE task_id          = ?2
-                AND activation_state = 'Active'"
-            ),
-            rusqlite::params![now, task_id],
-        )
-        .map_err(|_| ())?;
-    if activation_rows > 0 {
-        eprintln!(
-            "{{\"level\":\"info\",\"event\":\"ActivationCascadeTerminated\",\
-             \"task_id\":\"{task_id}\",\"activation_state\":\"Completed\",\
-             \"rows\":{activation_rows}}}",
-        );
     }
 
     // 4. Release the lane budget reservation.
@@ -7042,7 +7000,8 @@ fn commit_task_completion(
         return Err(());
     }
 
-    tx.commit().map_err(|_| ())
+    tx.commit().map_err(|_| ())?;
+    Ok(record)
 }
 
 // ---------------------------------------------------------------------------
@@ -7311,7 +7270,19 @@ fn wait_for_git_apply_pending_clear(
 /// initiative row missing, etc.) collapses to `Ok(None)` so the
 /// caller does not double-emit a stale `InitiativeStateChanged`.
 pub(crate) struct IntegrationMergeFinalizeOutcome {
+    /// Final `Running → Completed` (or in-place hop into `Completed`)
+    /// record. Emitted by the caller as the canonical
+    /// `TaskStateChanged` audit row for the synthetic coordinator's
+    /// terminal edge.
     pub task_record: TaskTransitionRecord,
+    /// Intermediate FSM-normalization hops the coordinator took to
+    /// reach `Running` so the terminal edge is FSM-legal (e.g.
+    /// `GatesPending → Admitted` and `Admitted → Running` if the
+    /// coordinator was admitted with non-empty `pending_gates`).
+    /// Emitted in order so the audit chain reflects every legal hop
+    /// per `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01`. Empty when the
+    /// coordinator was already `Running` at merge-finalize time.
+    pub normalization_records: Vec<TaskTransitionRecord>,
     pub initiative_from: String,
     pub initiative_to: String,
 }
@@ -7324,6 +7295,97 @@ fn finalize_integration_merge_completion(
     let now = unix_now_secs();
     let mut conn = store.lock_sync();
     let tx = conn.transaction()?;
+
+    // Read the synthetic coordinator's current FSM state so we can plan
+    // the normalization path to `Completed`.
+    //
+    // The FSM table (`task_transitions.rs::is_legal_transition`) only
+    // permits `Running → Completed` as the terminal edge. But the
+    // `IntegrationMerge` intent can be admitted while the coordinator
+    // is in `GatesPending` (Phase C transitions `Admitted → GatesPending`
+    // when `pending_gates` is non-empty, then Phase 2 / host-side merge
+    // still runs unconditionally after Phase C commits). When the merge
+    // then succeeds, the FSM forbids `GatesPending → Completed` and the
+    // synthetic coordinator gets stranded (`tasks.state=GatesPending`
+    // forever, `initiatives.state=Executing` forever) — the observed
+    // 2026-05-16 e2e regression for the primary initiative.
+    //
+    // We resolve the mismatch by walking through the FSM-legal hops
+    // (`GatesPending → Admitted → Running → Completed`) in a single
+    // transaction. Each hop produces its own `TaskTransitionRecord` so
+    // the audit chain captures the full path per
+    // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01`. The hops are
+    // "synthetic normalization" — they are not driven by an executor or
+    // a witness, but they are real FSM transitions and the dashboard
+    // must observe them so the operator sees the merge land instead of
+    // a sudden GatesPending→Completed jump.
+    let current_state_str: String = match tx.query_row(
+        &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
+        rusqlite::params![task_id],
+        |r| r.get(0),
+    ) {
+        Ok(s) => s,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"IntegrationMergeSyntheticTaskMissing\",\
+                 \"initiative_id\":\"{initiative_id}\",\"task_id\":\"{task_id}\"}}",
+            );
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+
+    let normalization_path: &[TaskState] = match current_state_str.as_str() {
+        s if s == TaskState::Running.as_sql_str() => &[],
+        s if s == TaskState::Admitted.as_sql_str() => &[TaskState::Running],
+        s if s == TaskState::GatesPending.as_sql_str() => {
+            &[TaskState::Admitted, TaskState::Running]
+        }
+        _ => {
+            // Already terminal (Completed / Failed / Aborted / Cancelled /
+            // BlockedRecoveryPending). The caller's `IntegrationMerge`
+            // intent is structurally a no-op for the FSM cascade — git
+            // is idempotent, but the task FSM is already at its terminal
+            // edge and there is nothing further to drive. Returning
+            // `Ok(None)` prevents the caller from re-emitting
+            // `IntegrationMergeCompleted` on a stranded retry, which
+            // fixes the 2026-05-16 e2e "duplicate IntegrationMergeCompleted
+            // for same commit_sha" regression observed on the sibling.
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"IntegrationMergeSyntheticTaskFinalizeSkipped\",\
+                 \"initiative_id\":\"{initiative_id}\",\"task_id\":\"{task_id}\",\
+                 \"current_state\":\"{current_state_str}\"}}",
+            );
+            return Ok(None);
+        }
+    };
+
+    let mut normalization_records: Vec<TaskTransitionRecord> =
+        Vec::with_capacity(normalization_path.len());
+    for next in normalization_path {
+        match transition_task_in_tx(
+            &tx,
+            task_id,
+            next.clone(),
+            None,
+            TransitionActor::Kernel,
+        ) {
+            Ok(rec) => normalization_records.push(rec),
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"IntegrationMergeSyntheticTaskNormalizeSkipped\",\
+                     \"initiative_id\":\"{initiative_id}\",\
+                     \"intermediate\":\"{}\",\"reason\":\"{e}\"}}",
+                    next.as_sql_str(),
+                );
+                // Tx rolls back via Drop on early return — no partial
+                // FSM hop is committed. Caller treats this as Ok(None)
+                // (skip cascade) so `IntegrationMergeCompleted` is not
+                // emitted for a structurally inapplicable merge.
+                return Ok(None);
+            }
+        }
+    }
 
     let task_record = match transition_task_in_tx(
         &tx,
@@ -7338,9 +7400,6 @@ fn finalize_integration_merge_completion(
                 "{{\"level\":\"warn\",\"event\":\"IntegrationMergeSyntheticTaskTransitionSkipped\",\
                  \"initiative_id\":\"{initiative_id}\",\"reason\":\"{e}\"}}",
             );
-            // Tx rolls back via Drop on early return — the synthetic
-            // task row is left untouched and the initiative-state UPDATE
-            // never fires. Caller treats this as Ok(None) (skip cascade).
             return Ok(None);
         }
     };
@@ -7371,6 +7430,7 @@ fn finalize_integration_merge_completion(
             tx.commit()?;
             return Ok(Some(IntegrationMergeFinalizeOutcome {
                 task_record,
+                normalization_records,
                 initiative_from: s.clone(),
                 initiative_to: s,
             }));
@@ -7379,6 +7439,7 @@ fn finalize_integration_merge_completion(
             tx.commit()?;
             return Ok(Some(IntegrationMergeFinalizeOutcome {
                 task_record,
+                normalization_records,
                 initiative_from: String::new(),
                 initiative_to: String::new(),
             }));
@@ -7398,6 +7459,7 @@ fn finalize_integration_merge_completion(
 
     Ok(Some(IntegrationMergeFinalizeOutcome {
         task_record,
+        normalization_records,
         initiative_from: from_state,
         initiative_to: InitiativeState::Completed.as_sql_str().to_owned(),
     }))

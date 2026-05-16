@@ -3285,6 +3285,20 @@ fn task_row_to_view(
     let path_allowlist = raxis_store::views::plan_fields::reveal_for_task(conn, &t.task_id)
         .map(|f| f.path_allowlist)
         .unwrap_or_default();
+    // `is_active` mirrors whether there's any `Active`
+    // `subtask_activations` row bound to this task. The FE renders
+    // this as the dashboard's "really running" signal even when
+    // `tasks.state` has flickered to `Admitted` between VM hops —
+    // see `TaskView::is_active` doc.
+    let is_active: bool = conn
+        .query_row(
+            "SELECT 1 FROM subtask_activations \
+             WHERE task_id = ?1 AND activation_state = 'Active' \
+             LIMIT 1",
+            rusqlite::params![&t.task_id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
     // INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01:
     // detect the synthetic coordinator row by the
     // `task_id == initiative_id` predicate and stamp a stable
@@ -3324,6 +3338,7 @@ fn task_row_to_view(
         review_verdict: None,
         last_critique: None,
         reviewer_panel_results: Vec::new(),
+        is_active,
     }
 }
 

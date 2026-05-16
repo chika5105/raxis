@@ -271,13 +271,24 @@ export function isFailureAuditKind(eventKind: string): boolean {
 /// `Operator*` event with `outcome != "Accepted"`. Use this from
 /// surfaces that have the payload in hand (Notifications, Audit,
 /// per-session SSE).
+///
+/// `SessionVmExited` and similar dual-mode events are routed
+/// through `isPayloadGracefulNonFailure` so a clean
+/// `signal_class: "GracefulExit"`, `exit_code: 0` exit never
+/// shows up as a "failure event" in the audit feed. The kind-only
+/// classifier (`isFailureAuditKind`) is intentionally STRICTER
+/// (kind alone is enough), so call sites that have the payload
+/// MUST use this function to avoid the false-positive.
 export function isFailureAuditEvent(
   eventKind: string,
   payload: unknown,
 ): boolean {
+  const obj = isObject(payload) ? payload : null;
+  if (obj && isPayloadGracefulNonFailure(eventKind, obj)) {
+    return false;
+  }
   if (isFailureAuditKind(eventKind)) return true;
   if (!eventKind.startsWith("Operator")) return false;
-  const obj = isObject(payload) ? payload : null;
   if (!obj) return false;
   const outcome = str(obj, "outcome");
   return outcome !== null && outcome !== "Accepted";
@@ -287,6 +298,9 @@ function isFailureAuditKindWithPayload(
   eventKind: string,
   obj: Record<string, unknown>,
 ): boolean {
+  if (isPayloadGracefulNonFailure(eventKind, obj)) {
+    return false;
+  }
   if (FAILURE_KINDS.has(eventKind) || looksLikeFailureKind(eventKind)) {
     return true;
   }
@@ -297,8 +311,43 @@ function isFailureAuditKindWithPayload(
   return false;
 }
 
+/// Audit events whose KIND looks failure-shaped but whose PAYLOAD
+/// declares a clean terminal. The dashboard treats these as
+/// non-failures so the operator's "Failure events" feed isn't
+/// polluted with normal session lifecycle.
+///
+///   * `SessionVmExited` with `signal_class: "GracefulExit"` and
+///     `exit_code: 0` — the guest PID 1 returned cleanly. This is
+///     literally the success terminal for an executor session.
+///     Kernel emits the same event kind for every VM exit (clean
+///     OR signaled), so the kind alone is ambiguous.
+///
+/// `SessionRevoked` and `OperatorCertRevoked` are handled higher
+/// up: `looksLikeFailureKind` no longer matches the `Revoked`
+/// suffix, so they never even reach this function.
+function isPayloadGracefulNonFailure(
+  eventKind: string,
+  obj: Record<string, unknown>,
+): boolean {
+  if (eventKind === "SessionVmExited") {
+    const signalClass = str(obj, "signal_class");
+    const exitCode = obj["exit_code"];
+    if (signalClass === "GracefulExit" && exitCode === 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const FAILURE_KINDS = new Set<string>([
-  // Lifecycle terminals
+  // Lifecycle terminals — `SessionVmExited` is dual-mode
+  // (graceful OR signaled) and the payload-aware classifier
+  // (`isFailureAuditEvent`) gates it through
+  // `isPayloadGracefulNonFailure` BEFORE this set is consulted,
+  // so a clean `GracefulExit` + `exit_code: 0` exit never trips
+  // the failure feed. Non-graceful exits and the kind-only
+  // classifier (`isFailureAuditKind`, used by callers without
+  // the payload) still treat it as a failure.
   "SessionVmFailedFinal",
   "SessionVmExited",
   "TaskBlockedForRecovery",
@@ -338,8 +387,17 @@ const FAILURE_KINDS = new Set<string>([
 // Suffix fallback for `Operator*` and any kernel-side variant the
 // FE hasn't enumerated yet — keeps the panel rendering through a
 // future schema bump even before the FE is rebuilt.
+//
+// `Revoked` is intentionally NOT in this regex: the only kernel
+// events ending in `Revoked` today are `SessionRevoked` (clean
+// session terminal) and `OperatorCertRevoked` (deliberate admin
+// action with `reason` already populated). Treating either as a
+// failure-shaped event drove the dashboard to surface clean
+// terminals under "Failure events" and to fire the
+// `INV-FAILURE-REASON-MANDATORY-01` kernel-bug badge on
+// reason-less but-perfectly-fine `SessionRevoked` rows.
 function looksLikeFailureKind(kind: string): boolean {
-  return /(Failed|FailedFinal|Crashed|Denied|Rejected|Refused|Revoked|Quarantined|Aborted|StallDetected|ProcessFailed|TimedOut)$/.test(
+  return /(Failed|FailedFinal|Crashed|Denied|Rejected|Refused|Quarantined|Aborted|StallDetected|ProcessFailed|TimedOut)$/.test(
     kind,
   );
 }
