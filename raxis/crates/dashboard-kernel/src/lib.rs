@@ -1144,6 +1144,71 @@ impl DashboardData for KernelDashboardData {
     /// (we aggregate in two passes and stitch in Rust to keep
     /// the SQL trivially auditable and to avoid the cartesian
     /// blow-up of a window-function over both tables).
+    /// iter68 PR 4 — per-task latest-verdict-per-gate rollup for
+    /// every task in `initiative_id`.
+    ///
+    /// One scan over `witness_records JOIN tasks` using a window
+    /// function isn't portable to all SQLite builds; instead we
+    /// use the classic "latest row per group" pattern:
+    /// `GROUP BY (task_id, gate_type)` taking
+    /// `MAX(recorded_at)` and then a self-join to fetch the
+    /// matching `result_class`. SQLite's bare-column-from-GROUP-BY
+    /// extension would be simpler but is not enabled in
+    /// raxis-store's `rusqlite` build profile, so we go the
+    /// portable route.
+    fn list_dag_gate_summaries(
+        &self,
+        initiative_id: &str,
+    ) -> Result<
+        std::collections::HashMap<String, Vec<raxis_dashboard::data::DagGateVerdictChip>>,
+        ApiError,
+    > {
+        use std::collections::HashMap;
+        let conn = self.open_ro()?;
+        let sql = "SELECT w.task_id, w.gate_type, w.result_class, w.recorded_at \
+                   FROM witness_records w \
+                   JOIN ( \
+                     SELECT task_id, gate_type, MAX(recorded_at) AS rec \
+                     FROM witness_records \
+                     WHERE task_id IN ( \
+                       SELECT task_id FROM tasks WHERE initiative_id = ?1 \
+                     ) \
+                     GROUP BY task_id, gate_type \
+                   ) latest \
+                     ON w.task_id = latest.task_id \
+                    AND w.gate_type = latest.gate_type \
+                    AND w.recorded_at = latest.rec \
+                   ORDER BY w.task_id, w.gate_type";
+        let mut stmt = conn.prepare(sql).map_err(|e| ApiError::Internal {
+            log_only: format!("dag_gate_summaries prepare: {e}"),
+        })?;
+        let rows = stmt
+            .query_map(rusqlite::params![initiative_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    raxis_dashboard::data::DagGateVerdictChip {
+                        gate_type: row.get(1)?,
+                        latest_verdict: row.get(2)?,
+                        recorded_at: row
+                            .get::<_, i64>(3)?
+                            .max(0),
+                    },
+                ))
+            })
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("dag_gate_summaries query: {e}"),
+            })?;
+        let mut out: HashMap<String, Vec<raxis_dashboard::data::DagGateVerdictChip>> =
+            HashMap::new();
+        for r in rows {
+            let (task_id, chip) = r.map_err(|e| ApiError::Internal {
+                log_only: format!("dag_gate_summaries row: {e}"),
+            })?;
+            out.entry(task_id).or_default().push(chip);
+        }
+        Ok(out)
+    }
+
     /// iter68 — `GET /api/tasks/:task_id/witnesses`.
     ///
     /// Read-side wrapper around

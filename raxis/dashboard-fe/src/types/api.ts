@@ -551,6 +551,21 @@ export interface DagNode {
   /// pulse so mid-execution `Admitted` tasks don't appear stalled.
   /// Optional for back-compat with older kernels.
   is_active?: boolean;
+  /// iter68 PR 4 — latest-verdict-per-gate rollup. The DAG
+  /// renders one colour-coded chip per gate beneath each node.
+  /// Stable-ordered by `gate_type` (alphabetical) so colour
+  /// columns line up across polls. Optional for back-compat
+  /// with pre-iter68 kernels.
+  gate_verdict_summary?: DagGateVerdictChip[];
+}
+
+export interface DagGateVerdictChip {
+  /// Gate this verdict applies to (e.g. `tests`).
+  gate_type: string;
+  /// One of `"Pass" | "Fail" | "Inconclusive"`.
+  latest_verdict: string;
+  /// Unix-seconds wall-clock of the verdict.
+  recorded_at: number;
 }
 
 export interface DagView {

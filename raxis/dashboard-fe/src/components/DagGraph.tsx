@@ -17,6 +17,16 @@ export interface DagGraphNode {
   /// and pulse so mid-execution `Admitted` tasks (between VM hops)
   /// don't visually look stalled. Optional for back-compat.
   is_active?: boolean;
+  /// iter68 PR 4 — latest-verdict-per-gate rollup. The DAG
+  /// renders one colour-coded dot per gate beneath the
+  /// `task_id` row so operators can pivot on "which task has a
+  /// failing gate" at a glance, without drilling into the
+  /// per-task witness panel.
+  gate_verdict_summary?: Array<{
+    gate_type: string;
+    latest_verdict: string;
+    recorded_at: number;
+  }>;
 }
 
 /// Effective state for tone / chip / pulse derivation: an active
@@ -90,7 +100,22 @@ interface DagGraphProps {
 }
 
 const NODE_W = 200;
-const NODE_H = 64;
+const NODE_H = 80;
+/// iter68 PR 4 — radius of the per-gate verdict dot rendered
+/// in the bottom-left strip of each node.
+const GATE_DOT_R = 4;
+/// Horizontal pitch between gate dots. Each dot takes up 12 px
+/// (2 r + gap) so a node fits ~14 chips before clipping; rare
+/// in practice (tasks have 1–3 gates).
+const GATE_DOT_PITCH = 12;
+/// Colours for `WitnessResultClass` rendered as gate dots. Same
+/// semantic-token language the verdict pills + state badges use,
+/// so colour-blind operators get a consistent palette.
+const GATE_DOT_COLOR: Record<string, string> = {
+  Pass: "rgb(var(--c-ok))",
+  Fail: "rgb(var(--c-bad))",
+  Inconclusive: "rgb(var(--c-warn))",
+};
 // State chip occupies a fixed slot in the top-right of the
 // node. The chip width is sized to fit a 10-char uppercase
 // label at fontSize 9 bold — `shortStateLabel` (in
@@ -394,6 +419,35 @@ export function DagGraph({
                   ? `${n.task_id.slice(0, 20)}…`
                   : n.task_id}
               </text>
+              {/* iter68 PR 4 — gate verdict dots. One colour-
+                  coded dot per gate ordered alphabetically by
+                  gate_type (server-side stable sort). Hovering
+                  the dot in a real browser surfaces the gate +
+                  verdict + recorded_at via `<title>` (no JS;
+                  SVG-native tooltip). */}
+              {n.gate_verdict_summary?.map((chip, idx) => {
+                const cx = 10 + GATE_DOT_R + idx * GATE_DOT_PITCH;
+                const cy = n.h - 12;
+                const colour =
+                  GATE_DOT_COLOR[chip.latest_verdict] ??
+                  "rgb(var(--c-ink-subtle))";
+                return (
+                  <g key={`${n.task_id}-${chip.gate_type}-${idx}`}>
+                    <circle
+                      cx={cx}
+                      cy={cy}
+                      r={GATE_DOT_R}
+                      fill={colour}
+                      stroke="rgb(var(--c-panel))"
+                      strokeWidth={0.75}
+                    >
+                      <title>
+                        {`${chip.gate_type}: ${chip.latest_verdict}`}
+                      </title>
+                    </circle>
+                  </g>
+                );
+              })}
             </g>
           );
         })}

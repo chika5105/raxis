@@ -99,6 +99,12 @@ pub struct DagNode {
     /// `is_active` is true regardless of the `state` string. See
     /// `INV-DASHBOARD-RUNNING-STATE-VISIBLE-01`.
     pub is_active: bool,
+    /// iter68 PR 4 — latest-verdict-per-gate rollup so the FE can
+    /// render a colour-coded chip strip under each node. Empty
+    /// when the task has no witnesses yet. Stable-ordered by
+    /// `gate_type`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate_verdict_summary: Vec<crate::data::DagGateVerdictChip>,
 }
 
 /// `GET /api/initiatives/:id/dag`.
@@ -112,6 +118,18 @@ where
 {
     require_read(&op)?;
     let init = state.data.get_initiative(&id)?;
+    // iter68 PR 4 — one aggregating SQL hop fetches every task's
+    // latest-verdict-per-gate so the DAG renders chips inline.
+    // Failure here is *not* fatal — an empty map degrades the DAG
+    // to its iter-67 shape (no chips) rather than 500'ing the
+    // entire DAG view. The structured-log line surfaces the gap.
+    let chip_map = state.data.list_dag_gate_summaries(&id).unwrap_or_else(|e| {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"DagGateChipsDegraded\",\
+             \"initiative_id\":\"{id}\",\"error\":\"{e}\"}}"
+        );
+        std::collections::HashMap::new()
+    });
     let nodes = init
         .tasks
         .iter()
@@ -120,6 +138,10 @@ where
             title: t.title.clone(),
             state: t.state.clone(),
             is_active: t.is_active,
+            gate_verdict_summary: chip_map
+                .get(&t.task_id)
+                .cloned()
+                .unwrap_or_default(),
         })
         .collect();
     Ok(Json(DagView {

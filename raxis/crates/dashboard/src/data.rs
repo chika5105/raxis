@@ -295,6 +295,28 @@ pub struct GateStatRow {
     pub fixup_loop_count: u64,
 }
 
+/// iter68 PR 4 — one entry in a DAG node's `gate_verdict_summary`.
+///
+/// Renders as a colour-coded chip under each DAG node so an
+/// operator scanning the initiative DAG can pivot on "which task
+/// has a failing gate" without drilling into each node. Pinned to
+/// the latest witness verdict per `(task_id, gate_type)` —
+/// historical verdicts live on the per-task witness panel.
+///
+/// `latest_verdict` is one of `"Pass" | "Fail" | "Inconclusive"`
+/// (matches `WitnessResultClass`). Adding a fourth class requires
+/// a parallel edit on the FE chip palette so the new verdict has
+/// a colour assignment.
+#[derive(Debug, Clone, Serialize)]
+pub struct DagGateVerdictChip {
+    /// The gate this verdict applies to (e.g. `tests`, `coverage`).
+    pub gate_type: String,
+    /// One of `"Pass" | "Fail" | "Inconclusive"`.
+    pub latest_verdict: String,
+    /// Unix-seconds wall-clock of the latest witness for this gate.
+    pub recorded_at: i64,
+}
+
 /// iter68 — `GET /api/tasks/:task_id/witnesses` wire view.
 ///
 /// Projection of the `witness_records` row the dashboard renders
@@ -1870,6 +1892,27 @@ pub trait DashboardData: Send + Sync + 'static {
         _task_id: &str,
     ) -> Result<Vec<WitnessView>, ApiError> {
         Ok(Vec::new())
+    }
+
+    /// iter68 PR 4 — per-task latest-verdict-per-gate rollup for
+    /// every task in `initiative_id`. Returns a map
+    /// `task_id → Vec<DagGateVerdictChip>`. Used by the DAG handler
+    /// to attach colour-coded gate chips to each `DagNode` without
+    /// issuing N queries (one per task).
+    ///
+    /// Default impl returns an empty map; production wires this
+    /// through `KernelDashboardData::list_dag_gate_summaries`
+    /// using a single aggregating SQL query.
+    ///
+    /// **Wire contract.** Each `Vec<DagGateVerdictChip>` is
+    /// alphabetically ordered by `gate_type` so the FE renders
+    /// chips in a stable column order. Tasks with no witnesses
+    /// are absent from the map (callers default to `Vec::new()`).
+    fn list_dag_gate_summaries(
+        &self,
+        _initiative_id: &str,
+    ) -> Result<std::collections::HashMap<String, Vec<DagGateVerdictChip>>, ApiError> {
+        Ok(std::collections::HashMap::new())
     }
 
     /// iter68 — `specs/v3/worktree-snapshots.md` §5.
