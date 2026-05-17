@@ -959,8 +959,16 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          # `extended_e2e_support::dep_fetch_evidence` pins exactly one\n\
          # `TproxyAdmissionGranted{{host_or_sni=\"example.com\",port=443}}`\n\
          # per executor session. RFC-2606 reserved, IANA-maintained.\n\
+         #\n\
+         # `pypi.org` + `files.pythonhosted.org` are the two hosts\n\
+         # `pip install` reaches at runtime — pypi.org for the\n\
+         # simple-index resolution + JSON metadata, then\n\
+         # files.pythonhosted.org for the wheel download. The same\n\
+         # dep-fetch-evidence task chains a `pip install` after the\n\
+         # example.com fetch, and the witness verifies the install\n\
+         # via the `--report` JSON (wheel sha256 + package version).\n\
          [egress]\n\
-         domains = [\"api.anthropic.com\", \"example.com\"]\n\
+         domains = [\"api.anthropic.com\", \"example.com\", \"pypi.org\", \"files.pythonhosted.org\"]\n\
          patterns = []\n\
          \n\
          [[providers]]\n\

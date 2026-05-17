@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import Editor from "@monaco-editor/react";
 
 import { dashboardApi } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
@@ -8,6 +9,8 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { fmtBytes } from "@/lib/format";
+import { detectMonacoLanguage } from "@/lib/monaco-language";
+import { useTheme } from "@/lib/theme-context";
 import type { WorktreeTree, WorktreeTreeEntry } from "@/types/api";
 
 interface RepoBrowserProps {
@@ -306,6 +309,9 @@ interface FileViewProps {
 const LARGE_TEXT_BYTES = 256 * 1024;
 
 function FileView({ worktreeName, path }: FileViewProps) {
+  const { theme } = useTheme();
+  const monacoTheme = theme === "dark" ? "vs-dark" : "vs";
+
   const file = useQuery({
     queryKey: ["worktree-file", worktreeName, path],
     queryFn: ({ signal }) => dashboardApi.git.file(worktreeName, path, signal),
@@ -331,6 +337,14 @@ function FileView({ worktreeName, path }: FileViewProps) {
   }
   const f = file.data;
 
+  const language = detectMonacoLanguage(f.path);
+  const lineCount =
+    f.encoding === "utf8" ? Math.max(1, f.content.split("\n").length) : 1;
+  // Cap the inline editor height to ~70 viewport-units; the Monaco
+  // editor handles its own scrolling above that. Using a rough
+  // 18px/line average matches Monaco's default density.
+  const editorPx = Math.min(Math.max(160, lineCount * 18 + 24), 720);
+
   return (
     <div className="card p-0 overflow-hidden">
       <header className="px-3 py-2 border-b border-edge bg-panel-high flex items-center gap-2 text-xs flex-wrap">
@@ -340,28 +354,51 @@ function FileView({ worktreeName, path }: FileViewProps) {
         <span className="badge bg-edge/40 border-edge-strong text-ink-muted text-[10px]">
           {f.encoding}
         </span>
-      </header>
-      <div className="p-3">
-        {f.encoding === "utf8" ? (
-          <>
-            {f.size > LARGE_TEXT_BYTES && (
-              <p className="mb-2 text-[11px] text-warn">
-                Large file ({fmtBytes(f.size)}) — rendering inline; expect some
-                scroll lag.
-              </p>
-            )}
-            <pre className="font-mono text-[12px] leading-relaxed overflow-auto scroll-thin max-h-[70vh] text-ink whitespace-pre">
-              {f.content}
-            </pre>
-          </>
-        ) : decoded != null ? (
-          <BinaryView raw={decoded} />
-        ) : (
-          <p className="text-xs text-ink-subtle italic">
-            Unable to decode binary content for inline display.
-          </p>
+        {f.encoding === "utf8" && (
+          <span className="badge bg-edge/40 border-edge-strong text-ink-muted text-[10px]">
+            {language}
+          </span>
         )}
-      </div>
+      </header>
+      {f.encoding === "utf8" ? (
+        <>
+          {f.size > LARGE_TEXT_BYTES && (
+            <p className="m-3 text-[11px] text-warn">
+              Large file ({fmtBytes(f.size)}) — rendering inline; expect some
+              scroll lag.
+            </p>
+          )}
+          <div style={{ height: `${editorPx}px` }} data-testid="repo-file-editor">
+            <Editor
+              height="100%"
+              defaultLanguage={language}
+              language={language}
+              path={f.path}
+              theme={monacoTheme}
+              value={f.content}
+              options={{
+                readOnly: true,
+                domReadOnly: true,
+                fontSize: 12,
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                tabSize: 2,
+                wordWrap: "on",
+                renderLineHighlight: "none",
+              }}
+            />
+          </div>
+        </>
+      ) : decoded != null ? (
+        <div className="p-3">
+          <BinaryView raw={decoded} />
+        </div>
+      ) : (
+        <p className="p-3 text-xs text-ink-subtle italic">
+          Unable to decode binary content for inline display.
+        </p>
+      )}
     </div>
   );
 }

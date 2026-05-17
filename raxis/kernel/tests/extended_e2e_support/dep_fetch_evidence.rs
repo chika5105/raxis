@@ -1,20 +1,25 @@
 //! Dep-fetch-evidence witness — exercises the kernel's Path A3
-//! mediated-egress stack end-to-end against a real public host.
+//! mediated-egress stack end-to-end against real public hosts.
 //!
 //! ## What the matching plan task does (`live-e2e/seed/prompts/dep_fetch_evidence.md`)
 //!
 //!   1. Issues a single `GET https://example.com/` from inside the
 //!      executor VM via stdlib `http.client.HTTPSConnection`.
-//!   2. Writes a JSON evidence file to
-//!      `out/deps/install-evidence.json` carrying the HTTP status,
-//!      body size, body SHA-256, and a boolean that pins the
-//!      well-known `Example Domain` substring.
-//!   3. `git add` + commit + `task_complete`.
+//!   2. **iter69 extension**: runs `python3 -m pip install
+//!      --target=out/deps/_pip --report=out/deps/_pip-report.json
+//!      certifi` so the kernel admits the two-host pip flow
+//!      (`pypi.org` for index resolution + JSON metadata,
+//!      `files.pythonhosted.org` for the wheel download) and the
+//!      executor produces a verifiable per-wheel SHA256 manifest.
+//!   3. Merges the example.com fetch JSON with the pip `--report`
+//!      output into a single evidence file at
+//!      `out/deps/install-evidence.json`.
+//!   4. `git add` + commit + `task_complete`.
 //!
 //! `example.com` is IANA-reserved (RFC 2606) — its body is stable
 //! and contains the literal string `Example Domain` inside the
-//! `<h1>`. No pip / npm / cargo / package-manager involvement is
-//! needed; the stdlib is enough.
+//! `<h1>`. `certifi` is a pure-Python wheel with no transitive
+//! deps and a stable, very small footprint (~165 KiB).
 //!
 //! ## What this witness asserts
 //!
@@ -36,14 +41,14 @@
 //!    pass the disk-side check below without ever lighting up the
 //!    A3 stack.
 //!
-//! 3. **Audit-chain: no OTHER A3 grants on the executor's
-//!    session.** The task is pinned to a single host; a grant for
-//!    any other host on the same session is a scope leak and
-//!    fails the witness.
+//! 3. **Audit-chain: every A3 grant on the executor's session
+//!    targets a host in the pinned allowlist
+//!    `{example.com, pypi.org, files.pythonhosted.org}`.** A grant
+//!    to any other host is a scope leak and fails the witness.
 //!
 //! 4. **On-disk: `<workdir>/out/deps/install-evidence.json`
-//!    exists, parses as JSON, and carries the four contractual
-//!    fields**:
+//!    exists, parses as JSON, and carries the four HTTPS-arm
+//!    contractual fields**:
 //!
 //!    | field                          | expected           |
 //!    |--------------------------------|--------------------|
@@ -58,6 +63,21 @@
 //!    refresh. The `body_contains_example_domain` flag — checked
 //!    inside the executor against the live response bytes — is
 //!    the structural pin instead.
+//!
+//! 5. **On-disk pip-install arm (iter69)**: the same
+//!    `install-evidence.json` carries a `pip_install` object that
+//!    parses + asserts:
+//!
+//!    | field                            | expected                                  |
+//!    |----------------------------------|-------------------------------------------|
+//!    | `pip_install.success`            | `true`                                    |
+//!    | `pip_install.installed[*].sha256`| 64-char lowercase hex per entry           |
+//!    | at least one `installed` entry   | `name == "certifi"` (case-insensitive)    |
+//!
+//!    The witness does NOT pin a specific certifi version or
+//!    wheel SHA — both rotate as the upstream package releases
+//!    refresh. The structural pin is "pip emitted ≥ 1 install
+//!    row with a verifiable SHA256, including certifi".
 //!
 //! ## Cross-witness shape
 //!
@@ -112,6 +132,27 @@ pub const TARGET_PORT: u16 = 443;
 /// using a substring (rather than a body SHA) makes the witness
 /// robust to multi-year IANA refresh cycles.
 pub const EXPECTED_BODY_SUBSTRING: &str = "Example Domain";
+
+/// PyPI index host — `pip install` resolves the simple index
+/// against this host (HTTPS, port 443). Required in the kernel's
+/// `[egress].domains` list alongside `files.pythonhosted.org`.
+pub const PIP_HOST_INDEX: &str = "pypi.org";
+
+/// File-hosting CDN host — `pip` downloads wheels from
+/// `files.pythonhosted.org` after resolving via `pypi.org`. Both
+/// hosts must be in the egress allowlist for an install to land.
+pub const PIP_HOST_FILES: &str = "files.pythonhosted.org";
+
+/// Pinned package the executor installs. Pure-Python wheel with
+/// zero transitive deps so the install path is deterministic.
+pub const PIP_PACKAGE_NAME: &str = "certifi";
+
+/// The full set of hosts the witness will permit to appear in
+/// `TproxyAdmissionGranted` events on the executor's session. A
+/// grant for any host outside this set is treated as a scope
+/// leak and fails the witness closed. Includes the example.com
+/// HTTPS fetch arm and the two pip-install arm hosts.
+pub const ALLOWED_HOSTS: &[&str] = &[TARGET_HOST, PIP_HOST_INDEX, PIP_HOST_FILES];
 
 // ---------------------------------------------------------------------------
 // Witness type.
@@ -192,9 +233,11 @@ impl DepFetchEvidenceWitness {
     }
 
     /// Find any `TproxyAdmissionGranted` on the executor's session
-    /// whose `host_or_sni` is something OTHER than the pinned
-    /// target. Returns a vector of `(seq, host_or_sni)` so the
-    /// diagnostic can name the leaked host.
+    /// whose `host_or_sni` is OUTSIDE the pinned allowlist (see
+    /// [`ALLOWED_HOSTS`]). Returns a vector of `(seq, host_or_sni)`
+    /// so the diagnostic can name the leaked host. A grant with no
+    /// SNI also counts as off-target — every host we expect is
+    /// HTTPS and SNI-bearing.
     fn off_target_grants(&self, chain: &[AuditEvent]) -> Vec<(u64, String)> {
         chain
             .iter()
@@ -204,12 +247,36 @@ impl DepFetchEvidenceWitness {
                     host_or_sni,
                     ..
                 }) if session_id == self.executor_session_id
-                    && host_or_sni.as_deref() != Some(TARGET_HOST) =>
+                    && !host_or_sni
+                        .as_deref()
+                        .is_some_and(|h| ALLOWED_HOSTS.contains(&h)) =>
                 {
                     Some((
                         ev.seq,
                         host_or_sni.unwrap_or_else(|| "<no-sni>".to_owned()),
                     ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Count grants on the executor's session targeting a
+    /// specific host (any port). Used by the diagnostic to
+    /// surface which arm of the egress flow lit up the audit
+    /// chain.
+    fn grants_for_host(&self, chain: &[AuditEvent], host: &str) -> Vec<u64> {
+        chain
+            .iter()
+            .filter_map(|ev| match typed(ev) {
+                Some(AuditEventKind::TproxyAdmissionGranted {
+                    session_id,
+                    host_or_sni,
+                    ..
+                }) if session_id == self.executor_session_id
+                    && host_or_sni.as_deref() == Some(host) =>
+                {
+                    Some(ev.seq)
                 }
                 _ => None,
             })
@@ -244,12 +311,38 @@ impl DepFetchEvidenceWitness {
 /// Structured view of the on-disk evidence file. Only the four
 /// fields the witness pins are decoded; any other fields are
 /// retained as `extras` for the diagnostic but not asserted.
+///
+/// The `pip_install` arm (iter69) is optional in the parse type
+/// — a missing block surfaces as `None` so the diagnostic can
+/// name "pip arm absent" distinctly from "pip arm present but
+/// malformed". The witness predicate fails closed when it's
+/// `None`.
 #[derive(Debug, Clone)]
 pub struct EvidenceFile {
     pub http_status: u16,
     pub body_size_bytes: u64,
     pub body_sha256: String,
     pub body_contains_example_domain: bool,
+    pub pip_install: Option<PipInstallEvidence>,
+}
+
+/// Structured view of the optional `pip_install` block. Mirrors
+/// the shape the executor's prompt produces from
+/// `pip install --report`. Each row carries the package name
+/// (lowercased), the resolved version string (free-form text;
+/// pip puts e.g. `2024.7.4` here), and the per-wheel SHA256 from
+/// `download_info.archive_info.hash`.
+#[derive(Debug, Clone)]
+pub struct PipInstallEvidence {
+    pub success: bool,
+    pub installed: Vec<PipInstallEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PipInstallEntry {
+    pub name: String,
+    pub version: String,
+    pub sha256: String,
 }
 
 impl EvidenceFile {
@@ -280,11 +373,71 @@ impl EvidenceFile {
             .get("body_contains_example_domain")
             .and_then(|x| x.as_bool())
             .ok_or("missing or non-boolean `body_contains_example_domain`")?;
+        let pip_install = obj
+            .get("pip_install")
+            .map(PipInstallEvidence::from_json)
+            .transpose()?;
         Ok(Self {
             http_status,
             body_size_bytes,
             body_sha256,
             body_contains_example_domain,
+            pip_install,
+        })
+    }
+}
+
+impl PipInstallEvidence {
+    fn from_json(v: &serde_json::Value) -> Result<Self, String> {
+        let obj = v
+            .as_object()
+            .ok_or("`pip_install` is not a JSON object")?;
+        let success = obj
+            .get("success")
+            .and_then(|x| x.as_bool())
+            .ok_or("missing or non-boolean `pip_install.success`")?;
+        let installed_raw = obj
+            .get("installed")
+            .and_then(|x| x.as_array())
+            .ok_or("missing or non-array `pip_install.installed`")?;
+        let mut installed = Vec::with_capacity(installed_raw.len());
+        for (idx, row) in installed_raw.iter().enumerate() {
+            installed.push(PipInstallEntry::from_json(row).map_err(|e| {
+                format!("`pip_install.installed[{idx}]`: {e}")
+            })?);
+        }
+        Ok(Self { success, installed })
+    }
+}
+
+impl PipInstallEntry {
+    fn from_json(v: &serde_json::Value) -> Result<Self, String> {
+        let obj = v.as_object().ok_or("entry is not a JSON object")?;
+        let name = obj
+            .get("name")
+            .and_then(|x| x.as_str())
+            .ok_or("missing or non-string `name`")?
+            .to_ascii_lowercase();
+        let version = obj
+            .get("version")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_owned();
+        let sha256 = obj
+            .get("sha256")
+            .and_then(|x| x.as_str())
+            .ok_or("missing or non-string `sha256`")?
+            .to_owned();
+        if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!(
+                "`sha256` is not a 64-char lowercase hex string (got len={}, value={sha256:?})",
+                sha256.len()
+            ));
+        }
+        Ok(Self {
+            name,
+            version,
+            sha256,
         })
     }
 }
@@ -304,18 +457,46 @@ impl EnforcementWitness for DepFetchEvidenceWitness {
             return false;
         }
         // (3) no off-target grants in the executor's session.
-        //     (Tightens scope: the pinned task contacts exactly
-        //     one host.)
+        //     The task is pinned to the
+        //     `{example.com, pypi.org, files.pythonhosted.org}`
+        //     allowlist (see [`ALLOWED_HOSTS`]).
         if !self.off_target_grants(chain).is_empty() {
             return false;
         }
-        // (4) on-disk evidence file parses cleanly with the four
-        //     contractual fields.
+        // (4) pip-install arm: at least one grant to pypi.org
+        //     (simple-index resolution) AND at least one grant
+        //     to files.pythonhosted.org (wheel download). Both
+        //     fire on a real `pip install --no-cache-dir`. If
+        //     either is missing, the install evidence below
+        //     could in principle be synthesised offline; failing
+        //     closed on the chain side keeps the witness honest.
+        if self.grants_for_host(chain, PIP_HOST_INDEX).is_empty() {
+            return false;
+        }
+        if self.grants_for_host(chain, PIP_HOST_FILES).is_empty() {
+            return false;
+        }
+        // (5) on-disk evidence file parses cleanly with the four
+        //     HTTPS-arm contractual fields, AND the iter69 pip-
+        //     install arm carries a `success=true` block with at
+        //     least one row whose `name == "certifi"`.
         match self.parse_evidence() {
             Ok(ev) => {
-                ev.http_status == 200
+                if !(ev.http_status == 200
                     && ev.body_size_bytes > 0
-                    && ev.body_contains_example_domain
+                    && ev.body_contains_example_domain)
+                {
+                    return false;
+                }
+                let Some(pip) = ev.pip_install.as_ref() else {
+                    return false;
+                };
+                if !pip.success || pip.installed.is_empty() {
+                    return false;
+                }
+                pip.installed
+                    .iter()
+                    .any(|e| e.name == PIP_PACKAGE_NAME)
             }
             Err(_) => false,
         }
@@ -325,6 +506,8 @@ impl EnforcementWitness for DepFetchEvidenceWitness {
         let grants = self.matching_grants(chain);
         let denials = self.target_denials(chain);
         let off_target = self.off_target_grants(chain);
+        let pip_index_grants = self.grants_for_host(chain, PIP_HOST_INDEX);
+        let pip_files_grants = self.grants_for_host(chain, PIP_HOST_FILES);
         let evidence = self.parse_evidence();
         let abs = self.absolute_evidence_path();
         let disk_state = match std::fs::metadata(&abs) {
@@ -333,14 +516,35 @@ impl EnforcementWitness for DepFetchEvidenceWitness {
             Err(e) => format!("not present ({e})"),
         };
         let evidence_summary = match &evidence {
-            Ok(ev) => format!(
-                "http_status={s}, body_size_bytes={n}, \
-                 body_contains_example_domain={c}, body_sha256={sh}",
-                s = ev.http_status,
-                n = ev.body_size_bytes,
-                c = ev.body_contains_example_domain,
-                sh = ev.body_sha256,
-            ),
+            Ok(ev) => {
+                let pip = match ev.pip_install.as_ref() {
+                    None => "<absent>".to_owned(),
+                    Some(p) => {
+                        let rows: Vec<String> = p
+                            .installed
+                            .iter()
+                            .map(|e| {
+                                format!(
+                                    "{}@{} sha256={}",
+                                    e.name,
+                                    e.version,
+                                    &e.sha256[..e.sha256.len().min(12)],
+                                )
+                            })
+                            .collect();
+                        format!("success={}, installed={:?}", p.success, rows)
+                    }
+                };
+                format!(
+                    "http_status={s}, body_size_bytes={n}, \
+                     body_contains_example_domain={c}, body_sha256={sh}; \
+                     pip_install: {pip}",
+                    s = ev.http_status,
+                    n = ev.body_size_bytes,
+                    c = ev.body_contains_example_domain,
+                    sh = ev.body_sha256,
+                )
+            }
             Err(e) => format!("(parse error: {e})"),
         };
         format!(
@@ -348,6 +552,8 @@ impl EnforcementWitness for DepFetchEvidenceWitness {
              TproxyAdmissionGranted matching {host}:{port}: seqs={grants:?}\n  \
              TproxyAdmissionDenied  matching {host}:_:    seqs+reasons={denials:?}\n  \
              off-target grants on this session: {off_target:?}\n  \
+             TproxyAdmissionGranted matching {pip_idx}: seqs={pip_index_grants:?}\n  \
+             TproxyAdmissionGranted matching {pip_files}: seqs={pip_files_grants:?}\n  \
              evidence file: {abs}\n  \
              disk state:    {disk_state}\n  \
              parsed:        {evidence_summary}",
@@ -355,6 +561,8 @@ impl EnforcementWitness for DepFetchEvidenceWitness {
             sid = self.executor_session_id,
             host = TARGET_HOST,
             port = TARGET_PORT,
+            pip_idx = PIP_HOST_INDEX,
+            pip_files = PIP_HOST_FILES,
             abs = abs.display(),
         )
     }
@@ -370,33 +578,52 @@ impl EnforcementWitness for DepFetchEvidenceWitness {
 /// Used by the realism-scenario wiring smoke test and by this
 /// module's unit tests. The session id is parameterised so the
 /// caller can match it to the witness it constructs.
+///
+/// The chain contains three grants — one per host in
+/// [`ALLOWED_HOSTS`] — so the iter69 pip-install arm of the
+/// predicate is also satisfied. The `original_dst_ip` /
+/// `tunnel_id` fields are dummy values; the witness only pins
+/// `host_or_sni` + port + session.
 #[must_use]
 pub fn synthetic_satisfying_chain(session_id: &str) -> Vec<AuditEvent> {
-    let payload = AuditEventKind::TproxyAdmissionGranted {
-        session_id: session_id.to_owned(),
-        host_or_sni: Some(TARGET_HOST.to_owned()),
-        original_dst_ip: "93.184.216.34".to_owned(),
-        original_dst_port: TARGET_PORT,
-        protocol: "https".to_owned(),
-        tunnel_id: uuid::Uuid::nil().to_string(),
-    };
-    vec![AuditEvent {
-        seq: 1,
-        event_id: uuid::Uuid::nil(),
-        event_kind: "TproxyAdmissionGranted".to_owned(),
-        session_id: Some(session_id.to_owned()),
-        task_id: Some(TASK_DEP_FETCH_EVIDENCE.to_owned()),
-        initiative_id: Some("init-realistic".to_owned()),
-        payload: serde_json::to_value(&payload).unwrap(),
-        emitted_at: 1700000000,
-        prev_sha256: "0".repeat(64),
-    }]
+    fn grant_event(seq: u64, session_id: &str, host: &str) -> AuditEvent {
+        let payload = AuditEventKind::TproxyAdmissionGranted {
+            session_id: session_id.to_owned(),
+            host_or_sni: Some(host.to_owned()),
+            original_dst_ip: "93.184.216.34".to_owned(),
+            original_dst_port: 443,
+            protocol: "https".to_owned(),
+            tunnel_id: uuid::Uuid::nil().to_string(),
+        };
+        AuditEvent {
+            seq,
+            event_id: uuid::Uuid::nil(),
+            event_kind: "TproxyAdmissionGranted".to_owned(),
+            session_id: Some(session_id.to_owned()),
+            task_id: Some(TASK_DEP_FETCH_EVIDENCE.to_owned()),
+            initiative_id: Some("init-realistic".to_owned()),
+            payload: serde_json::to_value(&payload).unwrap(),
+            emitted_at: 1_700_000_000 + seq as i64,
+            prev_sha256: "0".repeat(64),
+        }
+    }
+    vec![
+        grant_event(1, session_id, TARGET_HOST),
+        grant_event(2, session_id, PIP_HOST_INDEX),
+        grant_event(3, session_id, PIP_HOST_FILES),
+    ]
 }
 
 /// Write a synthetic-but-shape-faithful evidence file into
 /// `workdir/out/deps/install-evidence.json`. Used by the wiring
 /// smoke test so it can drive the on-disk arm of the witness
 /// without a real network fetch.
+///
+/// Includes a synthetic `pip_install` block with one row whose
+/// name is `certifi`, so the iter69 pip-install arm of the
+/// witness predicate is satisfied. The wheel SHA256 is a fixed
+/// 64-char hex string with no special meaning — the witness
+/// only validates structural shape, not the literal bytes.
 pub fn write_synthetic_evidence(workdir: &Path) -> std::io::Result<PathBuf> {
     let dir = workdir.join("out").join("deps");
     std::fs::create_dir_all(&dir)?;
@@ -417,6 +644,20 @@ pub fn write_synthetic_evidence(workdir: &Path) -> std::io::Result<PathBuf> {
         "body_contains_example_domain": true,
         "fetched_at_unix":            1_700_000_000,
         "transport":                  "https",
+        "pip_install": {
+            "requested":  ["certifi"],
+            "target_dir": "out/deps/_pip",
+            "report_path": "out/deps/_pip-report.json",
+            "success":    true,
+            "installed":  [
+                {
+                    "name":    PIP_PACKAGE_NAME,
+                    "version": "2024.7.4",
+                    "sha256":  "a".repeat(64),
+                    "url":     "https://files.pythonhosted.org/packages/.../certifi-2024.7.4-py3-none-any.whl",
+                }
+            ],
+        },
     });
     let mut out = serde_json::to_string_pretty(&evidence).expect("serialize evidence");
     out.push('\n');
@@ -502,12 +743,25 @@ mod tests {
         DepFetchEvidenceWitness::for_realistic_plan(session_id, workdir)
     }
 
+    /// Build the canonical chain that satisfies every arm of the
+    /// witness — three grants, one per allowed host, scoped to
+    /// the supplied executor session. The tests use this as their
+    /// happy-path baseline and then mutate / extend it to drive
+    /// individual failure axes.
+    fn full_chain(session_id: &str) -> Vec<AuditEvent> {
+        vec![
+            grant(10, session_id, Some(TARGET_HOST), TARGET_PORT),
+            grant(11, session_id, Some(PIP_HOST_INDEX), 443),
+            grant(12, session_id, Some(PIP_HOST_FILES), 443),
+        ]
+    }
+
     #[test]
-    fn happy_path_grant_plus_disk_evidence_satisfies() {
+    fn happy_path_full_chain_plus_disk_evidence_satisfies() {
         let tmp = TempDir::new().unwrap();
         write_synthetic_evidence(tmp.path()).expect("smoke evidence");
         let w = witness_for(tmp.path(), "sess-exec-1");
-        let chain = vec![grant(10, "sess-exec-1", Some(TARGET_HOST), TARGET_PORT)];
+        let chain = full_chain("sess-exec-1");
         assert!(w.satisfied_by(&chain), "{}", w.diagnostic(&chain));
     }
 
@@ -535,15 +789,14 @@ mod tests {
 
     #[test]
     fn grant_for_wrong_host_does_not_satisfy() {
+        // A grant for a host outside the pinned allowlist
+        // (`{example.com, pypi.org, files.pythonhosted.org}`)
+        // is treated as a scope leak — the witness fails closed
+        // even if all the other arms also fire.
         let tmp = TempDir::new().unwrap();
         write_synthetic_evidence(tmp.path()).expect("smoke evidence");
         let w = witness_for(tmp.path(), "sess-exec-1");
-        let chain = vec![grant(
-            10,
-            "sess-exec-1",
-            Some("api.anthropic.com"),
-            443,
-        )];
+        let chain = vec![grant(10, "sess-exec-1", Some("api.anthropic.com"), 443)];
         assert!(!w.satisfied_by(&chain));
     }
 
@@ -568,10 +821,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_synthetic_evidence(tmp.path()).expect("smoke evidence");
         let w = witness_for(tmp.path(), "sess-exec-1");
-        let chain = vec![
-            grant(10, "sess-exec-1", Some(TARGET_HOST), TARGET_PORT),
-            deny(11, "sess-exec-1", Some(TARGET_HOST), "host_not_in_allowlist"),
-        ];
+        let mut chain = full_chain("sess-exec-1");
+        chain.push(deny(
+            13,
+            "sess-exec-1",
+            Some(TARGET_HOST),
+            "host_not_in_allowlist",
+        ));
         assert!(!w.satisfied_by(&chain));
         let diag = w.diagnostic(&chain);
         assert!(diag.contains("host_not_in_allowlist"), "{diag}");
@@ -579,17 +835,68 @@ mod tests {
 
     #[test]
     fn off_target_grant_on_same_session_fails() {
-        // The task is pinned to ONE host. A second grant on the
-        // executor's session for a different host means the
+        // The task is pinned to `ALLOWED_HOSTS`. A grant on the
+        // executor's session for any other host means the
         // executor went outside its scope.
+        let tmp = TempDir::new().unwrap();
+        write_synthetic_evidence(tmp.path()).expect("smoke evidence");
+        let w = witness_for(tmp.path(), "sess-exec-1");
+        let mut chain = full_chain("sess-exec-1");
+        chain.push(grant(13, "sess-exec-1", Some("api.anthropic.com"), 443));
+        assert!(!w.satisfied_by(&chain));
+    }
+
+    #[test]
+    fn missing_pypi_index_grant_fails() {
+        // iter69 pip-install arm — the witness requires a chain
+        // grant to `pypi.org` so the `pip install` flow is
+        // proven to have round-tripped through the kernel's
+        // admission stack.
         let tmp = TempDir::new().unwrap();
         write_synthetic_evidence(tmp.path()).expect("smoke evidence");
         let w = witness_for(tmp.path(), "sess-exec-1");
         let chain = vec![
             grant(10, "sess-exec-1", Some(TARGET_HOST), TARGET_PORT),
-            grant(11, "sess-exec-1", Some("api.anthropic.com"), 443),
+            // No pypi.org grant — only the wheel host.
+            grant(11, "sess-exec-1", Some(PIP_HOST_FILES), 443),
         ];
         assert!(!w.satisfied_by(&chain));
+    }
+
+    #[test]
+    fn missing_pythonhosted_files_grant_fails() {
+        // Symmetric to the above — pypi.org alone is not enough,
+        // the wheel host must also fire.
+        let tmp = TempDir::new().unwrap();
+        write_synthetic_evidence(tmp.path()).expect("smoke evidence");
+        let w = witness_for(tmp.path(), "sess-exec-1");
+        let chain = vec![
+            grant(10, "sess-exec-1", Some(TARGET_HOST), TARGET_PORT),
+            grant(11, "sess-exec-1", Some(PIP_HOST_INDEX), 443),
+        ];
+        assert!(!w.satisfied_by(&chain));
+    }
+
+    /// Canonical `pip_install` block — embedded in the
+    /// hand-rolled evidence JSON used by the disk-failure tests
+    /// below so each test isolates the on-disk axis it's
+    /// targeting (HTTPS status, body substring, sha shape, …)
+    /// without also flunking the pip-install arm.
+    fn valid_pip_install_block() -> serde_json::Value {
+        serde_json::json!({
+            "requested":  ["certifi"],
+            "target_dir": "out/deps/_pip",
+            "report_path": "out/deps/_pip-report.json",
+            "success":    true,
+            "installed":  [
+                {
+                    "name":    PIP_PACKAGE_NAME,
+                    "version": "2024.7.4",
+                    "sha256":  "a".repeat(64),
+                    "url":     "https://files.pythonhosted.org/packages/.../certifi-2024.7.4-py3-none-any.whl",
+                }
+            ],
+        })
     }
 
     #[test]
@@ -597,7 +904,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         // NOTE: no `write_synthetic_evidence` — the file is absent.
         let w = witness_for(tmp.path(), "sess-exec-1");
-        let chain = vec![grant(10, "sess-exec-1", Some(TARGET_HOST), TARGET_PORT)];
+        let chain = full_chain("sess-exec-1");
         assert!(!w.satisfied_by(&chain));
         let diag = w.diagnostic(&chain);
         assert!(
@@ -618,12 +925,13 @@ mod tests {
                 "body_size_bytes":            42,
                 "body_sha256":                "f".repeat(64),
                 "body_contains_example_domain": true,
+                "pip_install":                valid_pip_install_block(),
             }))
             .unwrap(),
         )
         .unwrap();
         let w = witness_for(tmp.path(), "sess-exec-1");
-        let chain = vec![grant(10, "sess-exec-1", Some(TARGET_HOST), TARGET_PORT)];
+        let chain = full_chain("sess-exec-1");
         assert!(!w.satisfied_by(&chain));
     }
 
@@ -639,12 +947,13 @@ mod tests {
                 "body_size_bytes":            42,
                 "body_sha256":                "0".repeat(64),
                 "body_contains_example_domain": false,
+                "pip_install":                valid_pip_install_block(),
             }))
             .unwrap(),
         )
         .unwrap();
         let w = witness_for(tmp.path(), "sess-exec-1");
-        let chain = vec![grant(10, "sess-exec-1", Some(TARGET_HOST), TARGET_PORT)];
+        let chain = full_chain("sess-exec-1");
         assert!(!w.satisfied_by(&chain));
     }
 
@@ -660,15 +969,148 @@ mod tests {
                 "body_size_bytes":            42,
                 "body_sha256":                "not-a-hex-string",
                 "body_contains_example_domain": true,
+                "pip_install":                valid_pip_install_block(),
             }))
             .unwrap(),
         )
         .unwrap();
         let w = witness_for(tmp.path(), "sess-exec-1");
-        let chain = vec![grant(10, "sess-exec-1", Some(TARGET_HOST), TARGET_PORT)];
+        let chain = full_chain("sess-exec-1");
         assert!(!w.satisfied_by(&chain));
         let diag = w.diagnostic(&chain);
         assert!(diag.contains("body_sha256"), "{diag}");
+    }
+
+    #[test]
+    fn evidence_with_missing_pip_install_block_fails() {
+        // iter69 — an evidence file that carries only the
+        // HTTPS-fetch arm (no `pip_install` key) must fail; the
+        // pip arm is a hard requirement once egress is wired.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("out").join("deps");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("install-evidence.json"),
+            serde_json::to_string(&serde_json::json!({
+                "http_status":                200,
+                "body_size_bytes":            42,
+                "body_sha256":                "0".repeat(64),
+                "body_contains_example_domain": true,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let w = witness_for(tmp.path(), "sess-exec-1");
+        let chain = full_chain("sess-exec-1");
+        assert!(!w.satisfied_by(&chain));
+        let diag = w.diagnostic(&chain);
+        assert!(diag.contains("<absent>"), "{diag}");
+    }
+
+    #[test]
+    fn evidence_with_pip_install_success_false_fails() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("out").join("deps");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("install-evidence.json"),
+            serde_json::to_string(&serde_json::json!({
+                "http_status":                200,
+                "body_size_bytes":            42,
+                "body_sha256":                "0".repeat(64),
+                "body_contains_example_domain": true,
+                "pip_install":                serde_json::json!({
+                    "requested":  ["certifi"],
+                    "target_dir": "out/deps/_pip",
+                    "report_path": "out/deps/_pip-report.json",
+                    "success":    false,
+                    "installed":  [],
+                }),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let w = witness_for(tmp.path(), "sess-exec-1");
+        let chain = full_chain("sess-exec-1");
+        assert!(!w.satisfied_by(&chain));
+    }
+
+    #[test]
+    fn evidence_with_pip_install_missing_certifi_fails() {
+        // iter69 — at least one entry in `pip_install.installed`
+        // must name `certifi`. If only an unrelated package shows
+        // up, the executor installed the wrong thing.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("out").join("deps");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("install-evidence.json"),
+            serde_json::to_string(&serde_json::json!({
+                "http_status":                200,
+                "body_size_bytes":            42,
+                "body_sha256":                "0".repeat(64),
+                "body_contains_example_domain": true,
+                "pip_install":                serde_json::json!({
+                    "requested":  ["certifi"],
+                    "target_dir": "out/deps/_pip",
+                    "report_path": "out/deps/_pip-report.json",
+                    "success":    true,
+                    "installed":  [
+                        {
+                            "name":    "idna",
+                            "version": "3.7",
+                            "sha256":  "b".repeat(64),
+                            "url":     "https://files.pythonhosted.org/packages/.../idna-3.7-py3-none-any.whl",
+                        }
+                    ],
+                }),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let w = witness_for(tmp.path(), "sess-exec-1");
+        let chain = full_chain("sess-exec-1");
+        assert!(!w.satisfied_by(&chain));
+    }
+
+    #[test]
+    fn evidence_with_pip_install_non_hex_sha_fails_parse_with_named_field() {
+        // iter69 — per-wheel sha256 must be 64-char lowercase hex.
+        // A short or non-hex value surfaces with the `sha256`
+        // field name in the parse-error diagnostic.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("out").join("deps");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("install-evidence.json"),
+            serde_json::to_string(&serde_json::json!({
+                "http_status":                200,
+                "body_size_bytes":            42,
+                "body_sha256":                "0".repeat(64),
+                "body_contains_example_domain": true,
+                "pip_install":                serde_json::json!({
+                    "requested":  ["certifi"],
+                    "target_dir": "out/deps/_pip",
+                    "report_path": "out/deps/_pip-report.json",
+                    "success":    true,
+                    "installed":  [
+                        {
+                            "name":    PIP_PACKAGE_NAME,
+                            "version": "2024.7.4",
+                            "sha256":  "not-a-hex-string",
+                            "url":     "https://files.pythonhosted.org/packages/.../certifi-2024.7.4-py3-none-any.whl",
+                        }
+                    ],
+                }),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let w = witness_for(tmp.path(), "sess-exec-1");
+        let chain = full_chain("sess-exec-1");
+        assert!(!w.satisfied_by(&chain));
+        let diag = w.diagnostic(&chain);
+        assert!(diag.contains("sha256"), "{diag}");
     }
 
     #[test]

@@ -507,6 +507,26 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
 
     let mut router = api_router.merge(sse_router);
 
+    // ── Explicit /api/* 404 (must be merged BEFORE the SPA fallback) ──
+    //
+    // Without this, an unknown `/api/whatever` request falls
+    // through to `ServeDir`, which happily returns `index.html`
+    // with a 200 — the FE then tries `JSON.parse("<!doctype ...")`
+    // and surfaces the classic "Unexpected token '<'…is not
+    // valid JSON" error to the operator. That mode is most
+    // pronounced when the FE bundle is newer than the running
+    // kernel binary (e.g. a route added in a later iter), but
+    // it can also fire on a plain typo.
+    //
+    // Mounting an `/api/*rest` catch-all here turns every
+    // unknown API path into a typed, machine-readable 404 with
+    // the same JSON shape the rest of the API uses, so the FE
+    // can render a clean "endpoint missing on this kernel"
+    // chip instead of a JSON-parse stack trace.
+    let api_fallback: Router<AppState<D>> =
+        Router::new().route("/api/*rest", get(api_not_found).post(api_not_found));
+    router = router.merge(api_fallback);
+
     // SPA fallback: any non-API route serves index.html so
     // React Router can resolve client-side routes. ServeDir's
     // fallback wires `not_found_service` to a handler that
@@ -556,6 +576,19 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
             observability_middleware::<D>,
         ))
         .with_state(state)
+}
+
+/// Catch-all handler for unknown `/api/*` routes.
+///
+/// Returns the same JSON error envelope every other handler
+/// uses (`ApiError::NotFound { kind: "endpoint" }`) so the FE
+/// never has to JSON-parse the SPA's `index.html`. The kernel
+/// emits no audit row for these — a request to a nonexistent
+/// endpoint is signal-of-bugs, not signal-of-operator-intent.
+async fn api_not_found(uri: axum::http::Uri) -> crate::error::ApiError {
+    crate::error::ApiError::NotFound {
+        kind: format!("endpoint {}", uri.path()),
+    }
 }
 
 /// V3 perf-telemetry — record one
@@ -808,6 +841,136 @@ mod tests {
         assert_eq!(addr.ip().to_string(), "127.0.0.1");
         assert!(addr.port() > 0);
         let handle = ServerHandle::spawn(server);
+        handle.shutdown().await.unwrap();
+    }
+
+    /// iter69 — unknown `/api/*` routes MUST return a typed
+    /// JSON 404 instead of falling through to the SPA's
+    /// `index.html`. Without this guard, every browser fetch to
+    /// a not-yet-deployed endpoint surfaces as
+    /// `JSON.parse("<!doctype …")` rather than a clean
+    /// `ApiError(404, "FAIL_DASHBOARD_NOT_FOUND")`. The mode
+    /// pops most visibly when the FE bundle is newer than the
+    /// running kernel (e.g. operator upgraded the SPA but not
+    /// the kernel binary), but it can also fire on a typo.
+    ///
+    /// The test boots a real server with a `static_dir` that
+    /// has a synthetic `index.html`, so we'd see the SPA
+    /// fallback if the catch-all were missing. We then probe
+    /// `/api/totally-bogus` and assert (a) status is 404, (b)
+    /// content-type is `application/json`, (c) body is the
+    /// canonical `ApiErrorBody` with the right code.
+    #[tokio::test]
+    async fn unknown_api_route_returns_json_404_not_spa_html() {
+        // Lay down a synthetic SPA bundle so the fallback would
+        // otherwise return its index.html.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let spa_dir = tmp.path().to_path_buf();
+        std::fs::write(
+            spa_dir.join("index.html"),
+            b"<!doctype html><html><body>spa fallback marker</body></html>",
+        )
+        .expect("write index.html");
+
+        let cfg = DashboardConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".into(),
+            bind_port: 0,
+            static_dir: Some(spa_dir.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let data = InMemoryDashboardData::new();
+        let server = DashboardServer::bind(cfg, Arc::clone(&data))
+            .await
+            .expect("bind");
+        let addr = server.local_addr();
+        let handle = ServerHandle::spawn(server);
+
+        // Probe an `/api/*` path that does not exist.
+        let url = format!("http://{}/api/totally-bogus-endpoint", addr);
+        let resp = reqwest::Client::new()
+            .get(&url)
+            .send()
+            .await
+            .expect("send request");
+
+        assert_eq!(
+            resp.status().as_u16(),
+            404,
+            "unknown /api/* must be 404 (got {})",
+            resp.status(),
+        );
+        let ctype = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        assert!(
+            ctype.starts_with("application/json"),
+            "unknown /api/* must return application/json, got {ctype:?}",
+        );
+        let body = resp.text().await.expect("read body");
+        assert!(
+            body.contains("FAIL_DASHBOARD_NOT_FOUND"),
+            "404 body must carry the canonical error code; got {body:?}",
+        );
+        // The body must NOT be the SPA marker — if it were, the
+        // catch-all is broken and the FE will see HTML.
+        assert!(
+            !body.contains("spa fallback marker"),
+            "404 body leaked the SPA index.html — the /api/* \
+             catch-all is not wired ahead of the static-file \
+             fallback: {body}",
+        );
+
+        handle.shutdown().await.unwrap();
+    }
+
+    /// Companion to the test above — confirms that NON-API
+    /// routes still resolve through the SPA so React Router
+    /// can take over for client-side deep links (e.g.
+    /// `/initiatives/abc`). Without this we'd accidentally
+    /// regress the SPA's deep-link routing while fixing the
+    /// /api/* leak.
+    #[tokio::test]
+    async fn unknown_non_api_route_falls_back_to_spa_index_html() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let spa_dir = tmp.path().to_path_buf();
+        std::fs::write(
+            spa_dir.join("index.html"),
+            b"<!doctype html><html><body>spa fallback marker</body></html>",
+        )
+        .expect("write index.html");
+
+        let cfg = DashboardConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".into(),
+            bind_port: 0,
+            static_dir: Some(spa_dir.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let data = InMemoryDashboardData::new();
+        let server = DashboardServer::bind(cfg, Arc::clone(&data))
+            .await
+            .expect("bind");
+        let addr = server.local_addr();
+        let handle = ServerHandle::spawn(server);
+
+        let url = format!("http://{}/initiatives/some-deep-link", addr);
+        let resp = reqwest::Client::new()
+            .get(&url)
+            .send()
+            .await
+            .expect("send request");
+        assert!(resp.status().is_success(), "got {}", resp.status());
+        let body = resp.text().await.expect("read body");
+        assert!(
+            body.contains("spa fallback marker"),
+            "non-API deep link MUST resolve to the SPA index.html so \
+             React Router can take over; body was: {body}",
+        );
+
         handle.shutdown().await.unwrap();
     }
 }

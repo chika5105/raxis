@@ -145,8 +145,16 @@ max_consecutive_respawns = 5
 # `extended_e2e_support::dep_fetch_evidence` pins exactly one
 # `TproxyAdmissionGranted{host_or_sni="example.com",port=443}`
 # per executor session. RFC-2606 reserved, IANA-maintained.
+#
+# `pypi.org` + `files.pythonhosted.org` are the two hosts
+# `pip install` reaches at runtime — pypi.org for the
+# simple-index resolution + JSON metadata, then
+# files.pythonhosted.org for the wheel download. The same
+# dep-fetch-evidence task chains a `pip install` after the
+# example.com fetch, and the witness verifies the install
+# via the `--report` JSON (wheel sha256 + package version).
 [egress]
-domains = ["api.anthropic.com", "example.com"]
+domains = ["api.anthropic.com", "example.com", "pypi.org", "files.pythonhosted.org"]
 patterns = []
 
 [[providers]]
