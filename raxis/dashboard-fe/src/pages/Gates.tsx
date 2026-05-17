@@ -29,15 +29,8 @@ export function GatesPage() {
     refetchInterval: 10_000,
   });
 
-  if (stats.isLoading) return <PageSpinner label="Loading gate stats…" />;
-  if (stats.isError)
-    return (
-      <ErrorBox
-        message={`Failed to load gate stats: ${
-          stats.error instanceof Error ? stats.error.message : "unknown"
-        }`}
-      />
-    );
+  if (stats.isLoading) return <PageSpinner />;
+  if (stats.isError) return <ErrorBox error={stats.error} />;
 
   const data = stats.data;
   if (!data || data.gates.length === 0) {

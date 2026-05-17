@@ -1802,16 +1802,17 @@ fn configured_dashboard_port() -> u16 {
 /// built. The kernel's `[dashboard].static_dir` field consumes
 /// this; absent ⇒ JSON-API-only dashboard (still useful for
 /// programmatic poking, just no UI).
+///
+/// Delegates to [`common::dashboard::locate_dashboard_dist`] so
+/// the iter52 presence check AND the iter68 staleness rebuild
+/// (`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01` /
+/// `INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-FRESH-01`) apply identically
+/// to this test driver. Previously this test inlined a private
+/// presence-only copy and silently served a stale dist on every
+/// run where `dashboard-fe/dist/index.html` already existed —
+/// the same hazard caught on the realistic-scenario test.
 fn locate_dashboard_dist() -> Option<PathBuf> {
-    let raxis_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .to_path_buf();
-    let dist = raxis_root.join("dashboard-fe").join("dist");
-    if dist.join("index.html").is_file() {
-        Some(dist)
-    } else {
-        None
-    }
+    common::dashboard::locate_dashboard_dist()
 }
 
 /// Return-type of `mint_dashboard_jwt`. `None` ⇒ best-effort

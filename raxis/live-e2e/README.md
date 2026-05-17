@@ -440,67 +440,114 @@ surfaces at bake time rather than at the next iter's
 
 ---
 
-## Dashboard FE bundle contract (`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01`)
+## Dashboard FE bundle contract (`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01` + `INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-FRESH-01`)
 
 Every realistic-scenario / full-lifecycle live-e2e run mounts
 the operator dashboard at `127.0.0.1:19820` (override via
 `RAXIS_E2E_DASHBOARD_PORT`). The dashboard is the operator's
-primary visibility surface for an in-flight run; without the
-React production bundle on disk it falls back to JSON-only
-mode and every SPA route returns HTTP 404 — silently breaking
-operator-side review and Dashboard QA workers attached to the
-run.
+primary visibility surface for an in-flight run. Two failure
+modes silently break this surface and are both treated as
+the same invariant family:
 
-**Auto-install + auto-build (default).** When
-`RAXIS_E2E_SKIP_DASHBOARD_BUILD` is **unset**, the harness
+* **Bundle absent** (`PRESENT-01`): no `dist/index.html` on disk
+  ⇒ the dashboard falls back to JSON-only and every SPA route
+  returns HTTP 404 — Dashboard QA workers attached to the run
+  see nothing.
+* **Bundle stale** (`FRESH-01`): a `dist/index.html` exists but
+  its mtime is older than something under
+  `dashboard-fe/src/**` or a tracked root config file (the
+  iter68 hazard) ⇒ the dashboard serves an old build and new
+  FE features (new pages, new sidebar entries, new types) are
+  silently invisible. The operator sees the UI fine — they
+  just don't see the work they shipped.
+
+**Auto-install + auto-build + auto-rebuild-on-staleness
+(default).** When `RAXIS_E2E_SKIP_DASHBOARD_BUILD` is
+**unset**, the harness
 ([`tests::common::dashboard::locate_dashboard_dist`]) ensures
-the bundle is present before the kernel binds the dashboard
-port:
+the bundle is BOTH present AND fresh before the kernel binds
+the dashboard port:
 
-1. Fast path: if `dashboard-fe/dist/index.html` already exists
-   on disk, the harness uses it as-is (no subprocess work).
-2. If `dashboard-fe/node_modules/.bin/vite` is absent, the
-   harness runs `npm ci` in `dashboard-fe/` (bounded by
-   `RAXIS_E2E_NPM_INSTALL_TIMEOUT_SECS`, default 600 s).
-3. The harness then runs `npm run build` in `dashboard-fe/`
-   (bounded by `RAXIS_E2E_NPM_BUILD_TIMEOUT_SECS`, default
-   300 s).
-4. Post-build sanity: the harness re-checks
+1. **Freshness probe** ([`probe_dashboard_fe_freshness`]):
+   single-pass mtime walk of `dashboard-fe/src/**` plus a fixed
+   list of root config files (`package.json`,
+   `package-lock.json`, `vite.config.ts`, `tsconfig*.json`,
+   `tailwind.config.*`, `postcss.config.*`, `index.html`).
+   Newest-source mtime is compared to
+   `dashboard-fe/dist/index.html` mtime. Sub-millisecond on a
+   normal tree.
+2. Fast path: if dist exists AND every probed source mtime is
+   `≤` the dist mtime, the harness uses it as-is and emits
+   `[dashboard-bundle] freshness=fresh`. No subprocess work.
+3. Stale path (`FRESH-01`): if dist exists BUT at least one src
+   file is newer, the harness logs
+   `[dashboard-bundle] freshness=stale dist_mtime_unix=… newest_source=… newest_source_mtime_unix=…`
+   and runs `npm run build` in place (bounded by
+   `RAXIS_E2E_NPM_BUILD_TIMEOUT_SECS`, default 300 s).
+4. Missing-bundle path (`PRESENT-01`): if dist is absent, the
+   harness runs `npm ci` (when `node_modules/.bin/vite` is
+   absent, bounded by `RAXIS_E2E_NPM_INSTALL_TIMEOUT_SECS`,
+   default 600 s) followed by `npm run build`.
+5. Post-build sanity: the harness re-checks
    `dashboard-fe/dist/index.html` exists.
 
-**Hard-fail policy.** Any failure in steps 2-4 panics the
-test with a panic body containing the literal token
-`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01 VIOLATED`.
+**Hard-fail policy.** Any failure in the install / build /
+sanity chain panics the test with a panic body carrying ONE
+of two literal tokens (so a CI log scraper can route on the
+failure family):
+
+* `INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01 VIOLATED` —
+  first-time install/build broke (no dist on disk at all).
+* `INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-FRESH-01 VIOLATED` —
+  staleness rebuild broke (dist present but src newer; the
+  in-place `npm run build` failed).
+
 Failure modes that hard-fail:
 
-| Failure                              | Surface                                 |
-|--------------------------------------|-----------------------------------------|
-| `dashboard-fe/package.json` missing  | Workspace shape broken; restore or opt out. |
-| `npm ci` spawn failure (no Node)     | Install Node + npm; toolchain hint in panic body. |
-| `npm ci` non-zero exit               | Real install failure (cold registry, EACCES, …); diagnose with the surfaced npm output. |
-| `npm ci` timeout                     | Cold pull >600 s; raise `RAXIS_E2E_NPM_INSTALL_TIMEOUT_SECS`. |
-| `npm run build` failure / timeout    | Real `tsc -b && vite build` failure; surfaced in npm output. |
-| Post-build dist still absent         | Build step lying about success; inspect npm warnings. |
+| Failure                                | Token         | Surface |
+|----------------------------------------|---------------|---------|
+| `dashboard-fe/package.json` missing & no dist | PRESENT-01 | Workspace shape broken; restore or opt out. |
+| `npm ci` spawn failure (no Node)       | PRESENT-01    | Install Node + npm; toolchain hint in panic body. |
+| `npm ci` non-zero exit                 | PRESENT-01    | Real install failure (cold registry, EACCES, …); diagnose with the surfaced npm output. |
+| `npm ci` timeout                       | PRESENT-01    | Cold pull >600 s; raise `RAXIS_E2E_NPM_INSTALL_TIMEOUT_SECS`. |
+| `npm run build` failure (first build)  | PRESENT-01    | Real `tsc -b && vite build` failure; surfaced in npm output. |
+| `npm run build` failure (stale rebuild)| FRESH-01      | Same diagnostic surface; the token tells operator the rebuild was triggered by an mtime delta. |
+| Post-build dist still absent           | (both)        | Build step lying about success; inspect npm warnings. |
 
-This is the iter52 lesson: the previous behaviour silently
-swallowed `tsc: command not found` (caused by a fresh worktree
-with no `node_modules/`), surfaced only as a single
-`[dashboard-bundle]` warning line buried in the cargo log, and
-left the dashboard UI broken for the entire 65 min run.
-Dashboard QA workers attached to such a run reported false-RED
-verdicts and consumed an entire iteration cycle. Hard-fail
-forces the failure to surface immediately so the operator
-fixes `node_modules/` (or sets the explicit opt-out) before
-the test ever submits its first plan.
+This is the iter52 + iter68 lesson:
+
+* **iter52** (PRESENT-01): the previous behaviour silently
+  swallowed `tsc: command not found` (caused by a fresh
+  worktree with no `node_modules/`), surfaced only as a single
+  `[dashboard-bundle]` warning line buried in the cargo log,
+  and left the dashboard UI broken for the entire 65 min run.
+* **iter68** (FRESH-01): a presence-only check silently served
+  a 6-hour-old `dist/index.html` against an in-tree src that
+  had a brand-new Gates page (and new sidebar entry, new
+  types). The operator saw the dashboard load fine — just
+  without any of the newly-shipped work. The fast-path
+  rewrite checks src/dist mtimes and forces an in-place
+  rebuild on any drift, mirroring the
+  `INV-IMAGE-BAKE-NO-STALE-CACHE-01` staging-binary freshness
+  check in `xtask::images`.
 
 **Opt-out (release-CI lanes that pre-build).** Set
-`RAXIS_E2E_SKIP_DASHBOARD_BUILD=1` to skip both the install
-and the build step. The harness logs an explicit opt-out line
-and the dashboard serves JSON API only (no UI). Use this when
-your CI workflow bakes `dashboard-fe/dist/` outside the
-cargo-test driver.
+`RAXIS_E2E_SKIP_DASHBOARD_BUILD=1` to skip BOTH the install
++ build pipeline AND the staleness rebuild. The harness logs
+an explicit opt-out line:
 
-**Bounded-wait composition.** Both subprocess steps satisfy
+* If a dist exists on disk it is served as-is (even if stale)
+  — the operator's "I manage the bundle externally" assertion
+  wins over the freshness gate. A `[dashboard-bundle] WARNING:
+  dist/ is stale relative to dashboard-fe/src/** but
+  RAXIS_E2E_SKIP_DASHBOARD_BUILD=1` line is emitted so the
+  staleness is still visible in CI logs.
+* If no dist exists, the dashboard serves JSON API only.
+
+Use this when your CI workflow bakes `dashboard-fe/dist/`
+outside the cargo-test driver.
+
+**Bounded-wait composition.** All subprocess steps satisfy
 `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01` via
 [`tests::common::dashboard::run_npm_bounded`], which polls
 `Child::try_wait` and `SIGKILL`s the child when the bounded
@@ -509,12 +556,21 @@ fall back to the default rather than disabling the bound.
 
 **Witness coverage:**
 [`tests::common::dashboard::tests::inv_live_e2e_dashboard_fe_bundle_present_01_*`](../kernel/tests/common/dashboard.rs)
-— 9 tests covering classifier exhaustion, env-var spelling,
-panic-token shape, timeout default bounds, env-override
-clamping, and `node_modules` probe edge cases.
+— classifier exhaustion (5 arms × {fresh/stale} flag),
+env-var spelling, PRESENT-01 panic-token shape, timeout
+default bounds, env-override clamping, and `node_modules` probe
+edge cases.
+[`tests::common::dashboard::tests::inv_live_e2e_dashboard_fe_bundle_fresh_01_*`](../kernel/tests/common/dashboard.rs)
+— stale-dist classifier routing (rebuild / install-then-rebuild
+/ opt-out-preserves-stale / no-pkg-json-fallback), FRESH-01
+panic-token shape, `DashboardFeFreshness::is_fresh()` mapping,
+and an end-to-end filesystem round-trip exercising
+`DistMissing` / `Fresh` / `Stale` / config-file-staleness arms
+against a synthetic `dashboard-fe/` tree.
 
 [`tests::common::dashboard::locate_dashboard_dist`]: ../kernel/tests/common/dashboard.rs
 [`tests::common::dashboard::run_npm_bounded`]: ../kernel/tests/common/dashboard.rs
+[`probe_dashboard_fe_freshness`]: ../kernel/tests/common/dashboard.rs
 
 ---
 

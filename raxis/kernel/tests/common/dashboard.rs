@@ -30,14 +30,32 @@
 //! `dashboard-fe/dist`, without `open(1)`, and (for the realistic
 //! scenario) without the live-e2e gates set.
 //!
-//! ## Auto-build of the React bundle (`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01`)
+//! ## Auto-build of the React bundle (`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01` + `INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-FRESH-01`)
 //!
 //! [`locate_dashboard_dist`] runs `npm ci` (when `node_modules/`
 //! is absent) followed by `npm run build` on demand if
-//! `dashboard-fe/dist/index.html` is missing. Without the bundle
-//! the kernel's dashboard server returns HTTP 404 for `/`,
-//! `/login`, and every SPA route — silently breaking operator-side
-//! review during a live-e2e run.
+//! `dashboard-fe/dist/index.html` is missing OR stale relative
+//! to the in-tree `dashboard-fe/src/**` + root config files.
+//! Without the bundle the kernel's dashboard server returns HTTP
+//! 404 for `/`, `/login`, and every SPA route — and a STALE
+//! bundle silently masks new FE features (new pages, new
+//! sidebar entries, new types) that have been committed but
+//! never re-bundled. Both shapes degrade operator-side review
+//! identically, so the harness treats them as one invariant
+//! family.
+//!
+//! `INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-FRESH-01` is the iter68
+//! companion of the iter52 presence-only check: a `dist/`
+//! whose mtime is older than the newest tracked source file
+//! triggers an in-place `npm run build` before the harness
+//! hands the path to the kernel. The freshness probe mirrors
+//! `xtask/src/images.rs::check_staged_binary_freshness` —
+//! single-pass mtime walk of `dashboard-fe/src/**` + a fixed
+//! list of root config files, compared to `dist/index.html`
+//! mtime. Operator opt-out via `RAXIS_E2E_SKIP_DASHBOARD_BUILD=1`
+//! preserves the iter52 semantics (skip rebuild entirely; use
+//! the on-disk dist as-is even if stale — for CI lanes that
+//! pre-bake the bundle externally).
 //!
 //! **Hard-fail policy.** When
 //! `RAXIS_E2E_SKIP_DASHBOARD_BUILD` is **unset** the harness
@@ -124,16 +142,102 @@ const DEFAULT_NPM_BUILD_TIMEOUT_SECS: u64 = 300;
 /// remediation block.
 pub const FE_BUNDLE_VIOLATION_TOKEN: &str = "INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01 VIOLATED";
 
+/// Companion token for the iter68 freshness-rebuild path
+/// (`INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-FRESH-01`). When a stale
+/// `dist/` triggers an in-place rebuild and that rebuild fails,
+/// the panic body carries THIS token rather than the
+/// PRESENT-01 token, so an operator scanning a CI log can
+/// distinguish "first-time build broke" from "staleness
+/// rebuild broke" without parsing the whole remediation block.
+pub const FE_BUNDLE_FRESHNESS_VIOLATION_TOKEN: &str =
+    "INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-FRESH-01 VIOLATED";
+
+/// Root-level config files whose mtimes participate in the
+/// freshness probe. A change to any of these implies a stale
+/// `dist/`: build-tool config, type-checker config, dep lock,
+/// CSS pipeline config, or the vite entry HTML. Members that
+/// do not exist on disk are skipped silently; only the
+/// existing-and-newer-than-dist case votes "stale".
+///
+/// We deliberately do NOT include `dashboard-fe/Cargo.toml` (no
+/// such file) or transitively-included npm package files
+/// (`node_modules/**`) — the latter is owned by the lockfile,
+/// so `package-lock.json` is sufficient as a proxy.
+const DASHBOARD_FE_FRESHNESS_CONFIG_FILES: &[&str] = &[
+    "package.json",
+    "package-lock.json",
+    "vite.config.ts",
+    "vite.config.js",
+    "tsconfig.json",
+    "tsconfig.app.json",
+    "tsconfig.node.json",
+    "tailwind.config.js",
+    "tailwind.config.ts",
+    "postcss.config.js",
+    "postcss.config.ts",
+    "index.html",
+];
+
+/// Verdict of the dist-vs-source freshness probe. The variants
+/// drive the structured `[dashboard-bundle] freshness=...`
+/// stderr log line so a build-log replay always answers "did
+/// the freshness gate fire on this run, and which way".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DashboardFeFreshness {
+    /// No `dist/index.html` on disk; the freshness probe is a
+    /// no-op (the missing-bundle path handles this).
+    DistMissing,
+    /// `dist/index.html` exists AND every probed source file's
+    /// mtime is `<=` the dist mtime. Fast path: no rebuild.
+    Fresh,
+    /// `dist/index.html` exists but at least one tracked source
+    /// file is newer. Carries the offending path + the two
+    /// mtimes so the operator-visible log line is actionable
+    /// without a second filesystem walk.
+    Stale {
+        dist_mtime_unix: i64,
+        newest_source_path: PathBuf,
+        newest_source_mtime_unix: i64,
+    },
+    /// The filesystem walk hit an error (permission, transient
+    /// I/O). Treated as `Fresh` by [`classify_bundle_state`] so
+    /// a flaky filesystem does not force needless rebuilds —
+    /// the conservative arm. The variant exists so the witness
+    /// suite can pin the policy.
+    ProbeError { reason: String },
+}
+
+impl DashboardFeFreshness {
+    /// True when the classifier MUST treat the dist as fresh
+    /// (either it is, or the probe could not decide and the
+    /// conservative default fires).
+    pub fn is_fresh(&self) -> bool {
+        matches!(
+            self,
+            DashboardFeFreshness::Fresh | DashboardFeFreshness::ProbeError { .. }
+        )
+    }
+}
+
 /// Pure-data classification of the `dashboard-fe` workspace state
 /// at the moment the harness needs to mount the dashboard. Drives
 /// the dispatch in [`locate_dashboard_dist`] and is exhaustively
 /// witness-tested below.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BundleState {
-    /// `dashboard-fe/dist/index.html` is already on disk — the
-    /// fast path. No subprocess work needed; the harness just
+    /// `dashboard-fe/dist/index.html` is already on disk AND
+    /// fresh relative to the in-tree source (or the operator
+    /// opted out of rebuilds via `RAXIS_E2E_SKIP_DASHBOARD_BUILD=1`).
+    /// Fast path: no subprocess work needed; the harness just
     /// hands the path to the kernel.
     DistAlreadyBuilt,
+
+    /// `dist/index.html` is on disk BUT stale relative to the
+    /// in-tree source — at least one tracked file under
+    /// `dashboard-fe/src/**` or a root config file has an mtime
+    /// later than the dist's. Run `npm run build` in place to
+    /// refresh the bundle. `INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-FRESH-01`.
+    DistStaleNeedsRebuild,
 
     /// `RAXIS_E2E_SKIP_DASHBOARD_BUILD=1` is set; harness must
     /// silently return `None` (dashboard serves JSON-only). No
@@ -160,25 +264,170 @@ pub enum BundleState {
 /// build subprocess steps; pinning the policy decision here
 /// means the witness coverage need not depend on the host
 /// having a usable `npm` binary.
+///
+/// Precedence (first match wins):
+///   1. `dist_present && (dist_is_fresh || skip_env_set)` →
+///      `DistAlreadyBuilt`. The opt-out preserves iter52
+///      semantics: an operator who pre-bakes the bundle
+///      externally MUST get their dist back unchanged.
+///   2. `skip_env_set` (with no dist) → `OptOutByEnv`.
+///   3. `!package_json_present` → `HardFailMissingPackageJson`
+///      (unless `dist_present`, in which case fall back to
+///      `DistAlreadyBuilt` because rebuild is impossible
+///      without `package.json` — a stale bundle is strictly
+///      better than no bundle).
+///   4. `!node_modules_vite_present` → `NeedsInstallThenBuild`.
+///   5. `dist_present` (implies !fresh, !skip) →
+///      `DistStaleNeedsRebuild`.
+///   6. Otherwise → `NeedsBuildOnly`.
 pub fn classify_bundle_state(
     dist_index_present: bool,
+    dist_is_fresh: bool,
     skip_env_set: bool,
     package_json_present: bool,
     node_modules_vite_present: bool,
 ) -> BundleState {
-    if dist_index_present {
+    if dist_index_present && (dist_is_fresh || skip_env_set) {
         return BundleState::DistAlreadyBuilt;
     }
     if skip_env_set {
         return BundleState::OptOutByEnv;
     }
     if !package_json_present {
+        if dist_index_present {
+            // Stale dist + no package.json → can't rebuild.
+            // Use stale as the lesser evil (a serving SPA, even
+            // if missing the newest features, beats HTTP 404).
+            return BundleState::DistAlreadyBuilt;
+        }
         return BundleState::HardFailMissingPackageJson;
     }
     if !node_modules_vite_present {
         return BundleState::NeedsInstallThenBuild;
     }
+    if dist_index_present {
+        return BundleState::DistStaleNeedsRebuild;
+    }
     BundleState::NeedsBuildOnly
+}
+
+/// Convert a `std::time::SystemTime` to a Unix-epoch i64 of
+/// seconds. Mirrors `xtask::images::mtime_to_unix`; we keep a
+/// private copy here so the kernel test crate does not pull in
+/// the xtask binary's internals.
+fn system_time_to_unix_secs(mtime: std::time::SystemTime) -> i64 {
+    mtime
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Walk `dashboard-fe/src/**` and the [`DASHBOARD_FE_FRESHNESS_CONFIG_FILES`]
+/// fixed list, returning the newest mtime found alongside the
+/// path that owns it. `None` when neither the src tree nor any
+/// config file exists (a fresh-clone shape where nothing tracks
+/// against the dist). Walk errors surface as
+/// `Err(reason)` so the caller can route to
+/// [`DashboardFeFreshness::ProbeError`].
+fn newest_source_mtime_in_dashboard_fe(
+    fe_root: &Path,
+) -> Result<Option<(std::time::SystemTime, PathBuf)>, String> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    // Walk src/** recursively.
+    let src_root = fe_root.join("src");
+    if src_root.is_dir() {
+        walk_dir_recursive(&src_root, &mut best)?;
+    }
+    // Stat each root config file individually.
+    for name in DASHBOARD_FE_FRESHNESS_CONFIG_FILES {
+        let p = fe_root.join(name);
+        if let Ok(meta) = std::fs::metadata(&p) {
+            if let Ok(m) = meta.modified() {
+                match &best {
+                    None => best = Some((m, p.clone())),
+                    Some((cur, _)) if m > *cur => best = Some((m, p.clone())),
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(best)
+}
+
+/// Recursive `src/**` walk. `node_modules` and `dist` are
+/// pruned at the directory level because the walk seed is
+/// `dashboard-fe/src/` (neither lives under it), but we keep
+/// the name-based prune as a defence-in-depth in case the
+/// caller seeds with `fe_root` directly in a future variant.
+fn walk_dir_recursive(
+    dir: &Path,
+    best: &mut Option<(std::time::SystemTime, PathBuf)>,
+) -> Result<(), String> {
+    let read = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
+    for entry in read {
+        let entry = entry.map_err(|e| format!("read_dir entry under {}: {e}", dir.display()))?;
+        let path = entry.path();
+        // Skip hidden + node_modules + dist as a belt-and-
+        // suspenders prune; the seed is normally `src/` so
+        // these branches never fire.
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with('.') || name == "node_modules" || name == "dist" {
+                continue;
+            }
+        }
+        let ft = entry
+            .file_type()
+            .map_err(|e| format!("file_type {}: {e}", path.display()))?;
+        if ft.is_dir() {
+            walk_dir_recursive(&path, best)?;
+        } else if ft.is_file() {
+            let meta = entry
+                .metadata()
+                .map_err(|e| format!("metadata {}: {e}", path.display()))?;
+            let m = meta
+                .modified()
+                .map_err(|e| format!("mtime {}: {e}", path.display()))?;
+            match best {
+                None => *best = Some((m, path)),
+                Some((cur, _)) if m > *cur => *best = Some((m, path)),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Probe `dashboard-fe/dist/index.html` against the in-tree
+/// source for freshness. Cheap (sub-millisecond on a normal
+/// dashboard-fe tree) and side-effect-free.
+///
+/// Conservative on probe errors: a transient filesystem error
+/// returns [`DashboardFeFreshness::ProbeError`] which the
+/// classifier maps back to "treat as fresh" — we do NOT force a
+/// needless rebuild on a flaky permission. The operator can
+/// always force a rebuild manually (delete `dist/`, set
+/// `RAXIS_E2E_SKIP_DASHBOARD_BUILD=1`, etc.).
+pub fn probe_dashboard_fe_freshness(fe_root: &Path) -> DashboardFeFreshness {
+    let dist_index = fe_root.join("dist").join("index.html");
+    let dist_mtime = match std::fs::metadata(&dist_index).and_then(|m| m.modified()) {
+        Ok(m) => m,
+        Err(_) => return DashboardFeFreshness::DistMissing,
+    };
+    match newest_source_mtime_in_dashboard_fe(fe_root) {
+        Err(reason) => DashboardFeFreshness::ProbeError { reason },
+        Ok(None) => DashboardFeFreshness::Fresh,
+        Ok(Some((src_mtime, src_path))) => {
+            if src_mtime > dist_mtime {
+                DashboardFeFreshness::Stale {
+                    dist_mtime_unix: system_time_to_unix_secs(dist_mtime),
+                    newest_source_path: src_path,
+                    newest_source_mtime_unix: system_time_to_unix_secs(src_mtime),
+                }
+            } else {
+                DashboardFeFreshness::Fresh
+            }
+        }
+    }
 }
 
 /// Resolve the bounded timeout for `npm ci` from the env, with
@@ -346,15 +595,108 @@ pub fn locate_dashboard_dist() -> Option<PathBuf> {
     let package_json_present = fe_root.join("package.json").is_file();
     let node_modules_ok = node_modules_vite_present(&fe_root);
 
+    let freshness = probe_dashboard_fe_freshness(&fe_root);
+    log_freshness_probe(&freshness);
+
     let state = classify_bundle_state(
         dist_index.is_file(),
+        freshness.is_fresh(),
         skip_env,
         package_json_present,
         node_modules_ok,
     );
 
     match state {
-        BundleState::DistAlreadyBuilt => Some(dist),
+        BundleState::DistAlreadyBuilt => {
+            // If we're using a stale dist because the operator
+            // explicitly opted out, leave an audit trail so the
+            // log answers "why is the UI showing old data" on
+            // future inspections.
+            if let DashboardFeFreshness::Stale { .. } = &freshness {
+                if skip_env {
+                    eprintln!(
+                        "[dashboard-bundle] WARNING: dist/ is stale relative to \
+                         dashboard-fe/src/** but {ENV_SKIP_DASHBOARD_BUILD}=1 — \
+                         serving stale bundle as requested. Unset the env var \
+                         to let the harness auto-rebuild on staleness \
+                         (INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-FRESH-01)."
+                    );
+                } else if !package_json_present {
+                    eprintln!(
+                        "[dashboard-bundle] WARNING: dist/ is stale AND \
+                         dashboard-fe/package.json missing — cannot rebuild. \
+                         Serving stale bundle as last-resort fallback. \
+                         Restore the workspace shape (see \
+                         INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01)."
+                    );
+                }
+            }
+            Some(dist)
+        }
+        BundleState::DistStaleNeedsRebuild => {
+            let (dist_unix, src_path, src_unix) = match &freshness {
+                DashboardFeFreshness::Stale {
+                    dist_mtime_unix,
+                    newest_source_path,
+                    newest_source_mtime_unix,
+                } => (*dist_mtime_unix, newest_source_path.clone(), *newest_source_mtime_unix),
+                // `classify_bundle_state` only routes here when
+                // `dist_is_fresh == false && skip == false &&
+                // dist_present == true`, which only fires from
+                // `Stale`. ProbeError + Fresh both report fresh
+                // (see `is_fresh`), DistMissing implies no dist.
+                other => {
+                    panic!(
+                        "{FE_BUNDLE_FRESHNESS_VIOLATION_TOKEN}: classifier routed to \
+                         DistStaleNeedsRebuild but freshness probe returned {other:?} \
+                         — classify_bundle_state and probe_dashboard_fe_freshness drifted. \
+                         File a kernel-tests bug; this should not happen in production.",
+                    );
+                }
+            };
+            eprintln!(
+                "[dashboard-bundle] freshness=stale: dist mtime={} src mtime={} \
+                 newest_source={} → running `npm run build` in {} (bounded by \
+                 {}={}s; opt out via {ENV_SKIP_DASHBOARD_BUILD}=1)",
+                dist_unix,
+                src_unix,
+                src_path.display(),
+                fe_root.display(),
+                ENV_NPM_BUILD_TIMEOUT_SECS,
+                npm_build_timeout().as_secs(),
+            );
+            let build_started = Instant::now();
+            if let Err(reason) =
+                run_npm_bounded(&fe_root, &["run", "build"], npm_build_timeout(), true)
+            {
+                panic!(
+                    "{FE_BUNDLE_FRESHNESS_VIOLATION_TOKEN}: stale-dist rebuild \
+                     failed in {}: {reason}. The harness detected that \
+                     dashboard-fe/dist/index.html is older than {} but the \
+                     in-place rebuild did not succeed. Diagnose with \
+                     `cd raxis/dashboard-fe && npm run build` directly, OR \
+                     set {ENV_SKIP_DASHBOARD_BUILD}=1 to explicitly opt out \
+                     (the dashboard will then serve the stale bundle).",
+                    fe_root.display(),
+                    src_path.display(),
+                );
+            }
+            eprintln!(
+                "[dashboard-bundle] stale-dist rebuild OK in {:.1}s",
+                build_started.elapsed().as_secs_f32(),
+            );
+            if !dist_index.is_file() {
+                panic!(
+                    "{FE_BUNDLE_FRESHNESS_VIOLATION_TOKEN}: post-rebuild sanity \
+                     check failed in {}: {} is not a file after `npm run build` \
+                     returned success on the stale-dist path. Inspect the npm \
+                     output above for warnings.",
+                    fe_root.display(),
+                    dist_index.display(),
+                );
+            }
+            Some(dist)
+        }
         BundleState::OptOutByEnv => {
             eprintln!(
                 "[dashboard-bundle] {ENV_SKIP_DASHBOARD_BUILD}=1 — skipping \
@@ -403,6 +745,41 @@ pub fn locate_dashboard_dist() -> Option<PathBuf> {
             run_build_or_panic(&fe_root, &dist, &dist_index)
         }
         BundleState::NeedsBuildOnly => run_build_or_panic(&fe_root, &dist, &dist_index),
+    }
+}
+
+/// Emit a one-line structured stderr trace of the freshness
+/// probe outcome. Mirrors the
+/// `xtask::images::handle_staged_binary_freshness` audit shape
+/// so a CI log scraper can join the two events on the same
+/// time-window.
+fn log_freshness_probe(freshness: &DashboardFeFreshness) {
+    match freshness {
+        DashboardFeFreshness::DistMissing => {
+            eprintln!("[dashboard-bundle] freshness=dist_missing");
+        }
+        DashboardFeFreshness::Fresh => {
+            eprintln!("[dashboard-bundle] freshness=fresh");
+        }
+        DashboardFeFreshness::Stale {
+            dist_mtime_unix,
+            newest_source_path,
+            newest_source_mtime_unix,
+        } => {
+            eprintln!(
+                "[dashboard-bundle] freshness=stale dist_mtime_unix={} \
+                 newest_source={} newest_source_mtime_unix={}",
+                dist_mtime_unix,
+                newest_source_path.display(),
+                newest_source_mtime_unix,
+            );
+        }
+        DashboardFeFreshness::ProbeError { reason } => {
+            eprintln!(
+                "[dashboard-bundle] freshness=probe_error reason={reason:?} \
+                 — treating as fresh (conservative fallback)"
+            );
+        }
     }
 }
 
@@ -771,14 +1148,14 @@ mod tests {
     /// silently re-introduce the iter52 silent-degrade behaviour
     /// (every regression flips at least one of these arms).
     #[test]
-    fn inv_live_e2e_dashboard_fe_bundle_present_01_classifier_dist_already_built_wins() {
-        // Even with everything else broken, an existing dist
-        // index file is always the fast path — never re-build.
+    fn inv_live_e2e_dashboard_fe_bundle_present_01_classifier_dist_already_built_wins_when_fresh() {
+        // A FRESH dist always wins over every other knob — the
+        // classic iter52 contract, preserved post-iter68.
         for skip in [false, true] {
             for pkg in [false, true] {
                 for nm in [false, true] {
                     assert_eq!(
-                        classify_bundle_state(true, skip, pkg, nm),
+                        classify_bundle_state(true, true, skip, pkg, nm),
                         BundleState::DistAlreadyBuilt,
                         "skip={skip} pkg={pkg} nm={nm}",
                     );
@@ -792,10 +1169,11 @@ mod tests {
         // Opt-out wins over package_json_missing /
         // node_modules_missing — the operator's "I'll handle the
         // bundle externally" wins over the workspace-shape arms.
+        // (Freshness is moot when dist is absent.)
         for pkg in [false, true] {
             for nm in [false, true] {
                 assert_eq!(
-                    classify_bundle_state(false, true, pkg, nm),
+                    classify_bundle_state(false, false, true, pkg, nm),
                     BundleState::OptOutByEnv,
                     "pkg={pkg} nm={nm}",
                 );
@@ -809,7 +1187,7 @@ mod tests {
         // shape is broken; hard-fail.
         for nm in [false, true] {
             assert_eq!(
-                classify_bundle_state(false, false, false, nm),
+                classify_bundle_state(false, false, false, false, nm),
                 BundleState::HardFailMissingPackageJson,
                 "nm={nm}",
             );
@@ -821,7 +1199,7 @@ mod tests {
         // No dist + no opt-out + package.json present + no
         // node_modules ⇒ run `npm ci` first then build.
         assert_eq!(
-            classify_bundle_state(false, false, true, false),
+            classify_bundle_state(false, false, false, true, false),
             BundleState::NeedsInstallThenBuild,
         );
     }
@@ -832,9 +1210,182 @@ mod tests {
         // No dist + no opt-out + package.json + node_modules.bin
         // populated ⇒ skip install, just build.
         assert_eq!(
-            classify_bundle_state(false, false, true, true),
+            classify_bundle_state(false, false, false, true, true),
             BundleState::NeedsBuildOnly,
         );
+    }
+
+    // ─── INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-FRESH-01 witnesses ───
+
+    /// A stale dist + no opt-out + healthy workspace routes to
+    /// `DistStaleNeedsRebuild` (the new arm). This is the
+    /// canonical iter68 path: dist exists but src is newer →
+    /// re-run `npm run build` in place.
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_fresh_01_stale_dist_with_healthy_workspace_rebuilds() {
+        assert_eq!(
+            classify_bundle_state(true, false, false, true, true),
+            BundleState::DistStaleNeedsRebuild,
+        );
+    }
+
+    /// A stale dist + healthy workspace BUT no node_modules → we
+    /// must run `npm ci` first (NeedsInstallThenBuild covers
+    /// both the "no dist" and the "stale dist after a fresh
+    /// worktree" shapes).
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_fresh_01_stale_dist_no_node_modules_installs_first() {
+        assert_eq!(
+            classify_bundle_state(true, false, false, true, false),
+            BundleState::NeedsInstallThenBuild,
+        );
+    }
+
+    /// A stale dist + opt-out preserves iter52 semantics — the
+    /// operator explicitly said "don't touch the bundle", so we
+    /// hand it back as-is even though src is newer. Emits a
+    /// WARNING log line so the staleness is visible in CI logs.
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_fresh_01_stale_dist_opt_out_preserves_stale() {
+        for pkg in [false, true] {
+            for nm in [false, true] {
+                assert_eq!(
+                    classify_bundle_state(true, false, true, pkg, nm),
+                    BundleState::DistAlreadyBuilt,
+                    "stale + opt-out MUST short-circuit to fast-path: pkg={pkg} nm={nm}",
+                );
+            }
+        }
+    }
+
+    /// A stale dist + no package.json → can't rebuild. Fall
+    /// back to serving the stale dist (a serving SPA, even if
+    /// outdated, beats HTTP 404). This is the strict superset
+    /// of the iter52 hard-fail: missing-pkg-json only hard-
+    /// fails when there is no usable dist on disk either.
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_fresh_01_stale_dist_no_package_json_falls_back() {
+        for nm in [false, true] {
+            assert_eq!(
+                classify_bundle_state(true, false, false, false, nm),
+                BundleState::DistAlreadyBuilt,
+                "stale + no pkg-json MUST fall back to stale dist: nm={nm}",
+            );
+        }
+    }
+
+    /// The freshness violation token is operator-facing and
+    /// carried verbatim by panics from the stale-rebuild path.
+    /// Pin the spelling so a rephrase does not silently break
+    /// CI log scrapers / runbook references.
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_fresh_01_violation_token_shape() {
+        assert_eq!(
+            FE_BUNDLE_FRESHNESS_VIOLATION_TOKEN,
+            "INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-FRESH-01 VIOLATED",
+        );
+    }
+
+    /// `DashboardFeFreshness::is_fresh()` mapping into the
+    /// classifier — `Fresh` and `ProbeError` both vote fresh
+    /// (conservative arm); `DistMissing` and `Stale` do not.
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_fresh_01_is_fresh_mapping() {
+        assert!(DashboardFeFreshness::Fresh.is_fresh());
+        assert!(DashboardFeFreshness::ProbeError {
+            reason: "synthetic".to_owned(),
+        }
+        .is_fresh());
+        assert!(!DashboardFeFreshness::DistMissing.is_fresh());
+        assert!(!DashboardFeFreshness::Stale {
+            dist_mtime_unix: 100,
+            newest_source_path: PathBuf::from("synthetic"),
+            newest_source_mtime_unix: 200,
+        }
+        .is_fresh());
+    }
+
+    /// End-to-end freshness probe over a synthetic
+    /// `dashboard-fe/` shape. Exercises all four
+    /// `DashboardFeFreshness` arms against real filesystem
+    /// state so a regression in either
+    /// `newest_source_mtime_in_dashboard_fe` or
+    /// `probe_dashboard_fe_freshness` trips here rather than
+    /// silently masking a stale bundle on a live-e2e run.
+    #[test]
+    fn inv_live_e2e_dashboard_fe_bundle_fresh_01_probe_round_trip() {
+        let tmp = tempfile::tempdir().expect("mkdtemp");
+        let fe = tmp.path();
+
+        // 1. No dist/, no src/ → DistMissing.
+        assert_eq!(
+            probe_dashboard_fe_freshness(fe),
+            DashboardFeFreshness::DistMissing,
+        );
+
+        // 2. dist/index.html present, no src/ tracked → Fresh
+        //    (nothing to invalidate it).
+        std::fs::create_dir_all(fe.join("dist")).expect("mkdir dist");
+        std::fs::write(fe.join("dist").join("index.html"), b"<!doctype html>")
+            .expect("write index.html");
+        // Backdate the dist so a subsequent src write is
+        // unambiguously newer regardless of FS mtime resolution.
+        let week_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 86400);
+        set_mtime(&fe.join("dist").join("index.html"), week_ago);
+        assert_eq!(probe_dashboard_fe_freshness(fe), DashboardFeFreshness::Fresh);
+
+        // 3. Add a src/ file with mtime newer than dist → Stale.
+        std::fs::create_dir_all(fe.join("src")).expect("mkdir src");
+        let src_file = fe.join("src").join("App.tsx");
+        std::fs::write(&src_file, b"export const App = () => null;")
+            .expect("write src/App.tsx");
+        let now = std::time::SystemTime::now();
+        set_mtime(&src_file, now);
+        match probe_dashboard_fe_freshness(fe) {
+            DashboardFeFreshness::Stale {
+                newest_source_path,
+                ..
+            } => {
+                assert_eq!(newest_source_path, src_file);
+            }
+            other => panic!("expected Stale, got {other:?}"),
+        }
+
+        // 4. Backdate the src file so dist is again newer →
+        //    Fresh (the reverse-order case).
+        set_mtime(&src_file, week_ago - std::time::Duration::from_secs(86400));
+        assert_eq!(probe_dashboard_fe_freshness(fe), DashboardFeFreshness::Fresh);
+
+        // 5. A root config file (e.g., package.json) newer than
+        //    dist also votes Stale — exercising the
+        //    DASHBOARD_FE_FRESHNESS_CONFIG_FILES path.
+        let pkg = fe.join("package.json");
+        std::fs::write(&pkg, b"{}").expect("write package.json");
+        set_mtime(&pkg, now);
+        match probe_dashboard_fe_freshness(fe) {
+            DashboardFeFreshness::Stale {
+                newest_source_path,
+                ..
+            } => {
+                assert_eq!(newest_source_path, pkg);
+            }
+            other => panic!("expected Stale via package.json, got {other:?}"),
+        }
+    }
+
+    /// Helper for the round-trip witness. We `filetime`-style
+    /// mtime-set via `utimensat`-equivalent on every platform
+    /// supported by `std`. Failure to set the mtime panics so a
+    /// misconfigured FS that silently ignores the write does not
+    /// produce false-green test runs.
+    fn set_mtime(path: &Path, when: std::time::SystemTime) {
+        // `std::fs::File::set_modified` is stable since 1.75.
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap_or_else(|e| panic!("open {} for mtime set: {e}", path.display()));
+        f.set_modified(when)
+            .unwrap_or_else(|e| panic!("set_modified {}: {e}", path.display()));
     }
 
     /// The opt-out env var name is part of the operator-facing
