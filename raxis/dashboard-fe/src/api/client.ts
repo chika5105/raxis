@@ -37,6 +37,7 @@ import type {
   SubsystemHealthResponse,
   TaskLlmTurnView,
   TaskView,
+  WorktreeSnapshotView,
   UnreadCountResponse,
   UpdatePolicyResponse,
   VerifyResponse,
@@ -329,6 +330,55 @@ export const dashboardApi = {
         `/api/tasks/${encodeURIComponent(id)}/llm-turns?${qs}`,
         signal ? { signal } : {},
       );
+    },
+    /// iter68 — `GET /api/tasks/:task_id/worktree-snapshots`.
+    /// Returns every content-addressed snapshot the kernel
+    /// captured for the task, newest first.
+    /// `specs/v3/worktree-snapshots.md`.
+    worktreeSnapshots: (
+      id: string,
+      signal?: AbortSignal,
+    ): Promise<WorktreeSnapshotView[]> =>
+      apiFetch<WorktreeSnapshotView[]>(
+        `/api/tasks/${encodeURIComponent(id)}/worktree-snapshots`,
+        signal ? { signal } : {},
+      ),
+  },
+
+  /// iter68 — top-level worktree-snapshot detail + blob streaming.
+  /// Used by both `<TaskWorktreeSnapshots>` (drill into one
+  /// snapshot) and the cross-task Worktrees view.
+  worktreeSnapshots: {
+    /// Fetch one snapshot row by id.
+    get: (
+      snapshotId: string,
+      signal?: AbortSignal,
+    ): Promise<WorktreeSnapshotView> =>
+      apiFetch<WorktreeSnapshotView>(
+        `/api/worktree-snapshots/${encodeURIComponent(snapshotId)}`,
+        signal ? { signal } : {},
+      ),
+    /// Stream a content-addressed body blob.
+    /// `kind ∈ {"diff","log","tree","porcelain"}`. Returns the
+    /// raw body bytes as a `string`; the FE renders them in a
+    /// `<pre>` so the consumer can use `text/plain`-style
+    /// formatting without re-decoding.
+    blobUrl: (
+      snapshotId: string,
+      kind: "diff" | "log" | "tree" | "porcelain",
+    ): string =>
+      `/api/worktree-snapshots/${encodeURIComponent(snapshotId)}/blob/${kind}`,
+    fetchBlob: async (
+      snapshotId: string,
+      kind: "diff" | "log" | "tree" | "porcelain",
+      signal?: AbortSignal,
+    ): Promise<string> => {
+      const url = `/api/worktree-snapshots/${encodeURIComponent(snapshotId)}/blob/${kind}`;
+      const res = await fetch(url, signal ? { signal, credentials: "include" } : { credentials: "include" });
+      if (!res.ok) {
+        throw new Error(`worktree-snapshot blob ${kind} fetch failed: ${res.status}`);
+      }
+      return res.text();
     },
   },
 

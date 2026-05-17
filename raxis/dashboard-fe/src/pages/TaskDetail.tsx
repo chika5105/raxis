@@ -12,6 +12,7 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
 import { TaskLlmTurns } from "@/components/TaskLlmTurns";
+import { TaskWorktreeSnapshots } from "@/components/TaskWorktreeSnapshots";
 import { fmtAbsolute, fmtRelative } from "@/lib/format";
 import {
   isTerminalFailureState,
@@ -204,6 +205,15 @@ export function TaskDetailPage() {
           rows arrive once the kernel-side tap is wired to
           pass `Some(task_id)` to `gateway.fetch(...)`. */}
       <TaskLlmTurns taskId={t.task_id} />
+
+      {/* iter68 — `<TaskWorktreeSnapshots>` renders the
+          per-task content-addressed snapshot timeline
+          captured by `kernel::worktree_snapshot`. Each row
+          is a point-in-time projection of the worktree
+          (diff / log / tree / porcelain) the operator can
+          drill into without re-running the executor.
+          `specs/v3/worktree-snapshots.md`. */}
+      <TaskWorktreeSnapshots taskId={t.task_id} />
 
       <section className="card p-4">
         <h2 className="text-sm font-semibold text-ink mb-3">Path scope (allowlist)</h2>

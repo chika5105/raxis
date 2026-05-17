@@ -391,6 +391,21 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route("/api/tasks/:id", get(tasks::detail::<D>))
         .route("/api/tasks/:id/outputs", get(tasks::outputs::<D>))
         .route("/api/tasks/:id/llm-turns", get(tasks::llm_turns::<D>))
+        // iter68 — worktree snapshots. specs/v3/worktree-snapshots.md
+        // §5. The list endpoint is per-task; the detail + blob
+        // endpoints are per-snapshot.
+        .route(
+            "/api/tasks/:id/worktree-snapshots",
+            get(worktree_snapshots::list_for_task::<D>),
+        )
+        .route(
+            "/api/worktree-snapshots/:snapshot_id",
+            get(worktree_snapshots::detail::<D>),
+        )
+        .route(
+            "/api/worktree-snapshots/:snapshot_id/blob/:kind",
+            get(worktree_snapshots::blob::<D>),
+        )
         // Sessions.
         .route("/api/sessions", get(sessions::list::<D>))
         .route("/api/sessions/:id", get(sessions::detail::<D>))

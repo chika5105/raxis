@@ -27,3 +27,4 @@ pub mod notifications;
 pub mod policy;
 pub mod sessions;
 pub mod tasks;
+pub mod worktree_snapshots;

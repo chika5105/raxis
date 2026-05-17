@@ -368,6 +368,38 @@ export interface TaskLlmTurnView {
   error?: string | null;
 }
 
+/// iter68 — `specs/v3/worktree-snapshots.md` §3. One row in
+/// `GET /api/tasks/:task_id/worktree-snapshots` and the response
+/// shape of `GET /api/worktree-snapshots/:id`.
+///
+/// All `*_blob_sha256` fields are nullable — an empty body
+/// (no diff because `base == HEAD`) intentionally does not
+/// allocate a blob file on disk. The detail panel renders only
+/// non-null bodies as openable tabs.
+export interface WorktreeSnapshotView {
+  snapshot_id: string;
+  task_id: string;
+  session_id?: string | null;
+  initiative_id?: string | null;
+  /// One of `ExecutorActivate | ExecutorIdle |
+  /// ExecutorCommitCopy | WitnessPass | WitnessFail |
+  /// WitnessInconclusive | IntegrationMerge | PreGc`.
+  trigger: string;
+  /// Unix-seconds wall-clock when the snapshot was captured.
+  taken_at: number;
+  base_sha: string;
+  head_sha: string;
+  commit_count: number;
+  diff_blob_sha256?: string | null;
+  log_blob_sha256?: string | null;
+  tree_blob_sha256?: string | null;
+  porcelain_blob_sha256?: string | null;
+  /// Pre-truncation byte count of the diff body.
+  diff_bytes_total: number;
+  /// `true` when the diff body was truncated at the 1 MiB cap.
+  diff_truncated: boolean;
+}
+
 export interface DagEdge {
   from: string;
   to: string;

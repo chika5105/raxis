@@ -1144,6 +1144,93 @@ impl DashboardData for KernelDashboardData {
     /// (we aggregate in two passes and stitch in Rust to keep
     /// the SQL trivially auditable and to avoid the cartesian
     /// blow-up of a window-function over both tables).
+    /// iter68 — `specs/v3/worktree-snapshots.md` §5.
+    ///
+    /// List every snapshot row for the task. The SQL query is
+    /// pinned to the column order produced by migration 24;
+    /// adding / removing a column there requires a parallel edit
+    /// here. The query MUST stay in lockstep with
+    /// `raxis-kernel::worktree_snapshot::list_for_task` — these
+    /// are the two production read paths. We could share via a
+    /// helper crate (TODO when a third caller appears).
+    fn list_worktree_snapshots(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<raxis_dashboard::data::WorktreeSnapshotView>, ApiError> {
+        let conn = self.open_ro()?;
+        let sql = "SELECT snapshot_id, task_id, session_id, initiative_id, \
+                          trigger, taken_at, base_sha, head_sha, commit_count, \
+                          diff_blob_sha256, log_blob_sha256, tree_blob_sha256, \
+                          porcelain_blob_sha256, diff_bytes_total, diff_truncated \
+                   FROM worktree_snapshots \
+                   WHERE task_id = ?1 \
+                   ORDER BY taken_at DESC, snapshot_id DESC";
+        let mut stmt = conn.prepare(sql).map_err(|e| ApiError::Internal {
+            log_only: format!("worktree_snapshots prepare: {e}"),
+        })?;
+        let rows = stmt
+            .query_map(rusqlite::params![task_id], parse_worktree_snapshot_row)
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("worktree_snapshots query: {e}"),
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("worktree_snapshots collect: {e}"),
+            })?;
+        Ok(rows)
+    }
+
+    /// iter68 — fetch one snapshot row.
+    fn get_worktree_snapshot(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<raxis_dashboard::data::WorktreeSnapshotView, ApiError> {
+        let conn = self.open_ro()?;
+        let sql = "SELECT snapshot_id, task_id, session_id, initiative_id, \
+                          trigger, taken_at, base_sha, head_sha, commit_count, \
+                          diff_blob_sha256, log_blob_sha256, tree_blob_sha256, \
+                          porcelain_blob_sha256, diff_bytes_total, diff_truncated \
+                   FROM worktree_snapshots WHERE snapshot_id = ?1";
+        match conn.query_row(
+            sql,
+            rusqlite::params![snapshot_id],
+            parse_worktree_snapshot_row,
+        ) {
+            Ok(v) => Ok(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(ApiError::NotFound {
+                kind: "worktree_snapshot".into(),
+            }),
+            Err(e) => Err(ApiError::Internal {
+                log_only: format!("worktree_snapshot get: {e}"),
+            }),
+        }
+    }
+
+    /// iter68 — read a body blob off disk. The shape of the
+    /// on-disk path MUST match `kernel::worktree_snapshot::
+    /// blob_path` exactly; the literal `<data_dir>/worktree-
+    /// snapshots/blobs/<sha>` is pinned here so a rename on the
+    /// kernel side requires a parallel edit (and the integration
+    /// test in PR 2 catches the drift).
+    fn read_worktree_snapshot_blob(
+        &self,
+        snapshot_id: &str,
+        kind: raxis_dashboard::data::WorktreeSnapshotBlobKind,
+    ) -> Result<Vec<u8>, ApiError> {
+        let view = self.get_worktree_snapshot(snapshot_id)?;
+        let sha = kind.sha256_of(&view).ok_or(ApiError::NotFound {
+            kind: "worktree_snapshot_blob_empty".into(),
+        })?;
+        let path = self
+            .data_dir
+            .join("worktree-snapshots")
+            .join("blobs")
+            .join(sha);
+        std::fs::read(&path).map_err(|_| ApiError::NotFound {
+            kind: "worktree_snapshot_blob".into(),
+        })
+    }
+
     fn gate_stats(&self) -> Result<raxis_dashboard::data::GateStatsResponse, ApiError> {
         use raxis_dashboard::data::{GateStatRow, GateStatsResponse};
         let conn = self.open_ro()?;
@@ -3402,6 +3489,36 @@ fn session_record_to_view(
         ts_unix: r.ts_unix,
         payload: r.payload,
     }
+}
+
+/// iter68 — parse a `worktree_snapshots` SQL row into the
+/// dashboard wire view. The column order MUST match the SELECT
+/// list in `list_worktree_snapshots` / `get_worktree_snapshot`
+/// exactly; reordering one without the other is a silent
+/// classifier crash at runtime.
+fn parse_worktree_snapshot_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<raxis_dashboard::data::WorktreeSnapshotView> {
+    let diff_truncated_int: i64 = row.get(14)?;
+    let diff_bytes_total_int: i64 = row.get(13)?;
+    let commit_count_int: i64 = row.get(8)?;
+    Ok(raxis_dashboard::data::WorktreeSnapshotView {
+        snapshot_id: row.get(0)?,
+        task_id: row.get(1)?,
+        session_id: row.get(2)?,
+        initiative_id: row.get(3)?,
+        trigger: row.get(4)?,
+        taken_at: row.get(5)?,
+        base_sha: row.get(6)?,
+        head_sha: row.get(7)?,
+        commit_count: commit_count_int.max(0) as u32,
+        diff_blob_sha256: row.get(9)?,
+        log_blob_sha256: row.get(10)?,
+        tree_blob_sha256: row.get(11)?,
+        porcelain_blob_sha256: row.get(12)?,
+        diff_bytes_total: diff_bytes_total_int.max(0) as u64,
+        diff_truncated: diff_truncated_int != 0,
+    })
 }
 
 fn task_row_to_view(

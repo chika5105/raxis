@@ -295,6 +295,108 @@ pub struct GateStatRow {
     pub fixup_loop_count: u64,
 }
 
+/// One row in `GET /api/tasks/:task_id/worktree-snapshots`.
+///
+/// iter68 — `specs/v3/worktree-snapshots.md` §3. Each row is a
+/// point-in-time projection of the task's worktree. The four
+/// `*_blob_sha256` fields are nullable (empty body → no blob);
+/// the dashboard renders them as "view diff / log / tree / status"
+/// links that hit `/api/worktree-snapshots/:id/blob/:kind`.
+///
+/// Wire-stable: this is exactly the shape the kernel-side
+/// `worktree_snapshots` row projects to. Adding a column to the
+/// SQL table requires bumping a new migration AND adding a field
+/// here so the dashboard can render it.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeSnapshotView {
+    /// Stable id; opaque to the FE.
+    pub snapshot_id: String,
+    /// The task this snapshot belongs to.
+    pub task_id: String,
+    /// Owning session id, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Owning initiative id, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiative_id: Option<String>,
+    /// One of `ExecutorActivate | ExecutorIdle | ExecutorCommitCopy |
+    /// WitnessPass | WitnessFail | WitnessInconclusive |
+    /// IntegrationMerge | PreGc`. Pinned to the kernel-side enum.
+    pub trigger: String,
+    /// Unix-seconds wall-clock when the snapshot was taken.
+    pub taken_at: i64,
+    /// Base commit the diff is rooted at.
+    pub base_sha: String,
+    /// Worktree HEAD commit at snapshot time.
+    pub head_sha: String,
+    /// Number of commits in `base..HEAD`.
+    pub commit_count: u32,
+    /// SHA-256 of `git diff <base>..HEAD` body, or null when the
+    /// body is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_blob_sha256: Option<String>,
+    /// SHA-256 of `git log <base>..HEAD --format=...`, or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_blob_sha256: Option<String>,
+    /// SHA-256 of `git ls-tree -r HEAD --name-only`, or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_blob_sha256: Option<String>,
+    /// SHA-256 of `git status --porcelain`, or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub porcelain_blob_sha256: Option<String>,
+    /// Pre-truncation byte count of the diff body.
+    pub diff_bytes_total: u64,
+    /// `true` when the diff body was truncated at the 1 MiB cap
+    /// (`INV-WORKTREE-SNAPSHOT-BOUNDED-DIFF-01`).
+    pub diff_truncated: bool,
+}
+
+/// Body-kind selector for `GET /api/worktree-snapshots/:id/blob/:kind`.
+///
+/// iter68 — `specs/v3/worktree-snapshots.md` §5. The route handler
+/// resolves the requested kind back onto the matching
+/// `*_blob_sha256` column on the snapshot row, then streams the
+/// blob body from `<data_dir>/worktree-snapshots/blobs/<sha256>`.
+/// Pinning the enum here (rather than accepting an arbitrary
+/// string) means a malformed URL surfaces as a 400 at axum's
+/// extractor layer before the handler runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorktreeSnapshotBlobKind {
+    /// `git diff <base>..HEAD`. May be truncated.
+    Diff,
+    /// `git log <base>..HEAD --format=%H\t%an\t%at\t%s`.
+    Log,
+    /// `git ls-tree -r HEAD --name-only` — full tracked file
+    /// listing at HEAD.
+    Tree,
+    /// `git status --porcelain` — uncommitted changes (usually
+    /// empty for an executor at idle).
+    Porcelain,
+}
+
+impl WorktreeSnapshotBlobKind {
+    /// Round-trip with the route extractor.
+    pub fn as_path_segment(self) -> &'static str {
+        match self {
+            Self::Diff => "diff",
+            Self::Log => "log",
+            Self::Tree => "tree",
+            Self::Porcelain => "porcelain",
+        }
+    }
+
+    /// Project the corresponding `*_blob_sha256` off a snapshot view.
+    pub fn sha256_of<'a>(self, view: &'a WorktreeSnapshotView) -> Option<&'a str> {
+        match self {
+            Self::Diff => view.diff_blob_sha256.as_deref(),
+            Self::Log => view.log_blob_sha256.as_deref(),
+            Self::Tree => view.tree_blob_sha256.as_deref(),
+            Self::Porcelain => view.porcelain_blob_sha256.as_deref(),
+        }
+    }
+}
+
 /// `GET /api/gates/stats` response envelope.
 ///
 /// Rendered by the dashboard's Gates page (a minimal table
@@ -1710,6 +1812,64 @@ pub trait DashboardData: Send + Sync + 'static {
         Ok(GateStatsResponse {
             gates: Vec::new(),
             generated_at: 0,
+        })
+    }
+
+    /// iter68 — `specs/v3/worktree-snapshots.md` §5.
+    ///
+    /// List every worktree snapshot the kernel captured for the
+    /// task, newest first. Powers `GET
+    /// /api/tasks/:task_id/worktree-snapshots`.
+    ///
+    /// Default impl returns `Ok(vec![])` so older fixtures
+    /// continue compiling without the new capability. Production
+    /// wires this through `KernelDashboardData::list_worktree_snapshots`.
+    fn list_worktree_snapshots(
+        &self,
+        _task_id: &str,
+    ) -> Result<Vec<WorktreeSnapshotView>, ApiError> {
+        Ok(Vec::new())
+    }
+
+    /// iter68 — `specs/v3/worktree-snapshots.md` §5.
+    ///
+    /// Look up one snapshot row by id. Powers `GET
+    /// /api/worktree-snapshots/:snapshot_id`. Returns
+    /// `Err(NotFound { kind: "worktree_snapshot" })` for an
+    /// unknown id so the route returns 404 with a stable shape.
+    fn get_worktree_snapshot(
+        &self,
+        _snapshot_id: &str,
+    ) -> Result<WorktreeSnapshotView, ApiError> {
+        Err(ApiError::NotFound {
+            kind: "worktree_snapshot".into(),
+        })
+    }
+
+    /// iter68 — `specs/v3/worktree-snapshots.md` §5.
+    ///
+    /// Stream a body blob (`diff` / `log` / `tree` / `porcelain`)
+    /// for the requested snapshot. The route handler resolves
+    /// `kind` back onto the matching `*_blob_sha256` column,
+    /// then this method reads the on-disk blob.
+    ///
+    /// Returns `Err(NotFound)` when:
+    ///   * the snapshot id is unknown, OR
+    ///   * the requested body kind was empty (no `*_blob_sha256`
+    ///     value on the row — there is genuinely nothing to
+    ///     stream), OR
+    ///   * the blob file is missing on disk (operator manually
+    ///     deleted; orphan-detection log will surface it).
+    ///
+    /// Default impl returns `NotFound`. Production wires this
+    /// through `KernelDashboardData`.
+    fn read_worktree_snapshot_blob(
+        &self,
+        _snapshot_id: &str,
+        _kind: WorktreeSnapshotBlobKind,
+    ) -> Result<Vec<u8>, ApiError> {
+        Err(ApiError::NotFound {
+            kind: "worktree_snapshot_blob".into(),
         })
     }
 
