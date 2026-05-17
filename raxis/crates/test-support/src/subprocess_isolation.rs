@@ -135,6 +135,16 @@ impl Backend for SubprocessIsolation {
             .unwrap_or_else(|| std::path::PathBuf::from("/bin/cat"));
 
         let mut cmd = Command::new(&binary);
+        // `INV-PLANNER-PID1-ONLY-EXEC-01` — SubprocessIsolation
+        // is the canonical host-side fixture that spawns planner
+        // binaries as ordinary child processes (NOT as PID 1).
+        // The planner binaries refuse to start outside PID 1 in
+        // production; tests that drive a real planner binary
+        // through this fixture get a built-in bypass so the
+        // host-mode contract continues to work. Production
+        // microVM spawn paths (Firecracker / AVF) never go
+        // through this substrate.
+        cmd.env("RAXIS_PLANNER_PID1_ENFORCEMENT_BYPASS", "1");
         // Argv from the spec — the substrate threads it verbatim so
         // tests that drive a planner-shaped helper get the exact argv
         // the kernel constructed.

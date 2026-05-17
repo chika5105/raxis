@@ -113,8 +113,9 @@ pub use driver::{
 pub use error::PlannerError;
 pub use gemini_client::GeminiClient;
 pub use guest_init::{
-    ensure_cargo_offline_default, init_pid1_a3_egress, init_pid1_filesystem,
-    mount_workspace_shares, parse_virtiofs_mounts, shutdown_or_exit, CargoOfflineDefaultOutcome,
+    enforce_pid1_or_abort, ensure_cargo_offline_default, init_pid1_a3_egress,
+    init_pid1_filesystem, mount_workspace_shares, parse_virtiofs_mounts, shutdown_or_exit,
+    CargoOfflineDefaultOutcome, PID1_ENFORCEMENT_EXIT_CODE,
     MountAttempt, MountStatus, VirtioFsMountSpec, WorkspaceMountOutcome, A3_DEFAULT_TPROXY_PORT,
     A3_TPROXY_PORT_ENV, CARGO_OFFLINE_ENV, VIRTIOFS_MOUNTS_ENV,
 };

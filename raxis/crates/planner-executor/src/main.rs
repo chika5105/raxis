@@ -18,13 +18,24 @@
 //! scaffold.
 
 use raxis_planner_core::{
-    ensure_cargo_offline_default, hydrate_from_proc_cmdline, init_pid1_a3_egress,
-    init_pid1_filesystem, mount_workspace_shares, park_on_signal, render_boot_log,
-    run_role_session, shutdown_or_exit, BootContext, CargoOfflineDefaultOutcome, DriverError,
-    DriverOutcome, HydrationOutcome, MountStatus, PlannerError, Role, WorkspaceMountOutcome,
+    enforce_pid1_or_abort, ensure_cargo_offline_default, hydrate_from_proc_cmdline,
+    init_pid1_a3_egress, init_pid1_filesystem, mount_workspace_shares, park_on_signal,
+    render_boot_log, run_role_session, shutdown_or_exit, BootContext, CargoOfflineDefaultOutcome,
+    DriverError, DriverOutcome, HydrationOutcome, MountStatus, PlannerError, Role,
+    WorkspaceMountOutcome,
 };
 
 fn main() -> ! {
+    // Step 0: `INV-PLANNER-PID1-ONLY-EXEC-01` — refuse to start
+    // when the binary is invoked as a child process inside an
+    // already-running microVM. The contract is "PID 1 of a
+    // microVM"; any other invocation is a jailbreak vector (a
+    // curious or adversarial in-VM agent re-execing the
+    // executor binary to inherit the parent's session token and
+    // port bindings). See the helper docstring + the
+    // `iter72-dep-fetch-jailbreak` postmortem for context.
+    enforce_pid1_or_abort();
+
     // Step 1: when running as PID 1 inside a Linux initramfs,
     // mount /proc, /sys, /dev, /tmp before any other I/O. See
     // `raxis-planner-core::guest_init` for the full rationale.

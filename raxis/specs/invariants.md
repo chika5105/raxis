@@ -1090,6 +1090,45 @@ intent, and respawns the orchestrator to pick a recovery action.
 
 ---
 
+### INV-PLANNER-PID1-ONLY-EXEC-01 — Planner binaries refuse to start outside PID 1
+
+Canonical home: [`v2/planner-pid1-only-exec.md`](v2/planner-pid1-only-exec.md).
+
+**Statement.** Each planner binary (`raxis-executor`,
+`raxis-orchestrator`, `raxis-reviewer`) MUST refuse to start on
+Linux when `std::process::id() != 1`, except when explicitly
+bypassed via `RAXIS_PLANNER_PID1_ENFORCEMENT_BYPASS=1`
+(SubprocessIsolation test fixtures only). The refusal MUST:
+
+1. Run as the very first step of `main()`, BEFORE any
+   filesystem mount, env hydration, or socket binding.
+2. Emit a structured stderr breadcrumb
+   (`planner_pid1_enforcement_violation`) carrying `pid`,
+   `ppid`, `argv0`, the cited invariant, and the exit code.
+3. Exit with code `126`, distinct from every other documented
+   planner exit code (0 / 1 / 2 / 64 / 78).
+
+**Justification.** Inside a Raxis microVM the planner binary is
+PID 1 (`/init` in the initramfs). After PID 1 boots, the binary
+remains at `/usr/local/bin/raxis-{executor,orchestrator,reviewer}`
+and is reachable from the agent's `bash` tool. A child
+invocation of the binary inside its own VM is a jailbreak: the
+child inherits the parent's session token, can read the parent's
+`/proc/<ppid>/cmdline`, and collides on the parent's
+port-binding setup. iter72 forensics observed this in the wild
+(an executor's Claude agent ran `raxis-executor --help` while
+diagnosing DNS).
+
+**Scenario.** An LLM-driven `bash` invocation inside an executor
+VM runs `/usr/local/bin/raxis-executor --help`. The child sees
+PID > 1, emits the structured violation breadcrumb to its
+stderr (visible in the VM console log), and exits 126 BEFORE
+opening any file descriptor or socket. The parent session
+continues unaffected; the kernel's audit chain captures the
+breadcrumb via the console-log scraper.
+
+---
+
 ## §19 — Gate rejection and agent-hint contract
 
 Canonical home: [`v3/gate-rejection-orchestrator-fixup.md`](v3/gate-rejection-orchestrator-fixup.md).

@@ -435,6 +435,149 @@ mod linux {
     }
 }
 
+/// `INV-PLANNER-PID1-ONLY-EXEC-01` — exit code emitted by
+/// [`enforce_pid1_or_abort`] when the binary is invoked outside
+/// PID 1 on Linux. Chosen distinct from every documented planner
+/// exit (0 = clean, 1 = generic error, 2 = misuse, 64 =
+/// `BOOT_ERR_ISOLATION_UNAVAILABLE`, 78 =
+/// `BOOT_ERR_CONFIG`) so an operator scanning `dmesg` /
+/// substrate logs can tell at a glance that the binary refused
+/// to start because the agent (LLM) re-exec'd it from inside a
+/// VM.
+pub const PID1_ENFORCEMENT_EXIT_CODE: u8 = 126;
+
+/// `INV-PLANNER-PID1-ONLY-EXEC-01` — refuse to start when this
+/// binary is invoked outside PID 1 on Linux.
+///
+/// ## Why this exists
+///
+/// Inside a Raxis microVM the planner binary is wired as `/init`
+/// (PID 1). After PID 1 boots, the binary remains on disk at
+/// `/usr/local/bin/raxis-{executor,orchestrator,reviewer}`,
+/// reachable through `$PATH` from the agent's bash tool. In
+/// iter72 forensics we observed the executor's Claude agent
+/// running `bash -lc "raxis-executor --help"` while diagnosing a
+/// `dep-fetch-evidence` DNS failure — the agent had no malicious
+/// intent, but a child invocation of the executor binary inside
+/// its own VM IS a jailbreak vector:
+///
+/// 1. The child process inherits the parent's environment,
+///    including `RAXIS_SESSION_TOKEN`, `RAXIS_PLANNER_TASK_PROMPT_PATH`,
+///    and `RAXIS_KERNEL_VSOCK_LISTEN_PORT`. It can dial the
+///    kernel-side planner IPC socket and submit intents using the
+///    parent's session token until the parent's session is revoked.
+/// 2. The child can read the parent's `/proc/<parent_pid>/cmdline`
+///    to learn the parent's per-task arguments (initiative id,
+///    task id) and impersonate the parent's identity at the
+///    kernel-side dispatch matrix.
+/// 3. The child's port-binding attempts (vsock loopback forwarder
+///    on the credential-proxy port; airgap A3 chokepoint on port
+///    3129) collide with the parent's, which manifests at the
+///    host as a stalled VM — exactly the kind of stall the
+///    iter72 idle watchdog catches *after* the damage is done.
+///
+/// The cleanest defense is to refuse to start in the first place:
+/// the planner binary contract is "PID 1 of a microVM". Any
+/// invocation that violates the contract is rejected with a
+/// distinctive exit code and a structured stderr breadcrumb that
+/// surfaces in the in-VM console log, so a post-mortem replay
+/// can correlate the jailbreak attempt against the agent's
+/// tool-use audit chain.
+///
+/// ## Scope of the check
+///
+/// **Linux only.** On macOS the binaries are not executed
+/// directly (they cross-compile to aarch64-linux for the
+/// microVM); the unit tests in `raxis-planner-core` exercise the
+/// library surface, not these `main()`s. On Linux outside the
+/// substrate the binary is genuinely useless (no `RAXIS_*` env,
+/// no kernel UDS, no canonical image), so refusing to start
+/// loses nothing the operator could legitimately want.
+///
+/// ## Override (test-only)
+///
+/// Setting `RAXIS_PLANNER_PID1_ENFORCEMENT_BYPASS=1` skips the
+/// check. This exists so a host-mode `SubprocessIsolation`
+/// fixture (used by some legacy kernel tests that drive the
+/// planner as a child process rather than a real microVM) can
+/// continue to function. The bypass is logged loudly so a
+/// production operator who flips it by mistake sees the warning
+/// in the kernel stderr stream.
+///
+/// ## Behaviour
+///
+/// * Linux + PID 1 + bypass-unset: return `Ok(())`. Normal flow.
+/// * Linux + PID 1 + bypass-set: log warning, return `Ok(())`.
+/// * Linux + PID ≠ 1 + bypass-unset: log structured stderr,
+///   exit with [`PID1_ENFORCEMENT_EXIT_CODE`] (`126`). Does
+///   not return.
+/// * Linux + PID ≠ 1 + bypass-set: log warning, return `Ok(())`.
+/// * Non-Linux: return `Ok(())` (no-op).
+pub fn enforce_pid1_or_abort() {
+    #[cfg(target_os = "linux")]
+    {
+        let bypass = std::env::var("RAXIS_PLANNER_PID1_ENFORCEMENT_BYPASS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let pid = std::process::id();
+        if pid == 1 {
+            // Normal flow; nothing to log.
+            return;
+        }
+        if bypass {
+            eprintln!(
+                "{{\"level\":\"warn\",\
+                 \"event\":\"planner_pid1_enforcement_bypassed\",\
+                 \"pid\":{pid},\
+                 \"reason\":\"RAXIS_PLANNER_PID1_ENFORCEMENT_BYPASS=1; \
+                 this should ONLY be set by legacy host-mode \
+                 SubprocessIsolation fixtures. Production microVMs \
+                 must NEVER set this.\"}}"
+            );
+            return;
+        }
+        // Determine the binary's argv[0] for the structured
+        // breadcrumb so a forensic replay can identify which of
+        // the three planner binaries the agent re-exec'd.
+        let argv0 = std::env::args()
+            .next()
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        // Capture parent pid for jailbreak-attribution chains —
+        // PPID is the in-VM agent's shell (or the agent's process
+        // tree root) and lets the operator correlate the attempt
+        // against the agent's bash tool-use audit chain.
+        let ppid = std::os::unix::process::parent_id();
+        eprintln!(
+            "{{\"level\":\"error\",\
+             \"event\":\"planner_pid1_enforcement_violation\",\
+             \"pid\":{pid},\
+             \"ppid\":{ppid},\
+             \"argv0\":\"{argv0}\",\
+             \"exit_code\":{exit_code},\
+             \"invariant\":\"INV-PLANNER-PID1-ONLY-EXEC-01\",\
+             \"reason\":\"raxis-planner binaries MUST run only as \
+             PID 1 of a microVM. This invocation is a child process \
+             — likely an LLM-driven re-exec from within an executor \
+             VM. Aborting to prevent session-token reuse and \
+             port-binding collisions. See \
+             specs/v2/planner-ipc-idle-watchdog.md \
+             §1.1 + specs/v2/planner-harness.md for the \
+             jailbreak taxonomy.\"}}",
+            pid = pid,
+            ppid = ppid,
+            argv0 = argv0,
+            exit_code = PID1_ENFORCEMENT_EXIT_CODE,
+        );
+        std::process::exit(PID1_ENFORCEMENT_EXIT_CODE as i32);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // No-op on macOS / Windows. The planner binaries never
+        // run natively on these hosts — they cross-compile to
+        // aarch64-linux for the microVM.
+    }
+}
+
 /// Mount `/proc`, `/sys`, `/dev`, `/tmp` if and only if this
 /// process is PID 1 on Linux. No-op everywhere else (subprocess
 /// substrate on the host, macOS dev workflows, …).
@@ -1225,5 +1368,80 @@ mod cargo_offline_default_tests {
             ));
             assert_eq!(std::env::var(CARGO_OFFLINE_ENV).unwrap(), "true");
         });
+    }
+}
+
+/// `INV-PLANNER-PID1-ONLY-EXEC-01` — unit tests for
+/// [`enforce_pid1_or_abort`]. Cannot exercise the abort path
+/// directly (would terminate the test runner), but cover the
+/// no-op branches and the bypass surface.
+#[cfg(test)]
+mod pid1_enforcement_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Serialise env mutations across tests (matches the
+    /// pattern in `cargo_offline_default_tests::with_env_snapshot`).
+    fn with_bypass_env<F: FnOnce()>(f: F) {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        const KEY: &str = "RAXIS_PLANNER_PID1_ENFORCEMENT_BYPASS";
+        let prev = std::env::var(KEY).ok();
+        // SAFETY: serialised via the static mutex; no other test
+        // in this module touches the variable concurrently.
+        unsafe {
+            std::env::remove_var(KEY);
+        }
+        f();
+        // SAFETY: see above.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(KEY, v),
+                None => std::env::remove_var(KEY),
+            }
+        }
+    }
+
+    /// On macOS / Windows the helper is a no-op regardless of
+    /// PID — the planner binaries cross-compile to
+    /// aarch64-linux for the microVM and are not executed
+    /// natively on the host. Test runners on macOS calling the
+    /// helper MUST NOT abort.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn enforce_pid1_or_abort_is_noop_on_non_linux() {
+        with_bypass_env(|| {
+            // No assertion needed — the call returning without
+            // aborting is itself the witness.
+            enforce_pid1_or_abort();
+        });
+    }
+
+    /// On Linux + PID ≠ 1 + bypass set, the helper MUST NOT
+    /// abort. This is the SubprocessIsolation contract: the
+    /// fixture sets the bypass before exec'ing the planner
+    /// binary so legacy host-mode tests continue to function.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn enforce_pid1_or_abort_respects_bypass_outside_pid1() {
+        with_bypass_env(|| {
+            // The test runner is unlikely to be PID 1; set the
+            // bypass and assert the call returns without
+            // exiting the process.
+            // SAFETY: serialised via with_bypass_env's mutex.
+            unsafe {
+                std::env::set_var("RAXIS_PLANNER_PID1_ENFORCEMENT_BYPASS", "1");
+            }
+            enforce_pid1_or_abort();
+            // If we reach here the call returned cleanly. Pass.
+        });
+    }
+
+    /// The advertised exit code is the operator-facing
+    /// breadcrumb; pin it so a future refactor cannot silently
+    /// alter the visible signal.
+    #[test]
+    fn pid1_enforcement_exit_code_is_126() {
+        assert_eq!(PID1_ENFORCEMENT_EXIT_CODE, 126);
     }
 }

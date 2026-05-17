@@ -23,12 +23,18 @@
 //! deadline path.
 
 use raxis_planner_core::{
-    hydrate_from_proc_cmdline, init_pid1_filesystem, mount_workspace_shares, park_on_signal,
-    render_boot_log, run_role_session, shutdown_or_exit, BootContext, DriverError, DriverOutcome,
-    HydrationOutcome, MountStatus, PlannerError, Role, WorkspaceMountOutcome,
+    enforce_pid1_or_abort, hydrate_from_proc_cmdline, init_pid1_filesystem, mount_workspace_shares,
+    park_on_signal, render_boot_log, run_role_session, shutdown_or_exit, BootContext, DriverError,
+    DriverOutcome, HydrationOutcome, MountStatus, PlannerError, Role, WorkspaceMountOutcome,
 };
 
 fn main() -> ! {
+    // Step 0: `INV-PLANNER-PID1-ONLY-EXEC-01` — refuse to start
+    // when the binary is invoked as a child process inside an
+    // already-running microVM. See `raxis-planner-core::guest_init`
+    // for the full jailbreak-mode rationale.
+    enforce_pid1_or_abort();
+
     // Step 1: when running as PID 1 inside a Linux initramfs,
     // mount /proc, /sys, /dev, /tmp before any other I/O. See
     // `raxis-planner-core::guest_init` for the full rationale.
