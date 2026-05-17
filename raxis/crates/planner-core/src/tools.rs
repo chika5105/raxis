@@ -1116,6 +1116,19 @@ impl Tool for StructuredOutputTool {
                 raxis_types::IntentOutcome::Rejected { error_code, .. } => Ok(ToolOutput::err(
                     format!("kernel rejected structured_output: {error_code}"),
                 )),
+                // V3 iter70 — structured_output never produces an
+                // AcceptedBatch envelope (the kernel only emits
+                // AcceptedBatch on BatchActivateSubTasks). Reaching
+                // here means a kernel-side wire-routing bug or a
+                // future widening of AcceptedBatch usage; treat
+                // defensively as an unexpected response so the
+                // dispatch loop surfaces it as a soft error rather
+                // than panicking.
+                raxis_types::IntentOutcome::AcceptedBatch { .. } => Ok(ToolOutput::err(
+                    "structured_output: kernel returned AcceptedBatch — unexpected variant for \
+                     this intent kind"
+                        .to_owned(),
+                )),
             },
             Err(e) => Ok(ToolOutput::err(format!(
                 "structured_output transport error: {e}"
@@ -1458,6 +1471,100 @@ impl Tool for ActivateSubtaskTool {
     }
 }
 
+/// Declaration-only `batch_activate_subtasks` (V3 iter70) — the
+/// orchestrator's *bulk* DAG driver. Arguments: an array of
+/// `subtask_task_ids` (the SET of candidate task ids to admit
+/// this turn).
+///
+/// **Order semantics.** The input order is informational only —
+/// the kernel ignores it. The kernel:
+///   1. evaluates each id against the same admission gates
+///      as singular `activate_subtask` (plan-membership,
+///      FSM state, predecessor-closure, `can_delegate`);
+///   2. filters down to the admissible subset;
+///   3. sorts that subset by its own deterministic policy
+///      `(admitted_at ASC, task_id ASC)`;
+///   4. admits `min(admissible_count, concurrency_headroom)`
+///      of them in that sorted order; and
+///   5. returns a per-id outcome (Accepted with kernel-assigned
+///      `admission_order`, DroppedAtCap, NotAdmissible,
+///      UnknownTask, or DuplicateInBatch) so the orchestrator
+///      learns exactly what happened to each candidate.
+///
+/// One bad id does NOT poison the batch — typos surface as
+/// per-id `UnknownTask` while other valid ids in the same batch
+/// admit normally.
+///
+/// **Per-id machinery is the singular path.** The kernel runs
+/// the EXACT same activation code as singular `activate_subtask`
+/// for each admitted id (no FSM divergence, no SQL divergence)
+/// — the batch is a wrapper that picks WHICH candidates to
+/// admit; the per-task FSM transitions are unchanged.
+struct BatchActivateSubtasksTool;
+
+#[async_trait::async_trait]
+impl Tool for BatchActivateSubtasksTool {
+    fn name(&self) -> &'static str {
+        "batch_activate_subtasks"
+    }
+    fn description(&self) -> &'static str {
+        "TERMINAL — propose a SET of ready sub-task ids for \
+         admission in a single turn. The kernel decides which \
+         candidates win the available concurrency headroom \
+         (kernel-side sort `(admitted_at ASC, task_id ASC)`) \
+         and returns a per-id outcome for every submitted id. \
+         The valid ids are the `task_id` column of rows in the \
+         KSB `dag=` block whose `state` is `pending` AND whose \
+         predecessors (per the plan) are all `complete`. List \
+         every candidate you want this turn — the kernel ignores \
+         order and picks what fits. A typo / hallucinated id \
+         surfaces as a per-id `UnknownTask` outcome and does NOT \
+         poison the other ids in the same batch. Use this \
+         instead of singular `activate_subtask` whenever you \
+         have two or more admissible candidates in the same \
+         turn. Call this exactly once per turn; the kernel \
+         spawns the corresponding executor (or reviewer) \
+         sessions in parallel and returns control. The \
+         orchestrator's next turn will see the updated DAG \
+         state."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type":     "object",
+            "required": ["subtask_task_ids"],
+            "properties": {
+                "subtask_task_ids": {
+                    "type":     "array",
+                    "minItems": 1,
+                    "maxItems": 64,
+                    "items": {
+                        "type":      "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": "Task id from the KSB \
+                                        `dag=` block. \
+                                        MUST exactly match one \
+                                        of the listed rows; \
+                                        case-sensitive."
+                    },
+                    "description": "Set of candidate task ids to \
+                                    propose for admission. The \
+                                    kernel ignores input order \
+                                    and picks what fits the \
+                                    available headroom."
+                }
+            }
+        })
+    }
+    async fn execute(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::ok("batch_activate_subtasks"))
+    }
+}
+
 /// Declaration-only `retry_subtask` — first half of the two-intent
 /// retry contract (`INV-ORCH-RETRY-SUBTASK-TWO-INTENT-CONTRACT-01`).
 /// Same input shape as [`ActivateSubtaskTool`].
@@ -1646,6 +1753,8 @@ pub fn build_orchestrator_registry() -> ToolRegistry {
     r.register(Arc::new(VmCapabilitiesTool));
     // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
     r.register(Arc::new(ActivateSubtaskTool));
+    // V3 iter70 — batch-admit primitive.
+    r.register(Arc::new(BatchActivateSubtasksTool));
     r.register(Arc::new(RetrySubtaskTool));
     r.register(Arc::new(IntegrationMergeTool));
     r
@@ -1699,6 +1808,8 @@ pub fn build_orchestrator_registry_with_sleep(
     r.register(Arc::new(VmCapabilitiesTool));
     // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
     r.register(Arc::new(ActivateSubtaskTool));
+    // V3 iter70 — batch-admit primitive.
+    r.register(Arc::new(BatchActivateSubtasksTool));
     r.register(Arc::new(RetrySubtaskTool));
     r.register(Arc::new(IntegrationMergeTool));
     r
@@ -1983,6 +2094,12 @@ mod tests {
             r.get("integration_merge").is_some(),
             "orchestrator registry MUST declare `integration_merge`"
         );
+        // V3 iter70 — batch-admit primitive.
+        assert!(
+            r.get("batch_activate_subtasks").is_some(),
+            "orchestrator registry MUST declare `batch_activate_subtasks` \
+             (V3 iter70 batch primitive)"
+        );
     }
 
     /// Same invariant for the `_with_sleep` variant — adding a
@@ -1993,6 +2110,8 @@ mod tests {
         assert!(r.get("activate_subtask").is_some());
         assert!(r.get("retry_subtask").is_some());
         assert!(r.get("integration_merge").is_some());
+        // V3 iter70 — batch-admit primitive.
+        assert!(r.get("batch_activate_subtasks").is_some());
     }
 
     /// V2 §3.2 — executor terminal-tool declarations.

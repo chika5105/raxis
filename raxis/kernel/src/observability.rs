@@ -2730,6 +2730,7 @@ mod substrate_ipc_tests {
                 sub_task_kind: None,
                 parent_gate_failure_task_id: None,
                 parent_gate_failure_type: None,
+            batch_task_ids: None,
             }),
             // ── Dispatched: verifier / WitnessSubmission ──
             M::WitnessSubmission(WitnessSubmission {

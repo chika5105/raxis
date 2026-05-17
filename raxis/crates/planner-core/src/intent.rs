@@ -161,6 +161,10 @@ impl IntentSubmitter {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            // V3 iter70 BatchActivateSubTasks payload — populated
+            // by the dedicated builder. None for every other
+            // intent kind (the kernel ignores otherwise).
+            batch_task_ids: None,
         }
     }
 
@@ -229,6 +233,24 @@ impl IntentSubmitter {
     ) -> Result<IntentResponse, SubmitError> {
         let mut req = self.skeleton(IntentKind::ActivateSubTask);
         req.task_id = subtask_task_id;
+        self.send(IpcMessage::IntentRequest(req)).await
+    }
+
+    /// **V3 iter70** — submit a `BatchActivateSubTasks` intent
+    /// (orchestrator role). The orchestrator's own `task_id` stays
+    /// on the envelope's `task_id` field (per the singular
+    /// `ActivateSubTask` convention: envelope identifies the
+    /// SUBMITTER); the candidate SET goes in `batch_task_ids`.
+    /// Order is informational only — the kernel ignores it and
+    /// admits up to the live concurrency headroom in kernel-sorted
+    /// order. The response carries `IntentOutcome::AcceptedBatch
+    /// { results }` with a per-id outcome for every submitted id.
+    pub async fn submit_batch_activate_subtasks(
+        &self,
+        candidate_task_ids: Vec<TaskId>,
+    ) -> Result<IntentResponse, SubmitError> {
+        let mut req = self.skeleton(IntentKind::BatchActivateSubTasks);
+        req.batch_task_ids = Some(candidate_task_ids);
         self.send(IpcMessage::IntentRequest(req)).await
     }
 
@@ -367,6 +389,8 @@ pub fn orchestrator_terminal_tool_to_intent_kind(name: &str) -> Option<IntentKin
         "integration_merge" => Some(IntentKind::IntegrationMerge),
         "activate_subtask" => Some(IntentKind::ActivateSubTask),
         "retry_subtask" => Some(IntentKind::RetrySubTask),
+        // V3 iter70 — batch-admit primitive.
+        "batch_activate_subtasks" => Some(IntentKind::BatchActivateSubTasks),
         _ => None,
     }
 }

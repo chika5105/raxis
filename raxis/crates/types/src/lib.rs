@@ -55,8 +55,9 @@ pub use id::{
 };
 pub use initiative_event::{ClosedReason, InitiativeEvent};
 pub use intent::{
-    BudgetSnapshot, IntentKind, IntentOutcome, IntentRequest, IntentResponse, PlannerErrorTemplate,
-    SubTaskKind, SubmittedClaim, TokensReport, MAX_CRITIQUE_BYTES,
+    BatchTaskOutcome, BatchTaskResult, BudgetSnapshot, IntentKind, IntentOutcome, IntentRequest,
+    IntentResponse, NotAdmissibleReason, PlannerErrorTemplate, SubTaskKind, SubmittedClaim,
+    TokensReport, MAX_BATCH_ACTIVATE_TASK_IDS, MAX_CRITIQUE_BYTES,
 };
 pub use operator::{ApprovalScope, OperatorErrorDetail, OperatorRequest, OperatorResponse};
 pub use operator_cert::{CertKind, OperatorCert};

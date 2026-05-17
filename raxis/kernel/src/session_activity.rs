@@ -137,6 +137,14 @@ impl LastIntentOutcome {
             IntentOutcome::Rejected { error_code, .. } => Self::Rejected {
                 error_code: error_code.to_string(),
             },
+            // V3 iter70 — envelope-level success for the batch
+            // primitive. The operator-facing tracker only cares
+            // about the envelope verdict (per-id outcomes are
+            // surfaced via the dashboard's structured-log feed);
+            // a partial-admission turn still counts as `Accepted`
+            // at this layer so the operator's "last activity"
+            // muscle memory remains stable.
+            IntentOutcome::AcceptedBatch { .. } => Self::Accepted,
         }
     }
 

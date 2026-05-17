@@ -458,6 +458,7 @@ mod tests {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            batch_task_ids: None,
         }
     }
 
@@ -646,7 +647,7 @@ mod tests {
                     IntentOutcome::Rejected { error_code, .. } => {
                         assert_eq!(error_code, PlannerErrorCode::InvalidRequest);
                     }
-                    IntentOutcome::Accepted { .. } => {
+                    IntentOutcome::Accepted { .. } | IntentOutcome::AcceptedBatch { .. } => {
                         panic!("expected Rejected outcome");
                     }
                 }

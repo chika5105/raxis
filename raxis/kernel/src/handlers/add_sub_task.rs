@@ -506,6 +506,7 @@ mod tests {
             sub_task_kind: kind,
             parent_gate_failure_task_id: parent_id,
             parent_gate_failure_type: gate_type.map(str::to_owned),
+            batch_task_ids: None,
         }
     }
 

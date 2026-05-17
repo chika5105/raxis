@@ -115,6 +115,10 @@ pub fn evaluate_dispatch(
         // V3 — same authority pattern as the other sub-task
         // lifecycle kinds: V1 NULL sessions cannot delegate.
         (AddSubTask, None) => Unauthorized,
+        // V3 iter70 — batch-admit primitive: same authority shape
+        // as singular ActivateSubTask. V1 NULL sessions cannot
+        // delegate, so the batch wrapper is fail-closed too.
+        (BatchActivateSubTasks, None) => Unauthorized,
 
         // ── Orchestrator row ─────────────────────────────────────────
         // Step 8: Orchestrator owns IntegrationMerge (and only the
@@ -144,6 +148,13 @@ pub fn evaluate_dispatch(
         // (gate-fixup task). Reviewer / Executor / V1 sessions
         // are fail-closed at the matrix.
         (AddSubTask, Some(Orchestrator)) => Authorized,
+        // V3 iter70 — batch-admit primitive: the Orchestrator
+        // is the unique delegator and therefore the unique
+        // submitter of the bulk variant. Same authority as
+        // singular `ActivateSubTask` (per-id admission machinery
+        // is the singular path re-used unchanged; INV-IPC-BATCH-
+        // REUSE-SINGULAR-MACHINERY-01).
+        (BatchActivateSubTasks, Some(Orchestrator)) => Authorized,
 
         // ── Executor row ─────────────────────────────────────────────
         // The Executor's job is to produce commits and complete
@@ -162,6 +173,9 @@ pub fn evaluate_dispatch(
         // TaskSummary mid-task.
         (StructuredOutput, Some(Executor)) => Authorized,
         (AddSubTask, Some(Executor)) => Unauthorized,
+        // V3 iter70: Executors do not delegate; the batch primitive
+        // is Orchestrator-only.
+        (BatchActivateSubTasks, Some(Executor)) => Unauthorized,
 
         // ── Reviewer row ─────────────────────────────────────────────
         // The Reviewer's only authorized intent is SubmitReview.
@@ -184,6 +198,9 @@ pub fn evaluate_dispatch(
         // Pure-Static actor and NEVER emits structured output.
         (StructuredOutput, Some(Reviewer)) => Unauthorized,
         (AddSubTask, Some(Reviewer)) => Unauthorized,
+        // V3 iter70: Reviewer is Pure-Static; no delegation,
+        // no batch primitive.
+        (BatchActivateSubTasks, Some(Reviewer)) => Unauthorized,
     }
 }
 
@@ -195,11 +212,12 @@ pub fn evaluate_dispatch(
 mod tests {
     use super::*;
 
-    /// The matrix is a 9×4 grid (9 intent kinds × 3 agent types + 1
-    /// NULL backward-compat row) with each cell labelled `Authorized`
-    /// or `Unauthorized`. We enumerate every cell explicitly so that
-    /// any future table-edit silently breaks this test instead of
-    /// silently widening or tightening authority.
+    /// The matrix is a 10×4 grid (10 intent kinds × 3 agent types
+    /// + 1 NULL backward-compat row) with each cell labelled
+    /// `Authorized` or `Unauthorized`. We enumerate every cell
+    /// explicitly so that any future table-edit silently breaks
+    /// this test instead of silently widening or tightening
+    /// authority.
     #[test]
     fn matrix_authorizes_exactly_the_expected_cells() {
         // (kind, agent_type, expected_verdict)
@@ -214,6 +232,7 @@ mod tests {
             (IntentKind::SubmitReview, None, false),
             (IntentKind::StructuredOutput, None, false),
             (IntentKind::AddSubTask, None, false),
+            (IntentKind::BatchActivateSubTasks, None, false),
             // Orchestrator
             (
                 IntentKind::SingleCommit,
@@ -257,6 +276,11 @@ mod tests {
             ),
             (
                 IntentKind::AddSubTask,
+                Some(SessionAgentType::Orchestrator),
+                true,
+            ),
+            (
+                IntentKind::BatchActivateSubTasks,
                 Some(SessionAgentType::Orchestrator),
                 true,
             ),
@@ -306,6 +330,11 @@ mod tests {
                 Some(SessionAgentType::Executor),
                 false,
             ),
+            (
+                IntentKind::BatchActivateSubTasks,
+                Some(SessionAgentType::Executor),
+                false,
+            ),
             // Reviewer
             (
                 IntentKind::SingleCommit,
@@ -352,14 +381,19 @@ mod tests {
                 Some(SessionAgentType::Reviewer),
                 false,
             ),
+            (
+                IntentKind::BatchActivateSubTasks,
+                Some(SessionAgentType::Reviewer),
+                false,
+            ),
         ];
 
-        // 9 kinds × (3 agent types + 1 NULL) = 36 cells.
+        // 10 kinds × (3 agent types + 1 NULL) = 40 cells.
         assert_eq!(
             expectations.len(),
-            9 * 4,
-            "matrix coverage: 9 IntentKind variants × 4 agent-type \
-             buckets (Orchestrator/Executor/Reviewer/None) = 36 cells. \
+            10 * 4,
+            "matrix coverage: 10 IntentKind variants × 4 agent-type \
+             buckets (Orchestrator/Executor/Reviewer/None) = 40 cells. \
              A mismatch here is a test-data drift, not a matrix bug."
         );
 
@@ -395,10 +429,11 @@ mod tests {
         // the explicit coverage above.
         assert_eq!(
             IntentKind::ALL.len(),
-            9,
-            "matrix sized for 9 IntentKind variants (V2 base 7 + V2.5 \
-             `StructuredOutput` + V3 `AddSubTask`); bumping requires a \
-             new row in `evaluate_dispatch` AND a new line in \
+            10,
+            "matrix sized for 10 IntentKind variants (V2 base 7 + V2.5 \
+             `StructuredOutput` + V3 `AddSubTask` + V3 iter70 \
+             `BatchActivateSubTasks`); bumping requires a new row in \
+             `evaluate_dispatch` AND a new line in \
              `matrix_authorizes_exactly_the_expected_cells`."
         );
         assert_eq!(
@@ -431,15 +466,16 @@ mod tests {
 
     /// INV-DISPATCH structural property: only the Orchestrator may
     /// submit delegation intents (`ActivateSubTask`, `RetrySubTask`,
-    /// `AddSubTask`). The boolean-field gate `can_delegate` is the
-    /// SECOND line of defence (INV-DELEGATE-01); the matrix is the
-    /// FIRST.
+    /// `AddSubTask`, `BatchActivateSubTasks`). The boolean-field
+    /// gate `can_delegate` is the SECOND line of defence
+    /// (INV-DELEGATE-01); the matrix is the FIRST.
     #[test]
     fn only_orchestrator_authorized_for_delegation() {
         for delegation in [
             IntentKind::ActivateSubTask,
             IntentKind::RetrySubTask,
             IntentKind::AddSubTask,
+            IntentKind::BatchActivateSubTasks,
         ] {
             for &a in &SessionAgentType::ALL {
                 let v = evaluate_dispatch(delegation, Some(a));

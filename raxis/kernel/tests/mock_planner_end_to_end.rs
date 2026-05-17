@@ -159,6 +159,7 @@ impl MockPlanner {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            batch_task_ids: None,
         }
     }
 
@@ -351,7 +352,7 @@ async fn intent_with_unknown_session_is_rejected_unauthorized() {
                 "error_detail MUST be None for UNAUTHORIZED (INV-08); got {error_detail:?}",
             );
         }
-        IntentOutcome::Accepted { .. } => {
+        IntentOutcome::Accepted { .. } | IntentOutcome::AcceptedBatch { .. } => {
             panic!("kernel must NOT accept an intent with a bogus session_token");
         }
     }
@@ -678,7 +679,7 @@ async fn intent_with_real_session_token_clears_step2_envelope_acceptance() {
                 kernel.captured_stderr(),
             );
         }
-        IntentOutcome::Accepted { .. } => {
+        IntentOutcome::Accepted { .. } | IntentOutcome::AcceptedBatch { .. } => {
             panic!(
                 "intent was Accepted without a seeded task — unexpected, \
                  but proves the lock_sync chain ran without panic"

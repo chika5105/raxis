@@ -131,6 +131,45 @@ pub enum IntentKind {
     ///     event. A follow-up `ActivateSubTask` from the Orchestrator
     ///     then spawns the VM (existing path).
     AddSubTask,
+
+    /// **V3 batch-admit primitive (iter70).** Orchestrator-only.
+    /// Requests that the Kernel admit a SET of candidate sub-tasks
+    /// in a single IPC round-trip. The Orchestrator passes a *set*
+    /// of `task_id`s via [`IntentRequest::batch_task_ids`]; the Kernel:
+    ///   1. evaluates each id independently against the same
+    ///      admission gates the singular `ActivateSubTask` enforces
+    ///      (plan-membership, FSM state, predecessor-completion,
+    ///      `vm_image` alias, `can_delegate`),
+    ///   2. filters down to the admissible subset,
+    ///   3. sorts that subset by the **kernel-side** deterministic
+    ///      policy `(admitted_at ASC, task_id ASC)` — the input
+    ///      order is informational at best; the kernel decides
+    ///      which candidates win the available headroom,
+    ///   4. admits `min(admissible_count, concurrency_headroom)`
+    ///      of them by re-using the SAME per-task admission
+    ///      machinery the singular `ActivateSubTask` runs (no
+    ///      duplicate FSM transition or SQL; INV-IPC-BATCH-REUSE-
+    ///      SINGULAR-MACHINERY-01), and
+    ///   5. returns a per-id [`BatchTaskResult`] for EVERY
+    ///      submitted id so the LLM learns exactly what happened
+    ///      to each candidate (Accepted / DroppedAtCap /
+    ///      NotAdmissible / UnknownTask / DuplicateInBatch).
+    /// Wire fields used:
+    ///   * `batch_task_ids` — required `Some(non-empty)`; capped
+    ///     at [`MAX_BATCH_ACTIVATE_TASK_IDS`] (defense-in-depth
+    ///     bound). `task_id` on the envelope MUST equal the
+    ///     Orchestrator's own task id (same convention as
+    ///     singular `ActivateSubTask`: envelope identifies the
+    ///     SUBMITTER; the payload field carries the targets).
+    /// Outcome variant: [`IntentOutcome::AcceptedBatch`]. The
+    /// kernel returns `Rejected{FailInvalidArgument}` ONLY for
+    /// envelope-malformed cases (`batch_task_ids = None | Some([])`,
+    /// oversize, role mismatch); per-id classification failures
+    /// (typo → `UnknownTask`, wrong-state → `NotAdmissible`,
+    /// repeated id → `DuplicateInBatch`) surface inside
+    /// `BatchTaskResult::outcome` so a single bad id never
+    /// poisons a batch with otherwise-valid ids.
+    BatchActivateSubTasks,
 }
 
 /// V3 (`specs/v3/gate-rejection-orchestrator-fixup.md` §4.3).
@@ -174,6 +213,7 @@ impl IntentKind {
             Self::SubmitReview => "SubmitReview",
             Self::StructuredOutput => "StructuredOutput",
             Self::AddSubTask => "AddSubTask",
+            Self::BatchActivateSubTasks => "BatchActivateSubTasks",
         }
     }
 
@@ -211,6 +251,7 @@ impl IntentKind {
                 | Self::RetrySubTask
                 | Self::SubmitReview
                 | Self::AddSubTask
+                | Self::BatchActivateSubTasks
         )
     }
 
@@ -223,7 +264,7 @@ impl IntentKind {
     /// All variants. Used by the static-dispatch-matrix exhaustiveness
     /// guard (v2-deep-spec.md §Step 20) so a future added variant
     /// automatically fails the matrix-build test until a row is added.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::SingleCommit,
         Self::IntegrationMerge,
         Self::CompleteTask,
@@ -233,8 +274,22 @@ impl IntentKind {
         Self::SubmitReview,
         Self::StructuredOutput,
         Self::AddSubTask,
+        Self::BatchActivateSubTasks,
     ];
 }
+
+/// Defense-in-depth ceiling on the number of candidate task ids a
+/// single [`IntentKind::BatchActivateSubTasks`] envelope may carry.
+/// The bound exists so a malicious or hallucinating orchestrator
+/// cannot DoS the kernel by emitting a single batch envelope listing
+/// every task in a 10 000-task plan; the per-task admission machinery
+/// is `O(N)` SQL + `O(N)` substrate spawns, and the kernel's
+/// concurrency cap is small (default 3, max 20). 64 is generous for
+/// any realistic plan while keeping the per-batch work bounded.
+/// Exceeding this returns `FAIL_INVALID_ARGUMENT` at the
+/// envelope-validation gate — the Orchestrator must resubmit a
+/// trimmed set.
+pub const MAX_BATCH_ACTIVATE_TASK_IDS: usize = 64;
 
 // ---------------------------------------------------------------------------
 // SubmittedClaim — one entry in IntentRequest.submitted_claims.
@@ -471,6 +526,29 @@ pub struct IntentRequest {
     /// be `None` for every other intent kind.
     #[serde(default)]
     pub parent_gate_failure_type: Option<String>,
+
+    // ── V3 iter70 BatchActivateSubTasks payload ────────────────────────
+    /// **V3 BatchActivateSubTasks only (iter70).** The candidate
+    /// SET of sub-task ids the orchestrator proposes for admission
+    /// in this turn. The kernel evaluates each id independently
+    /// against the same admission gates as singular
+    /// `ActivateSubTask`, sorts the admissible subset by its own
+    /// deterministic policy `(admitted_at ASC, task_id ASC)`, and
+    /// admits up to the live concurrency headroom. Per-id outcomes
+    /// (Accepted / DroppedAtCap / NotAdmissible / UnknownTask /
+    /// DuplicateInBatch) surface on
+    /// [`IntentOutcome::AcceptedBatch::results`].
+    /// Required `Some(non-empty)` on `BatchActivateSubTasks`;
+    /// `None | Some([])` ⇒ `FAIL_INVALID_ARGUMENT`. MUST be `None`
+    /// for every other intent kind (kernel ignores otherwise). The
+    /// list is capped at [`MAX_BATCH_ACTIVATE_TASK_IDS`].
+    /// **Order semantics:** the input ordering is informational
+    /// only; the kernel ignores it. See [`IntentKind::BatchActivateSubTasks`].
+    /// **Wire encoding note:** see the analogous comment on
+    /// `approved` — `skip_serializing_if` is intentionally absent
+    /// for bincode round-trip compatibility.
+    #[serde(default)]
+    pub batch_task_ids: Option<Vec<TaskId>>,
 }
 
 /// Cumulative LLM token usage the
@@ -605,13 +683,141 @@ pub enum IntentOutcome {
         /// Non-null only for FAIL_POLICY_VIOLATION. Fixed template set; INV-08.
         error_detail: Option<PlannerErrorTemplate>,
     },
+    /// **V3 iter70.** Successful envelope for
+    /// [`IntentKind::BatchActivateSubTasks`]: the envelope itself was
+    /// well-formed (non-empty, under [`MAX_BATCH_ACTIVATE_TASK_IDS`],
+    /// authorised submitter); per-id outcomes are reported inside
+    /// `results`. NOTE: an envelope where every id ended up as
+    /// `UnknownTask` / `NotAdmissible` / `DroppedAtCap` is STILL
+    /// `AcceptedBatch` — the wire-level success means "kernel evaluated
+    /// the batch"; per-id `Accepted` vs. non-`Accepted` is the
+    /// task-level decision. The planner-core driver MAY treat a
+    /// zero-`Accepted` batch as a no-progress turn for its own
+    /// retry book-keeping.
+    AcceptedBatch {
+        /// Lane budget snapshot AFTER all admitted-this-batch
+        /// budget consumption. Same accounting as the singular
+        /// `Accepted::remaining_budget`; each per-id `Accepted`
+        /// charged its lane independently and this snapshot is
+        /// the orchestrator-lane post-state.
+        remaining_budget: BudgetSnapshot,
+        /// One entry per id in the submitted `batch_task_ids`,
+        /// in the SAME order the orchestrator submitted them
+        /// (so a downstream tool wrapper can 1:1 zip the
+        /// outcomes back to its own input vector).
+        results: Vec<BatchTaskResult>,
+    },
 }
 
 impl IntentResponse {
     /// Convenience: was this intent accepted?
+    /// `AcceptedBatch` counts as accepted at the envelope level
+    /// (per-id outcomes are inspected on
+    /// [`IntentOutcome::AcceptedBatch::results`]).
     pub fn is_accepted(&self) -> bool {
-        matches!(self.outcome, IntentOutcome::Accepted { .. })
+        matches!(
+            self.outcome,
+            IntentOutcome::Accepted { .. } | IntentOutcome::AcceptedBatch { .. }
+        )
     }
+}
+
+// ---------------------------------------------------------------------------
+// BatchTaskResult / BatchTaskOutcome / NotAdmissibleReason
+// V3 iter70 — per-id outcome carried on
+// `IntentOutcome::AcceptedBatch::results`.
+// ---------------------------------------------------------------------------
+
+/// Per-id outcome the kernel reports on the BatchActivateSubTasks
+/// response. Returned in input order so the tool-call wrapper can
+/// reconcile each candidate with its outcome.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchTaskResult {
+    /// The candidate task id the orchestrator submitted at this
+    /// position in `batch_task_ids`. Echoed verbatim — including
+    /// for `UnknownTask` outcomes — so the tool-call layer can
+    /// emit a structured per-id log entry without needing to
+    /// re-derive the id from its own input.
+    pub task_id: TaskId,
+    /// Classification of what the kernel did for this id.
+    pub outcome: BatchTaskOutcome,
+}
+
+/// Per-id classification on a BatchActivateSubTasks response.
+///
+/// **Status taxonomy:**
+///   * `Accepted` — kernel ran the SAME per-task admission
+///     machinery as singular `ActivateSubTask` and the task was
+///     admitted-and-spawned this turn. `admission_order` is the
+///     0-based slot within this batch's admitted list (so the
+///     orchestrator can see which of its candidates won the
+///     scarce headroom).
+///   * `DroppedAtCap` — the task was admissible under every
+///     gate, but the concurrency headroom was already filled
+///     by higher-priority (kernel-sorted) candidates from the
+///     same batch. The orchestrator may resubmit this id on a
+///     future turn after a worker completes.
+///   * `NotAdmissible` — the task is in the plan and belongs
+///     to this initiative, but is not currently eligible
+///     (wrong FSM state, predecessor not complete, etc.).
+///     The reason is sub-classified in `NotAdmissibleReason`.
+///   * `UnknownTask` — typo / hallucination: the id does not
+///     map to any task in this initiative's plan registry. NOT
+///     an envelope-level reject (so a batch of `[bad, good]`
+///     still admits `good`).
+///   * `DuplicateInBatch` — the orchestrator listed the same
+///     id twice (or more) in the same `batch_task_ids`. The
+///     FIRST occurrence is evaluated normally; subsequent
+///     occurrences emit `DuplicateInBatch` so the orchestrator
+///     can tell its own deduplication is broken.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BatchTaskOutcome {
+    Accepted {
+        /// 0-based admission slot within this batch. `0` is the
+        /// first admitted in kernel-sorted order; equals
+        /// `results.iter().filter(|r| matches!(r.outcome,
+        /// Accepted { .. })).count() - 1` for the LAST admitted
+        /// id, etc.
+        admission_order: u32,
+    },
+    DroppedAtCap,
+    NotAdmissible {
+        reason: NotAdmissibleReason,
+    },
+    UnknownTask,
+    DuplicateInBatch,
+}
+
+/// Detail enum for `BatchTaskOutcome::NotAdmissible`. The
+/// orchestrator's NNSP teaches the LLM to inspect this so it can
+/// pick a different candidate on its next turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum NotAdmissibleReason {
+    /// The task's FSM state is not `Admitted` (it is
+    /// already running, completed, failed, or in some other
+    /// non-admittable state). The string captures the observed
+    /// state for forensic clarity (e.g. `"Running"`,
+    /// `"Completed"`, `"PendingActivation"`).
+    WrongState { observed: String },
+    /// One or more DAG predecessors are not `Completed`. The
+    /// list carries `(predecessor_task_id, observed_state)` for
+    /// each blocker so the orchestrator can decide which
+    /// predecessor to drive next.
+    PredecessorsNotComplete {
+        predecessors: Vec<(String, String)>,
+    },
+    /// The task row is missing the in-memory plan registry entry
+    /// the activation path needs (typed agent kind, vm_image
+    /// alias, task prompt). Should be impossible in practice
+    /// — surfaced as defense-in-depth so a corrupt registry
+    /// row does not silently propagate as `UnknownTask`.
+    PlanRegistryMissing,
+    /// The task has a prior `subtask_activations` row that is
+    /// neither `PendingActivation` nor terminal — i.e. it is
+    /// already running through the singular path. The
+    /// orchestrator should wait for that activation to settle
+    /// rather than retry through batch.
+    AlreadyActive,
 }
 
 // ---------------------------------------------------------------------------
@@ -627,27 +833,32 @@ impl IntentResponse {
 mod tests {
     use super::*;
 
-    /// V3 has 9 IntentKind variants total:
+    /// V3 has 10 IntentKind variants total:
     ///   * 4 V1 — SingleCommit, IntegrationMerge, CompleteTask,
     ///     ReportFailure.
     ///   * 3 V2 — ActivateSubTask, RetrySubTask, SubmitReview.
     ///   * 1 V2.5 — `StructuredOutput`.
     ///   * 1 V3 — `AddSubTask` (gate-fixup spawn entry, see
     ///     `specs/v3/gate-rejection-orchestrator-fixup.md`).
+    ///   * 1 V3 iter70 — `BatchActivateSubTasks` (batch-admit
+    ///     primitive; the kernel selects which candidates win
+    ///     the scarce concurrency headroom and reports per-id
+    ///     outcomes back to the orchestrator).
+    ///
     ///     The pinned-count test surfaces accidental adds at the test
     ///     layer before any dispatch matrix or store mapping regresses.
     #[test]
     fn intent_kind_variant_count_is_pinned_to_v3() {
         assert_eq!(
             IntentKind::ALL.len(),
-            9,
-            "V3 has exactly 9 IntentKind variants \
+            10,
+            "V3 (iter70) has exactly 10 IntentKind variants \
              (4 V1: SingleCommit, IntegrationMerge, CompleteTask, \
              ReportFailure; 3 V2: ActivateSubTask, RetrySubTask, \
              SubmitReview; 1 V2.5: StructuredOutput; \
-             1 V3: AddSubTask). Bumping this requires the static \
-             dispatch matrix (v2-deep-spec.md §Step 20) to gain a \
-             matching row."
+             2 V3: AddSubTask, BatchActivateSubTasks). Bumping \
+             this requires the static dispatch matrix \
+             (v2-deep-spec.md §Step 20) to gain a matching row."
         );
     }
 
@@ -778,6 +989,7 @@ mod tests {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            batch_task_ids: None,
         };
 
         // 1. bincode round-trip on the canonical wire shape.
@@ -831,6 +1043,7 @@ mod tests {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            batch_task_ids: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: IntentRequest = serde_json::from_str(&s).unwrap();
@@ -887,6 +1100,7 @@ mod tests {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            batch_task_ids: None,
         };
 
         // Canonical IPC wire — bincode standard().
@@ -948,6 +1162,7 @@ mod tests {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            batch_task_ids: None,
         };
         let bytes = bincode::serde::encode_to_vec(&req, bincode::config::standard())
             .expect("bincode encode");
@@ -1002,6 +1217,7 @@ mod tests {
             sub_task_kind: Some(SubTaskKind::GateFixup),
             parent_gate_failure_task_id: Some(parent.clone()),
             parent_gate_failure_type: Some("NoSecretStrings".to_owned()),
+            batch_task_ids: None,
         };
 
         // Canonical IPC wire — bincode.
@@ -1068,5 +1284,162 @@ mod tests {
         assert!(!k.requires_justification());
         assert!(!k.requires_approved());
         assert!(k.is_v2_subtask_kind());
+    }
+
+    /// **V3 iter70.** `BatchActivateSubTasks` is a sub-task
+    /// lifecycle kind that wraps a SET of singular activations.
+    /// Carries no SHA range, no justification, no approved
+    /// — same predicate shape as singular `ActivateSubTask`.
+    /// Pinned here so a future widening of the wire shape does
+    /// not silently change the predicate matrix the kernel
+    /// dispatch layer reads.
+    #[test]
+    fn batch_activate_sub_tasks_predicates_match_lifecycle_layer() {
+        let k = IntentKind::BatchActivateSubTasks;
+        assert!(!k.requires_sha_range());
+        assert!(!k.requires_justification());
+        assert!(!k.requires_approved());
+        assert!(k.is_v2_subtask_kind());
+    }
+
+    /// **V3 iter70.** Wire round-trip for a
+    /// `BatchActivateSubTasks` envelope: bincode encode +
+    /// decode preserves `batch_task_ids` exactly, and the JSON
+    /// projection exposes the field for audit-replay UIs.
+    #[test]
+    fn v3_batch_activate_sub_tasks_round_trips_with_candidate_set() {
+        use crate::TaskId;
+        use uuid::Uuid;
+
+        let id_a = TaskId::parse("dep-fetch-evidence").unwrap();
+        let id_b = TaskId::parse("materialize-records").unwrap();
+        let id_c = TaskId::parse("lint-defect").unwrap();
+        let owner = TaskId::parse("orchestrator-root").unwrap();
+        let req = IntentRequest {
+            session_token: "tok".into(),
+            sequence_number: 11,
+            envelope_nonce: "b".repeat(32),
+            intent_kind: IntentKind::BatchActivateSubTasks,
+            task_id: owner.clone(),
+            base_sha: None,
+            head_sha: None,
+            submitted_claims: vec![],
+            justification: None,
+            idempotency_key: Some(Uuid::nil()),
+            approval_token: None,
+            approved: None,
+            critique: None,
+            resolved_via_escalation: None,
+            tokens_used: None,
+            structured_output: None,
+            sub_task_kind: None,
+            parent_gate_failure_task_id: None,
+            parent_gate_failure_type: None,
+            batch_task_ids: Some(vec![id_a.clone(), id_b.clone(), id_c.clone()]),
+        };
+
+        // Canonical IPC wire — bincode.
+        let bytes = bincode::serde::encode_to_vec(&req, bincode::config::standard())
+            .expect("bincode encode");
+        let (back, _): (IntentRequest, _) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+                .expect("bincode decode");
+        assert_eq!(back.intent_kind, IntentKind::BatchActivateSubTasks);
+        let back_ids = back.batch_task_ids.as_ref().expect("batch_task_ids preserved");
+        assert_eq!(back_ids.len(), 3);
+        assert_eq!(back_ids[0], id_a);
+        assert_eq!(back_ids[1], id_b);
+        assert_eq!(back_ids[2], id_c);
+
+        // JSON projection — `batch_task_ids` surfaces literally.
+        let v = serde_json::to_value(&req).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(
+            obj.contains_key("batch_task_ids"),
+            "JSON projection MUST surface `batch_task_ids` for v3 iter70"
+        );
+    }
+
+    /// **V3 iter70.** `IntentOutcome::AcceptedBatch` carries a
+    /// per-id result vector — pin the round-trip so a future
+    /// variant change is caught at unit-test layer.
+    #[test]
+    fn v3_intent_outcome_accepted_batch_round_trips() {
+        use crate::TaskId;
+
+        let outcome = IntentOutcome::AcceptedBatch {
+            remaining_budget: BudgetSnapshot {
+                admission_units: 42,
+            },
+            results: vec![
+                BatchTaskResult {
+                    task_id: TaskId::parse("good-task").unwrap(),
+                    outcome: BatchTaskOutcome::Accepted {
+                        admission_order: 0,
+                    },
+                },
+                BatchTaskResult {
+                    task_id: TaskId::parse("typo-task").unwrap(),
+                    outcome: BatchTaskOutcome::UnknownTask,
+                },
+                BatchTaskResult {
+                    task_id: TaskId::parse("at-cap-task").unwrap(),
+                    outcome: BatchTaskOutcome::DroppedAtCap,
+                },
+                BatchTaskResult {
+                    task_id: TaskId::parse("dup-task").unwrap(),
+                    outcome: BatchTaskOutcome::DuplicateInBatch,
+                },
+                BatchTaskResult {
+                    task_id: TaskId::parse("pred-pending-task").unwrap(),
+                    outcome: BatchTaskOutcome::NotAdmissible {
+                        reason: NotAdmissibleReason::PredecessorsNotComplete {
+                            predecessors: vec![(
+                                "upstream".to_owned(),
+                                "Admitted".to_owned(),
+                            )],
+                        },
+                    },
+                },
+            ],
+        };
+        let bytes =
+            bincode::serde::encode_to_vec(&outcome, bincode::config::standard()).unwrap();
+        let (back, _): (IntentOutcome, _) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+        let results = match back {
+            IntentOutcome::AcceptedBatch { results, .. } => results,
+            other => panic!("expected AcceptedBatch, got {other:?}"),
+        };
+        assert_eq!(results.len(), 5);
+        assert!(matches!(
+            results[0].outcome,
+            BatchTaskOutcome::Accepted { admission_order: 0 }
+        ));
+        assert!(matches!(results[1].outcome, BatchTaskOutcome::UnknownTask));
+        assert!(matches!(results[2].outcome, BatchTaskOutcome::DroppedAtCap));
+        assert!(matches!(
+            results[3].outcome,
+            BatchTaskOutcome::DuplicateInBatch
+        ));
+        match &results[4].outcome {
+            BatchTaskOutcome::NotAdmissible {
+                reason: NotAdmissibleReason::PredecessorsNotComplete { predecessors },
+            } => {
+                assert_eq!(predecessors.len(), 1);
+                assert_eq!(predecessors[0].0, "upstream");
+                assert_eq!(predecessors[0].1, "Admitted");
+            }
+            other => panic!("expected PredecessorsNotComplete, got {other:?}"),
+        }
+    }
+
+    /// **V3 iter70.** The defense-in-depth ceiling on batch
+    /// size is `MAX_BATCH_ACTIVATE_TASK_IDS = 64`. Pinned so a
+    /// future widening of the wire shape is a deliberate
+    /// matrix-update, not an accidental drift.
+    #[test]
+    fn max_batch_activate_task_ids_pin() {
+        assert_eq!(MAX_BATCH_ACTIVATE_TASK_IDS, 64);
     }
 }

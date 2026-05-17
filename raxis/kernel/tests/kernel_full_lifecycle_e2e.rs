@@ -89,7 +89,8 @@ fn build_bogus_intent(seq: u64) -> IntentRequest {
         structured_output: None,
         sub_task_kind: None,
         parent_gate_failure_task_id: None,
-        parent_gate_failure_type: None,
+            parent_gate_failure_type: None,
+            batch_task_ids: None,
     }
 }
 

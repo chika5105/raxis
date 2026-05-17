@@ -1102,6 +1102,54 @@ pub(crate) mod planner_dispatch_log {
                 }
                 level::WARN
             }
+            // V3 iter70 — envelope-level accepted batch. We tag
+            // the line as `accepted_batch` with the per-id
+            // outcome counts so the dashboard can surface
+            // partial-admission turns without needing to
+            // re-shape every consumer of the singular path.
+            IntentOutcome::AcceptedBatch {
+                remaining_budget,
+                results,
+            } => {
+                let total = results.len();
+                let accepted = results
+                    .iter()
+                    .filter(|r| {
+                        matches!(
+                            r.outcome,
+                            raxis_types::BatchTaskOutcome::Accepted { .. }
+                        )
+                    })
+                    .count();
+                let dropped_cap = results
+                    .iter()
+                    .filter(|r| matches!(r.outcome, raxis_types::BatchTaskOutcome::DroppedAtCap))
+                    .count();
+                let not_admissible = results
+                    .iter()
+                    .filter(|r| matches!(r.outcome, raxis_types::BatchTaskOutcome::NotAdmissible { .. }))
+                    .count();
+                let unknown = results
+                    .iter()
+                    .filter(|r| matches!(r.outcome, raxis_types::BatchTaskOutcome::UnknownTask))
+                    .count();
+                let duplicate = results
+                    .iter()
+                    .filter(|r| matches!(r.outcome, raxis_types::BatchTaskOutcome::DuplicateInBatch))
+                    .count();
+                body.insert("status".into(), json!("accepted_batch"));
+                body.insert(
+                    "admission_units_remaining".into(),
+                    json!(remaining_budget.admission_units),
+                );
+                body.insert("batch_total".into(), json!(total));
+                body.insert("batch_accepted".into(), json!(accepted));
+                body.insert("batch_dropped_at_cap".into(), json!(dropped_cap));
+                body.insert("batch_not_admissible".into(), json!(not_admissible));
+                body.insert("batch_unknown".into(), json!(unknown));
+                body.insert("batch_duplicate".into(), json!(duplicate));
+                level::INFO
+            }
         };
         finalize_line(log_level, MODULE, "intent_response", body, ts_unix)
     }
@@ -1604,6 +1652,7 @@ mod planner_dispatch_log_tests {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            batch_task_ids: None,
             tokens_used: None,
             structured_output: None,
         }

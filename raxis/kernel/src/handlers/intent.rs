@@ -140,6 +140,27 @@ pub async fn handle(req: IntentRequest, ctx: &Arc<HandlerContext>) -> IntentResp
     let (verdict_label, verdict_reason): (&'static str, String) = match &resp.outcome {
         IntentOutcome::Accepted { .. } => ("Accepted", "ok".to_owned()),
         IntentOutcome::Rejected { error_code, .. } => ("Rejected", error_code.to_string()),
+        // V3 iter70 — envelope-level success for the batch
+        // primitive. Per-id outcomes are inspected on
+        // `results`, but for the audit-span "verdict" label
+        // the envelope is Accepted (the batch was admitted to
+        // the evaluator; per-id Accepted-vs-not is a separate
+        // metric dimension surfaced via `BatchTaskOutcome`).
+        IntentOutcome::AcceptedBatch { results, .. } => {
+            let accepted = results
+                .iter()
+                .filter(|r| {
+                    matches!(
+                        r.outcome,
+                        raxis_types::BatchTaskOutcome::Accepted { .. }
+                    )
+                })
+                .count();
+            (
+                "AcceptedBatch",
+                format!("accepted={accepted}/{}", results.len()),
+            )
+        }
     };
     span.set_attr("verdict", verdict_label);
     span.set_attr("verdict_reason", verdict_reason.as_str());
@@ -314,7 +335,15 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     // of this handler preserves the single-spawn-point invariant
     // and makes the retry contract trivially auditable.
     if matches!(req.intent_kind, IntentKind::ActivateSubTask) {
-        return handle_activate_sub_task(req, session, session_id, seq, ctx).await;
+        return handle_activate_sub_task(
+            req,
+            session,
+            session_id,
+            seq,
+            ctx,
+            ActivationMode::Singular,
+        )
+        .await;
     }
     if matches!(req.intent_kind, IntentKind::RetrySubTask) {
         return handle_retry_sub_task(req, session, session_id, seq, ctx).await;
@@ -327,6 +356,16 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     // owns shape validation + admit-pipeline routing.
     if matches!(req.intent_kind, IntentKind::AddSubTask) {
         return crate::handlers::add_sub_task::handle(req, session, session_id, seq, ctx).await;
+    }
+    // V3 iter70 — batch-admit primitive. Same early-dispatch
+    // shape as singular `ActivateSubTask`: the batch handler
+    // owns its own envelope validation, per-id classification,
+    // kernel-side scheduling selection, and substrate-spawn
+    // fan-out. INV-IPC-BATCH-REUSE-SINGULAR-MACHINERY-01 — the
+    // per-task admission body is the same code-path as singular
+    // `ActivateSubTask` (no FSM divergence, no SQL divergence).
+    if matches!(req.intent_kind, IntentKind::BatchActivateSubTasks) {
+        return handle_batch_activate_sub_tasks(req, session, session_id, seq, ctx).await;
     }
 
     // ── Phase A (spawn_blocking) — Steps 2-8 + dispatch ───────────────────
@@ -1045,11 +1084,13 @@ fn run_phase_a(
         IntentKind::SingleCommit | IntentKind::IntegrationMerge => {}
         IntentKind::ActivateSubTask
         | IntentKind::RetrySubTask
-        | IntentKind::AddSubTask => {
-            // Belt-and-braces: `handle_inner` intercepts all three
+        | IntentKind::AddSubTask
+        | IntentKind::BatchActivateSubTasks => {
+            // Belt-and-braces: `handle_inner` intercepts these
             // kinds BEFORE Phase A (early-dispatch into
             // `handle_activate_sub_task` / `handle_retry_sub_task` /
-            // `handlers::add_sub_task::handle`), so this arm only
+            // `handlers::add_sub_task::handle` /
+            // `handle_batch_activate_sub_tasks`), so this arm only
             // fires if a future regression lets a sub-task
             // lifecycle kind slip past the early-dispatch. INV-08
             // — coarse code on the wire.
@@ -4868,19 +4909,58 @@ async fn terminate_session_after_activation_failure(
     }
 }
 
+/// **V3 iter70 — `INV-IPC-BATCH-REUSE-SINGULAR-MACHINERY-01`.**
+/// Selector for which entry-point invoked the singular
+/// `handle_activate_sub_task`. `Singular` is the
+/// historical path: the singular IPC envelope was the source of
+/// truth, and we do replay+sequence-advance at Step 1.
+/// `BatchInner` is the per-id call made by
+/// [`handle_batch_activate_sub_tasks`] after IT has performed
+/// replay+sequence-advance on the BATCH envelope; the inner
+/// activation MUST NOT advance the session sequence again
+/// (every batch envelope = one sequence-number consumed,
+/// regardless of how many per-id admissions it fans out into).
+/// All other steps (disk-full gate, per-task cap, activation
+/// FSM, substrate spawn, Active flip, audit-chain emission) are
+/// identical between the two modes — the per-task admission
+/// body is the same code, and the FSM transitions are NOT
+/// touched on either path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivationMode {
+    /// Singular ActivateSubTask envelope from the IPC dispatch
+    /// loop. Do the replay+sequence-advance at Step 1.
+    Singular,
+    /// Per-id call from [`handle_batch_activate_sub_tasks`].
+    /// SKIP the replay+sequence-advance — the batch envelope
+    /// already advanced the session sequence ONCE for the
+    /// whole batch.
+    BatchInner,
+}
+
 async fn handle_activate_sub_task(
     req: IntentRequest,
     _session: authority::session::SessionRow,
     session_id: SessionId,
     seq: u64,
     ctx: &Arc<HandlerContext>,
+    mode: ActivationMode,
 ) -> HandlerResult {
     // ── Step 1: replay protection (envelope acceptance) ────────────────
-    let presented_seq_i64 = match i64::try_from(seq) {
-        Ok(v) => v,
-        Err(_) => return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted)),
-    };
-    {
+    //
+    // V3 iter70 (`INV-IPC-BATCH-REUSE-SINGULAR-MACHINERY-01`):
+    // when invoked as a per-id call from
+    // [`handle_batch_activate_sub_tasks`] (`mode = BatchInner`),
+    // skip the replay/sequence-advance because the BATCH
+    // envelope already consumed the session's next sequence
+    // number on entry to the batch handler. Re-advancing here
+    // would corrupt the session's sequence cursor and produce
+    // `UNAUTHORIZED` rejections on the orchestrator's next
+    // legitimate intent.
+    if matches!(mode, ActivationMode::Singular) {
+        let presented_seq_i64 = match i64::try_from(seq) {
+            Ok(v) => v,
+            Err(_) => return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted)),
+        };
         let store = Arc::clone(&ctx.store);
         let session = session_id.clone();
         let nonce = req.envelope_nonce.clone();
@@ -6002,6 +6082,416 @@ async fn handle_activate_sub_task(
             warn_delegation_stale: false,
         },
     })
+}
+
+// ---------------------------------------------------------------------------
+// handle_batch_activate_sub_tasks — V3 iter70 batch-admit primitive.
+// ---------------------------------------------------------------------------
+//
+// Spec references:
+//   * `IntentKind::BatchActivateSubTasks` doc (this same crate).
+//   * INV-IPC-BATCH-REUSE-SINGULAR-MACHINERY-01 — the per-task
+//     admission body is the SAME `handle_activate_sub_task`
+//     code path (invoked with `ActivationMode::BatchInner`).
+//     The FSM transition rules, SQL writes, audit emissions,
+//     and substrate-spawn sequence are NOT duplicated here.
+//
+// Handler outline:
+//   Step 1.  Envelope check (replay + sequence advance). One
+//            sequence-number consumed per batch envelope —
+//            INDEPENDENT of how many per-id admissions fan out.
+//   Step 2.  Envelope shape validation:
+//              * `batch_task_ids` is `Some(non-empty)`;
+//              * len ≤ `MAX_BATCH_ACTIVATE_TASK_IDS`.
+//            Failure ⇒ `FailInvalidArgument`. NO per-id reject
+//            here — `UnknownTask` typos are per-id outcomes,
+//            not envelope rejections.
+//   Step 3.  Per-id read-only classify (one SQL transaction):
+//              * second-and-later occurrences of the same id
+//                ⇒ `DuplicateInBatch`;
+//              * plan registry miss ⇒ `UnknownTask`;
+//              * tasks.state ≠ `Admitted`
+//                ⇒ `NotAdmissible{WrongState}`;
+//              * missing predecessor closure
+//                ⇒ `NotAdmissible{PredecessorsNotComplete}`;
+//              * subtask_activations row already past
+//                `PendingActivation`
+//                ⇒ `NotAdmissible{AlreadyActive}`;
+//              * else ⇒ Admissible with `admitted_at` for
+//                kernel-side sort.
+//   Step 4.  Kernel-side sort: admissibles sorted by
+//            `(admitted_at ASC, task_id ASC)` — the
+//            orchestrator's input order is IGNORED.
+//   Step 5.  Headroom computation: `max_concurrent_vms -
+//            active_count`, saturated at zero. Take the first
+//            `min(admissible_count, headroom)` from the sorted
+//            list; rest become `DroppedAtCap`.
+//   Step 6.  Per-id admission: for each kernel-selected id,
+//            synthesize an inner IntentRequest with `task_id`
+//            set to the target, invoke
+//            `handle_activate_sub_task` with
+//            `ActivationMode::BatchInner`, and project the
+//            HandlerResult into a `BatchTaskOutcome::Accepted{
+//            admission_order}` (success) or `DroppedAtCap` /
+//            `NotAdmissible{WrongState{observed:"<code>"}}`
+//            (TOCTOU race).
+//   Step 7.  Compose results in the SAME order the orchestrator
+//            submitted (`batch_task_ids` index order) so a
+//            downstream tool wrapper can 1:1 zip. Return
+//            `IntentResponse{outcome: AcceptedBatch{remaining_
+//            budget, results}}`.
+
+#[derive(Debug, Clone)]
+enum BatchClassify {
+    Duplicate,
+    Unknown,
+    NotAdmissible(raxis_types::NotAdmissibleReason),
+    /// Admissible — carries `(admitted_at, task_id)` for the
+    /// kernel-side sort.
+    Admissible { admitted_at: i64 },
+}
+
+async fn handle_batch_activate_sub_tasks(
+    req: IntentRequest,
+    session: authority::session::SessionRow,
+    session_id: SessionId,
+    seq: u64,
+    ctx: &Arc<HandlerContext>,
+) -> HandlerResult {
+    use raxis_types::{
+        BatchTaskOutcome, BatchTaskResult, NotAdmissibleReason, MAX_BATCH_ACTIVATE_TASK_IDS,
+    };
+
+    // ── Step 1: replay protection + sequence advance ───────────────
+    // Identical to the singular ActivateSubTask Step 1. ONE
+    // sequence-number consumed per batch envelope.
+    let presented_seq_i64 = match i64::try_from(seq) {
+        Ok(v) => v,
+        Err(_) => return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted)),
+    };
+    {
+        let store = Arc::clone(&ctx.store);
+        let session = session_id.clone();
+        let nonce = req.envelope_nonce.clone();
+        let audit = Arc::clone(&ctx.audit);
+        let session_s = session.as_str().to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            authority::session::accept_envelope_and_advance_sequence(
+                &session,
+                presented_seq_i64,
+                &nonce,
+                &store,
+            )
+        })
+        .await
+        .map_err(|_| (PlannerErrorCode::Unauthorized, TaskState::Admitted))?;
+        if let Err(reason) = result {
+            let _ = audit.emit(
+                raxis_audit_tools::AuditEventKind::ReplayRejected {
+                    session_id: session_s,
+                    sequence_num: seq,
+                    reason: format!("{reason:?}"),
+                },
+                Some(session_id.as_str()),
+                None,
+                None,
+            );
+            return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted));
+        }
+    }
+
+    // ── Step 2: envelope shape validation ─────────────────────────
+    let candidate_ids: Vec<raxis_types::TaskId> = match req.batch_task_ids.as_ref() {
+        Some(ids) if !ids.is_empty() && ids.len() <= MAX_BATCH_ACTIVATE_TASK_IDS => ids.clone(),
+        _ => return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted)),
+    };
+
+    // ── Step 3: per-id read-only classify (one SQL transaction) ────
+    let classification: Vec<BatchClassify> = {
+        let store_arc = Arc::clone(&ctx.store);
+        let plan_registry_arc = Arc::clone(&ctx.plan_registry);
+        let candidate_ids_clone = candidate_ids.clone();
+        tokio::task::spawn_blocking(move || -> Vec<BatchClassify> {
+            classify_batch_candidates(&candidate_ids_clone, &store_arc, &plan_registry_arc)
+        })
+        .await
+        .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?
+    };
+
+    // ── Step 4: kernel-side sort of admissibles ───────────────────
+    // (admitted_at ASC, task_id ASC). The candidate's index in
+    // `candidate_ids` is preserved so the final response can be
+    // assembled in the SAME order the orchestrator submitted.
+    let mut admissible: Vec<(usize, i64)> = classification
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, c)| match c {
+            BatchClassify::Admissible { admitted_at } => Some((idx, *admitted_at)),
+            _ => None,
+        })
+        .collect();
+    admissible.sort_by(|a, b| {
+        let (idx_a, at_a) = *a;
+        let (idx_b, at_b) = *b;
+        at_a.cmp(&at_b)
+            .then_with(|| candidate_ids[idx_a].as_str().cmp(candidate_ids[idx_b].as_str()))
+    });
+
+    // ── Step 5: headroom truncate ─────────────────────────────────
+    let headroom: usize = {
+        let policy_snapshot = ctx.policy.load();
+        let cap = policy_snapshot.host_capacity().max_concurrent_vms as usize;
+        let running = ctx.session_spawn.active_count().await;
+        cap.saturating_sub(running)
+    };
+    let admit_slice_len = admissible.len().min(headroom);
+    let to_admit: Vec<(usize, i64)> = admissible.iter().take(admit_slice_len).copied().collect();
+    let to_drop_at_cap: Vec<usize> = admissible
+        .iter()
+        .skip(admit_slice_len)
+        .map(|(idx, _)| *idx)
+        .collect();
+
+    // ── Step 6: per-id admission via singular machinery ───────────
+    // For each kernel-selected id, synthesize an inner
+    // IntentRequest{task_id=target, ...}, re-enter
+    // handle_activate_sub_task with mode=BatchInner. The session
+    // sequence cursor was already advanced in Step 1 — BatchInner
+    // explicitly skips the envelope check so we do not re-advance.
+    let mut per_idx_outcome: Vec<Option<BatchTaskOutcome>> = vec![None; candidate_ids.len()];
+    for (admission_slot, (orig_idx, _admitted_at)) in to_admit.iter().enumerate() {
+        let target = candidate_ids[*orig_idx].clone();
+        let mut inner_req = req.clone();
+        inner_req.intent_kind = IntentKind::ActivateSubTask;
+        inner_req.task_id = target.clone();
+        inner_req.batch_task_ids = None;
+        let result = handle_activate_sub_task(
+            inner_req,
+            session.clone(),
+            session_id.clone(),
+            seq,
+            ctx,
+            ActivationMode::BatchInner,
+        )
+        .await;
+        per_idx_outcome[*orig_idx] = Some(match result {
+            Ok(_resp) => BatchTaskOutcome::Accepted {
+                admission_order: admission_slot as u32,
+            },
+            Err((code, _state)) => match code {
+                PlannerErrorCode::FailVmConcurrencyAtCap => BatchTaskOutcome::DroppedAtCap,
+                // TOCTOU race after classify: predecessors changed,
+                // task state changed, or another path raced. Surface
+                // as NotAdmissible{WrongState} with the error code
+                // as the observed-state lexeme — keeps the rich
+                // taxonomy without adding a new outcome variant.
+                other => BatchTaskOutcome::NotAdmissible {
+                    reason: NotAdmissibleReason::WrongState {
+                        observed: format!("{other:?}"),
+                    },
+                },
+            },
+        });
+    }
+    for idx in to_drop_at_cap {
+        per_idx_outcome[idx] = Some(BatchTaskOutcome::DroppedAtCap);
+    }
+
+    // ── Step 7: assemble per-id results in input order ────────────
+    let mut results: Vec<BatchTaskResult> = Vec::with_capacity(candidate_ids.len());
+    for (idx, id) in candidate_ids.iter().enumerate() {
+        let outcome = per_idx_outcome[idx].take().unwrap_or_else(|| match &classification[idx] {
+            BatchClassify::Duplicate => BatchTaskOutcome::DuplicateInBatch,
+            BatchClassify::Unknown => BatchTaskOutcome::UnknownTask,
+            BatchClassify::NotAdmissible(reason) => BatchTaskOutcome::NotAdmissible {
+                reason: reason.clone(),
+            },
+            // Should not happen — `Admissible` candidates went
+            // through Step 6 / drop-at-cap. Treat defensively as
+            // DroppedAtCap so a future refactor surfaces it as a
+            // benign no-op rather than a panic.
+            BatchClassify::Admissible { .. } => BatchTaskOutcome::DroppedAtCap,
+        });
+        results.push(BatchTaskResult {
+            task_id: id.clone(),
+            outcome,
+        });
+    }
+
+    // ── Step 8: orchestrator-lane budget snapshot ─────────────────
+    // The envelope's `task_id` is the orchestrator's own task id
+    // (singular ActivateSubTask convention: envelope identifies
+    // the submitter; payload field carries the targets). Use it
+    // for the lane lookup so the snapshot is the orchestrator's
+    // lane post-state — symmetric with how singular
+    // ActivateSubTask projects its `remaining_budget`.
+    let orchestrator_task_id = req.task_id.as_str().to_owned();
+    let policy_snapshot = ctx.policy.load();
+    let remaining_budget = {
+        let store_for_budget = Arc::clone(&ctx.store);
+        let policy_for_budget = Arc::clone(&policy_snapshot);
+        let task_id_for_budget = orchestrator_task_id.clone();
+        tokio::task::spawn_blocking(move || -> BudgetSnapshot {
+            match load_task(&task_id_for_budget, store_for_budget.as_ref()) {
+                Ok(t) => lane_budget_snapshot(
+                    &t.lane_id,
+                    policy_for_budget.as_ref(),
+                    store_for_budget.as_ref(),
+                ),
+                Err(_) => BudgetSnapshot {
+                    admission_units: 0,
+                },
+            }
+        })
+        .await
+        .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?
+    };
+
+    Ok(IntentResponse {
+        sequence_number: seq,
+        task_state: TaskState::Admitted,
+        outcome: IntentOutcome::AcceptedBatch {
+            remaining_budget,
+            results,
+        },
+    })
+}
+
+/// Classify a batch of candidate task ids in ONE read-only SQL
+/// transaction. Each candidate maps to a [`BatchClassify`] variant
+/// in input order (so the caller can index back by position). The
+/// per-task admission machinery is NOT touched here — this fn is
+/// pure observation; admission happens in
+/// [`handle_batch_activate_sub_tasks`] Step 6 via
+/// `handle_activate_sub_task(.., ActivationMode::BatchInner)`.
+fn classify_batch_candidates(
+    candidate_ids: &[raxis_types::TaskId],
+    store: &Arc<Store>,
+    plan_registry: &Arc<crate::initiatives::plan_registry::PlanRegistry>,
+) -> Vec<BatchClassify> {
+    use std::collections::HashSet;
+    let mut out: Vec<BatchClassify> = Vec::with_capacity(candidate_ids.len());
+    let mut conn = store.lock_sync();
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(_) => {
+            // Defense-in-depth: a tx-begin failure makes every id
+            // an `UnknownTask` (we cannot classify; conservative
+            // surfacing keeps the response well-formed).
+            return candidate_ids
+                .iter()
+                .map(|_| BatchClassify::Unknown)
+                .collect();
+        }
+    };
+    let mut seen: HashSet<String> = HashSet::with_capacity(candidate_ids.len());
+    for id in candidate_ids {
+        let id_str = id.as_str();
+        if !seen.insert(id_str.to_owned()) {
+            out.push(BatchClassify::Duplicate);
+            continue;
+        }
+        // tasks row lookup → state + initiative_id + admitted_at
+        let task_row: Option<(String, String, i64)> = tx
+            .query_row(
+                &format!(
+                    "SELECT initiative_id, state, admitted_at FROM {TASKS} WHERE task_id = ?1"
+                ),
+                rusqlite::params![id_str],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok();
+        let (initiative_id, task_state_str, admitted_at) = match task_row {
+            Some(t) => t,
+            None => {
+                out.push(BatchClassify::Unknown);
+                continue;
+            }
+        };
+        if task_state_str != TaskState::Admitted.as_sql_str() {
+            out.push(BatchClassify::NotAdmissible(
+                raxis_types::NotAdmissibleReason::WrongState {
+                    observed: task_state_str,
+                },
+            ));
+            continue;
+        }
+        // Plan registry — must carry typed agent kind. A missing
+        // registry entry is a defense-in-depth surface: tasks rows
+        // are inserted by `approve_plan` which also populates
+        // `plan_registry`, so a miss here means a corrupt
+        // initialisation that should NOT silently admit.
+        let key =
+            crate::initiatives::plan_registry::TaskKey::new(&initiative_id, id_str);
+        if plan_registry.get(&key).is_none() {
+            out.push(BatchClassify::NotAdmissible(
+                raxis_types::NotAdmissibleReason::PlanRegistryMissing,
+            ));
+            continue;
+        }
+        // Predecessor closure — INV-KERNEL-DAG-AUTHORITY-01.
+        let missing = match missing_predecessors_for_activation(&tx, id_str) {
+            Ok(v) => v,
+            Err(_) => {
+                out.push(BatchClassify::NotAdmissible(
+                    raxis_types::NotAdmissibleReason::WrongState {
+                        observed: "PredecessorLookupFailed".to_owned(),
+                    },
+                ));
+                continue;
+            }
+        };
+        if !missing.is_empty() {
+            out.push(BatchClassify::NotAdmissible(
+                raxis_types::NotAdmissibleReason::PredecessorsNotComplete {
+                    predecessors: missing,
+                },
+            ));
+            continue;
+        }
+        // Latest activation row — must be PendingActivation (the
+        // state machine waiting for an `ActivateSubTask`); anything
+        // else means the task is already running through the
+        // singular path or has been terminated.
+        let activation_state: Option<String> = tx
+            .query_row(
+                &format!(
+                    "SELECT activation_state FROM {SUBTASK_ACTIVATIONS}
+                     WHERE task_id = ?1
+                     ORDER BY created_at DESC
+                     LIMIT 1"
+                ),
+                rusqlite::params![id_str],
+                |r| r.get(0),
+            )
+            .ok();
+        match activation_state.as_deref() {
+            Some("PendingActivation") | None => {
+                // None = no activation row yet (very early state);
+                // singular ActivateSubTask would reject this with
+                // FailUnknownTask. Treat as NotAdmissible so the
+                // orchestrator does not waste a turn re-batching.
+                if activation_state.is_none() {
+                    out.push(BatchClassify::NotAdmissible(
+                        raxis_types::NotAdmissibleReason::WrongState {
+                            observed: "NoPendingActivationRow".to_owned(),
+                        },
+                    ));
+                    continue;
+                }
+                out.push(BatchClassify::Admissible { admitted_at });
+            }
+            Some(other) => {
+                out.push(BatchClassify::NotAdmissible(
+                    raxis_types::NotAdmissibleReason::AlreadyActive,
+                ));
+                let _ = other;
+            }
+        }
+    }
+    // Read-only tx: nothing to commit; drop to release.
+    drop(tx);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -7905,6 +8395,7 @@ mod tests {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            batch_task_ids: None,
         }
     }
 
@@ -8301,6 +8792,7 @@ mod tests {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            batch_task_ids: None,
         }
     }
 
@@ -9702,6 +10194,7 @@ mod tests {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            batch_task_ids: None,
         }
     }
 
@@ -10830,6 +11323,7 @@ mod tests {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            batch_task_ids: None,
         }
     }
 
@@ -11997,6 +12491,7 @@ mod tests {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            batch_task_ids: None,
         }
     }
 

@@ -291,6 +291,11 @@ async fn run_post_ceiling_scenario() {
                      got Rejected({error_code:?}). Kernel stderr:\n{}",
                     kernel.captured_stderr(),
                 ),
+                IntentOutcome::AcceptedBatch { .. } => panic!(
+                    "ReportFailure must not produce AcceptedBatch — wire-shape regression. \
+                     Kernel stderr:\n{}",
+                    kernel.captured_stderr(),
+                ),
             }
         }
         other => panic!(
@@ -504,6 +509,7 @@ impl MockExecutor {
             sub_task_kind: None,
             parent_gate_failure_task_id: None,
             parent_gate_failure_type: None,
+            batch_task_ids: None,
         }
     }
 

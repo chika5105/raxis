@@ -1274,12 +1274,37 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                                  \n\
                                  Otherwise (no Executor row carries \
                                  `aggregate=AtLeastOneRejected` with \
-                                 `retry_admissible=true`), find the first \
-                                 task whose `state` is `pending` \
-                                 (or `admitted`) AND whose `preds_ready=true`. \
-                                 Call `activate_subtask { subtask_task_id: \
-                                 \"<task_id>\" }` with that row's task id \
-                                 (verbatim — case-sensitive). \
+                                 `retry_admissible=true`), find ALL tasks \
+                                 whose `state` is `pending` (or \
+                                 `admitted`) AND whose `preds_ready=true`. \
+                                 If MORE THAN ONE such task exists, \
+                                 call `batch_activate_subtasks { \
+                                 subtask_task_ids: [\"<id_1>\", \
+                                 \"<id_2>\", ...] }` with the full list of \
+                                 candidate ids (verbatim — case-sensitive). \
+                                 The input ORDER does not matter — the \
+                                 kernel runs its own scheduling \
+                                 (`admitted_at ASC, task_id ASC`) and \
+                                 admits as many candidates as fit the \
+                                 current concurrency headroom \
+                                 (configurable per initiative via \
+                                 `[workspace] max_concurrent_admissions`, \
+                                 default 3). The kernel returns a per-id \
+                                 outcome (`Accepted`, `DroppedAtCap`, \
+                                 `NotAdmissible`, `UnknownTask`, \
+                                 `DuplicateInBatch`); your next turn will \
+                                 see the updated DAG with admitted rows \
+                                 in `state=running`. A bad id (typo, \
+                                 hallucination) surfaces as a per-id \
+                                 `UnknownTask` outcome and does NOT \
+                                 poison the rest of the batch. If only \
+                                 ONE task is ready, you MAY use singular \
+                                 `activate_subtask { subtask_task_id: \
+                                 \"<task_id>\" }` instead — the singular \
+                                 path stays available for backward \
+                                 compatibility, but `batch_activate_subtasks` \
+                                 with a single-element list works \
+                                 identically. \
                                  \n\
                                  NEVER activate a row whose \
                                  `preds_ready=false` — at least one of \
@@ -1429,7 +1454,8 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                                     or the literal `<none>` / `<unset>` \
                                     is rejected as `INVALID_REQUEST`.\n\
                               \n\
-                              You MUST call exactly ONE of `activate_subtask`, \
+                              You MUST call exactly ONE of \
+                              `activate_subtask`, `batch_activate_subtasks`, \
                               `retry_subtask`, or `integration_merge` per \
                               turn. Free-form text alone (no tool call) ends \
                               the session in Idle and the kernel records an \
@@ -1451,7 +1477,8 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                               turns in this conversation. By the time you \
                               have used >50% of the budget you should be \
                               issuing terminal-tool calls aggressively \
-                              (`activate_subtask` / `retry_subtask` / \
+                              (`activate_subtask` / \
+                              `batch_activate_subtasks` / `retry_subtask` / \
                               `integration_merge`) rather than re-reading the \
                               `dag=` block; if you have used >75% you must \
                               `integration_merge` if any executor row is \
@@ -1511,6 +1538,44 @@ async fn submit_terminal(
                 DriverError::InvalidTaskId(format!("subtask_task_id `{id}` failed validation: {e}"))
             })?;
             submitter.submit_activate_subtask(parsed).await?;
+        }
+        IntentKind::BatchActivateSubTasks => {
+            // V3 iter70 — batch-admit primitive. The tool input
+            // carries a JSON array under `subtask_task_ids`. Parse
+            // each id through `TaskId::parse` so a malformed id
+            // surfaces as a driver-level error (the kernel would
+            // reject the envelope outright on the bincode round-
+            // trip if we let an invalid string through). The
+            // kernel does NOT inspect the array's order; we ship
+            // it through in input order purely for forensics.
+            let arr = input
+                .get("subtask_task_ids")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if arr.is_empty() {
+                return Err(DriverError::InvalidTaskId(
+                    "batch_activate_subtasks: `subtask_task_ids` must be a \
+                     non-empty array of task ids"
+                        .to_owned(),
+                ));
+            }
+            let mut parsed_ids: Vec<TaskId> = Vec::with_capacity(arr.len());
+            for (idx, v) in arr.iter().enumerate() {
+                let raw = v.as_str().ok_or_else(|| {
+                    DriverError::InvalidTaskId(format!(
+                        "batch_activate_subtasks: subtask_task_ids[{idx}] is not a string"
+                    ))
+                })?;
+                let parsed = TaskId::parse(raw).map_err(|e| {
+                    DriverError::InvalidTaskId(format!(
+                        "batch_activate_subtasks: subtask_task_ids[{idx}]=`{raw}` failed \
+                         validation: {e}"
+                    ))
+                })?;
+                parsed_ids.push(parsed);
+            }
+            submitter.submit_batch_activate_subtasks(parsed_ids).await?;
         }
         IntentKind::RetrySubTask => {
             let id = pick_str(input, "subtask_task_id").unwrap_or_default();
