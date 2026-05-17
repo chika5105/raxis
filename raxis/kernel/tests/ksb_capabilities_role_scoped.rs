@@ -28,8 +28,9 @@
 #![cfg(test)]
 
 use raxis_ksb::{
-    Capabilities, ExecutorCapabilities, InitiativeCapabilityView, MaxTurnsScalingView,
-    OrchestratorCapabilities, ReviewerCapabilities, SessionCapabilityView, TaskCapabilityView,
+    Capabilities, ConcurrencyCapabilityView, ExecutorCapabilities, InitiativeCapabilityView,
+    MaxTurnsScalingView, OrchestratorCapabilities, ReviewerCapabilities, SessionCapabilityView,
+    TaskCapabilityView,
 };
 
 /// V3 fixture default — inert `MaxTurnsScalingView` carrying
@@ -82,6 +83,8 @@ fn orchestrator_envelope_carries_initiative_and_tasks() {
             orchestrator_respawns_remaining: 2,
         },
         tasks: vec![sample_task_view("task-a"), sample_task_view("task-b")],
+        ready_now: Vec::new(),
+        concurrency: ConcurrencyCapabilityView::default(),
         max_turns_scaling: default_scaling(),
     });
     let json = serde_json::to_value(&env).expect("orchestrator serialise");
@@ -214,6 +217,8 @@ fn capabilities_round_trip_through_json_for_every_variant() {
                 orchestrator_respawns_remaining: 3,
             },
             tasks: vec![sample_task_view("task-rt")],
+            ready_now: Vec::new(),
+            concurrency: ConcurrencyCapabilityView::default(),
             max_turns_scaling: default_scaling(),
         }),
         Capabilities::Executor(ExecutorCapabilities {
@@ -283,6 +288,8 @@ fn rendered_capabilities_block_respects_role_scope() {
                 orchestrator_respawns_remaining: 2,
             },
             tasks: vec![sample_task_view("task-x")],
+            ready_now: Vec::new(),
+            concurrency: ConcurrencyCapabilityView::default(),
             max_turns_scaling: default_scaling(),
         },
     )))
@@ -397,6 +404,8 @@ fn inv_ksb_max_turns_visibility_01_all_three_roles_carry_planner_max_turns() {
                 orchestrator_respawns_remaining: 3,
             },
             tasks: vec![],
+            ready_now: Vec::new(),
+            concurrency: ConcurrencyCapabilityView::default(),
             max_turns_scaling: default_scaling(),
         }),
         "orchestrator",
@@ -471,6 +480,8 @@ fn inv_planner_max_turns_progressive_on_retry_01_role_scoped() {
             orchestrator_respawns_remaining: 3,
         },
         tasks: vec![sample_task_view("task-pr")],
+        ready_now: Vec::new(),
+        concurrency: ConcurrencyCapabilityView::default(),
         max_turns_scaling: scaling,
     });
     let orch_json = serde_json::to_value(&orch_caps).expect("orchestrator serialise");

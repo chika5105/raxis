@@ -212,8 +212,8 @@ pub fn evaluate_dispatch(
 mod tests {
     use super::*;
 
-    /// The matrix is a 10×4 grid (10 intent kinds × 3 agent types
-    /// + 1 NULL backward-compat row) with each cell labelled
+    /// The matrix is a 10×4 grid (10 intent kinds × 3 agent types,
+    /// plus 1 NULL backward-compat row) with each cell labelled
     /// `Authorized` or `Unauthorized`. We enumerate every cell
     /// explicitly so that any future table-edit silently breaks
     /// this test instead of silently widening or tightening

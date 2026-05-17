@@ -584,9 +584,59 @@ pub struct OrchestratorCapabilities {
     /// `retry_subtask` on a reviewer (reviewers are
     /// reactivate-only).
     pub tasks: Vec<TaskCapabilityView>,
+    /// V3 iter70+ — kernel-authoritative list of task ids that are
+    /// admissible **right now** for `activate_subtask` /
+    /// `batch_activate_subtasks`. Computed via the SAME predicate
+    /// `handle_activate_sub_task` and `classify_batch_candidates`
+    /// use (`tasks.state IN ('Admitted','GatesPending') AND every
+    /// `task_dag_edges` predecessor is in `tasks.state =
+    /// 'Completed'` AND no live `subtask_activations` row in
+    /// `PendingActivation` / `Running`). Sorted
+    /// `(admitted_at ASC, task_id ASC)` — exactly the order the
+    /// kernel's batch handler applies after candidate
+    /// classification. The orchestrator LLM picks dispatch
+    /// candidates from this list directly; it does NOT re-derive
+    /// admissibility from `preds_ready` / `state` in the rendered
+    /// DAG (which it was getting wrong on the iter70 primary
+    /// plan, falling into NNSP idle-no-terminal-intent). Empty
+    /// vector ⇒ no subtask is dispatchable this turn (consider
+    /// `integration_merge` or yield).
+    /// `INV-KSB-READY-NOW-MATCHES-KERNEL-ADMISSION-01`.
+    #[serde(default)]
+    pub ready_now: Vec<String>,
+    /// V3 iter70+ — concurrency posture the orchestrator sees on
+    /// every turn. Mirrors the kernel's per-initiative concurrency
+    /// gate (`[workspace] max_concurrent_admissions` from the
+    /// signed plan registry).
+    /// `INV-KSB-CONCURRENCY-VIEW-MIRRORS-KERNEL-CAP-01`.
+    #[serde(default)]
+    pub concurrency: ConcurrencyCapabilityView,
     /// V3 — progressive scaling view (this session's
     /// per-attempt budget breakdown).
     pub max_turns_scaling: MaxTurnsScalingView,
+}
+
+/// Per-initiative concurrency posture surfaced to the orchestrator
+/// LLM. Stable on the wire — every field is a u32 so `headroom`
+/// rendering is allocation-free.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConcurrencyCapabilityView {
+    /// `max_concurrent_admissions` from the initiative's plan
+    /// registry entry (`[workspace] max_concurrent_admissions`,
+    /// default 3).
+    pub cap: u32,
+    /// Number of currently-non-terminal subtask activations for
+    /// the initiative (`subtask_activations.activation_state IN
+    /// ('PendingActivation','Running')`). Read at KSB assembly time
+    /// from the same connection that builds the rest of the
+    /// snapshot, so the view is point-in-time consistent with the
+    /// rendered DAG block.
+    pub active_count: u32,
+    /// `cap - active_count`, saturating-clamped at 0 in case the
+    /// kernel admits over-cap during a TOCTOU race (the gate is
+    /// best-effort; a per-id `DroppedAtCap` outcome from the
+    /// batch handler is the kernel's authoritative answer).
+    pub headroom: u32,
 }
 
 /// Executor's envelope. Single task — the one this executor session
@@ -1228,6 +1278,19 @@ fn check_capabilities_delimiter(caps: &Capabilities) -> Result<(), KsbError> {
                 field: "capabilities",
             });
         }
+        // V3 iter70+ — defence-in-depth on `ready_now`. The task
+        // ids come from the kernel's own `tasks` table so the
+        // injection surface is structurally absent (admission-side
+        // INSERT validates the id), but the chokepoint scan stays
+        // honest so a future schema laxity surfaces here rather
+        // than as a prompt-injection escape.
+        for tid in &o.ready_now {
+            if tid.contains(KSB_DELIMITER_CLOSE) {
+                return Err(KsbError::DelimiterInjection {
+                    field: "capabilities",
+                });
+            }
+        }
     }
     if let Capabilities::Reviewer(r) = caps {
         if r.artifact_task_id.contains(KSB_DELIMITER_CLOSE) {
@@ -1276,6 +1339,33 @@ fn push_capabilities(buf: &mut String, caps: &Capabilities) {
             );
             buf.push_str(" remaining=");
             buf.push_str(&o.initiative.orchestrator_respawns_remaining.to_string());
+            buf.push('\n');
+            // V3 iter70+ — emit the kernel-authoritative dispatch
+            // hint lines BEFORE the `tasks=` block so the LLM reads
+            // its admission menu first. The orchestrator system
+            // prompt instructs the model to pick exclusively from
+            // `ready_now=[…]` for `activate_subtask` /
+            // `batch_activate_subtasks` and to consult `concurrency=
+            // cap=N active=M headroom=K` to decide singular vs
+            // batch. The model is forbidden from re-deriving
+            // admissibility from the `dag=` block's per-row
+            // `preds_ready` field.
+            // `INV-KSB-READY-NOW-MATCHES-KERNEL-ADMISSION-01`
+            // `INV-KSB-CONCURRENCY-VIEW-MIRRORS-KERNEL-CAP-01`.
+            buf.push_str("  ready_now=[");
+            for (idx, tid) in o.ready_now.iter().enumerate() {
+                if idx > 0 {
+                    buf.push_str(", ");
+                }
+                buf.push_str(tid);
+            }
+            buf.push_str("]\n");
+            buf.push_str("  concurrency: cap=");
+            buf.push_str(&o.concurrency.cap.to_string());
+            buf.push_str(" active=");
+            buf.push_str(&o.concurrency.active_count.to_string());
+            buf.push_str(" headroom=");
+            buf.push_str(&o.concurrency.headroom.to_string());
             buf.push('\n');
             buf.push_str("  tasks=\n");
             if o.tasks.is_empty() {
@@ -2040,6 +2130,8 @@ mod tests {
                 orchestrator_respawns_remaining: 3,
             },
             tasks: Vec::new(),
+            ready_now: Vec::new(),
+            concurrency: ConcurrencyCapabilityView::default(),
             max_turns_scaling: MaxTurnsScalingView {
                 max_turns_attempt: 1,
                 max_turns_base: 77,

@@ -2942,7 +2942,7 @@ fn parse_plan_workspace_target_ref(plan_toml: &str) -> Result<Option<String>, Li
 ///     a string instead of an integer).
 ///   * Out-of-range values
 ///     (`< 1` or
-///      `> OrchestratorPlanFields::MAX_MAX_CONCURRENT_ADMISSIONS`).
+///     `> OrchestratorPlanFields::MAX_MAX_CONCURRENT_ADMISSIONS`).
 ///     The lower bound is enforced because `0` would silently
 ///     dead-lock the initiative (the gate would never permit a
 ///     respawn); the upper bound (`20`) is a structural ceiling

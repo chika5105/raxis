@@ -31,9 +31,10 @@ use rusqlite::{Connection, OptionalExtension};
 use thiserror::Error;
 
 use raxis_ksb::{
-    Capabilities, CredentialPort, DagRow, ExecutorCapabilities, InitiativeCapabilityView,
-    KsbSnapshot, OrchestratorCapabilities, PendingEscalation, ReviewerCapabilities,
-    ReviewerVerdict, SessionCapabilityView, TaskCapabilityView, KSB_SCHEMA_VERSION,
+    Capabilities, ConcurrencyCapabilityView, CredentialPort, DagRow, ExecutorCapabilities,
+    InitiativeCapabilityView, KsbSnapshot, OrchestratorCapabilities, PendingEscalation,
+    ReviewerCapabilities, ReviewerVerdict, SessionCapabilityView, TaskCapabilityView,
+    KSB_SCHEMA_VERSION,
 };
 use raxis_store::Table;
 use raxis_types::SessionAgentType;
@@ -602,9 +603,23 @@ fn read_dag_rows_for_initiative(
     // one or call `read_file` against `.git/refs/heads/...`,
     // both of which would round-trip incorrect (or empty)
     // values into the kernel.
+    // Filter the synthetic coordinator row (`task_id == initiative_id`,
+    // inserted at orchestrator-spawn time per `lifecycle.rs §spawn_
+    // orchestrator_session_for_initiative` and used to receive the
+    // initiative-level `block_reason` on `IntegrationMerge` failure).
+    // The coordinator row is load-bearing for kernel bookkeeping and
+    // for the dashboard's failure-surface, but it MUST NOT appear in
+    // the orchestrator LLM's `dag=` block: the LLM has no admission
+    // primitive that targets it, and leaking it caused the iter70
+    // primary-initiative NNSP failure where the model spent its
+    // turn budget puzzling "why is there a row whose id matches my
+    // own initiative_id, in state=admitted, with no title or
+    // reviewers?" instead of dispatching ready successor tasks.
+    // (`INV-KSB-COORDINATOR-ROW-HIDDEN-FROM-DAG-01`.)
     let sql = format!(
         "SELECT task_id, state, evaluation_sha FROM {tasks} \
          WHERE initiative_id = ?1 \
+           AND task_id != ?1 \
          ORDER BY admitted_at ASC, task_id ASC",
         tasks = Table::Tasks.as_str(),
     );
@@ -934,10 +949,42 @@ fn assemble_capabilities(
                 read_orchestrator_no_progress_respawn_count(conn, inputs.initiative_id)?;
             let initiative = build_initiative_view(inputs.initiative_id, orch_count);
             let tasks = read_executor_task_capability_views(conn, registry, inputs.initiative_id)?;
+            // V3 iter70+ — surface the kernel-authoritative ready
+            // set and per-initiative concurrency posture directly
+            // to the orchestrator LLM. The previous design forced
+            // the model to re-derive admissibility from `dag=`
+            // rows + `preds_ready` flags, which it consistently
+            // got wrong on plans larger than ~5 tasks and which
+            // ate respawn-budget on `IdleNoTerminalIntent` exits.
+            // Both projections share the SAME SQL connection used
+            // for the rest of the assembly, so the view is
+            // point-in-time consistent with the rendered `dag=`
+            // block.
+            let ready_now = read_ready_now_task_ids(conn, registry, inputs.initiative_id)?;
+            let cap = registry
+                .orchestrator(inputs.initiative_id)
+                .map(|o| o.max_concurrent_admissions)
+                // Defensive default — matches
+                // `OrchestratorPlanFields::default().max_concurrent_admissions`
+                // (= 3). A missing entry would mean a corrupt
+                // initialisation; surfacing `cap=3` here keeps
+                // the KSB renderable while the bigger problem
+                // (missing plan registry entry) surfaces elsewhere.
+                .unwrap_or(3);
+            let active_count =
+                read_active_subtask_activations_count(conn, inputs.initiative_id)?;
+            let headroom = cap.saturating_sub(active_count);
+            let concurrency = ConcurrencyCapabilityView {
+                cap,
+                active_count,
+                headroom,
+            };
             Ok(Capabilities::Orchestrator(OrchestratorCapabilities {
                 session,
                 initiative,
                 tasks,
+                ready_now,
+                concurrency,
                 // V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`
                 // orchestrator carries the scaling view so its
                 // NNSP can reason about retry economics (e.g. surface
@@ -1054,6 +1101,152 @@ fn read_executor_task_capability_views(
         )?);
     }
     Ok(out)
+}
+
+/// V3 iter70+ — compute the kernel-authoritative `ready_now` list:
+/// every executor task in this initiative that
+/// `handle_activate_sub_task` / `classify_batch_candidates` would
+/// admit RIGHT NOW. The predicate mirrors
+/// `handle_batch_activate_sub_tasks` exactly (see
+/// `kernel/src/handlers/intent.rs::classify_batch_candidates`):
+///
+/// * `tasks.state = 'Admitted'` (post-admission, pre-activation)
+/// * `plan_registry` entry present (defense-in-depth)
+/// * every `task_dag_edges` predecessor in `tasks.state = 'Completed'`
+/// * latest `subtask_activations.activation_state = 'PendingActivation'`
+///   (the FSM is parked waiting for an `ActivateSubTask` intent)
+///
+/// The synthetic coordinator row (`task_id == initiative_id`) is
+/// excluded by the outer `task_id != ?1` predicate so the
+/// orchestrator never sees its own bookkeeping row in
+/// `ready_now=[…]`. Reviewer rows are excluded by filtering on
+/// `plan_registry.session_agent_type == Executor` — reviewers are
+/// activated by the kernel's evaluation-sha gate, not by the
+/// orchestrator's `activate_subtask`, so surfacing them as
+/// "ready_now" would be a category error.
+///
+/// Order: `(admitted_at ASC, task_id ASC)` — byte-identical to the
+/// kernel's batch-handler sort, so the LLM picking from this list
+/// in order gets the same admission ordering the kernel would
+/// produce regardless.
+///
+/// Performance: O(N · E_avg) SQL probes per turn, where N is the
+/// task count and E_avg is the average inbound-edge count. On a
+/// 15-task plan that is < 100 SQLite point lookups, well inside
+/// the KSB-assembly budget.
+///
+/// `INV-KSB-READY-NOW-MATCHES-KERNEL-ADMISSION-01`.
+fn read_ready_now_task_ids(
+    conn: &Connection,
+    registry: &PlanRegistry,
+    initiative_id: &str,
+) -> Result<Vec<String>, rusqlite::Error> {
+    let sql = format!(
+        "SELECT task_id FROM {tasks} \
+         WHERE initiative_id = ?1 \
+           AND task_id != ?1 \
+           AND state = ?2 \
+         ORDER BY admitted_at ASC, task_id ASC",
+        tasks = Table::Tasks.as_str(),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let admitted_ids: Vec<String> = stmt
+        .query_map(
+            rusqlite::params![initiative_id, TaskState::Admitted.as_sql_str()],
+            |r| r.get::<_, String>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut out: Vec<String> = Vec::with_capacity(admitted_ids.len());
+    for task_id in admitted_ids {
+        let key = TaskKey::new(initiative_id.to_owned(), task_id.clone());
+        let fields = match registry.get(&key) {
+            Some(f) => f,
+            None => continue,
+        };
+        // Only executor rows are activatable via `activate_subtask` /
+        // `batch_activate_subtasks`. Reviewer activations are driven
+        // by the kernel's evaluation-sha gate, not by the
+        // orchestrator's intent, so they MUST NOT appear here.
+        if fields.session_agent_type != SessionAgentType::Executor {
+            continue;
+        }
+        // Predecessor closure — mirrors
+        // `missing_predecessors_for_activation` in
+        // `kernel/src/handlers/intent.rs`. A non-Completed
+        // predecessor disqualifies the task.
+        let any_unfinished_pred: bool = {
+            let pred_sql = format!(
+                "SELECT 1 \
+                   FROM {edges} AS e \
+                   JOIN {tasks} AS pred \
+                     ON pred.task_id = e.predecessor_task_id \
+                  WHERE e.successor_task_id = ?1 \
+                    AND pred.state != ?2 \
+                  LIMIT 1",
+                edges = Table::TaskDagEdges.as_str(),
+                tasks = Table::Tasks.as_str(),
+            );
+            conn.query_row(
+                &pred_sql,
+                rusqlite::params![&task_id, TaskState::Completed.as_sql_str()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some()
+        };
+        if any_unfinished_pred {
+            continue;
+        }
+        // Latest activation row — must be `PendingActivation`. A
+        // missing row (very-early state) or any other state means
+        // the FSM is not parked at the admission boundary.
+        let activation_state: Option<String> = conn
+            .query_row(
+                &format!(
+                    "SELECT activation_state FROM {acts} \
+                     WHERE task_id = ?1 \
+                     ORDER BY created_at DESC LIMIT 1",
+                    acts = Table::SubtaskActivations.as_str(),
+                ),
+                rusqlite::params![&task_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        if activation_state.as_deref() != Some("PendingActivation") {
+            continue;
+        }
+        out.push(task_id);
+    }
+    Ok(out)
+}
+
+/// V3 iter70+ — count live subtask activations for the
+/// initiative. Mirrors the per-initiative bounded-concurrency
+/// gate enforced by the orchestrator-post-exit respawn hook
+/// (`session_spawn_orchestrator.rs` Mode A), which gates on
+/// `subtask_activations.activation_state = 'Active' AND
+/// initiative_id = ?1`. `Active` is the post-spawn pre-terminate
+/// state — the row carries a non-null `session_id` and an
+/// `activated_at` timestamp, the VM has booted. The result feeds
+/// the LLM's `concurrency: cap=N active=M headroom=K` line so it
+/// can pre-size its `batch_activate_subtasks` request to the
+/// actual headroom and avoid per-id `DroppedAtCap` outcomes from
+/// the kernel's batch handler.
+///
+/// `INV-KSB-CONCURRENCY-VIEW-MIRRORS-KERNEL-CAP-01`.
+fn read_active_subtask_activations_count(
+    conn: &Connection,
+    initiative_id: &str,
+) -> Result<u32, rusqlite::Error> {
+    let sql = format!(
+        "SELECT COUNT(1) FROM {acts} \
+          WHERE initiative_id = ?1 \
+            AND activation_state = 'Active'",
+        acts = Table::SubtaskActivations.as_str(),
+    );
+    let count: i64 = conn.query_row(&sql, rusqlite::params![initiative_id], |r| r.get(0))?;
+    Ok(u32::try_from(count.max(0)).unwrap_or(u32::MAX))
 }
 
 /// For the executor: build the [`TaskCapabilityView`] for the single
@@ -1927,6 +2120,447 @@ mod tests {
             "rendered KSB MUST surface preds_ready=false on the \
              reviewer row; got: {rendered}",
         );
+    }
+
+    /// `INV-KSB-COORDINATOR-ROW-HIDDEN-FROM-DAG-01` — the synthetic
+    /// coordinator task row (`task_id == initiative_id`, inserted at
+    /// orchestrator-spawn time per `lifecycle.rs §spawn_orchestrator_
+    /// session_for_initiative`) MUST NOT appear in
+    /// `OrchestratorCapabilities::tasks` nor in `KsbSnapshot::dag_rows`.
+    /// Leaking it (iter70 regression) caused the orchestrator LLM to
+    /// spend its turn-budget puzzling "why is there a row whose id
+    /// matches my own initiative_id, in state=admitted, with no
+    /// title or reviewers?" instead of dispatching ready successor
+    /// tasks.
+    #[test]
+    fn dag_rows_and_tasks_exclude_synthetic_coordinator_row() {
+        let (store, _dir) = fresh_store();
+        let registry = PlanRegistry::new();
+        let init = "init-iter70-coord";
+        let exec = "real-executor-task";
+        registry.insert_orchestrator(
+            init.to_owned(),
+            OrchestratorPlanFields {
+                cross_cutting_artifacts: vec![],
+                description: "coordinator-row exclusion witness".to_owned(),
+                target_ref: "refs/heads/main".to_owned(),
+                elastic: None,
+                ..Default::default()
+            },
+        );
+        registry.insert(
+            TaskKey::new(init.to_owned(), exec.to_owned()),
+            TaskPlanFields {
+                description: format!("{exec} description"),
+                session_agent_type: SessionAgentType::Executor,
+                ..Default::default()
+            },
+        );
+
+        let conn = store.lock_sync();
+        conn.execute(
+            "INSERT INTO initiatives (
+                 initiative_id, state, terminal_criteria_json,
+                 plan_artifact_sha256, created_at
+             ) VALUES (?1, 'ApprovedPlan', '{}', 'sha-test', 0)",
+            rusqlite::params![init],
+        )
+        .expect("insert initiative");
+        // Synthetic coordinator row (`task_id == initiative_id`).
+        // Mirrors what `lifecycle.rs §spawn_orchestrator_session_
+        // for_initiative` would insert.
+        conn.execute(
+            "INSERT INTO tasks (
+                 task_id, initiative_id, lane_id, state, actor,
+                 policy_epoch, admitted_at, transitioned_at
+             ) VALUES (?1, ?1, 'default', 'Admitted', 'kernel', 0, 0, 0)",
+            rusqlite::params![init],
+        )
+        .expect("insert coordinator row");
+        // Real executor task.
+        conn.execute(
+            "INSERT INTO tasks (
+                 task_id, initiative_id, lane_id, state, actor,
+                 policy_epoch, admitted_at, transitioned_at
+             ) VALUES (?1, ?2, 'default', 'Admitted', 'kernel', 0, 100, 100)",
+            rusqlite::params![exec, init],
+        )
+        .expect("insert executor row");
+        drop(conn);
+
+        let conn = store.lock_sync();
+        let snap = assemble_ksb_snapshot(
+            &conn,
+            &registry,
+            &KsbInputs {
+                initiative_id: init,
+                task_id: None,
+                role: KsbRole::Orchestrator,
+                token_budget_remaining: 0,
+                wallclock_budget_remaining_s: 0,
+                credential_ports: Vec::new(),
+                session_id: "",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
+            },
+        )
+        .expect("assemble orchestrator snapshot");
+        drop(conn);
+
+        // The DAG block MUST carry the real executor row and MUST
+        // NOT carry the synthetic coordinator row.
+        let dag_ids: Vec<&str> = snap.dag_rows.iter().map(|r| r.task_id.as_str()).collect();
+        assert!(
+            dag_ids.contains(&exec),
+            "dag_rows MUST include the real executor row; got: {dag_ids:?}",
+        );
+        assert!(
+            !dag_ids.contains(&init),
+            "dag_rows MUST NOT include the synthetic coordinator row \
+             (task_id == initiative_id); got: {dag_ids:?}",
+        );
+
+        // The capabilities.tasks block (already filters by
+        // `session_agent_type == Executor`) MUST also exclude the
+        // coordinator. Pin the contract explicitly.
+        let caps = snap
+            .capabilities
+            .as_ref()
+            .expect("orchestrator capabilities present");
+        let raxis_ksb::Capabilities::Orchestrator(o) = caps else {
+            panic!("expected Orchestrator capabilities; got {caps:?}");
+        };
+        let task_ids: Vec<&str> = o.tasks.iter().map(|t| t.task_id.as_str()).collect();
+        assert!(
+            !task_ids.contains(&init),
+            "capabilities.tasks MUST NOT include the synthetic \
+             coordinator row; got: {task_ids:?}",
+        );
+
+        // The rendered KSB MUST NOT mention the coordinator's id on
+        // any DAG line.
+        let rendered = raxis_ksb::render_ksb(&snap).expect("render");
+        for line in rendered.lines() {
+            assert!(
+                !(line.trim_start().starts_with(&format!("- {init} ")) && line.contains(" preds_ready=")),
+                "rendered DAG block MUST NOT contain a row for the \
+                 synthetic coordinator (`task_id == initiative_id`); \
+                 offending line: {line:?}; full render:\n{rendered}",
+            );
+        }
+    }
+
+    /// `INV-KSB-READY-NOW-MATCHES-KERNEL-ADMISSION-01` — the
+    /// `OrchestratorCapabilities::ready_now` projection MUST equal
+    /// the set of task ids the kernel's
+    /// `classify_batch_candidates` would mark `Admissible` right
+    /// now. The predicate is: task state == Admitted AND every
+    /// `task_dag_edges` predecessor in `tasks.state = 'Completed'`
+    /// AND the latest `subtask_activations.activation_state ==
+    /// 'PendingActivation'` AND `plan_registry.session_agent_type
+    /// == Executor`.
+    #[test]
+    fn ready_now_matches_kernel_admission_predicate() {
+        let (store, _dir) = fresh_store();
+        let registry = PlanRegistry::new();
+        let init = "init-iter70-ready";
+        let ready_a = "ready-a";
+        let ready_b = "ready-b";
+        let blocked_pred = "blocked-pred";
+        let no_activation_row = "no-activation-row";
+        let reviewer = "reviewer-of-ready-a";
+        let pred_done = "predecessor-completed";
+
+        registry.insert_orchestrator(
+            init.to_owned(),
+            OrchestratorPlanFields {
+                cross_cutting_artifacts: vec![],
+                description: "ready_now witness".to_owned(),
+                target_ref: "refs/heads/main".to_owned(),
+                elastic: None,
+                max_concurrent_admissions: 5,
+            },
+        );
+        for (tid, kind) in &[
+            (pred_done, SessionAgentType::Executor),
+            (ready_a, SessionAgentType::Executor),
+            (ready_b, SessionAgentType::Executor),
+            (blocked_pred, SessionAgentType::Executor),
+            (no_activation_row, SessionAgentType::Executor),
+            (reviewer, SessionAgentType::Reviewer),
+        ] {
+            registry.insert(
+                TaskKey::new(init.to_owned(), (*tid).to_owned()),
+                TaskPlanFields {
+                    description: format!("{tid} description"),
+                    session_agent_type: *kind,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let conn = store.lock_sync();
+        conn.execute(
+            "INSERT INTO initiatives (
+                 initiative_id, state, terminal_criteria_json,
+                 plan_artifact_sha256, created_at
+             ) VALUES (?1, 'Executing', '{}', 'sha', 0)",
+            rusqlite::params![init],
+        )
+        .expect("init");
+        // Coordinator row (must be filtered out everywhere).
+        conn.execute(
+            "INSERT INTO tasks (task_id, initiative_id, lane_id, state, actor, \
+                                policy_epoch, admitted_at, transitioned_at) \
+             VALUES (?1, ?1, 'default', 'Admitted', 'kernel', 0, 0, 0)",
+            rusqlite::params![init],
+        )
+        .expect("coord");
+        // pred_done = Completed (so any successor whose predecessor
+        // closure depends on it gets `preds_ready=true`).
+        conn.execute(
+            "INSERT INTO tasks (task_id, initiative_id, lane_id, state, actor, \
+                                policy_epoch, admitted_at, transitioned_at, \
+                                evaluation_sha) \
+             VALUES (?1, ?2, 'default', 'Completed', 'kernel', 0, 10, 10, ?3)",
+            rusqlite::params![pred_done, init, "a".repeat(40)],
+        )
+        .expect("pred_done");
+        // The candidate fixtures, all Admitted.
+        for (tid, ts) in &[
+            (ready_a, 20i64),
+            (ready_b, 30i64),
+            (blocked_pred, 40i64),
+            (no_activation_row, 50i64),
+            (reviewer, 60i64),
+        ] {
+            conn.execute(
+                "INSERT INTO tasks (task_id, initiative_id, lane_id, state, actor, \
+                                    policy_epoch, admitted_at, transitioned_at) \
+                 VALUES (?1, ?2, 'default', 'Admitted', 'kernel', 0, ?3, ?3)",
+                rusqlite::params![tid, init, ts],
+            )
+            .expect("task");
+        }
+        // Edges:
+        //   ready_a   ⟵ pred_done       (pred Completed → ready)
+        //   blocked_pred ⟵ ready_a      (pred is Admitted not Completed → NOT ready)
+        //   reviewer  ⟵ ready_a         (pred Admitted → reviewer NOT ready,
+        //                                also reviewer rows are excluded
+        //                                from ready_now by agent-type filter)
+        for (pred, succ) in &[
+            (pred_done, ready_a),
+            (ready_a, blocked_pred),
+            (ready_a, reviewer),
+        ] {
+            conn.execute(
+                "INSERT INTO task_dag_edges (initiative_id, predecessor_task_id, \
+                                              successor_task_id, predecessor_satisfied) \
+                 VALUES (?1, ?2, ?3, 0)",
+                rusqlite::params![init, pred, succ],
+            )
+            .expect("edge");
+        }
+        // Activation rows:
+        //   ready_a       latest = PendingActivation (ADMISSIBLE)
+        //   ready_b       latest = PendingActivation (ADMISSIBLE)
+        //   blocked_pred  latest = PendingActivation (would be admissible, but pred not Completed)
+        //   no_activation_row  NO row (NOT admissible)
+        //   reviewer      latest = PendingActivation (reviewers excluded by agent-type filter)
+        for (tid, state, created_at) in &[
+            (ready_a, "PendingActivation", 21i64),
+            (ready_b, "PendingActivation", 31i64),
+            (blocked_pred, "PendingActivation", 41i64),
+            (reviewer, "PendingActivation", 61i64),
+        ] {
+            conn.execute(
+                "INSERT INTO subtask_activations \
+                    (activation_id, task_id, initiative_id, activation_state, \
+                     session_id, crash_retry_count, review_reject_count, \
+                     validation_reject_count, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, NULL, 0, 0, 0, ?5)",
+                rusqlite::params![format!("act-{tid}"), tid, init, state, created_at],
+            )
+            .expect("activation");
+        }
+        drop(conn);
+
+        let conn = store.lock_sync();
+        let snap = assemble_ksb_snapshot(
+            &conn,
+            &registry,
+            &KsbInputs {
+                initiative_id: init,
+                task_id: None,
+                role: KsbRole::Orchestrator,
+                token_budget_remaining: 0,
+                wallclock_budget_remaining_s: 0,
+                credential_ports: Vec::new(),
+                session_id: "",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
+            },
+        )
+        .expect("snapshot");
+        drop(conn);
+
+        let raxis_ksb::Capabilities::Orchestrator(o) = snap
+            .capabilities
+            .as_ref()
+            .expect("capabilities present")
+        else {
+            panic!("expected orchestrator capabilities");
+        };
+
+        assert_eq!(
+            o.ready_now,
+            vec![ready_a.to_owned(), ready_b.to_owned()],
+            "ready_now MUST list only Executor tasks whose latest \
+             activation is PendingActivation AND whose predecessors \
+             are all Completed; got: {:?}",
+            o.ready_now,
+        );
+
+        // Concurrency cap reflects the plan registry value (5);
+        // active_count is 0 (no Active activation rows seeded).
+        assert_eq!(o.concurrency.cap, 5);
+        assert_eq!(o.concurrency.active_count, 0);
+        assert_eq!(o.concurrency.headroom, 5);
+
+        // Renderer must surface both lines in the orchestrator block.
+        let rendered = raxis_ksb::render_ksb(&snap).expect("render");
+        assert!(
+            rendered.contains(&format!("ready_now=[{ready_a}, {ready_b}]")),
+            "rendered KSB MUST surface `ready_now=[…]` in order; got:\n{rendered}",
+        );
+        assert!(
+            rendered.contains("concurrency: cap=5 active=0 headroom=5"),
+            "rendered KSB MUST surface `concurrency:` line; got:\n{rendered}",
+        );
+    }
+
+    /// `INV-KSB-CONCURRENCY-VIEW-MIRRORS-KERNEL-CAP-01` — the
+    /// `active_count` field MUST equal `COUNT(*) FROM
+    /// subtask_activations WHERE initiative_id = ? AND
+    /// activation_state = 'Active'` — the exact predicate the
+    /// orchestrator-post-exit respawn hook uses to gate bounded
+    /// concurrency (`session_spawn_orchestrator.rs` Mode A).
+    #[test]
+    fn concurrency_view_active_count_mirrors_post_exit_hook_predicate() {
+        let (store, _dir) = fresh_store();
+        let registry = PlanRegistry::new();
+        let init = "init-iter70-conc";
+
+        registry.insert_orchestrator(
+            init.to_owned(),
+            OrchestratorPlanFields {
+                cross_cutting_artifacts: vec![],
+                description: "concurrency view witness".to_owned(),
+                target_ref: "refs/heads/main".to_owned(),
+                elastic: None,
+                max_concurrent_admissions: 4,
+            },
+        );
+        // Two executor tasks so the projection has something to
+        // count; agent type kept consistent for the activation row
+        // FK.
+        for tid in &["e-active", "e-pending"] {
+            registry.insert(
+                TaskKey::new(init.to_owned(), (*tid).to_owned()),
+                TaskPlanFields {
+                    description: (*tid).to_owned(),
+                    session_agent_type: SessionAgentType::Executor,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let conn = store.lock_sync();
+        // Seed the session row FIRST so the subtask_activations FK
+        // (session_id) resolves at INSERT time. PRAGMA foreign_keys
+        // is ON in `Store::open`.
+        conn.execute(
+            "INSERT INTO sessions \
+                (session_id, role_id, session_token, lineage_id, \
+                 fetch_quota, created_at, expires_at, revoked) \
+             VALUES ('11111111-1111-1111-1111-111111111111', 'Executor', \
+                     'tok-iter70-conc', 'lin-iter70-conc', 1000, 1, 9999999999, 0)",
+            [],
+        )
+        .expect("session");
+        conn.execute(
+            "INSERT INTO initiatives (initiative_id, state, terminal_criteria_json, \
+                                       plan_artifact_sha256, created_at) \
+             VALUES (?1, 'Executing', '{}', 'sha', 0)",
+            rusqlite::params![init],
+        )
+        .expect("init");
+        conn.execute(
+            "INSERT INTO tasks (task_id, initiative_id, lane_id, state, actor, \
+                                policy_epoch, admitted_at, transitioned_at) \
+             VALUES (?1, ?1, 'default', 'Admitted', 'kernel', 0, 0, 0)",
+            rusqlite::params![init],
+        )
+        .expect("coord");
+        for (tid, ts) in &[("e-active", 10i64), ("e-pending", 20i64)] {
+            conn.execute(
+                "INSERT INTO tasks (task_id, initiative_id, lane_id, state, actor, \
+                                    policy_epoch, admitted_at, transitioned_at) \
+                 VALUES (?1, ?2, 'default', 'Running', 'kernel', 0, ?3, ?3)",
+                rusqlite::params![tid, init, ts],
+            )
+            .expect("task");
+        }
+        // One Active activation row + one PendingActivation row.
+        // The active_count helper counts ONLY Active rows.
+        conn.execute(
+            "INSERT INTO subtask_activations \
+                (activation_id, task_id, initiative_id, activation_state, \
+                 session_id, crash_retry_count, review_reject_count, \
+                 validation_reject_count, created_at, activated_at) \
+             VALUES ('act-active', 'e-active', ?1, 'Active', \
+                     '11111111-1111-1111-1111-111111111111', \
+                     0, 0, 0, 11, 12)",
+            rusqlite::params![init],
+        )
+        .expect("active");
+        conn.execute(
+            "INSERT INTO subtask_activations \
+                (activation_id, task_id, initiative_id, activation_state, \
+                 session_id, crash_retry_count, review_reject_count, \
+                 validation_reject_count, created_at) \
+             VALUES ('act-pending', 'e-pending', ?1, 'PendingActivation', \
+                     NULL, 0, 0, 0, 21)",
+            rusqlite::params![init],
+        )
+        .expect("pending");
+        drop(conn);
+
+        let conn = store.lock_sync();
+        let snap = assemble_ksb_snapshot(
+            &conn,
+            &registry,
+            &KsbInputs {
+                initiative_id: init,
+                task_id: None,
+                role: KsbRole::Orchestrator,
+                token_budget_remaining: 0,
+                wallclock_budget_remaining_s: 0,
+                credential_ports: Vec::new(),
+                session_id: "",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
+            },
+        )
+        .expect("snapshot");
+        drop(conn);
+
+        let raxis_ksb::Capabilities::Orchestrator(o) = snap.capabilities.as_ref().unwrap() else {
+            panic!("orchestrator caps expected");
+        };
+        assert_eq!(o.concurrency.cap, 4);
+        assert_eq!(o.concurrency.active_count, 1);
+        assert_eq!(o.concurrency.headroom, 3);
     }
 
     #[test]

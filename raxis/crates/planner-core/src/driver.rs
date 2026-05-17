@@ -1274,77 +1274,101 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                                  \n\
                                  Otherwise (no Executor row carries \
                                  `aggregate=AtLeastOneRejected` with \
-                                 `retry_admissible=true`), find ALL tasks \
-                                 whose `state` is `pending` (or \
-                                 `admitted`) AND whose `preds_ready=true`. \
-                                 If MORE THAN ONE such task exists, \
-                                 call `batch_activate_subtasks { \
-                                 subtask_task_ids: [\"<id_1>\", \
-                                 \"<id_2>\", ...] }` with the full list of \
-                                 candidate ids (verbatim — case-sensitive). \
-                                 The input ORDER does not matter — the \
-                                 kernel runs its own scheduling \
-                                 (`admitted_at ASC, task_id ASC`) and \
-                                 admits as many candidates as fit the \
-                                 current concurrency headroom \
-                                 (configurable per initiative via \
-                                 `[workspace] max_concurrent_admissions`, \
-                                 default 3). The kernel returns a per-id \
-                                 outcome (`Accepted`, `DroppedAtCap`, \
-                                 `NotAdmissible`, `UnknownTask`, \
-                                 `DuplicateInBatch`); your next turn will \
-                                 see the updated DAG with admitted rows \
-                                 in `state=running`. A bad id (typo, \
-                                 hallucination) surfaces as a per-id \
-                                 `UnknownTask` outcome and does NOT \
-                                 poison the rest of the batch. If only \
-                                 ONE task is ready, you MAY use singular \
-                                 `activate_subtask { subtask_task_id: \
-                                 \"<task_id>\" }` instead — the singular \
-                                 path stays available for backward \
-                                 compatibility, but `batch_activate_subtasks` \
-                                 with a single-element list works \
-                                 identically. \
+                                 `retry_admissible=true`), read the \
+                                 `capabilities.ready_now=[…]` line in \
+                                 the KSB — the kernel populates it with \
+                                 the EXACT set of task ids that are \
+                                 admissible right now (it has already \
+                                 applied every admission predicate: \
+                                 task state, predecessor closure, \
+                                 latest activation FSM state, plan \
+                                 registry presence). Pick your \
+                                 dispatch targets from this list \
+                                 ONLY; do NOT re-derive admissibility \
+                                 from the per-row `preds_ready` / \
+                                 `state` fields in the `dag=` block \
+                                 below. The `dag=` block is forensic \
+                                 (full plan view including completed \
+                                 and failed rows); `ready_now=[…]` is \
+                                 the authoritative menu.\n\
                                  \n\
-                                 NEVER activate a row whose \
-                                 `preds_ready=false` — at least one of \
-                                 its plan-declared predecessors is still \
-                                 short of `Completed` and the kernel will \
-                                 reject the activation (Reviewer rows: \
-                                 `ActivateSubTaskReviewerNoEvalSha` \
-                                 because the immediate Executor \
-                                 predecessor has not stamped \
-                                 `evaluation_sha` yet; Executor rows: a \
-                                 worktree-provision miss because the \
-                                 predecessor's commit closure has not been \
-                                 copied into the orchestrator ODB). Each \
-                                 such rejection burns one of your \
-                                 `orch_no_progress_respawns=` budget slots \
-                                 and on exceedance the kernel will mark the \
-                                 initiative `Failed`. \
-                                 Examples that look tempting but are wrong: \
-                                 the realistic plan's `lint-defect → \
-                                 lint-runner-python → review-lint-defect-A/B` \
-                                 chain — when `lint-defect` reports \
-                                 `state=complete` and \
-                                 `aggregate=NoSuccessors`, the next ready \
-                                 task is `lint-runner-python` (its sole \
-                                 predecessor is now Completed → \
-                                 `preds_ready=true`), NOT \
-                                 `review-lint-defect-A` (its IMMEDIATE \
-                                 predecessor `lint-runner-python` is still \
-                                 Admitted → `preds_ready=false`). \
+                                 - If `ready_now=[]` is EMPTY, there \
+                                   is no admissible subtask this turn. \
+                                   Check whether every Executor row \
+                                   in `dag=` reads `state=completed` \
+                                   AND `aggregate` is `AllPassed` or \
+                                   `NoSuccessors` — if so, you are \
+                                   done; call `integration_merge`. \
+                                   Otherwise yield (the kernel is \
+                                   waiting for an in-flight task to \
+                                   terminate; respawn-driven follow- \
+                                   ups will surface a fresh \
+                                   `ready_now` next turn).\n\
+                                 - If `ready_now=[id_1]` has EXACTLY \
+                                   ONE id, call `activate_subtask { \
+                                   subtask_task_id: \"<id_1>\" }` \
+                                   verbatim.\n\
+                                 - If `ready_now=[id_1, id_2, ...]` \
+                                   has TWO OR MORE ids, consult the \
+                                   `capabilities.concurrency: \
+                                   cap=N active=M headroom=K` line. \
+                                   Call `batch_activate_subtasks { \
+                                   subtask_task_ids: [\"<id>\", …] }` \
+                                   with up to `headroom` ids — or \
+                                   with the entire list when \
+                                   `headroom >= ready_now.len()` (the \
+                                   kernel will admit what fits and \
+                                   surface a per-id `DroppedAtCap` \
+                                   outcome for any overflow). Order \
+                                   inside the input array is \
+                                   IGNORED; the kernel sorts by \
+                                   `(admitted_at ASC, task_id ASC)` \
+                                   and returns per-id outcomes.\n\
                                  \n\
-                                 This rule subsumes reviewer activation: \
-                                 a reviewer row whose \
-                                 `preds_ready=true` is exactly the case \
-                                 where the immediate Executor predecessor \
-                                 has Completed and stamped \
-                                 `evaluation_sha`, which is the kernel's \
-                                 `ActivateSubTask` reviewer-branch \
+                                 The singular and batch forms are \
+                                 interchangeable for one-id dispatch; \
+                                 prefer batch when `ready_now` has \
+                                 multiple entries because it commits \
+                                 every admission decision in a single \
+                                 kernel turn and frees you from \
+                                 chaining `activate_subtask` calls \
+                                 across multiple respawns. \
+                                 \n\
+                                 NEVER activate a task id that is NOT \
+                                 in `ready_now=[…]`. The kernel \
+                                 excluded it for a reason — its \
+                                 predecessor closure is incomplete, \
+                                 its FSM is not parked at the \
+                                 admission boundary, or its plan \
+                                 registry entry is missing. \
+                                 Activating an id outside the menu \
+                                 will be REJECTED by the kernel \
+                                 (Reviewer rows: \
+                                 `ActivateSubTaskReviewerNoEvalSha`; \
+                                 Executor rows: worktree-provision \
+                                 miss; mis-typed id: \
+                                 `FailUnknownTask`) and EACH such \
+                                 rejection burns one of your \
+                                 `orch_no_progress_respawns=` budget \
+                                 slots; on exceedance the kernel \
+                                 marks the initiative `Failed`. The \
+                                 per-row `state=` and `preds_ready=` \
+                                 fields in the `dag=` block are \
+                                 forensic context only — they explain \
+                                 WHY a task is or is not in \
+                                 `ready_now`, they do not authorise \
+                                 you to second-guess the menu. \
+                                 Reviewer activation is handled \
+                                 transparently by `ready_now`: a \
+                                 reviewer becomes \"ready_now\" the \
+                                 instant its immediate Executor \
+                                 predecessor stamps \
+                                 `evaluation_sha`, which is exactly \
+                                 the kernel's reviewer-branch \
                                  admission predicate. Do NOT call \
-                                 `retry_subtask` while `aggregate=Pending` \
-                                 (covered by rule 3a below).\n\
+                                 `retry_subtask` while \
+                                 `aggregate=Pending` (covered by \
+                                 rule 3a below).\n\
                               3. If a row's `state` is `failed` and you judge \
                                  a retry is warranted, call `retry_subtask { \
                                  subtask_task_id: \"<task_id>\" }` instead.\n\
