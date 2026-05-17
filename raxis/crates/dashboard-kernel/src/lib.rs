@@ -1144,6 +1144,37 @@ impl DashboardData for KernelDashboardData {
     /// (we aggregate in two passes and stitch in Rust to keep
     /// the SQL trivially auditable and to avoid the cartesian
     /// blow-up of a window-function over both tables).
+    /// iter68 — `GET /api/tasks/:task_id/witnesses`.
+    ///
+    /// Read-side wrapper around
+    /// `raxis_store::views::witnesses::for_task`. The store
+    /// projection is already shaped correctly; we only need to
+    /// convert the `WitnessRow` → `WitnessView` and forward
+    /// SQL errors as `ApiError::Internal`.
+    fn list_witnesses_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<raxis_dashboard::data::WitnessView>, ApiError> {
+        let conn = self.open_ro()?;
+        let rows = raxis_store::views::witnesses::for_task(&conn, task_id).map_err(|e| {
+            ApiError::Internal {
+                log_only: format!("witnesses for_task: {e}"),
+            }
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|r| raxis_dashboard::data::WitnessView {
+                verifier_run_id: r.verifier_run_id,
+                task_id: r.task_id,
+                gate_type: r.gate_type,
+                result_class: r.result_class,
+                evaluation_sha: r.evaluation_sha,
+                blob_sha256: r.blob_sha256,
+                recorded_at: r.recorded_at.min(i64::MAX as u64) as i64,
+            })
+            .collect())
+    }
+
     /// iter68 — `specs/v3/worktree-snapshots.md` §5.
     ///
     /// List every snapshot row for the task. The SQL query is

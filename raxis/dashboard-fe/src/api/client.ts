@@ -37,6 +37,7 @@ import type {
   SubsystemHealthResponse,
   TaskLlmTurnView,
   TaskView,
+  WitnessView,
   WorktreeSnapshotView,
   UnreadCountResponse,
   UpdatePolicyResponse,
@@ -341,6 +342,14 @@ export const dashboardApi = {
     ): Promise<WorktreeSnapshotView[]> =>
       apiFetch<WorktreeSnapshotView[]>(
         `/api/tasks/${encodeURIComponent(id)}/worktree-snapshots`,
+        signal ? { signal } : {},
+      ),
+    /// iter68 — `GET /api/tasks/:task_id/witnesses`. Returns
+    /// every witness submission recorded against this task,
+    /// newest first. Read-only browse.
+    witnesses: (id: string, signal?: AbortSignal): Promise<WitnessView[]> =>
+      apiFetch<WitnessView[]>(
+        `/api/tasks/${encodeURIComponent(id)}/witnesses`,
         signal ? { signal } : {},
       ),
   },

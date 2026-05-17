@@ -12,6 +12,7 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
 import { TaskLlmTurns } from "@/components/TaskLlmTurns";
+import { TaskWitnesses } from "@/components/TaskWitnesses";
 import { TaskWorktreeSnapshots } from "@/components/TaskWorktreeSnapshots";
 import { fmtAbsolute, fmtRelative } from "@/lib/format";
 import {
@@ -205,6 +206,11 @@ export function TaskDetailPage() {
           rows arrive once the kernel-side tap is wired to
           pass `Some(task_id)` to `gateway.fetch(...)`. */}
       <TaskLlmTurns taskId={t.task_id} />
+
+      {/* iter68 — `<TaskWitnesses>` renders every witness
+          submission recorded against the task, newest first.
+          Pulls from `GET /api/tasks/:id/witnesses`. */}
+      <TaskWitnesses taskId={t.task_id} />
 
       {/* iter68 — `<TaskWorktreeSnapshots>` renders the
           per-task content-addressed snapshot timeline

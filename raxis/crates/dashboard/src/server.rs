@@ -391,6 +391,8 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route("/api/tasks/:id", get(tasks::detail::<D>))
         .route("/api/tasks/:id/outputs", get(tasks::outputs::<D>))
         .route("/api/tasks/:id/llm-turns", get(tasks::llm_turns::<D>))
+        // iter68 — per-task witness timeline. specs/v3 (PR 3).
+        .route("/api/tasks/:id/witnesses", get(tasks::witnesses::<D>))
         // iter68 — worktree snapshots. specs/v3/worktree-snapshots.md
         // §5. The list endpoint is per-task; the detail + blob
         // endpoints are per-snapshot.

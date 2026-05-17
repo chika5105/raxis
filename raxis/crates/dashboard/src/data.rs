@@ -295,6 +295,42 @@ pub struct GateStatRow {
     pub fixup_loop_count: u64,
 }
 
+/// iter68 — `GET /api/tasks/:task_id/witnesses` wire view.
+///
+/// Projection of the `witness_records` row the dashboard renders
+/// on the per-task page (one collapsible card per gate-type
+/// outcome). Mirrors `raxis-store::views::witnesses::WitnessRow`
+/// but with `recorded_at` as a signed Unix-seconds timestamp for
+/// JSON-typed FE consumption.
+///
+/// **Wire-stable.** Schema changes to `witness_records` require a
+/// parallel edit here so the FE does not silently start receiving
+/// rows it cannot render. The route handler MUST NOT join across
+/// `verifier_run_tokens` or read body blobs — those are kept
+/// out-of-band (the body lives at `<data_dir>/witness/<sha256>`
+/// and the dashboard offers a separate route for streaming it).
+#[derive(Debug, Clone, Serialize)]
+pub struct WitnessView {
+    /// Stable id of the `VerifierRunToken` that this witness
+    /// submission redeemed.
+    pub verifier_run_id: String,
+    /// Owning task.
+    pub task_id: String,
+    /// Gate the witness was attached to (e.g. `tests`, `coverage`).
+    pub gate_type: String,
+    /// One of `Pass | Fail | Inconclusive`. The FE renders this
+    /// as a colour-coded pill.
+    pub result_class: String,
+    /// HEAD sha the verifier evaluated against. Pinned by the
+    /// kernel-side `verifier_run_tokens.evaluation_sha`.
+    pub evaluation_sha: String,
+    /// SHA-256 of the verifier body blob on disk
+    /// (`<data_dir>/witness/<blob_sha256>`).
+    pub blob_sha256: String,
+    /// Unix-seconds wall-clock when the witness was recorded.
+    pub recorded_at: i64,
+}
+
 /// One row in `GET /api/tasks/:task_id/worktree-snapshots`.
 ///
 /// iter68 — `specs/v3/worktree-snapshots.md` §3. Each row is a
@@ -1813,6 +1849,27 @@ pub trait DashboardData: Send + Sync + 'static {
             gates: Vec::new(),
             generated_at: 0,
         })
+    }
+
+    /// iter68 — `GET /api/tasks/:task_id/witnesses`.
+    ///
+    /// Returns every witness recorded against the task, newest
+    /// first, projected onto [`WitnessView`]. Default impl returns
+    /// `Ok(vec![])` so older fixtures + the in-memory data layer
+    /// compile without the new capability; production wires this
+    /// through `KernelDashboardData::list_witnesses_for_task`.
+    ///
+    /// **Wire contract.** Ordered by `recorded_at DESC` so the
+    /// most-recent verdict is row 0 — the dashboard renders the
+    /// timeline top-down. Rows where `result_class != "Pass"`
+    /// carry the gate-rejection critique implicitly through the
+    /// `blob_sha256` body file (operator opens the body via a
+    /// separate route).
+    fn list_witnesses_for_task(
+        &self,
+        _task_id: &str,
+    ) -> Result<Vec<WitnessView>, ApiError> {
+        Ok(Vec::new())
     }
 
     /// iter68 — `specs/v3/worktree-snapshots.md` §5.

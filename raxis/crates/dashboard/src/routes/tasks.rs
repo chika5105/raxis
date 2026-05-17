@@ -17,7 +17,7 @@ use axum::Json;
 use serde::Deserialize;
 
 use crate::auth::DashboardRole;
-use crate::data::{StructuredOutputView, TaskLlmTurnView, TaskView};
+use crate::data::{StructuredOutputView, TaskLlmTurnView, TaskView, WitnessView};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
 
@@ -89,6 +89,26 @@ where
     let _ = state.data.get_task(&id)?;
     let records = state.data.tail_task_llm_turns(&id, q.limit)?;
     Ok(Json(records))
+}
+
+/// iter68 — `GET /api/tasks/:task_id/witnesses`.
+///
+/// Returns every witness record for the task, newest first.
+/// Powers `<TaskWitnesses>` on the TaskDetail page so an
+/// operator can see "every gate verdict ever produced for this
+/// task" without re-running anything. Read-role suffices.
+pub async fn witnesses<D>(
+    State(state): State<AppState<D>>,
+    op: AuthorizedOperator,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Vec<WitnessView>>>
+where
+    D: crate::data::DashboardData,
+{
+    require_read(&op)?;
+    let _ = state.data.get_task(&id)?;
+    let rows = state.data.list_witnesses_for_task(&id)?;
+    Ok(Json(rows))
 }
 
 fn require_read(op: &AuthorizedOperator) -> ApiResult<()> {

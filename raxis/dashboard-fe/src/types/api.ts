@@ -368,6 +368,23 @@ export interface TaskLlmTurnView {
   error?: string | null;
 }
 
+/// iter68 — `GET /api/tasks/:task_id/witnesses` row. One
+/// witness submission projection. The blob body lives at
+/// `<data_dir>/witness/<blob_sha256>` and is streamed by a
+/// future blob-fetch route; the FE shows the metadata here.
+export interface WitnessView {
+  verifier_run_id: string;
+  task_id: string;
+  gate_type: string;
+  /// One of `"Pass" | "Fail" | "Inconclusive"`. Colour-coded
+  /// by the FE.
+  result_class: string;
+  evaluation_sha: string;
+  blob_sha256: string;
+  /// Unix-seconds wall-clock the witness was recorded.
+  recorded_at: number;
+}
+
 /// iter68 — `specs/v3/worktree-snapshots.md` §3. One row in
 /// `GET /api/tasks/:task_id/worktree-snapshots` and the response
 /// shape of `GET /api/worktree-snapshots/:id`.
