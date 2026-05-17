@@ -1289,51 +1289,6 @@ parent to `Failed`.
 
 ---
 
-### INV-DASHBOARD-GATE-STATS-PER-GATE-ROLLUP-01 — `GET /api/gates/stats` exposes a stable per-gate rollup
-
-**Statement.** The dashboard's `GET /api/gates/stats` endpoint
-MUST return one row per `gate_type` observed in
-`witness_records`, alphabetically sorted by `gate_type`, with
-the following fields:
-
-  * `pass_count`, `fail_count`, `inconclusive_count` — counts
-    of each `result_class` over the lifetime of the kernel
-    deployment.
-  * `last_seen_at` — `MAX(recorded_at)` over the gate (Unix
-    seconds), `None` when the gate has never run.
-  * `fixup_loop_count` — `SUM(tasks.gate_fixup_attempts)
-    WHERE tasks.last_gate_type = <gate_type>`. Zero when no
-    gate-fixup loops have been admitted for this gate.
-
-The response envelope MUST carry `generated_at` (server wall
-clock at rollup time). On store-read errors the implementation
-MUST surface `Err(ApiError::Internal)` so a silent zero never
-masks a stuck rollup.
-
-**Justification.** Per-gate stats are the operator's
-fastest signal that a verifier is mis-authored (too many
-false-positives → over-budget fixup loops; too many
-inconclusives → I/O fault in the verifier). Bucketing the
-rollup server-side ensures every consumer (Vitest, e2e
-harness, Grafana scrape) sees the same numbers — the
-frontend never derives its own classification. Stable
-alphabetical ordering lets the FE diff row-by-row across
-polls without reconciling positions.
-
-**Scenario.** Two gates are configured: `NoSecretStrings` and
-`SchemaValid`. The kernel records 12 `Pass` + 3 `Fail`
-witnesses for `NoSecretStrings`, 5 `Pass` for `SchemaValid`.
-Two `Fail`s on `NoSecretStrings` triggered fixup loops that
-together admitted 4 `AddSubTask{GateFixup}` rows. The
-`/api/gates/stats` response contains two rows in this order:
-`{ gate_type: "NoSecretStrings", pass_count: 12, fail_count:
-3, inconclusive_count: 0, last_seen_at: <…>, fixup_loop_count:
-4 }` and `{ gate_type: "SchemaValid", pass_count: 5,
-fail_count: 0, inconclusive_count: 0, last_seen_at: <…>,
-fixup_loop_count: 0 }`.
-
----
-
 ### INV-GATE-FIXUP-ADMIT-ATOMIC-01 — Kernel-authoritative gate-fixup admit is a single transaction
 
 **Statement.** The kernel's `gate_fixup::admit_fixup_task_in_tx`
@@ -1449,32 +1404,6 @@ re-transitions `Admitted → Running` on the next intent.
 
 ---
 
-### INV-KSB-GATE-FIXUP-CONTEXT-01 — Fixup-executor KSBs are focused; non-fixup KSBs are unchanged
-
-**Statement.** When the KSB assembler emits a session prelude for
-a task with `is_gate_fixup = 1`, the prelude MUST carry a
-`gate_fixup` block containing `gate_type`, `agent_hint`,
-`parent_task_id`, `parent_evaluation_sha`, and
-`parent_worktree_pointer`. Tasks with `is_gate_fixup = 0` MUST
-NOT carry any gate-rejection state in their KSBs (no critique
-leak from a different task's failed gate).
-
-**Justification.** The fixup executor's whole purpose is to repair
-one specific gate failure; the focused KSB gives it everything it
-needs without diluting the prompt with general initiative
-context. Leaking gate-rejection state into unrelated KSBs makes
-session prompts non-deterministic with respect to which previous
-task was the most recent gate failure — exactly the kind of
-cross-task contamination that the existing KSB shape rules out.
-
-**Scenario.** A primary executor task and a sibling gate-fixup
-task both target the same parent initiative. The primary's KSB
-shows the initiative summary and predecessor completions; the
-fixup's KSB shows the focused `gate_fixup` block with the AWS-key
-hint, the parent's failing evaluation_sha, and nothing else.
-
----
-
 ## Removed / consolidated invariants
 
 The following invariant IDs appeared in earlier drafts of this file
@@ -1505,6 +1434,10 @@ homes still contain the full normative discussion.
 | INV-KSB-* | [`v2/kernel-mechanics-prompt.md`](v2/kernel-mechanics-prompt.md) |
 | INV-RETRY-* | [`v2/agent-disagreement.md`](v2/agent-disagreement.md) |
 | INV-CRED-PROXY-*, INV-PROVIDER-*, INV-ELASTIC-*, INV-PUSH-*, INV-VM-CAP-*, INV-CAPACITY-*, INV-MERGE-*, INV-CLOUD-FWD-*, INV-NETISO-*, INV-OPERATOR-CUSTOM-IMAGE-*, INV-PROXY-TABLE-*, INV-AUDIT-RETENTION-* | feature-area specs; see [`v2/`](v2/) and [`v3/`](v3/) directories |
+| INV-PLANNER-DNS-STUB-SYNC-BIND-01 | code-design constraint inside `raxis::tproxy::dns_stub`; rationale stays in the function's rustdoc |
+| INV-PLANNER-DNS-STUB-SERVFAIL-ON-UPSTREAM-ERROR-01 | code-design constraint inside `raxis::tproxy::dns_stub`; rationale stays in the function's rustdoc |
+| INV-DASHBOARD-GATE-STATS-PER-GATE-ROLLUP-01 | UI feature requirement; see [`v2/dashboard-hardening.md`](v2/dashboard-hardening.md) (matches the existing `INV-DASHBOARD-*` removal row) |
+| INV-KSB-GATE-FIXUP-CONTEXT-01 | KSB-shape detail; see [`v2/kernel-mechanics-prompt.md`](v2/kernel-mechanics-prompt.md) (matches the existing `INV-KSB-*` removal row) |
 
 Code comments still referencing the old IDs are accurate
 descriptions of behaviour — they just point at consolidated parents.

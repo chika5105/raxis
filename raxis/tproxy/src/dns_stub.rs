@@ -80,19 +80,72 @@ pub enum DnsStubError {
     UnexpectedResponse,
 }
 
+/// Owns the bound UDP + TCP listeners. Produced by
+/// [`bind_dns_stub`] (synchronous bind) and consumed by
+/// [`serve_dns_stub`] (the accept loops).
+///
+/// Splitting the bind from the serve loop fixes the iter72
+/// race documented in `specs/v3/guest-agent-jailbreak-replay-iter72.md`
+/// turns 1-6: previously `run_dns_stub` did the bind INSIDE its
+/// own `tokio::spawn` body, so the executor's boot log emitted
+/// `step="airgap-a3-chokepoint" outcome="activated"` BEFORE
+/// `UdpSocket::bind("127.0.0.1:53")` had run. The agent's first
+/// `bash -lc 'python3 ... http.client.HTTPSConnection'` could
+/// fire before `/etc/resolv.conf`'s `nameserver 127.0.0.1` had
+/// a listener, producing `gaierror: [Errno -3] Temporary failure
+/// in name resolution` and a 30-turn diagnostic spiral.
+pub struct BoundDnsStub {
+    udp: UdpSocket,
+    tcp: TcpListener,
+}
+
+impl BoundDnsStub {
+    /// Local-port pair the stub is bound to (always
+    /// `127.0.0.1:53`/`127.0.0.1:53` today; kept as accessors so
+    /// the executor's `outcome="activated"` log can name the
+    /// actual bound address rather than the spec default).
+    pub fn bound_addrs(&self) -> (SocketAddr, SocketAddr) {
+        let udp_addr = self
+            .udp
+            .local_addr()
+            .unwrap_or_else(|_| "127.0.0.1:53".parse().expect("static"));
+        let tcp_addr = self
+            .tcp
+            .local_addr()
+            .unwrap_or_else(|_| "127.0.0.1:53".parse().expect("static"));
+        (udp_addr, tcp_addr)
+    }
+}
+
 /// Bind the V2 default DNS listener pair (`127.0.0.1:53` UDP +
-/// TCP) and run them forever, fanning queries out to the kernel
-/// admission channel.
-pub async fn run_dns_stub(
+/// TCP) synchronously and return the owned listeners. The caller
+/// MUST hand the result to [`serve_dns_stub`] (or drop it to
+/// release the ports).
+///
+/// Errors here are bind-time errors — `EADDRINUSE` from a stray
+/// previous boot, or `EACCES` when the kernel hasn't granted the
+/// planner the right to bind port 53. Both are fail-fast and the
+/// executor exits with `BOOT_ERR_ISOLATION_UNAVAILABLE` so the
+/// substrate observes a clean `SessionVmExited`.
+pub async fn bind_dns_stub() -> Result<BoundDnsStub, DnsStubError> {
+    let bind: SocketAddr = "127.0.0.1:53".parse().expect("static parse");
+    let udp = UdpSocket::bind(bind).await?;
+    let tcp = TcpListener::bind(bind).await?;
+    Ok(BoundDnsStub { udp, tcp })
+}
+
+/// Serve the per-packet / per-connection DNS path forever,
+/// fanning queries out to the kernel admission channel. Consumes
+/// the [`BoundDnsStub`] returned by [`bind_dns_stub`].
+pub async fn serve_dns_stub(
+    listeners: BoundDnsStub,
     host_cid: u32,
     admission_port: u32,
     session_token: String,
 ) -> Result<(), DnsStubError> {
-    let bind: SocketAddr = "127.0.0.1:53".parse().expect("static parse");
-    let udp = UdpSocket::bind(bind).await?;
-    let tcp = TcpListener::bind(bind).await?;
+    let BoundDnsStub { udp, tcp } = listeners;
     eprintln!(
-        "raxis-tproxy(A3 dns): listening 127.0.0.1:53 udp+tcp; \
+        "raxis-tproxy(A3 dns): serving 127.0.0.1:53 udp+tcp; \
          kernel vsock=cid:{host_cid}/port:{admission_port}",
     );
 
@@ -156,7 +209,42 @@ async fn handle_udp_query(
     admission_port: u32,
     session_token: &str,
 ) -> Result<(), DnsStubError> {
-    let response = build_response_for_query(pkt, host_cid, admission_port, session_token).await?;
+    // Per iter72 forensics: when `build_response_for_query`
+    // returned `Err` (e.g. kernel-vsock connect timeout, kernel
+    // returned an unexpected envelope, or the wire packet was
+    // malformed past parse), the old code path propagated `Err`
+    // and **never sent a UDP response back to the libc client**.
+    // The libc resolver then waited the full
+    // `single-request-reopen timeout:5 attempts:2` cycle = 10s
+    // and surfaced `gaierror: [Errno -3] Temporary failure in
+    // name resolution` (EAI_AGAIN), triggering the agent's
+    // 30-turn diagnostic spiral.
+    //
+    // The new contract: any failure between the parsed-question
+    // step and the kernel-vsock round-trip MUST be translated
+    // into a wire SERVFAIL (RCODE=2) response so libc returns
+    // EAI_FAIL (-4) deterministically and the agent's tool gets
+    // a fast, structured error to react to.
+    let response = match build_response_for_query(pkt, host_cid, admission_port, session_token)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "raxis-tproxy(A3 dns): udp query failed, emitting SERVFAIL: {e}"
+            );
+            match build_servfail_from_query(pkt) {
+                Some(r) => r,
+                // Question section was unparseable — even
+                // SERVFAIL needs the qname echoed, so fall back
+                // to dropping the packet. libc will time out
+                // but this branch only fires on truly malformed
+                // wire input, which a libc resolver should never
+                // produce.
+                None => return Err(e),
+            }
+        }
+    };
     // Truncate per RFC1035 if the response exceeds the UDP cap.
     let to_send = if response.len() > MAX_UDP_PAYLOAD {
         truncate_response(&response)
@@ -184,12 +272,63 @@ async fn handle_tcp_connection(
     }
     let mut pkt = vec![0u8; body_len];
     sock.read_exact(&mut pkt).await?;
-    let response = build_response_for_query(&pkt, host_cid, admission_port, session_token).await?;
+    // Same SERVFAIL fallback as the UDP path — never silently
+    // drop a query that the libc resolver is waiting on.
+    let response = match build_response_for_query(&pkt, host_cid, admission_port, session_token)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "raxis-tproxy(A3 dns): tcp query failed, emitting SERVFAIL: {e}"
+            );
+            match build_servfail_from_query(&pkt) {
+                Some(r) => r,
+                None => return Err(e),
+            }
+        }
+    };
     let resp_len = (response.len() as u16).to_be_bytes();
     sock.write_all(&resp_len).await?;
     sock.write_all(&response).await?;
     sock.flush().await?;
     Ok(())
+}
+
+/// Build a SERVFAIL (RCODE=2) wire response from an inbound
+/// query. Echoes the question section so the libc resolver
+/// matches the response to the outstanding query by ID + QNAME.
+///
+/// Returns `None` only when the question section is too damaged
+/// to parse — in that case the caller has no valid choice but to
+/// drop the packet (libc will time out, but a libc-generated
+/// query is never malformed at this layer).
+fn build_servfail_from_query(pkt: &[u8]) -> Option<Vec<u8>> {
+    let parsed = parse_query(pkt).ok()?;
+    Some(build_servfail_response(&parsed))
+}
+
+fn build_servfail_response(q: &ParsedQuery) -> Vec<u8> {
+    let mut out = Vec::with_capacity(32);
+    out.extend_from_slice(&q.id.to_be_bytes());
+    let opcode = (q.flags >> 11) & 0xF;
+    let rd = (q.flags >> 8) & 1;
+    // RCODE=2 (SERVFAIL).
+    let flags_out: u16 = 0x8000              // QR
+        | (opcode << 11)
+        | (rd << 8)
+        | 0x0080                              // RA
+        | 0x0002;                             // SERVFAIL
+    out.extend_from_slice(&flags_out.to_be_bytes());
+    out.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
+    out.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT
+    out.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
+    out.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
+    out.extend_from_slice(&q.qname_wire);
+    out.push(0);
+    out.extend_from_slice(&q.qtype.to_be_bytes());
+    out.extend_from_slice(&q.qclass.to_be_bytes());
+    out
 }
 
 async fn build_response_for_query(
@@ -503,5 +642,42 @@ mod tests {
     #[test]
     fn max_udp_payload_pinned() {
         assert_eq!(MAX_UDP_PAYLOAD, 512);
+    }
+
+    // When build_response_for_query errors (e.g. kernel-vsock
+    // connect timeout), the stub MUST synthesise a SERVFAIL
+    // response from the inbound query so libc returns EAI_FAIL
+    // fast instead of waiting through
+    // `single-request-reopen timeout:5 attempts:2` and surfacing
+    // EAI_AGAIN (the iter72 symptom).
+    #[test]
+    fn build_servfail_from_query_echoes_qname_and_sets_rcode_2() {
+        let q = encode_query_for("example.com", QTYPE_A);
+        let resp = build_servfail_from_query(&q).expect("parses");
+        assert_eq!(&resp[0..2], &0x1234u16.to_be_bytes(), "id echoed");
+        let flags = u16::from_be_bytes([resp[2], resp[3]]);
+        assert_eq!(flags & 0x8000, 0x8000, "QR bit set");
+        assert_eq!(flags & 0x000F, 2, "RCODE=2 (SERVFAIL)");
+        assert_eq!(u16::from_be_bytes([resp[4], resp[5]]), 1, "QDCOUNT=1");
+        assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 0, "ANCOUNT=0");
+        // Question section must be echoed back so libc can match
+        // the response to its outstanding outbound query.
+        let body = &resp[12..];
+        assert!(body.starts_with(b"\x07example\x03com\x00"));
+    }
+
+    #[test]
+    fn build_servfail_from_query_returns_none_on_malformed() {
+        let too_short = vec![0u8; 4];
+        assert!(build_servfail_from_query(&too_short).is_none());
+    }
+
+    #[test]
+    fn build_servfail_response_preserves_question_qtype() {
+        let q = encode_query_for("example.com", QTYPE_AAAA);
+        let resp = build_servfail_from_query(&q).expect("parses");
+        // Last 4 bytes of the question section = qtype + qclass.
+        let qtype = u16::from_be_bytes([resp[resp.len() - 4], resp[resp.len() - 3]]);
+        assert_eq!(qtype, QTYPE_AAAA, "qtype echoed for AAAA query");
     }
 }

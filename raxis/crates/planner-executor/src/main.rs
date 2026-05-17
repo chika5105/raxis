@@ -185,6 +185,9 @@ async fn activate_airgap_a3_chokepoint() -> Result<(), u8> {
     #[cfg(target_os = "linux")]
     {
         use raxis_tproxy::linux::{accept_loop_a3, bind_default_listener};
+        // Bind the tproxy chokepoint synchronously before logging
+        // "activated" so the boot-log ordering pins the actual
+        // listener-ready instant.
         let listener = match bind_default_listener().await {
             Ok(l) => l,
             Err(e) => {
@@ -197,6 +200,30 @@ async fn activate_airgap_a3_chokepoint() -> Result<(), u8> {
                 return Err(64);
             }
         };
+        // Bind the DNS stub synchronously BEFORE returning from
+        // the activation function. Iter72 forensics showed the
+        // previous code spawned `run_dns_stub` directly and let
+        // `tokio::spawn` return immediately; the bind ran inside
+        // the spawn body, so the agent's first
+        // `bash -lc 'python3 ... http.client.HTTPSConnection'`
+        // could fire before `UdpSocket::bind("127.0.0.1:53")` had
+        // run. Symptom: `gaierror: [Errno -3] Temporary failure in
+        // name resolution` followed by a 30-turn diagnostic spiral
+        // (replay file `specs/v3/guest-agent-jailbreak-replay-iter72.md`
+        // turns 1-7).
+        let dns_listeners = match raxis_tproxy::dns_stub::bind_dns_stub().await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"step\":\"airgap-a3-chokepoint\",\
+                      \"role\":\"executor\",\"outcome\":\"dns-bind-failed\",\
+                      \"reason\":{:?}}}",
+                    e.to_string(),
+                );
+                return Err(64);
+            }
+        };
+        let (dns_udp_addr, dns_tcp_addr) = dns_listeners.bound_addrs();
         let token_for_loop = session_token.clone();
         tokio::spawn(async move {
             let res = accept_loop_a3(
@@ -218,8 +245,13 @@ async fn activate_airgap_a3_chokepoint() -> Result<(), u8> {
         });
         let token_for_dns = session_token.clone();
         tokio::spawn(async move {
-            let res =
-                raxis_tproxy::dns_stub::run_dns_stub(host_cid, admission_port, token_for_dns).await;
+            let res = raxis_tproxy::dns_stub::serve_dns_stub(
+                dns_listeners,
+                host_cid,
+                admission_port,
+                token_for_dns,
+            )
+            .await;
             if let Err(e) = res {
                 eprintln!(
                     "{{\"level\":\"error\",\"step\":\"airgap-a3-chokepoint\",\
@@ -233,7 +265,8 @@ async fn activate_airgap_a3_chokepoint() -> Result<(), u8> {
             "{{\"level\":\"info\",\"step\":\"airgap-a3-chokepoint\",\
               \"role\":\"executor\",\"outcome\":\"activated\",\
               \"host_cid\":{host_cid},\"admission_port\":{admission_port},\
-              \"tunnel_port\":{tunnel_port}}}"
+              \"tunnel_port\":{tunnel_port},\
+              \"dns_udp\":\"{dns_udp_addr}\",\"dns_tcp\":\"{dns_tcp_addr}\"}}"
         );
         Ok(())
     }
