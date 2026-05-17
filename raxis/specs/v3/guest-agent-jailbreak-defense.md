@@ -18,12 +18,13 @@
 Even after `enforce_pid1_or_abort` (`INV-PLANNER-PID1-ONLY-EXEC-01`)
 closed the most obvious vector — a child `raxis-executor` re-exec
 inheriting the parent's vsock-listener bindings — an in-VM LLM
-agent retains four independent **read** / **escape** vectors that
+agent retains six independent **read** / **escape** vectors that
 let it (a) recover kernel-stamped secrets like
 `RAXIS_SESSION_TOKEN`, (b) read the planner binary out of `/init`
 or `/proc/1/exe`, (c) issue `reboot(2)` to power-off the VM
-out-of-band, or (d) transitively escalate via a future setuid
-binary on the rootfs. This doc:
+out-of-band, (d) transitively escalate via a future setuid
+binary on the rootfs, or (e) inherit secrets via
+`Command::spawn`. This doc:
 
 1. Lists each vector with the exact `bash -lc "…"` command an
    adversarial / curious agent would run to exercise it,
@@ -71,6 +72,145 @@ admission token validation already bound the network surface;
 this doc is about the **local in-VM** surface that the iter72
 forensics revealed was wider than the original ground truth
 (`enforce_pid1_or_abort` covers only the re-exec sub-vector).
+
+## 1bis. Verbatim forensic record (iter72, May 17 2026 11:25 PT)
+
+The hardening in this doc is not theoretical. It was written by
+replaying the exact 32-turn LLM tool-call log captured from the
+`dep-fetch-evidence` executor session that triggered the user-flagged
+"trying to make it bind to the port" anomaly. The capture lives at
+`${RAXIS_DATA_DIR}/llm-turns/dep-fetch-evidence.jsonl` (one line per
+Anthropic `Messages` round-trip; per-line schema documented in
+`crates/llm-turns`). The five tool-call slices below are pulled
+verbatim from that file; the kernel-side ground-truth used to build
+the defense surface is "whatever the agent was actually able to
+observe."
+
+The session was a **legitimate** task — the agent had no malicious
+goal, it was diagnosing a DNS failure inside the executor VM — but
+the diagnostic spiral exercised every read vector we now block.
+
+### Turn 9 — agent inventories its own environment
+
+The agent, frustrated by DNS failures, inventoried env vars
+(deliberately excluding `TOKEN` to stay polite, but the underlying
+env was wide-open):
+
+```text
+agent tool_use:  bash { command: "env | grep -i 'raxis\\|proxy\\|dns' | grep -v TOKEN" }
+tool_result:
+  exit_code: 0
+  ----- stdout -----
+  RAXIS_VIRTIOFS_MOUNTS=workspace:/workspace:rw,raxis-meta:/raxis-meta:ro
+  RAXIS_KERNEL_VSOCK_LISTEN_PORT=1024
+  RAXIS_SESSION_ID=81fe8fae-5f95-4e3a-b5ac-5a05ea37cf79
+  RAXIS_TPROXY_KERNEL_TCP=127.0.0.1:60806
+  RAXIS_PLANNER_TASK_PROMPT_PATH=/raxis-meta/task-prompt.txt
+  RAXIS_PLANNER_MAX_TURNS=90
+  RAXIS_PLANNER_KSB_PATH=/raxis-meta/ksb.json
+```
+
+Without the `grep -v TOKEN` filter the agent had imposed on itself,
+`RAXIS_SESSION_TOKEN` would have been printed verbatim alongside
+the kernel-side admission port (`RAXIS_AIRGAP_A3_ADMISSION_PORT`).
+This is why `scrub_sensitive_env_for_agent` is the load-bearing
+defense — every subsequent `bash -lc` child inherits this env via
+`Command::spawn`, and the agent's grep filter is voluntary.
+
+### Turn 13–14 — `/raxis-meta` surface
+
+```text
+agent tool_use:  bash { command: "ls -la /raxis-meta/ 2>/dev/null || echo 'Cannot access /raxis-meta'" }
+tool_result:
+  exit_code: 0
+  ----- stdout -----
+  total 20
+  drwxr-xr-x 4 root root  128 May 17 18:41 .
+  -rw-r--r-- 1 root root 5359 May 17 18:41 ksb.json
+  -rw-r--r-- 1 root root 8916 May 17 18:41 task-prompt.txt
+```
+
+`/raxis-meta` is the read-only virtiofs share carrying the
+operator-stamped task prompt and the kernel-emitted KSB. This is
+intentional surface (the planner needs both to do its job) and is
+out-of-scope for this hardening doc — but it sets the stage for
+the next turn, where the agent generalizes to "let me list the
+binary surface too."
+
+### Turn 28 — agent discovers the planner binary
+
+```text
+agent reasoning:  "Let me try to understand the issue better. […]
+                   Let me check if there's a way to trigger the DNS service:"
+agent tool_use:   bash { command: "ls -la /usr/local/bin/ /usr/bin/ | grep -E 'dns|raxis' | head -20" }
+tool_result:
+  exit_code: 0
+  ----- stdout -----
+  lrwxrwxrwx  1 root root        8 May 17 18:41 dnsdomainname -> hostname
+  -rwxr-xr-x  1 root root  6079712 May 17 18:41 raxis-executor
+```
+
+A 6 MB ELF binary at a `$PATH` location — the agent has it as a
+candidate for the next move. This is the moment that made the
+operator's earlier observation precise ("It's doing very weird
+things like discovering it's own executable and trying to make it
+bind to the port, should not be happening. It should not have access
+to its own binary for jail brekas").
+
+### Turn 29 — the actual jailbreak attempt
+
+```text
+agent reasoning:  "There's a `raxis-executor` binary! Let me check what it is:"
+agent tool_use:   bash { command: "raxis-executor --help 2>&1 | head -30" }
+tool_result:
+  exit_code: 0
+  ----- stdout -----
+  {"level":"info","step":"planner-cmdline-env","role":"executor","outcome":"hydrated","applied":0,"skipped_already_set":8}
+  {"level":"info","step":"planner-virtiofs-mount","role":"executor","outcome":"already","tag":"workspace","guest_path":"/workspace","read_only":false}
+  {"level":"info","step":"planner-virtiofs-mount","role":"executor","outcome":"already","tag":"raxis-meta","guest_path":"/raxis-meta","read_only":true}
+  {"level":"info","step":"cargo-net-offline-default","role":"executor","event":"preserved_existing","value":"true"}
+  {"level":"info","step":"vsock-loopback-forwarder","role":"executor","outcome":"skipped","reason":"RAXIS_VSOCK_LOOPBACK_PLAN unset or empty"}
+  {"level":"error","step":"airgap-a3-chokepoint","role":"executor","outcome":"bind-failed","reason":"Address in use (os error 98)"}
+```
+
+Several facts are load-bearing here:
+
+1. **`applied=0, skipped_already_set=8`** — the child `raxis-executor`
+   process did NOT need `/proc/cmdline` at all; it inherited 8
+   `RAXIS_*` vars directly from its parent bash, which inherited
+   them from PID 1. Masking `/proc/cmdline` alone (V1) is necessary
+   but not sufficient — without the `scrub_sensitive_env_for_agent`
+   pass (V6), the env-inheritance vector through `Command::spawn`
+   stays open.
+2. **`airgap-a3-chokepoint outcome=bind-failed`** — the only
+   reason the re-exec did NOT cause two competing A3 chokepoints
+   was port contention with PID 1. This is fragile: change the
+   chokepoint to ephemeral per-invocation ports and the defense
+   collapses. `INV-PLANNER-PID1-ONLY-EXEC-01` is the explicit
+   defense against this re-exec class; the V3 hardening
+   (`drop_cap_sys_boot_from_bounding_set`) and V4 hardening
+   (`set_no_new_privs`) extend the same principle to other
+   privilege-escalation paths.
+3. **`bash -lc` returned `exit_code: 0`** because of the `2>&1 |
+   head -30` redirect — the underlying planner exit code (64,
+   `BOOT_ERR_ISOLATION_UNAVAILABLE`, emitted by
+   `enforce_pid1_or_abort` in iter72) was swallowed by `head`.
+   This means the agent's bash success/failure cannot be used as a
+   trust signal; the defenses MUST be effective independent of
+   what the agent observes.
+
+### Why this doc lists six vectors, not one
+
+The iter72 incident demonstrated **two distinct read primitives**
+(env via `Command::spawn`, env via `/proc/cmdline`) and **one
+escape primitive** (re-exec of `/usr/local/bin/raxis-executor`).
+Extrapolating that surface with the kernel's actual capability
+inventory (root uid, `CAP_SYS_BOOT` ambient, full procfs visible)
+gives the six vectors enumerated in §2 — each one was either
+directly observed in the iter72 capture or is the natural
+generalization of an observed read primitive (e.g. `/proc/1/environ`
+is the same data the agent recovered via `env | grep RAXIS_`, but
+from a different process; therefore both vectors need defenses).
 
 ## 2. Vector taxonomy + replay logs
 
