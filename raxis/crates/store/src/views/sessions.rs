@@ -31,6 +31,27 @@ pub struct SessionRow {
     pub expires_at: u64,
     pub revoked: bool,
     pub revoked_at: Option<u64>,
+    /// iter69 — first observed provider id for this session
+    /// (e.g. `"anthropic-prod"`). Populated opportunistically by
+    /// the kernel's intent handler the first time a planner
+    /// `IntentReport.tokens_used.provider_id` lands. `None` for
+    /// sessions that have not yet round-tripped through the
+    /// gateway (orchestrator sessions before their first
+    /// planner_fetch, sessions that short-circuit on a
+    /// deterministic check, V2.5-era sessions that pre-date
+    /// migration 25). Surfaced by the dashboard's session detail
+    /// view; renders "—" when `None`.
+    pub provider: Option<String>,
+    /// iter69 — most-recently observed model id for this session
+    /// (e.g. `"claude-3-5-sonnet-20241022"`). Populated lazily on
+    /// the dashboard read path by walking the latest LLM turn
+    /// capture for this session (today; a future iteration moves
+    /// the write inline with `record_to_view`). Note: the column
+    /// itself is currently always read-as-NULL by the store layer
+    /// — the dashboard does the enrichment on read so that
+    /// existing pre-iter69 sessions also surface a model badge
+    /// once they emit their next turn. See migration 25.
+    pub model: Option<String>,
 }
 
 /// Three-bucket projection of all session rows.
@@ -198,7 +219,8 @@ pub fn active_list(conn: &RoConn, limit: usize) -> Result<Vec<SessionRow>, Sessi
     let now_i = unix_now_secs().min(i64::MAX as u64) as i64;
     let mut stmt = conn.prepare(&format!(
         "SELECT session_id, role_id, lineage_id, worktree_root, \
-                sequence_number, created_at, expires_at, revoked, revoked_at \
+                sequence_number, created_at, expires_at, revoked, revoked_at, \
+                provider, model \
          FROM {} \
          WHERE revoked = 0 AND expires_at > ?1 \
          ORDER BY created_at DESC LIMIT ?2",
@@ -216,6 +238,8 @@ pub fn active_list(conn: &RoConn, limit: usize) -> Result<Vec<SessionRow>, Sessi
                 expires_at: r.get::<_, i64>(6)?.max(0) as u64,
                 revoked: r.get::<_, i64>(7)? != 0,
                 revoked_at: r.get::<_, Option<i64>>(8)?.map(|v| v.max(0) as u64),
+                provider: r.get::<_, Option<String>>(9)?,
+                model: r.get::<_, Option<String>>(10)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -242,7 +266,8 @@ pub fn active_list(conn: &RoConn, limit: usize) -> Result<Vec<SessionRow>, Sessi
 pub fn by_id(conn: &RoConn, session_id: &str) -> Result<Option<SessionRow>, SessionViewError> {
     let mut stmt = conn.prepare(&format!(
         "SELECT session_id, role_id, lineage_id, worktree_root, \
-                sequence_number, created_at, expires_at, revoked, revoked_at \
+                sequence_number, created_at, expires_at, revoked, revoked_at, \
+                provider, model \
          FROM {} \
          WHERE session_id = ?1 \
          LIMIT 1",
@@ -260,6 +285,8 @@ pub fn by_id(conn: &RoConn, session_id: &str) -> Result<Option<SessionRow>, Sess
                 expires_at: r.get::<_, i64>(6)?.max(0) as u64,
                 revoked: r.get::<_, i64>(7)? != 0,
                 revoked_at: r.get::<_, Option<i64>>(8)?.map(|v| v.max(0) as u64),
+                provider: r.get::<_, Option<String>>(9)?,
+                model: r.get::<_, Option<String>>(10)?,
             })
         })
         .map(Some)
@@ -268,6 +295,53 @@ pub fn by_id(conn: &RoConn, session_id: &str) -> Result<Option<SessionRow>, Sess
             other => Err(other),
         })?;
     Ok(row)
+}
+
+/// iter69 — best-effort write of the session's `provider` and
+/// `model` columns added in migration 25. The kernel calls this
+/// from the intent handler whenever a planner reports a non-empty
+/// `provider_id` (and, opportunistically, when the LLM turn
+/// capture for this session has parsed a non-empty `body.model`).
+///
+/// Semantics
+///   * NULL-coalescing: the first observed value sticks. Re-calls
+///     with a different provider/model are no-ops while the row
+///     already has a non-NULL value. This matches the per-session
+///     "first provider id wins" reporting model that the rest of
+///     the kernel assumes (provider migration mid-session is an
+///     escalation, not a silent column rewrite).
+///   * Best-effort: errors are swallowed by the caller. The store
+///     layer surfaces the rusqlite error so a writer that wants
+///     to be loud can; the kernel-side caller intentionally
+///     ignores it because the dashboard already has a runtime
+///     fallback (walk the latest LLM turn capture) and a stale
+///     NULL is preferable to a failed intent admission.
+///   * Idempotent: every successful call either writes once or
+///     no-ops. Safe to invoke on every intent.
+///
+/// The `WHERE` filter on `session_id` is keyed on the PK, so the
+/// statement compiles down to a single B-tree lookup; the cost is
+/// well under a microsecond on any reasonable kernel.db size.
+pub fn set_session_provider_model_if_unset(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<usize, rusqlite::Error> {
+    // COALESCE keeps the FIRST observed value. NULL parameters
+    // are NO-OPS thanks to the `COALESCE(col, ?, col)` shape —
+    // the value reduces to the existing column when the
+    // parameter is NULL, then COALESCE'd back into itself.
+    conn.execute(
+        &format!(
+            "UPDATE {} SET \
+                provider = COALESCE(provider, ?1), \
+                model    = COALESCE(model,    ?2) \
+             WHERE session_id = ?3",
+            Table::Sessions.as_str(),
+        ),
+        rusqlite::params![provider, model, session_id],
+    )
 }
 
 fn unix_now_secs() -> u64 {
@@ -482,6 +556,161 @@ mod tests {
         let tmp = fresh_store_with_seed_sessions();
         let conn = open_ro(tmp.path()).unwrap();
         assert!(by_id(&conn, "no-such-session").unwrap().is_none());
+    }
+
+    // iter69 — migration 25 added nullable `provider` and `model`
+    // columns. The store SELECTs both into `SessionRow`. The seed
+    // does NOT populate them, so the round-trip MUST surface
+    // `None` on both fields. A regression here means the SELECT
+    // column order silently drifted, which would have the
+    // dashboard render arbitrary string columns as
+    // provider/model. The test pins the contract.
+
+    #[test]
+    fn by_id_returns_null_provider_and_model_for_pre_iter69_seed() {
+        let tmp = fresh_store_with_seed_sessions();
+        let conn = open_ro(tmp.path()).unwrap();
+        let r = by_id(&conn, "s-active").unwrap().unwrap();
+        assert_eq!(
+            r.provider, None,
+            "fresh seed inserts no provider; migration 25 column defaults to NULL"
+        );
+        assert_eq!(
+            r.model, None,
+            "fresh seed inserts no model; migration 25 column defaults to NULL"
+        );
+    }
+
+    #[test]
+    fn active_list_surfaces_null_provider_and_model_for_pre_iter69_seed() {
+        let tmp = fresh_store_with_seed_sessions();
+        let conn = open_ro(tmp.path()).unwrap();
+        let rows = active_list(&conn, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.provider, None);
+        assert_eq!(r.model, None);
+    }
+
+    /// iter69 — the writer is the single point of truth for the
+    /// `sessions.provider` / `sessions.model` column writes. The
+    /// COALESCE shape means the FIRST observed value sticks. The
+    /// kernel relies on this so a mid-session provider failover
+    /// does NOT silently rewrite the session's "first observed
+    /// provider" telemetry visible to operators on the dashboard.
+    #[test]
+    fn set_session_provider_model_records_first_observation() {
+        const SESSIONS: &str = Table::Sessions.as_str();
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
+        {
+            let g = store.lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {SESSIONS} \
+                     (session_id, role_id, session_token, lineage_id, \
+                      fetch_quota, created_at, expires_at, revoked) \
+                     VALUES ('s-1', 'Executor', 'tok-1', 'lin', 0, 100, 9999999999, 0)"
+                ),
+                [],
+            )
+            .unwrap();
+            let n = set_session_provider_model_if_unset(
+                &g,
+                "s-1",
+                Some("anthropic-prod"),
+                Some("claude-3-5-sonnet"),
+            )
+            .unwrap();
+            assert_eq!(n, 1, "UPDATE must affect exactly one row");
+        }
+        let conn = open_ro(tmp.path()).unwrap();
+        let r = by_id(&conn, "s-1").unwrap().unwrap();
+        assert_eq!(r.provider.as_deref(), Some("anthropic-prod"));
+        assert_eq!(r.model.as_deref(), Some("claude-3-5-sonnet"));
+    }
+
+    #[test]
+    fn set_session_provider_model_is_coalesce_idempotent() {
+        const SESSIONS: &str = Table::Sessions.as_str();
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
+        let g = store.lock_sync();
+        g.execute(
+            &format!(
+                "INSERT INTO {SESSIONS} \
+                 (session_id, role_id, session_token, lineage_id, \
+                  fetch_quota, created_at, expires_at, revoked) \
+                 VALUES ('s-1', 'Executor', 'tok-1', 'lin', 0, 100, 9999999999, 0)"
+            ),
+            [],
+        )
+        .unwrap();
+
+        set_session_provider_model_if_unset(&g, "s-1", Some("anthropic-prod"), None).unwrap();
+        // Second call with a DIFFERENT provider: must NOT overwrite —
+        // the FIRST observed value sticks. This is the regression
+        // witness for "provider failover mid-session silently
+        // rewrites the dashboard header".
+        set_session_provider_model_if_unset(&g, "s-1", Some("openai-prod"), None).unwrap();
+
+        let provider: Option<String> = g
+            .query_row(
+                &format!("SELECT provider FROM {SESSIONS} WHERE session_id = 's-1'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            provider.as_deref(),
+            Some("anthropic-prod"),
+            "first observed provider must stick (COALESCE semantics)"
+        );
+    }
+
+    #[test]
+    fn set_session_provider_model_null_param_is_a_noop() {
+        const SESSIONS: &str = Table::Sessions.as_str();
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
+        let g = store.lock_sync();
+        g.execute(
+            &format!(
+                "INSERT INTO {SESSIONS} \
+                 (session_id, role_id, session_token, lineage_id, \
+                  fetch_quota, created_at, expires_at, revoked) \
+                 VALUES ('s-1', 'Executor', 'tok-1', 'lin', 0, 100, 9999999999, 0)"
+            ),
+            [],
+        )
+        .unwrap();
+        // Both params NULL: row touched (UPDATE fires) but neither
+        // column should change. We assert by reading back both
+        // columns and expecting NULL. The kernel takes this path
+        // when it has a provider id but no model id at intent-
+        // dispatch time.
+        set_session_provider_model_if_unset(&g, "s-1", None, None).unwrap();
+        let (provider, model): (Option<String>, Option<String>) = g
+            .query_row(
+                &format!("SELECT provider, model FROM {SESSIONS} WHERE session_id = 's-1'"),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(provider, None);
+        assert_eq!(model, None);
+    }
+
+    #[test]
+    fn set_session_provider_model_unknown_session_is_a_noop() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
+        let g = store.lock_sync();
+        let n = set_session_provider_model_if_unset(&g, "ghost", Some("anthropic"), None).unwrap();
+        assert_eq!(
+            n, 0,
+            "UPDATE on unknown session must affect zero rows — silent no-op"
+        );
     }
 
     /// `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01`. The seed has

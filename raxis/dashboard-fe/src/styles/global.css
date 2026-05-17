@@ -117,8 +117,46 @@
     height: 100%;
   }
 
+  /*
+   * iter69 — global density bump
+   * ────────────────────────────
+   * Operators reported that the dashboard at the browser's
+   * default 100 % zoom is "not clear" (too small to scan on a
+   * 1440p+ display). Reference screenshot at browser zoom
+   * 150 % was the target. We bump density via two independent
+   * dials so operators who prefer the previous tightness can
+   * still override with Cmd+Minus:
+   *
+   *   1. `html { font-size: 18px }` raises the rem base from
+   *      Tailwind's default 16 px → 18 px (a 12.5 % bump for
+   *      every `rem`-sized utility, including `text-base`,
+   *      `text-sm`, `text-xs`, and the rem-derived spacing
+   *      tokens). This is the conservative half — it scales
+   *      the chrome without touching ratios.
+   *
+   *   2. `body { zoom: 1.25 }` adds a 25 % scale on top of the
+   *      rem bump, so the effective default magnification ≈
+   *      1.41 × → close enough to the operator's 150 %
+   *      reference, while leaving room for Cmd+Plus / Cmd+
+   *      Minus to overshoot in either direction.
+   *
+   * `zoom` is a non-standard but extremely well-supported
+   * property (Chromium / WebKit since forever; Firefox 126+).
+   * Applied at the `body` level — not `html` — so the
+   * `position: fixed` viewport that the CommandPalette overlay
+   * draws against still anchors to the un-zoomed window.
+   *
+   * Override path: an operator who wants the tighter pre-iter69
+   * density can set `localStorage.raxis_density = "compact"`
+   * (no UI yet — keep this comment as a forward hook).
+   */
+  html {
+    font-size: 18px;
+  }
+
   body {
     margin: 0;
+    zoom: 1.25;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;

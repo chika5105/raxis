@@ -887,6 +887,41 @@ fn run_phase_a(
                     req.task_id.as_str(),
                 ],
             );
+
+            // iter69 — persist the session's provider id (and,
+            // when the planner side reports it, the model id)
+            // in the new `sessions.provider` / `sessions.model`
+            // columns added by migration 25. Best-effort
+            // NULL-coalescing UPDATE: the FIRST observed
+            // provider/model sticks per session so a
+            // provider failover mid-session does NOT silently
+            // rewrite the dashboard's session header. The
+            // dashboard also runs a read-side fallback that
+            // walks the latest LLM turn capture for `model`,
+            // so a NULL here is recoverable; we surface what
+            // we have when we have it.
+            //
+            // Errors are intentionally swallowed: the intent
+            // admission already succeeded by this point and a
+            // sessions UPDATE failure must not retroactively
+            // fail the intent. The dashboard's read-side
+            // enrichment compensates on the next render.
+            if !report.provider_id.is_empty() {
+                let _ = raxis_store::views::sessions::set_session_provider_model_if_unset(
+                    &conn,
+                    session_id.as_str(),
+                    Some(report.provider_id.as_str()),
+                    // `report` does not carry the model id (the
+                    // planner does not surface it at this seam).
+                    // The dashboard's read-side enrichment lifts
+                    // `body.model` from the latest LLM turn
+                    // capture and back-fills via the same
+                    // COALESCE-protected writer when it
+                    // observes a non-empty value. See
+                    // `KernelDashboardData::get_session`.
+                    None,
+                );
+            }
             drop(conn);
 
             // iter62 — `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01`

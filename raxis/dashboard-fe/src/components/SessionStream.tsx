@@ -356,7 +356,15 @@ export function SessionStream({
       <div
         ref={containerRef}
         onScroll={onScroll}
-        className="overflow-y-auto scroll-thin font-mono text-[12px] leading-relaxed bg-black/40 p-3 h-[60vh]"
+        // iter69: drop the hard-coded `bg-black/40`. In dark mode
+        // that's "slightly darker than the card" — fine. In light
+        // mode it's a 40 %-opacity BLACK overlay on a white
+        // canvas → muddy grey terminal-in-a-card look that
+        // operators reported as a "darkening" bug. Use the
+        // theme-aware `bg-panel` (page canvas) so the stream pane
+        // sits one elevation BELOW the card in both modes, with
+        // an `border` line for the seam.
+        className="overflow-y-auto scroll-thin font-mono text-[12px] leading-relaxed bg-panel border-t border-edge p-3 h-[60vh]"
       >
         {merged.length === 0 ? (
           <div className="text-ink-subtle italic">
@@ -443,7 +451,13 @@ function StreamLine({ event }: { event: StreamEventEnvelope }) {
   const onClick = useCallback(() => setExpanded((v) => !v), []);
   return (
     <div
-      className="grid grid-cols-[80px_110px_1fr] gap-2 hover:bg-white/5 px-1 py-0.5 cursor-pointer"
+      // iter69: `hover:bg-white/5` painted a 5 %-opacity WHITE
+      // overlay regardless of theme — fine on the dark stream
+      // pane, invisible (and double-darkening, due to alpha
+      // blending math) on the light-mode pane. Use the theme-
+      // aware `bg-panel-high` so the hover affordance reads
+      // identically in both modes.
+      className="grid grid-cols-[80px_110px_1fr] gap-2 hover:bg-panel-high px-1 py-0.5 cursor-pointer"
       onClick={onClick}
       data-testid="session-stream-row"
     >

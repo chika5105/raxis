@@ -48,7 +48,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 24;
+pub const SCHEMA_VERSION: u32 = 25;
 
 /// Apply all pending migrations to `conn`.
 /// Safe to call on every startup — skips already-applied migrations. Returns
@@ -133,6 +133,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 24 {
         apply_migration_24(conn)?;
+    }
+    if current_version < 25 {
+        apply_migration_25(conn)?;
     }
 
     Ok(())
@@ -2774,6 +2777,98 @@ CREATE INDEX IF NOT EXISTS idx_worktree_snapshots_diff_sha
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (24, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 25 — sessions.provider + sessions.model (iter69)
+//
+// Motivation
+//   The dashboard's Session Detail page surfaces a `provider` /
+//   `model` pair so operators can tell at a glance "which model
+//   spoke for this session" — critical when an initiative
+//   interleaves orchestrator / executor / reviewer planner_fetch
+//   round-trips against different upstream providers (e.g. a
+//   reviewer pinned to a cheap fast model while the executor
+//   burns a frontier model). Until iter69 the kernel rendered
+//   both fields as empty strings on the wire because the data
+//   simply was not persisted anywhere — the `sessions` row only
+//   knew `role_id` / `lineage_id` / lifecycle timestamps, and
+//   the per-turn LLM capture ring carried `model` per response
+//   but never rolled up to a stable session-level pair.
+//
+// Shape
+//   Two new TEXT columns on `sessions`, both nullable.
+//
+//   * `provider`  — populated by the kernel's intent handler from
+//                   `TokensReport.provider_id` (e.g.
+//                   `"anthropic-prod"`). NULL until the planner
+//                   has reported at least one usage delta. The
+//                   write is `UPDATE … SET provider =
+//                   COALESCE(provider, ?)` so the first observed
+//                   provider sticks; subsequent reports do not
+//                   churn the row.
+//   * `model`     — populated lazily on the dashboard read path
+//                   today (walk the latest LLM turn capture for
+//                   this session and lift `body.model`). A future
+//                   iteration may move this write inline with
+//                   `record_to_view` so the row is hot when an
+//                   operator first opens the session.
+//
+// Nullable on purpose — the columns are forward-looking telemetry
+//   that the kernel populates opportunistically. Existing sessions
+//   from before iter69 keep `provider IS NULL AND model IS NULL`;
+//   the dashboard renders "—" in those cases (matches the existing
+//   handling for `worktree_root IS NULL` and other lifecycle-late
+//   fields).
+//
+// No CHECK constraint
+//   The set of provider ids is governed by `policy.providers[]`,
+//   which the operator edits on every policy bump. Pinning a
+//   CHECK list here would require a migration on every policy
+//   update — strictly worse than the alternative of letting the
+//   row carry whatever the planner reported and surfacing
+//   mismatches through audit / lint at the policy seam.
+//
+// Backfill
+//   None. The migration cannot reconstruct historical provider /
+//   model pairs from existing audit / capture data without a
+//   per-session walk that is expensive on a long-lived install
+//   AND is best-effort anyway (older capture rings may have
+//   already rotated past the relevant turn). Operators see the
+//   pair appear naturally once each session next reports usage.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_25(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_25_ddl();
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 25 failed: {e}")))
+}
+
+/// The complete migration-25 DDL.
+pub fn render_migration_25_ddl() -> String {
+    let sessions = Table::Sessions.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- iter69 -- surface per-session provider+model on the dashboard.
+-- Both columns nullable; populated opportunistically by the
+-- kernel intent handler (provider) and by the dashboard
+-- session-view enrichment (model, lifted from the latest LLM
+-- turn capture). Existing rows remain NULL/NULL and render as
+-- a placeholder on the dashboard until the next usage report.
+ALTER TABLE {sessions} ADD COLUMN provider TEXT;
+ALTER TABLE {sessions} ADD COLUMN model TEXT;
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (25, strftime('%s', 'now'));
 
 COMMIT;
 "
@@ -6275,5 +6370,161 @@ mod tests {
             dup, 1,
             "validation_reject_count must appear exactly once after repeated apply_pending"
         );
+    }
+
+    /// iter69 — migration 25 must add `provider` and `model`
+    /// columns to `sessions` as nullable TEXT. The dashboard
+    /// uses these to render the Session Detail "Provider" /
+    /// "Model" badges; a typo in the migration would silently
+    /// regress the page back to the all-empty-stub state.
+    #[test]
+    fn migration_25_adds_provider_and_model_to_sessions() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "PRAGMA table_info({})",
+                Table::Sessions.as_str()
+            ))
+            .unwrap();
+        // PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
+        let cols: Vec<(String, String, i64, Option<String>)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let provider = cols
+            .iter()
+            .find(|(name, _, _, _)| name == "provider")
+            .expect("sessions.provider must exist after migration 25");
+        assert_eq!(
+            provider.1, "TEXT",
+            "sessions.provider must be TEXT (got {})",
+            provider.1
+        );
+        assert_eq!(
+            provider.2, 0,
+            "sessions.provider must be NULLABLE (notnull=0); the kernel populates lazily"
+        );
+        assert_eq!(
+            provider.3, None,
+            "sessions.provider must have no DEFAULT — NULL is the meaningful initial value"
+        );
+
+        let model = cols
+            .iter()
+            .find(|(name, _, _, _)| name == "model")
+            .expect("sessions.model must exist after migration 25");
+        assert_eq!(model.1, "TEXT");
+        assert_eq!(model.2, 0, "sessions.model must be NULLABLE");
+        assert_eq!(model.3, None);
+    }
+
+    /// Migration 25 is idempotent under `apply_pending`. Two
+    /// back-to-back applies must leave EXACTLY one `provider`
+    /// column on the `sessions` table (and one `model` column),
+    /// not a second-application duplicate that would later fail
+    /// the `SELECT provider FROM sessions` shape in
+    /// `views::sessions::by_id`.
+    #[test]
+    fn migration_25_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "PRAGMA table_info({})",
+                Table::Sessions.as_str()
+            ))
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let n_provider = names.iter().filter(|n| n.as_str() == "provider").count();
+        let n_model = names.iter().filter(|n| n.as_str() == "model").count();
+        assert_eq!(n_provider, 1, "exactly one provider column");
+        assert_eq!(n_model, 1, "exactly one model column");
+    }
+
+    /// `apply_pending` MUST walk migration 25 on a v24 database.
+    /// Force the schema version to 24 manually, then call
+    /// `apply_pending` — the columns should appear and the
+    /// recorded version should advance to 25 (= SCHEMA_VERSION).
+    #[test]
+    fn migration_25_applies_to_a_v24_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Apply 1..=24 first.
+        apply_migration_1(&conn).unwrap();
+        apply_migration_2(&conn).unwrap();
+        apply_migration_3(&conn).unwrap();
+        apply_migration_4(&conn).unwrap();
+        apply_migration_5(&conn).unwrap();
+        apply_migration_6(&conn).unwrap();
+        apply_migration_7(&conn).unwrap();
+        apply_migration_8(&conn).unwrap();
+        apply_migration_9(&conn).unwrap();
+        apply_migration_10(&conn).unwrap();
+        apply_migration_11(&conn).unwrap();
+        apply_migration_12(&conn).unwrap();
+        apply_migration_13(&conn).unwrap();
+        apply_migration_14(&conn).unwrap();
+        apply_migration_15(&conn).unwrap();
+        apply_migration_16(&conn).unwrap();
+        apply_migration_17(&conn).unwrap();
+        apply_migration_18(&conn).unwrap();
+        apply_migration_19(&conn).unwrap();
+        apply_migration_20(&conn).unwrap();
+        apply_migration_21(&conn).unwrap();
+        apply_migration_22(&conn).unwrap();
+        apply_migration_23(&conn).unwrap();
+        apply_migration_24(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 24);
+
+        // Pre-flight: a v24 sessions row must NOT carry the new
+        // columns (else this test would be a tautology and the
+        // forward-applies test below would mask drift).
+        let pre_existing = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name IN ('provider','model')",
+                    Table::Sessions.as_str()
+                ),
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pre_existing, 0,
+            "v24 schema must not yet have provider/model on sessions"
+        );
+
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let post = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name IN ('provider','model')",
+                    Table::Sessions.as_str()
+                ),
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(post, 2);
     }
 }

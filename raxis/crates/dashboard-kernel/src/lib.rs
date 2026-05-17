@@ -1634,6 +1634,20 @@ impl DashboardData for KernelDashboardData {
         // classifier sees the SessionRevoked rows without a
         // re-walk per response.
         let audit_chain = collect_lifecycle_audit_rows(&self.audit_dir);
+        // iter69 — owning-task enrichment for the list view.
+        // The list page renders per-row `initiative_id` /
+        // `task_id` / token totals; pre-iter69 every row
+        // hardcoded `None`/`0`, which made the list visually
+        // empty even when the underlying tasks had cumulative
+        // token data. We materialise the projection once per
+        // session via `owning_task_for_session` (a single
+        // indexed-PK lookup per session).
+        //
+        // `provider` / `model` flow through directly from the
+        // `sessions` columns added by migration 25; the read-
+        // side fallback (latest LLM turn capture) is deferred to
+        // the *detail* path to keep the list cheap on a long
+        // session catalog.
         Ok(rows
             .into_iter()
             .filter(|s| match &allowed {
@@ -1642,14 +1656,16 @@ impl DashboardData for KernelDashboardData {
             })
             .map(|s| {
                 let state = session_row_state(&s);
+                let owning = owning_task_for_session(&conn, s.session_id.as_str())
+                    .unwrap_or_default();
                 let view = SessionView {
                     session_id: s.session_id,
                     role: s.role_id,
                     initiative_id: None,
                     task_id: None,
                     state,
-                    provider: None,
-                    model: None,
+                    provider: s.provider,
+                    model: s.model,
                     input_tokens: 0,
                     output_tokens: 0,
                     created_at: s.created_at,
@@ -1667,6 +1683,7 @@ impl DashboardData for KernelDashboardData {
                     annotations: Vec::new(),
                     latest_annotation: None,
                 };
+                let view = enrich_session_view_with_owning_task(view, owning, None);
                 enrich_session_view_with_lifecycle(&audit_chain, view)
             })
             .collect())
@@ -1704,14 +1721,27 @@ impl DashboardData for KernelDashboardData {
         })?;
         let state = session_row_state(&s);
         let audit_chain = collect_lifecycle_audit_rows(&self.audit_dir);
+        // iter69 — owning-task projection + LLM-turn fallback for
+        // the detail panel. The detail page is the one place where
+        // we are willing to pay for the per-task ring tail (one
+        // file open + one line parse for the *latest* turn) so the
+        // dashboard renders a real model id even on pre-iter69
+        // sessions whose `sessions.model` column is still NULL.
+        // The list view skips this fallback to stay cheap.
+        let owning = owning_task_for_session(&conn, s.session_id.as_str())
+            .unwrap_or_default();
+        let fallback_model = owning
+            .task_id
+            .as_deref()
+            .and_then(|tid| latest_model_for_task(self.task_llm_capture.as_ref(), tid));
         let view = SessionView {
             session_id: s.session_id,
             role: s.role_id,
             initiative_id: None,
             task_id: None,
             state,
-            provider: None,
-            model: None,
+            provider: s.provider,
+            model: s.model,
             input_tokens: 0,
             output_tokens: 0,
             created_at: s.created_at,
@@ -1728,6 +1758,7 @@ impl DashboardData for KernelDashboardData {
             annotations: Vec::new(),
             latest_annotation: None,
         };
+        let view = enrich_session_view_with_owning_task(view, owning, fallback_model);
         Ok(enrich_session_view_with_lifecycle(&audit_chain, view))
     }
 
@@ -3697,6 +3728,143 @@ fn session_row_state(s: &raxis_store::views::sessions::SessionRow) -> String {
 /// the stable display id (`«integration-merge»`) at render time.
 pub(crate) const INTEGRATION_MERGE_TITLE: &str = "Integration merge";
 
+/// iter69 — per-session "owning task" projection used by the
+/// dashboard's session detail / list panels.
+///
+/// A session belongs to AT MOST one running task at any moment
+/// (a planner / executor / reviewer VM is bound to a single task
+/// for its whole lifetime), but the `tasks` table allows a
+/// session id to recur across task rows in two narrow cases:
+///
+///   1. Sub-task replays in a merge initiative — the
+///      orchestrator session can drive several follow-up tasks
+///      sequentially.
+///   2. Test fixtures that pin a single session id across
+///      multiple synthetic tasks for ergonomics.
+///
+/// The shape this struct returns is "the most recently
+/// transitioned task" for the session. That mirrors the dashboard
+/// display semantics: an operator looking at session detail wants
+/// the *current* task's identifier and token totals, not a
+/// stale earlier row. Ordering uses
+/// `transitioned_at DESC, task_id ASC` so the projection is
+/// deterministic even when two rows share a transition stamp.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SessionOwningTask {
+    pub initiative_id: Option<String>,
+    pub task_id: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// Look up the most-recent task owning the given session id and
+/// project the columns the dashboard's `SessionView` enrichment
+/// needs (`initiative_id`, `task_id`, `cumulative_input_tokens`,
+/// `cumulative_output_tokens`). Returns
+/// [`SessionOwningTask::default()`] when no task references the
+/// session — this is normal for orchestrator-only sessions
+/// before their first admitted intent and for sessions that
+/// short-circuit on a deterministic check.
+///
+/// Pinned column order against the tasks DDL (migration 1 / 12 /
+/// 21) — adding new columns to the SELECT is safe but reorderin
+/// existing ones requires updating the `r.get(N)` calls below.
+pub(crate) fn owning_task_for_session(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> rusqlite::Result<SessionOwningTask> {
+    let sql = format!(
+        "SELECT initiative_id, task_id, \
+                cumulative_input_tokens, cumulative_output_tokens \
+         FROM {tasks} \
+         WHERE session_id = ?1 \
+         ORDER BY transitioned_at DESC, task_id ASC \
+         LIMIT 1",
+        tasks = raxis_store::Table::Tasks.as_str(),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row = stmt.query_row(rusqlite::params![session_id], |r| {
+        Ok(SessionOwningTask {
+            initiative_id: r.get::<_, Option<String>>(0)?,
+            task_id: r.get::<_, Option<String>>(1)?,
+            input_tokens: r.get::<_, i64>(2)?.max(0) as u64,
+            output_tokens: r.get::<_, i64>(3)?.max(0) as u64,
+        })
+    });
+    match row {
+        Ok(v) => Ok(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(SessionOwningTask::default()),
+        Err(e) => Err(e),
+    }
+}
+
+/// iter69 — extract a model id from the most-recent LLM turn
+/// capture for the given task. Returns `None` when the capture
+/// is unwired (read-only data dir), the file is missing (task
+/// never round-tripped through the gateway), the latest record's
+/// body is non-JSON, or `body.model` is absent / empty.
+///
+/// The dashboard calls this from `enrich_session_view_with_owning_task`
+/// when the `sessions.model` column is NULL (the kernel did not
+/// yet persist a model — see migration 25 and the
+/// `set_session_provider_model_if_unset` writer in
+/// `crates/store/src/views/sessions.rs`). The lookup is
+/// O(1) on the per-task ring tail; even on a hot session detail
+/// fetch the cost is dominated by the SQLite round-trip above,
+/// not the file read.
+pub(crate) fn latest_model_for_task(
+    capture: Option<&Arc<TaskLlmCapture>>,
+    task_id: &str,
+) -> Option<String> {
+    let cap = capture?;
+    let mut recs = cap.tail(task_id, 1);
+    let last = recs.pop()?;
+    let body: serde_json::Value = serde_json::from_str(&last.body).ok()?;
+    body.get("model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// iter69 — fold the `owning_task_for_session` projection plus
+/// (optionally) a fallback model from the LLM turn capture into
+/// a partially-built `SessionView`. The fields touched are the
+/// ones that pre-iter69 hardcoded to `None` / `0`:
+///   * `initiative_id`
+///   * `task_id`
+///   * `input_tokens`
+///   * `output_tokens`
+///   * `model` — only when the session row carried NULL (the
+///     kernel had not yet persisted it).
+///
+/// `provider` is NEVER touched here — it is owned by the kernel
+/// intent handler and read from the `sessions.provider` column,
+/// because the dashboard cannot derive a provider id from the
+/// LLM turn capture (the capture surfaces the model name but not
+/// the policy-level provider id that the planner billed against).
+pub(crate) fn enrich_session_view_with_owning_task(
+    mut view: raxis_dashboard::data::SessionView,
+    owning_task: SessionOwningTask,
+    fallback_model: Option<String>,
+) -> raxis_dashboard::data::SessionView {
+    if view.initiative_id.is_none() {
+        view.initiative_id = owning_task.initiative_id;
+    }
+    if view.task_id.is_none() {
+        view.task_id = owning_task.task_id;
+    }
+    if view.input_tokens == 0 {
+        view.input_tokens = owning_task.input_tokens;
+    }
+    if view.output_tokens == 0 {
+        view.output_tokens = owning_task.output_tokens;
+    }
+    if view.model.is_none() {
+        view.model = fallback_model;
+    }
+    view
+}
+
 /// Compute the dashboard-visible title for a kernel task row.
 ///
 /// Returns `Integration merge` for the synthetic coordinator
@@ -4627,6 +4795,8 @@ mod tests {
             expires_at,
             revoked,
             revoked_at: if revoked { Some(150) } else { None },
+            provider: None,
+            model: None,
         }
     }
 
@@ -4877,5 +5047,279 @@ mod tests {
             0,
         );
         assert!(!snap.is_live(now));
+    }
+
+    // ── iter69 — session detail enrichment helpers ──────────────────────
+    //
+    // The `KernelDashboardData::get_session` / `list_sessions`
+    // panels used to hardcode `initiative_id = None`, `task_id =
+    // None`, `provider = None`, `model = None`, `input_tokens =
+    // 0`, `output_tokens = 0` — every value was a stub. The
+    // helpers below own the population. The tests pin the
+    // contract so a regression here surfaces empty dashboard
+    // headers immediately (instead of waiting for a manual click
+    // through the live dashboard).
+
+    /// Seed a kernel.db with the minimum schema the enrichment
+    /// helper exercises: one task referencing one session, with
+    /// token counters populated. Migration 25 (the iter69 schema
+    /// bump) is part of the standard `apply_pending` path so the
+    /// fresh DB already has the `sessions.provider` / `model`
+    /// columns.
+    fn seed_session_with_task() -> tempfile::TempDir {
+        const TASKS: &str = raxis_store::Table::Tasks.as_str();
+        const SESSIONS: &str = raxis_store::Table::Sessions.as_str();
+        const INITIATIVES: &str = raxis_store::Table::Initiatives.as_str();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = raxis_store::Store::open(&tmp.path().join("kernel.db")).unwrap();
+        let g = store.lock_sync();
+        g.execute(
+            &format!(
+                "INSERT INTO {INITIATIVES} \
+                    (initiative_id, state, terminal_criteria_json, \
+                     plan_artifact_sha256, created_at) \
+                 VALUES ('init-a', 'Executing', '{{}}', 'deadbeef', 100)"
+            ),
+            [],
+        )
+        .unwrap();
+        g.execute(
+            &format!(
+                "INSERT INTO {SESSIONS} \
+                    (session_id, role_id, session_token, lineage_id, \
+                     fetch_quota, created_at, expires_at, revoked) \
+                 VALUES ('sess-a', 'Executor', 'tok-a', 'lin', 0, \
+                         100, 9999999999, 0)"
+            ),
+            [],
+        )
+        .unwrap();
+        g.execute(
+            &format!(
+                "INSERT INTO {TASKS} \
+                    (task_id, initiative_id, lane_id, state, actor, \
+                     policy_epoch, admitted_at, transitioned_at, \
+                     session_id, cumulative_input_tokens, \
+                     cumulative_output_tokens) \
+                 VALUES ('task-a', 'init-a', 'lane-1', 'Running', 'orch', \
+                         1, 100, 200, 'sess-a', 1234, 567)"
+            ),
+            [],
+        )
+        .unwrap();
+        drop(g);
+        tmp
+    }
+
+    /// `owning_task_for_session` projects the most-recent task
+    /// owning the session into the per-row fields the dashboard
+    /// needs. The seed has exactly one task → all four fields
+    /// MUST come back populated.
+    #[test]
+    fn owning_task_for_session_returns_task_columns_when_present() {
+        let tmp = seed_session_with_task();
+        let conn = raxis_store::ro::open(tmp.path()).unwrap();
+        let r = owning_task_for_session(&conn, "sess-a").unwrap();
+        assert_eq!(r.initiative_id.as_deref(), Some("init-a"));
+        assert_eq!(r.task_id.as_deref(), Some("task-a"));
+        assert_eq!(r.input_tokens, 1234);
+        assert_eq!(r.output_tokens, 567);
+    }
+
+    /// A session without any tasks (orchestrator-only,
+    /// pre-spawn, post-revoke without follow-up): the projection
+    /// must default-collapse — `None`/`0` everywhere — so the
+    /// dashboard renders "—" / "0" instead of crashing the
+    /// classifier with a `QueryReturnedNoRows` propagated all
+    /// the way out.
+    #[test]
+    fn owning_task_for_session_collapses_to_default_when_no_task() {
+        let tmp = seed_session_with_task();
+        let conn = raxis_store::ro::open(tmp.path()).unwrap();
+        let r = owning_task_for_session(&conn, "no-such-session").unwrap();
+        assert!(r.initiative_id.is_none());
+        assert!(r.task_id.is_none());
+        assert_eq!(r.input_tokens, 0);
+        assert_eq!(r.output_tokens, 0);
+    }
+
+    /// When more than one task references the same session, the
+    /// projection returns the row with the highest
+    /// `transitioned_at` (and `task_id ASC` as the tie-breaker).
+    /// This mirrors the dashboard's "show the current task"
+    /// rendering choice.
+    #[test]
+    fn owning_task_for_session_returns_most_recent_task() {
+        const TASKS: &str = raxis_store::Table::Tasks.as_str();
+        let tmp = seed_session_with_task();
+        let store = raxis_store::Store::open(&tmp.path().join("kernel.db")).unwrap();
+        // Insert a SECOND task for the same session, with an
+        // OLDER `transitioned_at`. The lookup must still pick
+        // the newer row from the seed (transitioned_at=200).
+        {
+            let g = store.lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {TASKS} \
+                        (task_id, initiative_id, lane_id, state, actor, \
+                         policy_epoch, admitted_at, transitioned_at, \
+                         session_id, cumulative_input_tokens, \
+                         cumulative_output_tokens) \
+                     VALUES ('task-z', 'init-a', 'lane-1', 'Completed', 'orch', \
+                             1, 50, 100, 'sess-a', 99, 33)"
+                ),
+                [],
+            )
+            .unwrap();
+        }
+        let conn = raxis_store::ro::open(tmp.path()).unwrap();
+        let r = owning_task_for_session(&conn, "sess-a").unwrap();
+        assert_eq!(r.task_id.as_deref(), Some("task-a"));
+        assert_eq!(r.input_tokens, 1234);
+    }
+
+    /// The session-view fold MUST overwrite the hardcoded stub
+    /// values from the original code path. Build a stub view,
+    /// call the fold, and assert every populated field made it
+    /// through.
+    #[test]
+    fn enrich_session_view_with_owning_task_populates_stub_fields() {
+        let view = raxis_dashboard::data::SessionView {
+            session_id: "sess-a".into(),
+            role: "Executor".into(),
+            initiative_id: None,
+            task_id: None,
+            state: "Active".into(),
+            provider: None,
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            created_at: 100,
+            updated_at: 200,
+            failure: None,
+            annotations: Vec::new(),
+            latest_annotation: None,
+        };
+        let owning = SessionOwningTask {
+            initiative_id: Some("init-a".into()),
+            task_id: Some("task-a".into()),
+            input_tokens: 1234,
+            output_tokens: 567,
+        };
+        let fallback_model = Some("claude-3-5-sonnet".into());
+        let out = enrich_session_view_with_owning_task(view, owning, fallback_model);
+        assert_eq!(out.initiative_id.as_deref(), Some("init-a"));
+        assert_eq!(out.task_id.as_deref(), Some("task-a"));
+        assert_eq!(out.input_tokens, 1234);
+        assert_eq!(out.output_tokens, 567);
+        assert_eq!(out.model.as_deref(), Some("claude-3-5-sonnet"));
+        // `provider` is owned by the kernel intent handler, not
+        // by the fold — the helper MUST NOT touch it.
+        assert_eq!(out.provider, None);
+    }
+
+    /// When the session's `provider` / `model` columns are
+    /// already populated (the kernel intent handler ran), the
+    /// fold must NOT overwrite them with the fallback. The first
+    /// observed value sticks at every layer.
+    #[test]
+    fn enrich_session_view_with_owning_task_preserves_pre_populated_model() {
+        let view = raxis_dashboard::data::SessionView {
+            session_id: "sess-a".into(),
+            role: "Executor".into(),
+            initiative_id: Some("init-existing".into()),
+            task_id: Some("task-existing".into()),
+            state: "Active".into(),
+            provider: Some("anthropic-prod".into()),
+            model: Some("claude-3-haiku".into()),
+            input_tokens: 99,
+            output_tokens: 88,
+            created_at: 100,
+            updated_at: 200,
+            failure: None,
+            annotations: Vec::new(),
+            latest_annotation: None,
+        };
+        let owning = SessionOwningTask {
+            initiative_id: Some("init-other".into()),
+            task_id: Some("task-other".into()),
+            input_tokens: 1234,
+            output_tokens: 567,
+        };
+        let fallback_model = Some("claude-3-5-sonnet".into());
+        let out = enrich_session_view_with_owning_task(view, owning, fallback_model);
+        // All five pre-populated fields must stick.
+        assert_eq!(out.initiative_id.as_deref(), Some("init-existing"));
+        assert_eq!(out.task_id.as_deref(), Some("task-existing"));
+        assert_eq!(out.input_tokens, 99);
+        assert_eq!(out.output_tokens, 88);
+        assert_eq!(out.provider.as_deref(), Some("anthropic-prod"));
+        assert_eq!(out.model.as_deref(), Some("claude-3-haiku"));
+    }
+
+    /// `latest_model_for_task` is fail-soft when the capture is
+    /// unwired — operators on a read-only data dir (EROFS bind
+    /// mount, ENOSPC at boot) still get a renderable dashboard,
+    /// just without the model fallback.
+    #[test]
+    fn latest_model_for_task_returns_none_when_capture_is_unwired() {
+        let m = latest_model_for_task(None, "task-a");
+        assert!(m.is_none());
+    }
+
+    /// When the capture is wired and the latest record parses,
+    /// the helper lifts `body.model`. Synthesise a turn via the
+    /// public `TaskLlmCapture` surface.
+    #[test]
+    fn latest_model_for_task_lifts_body_model_from_latest_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap = crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default())
+            .unwrap();
+        let body = serde_json::json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "role": "assistant",
+            "usage": {"input_tokens": 1, "output_tokens": 2},
+        })
+        .to_string();
+        let rec = crate::LlmTurnRecord {
+            at_ms: 100,
+            task_id: "task-a".into(),
+            session_id: Some("sess-a".into()),
+            fetch_id: "f1".into(),
+            status_code: Some(200),
+            latency_ms: 10,
+            request_body: String::new(),
+            body,
+            body_truncated: false,
+            original_body_bytes: 0,
+            error: None,
+            agent_role: None,
+        };
+        cap.append("task-a", rec).unwrap();
+        let m = latest_model_for_task(Some(&cap), "task-a").unwrap();
+        assert_eq!(m, "claude-3-5-sonnet-20241022");
+    }
+
+    #[test]
+    fn latest_model_for_task_returns_none_when_body_is_non_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap = crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default())
+            .unwrap();
+        let rec = crate::LlmTurnRecord {
+            at_ms: 100,
+            task_id: "task-a".into(),
+            session_id: Some("sess-a".into()),
+            fetch_id: "f1".into(),
+            status_code: Some(500),
+            latency_ms: 10,
+            request_body: String::new(),
+            body: "Internal Server Error".into(),
+            body_truncated: false,
+            original_body_bytes: 0,
+            error: None,
+            agent_role: None,
+        };
+        cap.append("task-a", rec).unwrap();
+        assert!(latest_model_for_task(Some(&cap), "task-a").is_none());
     }
 }

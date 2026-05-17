@@ -274,6 +274,8 @@ mod tests {
             expires_at,
             revoked: false,
             revoked_at: None,
+            provider: None,
+            model: None,
         }
     }
 
