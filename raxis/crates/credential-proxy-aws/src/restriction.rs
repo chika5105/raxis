@@ -13,11 +13,11 @@
 //!     ASCII at load time.
 //!   * `allowed_regions`: e.g. `["us-east-1"]` — same shape, scoping
 //!     by AWS region.
-//! Both restrictions are **declarative-with-audit** in V2.3: the
-//! IMDS proxy serves credentials but does NOT see the actual API
-//! request the SDK subsequently issues to AWS — those flow direct
-//! from the agent VM to AWS over the kernel-managed egress allowlist
-//! (TProxy). The restrictions are therefore:
+//!     Both restrictions are **declarative-with-audit** in V2.3: the
+//!     IMDS proxy serves credentials but does NOT see the actual API
+//!     request the SDK subsequently issues to AWS — those flow direct
+//!     from the agent VM to AWS over the kernel-managed egress allowlist
+//!     (TProxy). The restrictions are therefore:
 //!   1. **Validated** at policy load time so a malformed list (e.g.
 //!      empty strings, non-ASCII chars) fails the operator's `raxis
 //!      policy load` step rather than appearing as a silent
@@ -32,12 +32,12 @@
 //!      declare `allowed_services` / `allowed_regions` here MUST
 //!      mirror them in the egress allowlist; `raxis doctor`
 //!      surfaces declarations without a matching egress entry.
-//! V3 adds the SigV4-aware egress proxy (`raxis-egress-aws`) which
-//! parses the SDK's `Authorization: AWS4-HMAC-SHA256 Credential=
+//!      V3 adds the SigV4-aware egress proxy (`raxis-egress-aws`) which
+//!      parses the SDK's `Authorization: AWS4-HMAC-SHA256 Credential=
 //! AKIA.../<region>/<service>/aws4_request` header and rejects
-//! requests outside the `allowed_services` / `allowed_regions`
-//! intersection. Until then, declarative + TProxy is the V2.3
-//! defence-in-depth contract.
+//!      requests outside the `allowed_services` / `allowed_regions`
+//!      intersection. Until then, declarative + TProxy is the V2.3
+//!      defence-in-depth contract.
 
 use serde::{Deserialize, Serialize};
 

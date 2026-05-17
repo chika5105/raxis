@@ -41,9 +41,9 @@
 //!    * `FAIL` for `Expired` (recovery ops also denied),
 //!    * `FAIL` for `NotYetValid` (cert is dead-on-arrival),
 //!    * `OK`   for `Active` and `AlwaysActiveEmergency`.
-//!    Plus `WARN` for any operator entry with
-//!    `force_misconfig_bypass = true` so the operator is reminded
-//!    they have an audited structural override active.
+//!      Plus `WARN` for any operator entry with
+//!      `force_misconfig_bypass = true` so the operator is reminded
+//!      they have an audited structural override active.
 //! # Distribution-specific subcommands
 //! Two additional subcommands are dispatched by name as the first
 //! positional argument; both are referenced by the Homebrew formula's
@@ -220,10 +220,10 @@ fn run_default(flags: &GlobalFlags, opts: DoctorOpts) -> Result<(), CliError> {
 ///     path) set; surfaced loudly so an operator who installed
 ///     an unsigned `cargo build` knows their kernel cannot
 ///     verify any image manifest.
-/// The compiled-in `EXPECTED_KERNEL_SIGNING_KEY_BYTES` constant is
-/// the public half of the kernel signing keypair; this command is
-/// therefore safe to run on any host, the output reveals nothing
-/// secret. Pinned by `release-and-distribution.md §9.2`.
+///     The compiled-in `EXPECTED_KERNEL_SIGNING_KEY_BYTES` constant is
+///     the public half of the kernel signing keypair; this command is
+///     therefore safe to run on any host, the output reveals nothing
+///     secret. Pinned by `release-and-distribution.md §9.2`.
 fn run_signing_key_fp(opts: DoctorOpts) -> Result<(), CliError> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -1865,7 +1865,7 @@ fn collect_bundles(data_dir: &Path, r: &mut Report) {
 ///   `Warn` otherwise (the production resolver pulls on demand
 ///   at first activation; the warning is a heads-up so operators
 ///   can pre-pull before the first session boots).
-/// Top-level rows:
+///   Top-level rows:
 /// * `vm_images.count` — how many entries the active policy
 ///   declares; `Warn` when zero (no operator-published images,
 ///   every Executor task boots the canonical starter).

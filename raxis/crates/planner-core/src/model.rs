@@ -106,9 +106,9 @@ pub struct Message {
 /// * `text` — plain text, both directions.
 /// * `tool_use` — assistant requests a tool call.
 /// * `tool_result` — user (planner) returns the tool's output.
-/// Other block kinds (`image`, `document`) round-trip as
-/// [`ContentBlock::Other`] so an upstream payload that adds new
-/// kinds doesn't break the planner's deserialisation.
+///   Other block kinds (`image`, `document`) round-trip as
+///   [`ContentBlock::Other`] so an upstream payload that adds new
+///   kinds doesn't break the planner's deserialisation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -202,10 +202,10 @@ pub struct ToolSpec {
 /// * `Long` — 1 hour. Cache writes are billed at 2× base; reads
 ///   at 0.10×. Use when prompts may sit idle longer than 5 min
 ///   (long agentic workloads, slow human follow-ups).
-/// Maps to Anthropic's `cache_control: { type: "ephemeral", ttl: "1h" }`
-/// (`Long`) vs. plain `cache_control: { type: "ephemeral" }` (`Short`).
-/// Bedrock uses the same shape; OpenAI / Gemini ignore TTL hints
-/// (their caching layer manages TTL implicitly).
+///   Maps to Anthropic's `cache_control: { type: "ephemeral", ttl: "1h" }`
+///   (`Long`) vs. plain `cache_control: { type: "ephemeral" }` (`Short`).
+///   Bedrock uses the same shape; OpenAI / Gemini ignore TTL hints
+///   (their caching layer manages TTL implicitly).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheTtl {
@@ -436,9 +436,9 @@ impl serde::Serialize for MessageRequest {
     /// 5. When `cache_messages`, emits a top-level
     ///    `cache_control: { "type": "ephemeral" }` (with optional
     ///    `ttl` honoring [`Self::cache_ttl`]).
-    /// This impl is the production wire-shape contract; any
-    /// serde-output regression must be caught by the
-    /// `request_serialises_*` golden tests in this module.
+    ///    This impl is the production wire-shape contract; any
+    ///    serde-output regression must be caught by the
+    ///    `request_serialises_*` golden tests in this module.
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
 
@@ -766,12 +766,12 @@ pub trait ModelClient: Send + Sync {
 ///   [`crate::http_fetch::KernelMediatedHttpFetch`] which routes
 ///   each call through `IpcMessage::PlannerFetchRequest` to the
 ///   kernel + gateway.
-/// Streaming (`create_message_stream`) still uses the embedded
-/// `reqwest::Client` directly because SSE is reqwest-specific; the
-/// kernel-mediated transport falls through the default
-/// [`ModelClient::create_message_stream`] body which wraps
-/// `create_message` in a synthetic four-event stream — semantics
-/// preserved per `INV-PROVIDER-04`.
+///   Streaming (`create_message_stream`) still uses the embedded
+///   `reqwest::Client` directly because SSE is reqwest-specific; the
+///   kernel-mediated transport falls through the default
+///   [`ModelClient::create_message_stream`] body which wraps
+///   `create_message` in a synthetic four-event stream — semantics
+///   preserved per `INV-PROVIDER-04`.
 pub struct AnthropicClient {
     http_fetch: std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
     /// Embedded `reqwest::Client` retained for the streaming path.

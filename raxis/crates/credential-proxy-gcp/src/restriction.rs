@@ -8,15 +8,15 @@
 //!   * `/computeMetadata/v1/instance/service-accounts/default/email`
 //!   * `/computeMetadata/v1/project/project-id`
 //!   * `/computeMetadata/v1/project/numeric-project-id`
-//! Operators tighten the allowlist when a task should only ever need
-//! the access token (e.g. a Cloud Storage migration that has no
-//! reason to read project metadata).
+//!     Operators tighten the allowlist when a task should only ever need
+//!     the access token (e.g. a Cloud Storage migration that has no
+//!     reason to read project metadata).
 //! # `allowed_scopes` / `project` pinning enforcement model (V2.3)
 //!the GCP restriction set acquires
 //! two declarative scoping fields:
 //!   * `allowed_scopes`: e.g.
 //!     `["https://www.googleapis.com/auth/devstorage.read_only"]`
-//! operator-declared OAuth scope intent. Stored verbatim,
+//!     operator-declared OAuth scope intent. Stored verbatim,
 //!     validated for `https://` URI shape at load time.
 //!   * `project`: e.g. `"my-staging-project"` — the GCP project
 //!     ID the agent's tasks are intended to operate on. The
@@ -26,7 +26,7 @@
 //!     `restrictions.project` and `config.project_id` at bind
 //!     time so a misconfigured proxy fails fast rather than
 //!     serving the wrong project's metadata.
-//! Both restrictions are enforced as follows:
+//!     Both restrictions are enforced as follows:
 //!   1. **Validated at policy load time**: scope URIs MUST start
 //!      with `https://`; project IDs MUST match GCP's
 //!      `[a-z][-a-z0-9]{4,28}[a-z0-9]` shape (a relaxed shape is

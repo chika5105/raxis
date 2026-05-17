@@ -79,9 +79,9 @@ pub fn run_quarantine(flags: &GlobalFlags, args: &[String]) -> Result<(), CliErr
 ///   4. Exit cleanly when the kernel writes a `Closed` frame
 ///      (initiative reached terminal state) or closes the
 ///      connection.
-/// The CLI does NOT enforce a timeout — operators terminate the
-/// watch with Ctrl-C (the `read_frame` blocking call surfaces the
-/// closed connection on the next iteration).
+///      The CLI does NOT enforce a timeout — operators terminate the
+///      watch with Ctrl-C (the `read_frame` blocking call surfaces the
+///      closed connection on the next iteration).
 pub fn run_watch(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let initiative_id = args
         .first()

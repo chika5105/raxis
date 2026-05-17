@@ -27,12 +27,12 @@
 //!    handler so the operator's actions are forensically traceable;
 //!    we follow that allowance only for `DryRunAdmit`
 //!    (`DryRunAdmitted` audit kind).
-//! All four real handlers are pure functions of `(ctx, request)`:
-//! re-running them with the same inputs produces the same response.
-//! This is what `operator-ergonomics.md §5.3` requires for
-//! `ProposeDefaults` and is the simplest way to keep the surface
-//! safe for `raxis plan prepare`-style tools to call repeatedly
-//! without operator confirmation.
+//!    All four real handlers are pure functions of `(ctx, request)`:
+//!    re-running them with the same inputs produces the same response.
+//!    This is what `operator-ergonomics.md §5.3` requires for
+//!    `ProposeDefaults` and is the simplest way to keep the surface
+//!    safe for `raxis plan prepare`-style tools to call repeatedly
+//!    without operator confirmation.
 
 use raxis_audit_tools::AuditEventKind;
 use raxis_types::operator_wire::OperatorResponse;
@@ -62,9 +62,9 @@ use crate::ipc::context::HandlerContext;
 ///    that pre-date the V3 prepare-time renderer skip rendering and
 ///    advise the operator that interactive defaulting requires a
 ///    V3 CLI.
-/// The response is a **pure function** of the active policy epoch.
-/// Calling this twice without an epoch advance returns byte-
-/// identical JSON.
+///    The response is a **pure function** of the active policy epoch.
+///    Calling this twice without an epoch advance returns byte-
+///    identical JSON.
 pub async fn handle_propose_defaults(
     initiative_id: Option<String>,
     ctx: &HandlerContext,
@@ -177,16 +177,16 @@ pub async fn handle_propose_defaults(
 ///    overhead allowance (admission-units are operator-defined and
 ///    treated as cents in the upper-bound projection — this is the
 ///    same convention the kernel's budget enforcer uses internally).
-/// **No-LLM-provider deployments.** When the policy declares zero
-/// LLM providers (e.g. a degraded read-only deployment), token cost
-/// is reported as `0`; the admission-overhead allowance is still
-/// included so operators see a non-zero upper bound for the
-/// kernel-side admission charge.
-/// Per `INV-OPERATOR-ERG-01` this handler does NOT verify the plan
-/// signature, NOT commit any rows, and NOT reserve any budget. The
-/// caller is expected to combine the returned upper bound with the
-/// operator's local budget policy *before* deciding whether to
-/// `submit plan`.
+///    **No-LLM-provider deployments.** When the policy declares zero
+///    LLM providers (e.g. a degraded read-only deployment), token cost
+///    is reported as `0`; the admission-overhead allowance is still
+///    included so operators see a non-zero upper bound for the
+///    kernel-side admission charge.
+///    Per `INV-OPERATOR-ERG-01` this handler does NOT verify the plan
+///    signature, NOT commit any rows, and NOT reserve any budget. The
+///    caller is expected to combine the returned upper bound with the
+///    operator's local budget policy *before* deciding whether to
+///    `submit plan`.
 pub async fn handle_estimate_cost(
     plan_toml: String,
     plan_sig_hex: String,
@@ -357,11 +357,11 @@ fn micro_dollars_to_cents(micro: u128) -> u128 {
 ///    default + the operator's `[git] target_ref_locked` flag.
 /// 6. Returns the resolved `target_ref` and any non-fatal
 ///    warnings the operator should review before live submission.
-/// On any fatal check failure the response is
-/// `OperatorResponse::Error { code: <FAIL_*>, detail: ... }` with
-/// the **same** code a real `CreateInitiative` would have surfaced.
-/// Operators get fast structured feedback without paying for the
-/// admission lock.
+///    On any fatal check failure the response is
+///    `OperatorResponse::Error { code: <FAIL_*>, detail: ... }` with
+///    the **same** code a real `CreateInitiative` would have surfaced.
+///    Operators get fast structured feedback without paying for the
+///    admission lock.
 pub async fn handle_dry_run_admit(
     plan_toml: String,
     _plan_sig_hex: String,
@@ -721,10 +721,10 @@ pub async fn validate_subscribe_admission(
 ///   quarantine button — see `views::initiative_quarantines`).
 /// * Its `state` is one of `Blocked`, `Failed`, `Aborted` (cannot
 ///   make forward progress without operator intervention).
-/// `paused_at` reports the quarantine `quarantined_at` time when
-/// available; otherwise it falls back to the initiative's
-/// `completed_at` (terminal states) and `None` when no timestamp
-/// is recorded.
+///   `paused_at` reports the quarantine `quarantined_at` time when
+///   available; otherwise it falls back to the initiative's
+///   `completed_at` (terminal states) and `None` when no timestamp
+///   is recorded.
 pub async fn handle_describe_initiative_pause(
     initiative_id: String,
     ctx: &HandlerContext,
@@ -909,10 +909,10 @@ pub async fn handle_list_task_outputs(task_id: String, ctx: &HandlerContext) -> 
 /// * the broadcast channel reports `Lagged(n)` — written as a
 ///   `Closed { reason: KernelShutdown }` final frame and
 ///   `Ok(())` returned (the operator is expected to reconnect).
-/// The streaming runner consumes the connection — once it
-/// returns, `dispatch_loop` is finished with this connection. We
-/// do not loop back to read another request because the operator
-/// CLI keeps the watch open until interrupted.
+///   The streaming runner consumes the connection — once it
+///   returns, `dispatch_loop` is finished with this connection. We
+///   do not loop back to read another request because the operator
+///   CLI keeps the watch open until interrupted.
 pub async fn stream_subscribe_initiative<S>(
     stream: &mut S,
     initiative_id: String,

@@ -30,17 +30,17 @@
 //!    requested commit SHA via `gix-ref::file::Transaction::commit`,
 //!    mirroring the host-side
 //!    `git update-ref <target_ref> <commit_sha>`.
-//! These two calls together implement the main-advancement work
-//! the spec calls "Phase 2 (idempotent domain commit)". They are
-//! independently idempotent:
+//!    These two calls together implement the main-advancement work
+//!    the spec calls "Phase 2 (idempotent domain commit)". They are
+//!    independently idempotent:
 //! * Re-running [`fetch_into_main`] after the objects were
 //!   already copied is a no-op (gix's clone path skips objects
 //!   already present in the destination ODB).
 //! * Re-running [`update_target_ref`] when the configured
 //!   target ref already equals the target SHA is a no-op (the
 //!   transaction's precondition matches the target value).
-//! Either ordering of crash-recovery (Phase 2 partially completed,
-//! Phase 3 not yet started) replays cleanly.
+//!   Either ordering of crash-recovery (Phase 2 partially completed,
+//!   Phase 3 not yet started) replays cleanly.
 //! ## What this crate does NOT do
 //! * It does not perform the SQLite Phase 1 / Phase 3 transitions
 //!   (`integration-merge.md §11`); those stay in the kernel's
@@ -195,12 +195,12 @@ pub struct MainAdvance {
 ///   The plan-side override + policy-side default + locked flag is
 ///   resolved at admission time per ; this
 ///   function takes the resolved string verbatim.
-/// **Returns.** [`MainAdvance`] capturing the previous and
-/// current target-ref SHAs. The kernel reads `current_sha` back
-/// into `initiatives.current_sha` before issuing Phase 3's
-/// `git_apply_pending = 0` UPDATE.
-/// **Idempotency.** Safe to call multiple times with the same
-/// `commit_sha`. Subsequent calls observe `already_at_target =
+///   **Returns.** [`MainAdvance`] capturing the previous and
+///   current target-ref SHAs. The kernel reads `current_sha` back
+///   into `initiatives.current_sha` before issuing Phase 3's
+///   `git_apply_pending = 0` UPDATE.
+///   **Idempotency.** Safe to call multiple times with the same
+///   `commit_sha`. Subsequent calls observe `already_at_target =
 /// true` and perform no work.
 pub fn commit_merge_to_target_ref(
     main_repo_root: &Path,

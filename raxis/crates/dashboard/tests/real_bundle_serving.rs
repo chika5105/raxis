@@ -10,13 +10,13 @@
 //!     real chunked production bundle (Vite-emitted asset
 //!     hashes, `<link rel="modulepreload">` chains, etc.) is
 //!     served correctly.
-//! The test SKIPS gracefully if the bundle is not present
-//! (e.g. on a CI worker that hasn't run `npm run build` yet).
-//! The skip message is loud enough to catch the regression
-//! "we shipped an installer that wires `static_dir` at a
-//! directory that doesn't exist".
-//! Uses the REAL [`raxis_dashboard::DashboardServer`] bound to
-//! `127.0.0.1:0` and a real `reqwest::Client` — no mocks.
+//!     The test SKIPS gracefully if the bundle is not present
+//!     (e.g. on a CI worker that hasn't run `npm run build` yet).
+//!     The skip message is loud enough to catch the regression
+//!     "we shipped an installer that wires `static_dir` at a
+//!     directory that doesn't exist".
+//!     Uses the REAL [`raxis_dashboard::DashboardServer`] bound to
+//!     `127.0.0.1:0` and a real `reqwest::Client` — no mocks.
 
 #![cfg(test)]
 

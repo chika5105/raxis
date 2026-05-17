@@ -17,10 +17,10 @@
 //!   * exit-code `6`  — cumulative token ceiling tripped
 //!   * exit-code `7`  — driver failure (transport, model, intent
 //!     submission). Stderr carries the structured detail.
-//! These exit codes are chosen so the kernel-side `SessionVmExited`
-//! audit event carries enough information to distinguish a planner
-//! crash from a kernel-substrate-supplied bad spec without having
-//! to parse the guest's stderr.
+//!     These exit codes are chosen so the kernel-side `SessionVmExited`
+//!     audit event carries enough information to distinguish a planner
+//!     crash from a kernel-substrate-supplied bad spec without having
+//!     to parse the guest's stderr.
 
 use thiserror::Error;
 

@@ -39,7 +39,7 @@
 //!   checks are unchanged.
 //! * Static asset serving. The React bundle is mounted into the
 //!   axum router at the kernel level via `tower_http::services::ServeDir`
-//! see `kernel/src/dashboard_glue.rs::serve_static`.
+//!   see `kernel/src/dashboard_glue.rs::serve_static`.
 //! # Crate layout
 //! * [`config`] — [`DashboardConfig`] (parsed from `[dashboard]`
 //!   in `policy.toml`).

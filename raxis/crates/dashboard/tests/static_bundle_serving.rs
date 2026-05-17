@@ -11,11 +11,11 @@
 //!      (deep-link reload doesn't 404),
 //!   4. `GET /api/*` continues to hit the JSON API and never
 //!      falls through to the static service.
-//! Uses the REAL [`raxis_dashboard::DashboardServer`] bound to
-//! `127.0.0.1:0` and a real `reqwest::Client`. The "bundle" is
-//! a tempdir with a stand-in `index.html` + asset so the test
-//! is hermetic — it does not depend on `dashboard-fe/dist/`
-//! existing on the build host.
+//!      Uses the REAL [`raxis_dashboard::DashboardServer`] bound to
+//!      `127.0.0.1:0` and a real `reqwest::Client`. The "bundle" is
+//!      a tempdir with a stand-in `index.html` + asset so the test
+//!      is hermetic — it does not depend on `dashboard-fe/dist/`
+//!      existing on the build host.
 
 #![cfg(test)]
 

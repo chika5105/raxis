@@ -132,10 +132,10 @@ pub enum LifecycleError {
     ///     trees in lockstep; an Orchestrator with a sparse-trimmed
     ///     working tree cannot safely complete a merge if any incoming
     ///     branch touches an excluded path.
-    /// Surfaced by `validate_clone_strategy_v2_format` /
-    /// `validate_sparse_orchestrator_exclusion` at `approve_plan` time,
-    /// **before** `BEGIN TRANSACTION`.
-    /// `rule` is one of:
+    ///     Surfaced by `validate_clone_strategy_v2_format` /
+    ///     `validate_sparse_orchestrator_exclusion` at `approve_plan` time,
+    ///     **before** `BEGIN TRANSACTION`.
+    ///     `rule` is one of:
     ///   * `"unknown_clone_strategy"` — value is not `full|blobless|sparse`.
     ///   * `"unknown_agent_type"` — value is not in `SessionAgentType`'s
     ///     SQL set (`Orchestrator|Executor|Reviewer`).
@@ -166,22 +166,22 @@ pub enum LifecycleError {
     ///     overrides at `approve_plan` time so the operator's
     ///     workspace-root lane is the authoritative ceiling for every
     ///     session in the initiative.
-    /// Surfaced by `validate_single_lane_propagation` at `approve_plan`
-    /// time, **before** `BEGIN TRANSACTION`, so a malformed plan never
-    /// allocates a row.
-    /// `rule` is one of:
+    ///     Surfaced by `validate_single_lane_propagation` at `approve_plan`
+    ///     time, **before** `BEGIN TRANSACTION`, so a malformed plan never
+    ///     allocates a row.
+    ///     `rule` is one of:
     ///   * `"missing_workspace_lane"` — plan TOML has no
     ///     `[workspace] lane_id`.
     ///   * `"empty_workspace_lane"` — `[workspace] lane_id` is the empty
     ///     string.
     ///   * `"single_lane_propagation"` — at least one `[[tasks]]`
     ///     block sets `lane_id` (V2 forbids per-task overrides).
-    /// `offending_task` names the offending task (or the literal
-    /// `"<workspace>"` for `missing_workspace_lane` /
-    /// `empty_workspace_lane`).
-    /// `suggestion` is the actionable remediation hint required by
-    /// `v2-deep-spec.md §Step 17` ("must always include a concrete
-    /// remediation suggestion, not just the violation").
+    ///     `offending_task` names the offending task (or the literal
+    ///     `"<workspace>"` for `missing_workspace_lane` /
+    ///     `empty_workspace_lane`).
+    ///     `suggestion` is the actionable remediation hint required by
+    ///     `v2-deep-spec.md §Step 17` ("must always include a concrete
+    ///     remediation suggestion, not just the violation").
     #[error(
         "plan single-lane propagation invalid (rule={rule}, task={offending_task}): {suggestion}"
     )]
@@ -257,21 +257,21 @@ pub enum LifecycleError {
     ///   * `"self_loop"`         — `task.predecessors` lists `task`.
     ///   * `"dangling_dependency"` — predecessor not declared in plan.
     ///   * `"cyclic_dependency"` — directed cycle through `predecessors`.
-    /// `offending_task` names the task whose entry triggered the rule
-    /// (for cycles, an arbitrary task on the cycle — sufficient for
-    /// the operator to grep the plan).
-    /// `suggestion` is the actionable remediation hint required by
-    /// `v2-deep-spec.md §Step 17` ("must always include a concrete
-    /// remediation suggestion, not just the violation").
-    /// **Note on shift-left vs in-tx:** the in-transaction
-    /// `scheduler::admit_in_tx` still calls `detect_cycle_in` as a
-    /// defense-in-depth backstop. It should never fire for a plan that
-    /// passed shift-left, but if a future refactor accidentally
-    /// bypasses the shift-left validator, the tx-level check catches
-    /// the cycle and rolls back. A plan that fails *only* the
-    /// in-tx check (theoretically impossible) surfaces as
-    /// `Scheduler(SchedulerError::CyclicDependency)`, distinct from
-    /// this variant.
+    ///     `offending_task` names the task whose entry triggered the rule
+    ///     (for cycles, an arbitrary task on the cycle — sufficient for
+    ///     the operator to grep the plan).
+    ///     `suggestion` is the actionable remediation hint required by
+    ///     `v2-deep-spec.md §Step 17` ("must always include a concrete
+    ///     remediation suggestion, not just the violation").
+    ///     **Note on shift-left vs in-tx:** the in-transaction
+    ///     `scheduler::admit_in_tx` still calls `detect_cycle_in` as a
+    ///     defense-in-depth backstop. It should never fire for a plan that
+    ///     passed shift-left, but if a future refactor accidentally
+    ///     bypasses the shift-left validator, the tx-level check catches
+    ///     the cycle and rolls back. A plan that fails *only* the
+    ///     in-tx check (theoretically impossible) surfaces as
+    ///     `Scheduler(SchedulerError::CyclicDependency)`, distinct from
+    ///     this variant.
     #[error("plan DAG invalid (rule={rule}, task={offending_task}): {suggestion}")]
     PlanDagInvalid {
         rule: &'static str,
@@ -311,16 +311,16 @@ pub enum LifecycleError {
     ///     exceeds the 32-entry / 16-KiB total cap.
     ///   * `"env_reserved_key"` — an `env` key starts with the
     ///     reserved `RAXIS_*` prefix.
-    /// Cross-source rules (collision against operator-side
-    /// `[[integration_merge_verifiers]]`, image resolution against
-    /// `[[vm_images]]` with `Verifier` role_restriction, hard-cap
-    /// timeout enforcement against `max_verifier_timeout_seconds`)
-    /// are **deferred** to a follow-up step that plumbs the
-    /// `PolicyBundle` into `approve_plan`. The structural rules
-    /// covered here run today, before `BEGIN TRANSACTION`.
-    /// Surfaced by `validate_plan_integration_merge_verifiers` at
-    /// `approve_plan` time. Sister-of `PlanDagInvalid` — shift-left
-    /// validation per `v2-deep-spec.md §Step 17`.
+    ///     Cross-source rules (collision against operator-side
+    ///     `[[integration_merge_verifiers]]`, image resolution against
+    ///     `[[vm_images]]` with `Verifier` role_restriction, hard-cap
+    ///     timeout enforcement against `max_verifier_timeout_seconds`)
+    ///     are **deferred** to a follow-up step that plumbs the
+    ///     `PolicyBundle` into `approve_plan`. The structural rules
+    ///     covered here run today, before `BEGIN TRANSACTION`.
+    ///     Surfaced by `validate_plan_integration_merge_verifiers` at
+    ///     `approve_plan` time. Sister-of `PlanDagInvalid` — shift-left
+    ///     validation per `v2-deep-spec.md §Step 17`.
     #[error("plan [[plan.integration_merge_verifiers]] invalid (rule={rule}, verifier={offending_verifier}): {suggestion}")]
     PlanIntegrationMergeVerifierInvalid {
         /// One of the rule strings listed in the variant doc.
@@ -348,10 +348,10 @@ pub enum LifecycleError {
     ///     `raxis_plan_credentials::ParseError` (missing required
     ///     field, wrong TOML type, etc.). The exact diagnostic from
     ///     the parser is preserved in `suggestion`.
-    /// Surfaced by `validate_task_credentials` at `approve_plan`
-    /// time, **before** `BEGIN TRANSACTION`, so a malformed plan
-    /// never allocates a row. Sister-of `PlanDagInvalid` —
-    /// shift-left validation per `v2-deep-spec.md §Step 17`.
+    ///     Surfaced by `validate_task_credentials` at `approve_plan`
+    ///     time, **before** `BEGIN TRANSACTION`, so a malformed plan
+    ///     never allocates a row. Sister-of `PlanDagInvalid` —
+    ///     shift-left validation per `v2-deep-spec.md §Step 17`.
     #[error("plan task-credentials invalid (rule={rule}, task={offending_task}, credential={offending_credential}): {suggestion}")]
     PlanTaskCredentialsInvalid {
         /// One of `unknown_proxy_type`, `malformed`.
@@ -386,9 +386,9 @@ pub enum LifecycleError {
     ///   resolves but the entry's `role_restriction` does not
     ///   include the task's role. Surfaced as
     ///   `FAIL_VM_IMAGE_ROLE_RESTRICTION_MISMATCH`.
-    /// Surfaces as `LifecycleError::PlanTaskVmImageInvalid` and
-    /// is emitted before BEGIN TRANSACTION so a malformed plan
-    /// never allocates a row.
+    ///   Surfaces as `LifecycleError::PlanTaskVmImageInvalid` and
+    ///   is emitted before BEGIN TRANSACTION so a malformed plan
+    ///   never allocates a row.
     #[error("plan task vm_image invalid (rule={rule}, task={offending_task}, image={offending_image:?}): {suggestion}")]
     PlanTaskVmImageInvalid {
         /// One of `"reviewer_image_not_allowed"`,
@@ -419,10 +419,10 @@ pub enum LifecycleError {
     ///     unlock the field.
     ///   * `"invalid"` — the plan-side `target_ref` failed
     ///     [`raxis_policy::validate_target_ref_format`].
-    /// Surfaces the operator-facing
-    /// `FAIL_POLICY_LOCKED_FIELD` (rule="locked") /
-    /// `FAIL_WORKSPACE_TARGET_REF_INVALID` (rule="invalid") error
-    /// codes from `raxis_types::OperatorErrorCode`.
+    ///     Surfaces the operator-facing
+    ///     `FAIL_POLICY_LOCKED_FIELD` (rule="locked") /
+    ///     `FAIL_WORKSPACE_TARGET_REF_INVALID` (rule="invalid") error
+    ///     codes from `raxis_types::OperatorErrorCode`.
     #[error("plan target_ref invalid (rule={rule}): plan={plan_value:?}, policy={policy_value:?}, suggestion={suggestion}")]
     PlanTargetRefInvalid {
         /// One of `"locked"`, `"invalid"`.
@@ -2751,11 +2751,11 @@ fn parse_plan_orchestrator(
 /// * Re-checks Reviewer-task elastic fields as defence-in-depth
 ///   against a future parser regression
 ///   (`FAIL_REVIEWER_ELASTIC_NOT_ALLOWED`).
-/// Pure function — no I/O, no store reads, no audit. Honours the
-/// "plan can NARROW" rule: `Some(false)` is always admissible,
-/// smaller `max_*` is fine; only `Some(true)` against
-/// disabled policy or larger `max_*` against the policy ceiling
-/// surfaces a `LifecycleError::PlanInvalid`.
+///   Pure function — no I/O, no store reads, no audit. Honours the
+///   "plan can NARROW" rule: `Some(false)` is always admissible,
+///   smaller `max_*` is fine; only `Some(true)` against
+///   disabled policy or larger `max_*` against the policy ceiling
+///   surfaces a `LifecycleError::PlanInvalid`.
 // `private_interfaces` clean: callers live inside this same module
 // (only call site is `approve_plan` at line 941), so the function
 // drops `pub(crate)` rather than promoting `PlanTask` (and its 25+
@@ -2916,17 +2916,17 @@ fn parse_plan_workspace_target_ref(plan_toml: &str) -> Result<Option<String>, Li
 /// 1. `[workspace] target_ref` from `plan.toml` (if present),
 /// 2. else `[git] default_target_ref` from `policy.toml`,
 /// 3. else `"refs/heads/main"`.
-/// **Locked-field enforcement.** When the active policy has
-/// `[git] target_ref_locked = true`, any plan-declared override
-/// that differs from `[git] default_target_ref` is rejected with
-/// `LifecycleError::PlanTargetRefInvalid { rule: "locked" }`.
-/// Equality is strict-byte (no canonicalization) — an operator
-/// who locks `"refs/heads/main"` and a plan that declares
-/// `"refs/heads/main"` round-trips cleanly.
-/// **Format enforcement.** A plan-declared override is structurally
-/// validated through [`raxis_policy::validate_target_ref_format`]
-/// before the locked-field check; the policy default was already
-/// validated at `PolicyBundle::validate` time.
+///    **Locked-field enforcement.** When the active policy has
+///    `[git] target_ref_locked = true`, any plan-declared override
+///    that differs from `[git] default_target_ref` is rejected with
+///    `LifecycleError::PlanTargetRefInvalid { rule: "locked" }`.
+///    Equality is strict-byte (no canonicalization) — an operator
+///    who locks `"refs/heads/main"` and a plan that declares
+///    `"refs/heads/main"` round-trips cleanly.
+///    **Format enforcement.** A plan-declared override is structurally
+///    validated through [`raxis_policy::validate_target_ref_format`]
+///    before the locked-field check; the policy default was already
+///    validated at `PolicyBundle::validate` time.
 pub(crate) fn resolve_target_ref(
     plan_value: Option<&str>,
     policy_default: &str,
@@ -3475,9 +3475,9 @@ fn validate_plan_integration_merge_verifiers(
 ///   * `"single_lane_propagation"` — at least one `[[tasks]]` block
 ///     declares its own `lane_id`. V2 forbids per-task overrides;
 ///     the workspace-root lane is the single authority.
-/// On success, returns the workspace-root lane id (a non-empty
-/// `String`) for the caller to propagate into every
-/// `scheduler::PlanTask::lane_id`.
+///     On success, returns the workspace-root lane id (a non-empty
+///     `String`) for the caller to propagate into every
+///     `scheduler::PlanTask::lane_id`.
 fn validate_single_lane_propagation(
     workspace_lane: &Option<String>,
     tasks: &[PlanTask],
@@ -3622,13 +3622,13 @@ fn validate_workspace_lane_in_policy(
 ///     `INV-PLANNER-HARNESS-05`/`-06`). An operator-declared
 ///     `Orchestrator` task would either silently shadow the
 ///     auto-created session or run alongside it; both are wrong.
-/// The structural rule fires first (it's a more general violation:
-/// any Orchestrator-in-`[[tasks]]` is wrong, regardless of clone
-/// strategy). The semantic rule fires when an Orchestrator declaration
-/// somehow slipped past defense-in-depth — useful for forward-compat
-/// where the Orchestrator might re-enter `[[tasks]]` in a future spec.
-/// Runs before `BEGIN TRANSACTION` so a malformed plan never allocates
-/// a row.
+///     The structural rule fires first (it's a more general violation:
+///     any Orchestrator-in-`[[tasks]]` is wrong, regardless of clone
+///     strategy). The semantic rule fires when an Orchestrator declaration
+///     somehow slipped past defense-in-depth — useful for forward-compat
+///     where the Orchestrator might re-enter `[[tasks]]` in a future spec.
+///     Runs before `BEGIN TRANSACTION` so a malformed plan never allocates
+///     a row.
 fn validate_sparse_orchestrator_exclusion(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
     for task in tasks {
         if task.session_agent_type == SessionAgentType::Orchestrator {
@@ -3772,10 +3772,10 @@ fn validate_cross_cutting_artifacts(
 ///      us "an arbitrary task on the cycle" for the diagnostic).
 ///      The in-tx `scheduler::dag::detect_cycle_in` is retained as a
 ///      defense-in-depth backstop — see `LifecycleError::PlanDagInvalid`.
-/// All four rules emit `LifecycleError::PlanDagInvalid { rule,
+///      All four rules emit `LifecycleError::PlanDagInvalid { rule,
 /// offending_task, suggestion }`. The `suggestion` field is mandatory
-/// per the spec; it is a concrete fix the operator can apply, not a
-/// generic restatement of the rule name.
+///      per the spec; it is a concrete fix the operator can apply, not a
+///      generic restatement of the rule name.
 /// # Why DFS, not the SQLite cycle check
 /// Pros of DFS-on-the-plan:
 ///   * Runs before tx → no rollback scar, no half-state.
@@ -3787,7 +3787,7 @@ fn validate_cross_cutting_artifacts(
 ///     the time t3 is admitted, the t1↔t2 cycle is already half-built.
 ///   * Produces a structured `(rule, offending_task, suggestion)`
 ///     triple instead of an opaque SQLite error.
-/// Cons:
+///     Cons:
 ///   * One additional graph traversal at approve time (O(V+E)).
 ///     Negligible for plan sizes of practical interest.
 fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
@@ -3929,11 +3929,11 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
 ///     (e.g., `src/api/handler.rs`); matched by string equality.
 ///   * **Directory prefixes** — repo-relative, ending in `/`
 ///     (e.g., `src/api/`); matched by prefix.
-/// Glob characters, absolute paths, and path-escapes are rejected here.
-/// We deliberately fail-fast at `approve_plan` (not at `start_initiative`)
-/// because the operator's signature is over the plan bytes — a plan with
-/// invalid syntax never makes it to the registry, never admits tasks, and
-/// never affects already-running initiatives.
+///     Glob characters, absolute paths, and path-escapes are rejected here.
+///     We deliberately fail-fast at `approve_plan` (not at `start_initiative`)
+///     because the operator's signature is over the plan bytes — a plan with
+///     invalid syntax never makes it to the registry, never admits tasks, and
+///     never affects already-running initiatives.
 /// # Reason taxonomy (canonical strings)
 /// Surfaces in `LifecycleError::PathAllowlistInvalidSyntax::reason`:
 /// | reason                    | trigger                                        |
@@ -4001,18 +4001,18 @@ fn validate_path_allowlist_v2_format(tasks: &[PlanTask]) -> Result<(), Lifecycle
 /// * 1 → task is bound to that environment (passes).
 /// * ≥ 2 → `FAIL_TASK_ENVIRONMENT_INCONSISTENT` (hard reject;
 ///   not downgradable by `--no-strict` per §11.7).
-/// **Activation gate (`§1.5.2`).** When `policy_environments` is
-/// empty, the entire check is a no-op — the operator has not
-/// opted into the environment model and INV-ENV-01 fires on
-/// zero plan tasks.
-/// **V2 MVP scope.** The URL-gate limb of the algorithm
-/// (`§11.3 step B`) and the same-cluster acknowledgement handler
-/// (`§11.4`) are deferred to V3 alongside the
-/// `[[environment_gates]]` parser; this validator covers the
-/// credential limb only, which is the path that matters for
-/// "does a single VM hold credentials for two environments at
-/// once" — the canonical blast-radius property INV-ENV-01
-/// exists to prevent.
+///   **Activation gate (`§1.5.2`).** When `policy_environments` is
+///   empty, the entire check is a no-op — the operator has not
+///   opted into the environment model and INV-ENV-01 fires on
+///   zero plan tasks.
+///   **V2 MVP scope.** The URL-gate limb of the algorithm
+///   (`§11.3 step B`) and the same-cluster acknowledgement handler
+///   (`§11.4`) are deferred to V3 alongside the
+///   `[[environment_gates]]` parser; this validator covers the
+///   credential limb only, which is the path that matters for
+///   "does a single VM hold credentials for two environments at
+///   once" — the canonical blast-radius property INV-ENV-01
+///   exists to prevent.
 fn validate_task_environment_consistency(
     tasks: &[PlanTask],
     policy_environments: &std::collections::HashMap<String, raxis_policy::EnvironmentConfig>,
@@ -4110,16 +4110,16 @@ fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
 ///      prepare` already filled (it only fires when the field is
 ///      empty), and inert when no `[default_executor_image]` is
 ///      declared.
-/// Tasks that omit `vm_image` AND have no policy default are
-/// admitted unchanged — the spawn path falls back to the
-/// canonical starter image (V1 forward-compat).
-/// **Inert when the registry is empty.** A policy with no
-/// `[[vm_images]]` entries is treated as "no operator-published
-/// image registry", and tasks omitting `vm_image` continue to
-/// boot the canonical starter image. Tasks declaring a non-empty
-/// `vm_image` against an empty registry are still rejected with
-/// `image_not_registered` so a half-rolled-out registry doesn't
-/// silently fall through.
+///      Tasks that omit `vm_image` AND have no policy default are
+///      admitted unchanged — the spawn path falls back to the
+///      canonical starter image (V1 forward-compat).
+///      **Inert when the registry is empty.** A policy with no
+///      `[[vm_images]]` entries is treated as "no operator-published
+///      image registry", and tasks omitting `vm_image` continue to
+///      boot the canonical starter image. Tasks declaring a non-empty
+///      `vm_image` against an empty registry are still rejected with
+///      `image_not_registered` so a half-rolled-out registry doesn't
+///      silently fall through.
 fn validate_task_vm_images(
     tasks: &mut [PlanTask],
     vm_images: &[raxis_policy::VmImageConfig],
@@ -4331,7 +4331,7 @@ fn insert_task_credential_proxies_in_tx(
 /// observable by the Orchestrator's "newly_activatable" prompt query
 /// on the next `InferenceRequest` (see `prompt-assembler.md §Layer 2`
 /// + `idx_subtask_activations_pending`).
-/// **Initial state.** The row is inserted with:
+///   **Initial state.** The row is inserted with:
 /// * `activation_state = 'PendingActivation'` — the only state for
 ///   which the cross-column CHECK clause permits `session_id IS NULL
 ///   AND activated_at IS NULL AND terminated_at IS NULL`. The
@@ -4345,15 +4345,15 @@ fn insert_task_credential_proxies_in_tx(
 ///   filled by the predecessor Executor's `CompleteTask` admission
 ///   (per `v2-deep-spec.md §Step 23`); for Executor activations it
 ///   stays `NULL` for the row's lifetime.
-/// **Drift protection.** The `activation_state` literal is taken
-/// straight from `SubtaskActivationState::PendingActivation`'s SQL
-/// projection so a future addition to the enum surfaces here at
-/// compile time. The DDL CHECK clause in
-/// `migration::ensure_v2_schema` independently pins the same set;
-/// the round-trip read in
-/// `read_subtask_activation_in_tx` (below) plus the
-/// `subtask_activations_round_trip_after_approve_plan` test in this
-/// file exercises the full insert → read loop.
+///   **Drift protection.** The `activation_state` literal is taken
+///   straight from `SubtaskActivationState::PendingActivation`'s SQL
+///   projection so a future addition to the enum surfaces here at
+///   compile time. The DDL CHECK clause in
+///   `migration::ensure_v2_schema` independently pins the same set;
+///   the round-trip read in
+///   `read_subtask_activation_in_tx` (below) plus the
+///   `subtask_activations_round_trip_after_approve_plan` test in this
+///   file exercises the full insert → read loop.
 fn insert_subtask_activation_in_tx(
     tx: &rusqlite::Transaction<'_>,
     task_id: &str,
@@ -4518,13 +4518,13 @@ fn string_array(entry: &toml::Value, field: &str) -> Vec<String> {
 ///   * Field present but malformed (non-integer, negative,
 ///     out-of-range, wrong TOML type) ⇒
 ///     `Err(LifecycleError::PlanInvalid)`.
-/// Used for retry-ceiling fields (`max_crash_retries`,
-/// `max_review_rejections`) where omission must remain a valid
-/// shape (kernel default applies) but a present-but-bogus value
-/// must surface as a parse-time rejection rather than silently
-/// degrading to the default. Fail-loud here keeps operator
-/// intent legible: a typo'd `max_crash_retries = "three"` is a
-/// `PlanInvalid` at sign time, not a silent fallback to `3`.
+///     Used for retry-ceiling fields (`max_crash_retries`,
+///     `max_review_rejections`) where omission must remain a valid
+///     shape (kernel default applies) but a present-but-bogus value
+///     must surface as a parse-time rejection rather than silently
+///     degrading to the default. Fail-loud here keeps operator
+///     intent legible: a typo'd `max_crash_retries = "three"` is a
+///     `PlanInvalid` at sign time, not a silent fallback to `3`.
 fn parse_optional_u32_field(
     entry: &toml::Value,
     field: &str,
@@ -5987,10 +5987,10 @@ predecessors = ["test-it"]
     ///   * `read_task_credential_proxies_in_tx` re-deserialises each
     ///     row back into the same `TaskCredentialDecl` shape the
     ///     parser produced.
-    /// This pins the (insert → SELECT → serde-from-JSON) path that
-    /// the kernel-side `CredentialProxyManager` will use at session-
-    /// spawn time. METADATA-ONLY invariant is enforced by inspecting
-    /// the column projection: no row may carry credential bytes.
+    ///     This pins the (insert → SELECT → serde-from-JSON) path that
+    ///     the kernel-side `CredentialProxyManager` will use at session-
+    ///     spawn time. METADATA-ONLY invariant is enforced by inspecting
+    ///     the column projection: no row may carry credential bytes.
     #[test]
     fn task_credential_proxies_persistence_round_trips_via_session_spawn() {
         use raxis_plan_credentials::{

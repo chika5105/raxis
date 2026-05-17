@@ -35,12 +35,12 @@
 //!   `retry_subtask`).
 //! * Seed prompt language ("you are an executor for task X" vs
 //!   "you are a reviewer of evaluation_sha Y").
-//! Everything else — env parsing, transport setup, loop driver,
-//! intent submission, error conversion — is identical. The driver
-//! concentrates the shared logic and exposes one
-//! [`run_role_session`] entry point each binary calls; the result
-//! is three role mains of < 30 lines each instead of three
-//! 200-line copies.
+//!   Everything else — env parsing, transport setup, loop driver,
+//!   intent submission, error conversion — is identical. The driver
+//!   concentrates the shared logic and exposes one
+//!   [`run_role_session`] entry point each binary calls; the result
+//!   is three role mains of < 30 lines each instead of three
+//!   200-line copies.
 //! ## Live-mode env contract (kernel-stamped)
 //! | Variable                       | Required for live mode? | Default                              | Purpose                                    |
 //! |--------------------------------|-------------------------|--------------------------------------|--------------------------------------------|

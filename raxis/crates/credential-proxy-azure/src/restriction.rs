@@ -19,7 +19,7 @@
 //!     header in V2.3 — runtime enforcement requires the V3
 //!     ARM-aware egress proxy that parses outbound REST URLs and
 //!     matches them against the action vocabulary.
-//! Behaviour summary:
+//!     Behaviour summary:
 //!   * `allowed_resources` is the **mandatory** gate: a request
 //!     for a resource not in the list gets `400 Bad Request`.
 //!   * `allowed_actions` is **declarative + audit echo**: the

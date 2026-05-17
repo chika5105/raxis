@@ -26,7 +26,7 @@ use crate::server::{AppState, AuthorizedOperator};
 
 /// `GET /api/gates/stats` — per-gate rollup of witness outcomes
 /// + cumulative fixup-loop counter. Read-role suffices; the
-/// signal is operator-visible by design.
+///   signal is operator-visible by design.
 pub async fn stats<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,

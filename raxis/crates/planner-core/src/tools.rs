@@ -818,9 +818,9 @@ pub const SLEEP_TOOL_HARD_MAX_SECONDS: u32 = 600;
 /// * `cumulative + seconds > max_cumulative` → `FAIL_SLEEP_BUDGET_EXCEEDED`.
 /// * `max_per_call == 0` → tool disabled, every call returns
 ///   `FAIL_SLEEP_DISABLED`.
-/// All errors are STRUCTURED (returned as `ToolOutput::err`) so the
-/// model can recover; `Tool::execute` itself returns `Ok` in every
-/// case (matches the dispatch loop's error contract — see `BashTool`).
+///   All errors are STRUCTURED (returned as `ToolOutput::err`) so the
+///   model can recover; `Tool::execute` itself returns `Ok` in every
+///   case (matches the dispatch loop's error contract — see `BashTool`).
 pub struct SleepTool {
     max_per_call_seconds: u32,
     max_cumulative_seconds: u32,
@@ -976,20 +976,20 @@ impl Tool for SleepTool {
 ///     operator-facing message, optional source-location evidence.
 ///   * `task_summary`    — final commit SHA, changed paths,
 ///     one-paragraph approach.
-/// **Authority.** Registered in the executor + orchestrator
-/// registries only; the reviewer registry never has it
-/// (INV-PLANNER-HARNESS-02). NOT a terminal tool — the dispatch
-/// loop keeps running after a successful submission.
-/// **Wire shape.** The model invokes the tool with
-/// `{ "kind": "progress_report", "files_modified": [...], ... }`
-/// (snake-case `kind` discriminator + variant fields). The tool
-/// parses into `StructuredOutputKind` (which uses the default
-/// external-tag serde representation for `bincode::serde`
-/// compatibility) by manually mapping the snake-case `kind`
-/// string to the matching variant. This is the ONLY place in
-/// the planner stack that bridges the model's snake-case
-/// projection to the external-tag wire shape; downstream
-/// handlers see the canonical bincode shape.
+///     **Authority.** Registered in the executor + orchestrator
+///     registries only; the reviewer registry never has it
+///     (INV-PLANNER-HARNESS-02). NOT a terminal tool — the dispatch
+///     loop keeps running after a successful submission.
+///     **Wire shape.** The model invokes the tool with
+///     `{ "kind": "progress_report", "files_modified": [...], ... }`
+///     (snake-case `kind` discriminator + variant fields). The tool
+///     parses into `StructuredOutputKind` (which uses the default
+///     external-tag serde representation for `bincode::serde`
+///     compatibility) by manually mapping the snake-case `kind`
+///     string to the matching variant. This is the ONLY place in
+///     the planner stack that bridges the model's snake-case
+///     projection to the external-tag wire shape; downstream
+///     handlers see the canonical bincode shape.
 pub struct StructuredOutputTool {
     submitter: Arc<crate::intent::IntentSubmitter>,
 }

@@ -460,11 +460,11 @@ impl UpstreamSession {
     ///   (userinfo present) — drives SCRAM-SHA-256 SASL against
     ///   `authSource` (default `admin`). Failure surfaces as
     ///   `UpstreamError::AuthRejected` for the audit trail.
-    /// `tls=true` / `ssl=true` is rejected as `Handshake` because
-    /// the proxy still talks plaintext only on the upstream socket
-    /// (V3 work). Operators on `mongo:7` containers can keep
-    /// `--noauth` or use `mongodb://user:pass@.../authSource=admin`
-    /// without TLS for development.
+    ///   `tls=true` / `ssl=true` is rejected as `Handshake` because
+    ///   the proxy still talks plaintext only on the upstream socket
+    ///   (V3 work). Operators on `mongo:7` containers can keep
+    ///   `--noauth` or use `mongodb://user:pass@.../authSource=admin`
+    ///   without TLS for development.
     pub async fn connect(
         url: &ParsedUpstreamUrl,
         connect_timeout: Duration,

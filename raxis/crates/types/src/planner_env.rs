@@ -108,11 +108,11 @@ pub const PLANNER_MAX_SLEEP_PER_CALL_ENV: &str = "RAXIS_PLANNER_MAX_SLEEP_SECOND
 pub const PLANNER_MAX_SLEEP_CUMULATIVE_ENV: &str = "RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS";
 
 /// + `extensibility-traits.md §9A.5` — base URL of the
-/// operator-run sidecar process when the resolved model maps to a
-/// `policy.toml [[providers]] kind = "http_sidecar"` row. Kernel
-/// stamps verbatim from `ProviderEntry::sidecar_endpoint`. Empty
-/// or absent ⇒ planner refuses to boot a sidecar provider with
-/// `DriverError::SidecarEnvMissing`.
+///   operator-run sidecar process when the resolved model maps to a
+///   `policy.toml [[providers]] kind = "http_sidecar"` row. Kernel
+///   stamps verbatim from `ProviderEntry::sidecar_endpoint`. Empty
+///   or absent ⇒ planner refuses to boot a sidecar provider with
+///   `DriverError::SidecarEnvMissing`.
 pub const PLANNER_SIDECAR_ENDPOINT_ENV: &str = "RAXIS_PLANNER_SIDECAR_ENDPOINT";
 
 /// logical sidecar provider id (matches the policy
@@ -122,10 +122,10 @@ pub const PLANNER_SIDECAR_ENDPOINT_ENV: &str = "RAXIS_PLANNER_SIDECAR_ENDPOINT";
 pub const PLANNER_SIDECAR_PROVIDER_ID_ENV: &str = "RAXIS_PLANNER_SIDECAR_PROVIDER_ID";
 
 /// + `extensibility-traits.md §9A.7A` — 32-byte HMAC
-/// shared secret in lowercase hex (64 chars). Kernel stamps from
-/// `ProviderEntry::sidecar_hmac_secret`. **Operator MUST rotate
-/// per-spawn** (the kernel mints fresh material each time so a
-/// compromised planner cannot replay across spawns). NEVER logged.
+///   shared secret in lowercase hex (64 chars). Kernel stamps from
+///   `ProviderEntry::sidecar_hmac_secret`. **Operator MUST rotate
+///   per-spawn** (the kernel mints fresh material each time so a
+///   compromised planner cannot replay across spawns). NEVER logged.
 pub const PLANNER_SIDECAR_HMAC_SECRET_ENV: &str = "RAXIS_PLANNER_SIDECAR_HMAC_SECRET";
 
 #[cfg(test)]

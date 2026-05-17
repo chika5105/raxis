@@ -57,19 +57,19 @@
 //! * `X-Raxis-HMAC`       — `hex(HMAC-SHA256(secret,
 //!                          request_id || ":" || timestamp || ":" ||
 //!                          body_bytes))`.
-//! The sidecar MUST reject any request where the HMAC fails or the
-//! timestamp is more than 30 seconds stale (replay window). The
-//! sidecar's response carries the same triple — the planner verifies
-//! it before parsing the body. Verification failures map to
-//! `ModelError::Transport` so the retry classifier
-//! ([`crate::retry::is_retryable`]) treats them as transient (the
-//! sidecar may have crashed mid-handshake; a fresh attempt against a
-//! restarted sidecar may succeed).
-//! Per `extensibility-traits.md §9A.7A` the canonical signing input
-//! is **not** the raw body alone — that would let an attacker who
-//! intercepts a single request replay it indefinitely. Including
-//! `request_id` and `timestamp` in the signing input binds each
-//! signature to a specific request at a specific moment.
+//!   The sidecar MUST reject any request where the HMAC fails or the
+//!   timestamp is more than 30 seconds stale (replay window). The
+//!   sidecar's response carries the same triple — the planner verifies
+//!   it before parsing the body. Verification failures map to
+//!   `ModelError::Transport` so the retry classifier
+//!   ([`crate::retry::is_retryable`]) treats them as transient (the
+//!   sidecar may have crashed mid-handshake; a fresh attempt against a
+//!   restarted sidecar may succeed).
+//!   Per `extensibility-traits.md §9A.7A` the canonical signing input
+//!   is **not** the raw body alone — that would let an attacker who
+//!   intercepts a single request replay it indefinitely. Including
+//!   `request_id` and `timestamp` in the signing input binds each
+//!   signature to a specific request at a specific moment.
 //! ## Retry / circuit-breaker composition
 //! `SidecarModelClient` plugs into the existing dispatch chain
 //! identically to every other `ModelClient`:

@@ -18,11 +18,11 @@
 //! * `timeout_secs` — Per-invocation deadline. Hard-capped at 300s
 //!   (5 minutes) by the loader; values above the cap are rejected at
 //!   registration time.
-//! The subprocess receives the model's `tool_use.input` as JSON on
-//! stdin, and is expected to write a `ToolOutput`-shaped JSON
-//! response to stdout (`{ "content": "...", "is_error": bool? }`).
-//! Non-zero exit codes are surfaced as
-//! [`crate::tools::ToolOutput::err`] without further interpretation.
+//!   The subprocess receives the model's `tool_use.input` as JSON on
+//!   stdin, and is expected to write a `ToolOutput`-shaped JSON
+//!   response to stdout (`{ "content": "...", "is_error": bool? }`).
+//!   Non-zero exit codes are surfaced as
+//!   [`crate::tools::ToolOutput::err`] without further interpretation.
 
 use std::process::Stdio;
 use std::sync::Arc;

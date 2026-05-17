@@ -163,13 +163,13 @@ pub enum Table {
     /// * `proxy_type` — `postgres | http | k8s | smtp`.
     /// * `proxy_json` — the per-proxy restriction blob (allow-lists,
     ///   upstream URL, etc.).
-    /// The credential **bytes themselves** (postgres URL with
-    /// password, bearer tokens, kubeconfig YAML, …) are NEVER
-    /// persisted in `kernel.db`. They live with the
-    /// `CredentialBackend` (the reference `FileCredentialBackend`
-    /// stores them in `~/.config/raxis/credentials/<name>.env` with
-    /// `0600` perms enforced; production deployments may swap in a
-    /// `VaultBackend`, `AwsSecretsManagerBackend`, etc.).
+    ///   The credential **bytes themselves** (postgres URL with
+    ///   password, bearer tokens, kubeconfig YAML, …) are NEVER
+    ///   persisted in `kernel.db`. They live with the
+    ///   `CredentialBackend` (the reference `FileCredentialBackend`
+    ///   stores them in `~/.config/raxis/credentials/<name>.env` with
+    ///   `0600` perms enforced; production deployments may swap in a
+    ///   `VaultBackend`, `AwsSecretsManagerBackend`, etc.).
     /// # Why a JSON column for `proxy_json`
     /// (vs. a normalised per-proxy-type column set): the
     /// per-proxy-type schemas drift independently —
@@ -178,13 +178,13 @@ pub enum Table {
     ///   allowed_path_prefixes;
     /// * k8s reuses http restrictions but is auditing-distinct;
     /// * future smtp adds rate-limit fields —
-    /// and the kernel never writes to this column outside of the
-    /// approve_plan transaction. It is read once at session-spawn
-    /// time and re-deserialised back into
-    /// `raxis_plan_credentials::TaskCredentialDecl`. JSON keeps the
-    /// schema flat while preserving per-proxy fidelity. The
-    /// `proxy_type` column is projected out of the JSON for
-    /// index/query convenience and CHECK-clause pinning.
+    ///   and the kernel never writes to this column outside of the
+    ///   approve_plan transaction. It is read once at session-spawn
+    ///   time and re-deserialised back into
+    ///   `raxis_plan_credentials::TaskCredentialDecl`. JSON keeps the
+    ///   schema flat while preserving per-proxy fidelity. The
+    ///   `proxy_type` column is projected out of the JSON for
+    ///   index/query convenience and CHECK-clause pinning.
     /// # Atomicity
     /// Inserted by `approve_plan` in the SAME transaction that
     /// admits the parent `tasks` row (INV-STORE-02). Foreign key on
@@ -287,8 +287,8 @@ pub enum Table {
     /// **Write-order contract** (mirrors `witness_index`):
     ///   1. Write blob(s) to FS, content-addressed (idempotent).
     ///   2. INSERT index row in single SQL transaction.
-    /// A crash between steps leaves orphaned blobs (harmless; never
-    /// referenced by any row).
+    ///      A crash between steps leaves orphaned blobs (harmless; never
+    ///      referenced by any row).
     ///
     /// **Pre-GC hard-fail.** `gc_session_worktree` MUST call
     /// `worktree_snapshot::snapshot_worktree(..., PreGc)` before

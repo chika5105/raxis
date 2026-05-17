@@ -490,13 +490,13 @@ fn require_arg<'a>(args: &'a [String], pos: usize, flag: &str) -> Result<&'a str
 ///    `"usage: --operator-key <path> is required"` error so the
 ///    operator sees the same message they would have seen before
 ///    the env-var fallback existed (no silent skipping).
-/// Security model: the env var stores a **path** (which is then
-/// `chmod 600` on disk), never the key bytes themselves. This
-/// preserves the §"Security model" invariant in
-/// `specs/v1/env-vars.md` — no secret material ever transits the
-/// process environment, where it would be visible to `ps eww`,
-/// `/proc/$pid/environ`, kernel-exported core dumps, and any child
-/// process inheriting the env block.
+///    Security model: the env var stores a **path** (which is then
+///    `chmod 600` on disk), never the key bytes themselves. This
+///    preserves the §"Security model" invariant in
+///    `specs/v1/env-vars.md` — no secret material ever transits the
+///    process environment, where it would be visible to `ps eww`,
+///    `/proc/$pid/environ`, kernel-exported core dumps, and any child
+///    process inheriting the env block.
 fn resolve_operator_key_path(
     flag_value: Option<PathBuf>,
     env_lookup: impl FnOnce(&str) -> Option<PathBuf>,

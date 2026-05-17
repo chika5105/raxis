@@ -29,22 +29,22 @@
 //!    `tokio::io::duplex` pair stands in for the UDS / VSock socket
 //!    so tests can pin frame round-trips without standing up the
 //!    full kernel.
-//! A trait-based design lets the dispatch loop and intent-submission
-//! helpers stay transport-agnostic: any binary that accepts
-//! `KernelTransport: KernelTransport` (the marker bound, see below)
-//! works the same way under all three substrates.
+//!    A trait-based design lets the dispatch loop and intent-submission
+//!    helpers stay transport-agnostic: any binary that accepts
+//!    `KernelTransport: KernelTransport` (the marker bound, see below)
+//!    works the same way under all three substrates.
 //! ## Wire shape
 //! Every frame is `[u32 LE body_len][bincode body]` per
 //! `raxis-ipc::frame` (`peripherals.md §3` opening normative note).
 //! The planner side serialises [`raxis_ipc::IpcMessage`] variants:
 //! * Outbound: `IntentRequest` / `EscalationRequest`
 //! * Inbound:  `KernelIntentResponse` / `KernelEscalationResponse`
-//! The kernel always responds with exactly one frame per request;
-//! [`KernelTransport::request`] therefore writes one outbound frame
-//! and reads one inbound frame in a single round-trip. Multiplexed
-//! request streams are out of scope for V2 — the kernel's planner
-//! handler is sequential per session, so a single in-flight request
-//! per connection is the contract.
+//!   The kernel always responds with exactly one frame per request;
+//!   [`KernelTransport::request`] therefore writes one outbound frame
+//!   and reads one inbound frame in a single round-trip. Multiplexed
+//!   request streams are out of scope for V2 — the kernel's planner
+//!   handler is sequential per session, so a single in-flight request
+//!   per connection is the contract.
 //! ## V2 limits
 //! * **TLS / mTLS over the transport.** The UDS socket relies on
 //!   filesystem permissions (`0660`, operator group) for auth; the
@@ -214,9 +214,9 @@ impl KernelTransportConfig {
     ///    [`KernelTransportConfig::VsockListen`] (Apple-VZ guest)
     /// 3. `RAXIS_KERNEL_VSOCK_CID` + `RAXIS_KERNEL_VSOCK_PORT` →
     ///    [`KernelTransportConfig::Vsock`] (Firecracker / dial-out)
-    /// All missing ⇒ [`TransportError::NotConfigured`].
-    /// The closure shape `&str -> Option<String>` mirrors
-    /// `std::env::var(_).ok()` so tests can inject a hermetic env.
+    ///    All missing ⇒ [`TransportError::NotConfigured`].
+    ///    The closure shape `&str -> Option<String>` mirrors
+    ///    `std::env::var(_).ok()` so tests can inject a hermetic env.
     pub fn from_env_fn<F>(f: F) -> Result<Self, TransportError>
     where
         F: Fn(&str) -> Option<String>,

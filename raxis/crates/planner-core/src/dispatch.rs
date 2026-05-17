@@ -412,9 +412,9 @@ pub enum DispatchError {
 /// * The role-specific tool registry.
 /// * Static per-session config (model id, max_turns, ...).
 /// * The per-task tool context (workspace root, deadline).
-/// Dispatch is started by [`DispatchLoop::run`] which takes the
-/// initial system prompt + initial user message and runs to a
-/// terminal outcome.
+///   Dispatch is started by [`DispatchLoop::run`] which takes the
+///   initial system prompt + initial user message and runs to a
+///   terminal outcome.
 pub struct DispatchLoop {
     model: Arc<dyn ModelClient>,
     registry: Arc<ToolRegistry>,

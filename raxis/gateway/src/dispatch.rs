@@ -325,11 +325,11 @@ fn host_of_url(url: &str) -> Option<String> {
 /// - `kind = "Anthropic"` matches any host ending in `anthropic.com`.
 /// - `kind = "OpenAI"`    matches any host ending in `openai.com`.
 /// - All other kinds: no auto-match.
-/// v2 will replace this with an explicit `url_match` field per
-/// `[[providers]]` entry. Until then, the auto-mapping covers the two
-/// providers the spec calls out by name; operators wanting other
-/// providers MUST set `provider_id` on the FetchRequest (a planned
-/// IPC field — currently unused).
+///   v2 will replace this with an explicit `url_match` field per
+///   `[[providers]]` entry. Until then, the auto-mapping covers the two
+///   providers the spec calls out by name; operators wanting other
+///   providers MUST set `provider_id` on the FetchRequest (a planned
+///   IPC field — currently unused).
 fn provider_for_host<'a>(view: &'a PolicyView, host: &str) -> Option<&'a ProviderEntryView> {
     let host_lower = host.to_lowercase();
     for entry in view.providers.values() {

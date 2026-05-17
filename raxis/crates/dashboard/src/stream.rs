@@ -52,7 +52,7 @@ impl StreamSubscription {
     ///   * `Ok(None)` — the publisher dropped (session closed),
     ///   * `Err(lagged_count)` — slow subscriber missed
     ///     `lagged_count` events; the receiver remains usable.
-    /// The SSE handler should forward `Err(_)` as an `event:
+    ///     The SSE handler should forward `Err(_)` as an `event:
     /// lagged\n` frame and continue reading.
     pub async fn recv(&mut self) -> Result<Option<StreamEvent>, u64> {
         match self.rx.recv().await {

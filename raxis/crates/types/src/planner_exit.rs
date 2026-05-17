@@ -76,30 +76,30 @@ use serde::{Deserialize, Serialize};
 ///     it doesn't know how to decode. `detail` carries the
 ///     planner-side `Display` of the unknown outcome so the
 ///     synthesised `block_reason` is still concrete.
-/// **Serde contract — INV-IPC-BINCODE.** Default external-tag
-/// representation (NO `#[serde(tag = ...)]`). The earlier draft of
-/// this enum used internally-tagged-with-content
-/// (`#[serde(tag = "kind", content = "detail")]`) which renders as
-/// `{"kind": "MaxTurnsReached", "detail": { "used": 60, "limit": 60 }}`
-/// in JSON, but the canonical IPC encoder for this enum is
-/// `bincode::serde` (frame `IpcMessage::PlannerExitNotice` on the
-/// **bincode 2.0** planner socket per `crates/ipc/src/message.rs`).
-/// `bincode::config::standard()` does NOT implement
-/// `serde::Deserializer::deserialize_any`, so the internally-tagged
-/// projection round-trips through the planner socket as
-/// `Decode(Serde(IdentifierNotSupported))` — the iter57 forensic
-/// surface, observed once per worker session-exit on the
-/// `planner_frame_decode_failed` warn line. Switching to the
-/// external-tag default form (`{"MaxTurnsReached": {"used": 60,
+///     **Serde contract — INV-IPC-BINCODE.** Default external-tag
+///     representation (NO `#[serde(tag = ...)]`). The earlier draft of
+///     this enum used internally-tagged-with-content
+///     (`#[serde(tag = "kind", content = "detail")]`) which renders as
+///     `{"kind": "MaxTurnsReached", "detail": { "used": 60, "limit": 60 }}`
+///     in JSON, but the canonical IPC encoder for this enum is
+///     `bincode::serde` (frame `IpcMessage::PlannerExitNotice` on the
+///     **bincode 2.0** planner socket per `crates/ipc/src/message.rs`).
+///     `bincode::config::standard()` does NOT implement
+///     `serde::Deserializer::deserialize_any`, so the internally-tagged
+///     projection round-trips through the planner socket as
+///     `Decode(Serde(IdentifierNotSupported))` — the iter57 forensic
+///     surface, observed once per worker session-exit on the
+///     `planner_frame_decode_failed` warn line. Switching to the
+///     external-tag default form (`{"MaxTurnsReached": {"used": 60,
 /// "limit": 60}}` in JSON, positional varint-tagged in bincode)
-/// is the canonical fix and matches the same conclusion already
-/// recorded for `IntentOutcome` (`crates/types/src/intent.rs:510`)
-/// and for the discussion in §IPC
-/// bincode contract. Variants and field names are unchanged so
-/// the tag-only delta is backward-compatible at the audit-event
-/// projection level (the audit chain sees the same kind / payload
-/// keys after the kernel's `WorkerPostExitSynth` formatter
-/// reshapes the value into the audit-event JSON envelope).
+///     is the canonical fix and matches the same conclusion already
+///     recorded for `IntentOutcome` (`crates/types/src/intent.rs:510`)
+///     and for the discussion in §IPC
+///     bincode contract. Variants and field names are unchanged so
+///     the tag-only delta is backward-compatible at the audit-event
+///     projection level (the audit chain sees the same kind / payload
+///     keys after the kernel's `WorkerPostExitSynth` formatter
+///     reshapes the value into the audit-event JSON envelope).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlannerExitOutcome {
     /// The planner submitted a terminal intent and is exiting
@@ -227,10 +227,10 @@ impl PlannerExitOutcome {
     ///     option umbrella the kernel synthesised pre-fix.
     ///   * `"unknown"` / `"unspecified"` / `"see logs"` /
     ///     `"internal error"` — opaque placeholders.
-    /// The witness test in `kernel/tests/concrete_reason_witness.rs`
-    /// asserts every variant produces a string that
-    /// (a) is non-empty, (b) does not match the forbidden
-    /// regex, and (c) names the specific cause.
+    ///     The witness test in `kernel/tests/concrete_reason_witness.rs`
+    ///     asserts every variant produces a string that
+    ///     (a) is non-empty, (b) does not match the forbidden
+    ///     regex, and (c) names the specific cause.
     pub fn format_concrete_reason(&self, role_str: &str) -> Option<String> {
         match self {
             PlannerExitOutcome::CleanCompletion { .. } => None,

@@ -75,14 +75,14 @@ pub struct SessionRow {
     ///   `IntentKind::StructuredOutput` to the initiative-scoped
     ///   `handle_structured_output_orchestrator` handler without
     ///   doing a `tasks` lookup that would always fail
-    ///  .
+    ///   .
     /// * Recovery / dashboard surfaces — typed back-edge from a
     ///   coordinator session to its initiative without joining
     ///   through `subtask_activations` (which only covers
     ///   Executor / Reviewer descendants).
-    /// Backed by the nullable `sessions.initiative_id` column with
-    /// FK to `initiatives(initiative_id) ON DELETE CASCADE`
-    /// introduced in migration 18.
+    ///   Backed by the nullable `sessions.initiative_id` column with
+    ///   FK to `initiatives(initiative_id) ON DELETE CASCADE`
+    ///   introduced in migration 18.
     pub initiative_id: Option<String>,
 }
 
@@ -106,9 +106,9 @@ impl Default for SessionConfig {
 /// Create a new session and insert the row into the `sessions` table.
 /// - For `Role::Planner`: `worktree_root` must be `Some`.
 /// - For `Role::Gateway` / `Role::Verifier`: `worktree_root` must be `None`.
-/// Returns the `(SessionId, session_token_hex)` pair on success. The raw token
-/// hex is sent to the operator/spawner; the kernel stores it directly in the
-/// sessions table for auth.rs to compare constant-time.
+///   Returns the `(SessionId, session_token_hex)` pair on success. The raw token
+///   hex is sent to the operator/spawner; the kernel stores it directly in the
+///   sessions table for auth.rs to compare constant-time.
 pub fn create_session(
     role: Role,
     worktree_root: Option<String>,
@@ -354,12 +354,12 @@ pub enum EnvelopeReplayReason {
 ///      duplicate `(session_id, envelope_nonce)` (UNIQUE) or
 ///      duplicate `(session_id, sequence_num)` (PK).
 ///   3. **Atomic advance** — `UPDATE sessions SET sequence_number = sequence_num`.
-/// Either all three succeed and commit, or none do (transaction rollback). The
-/// invariant `sessions.sequence_number == MAX(nonce_cache.sequence_num)` is
-/// preserved across crashes.
-/// Returns `Err(EnvelopeReplayReason)` on any failure for caller-side audit
-/// emission. The handler maps each reason to `PlannerErrorCode::Unauthorized`
-/// per INV-08 to avoid leaking which check failed.
+///      Either all three succeed and commit, or none do (transaction rollback). The
+///      invariant `sessions.sequence_number == MAX(nonce_cache.sequence_num)` is
+///      preserved across crashes.
+///      Returns `Err(EnvelopeReplayReason)` on any failure for caller-side audit
+///      emission. The handler maps each reason to `PlannerErrorCode::Unauthorized`
+///      per INV-08 to avoid leaking which check failed.
 pub fn accept_envelope_and_advance_sequence(
     session_id: &SessionId,
     presented_seq: i64,

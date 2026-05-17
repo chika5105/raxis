@@ -16,16 +16,16 @@
 //! * `mongodb://host:port/db` (no userinfo) — pure plaintext +
 //!   `--noauth`. Useful for ephemeral CI containers.
 //! * `mongodb://user:pass@host:port/db?authSource=admin`
-//! drives SCRAM-SHA-256 SASL against `authSource` (default
+//!   drives SCRAM-SHA-256 SASL against `authSource` (default
 //!   `admin`) before any data command. The proxy's SCRAM client
 //!   is RFC 5802 + 7677 compliant: nonce-prefix verified,
 //!   server-signature verified in constant time, iteration count
 //!   bounded ≥ 4096.
-//! In both cases the agent-side connection is no-auth from the
-//! agent's point of view (`mount_as` URI =
-//! `mongodb://127.0.0.1:PORT/db` with no credentials, hello
-//! response advertises an empty `saslSupportedMechs`). The proxy
-//! authenticates upstream with the kernel-resolved credential.
+//!   In both cases the agent-side connection is no-auth from the
+//!   agent's point of view (`mount_as` URI =
+//!   `mongodb://127.0.0.1:PORT/db` with no credentials, hello
+//!   response advertises an empty `saslSupportedMechs`). The proxy
+//!   authenticates upstream with the kernel-resolved credential.
 //! # What this crate supports
 //!   * `OP_MSG` framing on inbound messages, with the 64 MiB hard
 //!     cap enforced before any allocation.

@@ -100,17 +100,17 @@ pub enum OperatorRequest {
     ///   (`SHA-256[:16]` of the operator's Ed25519 public key) used
     ///   to look up the operator entry in `policy.operators` at
     ///   admission step 8.
-    /// **Hex-encoding choice (best-judgment, documented in spec):**
-    /// the V2 spec lists raw Rust types (`Vec<u8>`, `[u8; 32]`,
-    /// `[u8; 64]`, `OperatorFingerprint`). The actual JSON wire format
-    /// uses lowercase hex strings for byte-array fields so the
-    /// operator socket has a single "what does a bytes field look
-    /// like" answer and the JSON-frame contract test in
-    /// `tests::create_initiative_wire_shape` can pin the byte shape
-    /// with a regular string literal. The hex values are decoded back
-    /// into the typed bundle structures (`BundleSha256` /
-    /// `BundleNonce` / `OperatorFingerprint`) by the kernel admission
-    /// decoder.
+    ///   **Hex-encoding choice (best-judgment, documented in spec):**
+    ///   the V2 spec lists raw Rust types (`Vec<u8>`, `[u8; 32]`,
+    ///   `[u8; 64]`, `OperatorFingerprint`). The actual JSON wire format
+    ///   uses lowercase hex strings for byte-array fields so the
+    ///   operator socket has a single "what does a bytes field look
+    ///   like" answer and the JSON-frame contract test in
+    ///   `tests::create_initiative_wire_shape` can pin the byte shape
+    ///   with a regular string literal. The hex values are decoded back
+    ///   into the typed bundle structures (`BundleSha256` /
+    ///   `BundleNonce` / `OperatorFingerprint`) by the kernel admission
+    ///   decoder.
     CreateInitiative {
         /// CLI-chosen UUIDv7. Rejected with
         /// `FAIL_INITIATIVE_ID_COLLISION` on collision.

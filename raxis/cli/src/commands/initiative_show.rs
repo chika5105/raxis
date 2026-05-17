@@ -32,8 +32,8 @@
 //!     existing non-empty `<dir>` so the operator does not
 //!     accidentally clobber unrelated files. Implies the human
 //!     header is suppressed (the side-effect IS the output).
-//! `--json` emits the same data as a structured object (excludes
-//! `--to <dir>`, where the side-effect is the output).
+//!     `--json` emits the same data as a structured object (excludes
+//!     `--to <dir>`, where the side-effect is the output).
 //! # Output discipline
 //! - All fingerprints / SHAs render as their first 16 hex characters
 //!   followed by `…` so log captures are grep-friendly without

@@ -487,11 +487,11 @@ impl UpstreamSession {
     ///   scramble fast-path; full-auth path encrypts the password
     ///   with the server's RSA public key (RSA-OAEP-SHA1) when the
     ///   server's auth cache is cold.
-    /// `?ssl-mode=REQUIRED` is not yet supported and returns
-    /// `UpstreamError::Handshake`; operators that need TLS to the
-    /// upstream should set up host-side TLS termination via stunnel
-    /// or the upstream's own proxy (a TLS-to-upstream landing path
-    /// is tracked separately).
+    ///   `?ssl-mode=REQUIRED` is not yet supported and returns
+    ///   `UpstreamError::Handshake`; operators that need TLS to the
+    ///   upstream should set up host-side TLS termination via stunnel
+    ///   or the upstream's own proxy (a TLS-to-upstream landing path
+    ///   is tracked separately).
     pub async fn connect(
         url: &ParsedUpstreamUrl,
         connect_timeout: Duration,
@@ -892,10 +892,10 @@ impl UpstreamSession {
     /// * ERR_Packet (terminal),
     /// * OK_Packet (terminal — no result set),
     /// * binary-format ResultSetHeader + ColumnDef* + EOF + Row* + EOF.
-    /// V2.4 byte-relays the binary-row payloads verbatim; the proxy
-    /// does not introspect the row contents (the type metadata in
-    /// the ColumnDef packets is enough for the agent's driver to
-    /// decode).
+    ///   V2.4 byte-relays the binary-row payloads verbatim; the proxy
+    ///   does not introspect the row contents (the type metadata in
+    ///   the ColumnDef packets is enough for the agent's driver to
+    ///   decode).
     pub async fn forward_stmt_execute(
         &mut self,
         body: &[u8],
@@ -1249,7 +1249,7 @@ const _: () = {
 /// * bit 18 — `CLIENT_PS_MULTI_RESULTS`
 /// * bit 19 — `CLIENT_PLUGIN_AUTH`        (REQUIRED for the plugin
 ///   string in the response)
-/// We deliberately do NOT advertise:
+///   We deliberately do NOT advertise:
 /// * bit 5 (`CLIENT_COMPRESS`) — would require a zlib framing layer.
 /// * bit 6 (`CLIENT_ODBC`) — has no effect; just noise.
 /// * bit 7 (`CLIENT_LOCAL_FILES`) — would let the upstream issue

@@ -30,12 +30,12 @@
 //!      tokens cost real money; CI must never bill an account.
 //!   3. **Database services for the credential proxies** — Postgres +
 //!      MongoDB containers per `live-e2e/docker-compose.e2e.yml`.
-//!the test SKIPS (returns Ok without
-//! asserting) when `RAXIS_LIVE_E2E != "1"` so `cargo test --workspace`
-//! continues to pass on any developer's machine without those
-//! dependencies. The skip path emits a structured `Skipped:` line with
-//! the exact `docker compose` command the operator must run to gate
-//! the test back on.
+//!      the test SKIPS (returns Ok without
+//!      asserting) when `RAXIS_LIVE_E2E != "1"` so `cargo test --workspace`
+//!      continues to pass on any developer's machine without those
+//!      dependencies. The skip path emits a structured `Skipped:` line with
+//!      the exact `docker compose` command the operator must run to gate
+//!      the test back on.
 //! ## What the test actually does when gated ON
 //! The test exercises the production wire surface end-to-end:
 //!   * **Bootstrap**: spawns the production `raxis-kernel` binary in
@@ -475,12 +475,12 @@ fn require_gateway_binary() -> PathBuf {
 ///   * `raxis-orchestrator-core-<kernel_version>.img(.manifest.toml)`
 ///   * `raxis-executor-starter-<kernel_version>.img(.manifest.toml)`
 ///   * `raxis-reviewer-core-<kernel_version>.img(.manifest.toml)`
-/// Without these the orchestrator spawn fails with
-/// `CanonicalImageError::IoMissing` mid-lifecycle, which surfaces
-/// as a generic "session spawn failed" deep into the run. We
-/// preflight the FILE existence here; the kernel itself separately
-/// verifies the manifest signature against the build-time-pinned
-/// trust anchor (`raxis_canonical_images::EXPECTED_KERNEL_SIGNING_
+///     Without these the orchestrator spawn fails with
+///     `CanonicalImageError::IoMissing` mid-lifecycle, which surfaces
+///     as a generic "session spawn failed" deep into the run. We
+///     preflight the FILE existence here; the kernel itself separately
+///     verifies the manifest signature against the build-time-pinned
+///     trust anchor (`raxis_canonical_images::EXPECTED_KERNEL_SIGNING_
 /// KEY_BYTES`).
 fn require_canonical_images() {
     let install_dir_raw = std::env::var("RAXIS_INSTALL_DIR").unwrap_or_else(|_| {
@@ -727,17 +727,17 @@ fn spawn_kernel_normal(kernel_bin: &Path, data_dir: PathBuf, install_dir: &Path)
 ///     been built — without it the kernel's dashboard server
 ///     serves the JSON API only (no UI), which defeats the
 ///     visual-debug purpose.
-/// Genesis emits the block flush-left (Rust `\` line continuation
-/// in `genesis_tools::policy_toml::render_genesis_policy_toml`
-/// strips the source-file indentation), so each key sits at
-/// column 0. We preserve that shape so the rewritten file stays
-/// formatted the same way the genesis emitter would have written it.
-/// Failure mode: if the genesis template is ever changed and the
-/// `bind_port    = 9820` literal disappears, this helper panics
-/// with a clear remediation — silently failing here would land
-/// the test on the spec default port and silently skip the
-/// `static_dir` injection (no UI served), which is exactly the
-/// failure mode we are trying to prevent.
+///     Genesis emits the block flush-left (Rust `\` line continuation
+///     in `genesis_tools::policy_toml::render_genesis_policy_toml`
+///     strips the source-file indentation), so each key sits at
+///     column 0. We preserve that shape so the rewritten file stays
+///     formatted the same way the genesis emitter would have written it.
+///     Failure mode: if the genesis template is ever changed and the
+///     `bind_port    = 9820` literal disappears, this helper panics
+///     with a clear remediation — silently failing here would land
+///     the test on the spec default port and silently skip the
+///     `static_dir` injection (no UI served), which is exactly the
+///     failure mode we are trying to prevent.
 fn mutate_dashboard_block_in_policy(body: &mut String) {
     const NEEDLE: &str = "bind_port    = 9820\n";
     let port = configured_dashboard_port();
@@ -1264,17 +1264,17 @@ fn read_json_blocking(stream: &mut UnixStream) -> Value {
 ///   * `[[tasks.credentials]]` — `proxy_type` (NOT `kind`) selects the
 ///     proxy; `name` resolves against `<data_dir>/credentials/`;
 ///     `mount_as` is the env-var injected into the guest VM.
-/// **Spec drift note.** originally cited
-/// `[plan].name` / `[plan.gateway]` blocks — those keys are NOT
-/// part of the kernel's plan parser surface (they are inert if
-/// included). The provider/model pinning happens via the policy
-/// `[gateway]` + `[[providers]]` blocks (`peripherals.md §3.2`),
-/// which the test injects in `enable_gateway_in_policy` below. The
-/// spec is updated alongside this test to reflect the parser shape.
-/// The verifier section is intentionally omitted in this iteration:
-/// V2 verifier dispatch is exercised by per-proxy `live-e2e` slices;
-/// folding it in here would gate the test on yet another canonical
-/// image (`raxis-verifier-default-…`).
+///     **Spec drift note.** originally cited
+///     `[plan].name` / `[plan.gateway]` blocks — those keys are NOT
+///     part of the kernel's plan parser surface (they are inert if
+///     included). The provider/model pinning happens via the policy
+///     `[gateway]` + `[[providers]]` blocks (`peripherals.md §3.2`),
+///     which the test injects in `enable_gateway_in_policy` below. The
+///     spec is updated alongside this test to reflect the parser shape.
+///     The verifier section is intentionally omitted in this iteration:
+///     V2 verifier dispatch is exercised by per-proxy `live-e2e` slices;
+///     folding it in here would gate the test on yet another canonical
+///     image (`raxis-verifier-default-…`).
 fn canonical_plan_toml() -> String {
     [
         "[plan.initiative]",
@@ -1478,12 +1478,12 @@ fn policy_fingerprint_32(pubkey: &[u8; 32]) -> String {
 ///     surface the kind so the operator can correlate),
 ///   - the deadline elapsing without a terminal event,
 ///   - any chain-integrity break detected by `verify_chain_full`.
-/// We intentionally do NOT pin per-step intermediate events here.
-/// The chain ordering is non-deterministic across runs because the
-/// real LLM may pick different intermediate tool calls (read_file,
-/// bash) before the terminal `task_complete`. The post-mortem
-/// assertion (`assert_audit_invariants`) pins the *set* of events
-/// that must be present.
+///     We intentionally do NOT pin per-step intermediate events here.
+///     The chain ordering is non-deterministic across runs because the
+///     real LLM may pick different intermediate tool calls (read_file,
+///     bash) before the terminal `task_complete`. The post-mortem
+///     assertion (`assert_audit_invariants`) pins the *set* of events
+///     that must be present.
 fn poll_for_lifecycle_completion(data_dir: &Path, initiative_id: &str) -> Vec<AuditEvent> {
     let audit_dir = data_dir.join("audit");
     let deadline = lifecycle_deadline();

@@ -76,9 +76,9 @@ impl TaskKey {
 ///     `validate_sparse_orchestrator_exclusion` rule still fires if a
 ///     hand-edited plan or a future spec change ever puts an
 ///     `Orchestrator` task in `[[tasks]]`.
-/// Cloned (cheap — `Vec<String>` is heap-shared on Arc nowhere; this is a
-/// regular owning clone) on every `effective_allow` call so the lock is
-/// dropped immediately after lookup.
+///     Cloned (cheap — `Vec<String>` is heap-shared on Arc nowhere; this is a
+///     regular owning clone) on every `effective_allow` call so the lock is
+///     dropped immediately after lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPlanFields {
     pub path_allowlist: Vec<String>,
@@ -98,14 +98,14 @@ pub struct TaskPlanFields {
     ///   uses the canonical starter image).
     /// * The task is a Reviewer (which is structurally forbidden
     ///   from declaring an alias per `INV-PLANNER-HARNESS-02`).
-    /// The activation handler reads this through
-    /// [`PlanRegistry::get`] to decide whether to spawn the
-    /// canonical starter image or an operator-published one. The
-    /// alias is the trust anchor the operator signed; the kernel
-    /// re-resolves it against the *current* policy at activation
-    /// (re-checking `oci_digest` and `linux_kernel_version_min`)
-    /// so a credential rotation between admission and activation
-    /// does not silently drift the image bytes.
+    ///   The activation handler reads this through
+    ///   [`PlanRegistry::get`] to decide whether to spawn the
+    ///   canonical starter image or an operator-published one. The
+    ///   alias is the trust anchor the operator signed; the kernel
+    ///   re-resolves it against the *current* policy at activation
+    ///   (re-checking `oci_digest` and `linux_kernel_version_min`)
+    ///   so a credential rotation between admission and activation
+    ///   does not silently drift the image bytes.
     pub vm_image: String,
 
     /// Operator-authored seed prompt
@@ -143,8 +143,8 @@ pub struct TaskPlanFields {
     ///   the conservative default [`DEFAULT_MAX_CRASH_RETRIES`] so a
     ///   silent omission cannot widen the ceiling beyond a few
     ///   transient hypervisor failures.
-    /// **Crash classification.** `crash_retry_count` is bumped by the
-    /// kernel on:
+    ///   **Crash classification.** `crash_retry_count` is bumped by the
+    ///   kernel on:
     ///   * SIGCHLD / non-zero VM exit (recovery sweep);
     ///   * `SecurityViolation` revocation per v2-deep-spec.md §Step 14;
     ///   * `ReportFailure` from an Executor (V2.5 — see
@@ -154,7 +154,7 @@ pub struct TaskPlanFields {
     ///     a crash loop, and the V2 ops contract bounds every
     ///     unsuccessful attempt against an Executor under the
     ///     same per-task ceiling).
-    /// The retry handler reads it at counter-check time only.
+    ///     The retry handler reads it at counter-check time only.
     pub max_crash_retries: Option<u32>,
 
     /// V2 `v2-deep-spec.md §Step 12` — operator-declared ceiling on
@@ -174,11 +174,11 @@ pub struct TaskPlanFields {
     ///   review-loop oscillation (v2-deep-spec.md §Step 12 rationale:
     ///   review-fail typically signals planner / spec mismatch and
     ///   benefits from human escalation rather than unbounded retry).
-    /// **Counter substrate.** `review_reject_count` is bumped exactly
-    /// once per terminal-rejected aggregation round
-    /// (`handle_submit_review` → `compute_aggregate_review_outcome`
-    /// transitions to `AtLeastOneRejected`). The retry handler
-    /// reads the latest active activation row's value.
+    ///   **Counter substrate.** `review_reject_count` is bumped exactly
+    ///   once per terminal-rejected aggregation round
+    ///   (`handle_submit_review` → `compute_aggregate_review_outcome`
+    ///   transitions to `AtLeastOneRejected`). The retry handler
+    ///   reads the latest active activation row's value.
     pub max_review_rejections: Option<u32>,
 
     /// V2.7 — operator-declared per-task hard turn ceiling for the
@@ -199,18 +199,18 @@ pub struct TaskPlanFields {
     ///    `policy.gateway.planner_max_turns_default`.
     /// 3. Policy default `None` ⇒ fall through to the compiled
     ///    `raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS` (100).
-    /// The kernel (`session_spawn_orchestrator::resolve_planner_max_turns`)
-    /// performs this resolution at session-spawn time and stamps the
-    /// result into the spawned VM's env table as
-    /// [`raxis_types::planner_env::PLANNER_MAX_TURNS_ENV`]
-    /// (`RAXIS_PLANNER_MAX_TURNS`). The driver
-    /// (`raxis_planner_core::driver::run_role_session_with_env_fn`)
-    /// reads it at boot and hands it to `DispatchConfig::max_turns`.
-    /// **Validation.** `Some(0)` is rejected at plan-parse time with
-    /// `LifecycleError::PlanInvalid` because a 0-turn budget is never
-    /// useful and almost always indicates a typo (the agent would
-    /// terminate before issuing its first model call). `Some(n)` for
-    /// any `n >= 1` is admitted verbatim.
+    ///    The kernel (`session_spawn_orchestrator::resolve_planner_max_turns`)
+    ///    performs this resolution at session-spawn time and stamps the
+    ///    result into the spawned VM's env table as
+    ///    [`raxis_types::planner_env::PLANNER_MAX_TURNS_ENV`]
+    ///    (`RAXIS_PLANNER_MAX_TURNS`). The driver
+    ///    (`raxis_planner_core::driver::run_role_session_with_env_fn`)
+    ///    reads it at boot and hands it to `DispatchConfig::max_turns`.
+    ///    **Validation.** `Some(0)` is rejected at plan-parse time with
+    ///    `LifecycleError::PlanInvalid` because a 0-turn budget is never
+    ///    useful and almost always indicates a typo (the agent would
+    ///    terminate before issuing its first model call). `Some(n)` for
+    ///    any `n >= 1` is admitted verbatim.
     pub max_turns: Option<u32>,
 
     /// V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` —
@@ -228,13 +228,13 @@ pub struct TaskPlanFields {
     /// 3. Neither set ⇒ derived default
     ///    `max(round_up_to_5(base / 2), 10)` so cold-start retries
     ///    get a useful step even for plans that never declared one.
-    /// **Validation.** `Some(0)` is rejected at plan-parse time with
-    /// `LifecycleError::PlanInvalid` — a zero step degenerates the
-    /// progressive resolver back to a constant budget and would mask
-    /// the cold-start retry-tax this knob exists to absorb. If an
-    /// operator actually wants the constant-budget behaviour they
-    /// should pin `max_turns` to a higher value rather than zeroing
-    /// the step.
+    ///    **Validation.** `Some(0)` is rejected at plan-parse time with
+    ///    `LifecycleError::PlanInvalid` — a zero step degenerates the
+    ///    progressive resolver back to a constant budget and would mask
+    ///    the cold-start retry-tax this knob exists to absorb. If an
+    ///    operator actually wants the constant-budget behaviour they
+    ///    should pin `max_turns` to a higher value rather than zeroing
+    ///    the step.
     pub max_turns_step: Option<u32>,
 
     // ── V2 elastic-vm-scaling.md §2.2 — per-task elastic knobs ─────
@@ -363,10 +363,10 @@ impl TaskPlanFields {
     /// 2. `None` on the per-task field + `Some(d)` policy default ⇒
     ///    `d` (compiled default ignored).
     /// 3. `None` on both ⇒ [`DEFAULT_PLANNER_MAX_TURNS`].
-    /// Returns `(resolved_value, source_label)` so the
-    /// `session_spawn_orchestrator` callsite can emit a structured
-    /// `PlannerMaxTurnsResolved` log line whose `source` field names
-    /// the resolution arm verbatim.
+    ///    Returns `(resolved_value, source_label)` so the
+    ///    `session_spawn_orchestrator` callsite can emit a structured
+    ///    `PlannerMaxTurnsResolved` log line whose `source` field names
+    ///    the resolution arm verbatim.
     pub fn effective_max_turns(&self, policy_default: Option<u32>) -> (u32, &'static str) {
         if let Some(c) = self.max_turns {
             (c, "task")

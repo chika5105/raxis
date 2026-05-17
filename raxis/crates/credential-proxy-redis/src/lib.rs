@@ -86,11 +86,11 @@
 //!     `RAXIS_REDIS_PASSWORD=<password>` (one per line; quotes
 //!     and inline comments stripped) emits the ACL form.
 //!     Wire form: `AUTH <user> <password>`.
-//! Both shapes share the same `CredentialBackend::resolve()`
-//! return type — no trait change is needed (per the V2.3 design
-//! decision logged in ). Operators select the
-//! ACL form by adding the second key=value line to
-//! `<data_dir>/credentials/<name>.env`.
+//!     Both shapes share the same `CredentialBackend::resolve()`
+//!     return type — no trait change is needed (per the V2.3 design
+//!     decision logged in ). Operators select the
+//!     ACL form by adding the second key=value line to
+//!     `<data_dir>/credentials/<name>.env`.
 //! # Threat model
 //! Identical to the postgres / smtp / http proxies: a fully-
 //! compromised agent process cannot exfiltrate the upstream

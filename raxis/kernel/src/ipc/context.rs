@@ -351,12 +351,12 @@ pub struct HandlerContext {
     ///   writes each operator public key to `Category::Keys`
     ///   so a future `raxis keys list` can enumerate every
     ///   public key the kernel ever trusted, byte-for-byte.
-    /// **Why `Option`:** test fixtures that don't exercise the
-    /// store leave this `None`; the production boot path always
-    /// wires it. The `advance_epoch` / `approve_plan` callsites
-    /// degrade silently (skip the artifact write) when this is
-    /// `None` so that test handlers continue to pass without a
-    /// per-test tempdir for the artifact root.
+    ///   **Why `Option`:** test fixtures that don't exercise the
+    ///   store leave this `None`; the production boot path always
+    ///   wires it. The `advance_epoch` / `approve_plan` callsites
+    ///   degrade silently (skip the artifact write) when this is
+    ///   `None` so that test handlers continue to pass without a
+    ///   per-test tempdir for the artifact root.
     pub artifact_store: Option<Arc<ArtifactStore>>,
 
     /// V3 — authority-side OpenTelemetry observability hub.
@@ -406,15 +406,15 @@ pub struct HandlerContext {
     ///     `SessionSpawnService::with_egress_stall_tracker`.
     ///   - `crate::handlers::planner_fetch::handle` (kernel-mediated
     ///     `PlannerFetchRequest` `DomainNotAllowed` rejections).
-    /// Each chokepoint feeds the tracker on every denial and emits
-    /// one `SessionEgressStallDetected` audit event per
-    /// (session, destination) bucket per sliding window. The
-    /// `source` field on the event tags which chokepoint observed
-    /// the stall.
-    /// **Why `Arc`**: the tracker is shared concurrently across
-    /// every per-session admission task and every planner_fetch
-    /// dispatch; cloning the `Arc` is cheap and the inner
-    /// `Mutex<HashMap>` already serialises mutations.
+    ///     Each chokepoint feeds the tracker on every denial and emits
+    ///     one `SessionEgressStallDetected` audit event per
+    ///     (session, destination) bucket per sliding window. The
+    ///     `source` field on the event tags which chokepoint observed
+    ///     the stall.
+    ///     **Why `Arc`**: the tracker is shared concurrently across
+    ///     every per-session admission task and every planner_fetch
+    ///     dispatch; cloning the `Arc` is cheap and the inner
+    ///     `Mutex<HashMap>` already serialises mutations.
     pub egress_stall_tracker: Arc<raxis_egress_admission::EgressStallTracker>,
 
     /// `INV-FAILURE-REASON-MANDATORY-01` (clean-exit-no-terminal-
@@ -856,13 +856,13 @@ impl raxis_isolation::Backend for FailClosedTestIsolation {
 ///   assert the IPC handler reached the substrate-spawn callsite.
 /// * Returns `Ok(())` without binding any credential proxy or
 ///   admission listener.
-/// Mirrors the cfg-gated `build_fail_closed_test_isolation` /
-/// `build_default_test_credentials` / `build_default_test_domain`
-/// pattern: production binaries never construct this — they wire
-/// `LiveOrchestratorSpawn` from `main.rs`. The cfg gate
-/// (`debug_assertions || test`) is the same Layer-1 guard that keeps
-/// `FakeAuditSink` / `MockBackend` / `FailClosedTestIsolation` out of
-/// release artefacts.
+///   Mirrors the cfg-gated `build_fail_closed_test_isolation` /
+///   `build_default_test_credentials` / `build_default_test_domain`
+///   pattern: production binaries never construct this — they wire
+///   `LiveOrchestratorSpawn` from `main.rs`. The cfg gate
+///   (`debug_assertions || test`) is the same Layer-1 guard that keeps
+///   `FakeAuditSink` / `MockBackend` / `FailClosedTestIsolation` out of
+///   release artefacts.
 #[cfg(any(debug_assertions, test))]
 pub fn build_test_orchestrator_spawn() -> Arc<dyn OrchestratorSpawn> {
     Arc::new(crate::session_spawn_orchestrator::NoopOrchestratorSpawn::new())

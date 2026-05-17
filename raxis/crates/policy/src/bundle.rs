@@ -916,7 +916,7 @@ impl Default for HostCapacityConfig {
 ///   smaller values are rejected at `translate` time with
 ///   `MemoryBelowFloor`) and ≤ 65536 (64 GiB — sized for the
 ///   largest realistic per-VM working set on Apple Silicon hosts).
-/// V2 invariants this section honours:
+///   V2 invariants this section honours:
 /// * Per-role budgets stay symmetric across the three canonical
 ///   roles (`Orchestrator`, `Executor`, `Reviewer`). The kernel
 ///   does not expose a per-task override here — task-level
@@ -989,14 +989,14 @@ impl Default for IsolationConfig {
     /// * Reviewer initramfs ≈ 127 MiB unpacked → 1 GiB total covers
     ///   the static-analysis working set (ripgrep / read_file) and
     ///   the streaming planner.
-    /// vCPU defaults are tuned for Apple Silicon AVF: the
-    /// executor uses 2 vCPUs to keep build/test commands
-    /// responsive; the orchestrator and reviewer use 1 vCPU
-    /// because their workloads are inherently single-threaded
-    /// (one model in flight, one terminal-tool dispatch). Each
-    /// substrate's per-role timer / SMP behaviour is exercised
-    /// in `kernel/tests/full_e2e_session_lifecycle.rs` so a
-    /// regression in a substrate rev surfaces here.
+    ///   vCPU defaults are tuned for Apple Silicon AVF: the
+    ///   executor uses 2 vCPUs to keep build/test commands
+    ///   responsive; the orchestrator and reviewer use 1 vCPU
+    ///   because their workloads are inherently single-threaded
+    ///   (one model in flight, one terminal-tool dispatch). Each
+    ///   substrate's per-role timer / SMP behaviour is exercised
+    ///   in `kernel/tests/full_e2e_session_lifecycle.rs` so a
+    ///   regression in a substrate rev surfaces here.
     fn default() -> Self {
         Self {
             orchestrator_vcpu_count: 1,
@@ -1828,7 +1828,7 @@ pub struct GateEntry {
     ///   * `serde_json::to_vec(&hints).len() <= 4096` (4 KiB)
     ///   * no key may start with the reserved `RAXIS_` prefix
     ///     (prevents operator-spoofing of kernel-injected envs).
-    /// Default `BTreeMap::new()`; field is optional in TOML.
+    ///     Default `BTreeMap::new()`; field is optional in TOML.
     #[serde(default)]
     pub hints: BTreeMap<String, serde_json::Value>,
 
@@ -2003,7 +2003,7 @@ pub struct IntegrationMergeVerifierEntry {
     ///   * total JSON payload ≤ 4096 bytes
     ///   * no key may start with `RAXIS_` (reserved for
     ///     kernel-injected scope keys)
-    /// Default empty; field is optional in TOML.
+    ///     Default empty; field is optional in TOML.
     #[serde(default)]
     pub hints: BTreeMap<String, serde_json::Value>,
 }
@@ -2383,16 +2383,16 @@ pub struct GatewaySection {
     ///    (currently 100; bumped 20→50→100 across iter25 / iter31 to fit
     ///    the historical worst-case Executor task — see
     ///    `guides/recipes/env/11-planner-env-vars.md` for rationale).
-    /// Operators can pin a TIGHTER policy default (e.g. `5`) for CI /
-    /// known-easy scenarios so a Reviewer that hasn't decided in 5 turns
-    /// surfaces as `Outcome::TurnsExceeded` instead of burning the full
-    /// compiled budget. The token caps under `[budget.token_caps]`
-    /// remain the cost-side bound — `planner_max_turns_default` is the
-    /// **liveness** bound ("if you haven't finished in N turns, you're
-    /// stuck").
-    /// `None` ⇒ fall through to the compiled default.
-    /// `Some(0)` is rejected at policy-validate time (a 0-turn budget
-    /// is never useful and almost always a typo).
+    ///    Operators can pin a TIGHTER policy default (e.g. `5`) for CI /
+    ///    known-easy scenarios so a Reviewer that hasn't decided in 5 turns
+    ///    surfaces as `Outcome::TurnsExceeded` instead of burning the full
+    ///    compiled budget. The token caps under `[budget.token_caps]`
+    ///    remain the cost-side bound — `planner_max_turns_default` is the
+    ///    **liveness** bound ("if you haven't finished in N turns, you're
+    ///    stuck").
+    ///    `None` ⇒ fall through to the compiled default.
+    ///    `Some(0)` is rejected at policy-validate time (a 0-turn budget
+    ///    is never useful and almost always a typo).
     #[serde(default)]
     pub planner_max_turns_default: Option<u32>,
 
@@ -2414,17 +2414,17 @@ pub struct GatewaySection {
     /// 3. Derived default `max(round_up_to_5(base/2), 10)` so
     ///    cold-start retries still get a useful step even on plans
     ///    that never declared one.
-    /// **Why this exists.** The historical `materialize-records` /
-    /// `lint-runner` cold-start retry failure mode reproduces when
-    /// the executor VM is respawned with zero in-VM context and
-    /// must re-discover state from scratch — a budget that sufficed
-    /// for attempt 1 is reproducibly exhausted on attempt 2+
-    /// without progress. Progressive scaling is the defense-in-
-    /// depth backstop: any task with a sane per-attempt budget
-    /// still gets a graceful-degradation path before the
-    /// crash-retry ceiling kicks in.
-    /// `None` ⇒ fall through to the per-task field, then the
-    /// derived default.
+    ///    **Why this exists.** The historical `materialize-records` /
+    ///    `lint-runner` cold-start retry failure mode reproduces when
+    ///    the executor VM is respawned with zero in-VM context and
+    ///    must re-discover state from scratch — a budget that sufficed
+    ///    for attempt 1 is reproducibly exhausted on attempt 2+
+    ///    without progress. Progressive scaling is the defense-in-
+    ///    depth backstop: any task with a sane per-attempt budget
+    ///    still gets a graceful-degradation path before the
+    ///    crash-retry ceiling kicks in.
+    ///    `None` ⇒ fall through to the per-task field, then the
+    ///    derived default.
     #[serde(default)]
     pub planner_max_turns_step_default: Option<u32>,
 }
@@ -2480,15 +2480,15 @@ pub const PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS: u64 = 24 * 60 * 6
 ///     *(grace beyond the freshness window is bounded by the window
 ///     itself — a longer grace would just store dead rows)*
 ///   * `1 ≤ nonce_sweep_interval_secs ≤ PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS`
-/// Failures map to `FAIL_POLICY_PLAN_SIGNING_INVALID` at policy load
-/// (`plan-bundle-sealing.md §9`).
-/// `nonce_sweep_interval_secs` is a V2.1 implementation field not
-/// present in the original `plan-bundle-sealing.md §7.4` table. It is
-/// the cadence on which the kernel runs the §8.4 nonce-table DELETE
-/// query. The spec previously left this implicit ("default once per
-/// hour"); making it operator-tunable lets large deployments lengthen
-/// the cadence without touching the freshness window. Documented
-/// in-spec at §7.4 / §8.4 to keep implementation and spec aligned.
+///     Failures map to `FAIL_POLICY_PLAN_SIGNING_INVALID` at policy load
+///     (`plan-bundle-sealing.md §9`).
+///     `nonce_sweep_interval_secs` is a V2.1 implementation field not
+///     present in the original `plan-bundle-sealing.md §7.4` table. It is
+///     the cadence on which the kernel runs the §8.4 nonce-table DELETE
+///     query. The spec previously left this implicit ("default once per
+///     hour"); making it operator-tunable lets large deployments lengthen
+///     the cadence without touching the freshness window. Documented
+///     in-spec at §7.4 / §8.4 to keep implementation and spec aligned.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PlanSigningSection {
     /// How long a signed bundle remains submittable before
@@ -2649,14 +2649,14 @@ pub const PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING: u32 = 1024;
 ///   * `max_artifact_bytes ≤ PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING` (64 MiB)
 ///   * `max_bundle_bytes ≤ PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING` (128 MiB)
 ///   * `max_artifact_count ≤ PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING` (1024)
-/// In addition, structural coherence is enforced at validate time:
+///     In addition, structural coherence is enforced at validate time:
 ///   * `max_artifact_bytes ≤ max_bundle_bytes` (a single artifact
 ///     cannot exceed the total bundle cap, since the bundle contains
 ///     at least that artifact)
 ///   * `max_bundle_bytes ≥ 1` and `max_artifact_count ≥ 1` (a bundle
 ///     with zero artifacts cannot satisfy `artifacts[0] = plan.toml`)
-/// Failures map to `FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING` at
-/// policy load (`plan-bundle-sealing.md §9`).
+///     Failures map to `FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING` at
+///     policy load (`plan-bundle-sealing.md §9`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct PlanBundleLimitsSection {
     /// Maximum bytes for any single artifact (including `plan.toml`).
@@ -2939,15 +2939,15 @@ impl ProviderPricing {
     ///   a discount).
     /// * `cache_creation_tokens` at the cache-creation rate
     ///   (defaulting to `input_tokens_per_dollar`).
-    /// Returns `0` when *every* rate is zero — that case can only
-    /// occur in unit tests; `PolicyBundle::validate` rejects any
-    /// real `[[providers]]` entry with a zero `input_tokens_per_dollar`
-    /// or `output_tokens_per_dollar`.
-    /// Token counts are widened to `u128` internally to absorb the
-    /// `tokens * 1_000_000` multiplication without overflow even at
-    /// the (absurd) maximum of `u64::MAX` tokens; the final result
-    /// is saturated back into `u64` so callers never see overflow
-    /// panics.
+    ///   Returns `0` when *every* rate is zero — that case can only
+    ///   occur in unit tests; `PolicyBundle::validate` rejects any
+    ///   real `[[providers]]` entry with a zero `input_tokens_per_dollar`
+    ///   or `output_tokens_per_dollar`.
+    ///   Token counts are widened to `u128` internally to absorb the
+    ///   `tokens * 1_000_000` multiplication without overflow even at
+    ///   the (absurd) maximum of `u64::MAX` tokens; the final result
+    ///   is saturated back into `u64` so callers never see overflow
+    ///   panics.
     pub fn cost_micro_dollars(
         &self,
         input_tokens: u64,
@@ -3041,11 +3041,11 @@ pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
 ///   The dispatcher wraps every Sidecar call in a per-channel
 ///   semaphore + 3-state circuit breaker so a hanging upstream
 ///   never wedges the kernel.
-/// Note: the kernel unconditionally writes every notification to
-/// `<data_dir>/notifications/inbox.jsonl` AND the SQLite
-/// `notifications` table before fanning out to these channels.
-/// There is no longer a `Shell` variant — inbox.jsonl is always
-/// written by `dispatch()`, not by a channel handler.
+///   Note: the kernel unconditionally writes every notification to
+///   `<data_dir>/notifications/inbox.jsonl` AND the SQLite
+///   `notifications` table before fanning out to these channels.
+///   There is no longer a `Shell` variant — inbox.jsonl is always
+///   written by `dispatch()`, not by a channel handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum NotificationChannelKind {
     /// Append a JSON line to the operator-supplied path.
@@ -3575,14 +3575,14 @@ fn validate_integration_merge_verifiers_operator_side(
 /// 4. Per-gate-type schema validation is deferred to iter64; for
 ///    iter63 any well-formed JSON value is accepted as long as the
 ///    caps and reserved-prefix rule hold.
-/// `section` is a human-readable section name (`"[[gates]]"` or
-/// `"[[integration_merge_verifiers]]"`) used in the diagnostic
-/// string; `subject` is the entry's name (gate_type / verifier
-/// name) so operators can pinpoint the offending row.
-/// `pub` because `kernel/src/initiatives/lifecycle.rs` can call
-/// the same routine for plan-side
-/// `[[plan.integration_merge_verifiers]]` entries (which reuse
-/// the same `IntegrationMergeVerifierEntry` struct).
+///    `section` is a human-readable section name (`"[[gates]]"` or
+///    `"[[integration_merge_verifiers]]"`) used in the diagnostic
+///    string; `subject` is the entry's name (gate_type / verifier
+///    name) so operators can pinpoint the offending row.
+///    `pub` because `kernel/src/initiatives/lifecycle.rs` can call
+///    the same routine for plan-side
+///    `[[plan.integration_merge_verifiers]]` entries (which reuse
+///    the same `IntegrationMergeVerifierEntry` struct).
 // TODO(iter64): introduce a per-gate-type hint schema layer so
 // `path_glob`, `min_coverage_pct`, etc. are typed at validation
 // time per gate kind. iter63 keeps the validator schema-free
@@ -3856,10 +3856,10 @@ pub fn is_valid_verifier_name(s: &str) -> bool {
 /// * Bytes outside ASCII printable are rejected (UTF-8 ref names
 ///   are theoretically allowed by git but our enforcement table
 ///   does not yet cover them; reject to fail-closed).
-/// Returns `Ok(())` on success and `Err(reason)` describing the
-/// first violation (used by the loader to construct
-/// `FAIL_POLICY_TARGET_REF_INVALID` /
-/// `FAIL_WORKSPACE_TARGET_REF_INVALID` diagnostics).
+///   Returns `Ok(())` on success and `Err(reason)` describing the
+///   first violation (used by the loader to construct
+///   `FAIL_POLICY_TARGET_REF_INVALID` /
+///   `FAIL_WORKSPACE_TARGET_REF_INVALID` diagnostics).
 pub fn validate_target_ref_format(target_ref: &str) -> Result<(), String> {
     const PREFIX: &str = "refs/heads/";
     if !target_ref.starts_with(PREFIX) {
@@ -4647,12 +4647,12 @@ pub struct PermittedCredentialConfig {
 ///   * `verifier_idle_timeout_seconds = 60`
 ///   * `task_verifier_total_budget_seconds = 900` (15 minutes)
 ///   * `verifier_force_shutdown_grace_seconds = 10`
-/// **Hard caps** (rejected at validate time):
+///     **Hard caps** (rejected at validate time):
 ///   * `max_verifier_wall_seconds ≤ 4 hours`
 ///   * `verifier_idle_timeout_seconds ≤ 30 minutes`
 ///   * `task_verifier_total_budget_seconds ≤ 8 hours`
 ///   * `verifier_force_shutdown_grace_seconds ≤ 5 minutes`
-/// **Coherence rules**:
+///     **Coherence rules**:
 ///   * Every field MUST be `> 0` (a zero-valued bound would mean
 ///     "kill on first tick", which is an obvious operator typo).
 ///   * `verifier_idle_timeout_seconds ≤ max_verifier_wall_seconds`
@@ -5516,11 +5516,11 @@ impl PolicyBundle {
     ///   `max_vcpus_per_session` / `max_memory_mb_per_session` /
     ///   `max_concurrent_scaling_events_per_minute` bound the
     ///   `ScalingDecisionEngine`.
-    /// Honour INV-ELASTIC-05 / INV-ELASTIC-07: when `enabled =
+    ///   Honour INV-ELASTIC-05 / INV-ELASTIC-07: when `enabled =
     /// false`, the spawn helper that builds the new `VmSpec`
-    /// MUST clamp to baseline regardless of any signal-driven
-    /// scale-up trigger. The flag here is the single mechanical
-    /// gate.
+    ///   MUST clamp to baseline regardless of any signal-driven
+    ///   scale-up trigger. The flag here is the single mechanical
+    ///   gate.
     pub fn elastic(&self) -> &ElasticConfig {
         &self.elastic
     }
@@ -5670,17 +5670,17 @@ impl PolicyBundle {
     ///     `signed_by` (per `specs/v2/plan-bundle-sealing.md §3.4`)
     ///     and what `OperatorRequest::CreateInitiative` lookups
     ///     pass in via `req.signed_by.to_hex()`.
-    /// The 16-char form is *always* a prefix of the 32-char form for
-    /// the same key (`hex(d[..8]) == hex(d[..16])[..16]`), so
-    /// matching the supplied fingerprint as either an exact equality
-    /// or a 16-char prefix of a stored 32-char fingerprint is
-    /// unambiguous: a fingerprint can only resolve to the same
-    /// operator under both representations or to nothing at all.
-    /// We deliberately do NOT trim or pad the supplied input — the
-    /// caller passes whichever form they have and the lookup
-    /// transparently bridges the two surface layers (genesis policy
-    /// 32-char ↔ plan-bundle 16-char) without requiring a schema
-    /// change.
+    ///     The 16-char form is *always* a prefix of the 32-char form for
+    ///     the same key (`hex(d[..8]) == hex(d[..16])[..16]`), so
+    ///     matching the supplied fingerprint as either an exact equality
+    ///     or a 16-char prefix of a stored 32-char fingerprint is
+    ///     unambiguous: a fingerprint can only resolve to the same
+    ///     operator under both representations or to nothing at all.
+    ///     We deliberately do NOT trim or pad the supplied input — the
+    ///     caller passes whichever form they have and the lookup
+    ///     transparently bridges the two surface layers (genesis policy
+    ///     32-char ↔ plan-bundle 16-char) without requiring a schema
+    ///     change.
     pub fn operator_entry(&self, fingerprint: &str) -> Option<&OperatorEntry> {
         // Fast path: exact match (the common case for the dashboard /
         // audit-display surface that already speaks the 32-char form).
@@ -6226,9 +6226,9 @@ impl PolicyBundle {
     /// - `Some(&[...])` — explicit route; dispatch to these channels.
     /// - `None` — no explicit route; caller falls back to
     ///   `default_notification_channels()`.
-    /// The three-state return lets callers distinguish "operator
-    /// silenced" from "operator forgot to route" — important because
-    /// the second case fires the default channels.
+    ///   The three-state return lets callers distinguish "operator
+    ///   silenced" from "operator forgot to route" — important because
+    ///   the second case fires the default channels.
     pub fn notification_route(&self, event_kind: &str) -> Option<&[String]> {
         self.notification_routes
             .get(event_kind)

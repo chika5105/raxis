@@ -120,16 +120,16 @@ pub enum IntentKind {
     ///   * `base_sha` / `head_sha` are unused at this lifecycle
     ///     layer (no SHA range; the parent's worktree pointer is
     ///     reused when the fixup activates).
-    /// Admission contract (`INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`):
+    ///     Admission contract (`INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`):
     ///   * `parent.gate_fixup_attempts < [gate_fixup].max_attempts`
     ///     OR rejection with the dedicated retryable-but-
     ///     terminal-for-this-parent code
     ///     `FAIL_GATE_FIXUP_BUDGET_EXHAUSTED`.
-    /// On success the kernel inserts a `tasks` row with
-    /// `is_gate_fixup = 1`, increments the parent's
-    /// `gate_fixup_attempts`, and emits a `GateFixupSpawned` audit
-    /// event. A follow-up `ActivateSubTask` from the Orchestrator
-    /// then spawns the VM (existing path).
+    ///     On success the kernel inserts a `tasks` row with
+    ///     `is_gate_fixup = 1`, increments the parent's
+    ///     `gate_fixup_attempts`, and emits a `GateFixupSpawned` audit
+    ///     event. A follow-up `ActivateSubTask` from the Orchestrator
+    ///     then spawns the VM (existing path).
     AddSubTask,
 }
 
@@ -634,8 +634,8 @@ mod tests {
     ///   * 1 V2.5 — `StructuredOutput`.
     ///   * 1 V3 — `AddSubTask` (gate-fixup spawn entry, see
     ///     `specs/v3/gate-rejection-orchestrator-fixup.md`).
-    /// The pinned-count test surfaces accidental adds at the test
-    /// layer before any dispatch matrix or store mapping regresses.
+    ///     The pinned-count test surfaces accidental adds at the test
+    ///     layer before any dispatch matrix or store mapping regresses.
     #[test]
     fn intent_kind_variant_count_is_pinned_to_v3() {
         assert_eq!(

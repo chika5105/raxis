@@ -20,7 +20,7 @@
 //!    parks on Ctrl-C / SIGTERM exactly like the V2.3 scaffold did.
 //!    The behaviour is bit-for-bit identical, so no kernel
 //!    integration test changes were required to land V2.4.
-//! See `raxis-planner-core/src/driver.rs` for the env contract.
+//!    See `raxis-planner-core/src/driver.rs` for the env contract.
 
 use raxis_planner_core::{
     hydrate_from_proc_cmdline, init_pid1_filesystem, mount_workspace_shares, park_on_signal,

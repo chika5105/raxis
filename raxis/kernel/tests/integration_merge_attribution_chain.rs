@@ -9,16 +9,16 @@
 //!     impl wrapping `AuditWriter`. Same `Arc<dyn AuditSink>`
 //!     coercion the kernel's `HandlerContext` performs at boot.
 //!   * `raxis_audit_tools::AuditEventKind::IntegrationMergeCompleted`
-//! the real audit variant carrying the s30 attribution
+//!     the real audit variant carrying the s30 attribution
 //!     fields.
-//! Why this test does NOT call the kernel-internal verifier:
-//!   `raxis-kernel` is a bin-only crate; integration tests cannot
-//!   reach `handlers::integration_merge_attribution::
+//!     Why this test does NOT call the kernel-internal verifier:
+//!     `raxis-kernel` is a bin-only crate; integration tests cannot
+//!     reach `handlers::integration_merge_attribution::
 //!   verify_merge_conflict_resolution` directly. That function is
-//!   exhaustively covered by unit tests in the same module against
-//!   a real in-memory `Store`. This test pins the *audit chain
-//!   contract* — that the Step 30 attribution fields land on disk
-//!   in the shape an external auditor will read tomorrow.
+//!     exhaustively covered by unit tests in the same module against
+//!     a real in-memory `Store`. This test pins the *audit chain
+//!     contract* — that the Step 30 attribution fields land on disk
+//!     in the shape an external auditor will read tomorrow.
 
 use std::sync::Arc;
 

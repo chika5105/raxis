@@ -21,10 +21,10 @@
 //!    drops the connection. The CLI uses `Closed` as the unambiguous
 //!    "stream finished cleanly" signal so a peer-half-close is
 //!    distinguishable from a transport hiccup.
-//! All variant-payload fields are simple owned strings / integers
-//! so the type does not depend on any other `raxis-*` crate; this
-//! keeps the dependency graph free of cycles between `raxis-types`
-//! and the kernel.
+//!    All variant-payload fields are simple owned strings / integers
+//!    so the type does not depend on any other `raxis-*` crate; this
+//!    keeps the dependency graph free of cycles between `raxis-types`
+//!    and the kernel.
 
 use serde::{Deserialize, Serialize};
 

@@ -33,7 +33,7 @@
 //! 4. The `bundle_hash` recomputed from the per-file digests matches
 //!    the value the manifest claims (catches accidental edits to the
 //!    file list without re-signing).
-//! All four are checked atomically in [`verify`].
+//!    All four are checked atomically in [`verify`].
 //! ## What the manifest is NOT
 //! It is not a Docker / OCI manifest. The OCI image directory and the
 //! EROFS rootfs blob produced by `raxis-image-builder` are
@@ -414,16 +414,16 @@ impl ImageManifest {
     /// 2. Format line `"__image_format__\0{image_format.as_str()}\n"`.
     /// 3. Sort `files` by `path`, then hash
     ///    `"{path}\0{lowercase-hex sha256}\n"` for each entry.
-    /// The builder calls this after assembling `files` AND after
-    /// computing the .img blob's digest; `verify` calls it when
-    /// checking the signature. Folding `image_artefact_sha256` AND
-    /// `image_format` into `bundle_hash` means the Ed25519 signature
-    /// implicitly commits to both the packed artefact bytes and the
-    /// rootfs shape the substrate must dispatch on — a tampered
-    /// manifest claiming the wrong shape (e.g. swapping `RootfsErofs`
-    /// for `RootfsInitramfsCpio` to slip an unsigned initramfs past
-    /// the substrate's dispatch path) is caught here, before the
-    /// substrate sees the field.
+    ///    The builder calls this after assembling `files` AND after
+    ///    computing the .img blob's digest; `verify` calls it when
+    ///    checking the signature. Folding `image_artefact_sha256` AND
+    ///    `image_format` into `bundle_hash` means the Ed25519 signature
+    ///    implicitly commits to both the packed artefact bytes and the
+    ///    rootfs shape the substrate must dispatch on — a tampered
+    ///    manifest claiming the wrong shape (e.g. swapping `RootfsErofs`
+    ///    for `RootfsInitramfsCpio` to slip an unsigned initramfs past
+    ///    the substrate's dispatch path) is caught here, before the
+    ///    substrate sees the field.
     pub fn recompute_bundle_hash(&self) -> Result<[u8; BUNDLE_HASH_LEN], ManifestError> {
         let mut hasher = Sha256::new();
 
