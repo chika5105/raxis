@@ -178,8 +178,10 @@ pub const WITNESS_BODY_OPERATOR_HINTS_KEY: &str = "operator_hints";
 /// script-authored agent-facing repair hint. The verifier
 /// populates this on non-`Pass` submissions; the kernel reads it
 /// and (after wire-validity + tier-resolution) propagates it to
-/// `tasks.last_gate_critique`, the `KernelPush::GateRejected`,
-/// and the fixup-executor's KSB.
+/// `tasks.last_gate_critique` and the fixup-executor's KSB.
+/// (Iter72: `KernelPush::GateRejected` was removed; the
+/// kernel-authoritative auto-admit pipeline reads the same
+/// `last_gate_critique` column when it spawns the fixup task.)
 ///
 /// **Distinct from `operator_hints`.** `operator_hints` is
 /// kernel-injected from policy at commit time and the verifier
@@ -642,8 +644,8 @@ async fn handle_inner(
     // the gate, so the non-Pass branch routes into the iter65 gate-rejection
     // pipeline (agent_hint resolution → `last_gate_critique` persist →
     // either `GateRejectionTerminal` + `Failed` transition, or
-    // `GateRejectionAccepted` + `KernelPush::GateRejected` to the
-    // orchestrator for fixup). We return a distinct ack variant so the
+    // `GateRejectionAccepted` + kernel-authoritative
+    // `auto_admit_gate_fixup_task` for fixup). We return a distinct ack variant so the
     // planner does not mistake "non-Pass recorded" for "all gates
     // cleared, you may advance".
     if result_class != ResultClass::Pass {
@@ -913,10 +915,12 @@ async fn gate_recheck(
 //      pair-write through `transition_task_with_audit` so the
 //      dashboard observes the FSM flip in real time.
 //   4. If `[gate_fixup]` is present: emit `GateRejectionAccepted`
-//      + enqueue `KernelPush::GateRejected` to the orchestrator's
-//      live session. Budget enforcement happens at
-//      `AddSubTask{kind: GateFixup}` admit, NOT here — see
-//      `INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`.
+//      + invoke `kernel::gate_fixup::auto_admit_gate_fixup_task`
+//      to admit the fixup row + edge atomically under
+//      kernel-authoritative budget. The orchestrator discovers
+//      the new task via its next KSB refresh — see
+//      `INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01` and
+//      `INV-GATE-FIXUP-ADMIT-ATOMIC-01`.
 //
 // `INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01`,
 // `INV-GATE-REJECTION-PIPELINE-01`.

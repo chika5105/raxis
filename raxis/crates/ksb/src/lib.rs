@@ -370,8 +370,9 @@ pub struct GateFixupContext {
     /// parent's range stays intact.
     pub parent_evaluation_sha: String,
     /// Absolute or pointer path the kernel substrate provisions
-    /// the fixup's `/workspace` mount against. Same shape carried
-    /// in `KernelPush::GateRejected.parent_worktree_pointer`.
+    /// the fixup's `/workspace` mount against. The kernel
+    /// auto-admit pipeline derives this from the parent task's
+    /// worktree at admit time.
     pub parent_worktree_pointer: String,
     /// 1-based fixup attempt index. First fixup has
     /// `attempt_index = 1`; subsequent attempts increment.

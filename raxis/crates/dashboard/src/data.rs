@@ -265,9 +265,10 @@ pub struct OrchestratorGapsResponse {
 ///
 /// **`fixup_loop_count` semantics.** Sum of
 /// `tasks.gate_fixup_attempts` over every task that ran (or is
-/// running) this gate AND for whom the kernel admitted at least
-/// one `AddSubTask{kind: GateFixup}`. This is the "how often did
-/// this gate force the orchestrator into a repair loop?" signal —
+/// running) this gate AND for whom the kernel auto-admitted at
+/// least one gate-fixup row via
+/// `kernel::gate_fixup::auto_admit_gate_fixup_task`. This is the
+/// "how often did this gate force a repair loop?" signal —
 /// a high value relative to `pass_count` is the operator's cue
 /// that the gate is over-strict, the hint is misleading, or the
 /// agent cannot satisfy the gate in this loop budget.
@@ -288,8 +289,8 @@ pub struct GateStatRow {
     /// when the gate has never run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<i64>,
-    /// Cumulative count of `AddSubTask{kind: GateFixup}` rows
-    /// admitted for this gate (i.e.
+    /// Cumulative count of gate-fixup rows admitted for this
+    /// gate by the kernel-authoritative auto-admit pipeline (i.e.
     /// `SUM(tasks.gate_fixup_attempts) WHERE
     ///  tasks.last_gate_type = <gate_type>`).
     pub fixup_loop_count: u64,

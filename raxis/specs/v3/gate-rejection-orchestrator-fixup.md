@@ -1,6 +1,26 @@
 # RAXIS V3 — Gate-Rejection Orchestrator-Spawned Fixup
 
-> **Status:** V3 Specified (kernel-mediated retry budget; orchestrator-spawned fixup task; verifier-script-authored hints; cross-language verifier authoring via `raxis-verifier-submit`).
+> **Status (iter72):** **SUPERSEDED — gate-fixup admit is now kernel-authoritative.**
+>
+> Iter72 retired the orchestrator-mediated fixup admit. The new wire contract:
+> - `KernelPush::GateRejected` is **removed**.
+> - `IntentKind::AddSubTask` and `SubTaskKind` are **removed** from the wire enums.
+> - The kernel's `handlers::witness::process_non_pass_witness` now calls
+>   `kernel::gate_fixup::auto_admit_gate_fixup_task` directly. That helper
+>   performs the budget check, the parent / fixup-row / DAG-edge insert,
+>   and the `gate_fixup_attempts++` in a single SQLite transaction
+>   (`INV-GATE-FIXUP-ADMIT-ATOMIC-01`, `INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`).
+> - The orchestrator discovers the newly-admitted fixup task via its next
+>   KSB refresh and dispatches it with an ordinary `ActivateSubTask`.
+>
+> The text below is preserved as design history (rationale, audit-chain
+> shape, KSB renderer contract) and remains accurate for those sections.
+> Wire-shape references to `KernelPush::GateRejected` and
+> `AddSubTask{kind:GateFixup}` are **superseded**; the
+> `[gate_fixup]` policy section, the `agent_hint` reserved body key, and
+> the per-gate `agent_hint_default` field are **still authoritative**.
+>
+> **Status (V3, historical):** V3 Specified (kernel-mediated retry budget; orchestrator-spawned fixup task; verifier-script-authored hints; cross-language verifier authoring via `raxis-verifier-submit`).
 >
 > **Scope.** This spec covers what happens when a kernel-side `[[gates]]` verifier returns a non-`Pass` `result_class`. Today the parent task is stranded in `GatesPending` forever with no audit-visible signal to the orchestrator and no path to recovery; this spec replaces that with a bounded, kernel-budgeted, orchestrator-spawned fixup loop authored against an operator-configured executor profile.
 >

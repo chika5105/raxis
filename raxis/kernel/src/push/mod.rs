@@ -230,7 +230,6 @@ fn push_kind_str(push: &KernelPush) -> &'static str {
         KernelPush::AllReviewersPassed { .. } => "AllReviewersPassed",
         KernelPush::ReviewRejected { .. } => "ReviewRejected",
         KernelPush::SubTaskSecurityViolation { .. } => "SubTaskSecurityViolation",
-        KernelPush::GateRejected { .. } => "GateRejected",
     }
 }
 
@@ -241,11 +240,6 @@ fn push_task_id(push: &KernelPush) -> Option<&TaskId> {
         KernelPush::AllReviewersPassed { task_id } => Some(task_id),
         KernelPush::ReviewRejected { task_id, .. } => Some(task_id),
         KernelPush::SubTaskSecurityViolation { task_id } => Some(task_id),
-        // iter65 — `GateRejected` is the kernel→orchestrator anchor
-        // for a witness-gate rejection. `parent_task_id` is the task
-        // whose gate failed (the orchestrator routes the fixup
-        // subtask off this id).
-        KernelPush::GateRejected { parent_task_id, .. } => Some(parent_task_id),
     }
 }
 

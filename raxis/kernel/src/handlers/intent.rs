@@ -348,15 +348,6 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     if matches!(req.intent_kind, IntentKind::RetrySubTask) {
         return handle_retry_sub_task(req, session, session_id, seq, ctx).await;
     }
-    // V3 (`specs/v3/gate-rejection-orchestrator-fixup.md` §4.3) —
-    // `AddSubTask` is a sub-task lifecycle intent like
-    // `ActivateSubTask` / `RetrySubTask`. Authority for the
-    // `(AddSubTask, Orchestrator)` cell has already been cleared
-    // by the static dispatch matrix above; the handler module
-    // owns shape validation + admit-pipeline routing.
-    if matches!(req.intent_kind, IntentKind::AddSubTask) {
-        return crate::handlers::add_sub_task::handle(req, session, session_id, seq, ctx).await;
-    }
     // V3 iter70 — batch-admit primitive. Same early-dispatch
     // shape as singular `ActivateSubTask`: the batch handler
     // owns its own envelope validation, per-id classification,
@@ -1084,12 +1075,10 @@ fn run_phase_a(
         IntentKind::SingleCommit | IntentKind::IntegrationMerge => {}
         IntentKind::ActivateSubTask
         | IntentKind::RetrySubTask
-        | IntentKind::AddSubTask
         | IntentKind::BatchActivateSubTasks => {
             // Belt-and-braces: `handle_inner` intercepts these
             // kinds BEFORE Phase A (early-dispatch into
             // `handle_activate_sub_task` / `handle_retry_sub_task` /
-            // `handlers::add_sub_task::handle` /
             // `handle_batch_activate_sub_tasks`), so this arm only
             // fires if a future regression lets a sub-task
             // lifecycle kind slip past the early-dispatch. INV-08
@@ -8431,9 +8420,6 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: None,
-            sub_task_kind: None,
-            parent_gate_failure_task_id: None,
-            parent_gate_failure_type: None,
             batch_task_ids: None,
         }
     }
@@ -8828,9 +8814,6 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: None,
-            sub_task_kind: None,
-            parent_gate_failure_task_id: None,
-            parent_gate_failure_type: None,
             batch_task_ids: None,
         }
     }
@@ -10230,9 +10213,6 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: None,
-            sub_task_kind: None,
-            parent_gate_failure_task_id: None,
-            parent_gate_failure_type: None,
             batch_task_ids: None,
         }
     }
@@ -11359,9 +11339,6 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: payload,
-            sub_task_kind: None,
-            parent_gate_failure_task_id: None,
-            parent_gate_failure_type: None,
             batch_task_ids: None,
         }
     }
@@ -12527,9 +12504,6 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: None,
-            sub_task_kind: None,
-            parent_gate_failure_task_id: None,
-            parent_gate_failure_type: None,
             batch_task_ids: None,
         }
     }

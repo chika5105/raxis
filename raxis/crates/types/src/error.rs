@@ -200,23 +200,22 @@ pub enum PlannerErrorCode {
     #[serde(rename = "FAIL_REVIEW_OUTSTANDING")]
     FailReviewOutstanding,
 
-    /// **V3
-    /// `specs/v3/gate-rejection-orchestrator-fixup.md` §4.3.**
-    /// The orchestrator submitted `AddSubTask{kind: GateFixup}`
-    /// for a parent task whose `gate_fixup_attempts` has already
-    /// reached the `policy.gate_fixup.max_attempts` ceiling.
-    /// **Terminal for this parent task** (the kernel-side
-    /// budget is the single source of truth per
-    /// `INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`); the kernel
-    /// transitions the parent to `Failed` paired with the
-    /// rejection. The orchestrator MUST NOT retry; its only
-    /// recourse is to surface the failure upstream via the
-    /// normal initiative-failure path.
-    /// **Why dedicated, not `FAIL_BUDGET_EXCEEDED`.** The lane
-    /// budget code is retryable-after-rebudget; this code is
-    /// terminal-for-this-parent. The orchestrator's NNSP rule
-    /// for `AddSubTask` keys on this discriminator to know not
-    /// to enter a self-loop.
+    /// **V3 / iter72.** The kernel observed a parent task whose
+    /// `gate_fixup_attempts` reached `policy.gate_fixup.max_attempts`.
+    /// **Terminal for this parent task** (the kernel-side budget
+    /// is the single source of truth per
+    /// `INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`); the witness
+    /// handler pairs this with a parent-`Failed` transition
+    /// keyed by `terminal_reason = gate_rejected_fixup_budget_exhausted`.
+    ///
+    /// **iter72 note.** Pre-iter72 this code was returned over the
+    /// wire to the orchestrator's `AddSubTask{kind:GateFixup}`
+    /// intent. Iter72 removed that intent (gate-fixup admit is
+    /// kernel-authoritative now via
+    /// `kernel::gate_fixup::auto_admit_gate_fixup_task`), so this
+    /// code is no longer surfaced on a wire response — it remains
+    /// only as a reserved discriminator for audit-replay tooling
+    /// that walks historical chains containing the old wire shape.
     #[serde(rename = "FAIL_GATE_FIXUP_BUDGET_EXHAUSTED")]
     FailGateFixupBudgetExhausted,
 }

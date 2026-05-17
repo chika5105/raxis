@@ -155,12 +155,6 @@ impl IntentSubmitter {
             resolved_via_escalation: None,
             tokens_used: Some(self.last_token_report()),
             structured_output: None,
-            // V3 AddSubTask payload — only populated by the
-            // dedicated builder; every other intent leaves these
-            // three fields as `None`.
-            sub_task_kind: None,
-            parent_gate_failure_task_id: None,
-            parent_gate_failure_type: None,
             // V3 iter70 BatchActivateSubTasks payload — populated
             // by the dedicated builder. None for every other
             // intent kind (the kernel ignores otherwise).

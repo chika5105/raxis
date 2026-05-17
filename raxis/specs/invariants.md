@@ -1189,32 +1189,36 @@ dashboard surfaces the weak-verifier flag.
 
 ---
 
-### INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01 — Gate-fixup retry budget is enforced at `AddSubTask` admit, not duplicated
+### INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01 — Gate-fixup retry budget is enforced on one kernel code path
 
 **Statement.** The `[gate_fixup].max_attempts` budget MUST be
-enforced on exactly one code path: `handle_add_sub_task` when
-`kind == SubTaskKind::GateFixup`. The handler reads
-`parent.gate_fixup_attempts`, compares to policy, and either
-rejects with `FailGateFixupBudgetExhausted` (paired with
-`TaskStateChanged { GatesPending → Failed }` and
-`GateRejectionTerminal { terminal_reason: "fixup_budget_exhausted" }`),
-or inserts a fixup task and increments
-`parent.gate_fixup_attempts` in the same SQLite transaction.
+enforced on exactly one code path:
+`kernel::gate_fixup::auto_admit_gate_fixup_task` (iter72; replaces
+the pre-iter72 orchestrator-mediated `handle_add_sub_task`). The
+helper reads `parent.gate_fixup_attempts`, compares to policy, and
+either returns `AutoAdmitOutcome::BudgetExhausted` (paired by the
+witness handler with `TaskStateChanged { GatesPending → Failed }`
+and `GateRejectionTerminal { terminal_reason:
+"gate_rejected_fixup_budget_exhausted" }`), or inserts a fixup
+task and increments `parent.gate_fixup_attempts` in the same
+SQLite transaction.
 
 **Justification.** Multi-site budget enforcement (witness handler,
 intent handler, completion hook) is the canonical "off-by-one"
-trap. Centralising the check at admit time means: orchestrator
-can re-issue the push as many times as it wants; only the kernel
-gets to say "enough"; the parent's `Failed` transition lives on
-the same paired write as the rejection.
+trap. Iter72 collapsed the orchestrator-mediated round-trip down
+to a single kernel-side admit so the orchestrator cannot
+double-spend the budget by retrying the round-trip; only the
+kernel gets to say "enough"; the parent's `Failed` transition
+lives on the same paired write as the rejection.
 
-**Scenario.** Orchestrator receives a fourth `KernelPush::GateRejected`
-and emits `AddSubTask{kind: GateFixup}`. Kernel reads
-`parent.gate_fixup_attempts = 3` ≥ `max_attempts = 3`, rejects
-with `FailGateFixupBudgetExhausted`, transitions parent to
-`Failed`, and emits `GateRejectionTerminal
-{ terminal_reason: "fixup_budget_exhausted" }`. Orchestrator
-receives the `IntentResponse::Failed` and moves on.
+**Scenario.** A fourth non-`Pass` witness arrives for the same
+parent. `process_non_pass_witness` calls
+`auto_admit_gate_fixup_task`; the helper sees
+`parent.gate_fixup_attempts = 3` ≥ `max_attempts = 3`, returns
+`BudgetExhausted`. The witness handler emits
+`GateRejectionTerminal { terminal_reason:
+"gate_rejected_fixup_budget_exhausted" }` and transitions the
+parent to `Failed`.
 
 ---
 
@@ -1263,11 +1267,11 @@ fixup_loop_count: 0 }`.
 
 ---
 
-### INV-GATE-FIXUP-ADMIT-ATOMIC-01 — `AddSubTask{GateFixup}` admit is a single transaction
+### INV-GATE-FIXUP-ADMIT-ATOMIC-01 — Kernel-authoritative gate-fixup admit is a single transaction
 
-**Statement.** The kernel's `handle_add_sub_task` admit pipeline
-for `kind == SubTaskKind::GateFixup` MUST land its three SQL
-writes in one transaction:
+**Statement.** The kernel's `gate_fixup::admit_fixup_task_in_tx`
+helper (called from `auto_admit_gate_fixup_task`) MUST land its
+three SQL writes in one transaction:
 
   1. `INSERT INTO tasks (..., is_gate_fixup = 1,
      parent_gate_failure_task_id, parent_gate_failure_type,
@@ -1283,7 +1287,7 @@ attempt counter as `attempt_index`.
 
 **Justification.** A crash between (1) and (3) leaves the
 parent's budget counter unchanged while a fixup row exists — the
-next `AddSubTask` for the same parent succeeds and the budget
+next admit for the same parent succeeds and the budget
 under-counts. A crash between (1) and (2) leaves a fixup row
 with no DAG edge — the topology query (`SubscribeInitiative
 DagPanel`) silently drops the row. Combining the three writes
@@ -1292,18 +1296,19 @@ the audit emit with the post-commit observation eliminates a
 "ghost spawn" surface that would otherwise survive transaction
 rollback.
 
-**Scenario.** Orchestrator receives `KernelPush::GateRejected`
-and submits `AddSubTask{kind: GateFixup, task_id: "fixup-42",
-parent_gate_failure_task_id: "parent-1", parent_gate_failure_type:
-"NoSecretStrings"}`. Kernel observes parent state `GatesPending`,
-parent `gate_fixup_attempts = 1`, `[gate_fixup].max_attempts =
-3`. Inside one transaction the kernel inserts
-`tasks(fixup-42, ..., is_gate_fixup=1, parent_gate_failure_task_id
-= "parent-1")`, inserts `task_dag_edges(parent-1 → fixup-42)`,
-and updates `parent-1.gate_fixup_attempts = 2`. Post-commit, the
-audit chain carries `GateFixupSpawned { fixup_task_id: "fixup-42",
-parent_task_id: "parent-1", gate_type: "NoSecretStrings",
-parent_evaluation_sha: "<parent SHA>", attempt_index: 2 }`.
+**Scenario.** Witness handler receives a non-`Pass` witness for
+parent-1; `process_non_pass_witness` calls
+`auto_admit_gate_fixup_task("parent-1", ...)`. Kernel observes
+parent state `GatesPending`, parent `gate_fixup_attempts = 1`,
+`[gate_fixup].max_attempts = 3`. Inside one transaction the
+kernel inserts `tasks(parent-1--gatefixup-2, ..., is_gate_fixup=1,
+parent_gate_failure_task_id = "parent-1")`, inserts
+`task_dag_edges(parent-1 → parent-1--gatefixup-2)`, and updates
+`parent-1.gate_fixup_attempts = 2`. Post-commit, the audit chain
+carries `GateFixupSpawned { fixup_task_id:
+"parent-1--gatefixup-2", parent_task_id: "parent-1", gate_type:
+"NoSecretStrings", parent_evaluation_sha: "<parent SHA>",
+attempt_index: 2 }`.
 
 ---
 

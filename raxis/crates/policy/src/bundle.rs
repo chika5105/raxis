@@ -278,11 +278,14 @@ pub(crate) struct RawPolicy {
     /// **Optional**: omitted section means "gates are hard" — on
     /// a non-`Pass` witness, the parent task transitions directly
     /// to `Failed` with `GateRejectionTerminal{terminal_reason:
-    /// "no_fixup_profile"}` and no `KernelPush::GateRejected` is
-    /// emitted. When present and `enabled = true`, the kernel
-    /// emits the push and the orchestrator drives the fixup loop
-    /// via `AddSubTask{kind:GateFixup}`. When the section is
-    /// enabled, every `[[gates]]` row MUST carry
+    /// "no_fixup_profile"}`. When present and `enabled = true`,
+    /// the kernel-authoritative pipeline
+    /// (`kernel::gate_fixup::auto_admit_gate_fixup_task`) directly
+    /// admits a fixup task and the orchestrator dispatches it via
+    /// a normal `ActivateSubTask` (iter72 — replaces the
+    /// pre-iter72 `KernelPush::GateRejected` →
+    /// `AddSubTask{kind:GateFixup}` round-trip). When the section
+    /// is enabled, every `[[gates]]` row MUST carry
     /// `agent_hint_default` (validated at policy load).
     #[serde(default)]
     pub(crate) gate_fixup: Option<GateFixupSection>,
@@ -5850,11 +5853,13 @@ impl PolicyBundle {
     ///   * `handlers::witness` (non-`Pass` branch) — `None` →
     ///     transition parent to `Failed` with
     ///     `GateRejectionTerminal{terminal_reason: "no_fixup_profile"}`.
-    ///     `Some(_)` → commit witness + emit
-    ///     `KernelPush::GateRejected`.
-    ///   * `handlers::intent::handle_add_sub_task` — `Some(_)`
-    ///     is the budget+executor-image source for
-    ///     `kind:GateFixup` admits.
+    ///     `Some(_)` → commit witness + invoke
+    ///     `kernel::gate_fixup::auto_admit_gate_fixup_task`.
+    ///   * `kernel::gate_fixup::auto_admit_gate_fixup_task` —
+    ///     `Some(_)` is the budget+executor-image source for
+    ///     the kernel-authoritative fixup admit (iter72;
+    ///     replaces the pre-iter72 orchestrator-mediated
+    ///     `AddSubTask{kind:GateFixup}` flow).
     pub fn gate_fixup(&self) -> Option<&GateFixupProfile> {
         self.gate_fixup.as_ref()
     }

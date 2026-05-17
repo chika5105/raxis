@@ -151,55 +151,6 @@ pub enum KernelPush {
     /// wire shape stipulated by §14 line 588 verbatim.
     SubTaskSecurityViolation { task_id: TaskId },
 
-    /// **iter65.** Sent to the Orchestrator when a kernel-side
-    /// `[[gates]]` verifier returns a non-`Pass` `result_class` AND
-    /// the operator has a `[gate_fixup]` profile in policy that
-    /// authorises a fixup loop. The Orchestrator responds by
-    /// emitting `AddSubTask{kind: GateFixup, ..}` +
-    /// `ActivateSubTask` against the same parent task to spawn a
-    /// fixup executor. The kernel enforces
-    /// `[gate_fixup].max_attempts` at `AddSubTask` admit time and
-    /// rejects with `FailGateFixupBudgetExhausted` after the
-    /// budget is exhausted (the parent transitions to `Failed`
-    /// with `GateRejectionTerminal{ terminal_reason:
-    /// "fixup_budget_exhausted" }`).
-    ///
-    /// This push is the structural mirror of `ReviewRejected` for
-    /// gates: same orchestrator-mediated retry pattern, same KSB
-    /// surface, same audit chain shape — but for a different
-    /// rejection source (kernel-side verifier vs reviewer-task
-    /// session).
-    ///
-    /// `critique` is the resolved `agent_hint` (verifier-script
-    /// emitted Tier 1, operator-configured Tier 2, or a defensive
-    /// gate-name-only fallback). Capped at 8 KiB
-    /// (`WITNESS_AGENT_HINT_MAX_BYTES`).
-    ///
-    /// `evaluation_sha` is the commit SHA the verifier rejected;
-    /// the fixup-executor's KSB carries this so the executor
-    /// knows what commit its repair must surpass.
-    ///
-    /// `attempt_index` is the count of fixup attempts ALREADY
-    /// admitted (i.e. the next fixup, if spawned, will be
-    /// `attempt_index + 1`). The orchestrator displays this as
-    /// "retry N of M" in its KSB.
-    ///
-    /// `parent_worktree_pointer` is the orchestrator-visible
-    /// pointer to the parent's worktree (initiative slug + task
-    /// id), included so the orchestrator can route the fixup
-    /// against the right worktree without re-querying the
-    /// kernel.
-    ///
-    /// Cross-ref: `specs/v3/gate-rejection-orchestrator-fixup.md §4.2`.
-    GateRejected {
-        parent_task_id: TaskId,
-        gate_type: String,
-        critique: String,
-        evaluation_sha: String,
-        attempt_index: u32,
-        max_attempts: u32,
-        parent_worktree_pointer: String,
-    },
 }
 
 // ---------------------------------------------------------------------------
@@ -371,47 +322,6 @@ mod tests {
     }
 
     #[test]
-    fn gate_rejected_round_trips_through_bincode() {
-        let p = KernelPush::GateRejected {
-            parent_task_id: task_id("parent-1"),
-            gate_type: "NoSecretStrings".to_owned(),
-            critique: "AWS access key shape at src/auth.rs:42. Remove the literal and reference an env var instead.".to_owned(),
-            evaluation_sha: "deadbeefcafebabedeadbeefcafebabedeadbeef".to_owned(),
-            attempt_index: 1,
-            max_attempts: 3,
-            parent_worktree_pointer: "initiative-foo/task-parent-1".to_owned(),
-        };
-        assert_eq!(bincode_round_trip(p.clone()), p);
-    }
-
-    #[test]
-    fn gate_rejected_carries_max_critique_size_payload() {
-        // The kernel resolves `agent_hint` from the verifier, the
-        // operator default, or a defensive template. Whichever wins,
-        // the result is bounded by `WITNESS_AGENT_HINT_MAX_BYTES` (8
-        // KiB) — well under `MAX_CRITIQUE_BYTES` so this push is
-        // never the wire-budget bottleneck. Pin that an 8 KiB
-        // critique round-trips cleanly.
-        let critique = "g".repeat(8 * 1024);
-        let p = KernelPush::GateRejected {
-            parent_task_id: task_id("sub-large"),
-            gate_type: "NoSecretStrings".to_owned(),
-            critique: critique.clone(),
-            evaluation_sha: "abcd1234abcd1234abcd1234abcd1234abcd1234".to_owned(),
-            attempt_index: 2,
-            max_attempts: 3,
-            parent_worktree_pointer: "initiative-big/task-large".to_owned(),
-        };
-        match bincode_round_trip(p) {
-            KernelPush::GateRejected { critique: got, .. } => {
-                assert_eq!(got.len(), critique.len());
-                assert_eq!(got, critique);
-            }
-            other => panic!("wrong variant: {other:?}"),
-        }
-    }
-
-    #[test]
     fn kernel_push_frame_round_trips_through_bincode() {
         // The envelope must round-trip independently of the inner
         // variant, because `raxis-ipc::frame` wraps the whole frame in
@@ -493,21 +403,11 @@ mod tests {
             }),
             4
         );
-        // iter65 — GateRejected — index 5. Appended at the END of
-        // the enum so all previously-pinned discriminants are
-        // preserved.
-        assert_eq!(
-            discriminant_byte(&KernelPush::GateRejected {
-                parent_task_id: task_id("a"),
-                gate_type: String::new(),
-                critique: String::new(),
-                evaluation_sha: String::new(),
-                attempt_index: 0,
-                max_attempts: 0,
-                parent_worktree_pointer: String::new(),
-            }),
-            5
-        );
+        // iter72 — `KernelPush::GateRejected` (formerly index 5) was
+        // removed. Gate-fixup spawn is now kernel-authoritative
+        // (`kernel::gate_fixup::auto_admit_gate_fixup_task`); the
+        // orchestrator discovers the new fixup task via its KSB
+        // and dispatches it with a normal `ActivateSubTask`.
     }
 
     // ── JSON projection sanity (operator UI / test harnesses) ────────────

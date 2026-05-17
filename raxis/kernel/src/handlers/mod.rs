@@ -10,7 +10,6 @@
 //   escalation — handles EscalationRequest from planners (planner.sock,
 //                same socket as IntentRequest, different IpcMessage
 //                variant per kernel-core.md §2.3 dispatcher table).
-pub mod add_sub_task;
 pub mod agent_hint;
 pub mod escalation;
 pub mod integration_merge_attribution;

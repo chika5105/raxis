@@ -479,9 +479,9 @@ fn read_gate_fixup_context(
         // attempt count without a max ceiling. The renderer prints
         // `attempt=N/0` if the policy is unset, which the LLM
         // treats as "no declared ceiling — defer to the kernel's
-        // budget check." The full ceiling is plumbed via the
-        // `KernelPush::GateRejected.max_attempts` field on the
-        // orchestrator side; the executor's view here is the
+        // budget check." Iter72: the gate-fixup admit pipeline is
+        // kernel-authoritative (the kernel enforces the ceiling
+        // at admit time); the executor's view here is the
         // attempt counter only.
         max_attempts: 0,
     }))

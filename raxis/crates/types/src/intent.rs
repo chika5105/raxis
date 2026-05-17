@@ -97,41 +97,6 @@ pub enum IntentKind {
     /// `FAIL_STRUCTURED_OUTPUT_RATE_LIMITED`.
     StructuredOutput,
 
-    /// **V3 (`specs/v3/gate-rejection-orchestrator-fixup.md`).**
-    /// Orchestrator-only. Requests that the Kernel admit a new
-    /// sub-task row that was NOT declared in the operator-signed
-    /// plan. The only authorised use-case in V3 is gate-rejection
-    /// fixup (`sub_task_kind = SubTaskKind::GateFixup`) — a
-    /// kernel-budgeted retry loop driven by the
-    /// `KernelPush::GateRejected` push. Every other
-    /// `sub_task_kind` value is reserved for future work and
-    /// rejects with `FAIL_POLICY_VIOLATION`.
-    /// Wire fields used:
-    ///   * `task_id` — the NEW sub-task's identifier. MUST NOT
-    ///     collide with an existing `tasks.task_id` (returns
-    ///     `INVALID_REQUEST`).
-    ///   * `sub_task_kind` — `Some(SubTaskKind::GateFixup)`; any
-    ///     other value (or `None`) returns `INVALID_REQUEST`.
-    ///   * `parent_gate_failure_task_id` — required, the parent
-    ///     task whose gate produced the witness rejection.
-    ///   * `parent_gate_failure_type` — required, the gate-type
-    ///     string this fixup targets (MUST equal a known
-    ///     `policy.gates[].gate_type`).
-    ///   * `base_sha` / `head_sha` are unused at this lifecycle
-    ///     layer (no SHA range; the parent's worktree pointer is
-    ///     reused when the fixup activates).
-    ///     Admission contract (`INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`):
-    ///   * `parent.gate_fixup_attempts < [gate_fixup].max_attempts`
-    ///     OR rejection with the dedicated retryable-but-
-    ///     terminal-for-this-parent code
-    ///     `FAIL_GATE_FIXUP_BUDGET_EXHAUSTED`.
-    ///     On success the kernel inserts a `tasks` row with
-    ///     `is_gate_fixup = 1`, increments the parent's
-    ///     `gate_fixup_attempts`, and emits a `GateFixupSpawned` audit
-    ///     event. A follow-up `ActivateSubTask` from the Orchestrator
-    ///     then spawns the VM (existing path).
-    AddSubTask,
-
     /// **V3 batch-admit primitive (iter70).** Orchestrator-only.
     /// Requests that the Kernel admit a SET of candidate sub-tasks
     /// in a single IPC round-trip. The Orchestrator passes a *set*
@@ -172,35 +137,6 @@ pub enum IntentKind {
     BatchActivateSubTasks,
 }
 
-/// V3 (`specs/v3/gate-rejection-orchestrator-fixup.md` §4.3).
-/// Optional discriminator on the new `AddSubTask` intent: which
-/// admission code-path the kernel should follow. `Executor` is
-/// the implicit default for the wire (`None` decodes as `Executor`)
-/// and is **reserved** — no current handler accepts it; the only
-/// authorised variant at v3 is `GateFixup`.
-/// **Wire stability.** Encoded as a tagged enum through bincode
-/// standard(); the JSON projection uses
-/// `#[serde(rename_all = "PascalCase")]` to match other wire
-/// enums in this module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "PascalCase")]
-pub enum SubTaskKind {
-    /// Default. **Reserved** — a future iteration may allow
-    /// orchestrators to declare additional executor sub-tasks at
-    /// runtime, but until then admitting an `AddSubTask` with
-    /// `kind = Executor` rejects with `FAIL_POLICY_VIOLATION`.
-    #[default]
-    Executor,
-
-    /// **V3.** Kernel-budgeted fixup task spawned in response to a
-    /// non-`Pass` gate verdict. Subject to the
-    /// `policy.gate_fixup.max_attempts` ceiling enforced at admit
-    /// (`INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`). The
-    /// orchestrator emits this kind in response to a
-    /// `KernelPush::GateRejected` push (`§4.2`).
-    GateFixup,
-}
-
 impl IntentKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -212,7 +148,6 @@ impl IntentKind {
             Self::RetrySubTask => "RetrySubTask",
             Self::SubmitReview => "SubmitReview",
             Self::StructuredOutput => "StructuredOutput",
-            Self::AddSubTask => "AddSubTask",
             Self::BatchActivateSubTasks => "BatchActivateSubTasks",
         }
     }
@@ -225,9 +160,6 @@ impl IntentKind {
     /// carry no SHA range. The Kernel ignores `base_sha` / `head_sha`
     /// entirely on these kinds (it does not even read them, so a
     /// truncated planner that passes garbage Some-values is harmless).
-    /// V3 `AddSubTask` is also lifecycle-layer (the parent's worktree
-    /// pointer is reused on the fixup task's activation; the kernel
-    /// does NOT touch `base_sha` / `head_sha` at admit time).
     pub fn requires_sha_range(self) -> bool {
         matches!(
             self,
@@ -243,14 +175,12 @@ impl IntentKind {
     /// V2: whether this intent kind is one of the V2-only sub-task
     /// lifecycle kinds. Useful at the dispatch matrix boundary as a
     /// fast guard before consulting the per-(kind, agent_type) matrix.
-    /// V3 `AddSubTask` is also a sub-task lifecycle kind.
     pub fn is_v2_subtask_kind(self) -> bool {
         matches!(
             self,
             Self::ActivateSubTask
                 | Self::RetrySubTask
                 | Self::SubmitReview
-                | Self::AddSubTask
                 | Self::BatchActivateSubTasks
         )
     }
@@ -264,7 +194,7 @@ impl IntentKind {
     /// All variants. Used by the static-dispatch-matrix exhaustiveness
     /// guard (v2-deep-spec.md §Step 20) so a future added variant
     /// automatically fails the matrix-build test until a row is added.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 9] = [
         Self::SingleCommit,
         Self::IntegrationMerge,
         Self::CompleteTask,
@@ -273,7 +203,6 @@ impl IntentKind {
         Self::RetrySubTask,
         Self::SubmitReview,
         Self::StructuredOutput,
-        Self::AddSubTask,
         Self::BatchActivateSubTasks,
     ];
 }
@@ -497,35 +426,6 @@ pub struct IntentRequest {
     /// for bincode round-trip compatibility.
     #[serde(default)]
     pub structured_output: Option<crate::StructuredOutputKind>,
-
-    // ── V3 AddSubTask payload (specs/v3/gate-rejection-orchestrator-fixup.md) ──
-    /// **V3 AddSubTask only.** Discriminator on which admission
-    /// code-path the kernel should follow. At v3, the only
-    /// authorised value is `Some(SubTaskKind::GateFixup)`. Any
-    /// other value (or `None`) on an `AddSubTask` intent returns
-    /// `INVALID_REQUEST`. MUST be `None` for every other intent
-    /// kind. **Wire encoding note:** see the analogous comment on
-    /// `approved` — `skip_serializing_if` is intentionally absent.
-    #[serde(default)]
-    pub sub_task_kind: Option<SubTaskKind>,
-
-    /// **V3 AddSubTask only.** The parent task whose gate
-    /// produced the witness rejection that this fixup is
-    /// responding to. The kernel validates the parent exists,
-    /// belongs to the same initiative, and has
-    /// `gate_fixup_attempts < [gate_fixup].max_attempts`.
-    /// MUST be `None` for every other intent kind.
-    #[serde(default)]
-    pub parent_gate_failure_task_id: Option<TaskId>,
-
-    /// **V3 AddSubTask only.** The gate-type string this fixup
-    /// targets. MUST match a known `policy.gates[].gate_type`
-    /// (otherwise `FAIL_POLICY_VIOLATION` at admit). Stored on
-    /// the new fixup task row's `parent_gate_failure_type`
-    /// column for KSB assembly and dashboard rendering. MUST
-    /// be `None` for every other intent kind.
-    #[serde(default)]
-    pub parent_gate_failure_type: Option<String>,
 
     // ── V3 iter70 BatchActivateSubTasks payload ────────────────────────
     /// **V3 BatchActivateSubTasks only (iter70).** The candidate
@@ -833,32 +733,37 @@ pub enum NotAdmissibleReason {
 mod tests {
     use super::*;
 
-    /// V3 has 10 IntentKind variants total:
+    /// V3 (iter72) has 9 IntentKind variants total:
     ///   * 4 V1 — SingleCommit, IntegrationMerge, CompleteTask,
     ///     ReportFailure.
     ///   * 3 V2 — ActivateSubTask, RetrySubTask, SubmitReview.
     ///   * 1 V2.5 — `StructuredOutput`.
-    ///   * 1 V3 — `AddSubTask` (gate-fixup spawn entry, see
-    ///     `specs/v3/gate-rejection-orchestrator-fixup.md`).
     ///   * 1 V3 iter70 — `BatchActivateSubTasks` (batch-admit
     ///     primitive; the kernel selects which candidates win
     ///     the scarce concurrency headroom and reports per-id
     ///     outcomes back to the orchestrator).
     ///
-    ///     The pinned-count test surfaces accidental adds at the test
-    ///     layer before any dispatch matrix or store mapping regresses.
+    /// iter72 removed `AddSubTask` (V3 `kind:GateFixup` carrier).
+    /// The kernel now admits gate-fixup tasks directly from the
+    /// witness handler via `crate::gate_fixup::auto_admit_gate_fixup_task`
+    /// — no orchestrator-mediated wire intent needed.
+    ///
+    /// The pinned-count test surfaces accidental adds at the test
+    /// layer before any dispatch matrix or store mapping regresses.
     #[test]
     fn intent_kind_variant_count_is_pinned_to_v3() {
         assert_eq!(
             IntentKind::ALL.len(),
-            10,
-            "V3 (iter70) has exactly 10 IntentKind variants \
+            9,
+            "V3 (iter72) has exactly 9 IntentKind variants \
              (4 V1: SingleCommit, IntegrationMerge, CompleteTask, \
              ReportFailure; 3 V2: ActivateSubTask, RetrySubTask, \
              SubmitReview; 1 V2.5: StructuredOutput; \
-             2 V3: AddSubTask, BatchActivateSubTasks). Bumping \
-             this requires the static dispatch matrix \
-             (v2-deep-spec.md §Step 20) to gain a matching row."
+             1 V3 iter70: BatchActivateSubTasks). Bumping this \
+             requires the static dispatch matrix (v2-deep-spec.md \
+             §Step 20) to gain a matching row. AddSubTask was \
+             removed in iter72 — gate-fixup spawn is now kernel-\
+             authoritative (`gate_fixup::auto_admit_gate_fixup_task`)."
         );
     }
 
@@ -887,7 +792,7 @@ mod tests {
         assert_eq!(IntentKind::RetrySubTask.as_str(), "RetrySubTask");
         assert_eq!(IntentKind::SubmitReview.as_str(), "SubmitReview");
         assert_eq!(IntentKind::StructuredOutput.as_str(), "StructuredOutput");
-        assert_eq!(IntentKind::AddSubTask.as_str(), "AddSubTask");
+        assert_eq!(IntentKind::BatchActivateSubTasks.as_str(), "BatchActivateSubTasks");
     }
 
     /// V2 sub-task kinds do NOT carry a SHA range. The kernel
@@ -986,9 +891,6 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: None,
-            sub_task_kind: None,
-            parent_gate_failure_task_id: None,
-            parent_gate_failure_type: None,
             batch_task_ids: None,
         };
 
@@ -1040,9 +942,6 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: None,
-            sub_task_kind: None,
-            parent_gate_failure_task_id: None,
-            parent_gate_failure_type: None,
             batch_task_ids: None,
         };
         let s = serde_json::to_string(&req).unwrap();
@@ -1097,9 +996,6 @@ mod tests {
             resolved_via_escalation: Some(escalation_id.clone()),
             tokens_used: None,
             structured_output: None,
-            sub_task_kind: None,
-            parent_gate_failure_task_id: None,
-            parent_gate_failure_type: None,
             batch_task_ids: None,
         };
 
@@ -1159,9 +1055,6 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: None,
-            sub_task_kind: None,
-            parent_gate_failure_task_id: None,
-            parent_gate_failure_type: None,
             batch_task_ids: None,
         };
         let bytes = bincode::serde::encode_to_vec(&req, bincode::config::standard())
@@ -1180,110 +1073,6 @@ mod tests {
              elision"
         );
         assert!(obj.get("resolved_via_escalation").unwrap().is_null());
-    }
-
-    /// V3 — `AddSubTask` is wire-stable through bincode + JSON.
-    /// The three new optional fields (`sub_task_kind`,
-    /// `parent_gate_failure_task_id`, `parent_gate_failure_type`)
-    /// MUST round-trip through both canonical paths so audit replay
-    /// and operator JSON projection agree on the value, including
-    /// the `null` projection when the fields are absent (mirrors
-    /// the analogous `approved` / `resolved_via_escalation` rules).
-    /// See `specs/v3/gate-rejection-orchestrator-fixup.md` §4.3.
-    #[test]
-    fn v3_add_sub_task_round_trips_with_gate_fixup_payload() {
-        use crate::TaskId;
-        use uuid::Uuid;
-
-        let parent = TaskId::parse("parent-merge-1").unwrap();
-        let fixup = TaskId::parse("fixup-merge-1").unwrap();
-        let req = IntentRequest {
-            session_token: "tok".into(),
-            sequence_number: 7,
-            envelope_nonce: "a".repeat(32),
-            intent_kind: IntentKind::AddSubTask,
-            task_id: fixup.clone(),
-            base_sha: None,
-            head_sha: None,
-            submitted_claims: vec![],
-            justification: None,
-            idempotency_key: Some(Uuid::nil()),
-            approval_token: None,
-            approved: None,
-            critique: None,
-            resolved_via_escalation: None,
-            tokens_used: None,
-            structured_output: None,
-            sub_task_kind: Some(SubTaskKind::GateFixup),
-            parent_gate_failure_task_id: Some(parent.clone()),
-            parent_gate_failure_type: Some("NoSecretStrings".to_owned()),
-            batch_task_ids: None,
-        };
-
-        // Canonical IPC wire — bincode.
-        let bytes = bincode::serde::encode_to_vec(&req, bincode::config::standard())
-            .expect("bincode encode");
-        let (back, _): (IntentRequest, _) =
-            bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-                .expect("bincode decode");
-        assert_eq!(back.intent_kind, IntentKind::AddSubTask);
-        assert_eq!(back.sub_task_kind, Some(SubTaskKind::GateFixup));
-        assert_eq!(back.parent_gate_failure_task_id.as_ref(), Some(&parent));
-        assert_eq!(
-            back.parent_gate_failure_type.as_deref(),
-            Some("NoSecretStrings"),
-        );
-
-        // JSON projection — the new fields surface literally so
-        // audit-replay UIs can match on key name without depending
-        // on serde representation rules.
-        let v = serde_json::to_value(&req).unwrap();
-        let obj = v.as_object().unwrap();
-        for key in [
-            "sub_task_kind",
-            "parent_gate_failure_task_id",
-            "parent_gate_failure_type",
-        ] {
-            assert!(
-                obj.contains_key(key),
-                "JSON projection MUST surface `{key}` for v3 AddSubTask"
-            );
-        }
-        assert_eq!(
-            obj.get("sub_task_kind").unwrap().as_str(),
-            Some("GateFixup"),
-            "SubTaskKind JSON form must be `GateFixup` (PascalCase \
-             rename matches the rest of the V2 wire enums)",
-        );
-        assert_eq!(
-            obj.get("parent_gate_failure_type").unwrap().as_str(),
-            Some("NoSecretStrings"),
-        );
-    }
-
-    /// `SubTaskKind` default is `Executor`. This is the reserved
-    /// wire-default; an orchestrator that omits the field on an
-    /// `AddSubTask` intent gets routed to the
-    /// `kind = Executor` admit branch, which v3 rejects with
-    /// `FAIL_POLICY_VIOLATION`. Pinned here so a future default
-    /// flip is caught at unit-test layer.
-    #[test]
-    fn sub_task_kind_default_is_executor() {
-        let k: SubTaskKind = SubTaskKind::default();
-        assert_eq!(k, SubTaskKind::Executor);
-    }
-
-    /// `AddSubTask` is a V2 sub-task lifecycle kind (does not
-    /// carry a SHA range, does not require justification, does
-    /// not require approved). Pinned so the predicate set stays
-    /// honest after the v3 addition.
-    #[test]
-    fn add_sub_task_predicates_match_lifecycle_layer() {
-        let k = IntentKind::AddSubTask;
-        assert!(!k.requires_sha_range());
-        assert!(!k.requires_justification());
-        assert!(!k.requires_approved());
-        assert!(k.is_v2_subtask_kind());
     }
 
     /// **V3 iter70.** `BatchActivateSubTasks` is a sub-task
@@ -1332,9 +1121,6 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: None,
-            sub_task_kind: None,
-            parent_gate_failure_task_id: None,
-            parent_gate_failure_type: None,
             batch_task_ids: Some(vec![id_a.clone(), id_b.clone(), id_c.clone()]),
         };
 

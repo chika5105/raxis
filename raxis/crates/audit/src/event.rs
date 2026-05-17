@@ -1396,17 +1396,18 @@ pub enum AuditEventKind {
     /// authorises the kernel to attempt a fixup loop. The
     /// kernel pairs this audit with the `witness_records` insert and
     /// the `tasks.last_gate_critique` / `tasks.last_gate_type` /
-    /// `tasks.gate_reject_count++` update, then enqueues a
-    /// `KernelPush::GateRejected` for the orchestrator's session
-    /// stream.
+    /// `tasks.gate_reject_count++` update, then invokes the
+    /// kernel-authoritative auto-admit pipeline
+    /// (`kernel::gate_fixup::auto_admit_gate_fixup_task`) to
+    /// admit the fixup task atomically.
     ///
     /// **Not paired with a `TaskStateChanged`.** The parent task
-    /// stays in `GatesPending` until either (a) the orchestrator
-    /// emits `AddSubTask{kind:GateFixup}` (which transitions
-    /// `GatesPending → Running` for the fixup task while the
-    /// parent stays parked) or (b) the orchestrator exhausts the
-    /// budget (which triggers `GateRejectionTerminal` +
-    /// `TaskStateChanged { GatesPending → Failed }`).
+    /// stays in `GatesPending` until either (a) the kernel admits
+    /// a fixup task (which the orchestrator discovers on its
+    /// next KSB refresh and `ActivateSubTask`s) or (b) the
+    /// kernel-side budget is exhausted (which triggers
+    /// `GateRejectionTerminal` + `TaskStateChanged
+    /// { GatesPending → Failed }`).
     GateRejectionAccepted {
         task_id: String,
         gate_type: String,
@@ -1436,9 +1437,12 @@ pub enum AuditEventKind {
     /// - `"no_fixup_profile"` — `[gate_fixup]` absent / disabled
     ///   in policy. First-rejection terminal.
     /// - `"fixup_budget_exhausted"` — `gate_fixup_attempts ≥
-    ///   max_attempts` at `AddSubTask{kind:GateFixup}` admit time;
-    ///   the orchestrator's spawn was rejected and the kernel
+    ///   max_attempts` at the kernel-authoritative auto-admit
+    ///   call; admission is rejected and the kernel
     ///   transitions the parent.
+    /// - `"gate_rejected_fixup_budget_exhausted"` — synonym used
+    ///   by the iter72 witness handler's
+    ///   `auto_admit_gate_fixup_task` rejection branch.
     /// - `"fixup_executor_failed"` — every admitted fixup task
     ///   reached a terminal non-success state without clearing
     ///   the gate.
@@ -1485,11 +1489,14 @@ pub enum AuditEventKind {
 
     /// iter65 — `specs/v3/gate-rejection-orchestrator-fixup.md §4.9`.
     ///
-    /// Emitted at `AddSubTask{kind: GateFixup}` admit time, paired
-    /// with the new fixup-task `tasks` row insert and the parent
-    /// task's `gate_fixup_attempts` increment. Carries the parent's
-    /// gate context so audit replay can reconstruct the fixup
-    /// chain without joining `tasks`.
+    /// Emitted by the kernel-authoritative auto-admit pipeline
+    /// (`kernel::gate_fixup::auto_admit_gate_fixup_task`) at
+    /// fixup-row insert time, paired in the same SQLite
+    /// transaction with the new fixup-task row, the parent→fixup
+    /// DAG edge, and the parent task's `gate_fixup_attempts`
+    /// increment. Carries the parent's gate context so audit
+    /// replay can reconstruct the fixup chain without joining
+    /// `tasks`.
     GateFixupSpawned {
         /// Newly-admitted fixup task (`is_gate_fixup = 1`).
         fixup_task_id: String,
