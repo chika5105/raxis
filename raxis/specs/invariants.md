@@ -1043,6 +1043,53 @@ rejects in release builds with `INVARIANT_FAILURE_REASON_REQUIRED`.
 
 ---
 
+### INV-PLANNER-IPC-IDLE-WATCHDOG-01 — Wedged planner VMs are detected and forcibly recovered
+
+Canonical home: [`v2/planner-ipc-idle-watchdog.md`](v2/planner-ipc-idle-watchdog.md).
+
+**Statement.** Every kernel-supervised planner-IPC dispatch loop
+(`crate::ipc::server::drive_planner_stream`) MUST bound the
+wall-clock time between consecutive IPC frames from the planner
+side. When the bound is exceeded the kernel MUST:
+
+1. Forcibly terminate the substrate session via
+   `SessionSpawnService::terminate_session` (which routes through
+   the substrate's `shutdown_grace_then_force` dance, releasing
+   the host-side hypervisor handle + vsock CID + virtiofs daemon
+   adoption).
+2. Synthesise a CONCRETE Mode-B failure reason that names the
+   watchdog firing AND the threshold. The synthesised reason MUST
+   pre-empt every other source-of-truth tier (structured exit
+   notice, dispatch-stream error, activity breadcrumb), because
+   every other tier is by definition stale when the watchdog
+   fires.
+3. Drive the orchestrator-continuation respawn through the same
+   path Mode-B uses for any other premature exit, so the
+   orchestrator can decide retry_subtask vs. settle Blocked per
+   policy.
+
+**Justification.** Without the watchdog a wedged planner VM
+(host substrate reports the VM as "running" but no progress is
+being made — e.g. AVF orphan XPC adoption race, in-guest PID 1
+hung, vsock fd starvation) sits indefinitely consuming an
+admission slot and silently breaks every DAG that depends on it.
+The reproducer in iter71/iter72 was the AVF orphan pathology on
+macOS, where a `SIGKILL`'d kernel left
+`com.apple.Virtualization.VirtualMachine.xpc` processes parented
+to `launchd`, and the next fresh kernel's executors stalled
+before their first IntentRequest.
+
+**Scenario.** An executor VM logs `planner-boot` then never
+emits another frame (substrate-level wedge). After the configured
+threshold (default 900s; override via
+`RAXIS_PLANNER_IPC_IDLE_TIMEOUT_SECS`), the kernel emits
+`planner_ipc_idle_watchdog_fired`, terminates the substrate
+session, transitions the task `Running → Failed` with a reason
+quoting the threshold and (where available) the last-seen
+intent, and respawns the orchestrator to pick a recovery action.
+
+---
+
 ## §19 — Gate rejection and agent-hint contract
 
 Canonical home: [`v3/gate-rejection-orchestrator-fixup.md`](v3/gate-rejection-orchestrator-fixup.md).

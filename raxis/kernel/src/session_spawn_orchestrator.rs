@@ -1229,13 +1229,79 @@ fn maybe_apply_scale_down(
 /// inline tests in `concrete_reason_tests` below AND the
 /// file-sweep regression guard in
 /// `kernel/tests/concrete_reason_sweep.rs::no_umbrella_reason_in_kernel_or_dashboard_emit_sites`.
+///
+/// ## `INV-PLANNER-IPC-IDLE-WATCHDOG-01` (iter72) — `idle_watchdog`
+///
+/// `Some(...)` ⇒ the kernel-side planner-IPC idle watchdog
+/// fired before any frame arrived (see
+/// `crate::ipc::server::planner_ipc_idle_timeout`); the function
+/// returns immediately with a CONCRETE reason that names the
+/// watchdog firing and threshold. `None` ⇒ normal control flow
+/// (the other source-of-truth tiers below apply).
+///
+/// The watchdog source pre-empts the structured exit notice,
+/// dispatch-stream error, AND activity-tracker tiers because by
+/// definition the planner stopped producing signals BEFORE any
+/// of those tiers could observe a new event — every other tier
+/// would surface a stale, misleading reason ("clean EOF after
+/// last intent #3 (Accepted)…" would imply orderly shutdown
+/// when in fact the kernel forcibly killed the wedged VM).
+#[derive(Debug, Clone, Copy)]
+pub struct IdleWatchdogFired {
+    /// The idle-timeout duration (seconds) the kernel was
+    /// configured with — inlined verbatim into the synthesised
+    /// reason so the operator can correlate against the
+    /// `planner_ipc_idle_watchdog_fired` stderr breadcrumb
+    /// without checking the kernel configuration.
+    pub threshold_secs: u64,
+}
+
 pub(crate) fn build_worker_post_exit_failure_reason(
     role_str: &str,
     exit_notice: Option<&raxis_types::PlannerExitOutcome>,
     dispatch_err_str: Option<&str>,
     last_activity: Option<&crate::session_activity::SessionActivity>,
+    idle_watchdog: Option<IdleWatchdogFired>,
 ) -> String {
     use raxis_types::PlannerExitOutcome;
+    // 0) `INV-PLANNER-IPC-IDLE-WATCHDOG-01` — the kernel-side
+    //    idle watchdog fired before the planner sent any frame.
+    //    This pre-empts every other source-of-truth tier: the
+    //    structured exit notice, dispatch-stream error, and
+    //    last-activity breadcrumb are all by definition stale or
+    //    absent (the planner stopped emitting frames before any
+    //    new signal could be observed). The synthesised reason
+    //    NAMES the watchdog firing AND the threshold so the
+    //    operator can correlate directly against
+    //    `planner_ipc_idle_watchdog_fired` in kernel.stderr.log.
+    if let Some(fired) = idle_watchdog {
+        let last_seen_short = last_activity
+            .map(|a| {
+                format!(
+                    "last observed intent {kind} #{seq} ({outcome}) at unix={ts}",
+                    kind = a.last_intent_kind.as_str(),
+                    seq = a.last_intent_seq,
+                    outcome = a.last_intent_outcome.as_short_str(),
+                    ts = a.recorded_at_unix,
+                )
+            })
+            .unwrap_or_else(|| "no IntentRequest ever observed".to_owned());
+        return format!(
+            "session_spawn_orchestrator: {role_str} VM became unresponsive — \
+             the kernel-side planner-IPC idle watchdog fired after \
+             {secs}s without receiving any frame ({last}). The kernel \
+             forcibly terminated the substrate session; this is a \
+             wedged-VM signature, almost always rooted in a substrate-\
+             level fault (orphaned hypervisor handle from a prior \
+             SIGKILL'd kernel, in-guest PID 1 hung silently, host \
+             vsock CID collision, or virtiofs daemon adoption race). \
+             See `specs/v2/planner-ipc-idle-watchdog.md` for the full \
+             failure-mode taxonomy. INV-PLANNER-IPC-IDLE-WATCHDOG-01.",
+            role_str = role_str,
+            secs = fired.threshold_secs,
+            last = last_seen_short,
+        );
+    }
     // 1) Concrete structured exit notice from the planner.
     //    `format_concrete_reason` returns `None` only for
     //    `CleanCompletion`; the surrounding code path skips
@@ -1432,6 +1498,22 @@ pub fn spawn_planner_dispatcher(
             .as_ref()
             .ok()
             .and_then(|o| o.last_exit_notice.clone());
+        // `INV-PLANNER-IPC-IDLE-WATCHDOG-01` — surface the
+        // kernel-side idle-watchdog signal so the Mode-B
+        // synthesiser names the watchdog firing instead of
+        // mis-attributing the stall to "clean EOF without a
+        // PlannerExitNotice". When the watchdog fires the
+        // kernel ALSO forcibly terminates the substrate VM
+        // below (the substrate handle outlives the kernel-side
+        // stream; merely dropping the stream leaves the AVF VM
+        // running if its in-guest PID 1 is wedged).
+        let idle_watchdog_for_post_exit: Option<IdleWatchdogFired> = dispatch_result
+            .as_ref()
+            .ok()
+            .filter(|o| o.idle_watchdog_fired)
+            .map(|o| IdleWatchdogFired {
+                threshold_secs: o.idle_watchdog_threshold_secs,
+            });
         if let Err(e) = &dispatch_result {
             // Per the planner-dispatch logging convention, the
             // structured log keys on `step:"planner-dispatch"` so a
@@ -1444,6 +1526,63 @@ pub fn spawn_planner_dispatcher(
                  \"session_id\":\"{session_id}\",\"error\":\"{err}\"}}",
                 err = e,
             );
+        }
+
+        // `INV-PLANNER-IPC-IDLE-WATCHDOG-01` — forcibly terminate
+        // the substrate session BEFORE the SQL revoke when the
+        // kernel-side idle watchdog fired. Merely dropping the
+        // kernel-side `stream` is insufficient: the substrate
+        // handle (the live `Box<dyn IsolationSession>` held in
+        // `SessionSpawnService::sessions`) keeps the hypervisor
+        // VM running; only `terminate_session` issues the AVF /
+        // Firecracker stop dance that reaps the host-side XPC
+        // process and releases its vsock CID + virtiofs daemon
+        // handle.
+        //
+        // Best-effort: `SessionNotActive` is expected when the
+        // substrate already reaped the VM via another path (e.g.
+        // the kernel boot preflight in the next start cycle saw
+        // an orphan and killed it externally); a `BackendError`
+        // is surfaced as a structured warn but never propagates
+        // — the SQL revoke and Mode-B synthesis MUST still fire
+        // so the orchestrator can decide retry vs. settle.
+        if idle_watchdog_for_post_exit.is_some() {
+            let session_for_terminate = session_id.to_string();
+            let svc = Arc::clone(&ctx.session_spawn);
+            // 5-second grace — well above the AVF runtime's
+            // internal stop-then-force watchdog (see
+            // `isolation-apple-vz::runtime::stop`).
+            let grace = std::time::Duration::from_secs(5);
+            match svc.terminate_session(&session_for_terminate, grace).await {
+                Ok(report) => {
+                    eprintln!(
+                        "{{\"level\":\"info\",\
+                         \"event\":\"planner_ipc_idle_watchdog_session_terminated\",\
+                         \"session_id\":\"{session}\",\
+                         \"exit_status\":\"{status:?}\"}}",
+                        session = session_for_terminate,
+                        status = report.exit_status,
+                    );
+                }
+                Err(raxis_session_spawn::SpawnError::SessionNotActive { .. }) => {
+                    eprintln!(
+                        "{{\"level\":\"info\",\
+                         \"event\":\"planner_ipc_idle_watchdog_session_already_inactive\",\
+                         \"session_id\":\"{session}\"}}",
+                        session = session_for_terminate,
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"planner_ipc_idle_watchdog_terminate_failed\",\
+                         \"session_id\":\"{session}\",\
+                         \"error\":\"{err}\"}}",
+                        session = session_for_terminate,
+                        err = e,
+                    );
+                }
+            }
         }
 
         // V2 §Step 6 — finalize the session when the IPC channel
@@ -1867,6 +2006,7 @@ pub fn spawn_planner_dispatcher(
         let session_for_post_exit = session_id.clone();
         let dispatch_err_for_synth = dispatch_err_for_post_exit.clone();
         let exit_notice_for_synth = exit_notice_for_post_exit.clone();
+        let idle_watchdog_for_synth = idle_watchdog_for_post_exit;
         // INV-FAILURE-REASON-CONCRETE-01 (P2 ladder slot): clone
         // the activity tracker handle so the spawn_blocking body
         // can `take` the per-session breadcrumb when neither a
@@ -2239,6 +2379,7 @@ pub fn spawn_planner_dispatcher(
                 exit_notice_for_synth.as_ref(),
                 dispatch_err_for_synth.as_deref(),
                 last_activity.as_ref(),
+                idle_watchdog_for_synth,
             );
             if let Err(e) = transition_task_in_tx(
                 &tx,
@@ -5980,7 +6121,7 @@ mod concrete_reason_tests {
             used: 60,
             limit: 60,
         };
-        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
+        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None, None);
         assert!(!s.is_empty());
         assert_no_forbidden(&s);
         assert!(s.contains("max_turns"), "must name max_turns; got {s:?}");
@@ -6000,7 +6141,7 @@ mod concrete_reason_tests {
             used: 150_000,
             limit: 100_000,
         };
-        let s = build_worker_post_exit_failure_reason("reviewer", Some(&o), None, None);
+        let s = build_worker_post_exit_failure_reason("reviewer", Some(&o), None, None, None);
         assert_no_forbidden(&s);
         assert!(s.contains("max_tokens"), "must name max_tokens; got {s:?}");
         assert!(s.contains("input"), "must name the axis; got {s:?}");
@@ -6018,7 +6159,7 @@ mod concrete_reason_tests {
         let o = PlannerExitOutcome::IdleNoTerminalIntent {
             final_text_len: 1024,
         };
-        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
+        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None, None);
         assert_no_forbidden(&s);
         assert!(s.contains("end_turn"), "must mention end_turn; got {s:?}");
         assert!(
@@ -6035,7 +6176,7 @@ mod concrete_reason_tests {
             errors: 5,
             budget: 5,
         };
-        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
+        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None, None);
         assert_no_forbidden(&s);
         assert!(s.contains("tool-error"), "must name tool-error; got {s:?}");
         assert!(
@@ -6053,7 +6194,7 @@ mod concrete_reason_tests {
         let o = PlannerExitOutcome::ExplicitGiveUp {
             reason: driver_err.to_string(),
         };
-        let s = build_worker_post_exit_failure_reason("orchestrator", Some(&o), None, None);
+        let s = build_worker_post_exit_failure_reason("orchestrator", Some(&o), None, None, None);
         assert_no_forbidden(&s);
         assert!(
             s.contains("driver gave up"),
@@ -6072,7 +6213,7 @@ mod concrete_reason_tests {
         let o = PlannerExitOutcome::Unknown {
             detail: "planner-vNEXT::DispatchOutcome::FutureVariant".to_string(),
         };
-        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
+        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None, None);
         assert_no_forbidden(&s);
         assert!(
             s.contains("exit-notice"),
@@ -6094,7 +6235,7 @@ mod concrete_reason_tests {
         let o = PlannerExitOutcome::CleanCompletion {
             tool_name: "task_complete".to_string(),
         };
-        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
+        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None, None);
         assert_no_forbidden(&s);
         assert!(
             s.contains("CleanCompletion"),
@@ -6116,6 +6257,7 @@ mod concrete_reason_tests {
             None,
             Some("planner-boot-error: RAXIS_MODEL_ID unresolved"),
             None,
+            None,
         );
         assert_no_forbidden(&s);
         assert!(
@@ -6136,7 +6278,7 @@ mod concrete_reason_tests {
     /// not hedge between possibilities.
     #[test]
     fn concrete_reason_no_notice_no_dispatch_no_activity_fallback() {
-        let s = build_worker_post_exit_failure_reason("executor", None, None, None);
+        let s = build_worker_post_exit_failure_reason("executor", None, None, None, None);
         assert_no_forbidden(&s);
         assert!(
             s.contains("PlannerExitNotice"),
@@ -6172,7 +6314,7 @@ mod concrete_reason_tests {
             last_intent_outcome: LastIntentOutcome::Accepted,
             recorded_at_unix: 1_715_694_342_i64,
         };
-        let s = build_worker_post_exit_failure_reason("executor", None, None, Some(&activity));
+        let s = build_worker_post_exit_failure_reason("executor", None, None, Some(&activity), None);
         assert_no_forbidden(&s);
         assert!(
             s.contains("StructuredOutput"),
@@ -6200,11 +6342,95 @@ mod concrete_reason_tests {
             used: 42,
             limit: 100,
         };
-        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
+        let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None, None);
         assert!(
             s.contains("42 used / 100 limit"),
             "must render `n used / m limit`; got {s:?}"
         );
+    }
+
+    /// `INV-PLANNER-IPC-IDLE-WATCHDOG-01` — the watchdog branch
+    /// MUST pre-empt every other source-of-truth tier (exit
+    /// notice / dispatch err / activity / no-info). The
+    /// synthesised reason MUST name the watchdog firing AND the
+    /// threshold so the operator can correlate against the
+    /// `planner_ipc_idle_watchdog_fired` breadcrumb.
+    #[test]
+    fn concrete_reason_idle_watchdog_pre_empts_other_tiers() {
+        use super::IdleWatchdogFired;
+        let watchdog = IdleWatchdogFired {
+            threshold_secs: 900,
+        };
+        // Pile on every other signal — the watchdog branch MUST
+        // still win.
+        let exit_notice = PlannerExitOutcome::MaxTurnsReached {
+            used: 60,
+            limit: 60,
+        };
+        let s = build_worker_post_exit_failure_reason(
+            "executor",
+            Some(&exit_notice),
+            Some("planner-boot-error: model init OOM"),
+            None,
+            Some(watchdog),
+        );
+        assert_no_forbidden(&s);
+        assert!(
+            s.contains("idle watchdog"),
+            "must name the watchdog; got {s:?}"
+        );
+        assert!(
+            s.contains("900s"),
+            "must inline the threshold; got {s:?}"
+        );
+        assert!(
+            s.contains("wedged-VM"),
+            "must classify as wedged-VM signature; got {s:?}"
+        );
+        assert!(
+            s.contains("INV-PLANNER-IPC-IDLE-WATCHDOG-01"),
+            "must cite the invariant; got {s:?}"
+        );
+        // Other tiers' content MUST NOT appear when the
+        // watchdog fired — they are by definition stale.
+        assert!(
+            !s.contains("max_turns"),
+            "watchdog must pre-empt exit notice; got {s:?}"
+        );
+    }
+
+    /// Watchdog branch with an activity breadcrumb — the reason
+    /// MUST also surface the last observed intent so the
+    /// operator can see what the VM was doing before it wedged.
+    #[test]
+    fn concrete_reason_idle_watchdog_with_activity() {
+        use super::IdleWatchdogFired;
+        use crate::session_activity::{LastIntentOutcome, SessionActivity};
+        use raxis_types::IntentKind;
+        let activity = SessionActivity {
+            last_intent_kind: IntentKind::StructuredOutput,
+            last_intent_seq: 3,
+            last_intent_outcome: LastIntentOutcome::Accepted,
+            recorded_at_unix: 1_715_694_342_i64,
+        };
+        let watchdog = IdleWatchdogFired {
+            threshold_secs: 900,
+        };
+        let s = build_worker_post_exit_failure_reason(
+            "executor",
+            None,
+            None,
+            Some(&activity),
+            Some(watchdog),
+        );
+        assert_no_forbidden(&s);
+        assert!(
+            s.contains("StructuredOutput"),
+            "must inline last intent kind; got {s:?}"
+        );
+        assert!(s.contains("#3"), "must inline seq; got {s:?}");
+        assert!(s.contains("unix=1715694342"), "must inline ts; got {s:?}");
+        assert!(s.contains("900s"), "must inline threshold; got {s:?}");
     }
 }
 

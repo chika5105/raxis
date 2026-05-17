@@ -160,6 +160,109 @@ pub fn require_disk_hygiene() {
     require_disk_hygiene_with_threshold(90);
 }
 
+/// `INV-PLANNER-IPC-IDLE-WATCHDOG-01` test-side companion — reap
+/// orphaned Apple Virtualization.framework VM XPC processes left
+/// behind by a prior SIGKILL'd kernel run.
+///
+/// **Why this lives in the test harness, not the kernel.** Production
+/// kernels DO NOT kill arbitrary AVF VMs at boot because the host may
+/// be running a parallel Virtualization-framework consumer
+/// (xcrun simctl, a coworker's VM, a desktop emulator). In a live
+/// e2e run the host is dedicated and any AVF VM XPC alive at the
+/// start of a test is by definition an orphan from a previous run —
+/// the previous kernel was SIGKILL'd and its VMs survived as
+/// launchd-rooted XPCs that retain vsock CIDs and virtiofs daemon
+/// handles. Those leftovers race against fresh kernel spawns and
+/// produce the iter71/iter72 stall pattern documented in
+/// `specs/v2/planner-ipc-idle-watchdog.md §1.1`.
+///
+/// Operators can opt their production kernel into the same reaper
+/// via `RAXIS_BOOT_REAP_AVF_ORPHANS=1` (TODO — not yet wired into
+/// the kernel binary; tracked alongside this helper for symmetry).
+///
+/// On non-macOS hosts this is a no-op.
+pub fn reap_avf_orphan_vms() {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        // List all com.apple.Virtualization.VirtualMachine.xpc
+        // processes. `pgrep -f` matches against the full command
+        // line, which is what we want because AVF VM XPCs all share
+        // the same binary path.
+        const NEEDLE: &str = "com.apple.Virtualization.VirtualMachine.xpc";
+        let pgrep = match Command::new("/usr/bin/pgrep").args(["-f", NEEDLE]).output() {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!(
+                    "[realism-e2e] AVF-orphan reaper: pgrep unavailable ({e}); skipping",
+                );
+                return;
+            }
+        };
+        if !pgrep.status.success() {
+            // No matches is a non-zero exit; treat as "nothing to
+            // do" not "broken host".
+            eprintln!("[realism-e2e] AVF-orphan reaper: no orphan VMs found");
+            return;
+        }
+        let mut pids: Vec<u32> = Vec::new();
+        for line in String::from_utf8_lossy(&pgrep.stdout).lines() {
+            if let Ok(pid) = line.trim().parse::<u32>() {
+                pids.push(pid);
+            }
+        }
+        if pids.is_empty() {
+            return;
+        }
+        eprintln!(
+            "[realism-e2e] AVF-orphan reaper: found {} orphan VM XPC \
+             process(es) (pids={pids:?}); sending SIGKILL",
+            pids.len(),
+        );
+        for pid in &pids {
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+        // Give launchd a moment to reap.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        // Verify they're gone — log a warn if any survived so the
+        // operator can investigate manually rather than have the
+        // test silently fail later.
+        let verify = Command::new("/usr/bin/pgrep")
+            .args(["-f", NEEDLE])
+            .output()
+            .ok();
+        if let Some(v) = verify {
+            if v.status.success() {
+                let surviving: Vec<String> = String::from_utf8_lossy(&v.stdout)
+                    .lines()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !surviving.is_empty() {
+                    eprintln!(
+                        "[realism-e2e] AVF-orphan reaper: WARNING — \
+                         {} orphan VM XPC process(es) survived SIGKILL \
+                         (pids={surviving:?}); the test may stall on a \
+                         vsock CID collision. Run `sudo killall -KILL \
+                         com.apple.Virtualization.VirtualMachine.xpc` \
+                         manually.",
+                        surviving.len(),
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Firecracker on Linux uses regular processes parented to
+        // the spawning kernel; SIGKILL'ing the kernel reaps them
+        // through the normal kernel-side `wait4` path. No orphan
+        // class equivalent to AVF XPC has been observed on Linux.
+    }
+}
+
 /// Underlying probe — split out so unit tests can drive it with a
 /// 0% threshold against the live host (which always exceeds 0%).
 pub fn require_disk_hygiene_with_threshold(threshold_pct: u32) {

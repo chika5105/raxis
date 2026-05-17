@@ -465,12 +465,57 @@ where
     // the most actionable.
     let mut last_exit_notice: Option<raxis_types::PlannerExitOutcome> = None;
 
+    // `INV-PLANNER-IPC-IDLE-WATCHDOG-01` — per-frame deadline.
+    // Each iteration's `read_frame` is wrapped in a
+    // `tokio::time::timeout` with this duration. When the
+    // timer elapses without a frame arriving the loop sets
+    // `idle_watchdog_fired = true`, breaks out, and the
+    // surrounding `spawn_planner_dispatcher` post-exit hook
+    // calls `SessionSpawnService::terminate_session` to
+    // forcibly kill the wedged VM. `None` ⇒ watchdog disabled
+    // (env override `RAXIS_PLANNER_IPC_IDLE_TIMEOUT_SECS=0`).
+    let idle_timeout = planner_ipc_idle_timeout();
+    let idle_threshold_secs = idle_timeout.map(|d| d.as_secs()).unwrap_or(0);
+    let mut idle_watchdog_fired = false;
+
     loop {
-        let msg: IpcMessage = match read_frame(&mut stream).await {
-            Ok(m) => m,
-            Err(raxis_ipc::FrameError::Eof) => break, // clean disconnect
-            Err(e) => {
+        // `INV-PLANNER-IPC-IDLE-WATCHDOG-01` — wrap the
+        // per-frame read in a timeout. `read_frame` is
+        // cancellation-safe (a no-op `tokio::io::AsyncRead`
+        // wrapper around `read_exact`), so dropping the future
+        // on timeout cleanly tears down its partial state.
+        let frame_result: Result<Result<IpcMessage, raxis_ipc::FrameError>, _> = match idle_timeout
+        {
+            Some(d) => tokio::time::timeout(d, read_frame(&mut stream)).await,
+            None => Ok(read_frame(&mut stream).await),
+        };
+        let msg: IpcMessage = match frame_result {
+            Ok(Ok(m)) => m,
+            Ok(Err(raxis_ipc::FrameError::Eof)) => break, // clean disconnect
+            Ok(Err(e)) => {
                 planner_dispatch_log::planner_frame_decode_failed(&e.to_string());
+                break;
+            }
+            Err(_elapsed) => {
+                // `INV-PLANNER-IPC-IDLE-WATCHDOG-01` —
+                // the planner side has not sent ANY frame for
+                // `idle_threshold_secs` seconds. The session is
+                // declared wedged; the post-exit hook will
+                // forcibly terminate the substrate VM and
+                // synthesise a CONCRETE Mode-B failure reason
+                // that names the watchdog firing.
+                let session_label = session_id_for_activity
+                    .as_deref()
+                    .unwrap_or("<unbound-session>");
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                     \"event\":\"planner_ipc_idle_watchdog_fired\",\
+                     \"session_id\":\"{session}\",\
+                     \"idle_threshold_secs\":{secs}}}",
+                    session = session_label,
+                    secs = idle_threshold_secs,
+                );
+                idle_watchdog_fired = true;
                 break;
             }
         };
@@ -702,7 +747,11 @@ where
             }
         }
     }
-    Ok(PlannerStreamOutcome { last_exit_notice })
+    Ok(PlannerStreamOutcome {
+        last_exit_notice,
+        idle_watchdog_fired,
+        idle_watchdog_threshold_secs: idle_threshold_secs,
+    })
 }
 
 /// **`INV-FAILURE-REASON-CONCRETE-01`** — value returned by
@@ -729,6 +778,96 @@ pub(crate) struct PlannerStreamOutcome {
     /// stream, or `None` if the planner closed the connection
     /// without sending one.
     pub last_exit_notice: Option<raxis_types::PlannerExitOutcome>,
+
+    /// `INV-PLANNER-IPC-IDLE-WATCHDOG-01` — set to `true` when
+    /// the kernel-side idle-watchdog timer expired without any
+    /// IPC frame arriving from the planner. This is the
+    /// canonical signal for a wedged VM (host substrate kept the
+    /// VM "running" but the in-guest dispatch is no longer
+    /// making progress): the kernel must then forcibly terminate
+    /// the substrate session via
+    /// `SessionSpawnService::terminate_session` and synthesise a
+    /// CONCRETE Mode-B failure reason that names the watchdog
+    /// firing explicitly (rather than the generic clean-EOF
+    /// branch which would have fired had this happened to be a
+    /// genuine clean disconnect).
+    ///
+    /// Default `false`: the standard clean-EOF / dispatch-error
+    /// branches remain unchanged in behaviour. The flag is set
+    /// only by the watchdog arm of [`drive_planner_stream`] when
+    /// the per-frame `tokio::time::timeout` elapses.
+    pub idle_watchdog_fired: bool,
+
+    /// Duration (in seconds) the kernel waited for the next IPC
+    /// frame before declaring the session wedged. Surfaced via
+    /// the synthesised failure_reason so the operator can see
+    /// the exact threshold without checking the kernel
+    /// configuration.
+    pub idle_watchdog_threshold_secs: u64,
+}
+
+/// `INV-PLANNER-IPC-IDLE-WATCHDOG-01` — the maximum time the
+/// kernel will wait for the planner to send any IPC frame
+/// (IntentRequest, WitnessSubmission, EscalationRequest,
+/// PlannerExitNotice) before declaring the substrate-spawned
+/// session wedged and forcibly terminating its VM.
+///
+/// ## Why a watchdog at all
+///
+/// Before the watchdog, a wedged executor VM (e.g. one whose
+/// host-side AVF XPC process survived a SIGKILL of the parent
+/// kernel and now shares a vsock CID with a freshly-spawned
+/// peer) would block the dispatch loop's `read_frame(...)` call
+/// indefinitely. The kernel had no other liveness signal — no
+/// heartbeat, no progress event, nothing — so the wedged VM
+/// would sit there consuming an admission slot until operator
+/// intervention. Multiplied across a few orphaned VMs this
+/// silently broke entire initiative DAGs.
+///
+/// ## The chosen threshold
+///
+/// 15 minutes (900s) is the production default. The signal
+/// budgets are dominated by:
+///
+/// * LLM gateway round-trip (Anthropic / OpenAI / Gemini big
+///   prompts: 60–120s typical, 5 min worst-case at p99 for
+///   long-context turns).
+/// * In-VM bash tool execution (bounded by a per-task budget;
+///   credential-proxy fetches cap at ~90s, general bash at
+///   the planner-driver-imposed 300s).
+///
+/// 900s ⇒ even a worst-case LLM + a worst-case tool round-trip
+/// fits within one watchdog window. A genuine stall (no frame
+/// for 15 minutes) is almost certainly substrate-level: the
+/// guest kernel hung, PID 1 panicked silently, or the AVF host
+/// substrate stopped pumping bytes.
+///
+/// ## Override
+///
+/// Production callers can override the default via
+/// `RAXIS_PLANNER_IPC_IDLE_TIMEOUT_SECS`. The override is
+/// per-process (read once per `drive_planner_stream` invocation
+/// so unit tests can flip it via `std::env::set_var` before
+/// constructing a fixture). Setting it to `0` disables the
+/// watchdog entirely (the previous, unbounded behaviour) —
+/// used by long-running stress tests that may have many minutes
+/// between frames by design.
+pub(crate) const PLANNER_IPC_IDLE_TIMEOUT_DEFAULT_SECS: u64 = 900;
+
+/// Read the configured planner-IPC idle timeout. See
+/// [`PLANNER_IPC_IDLE_TIMEOUT_DEFAULT_SECS`] for the rationale.
+/// Returns `None` when the env var is set to `0` (watchdog
+/// disabled).
+pub(crate) fn planner_ipc_idle_timeout() -> Option<std::time::Duration> {
+    let secs = std::env::var("RAXIS_PLANNER_IPC_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(PLANNER_IPC_IDLE_TIMEOUT_DEFAULT_SECS);
+    if secs == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_secs(secs))
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -84,7 +84,8 @@ use extended_e2e_support::{
         bootstrap_with_custom_cert, build_operator_key, enable_gateway_in_policy,
         locate_executor_worktree_via_chain, locate_session_id_for_task, maybe_refresh_examples,
         poll_for_dual_lifecycle_completion, realism_workspace_root, realistic_lifecycle_deadline,
-        require_anthropic_dev_key, require_canonical_images, require_disk_hygiene,
+        reap_avf_orphan_vms, require_anthropic_dev_key, require_canonical_images,
+        require_disk_hygiene,
         require_gateway_binary, require_gcp_adc, require_tcp_reachable,
         seed_realistic_main_repository, spawn_kernel_normal, walk_chain_or_panic,
         write_credentials, write_provider_credentials, ExampleRefreshInputs, OperatorIpc,
@@ -169,6 +170,13 @@ fn realistic_session_lifecycle() {
     // operator dashboard (see `dashboard-hardening.md §5.7`).
     // Mirrors `cargo xtask hygiene-check --threshold-pct 90`.
     require_disk_hygiene();
+    // `INV-PLANNER-IPC-IDLE-WATCHDOG-01` companion — reap orphaned
+    // Apple Virtualization.framework VM XPC processes from any
+    // prior SIGKILL'd kernel run. These survive `pkill -9
+    // raxis-kernel` as launchd-rooted orphans and race against fresh
+    // VM spawns, producing the iter71/iter72 executor-stall pattern.
+    // See `specs/v2/planner-ipc-idle-watchdog.md §1.1`.
+    reap_avf_orphan_vms();
     //
     // Bring up the docker-compose backing stack BEFORE any other
     // preflight or seed step. Auto-bring-up is the operator-
