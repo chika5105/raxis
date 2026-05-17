@@ -1099,7 +1099,30 @@ fn build_role(
                     r
                 }
             },
-            vec!["integration_merge", "activate_subtask", "retry_subtask"],
+            // V3 iter70 — `batch_activate_subtasks` MUST appear here
+            // alongside the singular DAG terminals. The dispatch loop
+            // matches `ContentBlock::ToolUse { name }` against this
+            // whitelist BEFORE running the tool's `execute()`; omitting
+            // `batch_activate_subtasks` causes the orchestrator's
+            // `BatchActivateSubtasksTool::execute()` (which is a
+            // declaration-only stub returning the literal string
+            // `"batch_activate_subtasks"`) to run as if it were a
+            // non-terminal probe — the dispatch loop continues into
+            // turn N+1 with a ~15-token tool_result the LLM treats as
+            // a no-op acknowledgement, the next turn produces zero
+            // tool_use blocks, and the session exits `Idle`. Every
+            // such Idle increments `orch_no_progress_respawns`,
+            // typically tripping `orchestrator_respawn_ceiling_exceeded`
+            // on the same initiative across 3-4 respawns even though
+            // the LLM's behaviour was wire-correct. The pin in
+            // `build_role_orchestrator_pins_dag_terminals` (below)
+            // enforces that this entry never silently regresses.
+            vec![
+                "integration_merge",
+                "activate_subtask",
+                "batch_activate_subtasks",
+                "retry_subtask",
+            ],
         ),
     }
 }
@@ -2060,9 +2083,25 @@ mod tests {
             reg.get("structured_output").is_some(),
             "orchestrator MUST have structured_output (V2 §3.2)"
         );
+        // V3 iter70 — the orchestrator's terminal-tool whitelist MUST
+        // include `batch_activate_subtasks` alongside the singular DAG
+        // terminals. The dispatch loop's `terminal_tools.contains(...)`
+        // gate is the ONLY thing that promotes a `ToolUse` block into
+        // a `DispatchOutcome::TerminalTool` (which then routes through
+        // `submit_terminal` → `submit_batch_activate_subtasks`); leaving
+        // it out causes the LLM's correct `batch_activate_subtasks`
+        // call to fall through to the no-op `BatchActivateSubtasksTool::execute()`
+        // stub and the session exits `Idle`. This regression directly
+        // caused `orchestrator_respawn_ceiling_exceeded` failures in
+        // the iter70 e2e e2e (`extended_e2e_realistic_scenario`).
         assert_eq!(
             terminals,
-            vec!["integration_merge", "activate_subtask", "retry_subtask"]
+            vec![
+                "integration_merge",
+                "activate_subtask",
+                "batch_activate_subtasks",
+                "retry_subtask",
+            ]
         );
     }
 

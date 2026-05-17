@@ -686,20 +686,39 @@ fn planner_source_dirs(role: Role, workspace_root: &Path) -> [PathBuf; 2] {
         // === iter62 verifier-runtime ===
         //
         // Both verifier roles stage the same workspace crate
-        // (`raxis-verifier`); the second freshness path stays
-        // `planner-core` for now (the verifier binary today does
-        // not link planner-core, but the slot exists for symmetry
-        // with the planner roles' freshness checking — the freshness
-        // walker silently skips missing dirs per the function's
-        // doc comment).
+        // (`raxis-verifier`).
         Role::Verifier | Role::VerifierSymbolIndex => "verifier",
     };
-    [
-        workspace_root.join("crates").join(role_dir).join("src"),
-        workspace_root
+    // The second slot is the cross-role dependency that ALL planner
+    // roles re-link against (`planner-core`). For the verifier roles
+    // this slot is intentionally elided — the verifier binary does
+    // NOT link `planner-core` (verified by reading `crates/verifier/
+    // Cargo.toml`: deps are `raxis-types` only), so a `planner-core`
+    // source-tree mtime bump is NOT a real freshness signal for the
+    // verifier-staged binary. Prior versions included `planner-core`
+    // here "for symmetry"; the freshness check then tripped
+    // `INV-IMAGE-BAKE-NO-STALE-CACHE-01 VIOLATED` on every dev-loop
+    // bake that edited any `planner-core` source file (including the
+    // orchestrator-only `driver.rs`), because cargo's incremental
+    // cache restores the unchanged `target/.../raxis-verifier`
+    // binary at its original compile-time mtime (older than the
+    // freshly-edited planner-core source). The symmetric slot was
+    // load-bearing for the planner roles ONLY; the verifier slot is
+    // a no-op duplicate that gets walked twice. Empty-PathBuf in
+    // that slot is silently skipped by `newest_mtime_in_tree` (per
+    // its `if !root.exists()` early-return contract), preserving
+    // the symmetric two-slot return shape without re-walking the
+    // verifier source tree.
+    let second_slot = match role {
+        Role::Orchestrator | Role::Reviewer | Role::ExecutorStarter => workspace_root
             .join("crates")
             .join("planner-core")
             .join("src"),
+        Role::Verifier | Role::VerifierSymbolIndex => PathBuf::new(),
+    };
+    [
+        workspace_root.join("crates").join(role_dir).join("src"),
+        second_slot,
     ]
 }
 
