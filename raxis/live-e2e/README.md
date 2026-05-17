@@ -1450,6 +1450,39 @@ neither is available, the auto-open falls back to the system
 browser and prints a one-line hint pointing at the Shell-Command
 install action.
 
+### Post-run worktree snapshots and witnesses on the dashboard
+
+iter68 wired the live-e2e harness into two operator-facing
+read-out surfaces that survive `keep-alive` shutdown and are
+therefore the recommended post-mortem entry points when a slice
+behaves unexpectedly:
+
+* **Per-task worktree snapshots**
+  (`<data_dir>/worktree-snapshots/blobs/<sha256>`, indexed by
+  `worktree_snapshots`). Captured by the kernel at three trigger
+  sites — `ExecutorCommitCopy`, `WitnessPass | WitnessFail |
+  WitnessInconclusive`, and (hard-required) `PreGc`. The
+  TaskDetail page renders the snapshot timeline at
+  `/tasks/:task_id`; each row links to the raw diff / log / tree
+  / porcelain blob. Spec: [`raxis/specs/v3/worktree-snapshots.md`].
+* **Witness timeline**, both per-task on TaskDetail and
+  cross-task at `/witnesses` (sidebar glyph `W`). Backed by
+  `GET /api/witnesses?limit=N` (server-capped at 500). Use this
+  when investigating systemic gate-rejection patterns spanning
+  multiple initiatives (e.g. "did `no-secret-strings` flip from
+  Pass to Fail across every task at the same wall-clock
+  minute").
+* **Gate-verdict chips on the DAG**, rendered as color-coded
+  dots at the bottom of every task node on
+  `/initiatives/:id/dag`. Source = the same witness rollup
+  surfaced on the Witnesses page.
+
+These are read-only browse surfaces; no operator-write
+permission required. The kernel keeps the snapshot blobs even
+after `gc_session_worktree` destroys the on-disk worktree
+checkout (the `PreGc` snapshot is the immutable record of what
+the worktree looked like immediately before deletion).
+
 ### URL block at startup and end-of-run
 
 When the `extended_e2e_realistic_scenario` or

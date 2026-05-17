@@ -22,6 +22,7 @@ import { SessionDetailPage } from "@/pages/SessionDetail";
 import { SessionsPage } from "@/pages/Sessions";
 import { SystemCredentialsPage } from "@/pages/SystemCredentials";
 import { TaskDetailPage } from "@/pages/TaskDetail";
+import { WitnessesPage } from "@/pages/Witnesses";
 import { WorktreeDetailPage } from "@/pages/WorktreeDetail";
 
 const queryClient = new QueryClient({
@@ -80,6 +81,7 @@ export function App() {
                     <Route path="/escalations" element={<EscalationsPage />} />
                     <Route path="/audit" element={<AuditPage />} />
                     <Route path="/gates" element={<GatesPage />} />
+                    <Route path="/witnesses" element={<WitnessesPage />} />
                     <Route path="/git" element={<GitPage />} />
                     <Route path="/git/:name" element={<WorktreeDetailPage />} />
                     <Route path="/policy" element={<PolicyPage />} />

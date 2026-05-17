@@ -53,6 +53,8 @@ const NAV: NavSection[] = [
       { to: "/git", label: "Git Worktrees", glyph: "G" },
       { to: "/audit", label: "Audit Chain", glyph: "A" },
       { to: "/gates", label: "Gates", glyph: "T" },
+      // iter68 PR 5 — global witness timeline across every task.
+      { to: "/witnesses", label: "Witnesses", glyph: "W" },
     ],
   },
   {

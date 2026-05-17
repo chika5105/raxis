@@ -354,6 +354,20 @@ export const dashboardApi = {
       ),
   },
 
+  /// iter68 PR 5 — cross-task witness timeline.
+  witnesses: {
+    /// `GET /api/witnesses?limit=N`. Newest-first list across
+    /// every task. Server-side capped at 500.
+    list: (limit: number = 100, signal?: AbortSignal): Promise<WitnessView[]> => {
+      const qs = new URLSearchParams();
+      qs.set("limit", String(limit));
+      return apiFetch<WitnessView[]>(
+        `/api/witnesses?${qs}`,
+        signal ? { signal } : {},
+      );
+    },
+  },
+
   /// iter68 — top-level worktree-snapshot detail + blob streaming.
   /// Used by both `<TaskWorktreeSnapshots>` (drill into one
   /// snapshot) and the cross-task Worktrees view.

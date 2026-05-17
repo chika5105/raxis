@@ -1209,6 +1209,45 @@ impl DashboardData for KernelDashboardData {
         Ok(out)
     }
 
+    /// iter68 PR 5 — `GET /api/witnesses?limit=N`.
+    ///
+    /// Newest-first cross-task witness timeline. One ORDER BY +
+    /// LIMIT scan; no joins. Capped at 500 by the route handler.
+    fn list_recent_witnesses(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<raxis_dashboard::data::WitnessView>, ApiError> {
+        let conn = self.open_ro()?;
+        let sql = "SELECT verifier_run_id, task_id, gate_type, result_class, \
+                          evaluation_sha, blob_sha256, recorded_at \
+                   FROM witness_records \
+                   ORDER BY recorded_at DESC, verifier_run_id DESC \
+                   LIMIT ?1";
+        let mut stmt = conn.prepare(sql).map_err(|e| ApiError::Internal {
+            log_only: format!("recent_witnesses prepare: {e}"),
+        })?;
+        let rows = stmt
+            .query_map(rusqlite::params![limit as i64], |r| {
+                Ok(raxis_dashboard::data::WitnessView {
+                    verifier_run_id: r.get(0)?,
+                    task_id: r.get(1)?,
+                    gate_type: r.get(2)?,
+                    result_class: r.get(3)?,
+                    evaluation_sha: r.get(4)?,
+                    blob_sha256: r.get(5)?,
+                    recorded_at: r.get::<_, i64>(6)?.max(0),
+                })
+            })
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("recent_witnesses query: {e}"),
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("recent_witnesses collect: {e}"),
+            })?;
+        Ok(rows)
+    }
+
     /// iter68 — `GET /api/tasks/:task_id/witnesses`.
     ///
     /// Read-side wrapper around

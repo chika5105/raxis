@@ -1873,6 +1873,26 @@ pub trait DashboardData: Send + Sync + 'static {
         })
     }
 
+    /// iter68 PR 5 — `GET /api/witnesses?limit=N`.
+    ///
+    /// Returns the most-recent N witnesses across every task,
+    /// newest first. Powers the standalone Witnesses page (a
+    /// cross-task timeline operators use when investigating
+    /// gate-rejection patterns spanning multiple initiatives).
+    ///
+    /// Default impl returns `Ok(vec![])`. Production wires this
+    /// through `KernelDashboardData::list_recent_witnesses`. The
+    /// implementation MUST cap `limit` at 500 (mirrors the LLM
+    /// turns endpoint's contract) to keep the wire response
+    /// bounded; the route handler enforces the cap server-side
+    /// rather than trusting the FE.
+    fn list_recent_witnesses(
+        &self,
+        _limit: u32,
+    ) -> Result<Vec<WitnessView>, ApiError> {
+        Ok(Vec::new())
+    }
+
     /// iter68 — `GET /api/tasks/:task_id/witnesses`.
     ///
     /// Returns every witness recorded against the task, newest
