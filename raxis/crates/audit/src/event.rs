@@ -1450,6 +1450,39 @@ pub enum AuditEventKind {
         attempts_used: u32,
     },
 
+    /// iter68 — `specs/v3/worktree-snapshots.md` +
+    /// `INV-WORKTREE-SNAPSHOT-PRE-GC-01`.
+    ///
+    /// Emitted by `kernel::worktree_snapshot::snapshot_worktree`
+    /// after a content-addressed snapshot row commits. Carries the
+    /// snapshot id, the trigger string, and the `head_sha` so an
+    /// audit-chain replay can reconstruct the snapshot timeline
+    /// for any task without joining `worktree_snapshots`.
+    ///
+    /// `session_id` is optional because the `PreGc` trigger fires
+    /// from `gc_session_worktree` (which knows the session) but
+    /// the executor-side triggers may run before the kernel has
+    /// rebound the session (e.g., orchestrator-side activation
+    /// hook). `initiative_id` is similarly optional —
+    /// orchestrator-anchor snapshots are keyed by initiative;
+    /// executor / reviewer snapshots are keyed by session.
+    WorktreeSnapshotted {
+        snapshot_id: String,
+        task_id: String,
+        session_id: Option<String>,
+        initiative_id: Option<String>,
+        /// One of `ExecutorActivate | ExecutorIdle |
+        /// ExecutorCommitCopy | WitnessPass | WitnessFail |
+        /// WitnessInconclusive | IntegrationMerge | PreGc`.
+        /// Pinned in lockstep with the
+        /// `worktree_snapshots.trigger` CHECK clause.
+        trigger: String,
+        /// Worktree HEAD commit at snapshot time.
+        head_sha: String,
+        /// Base commit the diff is rooted at.
+        base_sha: String,
+    },
+
     /// iter65 — `specs/v3/gate-rejection-orchestrator-fixup.md §4.9`.
     ///
     /// Emitted at `AddSubTask{kind: GateFixup}` admit time, paired
@@ -4649,6 +4682,7 @@ impl AuditEventKind {
             // iter65 gate-rejection orchestrator-fixup family.
             Self::GateRejectionAccepted { .. } => "GateRejectionAccepted",
             Self::GateRejectionTerminal { .. } => "GateRejectionTerminal",
+            Self::WorktreeSnapshotted { .. } => "WorktreeSnapshotted",
             Self::GateFixupSpawned { .. } => "GateFixupSpawned",
             Self::GateFixupCompleted { .. } => "GateFixupCompleted",
             Self::WitnessMissingAgentHint { .. } => "WitnessMissingAgentHint",

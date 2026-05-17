@@ -2934,6 +2934,60 @@ fn handle_complete_task(
                 req.task_id.as_str(),
                 head_sha,
             );
+
+            // iter68 — `INV-WORKTREE-SNAPSHOT-CONTENT-ADDR-01` /
+            // `INV-WORKTREE-SNAPSHOT-DURABLE-WRITE-01`. The
+            // executor's evaluation_sha just landed in the
+            // orchestrator ODB; capture a snapshot of the
+            // executor worktree at this moment so the dashboard
+            // can render the full base..HEAD diff + commit log
+            // post-mortem. Best-effort: snapshot failure is
+            // structured-logged but does NOT block the
+            // CompleteTask path (only `PreGc` is hard-required).
+            // Runs in-line: `handle_complete_task` is sync; the
+            // snapshot writer's git plumbing + SQL insert are
+            // also sync. The handler is already doing blocking
+            // `domain.compute_touched_paths` calls in the same
+            // call stack via `rt_handle.block_on`, so the
+            // additional ~10 ms snapshot cost is in-budget.
+            if let Some(base_sha) = task.base_sha.clone() {
+                let snap_res = crate::worktree_snapshot::snapshot_worktree(
+                    &ctx.store,
+                    &data_dir,
+                    crate::worktree_snapshot::SnapshotInput {
+                        task_id: req.task_id.as_str().to_owned(),
+                        session_id: task.session_id.clone(),
+                        initiative_id: Some(task.initiative_id.clone()),
+                        trigger:
+                            crate::worktree_snapshot::SnapshotTrigger::ExecutorCommitCopy,
+                        worktree_root: exec_worktree.clone(),
+                        base_sha,
+                    },
+                );
+                match snap_res {
+                    Ok(rec) => {
+                        eprintln!(
+                            "{{\"level\":\"info\",\"event\":\"WorktreeSnapshotted\",\
+                             \"trigger\":\"ExecutorCommitCopy\",\
+                             \"task_id\":\"{}\",\"snapshot_id\":\"{}\",\
+                             \"head_sha\":\"{}\",\"commit_count\":{}}}",
+                            req.task_id.as_str(),
+                            rec.snapshot_id,
+                            rec.head_sha,
+                            rec.commit_count,
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"WorktreeSnapshotFailed\",\
+                             \"trigger\":\"ExecutorCommitCopy\",\
+                             \"task_id\":\"{}\",\"error\":\"{}\"}}",
+                            req.task_id.as_str(),
+                            e,
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -7067,13 +7121,26 @@ struct TaskRow {
     /// `0` for V2.4-and-earlier tasks (the column was added by
     /// migration 12 with `DEFAULT 0`).
     cumulative_token_cost_micros: u64,
+    /// iter68 — base SHA the task was anchored against at
+    /// admission time. Sourced for the worktree-snapshot writer
+    /// in `handle_complete_task` so the snapshot's
+    /// `base_sha..HEAD` range is identical to the one the
+    /// executor saw. `None` for pre-iter68 tasks where the
+    /// column was never populated.
+    base_sha: Option<String>,
+    /// iter68 — session the task is bound to (if any). The
+    /// snapshot row carries this so the dashboard's per-session
+    /// GitWorktrees page can roll up snapshots without joining
+    /// `tasks` again.
+    session_id: Option<String>,
 }
 
 fn load_task(task_id: &str, store: &Store) -> Result<TaskRow, ()> {
     let conn = store.lock_sync();
     conn.query_row(
         &format!(
-            "SELECT lane_id, state, initiative_id, cumulative_token_cost_micros
+            "SELECT lane_id, state, initiative_id, cumulative_token_cost_micros, \
+                    base_sha, session_id
              FROM {TASKS} WHERE task_id = ?1"
         ),
         rusqlite::params![task_id],
@@ -7083,6 +7150,8 @@ fn load_task(task_id: &str, store: &Store) -> Result<TaskRow, ()> {
                 state: row.get(1)?,
                 initiative_id: row.get(2)?,
                 cumulative_token_cost_micros: row.get::<_, i64>(3).map(|v| v as u64).unwrap_or(0),
+                base_sha: row.get(4)?,
+                session_id: row.get(5)?,
             })
         },
     )

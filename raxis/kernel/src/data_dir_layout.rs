@@ -96,6 +96,11 @@ pub const DATA_DIR_SUBDIRS: &[&str] = &[
     // Read + written by `kernel::witness_index`. **iter66 root cause
     // — see module-level comment.**
     "witness",
+    // Content-addressed worktree snapshot blob store. SQL index in
+    // `worktree_snapshots`; blobs live at
+    // `worktree-snapshots/blobs/<sha256>`. Read + written by
+    // `kernel::worktree_snapshot`. iter68 — specs/v3/worktree-snapshots.md.
+    "worktree-snapshots",
     // Per-session worktree clones produced by
     // `worktree_provisioning::{executor_clone_from_orchestrator,
     // reviewer_clone_at_evaluation_sha}`.

@@ -736,6 +736,11 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // `notification_priority_for_kind_str` keeps the surfaces
         // in lockstep per `INV-NOTIFICATION-PRIORITY-PARITY-01`.
         K::InitiativePermanentFailureEscalated { .. } => Some(Critical),
+        // iter68 — worktree snapshot writes are structural audit
+        // trail rows, NOT operator-attention events. The dashboard
+        // surfaces them on the per-task timeline + the worktree
+        // detail page directly; the notification inbox stays clean.
+        K::WorktreeSnapshotted { .. } => None,
     }
 }
 

@@ -268,6 +268,39 @@ pub enum Table {
     ///           open_expires_at_ms, half_open_inflight,
     ///           last_success_at_ms, last_state_change_at_ms)`.
     ProviderCircuitState,
+
+    // ── v3: Worktree snapshot store
+    //        (specs/v3/worktree-snapshots.md, INV-WORKTREE-SNAPSHOT-*) ─
+    /// **Content-addressed worktree snapshot index.** One row per
+    /// snapshot taken of a task's worktree at a lifecycle transition
+    /// (executor activation / idle / commit-copy / witness verdict /
+    /// integration-merge) AND unconditionally just before
+    /// `worktree_gc::gc_session_worktree` removes the on-disk tree.
+    ///
+    /// The row is **only an index** — the actual diff, commit log,
+    /// porcelain status, and tree listing live as content-addressed
+    /// blobs under `<data_dir>/worktree-snapshots/blobs/<sha256>`.
+    /// Identical worktree states (same diff bytes, same log, same
+    /// tree) dedupe to ONE blob on disk and many cheap index rows.
+    /// Mirrors the `witness_records` + `<data_dir>/witness/` shape.
+    ///
+    /// **Write-order contract** (mirrors `witness_index`):
+    ///   1. Write blob(s) to FS, content-addressed (idempotent).
+    ///   2. INSERT index row in single SQL transaction.
+    /// A crash between steps leaves orphaned blobs (harmless; never
+    /// referenced by any row).
+    ///
+    /// **Pre-GC hard-fail.** `gc_session_worktree` MUST call
+    /// `worktree_snapshot::snapshot_worktree(..., PreGc)` before
+    /// removing the tree. Pinned by
+    /// `INV-WORKTREE-SNAPSHOT-PRE-GC-01` — losing this snapshot
+    /// destroys all post-mortem inspection capability for the task.
+    ///
+    /// Schema: `(snapshot_id PK, task_id FK, session_id, initiative_id,
+    ///           trigger, taken_at, base_sha, head_sha, commit_count,
+    ///           diff_blob_sha256, log_blob_sha256, tree_blob_sha256,
+    ///           porcelain_blob_sha256, diff_bytes_total, diff_truncated)`.
+    WorktreeSnapshots,
 }
 
 impl Table {
@@ -313,6 +346,7 @@ impl Table {
             Self::StructuredOutputs => "structured_outputs",
             Self::Notifications => "notifications",
             Self::ProviderCircuitState => "provider_circuit_state",
+            Self::WorktreeSnapshots => "worktree_snapshots",
         }
     }
 }
@@ -360,10 +394,21 @@ mod tests {
             Table::StructuredOutputs,
             Table::Notifications,
             Table::ProviderCircuitState,
+            Table::WorktreeSnapshots,
         ];
         for t in all {
             assert!(!t.as_str().is_empty(), "Table::{t:?} returned empty string");
         }
+    }
+
+    /// V3 worktree snapshot index table name is wire-stable (the
+    /// dashboard `/api/tasks/:id/worktree-snapshots` route + audit
+    /// replay tooling read this table using its literal name in
+    /// production SQL). Pinning the literal here surfaces any
+    /// rename in code review. See `specs/v3/worktree-snapshots.md`.
+    #[test]
+    fn worktree_snapshots_table_name_is_pinned() {
+        assert_eq!(Table::WorktreeSnapshots.as_str(), "worktree_snapshots");
     }
 
     /// V2 §3.2 structured outputs table name is wire-stable (the

@@ -559,6 +559,84 @@ async fn handle_inner(
         result_class.as_str(),
     );
 
+    // iter68 — `INV-WORKTREE-SNAPSHOT-CONTENT-ADDR-01` /
+    // `INV-WORKTREE-SNAPSHOT-DURABLE-WRITE-01`. Capture a
+    // snapshot of the task's worktree at the moment the verdict
+    // landed. The trigger variant carries the verdict class so
+    // an operator scanning the dashboard timeline can pivot on
+    // "show me every worktree state at every gate failure". The
+    // worktree root is resolved through `resolve_worktree_root`
+    // (the same path `gate_recheck` uses for path-touch
+    // derivation) so a snapshot taken here always reflects what
+    // the gate evaluator saw. Best-effort: snapshot failure is
+    // structured-logged but does NOT block the gate-recheck
+    // pipeline; only `PreGc` is hard-required.
+    {
+        let trigger = match result_class {
+            ResultClass::Pass => crate::worktree_snapshot::SnapshotTrigger::WitnessPass,
+            ResultClass::Fail => crate::worktree_snapshot::SnapshotTrigger::WitnessFail,
+            ResultClass::Inconclusive => {
+                crate::worktree_snapshot::SnapshotTrigger::WitnessInconclusive
+            }
+        };
+        if let Some(base_sha) = task_row.base_sha.clone() {
+            let worktree_root = resolve_worktree_root(&task_row, ctx);
+            let store_for_snap = ctx.store.clone();
+            let data_dir_for_snap = ctx.data_dir.clone();
+            let task_id_for_snap = sub.task_id.as_str().to_owned();
+            let session_for_snap = task_row.session_id.clone();
+            let initiative_for_snap = task_row.initiative_id.clone();
+            let snap_res = tokio::task::spawn_blocking(move || {
+                crate::worktree_snapshot::snapshot_worktree(
+                    &store_for_snap,
+                    &data_dir_for_snap,
+                    crate::worktree_snapshot::SnapshotInput {
+                        task_id: task_id_for_snap,
+                        session_id: session_for_snap,
+                        initiative_id: Some(initiative_for_snap),
+                        trigger,
+                        worktree_root,
+                        base_sha,
+                    },
+                )
+            })
+            .await;
+            match snap_res {
+                Ok(Ok(rec)) => {
+                    eprintln!(
+                        "{{\"level\":\"info\",\"event\":\"WorktreeSnapshotted\",\
+                         \"trigger\":\"{}\",\"task_id\":\"{}\",\
+                         \"snapshot_id\":\"{}\",\"head_sha\":\"{}\",\
+                         \"commit_count\":{}}}",
+                        trigger.as_sql_str(),
+                        sub.task_id.as_str(),
+                        rec.snapshot_id,
+                        rec.head_sha,
+                        rec.commit_count,
+                    );
+                }
+                Ok(Err(e)) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"WorktreeSnapshotFailed\",\
+                         \"trigger\":\"{}\",\"task_id\":\"{}\",\"error\":\"{}\"}}",
+                        trigger.as_sql_str(),
+                        sub.task_id.as_str(),
+                        e,
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"WorktreeSnapshotJoinError\",\
+                         \"trigger\":\"{}\",\"task_id\":\"{}\",\"error\":\"{}\"}}",
+                        trigger.as_sql_str(),
+                        sub.task_id.as_str(),
+                        e,
+                    );
+                }
+            }
+        }
+    }
+
     // ── Step 6: Gate-recheck ──────────────────────────────────────────────
     // Only recheck if the witness was a Pass — Fail/Inconclusive can't clear
     // the gate, so the non-Pass branch routes into the iter65 gate-rejection

@@ -81,6 +81,14 @@ mod worktree_gc;
 // three role-specific operations the spawn / activation /
 // completion handlers invoke. See module doc-comment.
 mod worktree_provisioning;
+// iter68 — content-addressed worktree snapshot store. Captures
+// `git log / diff / status / ls-tree` body buffers at every
+// lifecycle transition + unconditionally pre-GC so the dashboard
+// can render task-level diff / commit history post-mortem.
+// `specs/v3/worktree-snapshots.md` +
+// `INV-WORKTREE-SNAPSHOT-{PRE-GC, CONTENT-ADDR, DURABLE-WRITE,
+// BOUNDED-DIFF}-01`.
+mod worktree_snapshot;
 
 use std::sync::Arc;
 

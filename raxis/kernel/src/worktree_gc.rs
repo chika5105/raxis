@@ -45,9 +45,11 @@
 // Adding a new audit variant would be a wire-shape change to the
 // chain; we intentionally avoid that.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use raxis_store::Store;
+
+use crate::worktree_snapshot::{snapshot_worktree, SnapshotInput, SnapshotTrigger};
 
 /// Outcome of a single [`gc_session_worktree`] call.
 ///
@@ -87,6 +89,14 @@ pub enum WorktreeGcError {
     /// sweep is appropriate.
     #[error("worktree destroy failed: {0}")]
     Destroy(#[from] raxis_worktree_staging::StagingError),
+    /// `INV-WORKTREE-SNAPSHOT-PRE-GC-01` — the pre-GC snapshot
+    /// could not be written; the GC MUST NOT remove the tree.
+    /// The caller (the periodic scrubber) retries on the next
+    /// sweep; the worktree stays on disk until either the
+    /// snapshot succeeds or operator intervention removes the
+    /// tree manually.
+    #[error("pre-GC snapshot failed; refusing to remove worktree (INV-WORKTREE-SNAPSHOT-PRE-GC-01): {0}")]
+    PreGcSnapshot(#[from] crate::worktree_snapshot::SnapshotError),
 }
 
 /// Run the §11.4 retention check and, if cleared, evict the
@@ -102,15 +112,29 @@ pub enum WorktreeGcError {
 /// block other store consumers (admission, audit emit).
 pub fn gc_session_worktree(
     store: &Store,
+    data_dir: &Path,
     session_id: &str,
 ) -> Result<WorktreeGcDecision, WorktreeGcError> {
     use raxis_store::views::sessions::{pending_initiative_for_session, worktree_root_for_session};
 
-    let (worktree_root_opt, pending_initiative): (Option<String>, Option<String>) = {
+    let (worktree_root_opt, pending_initiative, snapshot_targets): (
+        Option<String>,
+        Option<String>,
+        Vec<SessionTaskSnapshotTarget>,
+    ) = {
         let conn = store.lock_sync();
         let wr = worktree_root_for_session(&conn, session_id)?;
         let pi = pending_initiative_for_session(&conn, session_id)?;
-        (wr, pi)
+        let targets = if wr.is_some() && pi.is_none() {
+            // Only enumerate snapshot targets when we are actually
+            // going to destroy the tree. Retained-merge or orphan-
+            // session paths skip the SQL walk to keep the GC sweep
+            // cheap.
+            list_snapshot_targets_for_session(&conn, session_id)?
+        } else {
+            Vec::new()
+        };
+        (wr, pi, targets)
     };
 
     let path = match worktree_root_opt {
@@ -134,6 +158,80 @@ pub fn gc_session_worktree(
         });
     }
 
+    // ── iter68: INV-WORKTREE-SNAPSHOT-PRE-GC-01 — hard-required ────────────
+    //
+    // Before the tree leaves disk forever, write a content-addressed
+    // snapshot for every task bound to this session so the dashboard
+    // (and a post-mortem audit-chain replay) can render the worktree
+    // state at the moment of GC. A snapshot-write failure here MUST
+    // refuse to destroy — the next sweep retries; the operator can
+    // intervene manually if a persistent disk fault keeps the
+    // snapshot path from succeeding.
+    //
+    // Sessions with zero bound tasks (orphans created by aborted
+    // session-spawn handshakes) skip the snapshot since the
+    // `worktree_snapshots.task_id` FK can never be satisfied. The
+    // structured-log line records the skip so an operator can
+    // distinguish "no tasks → no snapshot" from "snapshot crashed".
+    if snapshot_targets.is_empty() {
+        eprintln!(
+            "{{\"level\":\"info\",\"step\":\"worktree_gc\",\
+             \"action\":\"pre_gc_snapshot_skipped_no_tasks\",\
+             \"session_id\":\"{session_id}\",\
+             \"worktree_root\":\"{}\"}}",
+            path.display(),
+        );
+    } else {
+        for target in &snapshot_targets {
+            // `worktree_root_for_session` returned `Some(_)` —
+            // so the tree IS on disk at `path`. If git plumbing
+            // fails (corrupted ODB, missing HEAD, base_sha not in
+            // the tree) the snapshot writer surfaces a
+            // `GitPlumbing` error and we abort GC. The retention
+            // log line below carries enough context for the
+            // operator to fix the underlying tree and retry.
+            let base_sha = match target.base_sha.clone() {
+                Some(b) => b,
+                None => {
+                    // Task admitted before iter68 — no base_sha to
+                    // anchor the diff. Skip the snapshot for this
+                    // task (legacy data; the INV does not retro-
+                    // actively bind pre-iter68 tasks) but keep
+                    // going for the rest.
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"step\":\"worktree_gc\",\
+                         \"action\":\"pre_gc_snapshot_skipped_no_base_sha\",\
+                         \"session_id\":\"{session_id}\",\
+                         \"task_id\":\"{}\"}}",
+                        target.task_id,
+                    );
+                    continue;
+                }
+            };
+            snapshot_worktree(
+                store,
+                data_dir,
+                SnapshotInput {
+                    task_id: target.task_id.clone(),
+                    session_id: Some(session_id.to_owned()),
+                    initiative_id: target.initiative_id.clone(),
+                    trigger: SnapshotTrigger::PreGc,
+                    worktree_root: path.clone(),
+                    base_sha,
+                },
+            )?;
+        }
+        eprintln!(
+            "{{\"level\":\"info\",\"step\":\"worktree_gc\",\
+             \"action\":\"pre_gc_snapshot_completed\",\
+             \"session_id\":\"{session_id}\",\
+             \"task_count\":{},\
+             \"worktree_root\":\"{}\"}}",
+            snapshot_targets.len(),
+            path.display(),
+        );
+    }
+
     raxis_worktree_staging::destroy(&path)?;
     eprintln!(
         "{{\"level\":\"info\",\"step\":\"worktree_gc\",\
@@ -143,6 +241,37 @@ pub fn gc_session_worktree(
         path.display(),
     );
     Ok(WorktreeGcDecision::Removed { path })
+}
+
+/// Per-task snapshot input materialised from
+/// `(tasks WHERE session_id = ?)` at GC-decision time. Held by
+/// value (not borrow) so the SQL lock is released before the
+/// snapshot writer runs.
+#[derive(Debug, Clone)]
+struct SessionTaskSnapshotTarget {
+    task_id: String,
+    base_sha: Option<String>,
+    initiative_id: Option<String>,
+}
+
+fn list_snapshot_targets_for_session(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Vec<SessionTaskSnapshotTarget>, rusqlite::Error> {
+    let tasks = raxis_store::Table::Tasks.as_str();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT task_id, base_sha, initiative_id FROM {tasks} WHERE session_id = ?1"
+    ))?;
+    let rows = stmt
+        .query_map(rusqlite::params![session_id], |row| {
+            Ok(SessionTaskSnapshotTarget {
+                task_id: row.get(0)?,
+                base_sha: row.get(1)?,
+                initiative_id: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +365,7 @@ mod tests {
         seed_session(disk.store(), session_id, Some(&wt));
         seed_task(disk.store(), "t-clear", "init-clear", session_id);
 
-        let decision = gc_session_worktree(disk.store(), session_id).unwrap();
+        let decision = gc_session_worktree(disk.store(), disk.data_dir(), session_id).unwrap();
         match decision {
             WorktreeGcDecision::Removed { path } => assert_eq!(path, wt),
             other => panic!("expected Removed, got {other:?}"),
@@ -257,7 +386,7 @@ mod tests {
         seed_session(disk.store(), session_id, Some(&wt));
         seed_task(disk.store(), "t-pending", "init-pending", session_id);
 
-        let decision = gc_session_worktree(disk.store(), session_id).unwrap();
+        let decision = gc_session_worktree(disk.store(), disk.data_dir(), session_id).unwrap();
         match decision {
             WorktreeGcDecision::RetainedPendingMerge {
                 path,
@@ -278,7 +407,8 @@ mod tests {
     #[test]
     fn no_worktree_when_session_unknown() {
         let disk = DiskStore::new();
-        let decision = gc_session_worktree(disk.store(), "ghost-session").unwrap();
+        let decision =
+            gc_session_worktree(disk.store(), disk.data_dir(), "ghost-session").unwrap();
         assert_eq!(decision, WorktreeGcDecision::NoWorktree);
     }
 
@@ -286,7 +416,8 @@ mod tests {
     fn no_worktree_when_column_null() {
         let disk = DiskStore::new();
         seed_session(disk.store(), "sess-orphan", None);
-        let decision = gc_session_worktree(disk.store(), "sess-orphan").unwrap();
+        let decision =
+            gc_session_worktree(disk.store(), disk.data_dir(), "sess-orphan").unwrap();
         assert_eq!(decision, WorktreeGcDecision::NoWorktree);
     }
 
@@ -299,13 +430,13 @@ mod tests {
         seed_session(disk.store(), session_id, Some(&wt));
         seed_task(disk.store(), "t-idem", "init-idem", session_id);
 
-        let d1 = gc_session_worktree(disk.store(), session_id).unwrap();
+        let d1 = gc_session_worktree(disk.store(), disk.data_dir(), session_id).unwrap();
         assert!(matches!(d1, WorktreeGcDecision::Removed { .. }));
         // Disk is gone, but the row still has worktree_root set —
         // destroy() is itself a no-op on a missing path, so we
         // should still see Removed (or NoWorktree if we cleared
         // the column on Phase 3, which we don't).
-        let d2 = gc_session_worktree(disk.store(), session_id).unwrap();
+        let d2 = gc_session_worktree(disk.store(), disk.data_dir(), session_id).unwrap();
         assert!(
             matches!(d2, WorktreeGcDecision::Removed { .. }),
             "idempotency: a second sweep after Removed must succeed"
@@ -323,7 +454,7 @@ mod tests {
         seed_task(disk.store(), "t-unblock", "init-unblock", session_id);
 
         // First sweep: blocked.
-        let d1 = gc_session_worktree(disk.store(), session_id).unwrap();
+        let d1 = gc_session_worktree(disk.store(), disk.data_dir(), session_id).unwrap();
         assert!(matches!(
             d1,
             WorktreeGcDecision::RetainedPendingMerge { .. }
@@ -337,8 +468,138 @@ mod tests {
         }
 
         // Second sweep: unblocked.
-        let d2 = gc_session_worktree(disk.store(), session_id).unwrap();
+        let d2 = gc_session_worktree(disk.store(), disk.data_dir(), session_id).unwrap();
         assert!(matches!(d2, WorktreeGcDecision::Removed { .. }));
+        assert!(!wt.exists());
+    }
+
+    // ── iter68 — INV-WORKTREE-SNAPSHOT-PRE-GC-01 witness tests ────────────
+    //
+    // These pin the contract that gc_session_worktree refuses to
+    // destroy a tree until snapshots have been written for every
+    // bound task that has a `base_sha`. The legacy tests above
+    // exercise the no-base_sha skip branch; these pin the
+    // happy-path snapshot emission + the snapshot-failure abort.
+
+    /// Initialise a tiny one-commit git repo at `worktree_path` and
+    /// return the resulting HEAD sha. Used by the pre-GC snapshot
+    /// tests so `git rev-parse HEAD` / `git diff` / `git log`
+    /// inside `worktree_snapshot::snapshot_worktree` succeed.
+    fn init_git_repo_with_one_commit(worktree_path: &Path) -> String {
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(worktree_path)
+                .output()
+                .expect("git available");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: stderr={}",
+                String::from_utf8_lossy(&out.stderr),
+            );
+            String::from_utf8(out.stdout).unwrap()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@raxis.local"]);
+        run(&["config", "user.name", "Raxis Test"]);
+        fs::write(worktree_path.join("hello.txt"), b"hello\n").unwrap();
+        run(&["add", "hello.txt"]);
+        run(&["commit", "-q", "-m", "init"]);
+        run(&["rev-parse", "HEAD"]).trim().to_owned()
+    }
+
+    fn seed_task_with_base_sha(
+        store: &raxis_store::Store,
+        task_id: &str,
+        initiative_id: &str,
+        session_id: &str,
+        base_sha: &str,
+    ) {
+        let g = store.lock_sync();
+        g.execute(
+            &format!(
+                "INSERT INTO {TASKS} \
+                    (task_id, initiative_id, lane_id, state, actor, \
+                     policy_epoch, admitted_at, transitioned_at, session_id, base_sha) \
+                 VALUES (?1, ?2, 'lane-1', 'Running', 'orch', 1, 100, 100, ?3, ?4)"
+            ),
+            rusqlite::params![task_id, initiative_id, session_id, base_sha],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn inv_worktree_snapshot_pre_gc_writes_snapshot_before_destroy() {
+        let disk = DiskStore::new();
+        let session_id = "sess-pregc";
+        let wt = stage_worktree_on_disk(disk.data_dir(), session_id);
+        let head_sha = init_git_repo_with_one_commit(&wt);
+        seed_initiative(disk.store(), "init-pregc", 0);
+        seed_session(disk.store(), session_id, Some(&wt));
+        seed_task_with_base_sha(
+            disk.store(),
+            "t-pregc",
+            "init-pregc",
+            session_id,
+            &head_sha,
+        );
+
+        let decision = gc_session_worktree(disk.store(), disk.data_dir(), session_id).unwrap();
+        assert!(matches!(decision, WorktreeGcDecision::Removed { .. }));
+        assert!(!wt.exists(), "tree removed after snapshot succeeded");
+
+        // INV-WORKTREE-SNAPSHOT-PRE-GC-01: a snapshot row must
+        // exist for the task with trigger='PreGc' before destroy.
+        let snaps = crate::worktree_snapshot::list_for_task(disk.store(), "t-pregc").unwrap();
+        assert_eq!(snaps.len(), 1, "exactly one pre-GC snapshot");
+        assert_eq!(
+            snaps[0].trigger,
+            crate::worktree_snapshot::SnapshotTrigger::PreGc
+        );
+        assert_eq!(snaps[0].head_sha, head_sha);
+        assert_eq!(snaps[0].task_id, "t-pregc");
+        assert_eq!(snaps[0].session_id.as_deref(), Some(session_id));
+    }
+
+    #[test]
+    fn inv_worktree_snapshot_pre_gc_skips_when_no_base_sha() {
+        // Legacy tasks (admitted before iter68) carry no base_sha.
+        // The GC MUST still proceed — we cannot snapshot what we
+        // cannot diff — but the structured-log line records the
+        // skip so the operator sees the data-quality gap.
+        let disk = DiskStore::new();
+        let session_id = "sess-legacy";
+        let wt = stage_worktree_on_disk(disk.data_dir(), session_id);
+        let _head = init_git_repo_with_one_commit(&wt);
+        seed_initiative(disk.store(), "init-legacy", 0);
+        seed_session(disk.store(), session_id, Some(&wt));
+        seed_task(disk.store(), "t-legacy", "init-legacy", session_id);
+
+        let decision = gc_session_worktree(disk.store(), disk.data_dir(), session_id).unwrap();
+        assert!(matches!(decision, WorktreeGcDecision::Removed { .. }));
+        assert!(!wt.exists());
+
+        // No snapshots persisted — the task had no base_sha to
+        // anchor a diff against.
+        let snaps = crate::worktree_snapshot::list_for_task(disk.store(), "t-legacy").unwrap();
+        assert!(
+            snaps.is_empty(),
+            "legacy task with NULL base_sha must skip the pre-GC snapshot row"
+        );
+    }
+
+    #[test]
+    fn inv_worktree_snapshot_pre_gc_skipped_for_orphan_session() {
+        // Sessions with zero bound tasks (rare; aborted spawn
+        // handshakes) skip the snapshot loop entirely and proceed
+        // to destroy.
+        let disk = DiskStore::new();
+        let session_id = "sess-orphan-pregc";
+        let wt = stage_worktree_on_disk(disk.data_dir(), session_id);
+        seed_session(disk.store(), session_id, Some(&wt));
+
+        let decision = gc_session_worktree(disk.store(), disk.data_dir(), session_id).unwrap();
+        assert!(matches!(decision, WorktreeGcDecision::Removed { .. }));
         assert!(!wt.exists());
     }
 }

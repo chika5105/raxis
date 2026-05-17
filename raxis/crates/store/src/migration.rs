@@ -48,7 +48,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 23;
+pub const SCHEMA_VERSION: u32 = 24;
 
 /// Apply all pending migrations to `conn`.
 /// Safe to call on every startup — skips already-applied migrations. Returns
@@ -130,6 +130,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 23 {
         apply_migration_23(conn)?;
+    }
+    if current_version < 24 {
+        apply_migration_24(conn)?;
     }
 
     Ok(())
@@ -2675,6 +2678,108 @@ COMMIT;
     )
 }
 
+// ── Migration 24 — v3: Worktree snapshot store (iter68) ────────────────────
+//
+// Specs: `specs/v3/worktree-snapshots.md`
+// Invariants:
+//   * `INV-WORKTREE-SNAPSHOT-PRE-GC-01` — every GC must snapshot first
+//   * `INV-WORKTREE-SNAPSHOT-CONTENT-ADDR-01` — identical states dedupe
+//   * `INV-WORKTREE-SNAPSHOT-DURABLE-WRITE-01` — blob fsync before row
+//   * `INV-WORKTREE-SNAPSHOT-BOUNDED-DIFF-01` — diffs capped 1 MiB
+//
+// One row per snapshot, content-addressed body blobs on disk at
+// `<data_dir>/worktree-snapshots/blobs/<sha256>`. The index columns
+// carry exactly enough to reconstruct the worktree state post-mortem
+// without re-walking git: `base_sha`/`head_sha` for the boundary,
+// `commit_count` for the chain length, plus four sha256s pointing at
+// the diff / log / tree-listing / porcelain-status blobs.
+//
+// **Composite-blob dedupe.** Two snapshots whose `diff_blob_sha256`
+// match share one blob on disk; the SQL row count goes up but the FS
+// cost stays flat for stable worktree states (the executor sitting
+// idle between witness rounds produces the same diff every time).
+//
+// The `trigger` CHECK clause stays in lockstep with
+// `kernel::worktree_snapshot::SnapshotTrigger` — adding a variant
+// requires bumping a new migration to widen the CHECK. The kernel-side
+// `SnapshotTrigger::as_sql_str` and this CHECK list are pinned
+// against each other by a witness test.
+
+fn apply_migration_24(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_24_ddl();
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 24 failed: {e}")))
+}
+
+/// The complete migration-24 DDL.
+pub fn render_migration_24_ddl() -> String {
+    let snapshots = Table::WorktreeSnapshots.as_str();
+    let tasks = Table::Tasks.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- iter68 — content-addressed worktree snapshot index.
+-- specs/v3/worktree-snapshots.md §3 (schema).
+-- INV-WORKTREE-SNAPSHOT-{{PRE-GC, CONTENT-ADDR, DURABLE-WRITE, BOUNDED-DIFF}}-01.
+CREATE TABLE IF NOT EXISTS {snapshots} (
+    snapshot_id           TEXT    NOT NULL PRIMARY KEY,
+    task_id               TEXT    NOT NULL
+        REFERENCES {tasks}(task_id),
+    session_id            TEXT,
+    initiative_id         TEXT,
+    trigger               TEXT    NOT NULL
+        CHECK (trigger IN ('ExecutorActivate','ExecutorIdle',
+                           'ExecutorCommitCopy','WitnessPass',
+                           'WitnessFail','WitnessInconclusive',
+                           'IntegrationMerge','PreGc')),
+    taken_at              INTEGER NOT NULL,
+    base_sha              TEXT    NOT NULL,
+    head_sha              TEXT    NOT NULL,
+    commit_count          INTEGER NOT NULL DEFAULT 0,
+    diff_blob_sha256      TEXT,
+    log_blob_sha256       TEXT,
+    tree_blob_sha256      TEXT,
+    porcelain_blob_sha256 TEXT,
+    diff_bytes_total      INTEGER NOT NULL DEFAULT 0,
+    diff_truncated        INTEGER NOT NULL DEFAULT 0
+        CHECK (diff_truncated IN (0, 1))
+);
+
+-- Per-task lookup: the dashboard's TaskDetail page lists every
+-- snapshot for the task in reverse-chronological order.
+CREATE INDEX IF NOT EXISTS idx_worktree_snapshots_task_time
+    ON {snapshots} (task_id, taken_at DESC);
+
+-- Per-session lookup: the GitWorktrees page joins snapshots back to
+-- the session that produced them (so a GC'd worktree can still
+-- surface its last few snapshots).
+CREATE INDEX IF NOT EXISTS idx_worktree_snapshots_session_time
+    ON {snapshots} (session_id, taken_at DESC);
+
+-- Per-initiative lookup: the InitiativeDetail page rolls up
+-- snapshots across the initiative's tasks.
+CREATE INDEX IF NOT EXISTS idx_worktree_snapshots_initiative_time
+    ON {snapshots} (initiative_id, taken_at DESC);
+
+-- Content-address dedupe lookup. Reading this index answers
+-- 'is the diff_blob_sha256 already referenced by another row?'
+-- in O(log N) — used by `snapshot_worktree` to short-circuit blob
+-- writes on stable worktree states.
+CREATE INDEX IF NOT EXISTS idx_worktree_snapshots_diff_sha
+    ON {snapshots} (diff_blob_sha256);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (24, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2978,6 +3083,15 @@ mod tests {
             //                entry above; the partial index is not a
             //                table and intentionally absent from this
             //                set.
+            // Migration 24 — v3: content-addressed worktree snapshot
+            //                store (specs/v3/worktree-snapshots.md).
+            //                Per-task index of snapshots taken at every
+            //                executor / witness / merge / pre-GC
+            //                lifecycle transition; bodies (diff / log /
+            //                tree / porcelain) live as
+            //                content-addressed blobs under
+            //                `<data_dir>/worktree-snapshots/blobs/<sha>`.
+            Table::WorktreeSnapshots,
         ]
         .iter()
         .map(|t| t.as_str().to_owned())
