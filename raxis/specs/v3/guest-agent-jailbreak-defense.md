@@ -86,6 +86,14 @@ verbatim from that file; the kernel-side ground-truth used to build
 the defense surface is "whatever the agent was actually able to
 observe."
 
+> **Full chain available in a sister file.** All 32 turns —
+> including the model's full chain-of-thought, every `bash`
+> `tool_use` command, and every `tool_result` (exit code +
+> stdout + stderr) — are reproduced byte-exact in
+> [`guest-agent-jailbreak-replay-iter72.md`](./guest-agent-jailbreak-replay-iter72.md).
+> This section excerpts the four pivot turns; the replay file is
+> the load-bearing forensic artefact.
+
 The session was a **legitimate** task — the agent had no malicious
 goal, it was diagnosing a DNS failure inside the executor VM — but
 the diagnostic spiral exercised every read vector we now block.
@@ -630,32 +638,51 @@ before the first model dispatch.
 
 ## 4. Defense-in-depth layering
 
-```text
-┌──────────────────────────────────────────────────────────────────────┐
-│                        Kernel-side defenses                          │
-│ ┌──────────────────────────┐  ┌──────────────────────────────────┐  │
-│ │ INV-NETISO-A3-VSOCK-     │  │ INV-PLANNER-IPC-IDLE-WATCHDOG-01 │  │
-│ │ CHOKEPOINT-01            │  │ (drive_planner_stream timeout)   │  │
-│ │ (kernel admission        │  │                                  │  │
-│ │  policy, session-token   │  │ Forcibly terminates a wedged VM  │  │
-│ │  validation, audit)      │  │ after 900s of IPC silence.       │  │
-│ └──────────────────────────┘  └──────────────────────────────────┘  │
-├──────────────────────────────────────────────────────────────────────┤
-│                        Guest-side defenses                           │
-│ ┌──────────────────────────┐  ┌──────────────────────────────────┐  │
-│ │ INV-PLANNER-PID1-ONLY-   │  │ INV-PLANNER-GUEST-AGENT-         │  │
-│ │ EXEC-01 (iter72)         │  │ JAILBREAK-DEFENSE-01 (this doc)  │  │
-│ │ Refuses re-exec from a   │  │                                  │  │
-│ │ child process of the     │  │ V1: /proc/cmdline masked         │  │
-│ │ planner binary.          │  │ V2: pr_set_dumpable disabled     │  │
-│ │                          │  │ V3: planner binaries masked      │  │
-│ │ Closes vector            │  │ V4: CAP_SYS_BOOT dropped from    │  │
-│ │ "agent invokes           │  │     bounding set                 │  │
-│ │  raxis-executor as       │  │ V5: PR_SET_NO_NEW_PRIVS set      │  │
-│ │  child"                  │  │ V6: RAXIS_* env scrubbed from    │  │
-│ │                          │  │     process env pre-dispatch     │  │
-│ └──────────────────────────┘  └──────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────┘
+The hardening composes with the kernel-side admission +
+watchdog layers; no single guest-side defense is load-bearing in
+isolation. The diagram below maps each iter72-grade attacker
+primitive to the layer(s) that contain it.
+
+```mermaid
+flowchart TB
+  classDef kernel fill:#1e293b,stroke:#0ea5e9,color:#e2e8f0,stroke-width:1.5px;
+  classDef guest  fill:#1e1b4b,stroke:#a78bfa,color:#e9d5ff,stroke-width:1.5px;
+  classDef attack fill:#450a0a,stroke:#f87171,color:#fecaca,stroke-width:1.5px;
+
+  subgraph ATK[Attacker primitives observed in iter72]
+    direction LR
+    A1[V1<br/>cat /proc/cmdline]:::attack
+    A2[V2<br/>cat /proc/1/environ]:::attack
+    A3[V3<br/>cp /init /workspace/init.elf]:::attack
+    A4[V4<br/>reboot 2]:::attack
+    A5[V5<br/>future setuid exec]:::attack
+    A6[V6<br/>bash -lc env]:::attack
+    AX[re-exec<br/>raxis-executor --help]:::attack
+    AN[vsock dial with<br/>stolen session token]:::attack
+  end
+
+  subgraph GST[Guest-side defenses inside the planner VM]
+    direction LR
+    G_PID1["INV-PLANNER-PID1-ONLY-EXEC-01<br/><br/>enforce_pid1_or_abort<br/>refuses re-exec; exits<br/>BOOT_ERR_ISOLATION_UNAVAILABLE"]:::guest
+    G_HARDEN["INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01<br/><br/>V1: mask_proc_cmdline<br/>V2: set_pid1_undumpable<br/>V3: mask_planner_binaries<br/>V4: drop CAP_SYS_BOOT from bset<br/>V5: PR_SET_NO_NEW_PRIVS<br/>V6: scrub_sensitive_env_for_agent"]:::guest
+  end
+
+  subgraph KRN[Kernel-side defenses on the host]
+    direction LR
+    K_ADMIT["INV-NETISO-A3-VSOCK-CHOKEPOINT-01<br/><br/>kernel admission policy +<br/>session-token validation +<br/>audit-chain replay protection"]:::kernel
+    K_WDOG["INV-PLANNER-IPC-IDLE-WATCHDOG-01<br/><br/>drive_planner_stream<br/>forcibly terminates a wedged VM<br/>after 900 s of IPC silence"]:::kernel
+  end
+
+  A1 --> G_HARDEN
+  A2 --> G_HARDEN
+  A3 --> G_HARDEN
+  A4 --> G_HARDEN
+  A5 --> G_HARDEN
+  A6 --> G_HARDEN
+  AX --> G_PID1
+  AN --> K_ADMIT
+  G_HARDEN -. residual escape vectors .-> K_ADMIT
+  G_PID1   -. wedged-VM fallback     .-> K_WDOG
 ```
 
 Each layer is independent: V6 (env scrub) defangs the most
@@ -663,6 +690,10 @@ common token-recovery path (`bash -lc 'env'`); V1+V2 defang
 the procfs alternates; V4 prevents the agent from
 out-of-band-killing the VM regardless of what V1–V3 leaked;
 V5 future-proofs against setuid drift in the canonical image.
+If every guest-side defense ever fails open at once, the
+kernel-side admission policy + audit chain still gate the only
+useful exfil channel (the kernel IPC vsock), and the idle
+watchdog still reaps a VM that goes silent on the IPC stream.
 
 ## 5. What this doc does NOT cover (future work)
 
