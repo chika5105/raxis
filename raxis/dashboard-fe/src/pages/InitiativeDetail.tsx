@@ -7,7 +7,7 @@ import { dashboardApi } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
 import { CredentialsView } from "@/components/CredentialsView";
 import { useOperatorRoles } from "@/components/useOperatorRoles";
-import { DagGraph } from "@/components/DagGraph";
+import { DagGraph, type DagGraphNode } from "@/components/DagGraph";
 import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
 import {
@@ -42,6 +42,33 @@ import {
   serializeStatusParam,
   toggleStatus,
 } from "@/lib/status-filter";
+import type { TaskView } from "@/types/api";
+
+/// Project an initiative's `TaskView[]` payload onto the
+/// minimal `DagGraphNode[]` shape the embedded DAG renderer
+/// consumes. Kept as a named, exported helper (not inlined
+/// inside the JSX) so the regression test in
+/// `dashboard-fe/src/test/initiative-detail-dag-bridge.test.ts`
+/// can assert the bridge preserves `is_active` — the field
+/// whose absence on iter69 caused every actively-executing
+/// task to render as a static `Admitted` chip in the DAG. The
+/// renderer itself already lifts `Admitted + is_active` to
+/// `Running` (see `DagGraph::effectiveState`); the bug was
+/// the page never forwarding the flag.
+///
+/// We deliberately copy ONLY the fields the renderer reads:
+/// every extra field would dilute the contract this helper
+/// pins. New visual signals (gate dots, error pills, …) are
+/// added here field-by-field as the DAG renderer learns to
+/// consume them.
+export function mapTasksToDagNodes(tasks: TaskView[]): DagGraphNode[] {
+  return tasks.map((t) => ({
+    task_id: t.task_id,
+    title: t.title,
+    state: t.state,
+    is_active: t.is_active,
+  }));
+}
 
 export function InitiativeDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
@@ -221,11 +248,15 @@ export function InitiativeDetailPage() {
           <Empty title="This initiative has no tasks." />
         ) : (
           <DagGraph
-            nodes={init.tasks.map((t) => ({
-              task_id: t.task_id,
-              title: t.title,
-              state: t.state,
-            }))}
+            // iter69: forwarded via `mapTasksToDagNodes` so the
+            // bridge is pinned by a unit test. Pre-iter69 this
+            // mapping stripped `is_active`, so every actively-
+            // executing task rendered as a static `Admitted`
+            // chip in the embedded DAG even though the tasks
+            // list (which reads the field directly) showed it
+            // Running. See
+            // `INV-DASHBOARD-RUNNING-STATE-VISIBLE-01`.
+            nodes={mapTasksToDagNodes(init.tasks)}
             edges={init.edges}
             onSelect={setSelectedTask}
             onActivate={(taskId) => navigate(`/tasks/${taskId}`)}

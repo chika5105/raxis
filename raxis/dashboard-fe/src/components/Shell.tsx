@@ -52,9 +52,10 @@ const NAV: NavSection[] = [
     items: [
       { to: "/git", label: "Git Worktrees", glyph: "G" },
       { to: "/audit", label: "Audit Chain", glyph: "A" },
+      // iter69 — Gates absorbed the standalone /witnesses page;
+      // per-gate rollup + cross-task verdict timeline now live
+      // on one surface with click-to-filter coupling.
       { to: "/gates", label: "Gates", glyph: "T" },
-      // iter68 PR 5 — global witness timeline across every task.
-      { to: "/witnesses", label: "Witnesses", glyph: "W" },
     ],
   },
   {
