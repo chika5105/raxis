@@ -53,7 +53,7 @@ export function GatesPage() {
         <h1>Gates</h1>
         <span className="raxis-page-subtitle">
           Per-gate rollup of witness outcomes. Refreshed{" "}
-          {fmtRelative(data.generated_at * 1000)}.
+          {fmtRelative(data.generated_at)}.
         </span>
       </header>
       <table className="raxis-table raxis-gates-table">
@@ -102,7 +102,7 @@ export function GateStatTableRow({ row }: GateStatRowProps) {
   const flagged = row.fail_count > 0 && row.fixup_loop_count >= row.fail_count;
   const lastSeenLabel =
     row.last_seen_at != null
-      ? fmtRelative(row.last_seen_at * 1000)
+      ? fmtRelative(row.last_seen_at)
       : "never";
 
   return (

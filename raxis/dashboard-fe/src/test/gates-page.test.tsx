@@ -82,4 +82,26 @@ describe("<GateStatTableRow>", () => {
     // operator just hasn't exercised it yet.
     expect(row.classList.contains("raxis-gate-row-flagged")).toBe(false);
   });
+
+  /// INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01 regression: the
+  /// backend emits `last_seen_at` as unix-SECONDS (mirrors
+  /// `recorded_at` from `witness_records`), so `fmtRelative`
+  /// must consume it verbatim. iter69 caught this surfacing as
+  /// "in 56,355 years" because the FE was multiplying by 1000
+  /// before handing it to `fmtRelative`. This test pins the
+  /// fix: a row with last_seen_at = (now - 5 minutes) MUST
+  /// render as a sub-minute / few-minute-old relative label,
+  /// never a year-scale one.
+  it("renders last_seen_at as a near-now relative time (no ms vs s confusion)", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const row: GateStatRow = {
+      ...HEALTHY_ROW,
+      gate_type: "RegressionGate",
+      last_seen_at: now - 300,
+    };
+    renderRow(row);
+    const tr = screen.getByTestId("gate-row-RegressionGate");
+    expect(tr.textContent ?? "").toMatch(/minutes? ago|just now|seconds? ago/);
+    expect(tr.textContent ?? "").not.toMatch(/years/);
+  });
 });

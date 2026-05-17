@@ -22,6 +22,12 @@ raxis-dashboard     = { workspace = true }
 # instead of degrading to the noop hub. Tests / embedded harnesses
 # that don't construct a hub continue to pass `None`.
 raxis-observability = { workspace = true }
+# iter69 — kernel `runtime/heartbeat.json` reader. Used by the
+# subsystem-health card for `kernel_main_loop` so the dashboard
+# surfaces the real heartbeat timestamp (not just `booted_at`)
+# and the staleness predicate is shared with the CLI's
+# `raxis status` (single source of truth for "kernel alive").
+raxis-runtime       = { workspace = true }
 # Credential viewer (INV-DASHBOARD-CREDENTIAL-*): the kernel-glue
 # layer reads `task_credential_proxies` via `raxis-plan-credentials`
 # (for the proxy variant taxonomy + ParsedUpstreamUrl-style hints)

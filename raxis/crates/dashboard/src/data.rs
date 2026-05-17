@@ -445,7 +445,7 @@ impl WorktreeSnapshotBlobKind {
     }
 
     /// Project the corresponding `*_blob_sha256` off a snapshot view.
-    pub fn sha256_of<'a>(self, view: &'a WorktreeSnapshotView) -> Option<&'a str> {
+    pub fn sha256_of(self, view: &WorktreeSnapshotView) -> Option<&str> {
         match self {
             Self::Diff => view.diff_blob_sha256.as_deref(),
             Self::Log => view.log_blob_sha256.as_deref(),
@@ -459,8 +459,8 @@ impl WorktreeSnapshotBlobKind {
 ///
 /// Rendered by the dashboard's Gates page (a minimal table
 /// + sparkline panel). Stable, ordered by `gate_type` so a
-/// future sparkline view can diff row-by-row without
-/// reconciling positions.
+///   future sparkline view can diff row-by-row without
+///   reconciling positions.
 #[derive(Debug, Clone, Serialize)]
 pub struct GateStatsResponse {
     /// One row per `gate_type` observed in `witness_records`.

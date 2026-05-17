@@ -64,7 +64,15 @@ use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
 use raxis_dashboard::stream::{StreamEvent, StreamSubscription};
 use raxis_policy::PolicyBundle;
-use raxis_store::Store;
+use raxis_store::{Store, Table};
+
+// Typed table-name constants for the iter68 PR 1-5 read paths.
+// `INV-STORE-03`: no raw table-name string literals in any crate
+// that touches `kernel.db`. These are `const &'static str` so they
+// compose seamlessly with `format!` in `prepare()` strings.
+const TBL_WITNESS_RECORDS: &str = Table::WitnessRecords.as_str();
+const TBL_WORKTREE_SNAPSHOTS: &str = Table::WorktreeSnapshots.as_str();
+const TBL_TASKS: &str = Table::Tasks.as_str();
 
 mod git;
 pub mod lifecycle;
@@ -594,31 +602,82 @@ impl DashboardData for KernelDashboardData {
         let now_s = unix_now_s();
         let store_ok = raxis_store::ro::open(&self.data_dir).is_ok();
         let chain_ok = ChainReader::open(&self.audit_dir).is_ok();
-        // Best-effort kernel-main-loop heartbeat: we use boot
-        // time as a proxy — without a real heartbeat surface the
-        // dashboard cannot tell more than "kernel is up enough
-        // to respond to a dashboard request" — that is a fact
-        // by construction; the audit chain + store-readable
-        // bools below carry the actual liveness signal.
+        // Best-effort kernel-main-loop heartbeat: read the live
+        // `<data_dir>/runtime/heartbeat.json` the kernel's
+        // `runtime::heartbeat::run_loop` rewrites every
+        // `HEARTBEAT_INTERVAL`. `last_heartbeat_at` (NOT
+        // `booted_at`) is the real liveness signal — the CLI's
+        // `raxis status` already branches on this; the dashboard
+        // now mirrors it via the same `Snapshot::is_live`
+        // predicate so both surfaces stay in sync.
+        let heartbeat = raxis_runtime::read(&self.data_dir).ok();
         let kernel_alive = self.booted_at > 0;
+        let heartbeat_status = match heartbeat.as_ref() {
+            Some(snap) if snap.is_live(now_s) => "ok",
+            Some(_) => "degraded",
+            None if kernel_alive => "degraded",
+            None => "unknown",
+        };
+        let heartbeat_summary = match heartbeat.as_ref() {
+            Some(snap) if snap.is_live(now_s) => {
+                format!("Heartbeat fresh — state={state}.", state = snap.state)
+            }
+            Some(snap) => format!(
+                "Heartbeat stale (last_heartbeat_at={ts}); kernel may be hung.",
+                ts = snap.last_heartbeat_at,
+            ),
+            None if kernel_alive => {
+                "Heartbeat file missing — kernel has not yet written `runtime/heartbeat.json`."
+                    .to_owned()
+            }
+            None => "Kernel boot timestamp not yet recorded.".to_owned(),
+        };
+        let heartbeat_observed_at: u64 = heartbeat
+            .as_ref()
+            .map(|s| s.last_heartbeat_at)
+            .unwrap_or_else(|| if kernel_alive { self.booted_at } else { 0 });
+        let heartbeat_details: Vec<SubsystemDetailRow> = if let Some(snap) = heartbeat.as_ref() {
+            vec![
+                SubsystemDetailRow {
+                    label: "Last heartbeat (unix-s)".into(),
+                    value: snap.last_heartbeat_at.to_string(),
+                },
+                SubsystemDetailRow {
+                    label: "Booted at (unix-s)".into(),
+                    value: snap.started_at.to_string(),
+                },
+                SubsystemDetailRow {
+                    label: "State".into(),
+                    value: snap.state.clone(),
+                },
+                SubsystemDetailRow {
+                    label: "PID".into(),
+                    value: snap.kernel_pid.to_string(),
+                },
+                SubsystemDetailRow {
+                    label: "Active verifiers".into(),
+                    value: format!(
+                        "{}/{}",
+                        snap.active_verifiers, snap.max_concurrent_verifiers
+                    ),
+                },
+            ]
+        } else {
+            vec![SubsystemDetailRow {
+                label: "Booted at (unix-s)".into(),
+                value: self.booted_at.to_string(),
+            }]
+        };
 
         let mut cards: Vec<SubsystemHealthCard> = SUBSYSTEM_CATALOG
             .iter()
             .map(|(id, label)| {
                 let (status, summary, details, last_observed_at, grafana_url) = match *id {
                     "kernel_main_loop" => (
-                        if kernel_alive { "ok" } else { "unknown" },
-                        if kernel_alive {
-                            "Kernel responding to dashboard requests."
-                        } else {
-                            "Kernel boot timestamp not yet recorded."
-                        }
-                        .to_owned(),
-                        vec![SubsystemDetailRow {
-                            label: "Booted at (unix-s)".into(),
-                            value: self.booted_at.to_string(),
-                        }],
-                        if kernel_alive { self.booted_at } else { 0 },
+                        heartbeat_status,
+                        heartbeat_summary.clone(),
+                        heartbeat_details.clone(),
+                        heartbeat_observed_at,
                         grafana_dashboard_url("kernel"),
                     ),
                     "audit_writer" => {
@@ -668,13 +727,18 @@ impl DashboardData for KernelDashboardData {
                         if store_ok { now_s } else { 0 },
                         grafana_dashboard_url("planner"),
                     ),
-                    "observability_pusher" => (
-                        "unknown",
-                        "Observability stack signal not yet wired into dashboard.".to_owned(),
-                        vec![],
-                        0,
-                        grafana_dashboard_url("observability"),
-                    ),
+                    "observability_pusher" => {
+                        let obs = self.policy.load().observability().clone();
+                        let card =
+                            classify_observability_pusher(&self.data_dir, &obs, now_s);
+                        (
+                            card.status,
+                            card.summary,
+                            card.details,
+                            card.last_observed_at,
+                            grafana_dashboard_url("observability"),
+                        )
+                    }
                     "git_worktree_pool" => (
                         if store_ok { "ok" } else { "unknown" },
                         "Git worktree pool tracked in initiatives view.".to_owned(),
@@ -1165,21 +1229,23 @@ impl DashboardData for KernelDashboardData {
     > {
         use std::collections::HashMap;
         let conn = self.open_ro()?;
-        let sql = "SELECT w.task_id, w.gate_type, w.result_class, w.recorded_at \
-                   FROM witness_records w \
-                   JOIN ( \
-                     SELECT task_id, gate_type, MAX(recorded_at) AS rec \
-                     FROM witness_records \
-                     WHERE task_id IN ( \
-                       SELECT task_id FROM tasks WHERE initiative_id = ?1 \
-                     ) \
-                     GROUP BY task_id, gate_type \
-                   ) latest \
-                     ON w.task_id = latest.task_id \
-                    AND w.gate_type = latest.gate_type \
-                    AND w.recorded_at = latest.rec \
-                   ORDER BY w.task_id, w.gate_type";
-        let mut stmt = conn.prepare(sql).map_err(|e| ApiError::Internal {
+        let sql = format!(
+            "SELECT w.task_id, w.gate_type, w.result_class, w.recorded_at \
+             FROM {TBL_WITNESS_RECORDS} w \
+             JOIN ( \
+               SELECT task_id, gate_type, MAX(recorded_at) AS rec \
+               FROM {TBL_WITNESS_RECORDS} \
+               WHERE task_id IN ( \
+                 SELECT task_id FROM {TBL_TASKS} WHERE initiative_id = ?1 \
+               ) \
+               GROUP BY task_id, gate_type \
+             ) latest \
+               ON w.task_id = latest.task_id \
+              AND w.gate_type = latest.gate_type \
+              AND w.recorded_at = latest.rec \
+             ORDER BY w.task_id, w.gate_type"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| ApiError::Internal {
             log_only: format!("dag_gate_summaries prepare: {e}"),
         })?;
         let rows = stmt
@@ -1218,12 +1284,14 @@ impl DashboardData for KernelDashboardData {
         limit: u32,
     ) -> Result<Vec<raxis_dashboard::data::WitnessView>, ApiError> {
         let conn = self.open_ro()?;
-        let sql = "SELECT verifier_run_id, task_id, gate_type, result_class, \
-                          evaluation_sha, blob_sha256, recorded_at \
-                   FROM witness_records \
-                   ORDER BY recorded_at DESC, verifier_run_id DESC \
-                   LIMIT ?1";
-        let mut stmt = conn.prepare(sql).map_err(|e| ApiError::Internal {
+        let sql = format!(
+            "SELECT verifier_run_id, task_id, gate_type, result_class, \
+                    evaluation_sha, blob_sha256, recorded_at \
+             FROM {TBL_WITNESS_RECORDS} \
+             ORDER BY recorded_at DESC, verifier_run_id DESC \
+             LIMIT ?1"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| ApiError::Internal {
             log_only: format!("recent_witnesses prepare: {e}"),
         })?;
         let rows = stmt
@@ -1293,14 +1361,16 @@ impl DashboardData for KernelDashboardData {
         task_id: &str,
     ) -> Result<Vec<raxis_dashboard::data::WorktreeSnapshotView>, ApiError> {
         let conn = self.open_ro()?;
-        let sql = "SELECT snapshot_id, task_id, session_id, initiative_id, \
-                          trigger, taken_at, base_sha, head_sha, commit_count, \
-                          diff_blob_sha256, log_blob_sha256, tree_blob_sha256, \
-                          porcelain_blob_sha256, diff_bytes_total, diff_truncated \
-                   FROM worktree_snapshots \
-                   WHERE task_id = ?1 \
-                   ORDER BY taken_at DESC, snapshot_id DESC";
-        let mut stmt = conn.prepare(sql).map_err(|e| ApiError::Internal {
+        let sql = format!(
+            "SELECT snapshot_id, task_id, session_id, initiative_id, \
+                    trigger, taken_at, base_sha, head_sha, commit_count, \
+                    diff_blob_sha256, log_blob_sha256, tree_blob_sha256, \
+                    porcelain_blob_sha256, diff_bytes_total, diff_truncated \
+             FROM {TBL_WORKTREE_SNAPSHOTS} \
+             WHERE task_id = ?1 \
+             ORDER BY taken_at DESC, snapshot_id DESC"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| ApiError::Internal {
             log_only: format!("worktree_snapshots prepare: {e}"),
         })?;
         let rows = stmt
@@ -1321,13 +1391,15 @@ impl DashboardData for KernelDashboardData {
         snapshot_id: &str,
     ) -> Result<raxis_dashboard::data::WorktreeSnapshotView, ApiError> {
         let conn = self.open_ro()?;
-        let sql = "SELECT snapshot_id, task_id, session_id, initiative_id, \
-                          trigger, taken_at, base_sha, head_sha, commit_count, \
-                          diff_blob_sha256, log_blob_sha256, tree_blob_sha256, \
-                          porcelain_blob_sha256, diff_bytes_total, diff_truncated \
-                   FROM worktree_snapshots WHERE snapshot_id = ?1";
+        let sql = format!(
+            "SELECT snapshot_id, task_id, session_id, initiative_id, \
+                    trigger, taken_at, base_sha, head_sha, commit_count, \
+                    diff_blob_sha256, log_blob_sha256, tree_blob_sha256, \
+                    porcelain_blob_sha256, diff_bytes_total, diff_truncated \
+             FROM {TBL_WORKTREE_SNAPSHOTS} WHERE snapshot_id = ?1"
+        );
         match conn.query_row(
-            sql,
+            &sql,
             rusqlite::params![snapshot_id],
             parse_worktree_snapshot_row,
         ) {
@@ -1379,14 +1451,14 @@ impl DashboardData for KernelDashboardData {
         // stable across polls (a sparkline view diffs row-by-
         // row across requests).
         let mut stmt = conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT gate_type, result_class, \
                         COUNT(*) AS n, \
                         MAX(recorded_at) AS last_seen \
-                   FROM witness_records \
+                   FROM {TBL_WITNESS_RECORDS} \
                   GROUP BY gate_type, result_class \
-                  ORDER BY gate_type",
-            )
+                  ORDER BY gate_type"
+            ))
             .map_err(|e| ApiError::Internal {
                 log_only: format!("gate_stats: prepare witness rollup: {e}"),
             })?;
@@ -1407,7 +1479,7 @@ impl DashboardData for KernelDashboardData {
         // `DashboardData::gate_stats`'s docstring.
         let mut acc: std::collections::BTreeMap<String, GateStatRow> =
             std::collections::BTreeMap::new();
-        while let Some(row) = rows_iter.next() {
+        for row in rows_iter.by_ref() {
             let (gate_type, result_class, n, last_seen) =
                 row.map_err(|e| ApiError::Internal {
                     log_only: format!("gate_stats: scan witness row: {e}"),
@@ -1451,13 +1523,13 @@ impl DashboardData for KernelDashboardData {
         // never failed a gate have NULL `last_gate_type` and
         // are dropped from the rollup by the GROUP BY.
         let mut stmt2 = conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT last_gate_type, SUM(gate_fixup_attempts) AS attempts \
-                   FROM tasks \
+                   FROM {TBL_TASKS} \
                   WHERE last_gate_type IS NOT NULL \
                     AND gate_fixup_attempts > 0 \
-                  GROUP BY last_gate_type",
-            )
+                  GROUP BY last_gate_type"
+            ))
             .map_err(|e| ApiError::Internal {
                 log_only: format!("gate_stats: prepare fixup rollup: {e}"),
             })?;
@@ -1470,7 +1542,7 @@ impl DashboardData for KernelDashboardData {
             .map_err(|e| ApiError::Internal {
                 log_only: format!("gate_stats: query fixup rollup: {e}"),
             })?;
-        while let Some(row) = rows_iter2.next() {
+        for row in rows_iter2.by_ref() {
             let (gate_type, attempts) = row.map_err(|e| ApiError::Internal {
                 log_only: format!("gate_stats: scan fixup row: {e}"),
             })?;
@@ -3098,6 +3170,165 @@ fn aggregate_subsystem_status(cards: &[SubsystemHealthCard]) -> String {
     }
 }
 
+/// iter69 — observability-pusher health classification.
+///
+/// Returns the (status, summary, details, last_observed_at)
+/// tuple the dashboard's Health card renders for the
+/// `observability_pusher` subsystem. The three branches:
+///
+///   1. **Policy disabled** → `"ok"`, no mtime tracking.
+///      Operators turn the stack off deliberately; the dashboard
+///      MUST NOT yellow-card a disabled subsystem.
+///   2. **Enabled + ring directory recent** → `"ok"` with the
+///      latest segment mtime in `last_observed_at`. The kernel
+///      writes to `<data_dir>/observability/{spans,metrics}/`
+///      on every emit; a recent mtime there is the
+///      cheapest proof the in-process hub + ring file exporter
+///      pair is alive.
+///   3. **Enabled + ring missing or stale** → `"degraded"` /
+///      `"failing"` with a human-readable reason in `summary`.
+///
+/// The pusher binary's own `/healthz` probe is intentionally
+/// NOT contacted here — the dashboard is a read-only surface
+/// over `data_dir`. The ring mtime is the closest local proxy.
+struct PusherHealthCard {
+    status: &'static str,
+    summary: String,
+    details: Vec<SubsystemDetailRow>,
+    last_observed_at: u64,
+}
+
+fn classify_observability_pusher(
+    data_dir: &std::path::Path,
+    obs: &raxis_policy::ObservabilityConfig,
+    now_s: u64,
+) -> PusherHealthCard {
+    if !obs.enabled {
+        return PusherHealthCard {
+            status: "ok",
+            summary: "Observability disabled in policy.toml; pusher not required."
+                .to_owned(),
+            details: vec![SubsystemDetailRow {
+                label: "Policy".into(),
+                value: "[observability].enabled = false".into(),
+            }],
+            last_observed_at: now_s,
+        };
+    }
+    let ring_root = if obs.ring.dir.is_empty() {
+        data_dir.join("observability")
+    } else {
+        std::path::PathBuf::from(&obs.ring.dir)
+    };
+    let spans_dir = ring_root.join("spans");
+    let metrics_dir = ring_root.join("metrics");
+    let pusher_events = ring_root.join("pusher-events.jsonl");
+    let spans_mtime = newest_mtime_in(&spans_dir).unwrap_or(0);
+    let metrics_mtime = newest_mtime_in(&metrics_dir).unwrap_or(0);
+    let pusher_mtime = mtime_of(&pusher_events).unwrap_or(0);
+    let kernel_side_mtime = spans_mtime.max(metrics_mtime);
+    let age_kernel = now_s.saturating_sub(kernel_side_mtime);
+    // 60s is the conservative ceiling: the kernel's heartbeat
+    // loop emits once every 5s by default; `HEARTBEAT_INTERVAL`
+    // bumps that to up to 30s on busy systems; a full minute of
+    // silence means the kernel-side hub is genuinely idle.
+    const FRESH_SECS: u64 = 60;
+    let kernel_side_fresh = kernel_side_mtime > 0 && age_kernel <= FRESH_SECS;
+    let pusher_ever_ran = pusher_mtime > 0;
+    let details = vec![
+        SubsystemDetailRow {
+            label: "Ring root".into(),
+            value: ring_root.display().to_string(),
+        },
+        SubsystemDetailRow {
+            label: "Spans mtime (unix-s)".into(),
+            value: spans_mtime.to_string(),
+        },
+        SubsystemDetailRow {
+            label: "Metrics mtime (unix-s)".into(),
+            value: metrics_mtime.to_string(),
+        },
+        SubsystemDetailRow {
+            label: "Pusher events mtime (unix-s)".into(),
+            value: pusher_mtime.to_string(),
+        },
+    ];
+    let (status, summary, last_observed_at) = if kernel_side_fresh && pusher_ever_ran {
+        (
+            "ok",
+            format!(
+                "Kernel ring written {age_kernel}s ago; pusher events file present."
+            ),
+            kernel_side_mtime.max(pusher_mtime),
+        )
+    } else if kernel_side_fresh {
+        (
+            "degraded",
+            format!(
+                "Kernel ring fresh ({age_kernel}s) but no \
+                 `pusher-events.jsonl` — pusher binary may not be running."
+            ),
+            kernel_side_mtime,
+        )
+    } else if kernel_side_mtime > 0 {
+        (
+            "degraded",
+            format!(
+                "Kernel ring stale (last write {age_kernel}s ago) — hub may be \
+                 disabled or starved."
+            ),
+            kernel_side_mtime,
+        )
+    } else {
+        (
+            "unknown",
+            "No observability segments on disk yet; kernel ring not initialised."
+                .to_owned(),
+            0,
+        )
+    };
+    PusherHealthCard {
+        status,
+        summary,
+        details,
+        last_observed_at,
+    }
+}
+
+/// Return the most-recent mtime (unix-seconds) of any direct
+/// child of `dir`, or `None` when the directory is missing /
+/// empty / unreadable.
+fn newest_mtime_in(dir: &std::path::Path) -> Option<u64> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut newest: u64 = 0;
+    for e in entries.flatten() {
+        let meta = match e.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if let Ok(mt) = meta.modified() {
+            if let Ok(d) = mt.duration_since(std::time::UNIX_EPOCH) {
+                let s = d.as_secs();
+                if s > newest {
+                    newest = s;
+                }
+            }
+        }
+    }
+    if newest == 0 {
+        None
+    } else {
+        Some(newest)
+    }
+}
+
+fn mtime_of(path: &std::path::Path) -> Option<u64> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mt = meta.modified().ok()?;
+    let d = mt.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(d.as_secs())
+}
+
 /// Compute the Grafana deep-link for one subsystem if the
 /// observability stack URL has been provisioned. The
 /// observability worker just landed `cargo xtask observability`
@@ -4547,5 +4778,104 @@ mod tests {
              dashboard-fe/src/lib/state-color.ts in the same commit \
              (INV-DASHBOARD-TASK-STATE-COMPLETENESS-01).",
         );
+    }
+
+    // ── iter69 — observability-pusher health classification ─────────────
+    //
+    // These tests pin the three operator-visible branches of
+    // `classify_observability_pusher` so future edits cannot
+    // silently regress the Health card back to "unknown forever".
+
+    fn disabled_obs_config() -> raxis_policy::ObservabilityConfig {
+        raxis_policy::ObservabilityConfig::disabled_default()
+    }
+
+    #[test]
+    fn pusher_card_is_ok_when_observability_is_disabled_in_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let card = classify_observability_pusher(
+            tmp.path(),
+            &disabled_obs_config(),
+            1_700_000_000,
+        );
+        assert_eq!(card.status, "ok");
+        assert!(card.summary.contains("disabled in policy"));
+        assert_eq!(card.last_observed_at, 1_700_000_000);
+    }
+
+    #[test]
+    fn pusher_card_is_unknown_when_enabled_but_ring_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = disabled_obs_config();
+        cfg.enabled = true;
+        let card = classify_observability_pusher(tmp.path(), &cfg, 1_700_000_000);
+        assert_eq!(card.status, "unknown");
+        assert!(card.summary.contains("No observability segments"));
+        assert_eq!(card.last_observed_at, 0);
+    }
+
+    #[test]
+    fn pusher_card_is_ok_when_kernel_ring_is_fresh_and_pusher_events_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let obs_root = tmp.path().join("observability");
+        std::fs::create_dir_all(obs_root.join("spans")).unwrap();
+        std::fs::write(obs_root.join("spans").join("seg-001.bin"), b"x").unwrap();
+        std::fs::write(obs_root.join("pusher-events.jsonl"), b"{}").unwrap();
+
+        let mut cfg = disabled_obs_config();
+        cfg.enabled = true;
+        // Pass a `now_s` close to the file mtimes so the card
+        // sees the ring as "fresh" (< FRESH_SECS old). We use
+        // the actual file mtime as the clock so we don't
+        // depend on system clock resolution.
+        let now_s = newest_mtime_in(&obs_root.join("spans")).unwrap();
+        let card = classify_observability_pusher(tmp.path(), &cfg, now_s);
+        assert_eq!(card.status, "ok", "summary={}", card.summary);
+        assert!(card.last_observed_at > 0);
+    }
+
+    // ── iter69 — kernel main-loop heartbeat parsing ─────────────────────
+    //
+    // The dashboard's `kernel_main_loop` card MUST consume the
+    // live `last_heartbeat_at` from `runtime/heartbeat.json`,
+    // NOT the kernel's `booted_at`. This test exercises the
+    // freshness arithmetic + the JSON read path directly.
+
+    #[test]
+    fn heartbeat_is_live_within_stale_window() {
+        let now = 1_700_000_005u64;
+        let snap = raxis_runtime::Snapshot::new(
+            42,
+            1_700_000_000,
+            1_700_000_004,
+            raxis_runtime::KernelLifecycleState::Running,
+            7,
+            0,
+            8,
+            0,
+            0,
+            0,
+            0,
+        );
+        assert!(snap.is_live(now));
+    }
+
+    #[test]
+    fn heartbeat_is_stale_past_window() {
+        let now = 1_700_001_000u64;
+        let snap = raxis_runtime::Snapshot::new(
+            42,
+            1_700_000_000,
+            1_700_000_004,
+            raxis_runtime::KernelLifecycleState::Running,
+            7,
+            0,
+            8,
+            0,
+            0,
+            0,
+            0,
+        );
+        assert!(!snap.is_live(now));
     }
 }

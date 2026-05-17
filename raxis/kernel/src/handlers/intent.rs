@@ -186,7 +186,13 @@ struct PreGateState {
 enum PreGateOutcome {
     Reject(PlannerErrorCode, TaskState),
     EarlyResponse(IntentResponse),
-    Proceed(PreGateState),
+    /// Boxed because `PreGateState` is the largest variant by far
+    /// (>200 B vs. <40 B for the other two); without the box every
+    /// `PreGateOutcome` paid the full `Proceed` size, triggering
+    /// `clippy::large_enum_variant`. Callers unbox on the happy
+    /// path at the single call site (`PreGateOutcome::Proceed(s)`
+    /// in `handle_inner`).
+    Proceed(Box<PreGateState>),
 }
 
 // ---------------------------------------------------------------------------
@@ -503,7 +509,12 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
             }
             return Ok(resp);
         }
-        PreGateOutcome::Proceed(s) => s,
+        // Unbox eagerly on the happy path so the rest of the
+        // pipeline keeps the existing `PreGateState` shape; the
+        // box was a clippy-driven layout choice (see
+        // `PreGateOutcome::Proceed` definition), not a semantic
+        // one.
+        PreGateOutcome::Proceed(s) => *s,
     };
 
     // ── Phase B (async) — Step 9: Gate evaluation ─────────────────────────
@@ -1409,7 +1420,7 @@ fn run_phase_a(
             }
         };
 
-    PreGateOutcome::Proceed(PreGateState {
+    PreGateOutcome::Proceed(Box::new(PreGateState {
         task,
         task_state,
         worktree_path,
@@ -1418,7 +1429,7 @@ fn run_phase_a(
         touched_paths,
         estimated_cost,
         resolved_via_escalation: req.resolved_via_escalation.clone(),
-    })
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -7447,15 +7458,10 @@ fn finalize_gate_fixup_completion(
     audit: &dyn raxis_audit_tools::AuditSink,
 ) {
     // Pull the fixup task's gate-fixup metadata in one SELECT.
-    let row: Result<
-        (
-            i64,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ),
-        rusqlite::Error,
-    > = {
+    // (is_gate_fixup, parent_gate_failure_task_id,
+    //  parent_gate_failure_type, evaluation_sha)
+    type FixupMetaRow = (i64, Option<String>, Option<String>, Option<String>);
+    let row: Result<FixupMetaRow, rusqlite::Error> = {
         let conn = store.lock_sync();
         conn.query_row(
             &format!(
@@ -7680,7 +7686,7 @@ fn finalize_integration_merge_completion(
         match transition_task_in_tx(
             &tx,
             task_id,
-            next.clone(),
+            *next,
             None,
             TransitionActor::Kernel,
         ) {
@@ -8936,6 +8942,11 @@ mod tests {
     // MUST be ignored entirely so non-fixup completion paths are
     // unaffected.
 
+    // Test-only helper; 8 parameters mirrors the storage row shape
+    // (parent + fixup + eval shas + the fixup-pair join columns).
+    // Collapsing into a struct would just hide the column-by-column
+    // intent at the call site.
+    #[allow(clippy::too_many_arguments)]
     fn seed_fixup_pair(
         store: &Store,
         parent_task_id: &str,

@@ -279,7 +279,7 @@ pub async fn handle(
     let parent_gate_type_owned = parent_gate_type.clone();
     let initiative_id_owned = parent.initiative_id.clone();
     let parent_attempts_pre = parent.gate_fixup_attempts;
-    let now_secs_i64 = raxis_types::unix_now_secs() as i64;
+    let now_secs_i64 = raxis_types::unix_now_secs();
     let admit_result = tokio::task::spawn_blocking(
         move || -> Result<AdmitOutcome, AdmitError> {
             let mut conn = store_arc.lock_sync();
@@ -525,7 +525,7 @@ mod tests {
     #[test]
     fn intent_shape_validation_rejects_missing_kind() {
         let req = fixture(None, Some(TaskId::parse("p-1").unwrap()), Some("NoSecretStrings"));
-        assert!(matches!(req.sub_task_kind, None));
+        assert!(req.sub_task_kind.is_none());
     }
 
     #[test]

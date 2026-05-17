@@ -3504,6 +3504,7 @@ dependencies = [
  "raxis-observability",
  "raxis-plan-credentials",
  "raxis-policy",
+ "raxis-runtime",
  "raxis-store",
  "raxis-test-support",
  "raxis-types",

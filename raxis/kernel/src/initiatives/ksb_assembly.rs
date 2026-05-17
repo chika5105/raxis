@@ -155,8 +155,8 @@ pub struct KsbInputs<'a> {
 ///     filter `Pending`, scoped to this initiative).
 ///   * `subtask_activations` (currently unused — reviewer verdicts
 ///     would be sourced here; placeholder for V3).
-/// **Pure projection.** No mutations; safe to call from a
-/// `spawn_blocking` context with the sync `Connection` lock.
+///     **Pure projection.** No mutations; safe to call from a
+///     `spawn_blocking` context with the sync `Connection` lock.
 pub fn assemble_ksb_snapshot(
     conn: &Connection,
     registry: &PlanRegistry,
@@ -346,17 +346,11 @@ fn read_gate_fixup_context(
 ) -> Result<Option<raxis_ksb::GateFixupContext>, rusqlite::Error> {
     let tasks = raxis_store::Table::Tasks.as_str();
     // Pull the fixup row.
-    let row: Result<
-        (
-            i64,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            i64,
-        ),
-        rusqlite::Error,
-    > = conn.query_row(
+    // (is_gate_fixup, parent_gate_failure_task_id, parent_gate_failure_type,
+    //  last_gate_critique, last_gate_type, gate_fixup_attempts)
+    type FixupChildRow =
+        (i64, Option<String>, Option<String>, Option<String>, Option<String>, i64);
+    let row: Result<FixupChildRow, rusqlite::Error> = conn.query_row(
         &format!(
             "SELECT is_gate_fixup, \
                     parent_gate_failure_task_id, \
@@ -407,10 +401,9 @@ fn read_gate_fixup_context(
         .unwrap_or_else(|| "<unknown>".to_owned());
 
     // Pull the parent's repair-relevant state.
-    let parent_row: Result<
-        (Option<String>, Option<String>, Option<String>),
-        rusqlite::Error,
-    > = conn.query_row(
+    // (last_gate_critique, evaluation_sha, session_id)
+    type FixupParentRow = (Option<String>, Option<String>, Option<String>);
+    let parent_row: Result<FixupParentRow, rusqlite::Error> = conn.query_row(
         &format!(
             "SELECT last_gate_critique, evaluation_sha, session_id \
                FROM {tasks} WHERE task_id = ?1"
@@ -792,18 +785,18 @@ fn read_reviewer_counts_per_executor(
 ///     row — the concatenated formatted critiques
 ///     (`[Reviewer <id>]: <text>\n\n` per submission, per Step 22
 ///     of the v2-deep-spec). Empty until at least one rejection.
-/// The renderer joins these via `task_dag_edges` (reviewer →
-/// executor predecessor) so each rendered `reviewer_verdicts=`
-/// row carries the executor's `evaluation_sha` (the SHA the
-/// reviewer voted against). Reviewer rows whose `review_verdict`
-/// is still NULL are omitted (no signal yet) so the orchestrator
-/// does not over-trigger retry on stale state.
-/// Critique extraction parses the executor's
-/// `last_critique` looking for the `[Reviewer <reviewer_task_id>]: `
-/// prefix — fail-soft (empty critique on parse miss) so a malformed
-/// critique payload never breaks the projection. The KSB renderer
-/// (`crates/ksb/src/lib.rs`) tolerates an empty critique field by
-/// rendering `""` verbatim.
+///     The renderer joins these via `task_dag_edges` (reviewer →
+///     executor predecessor) so each rendered `reviewer_verdicts=`
+///     row carries the executor's `evaluation_sha` (the SHA the
+///     reviewer voted against). Reviewer rows whose `review_verdict`
+///     is still NULL are omitted (no signal yet) so the orchestrator
+///     does not over-trigger retry on stale state.
+///     Critique extraction parses the executor's
+///     `last_critique` looking for the `[Reviewer <reviewer_task_id>]: `
+///     prefix — fail-soft (empty critique on parse miss) so a malformed
+///     critique payload never breaks the projection. The KSB renderer
+///     (`crates/ksb/src/lib.rs`) tolerates an empty critique field by
+///     rendering `""` verbatim.
 fn read_reviewer_verdicts_for_initiative(
     conn: &Connection,
     initiative_id: &str,
