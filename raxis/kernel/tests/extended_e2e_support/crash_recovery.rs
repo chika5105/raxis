@@ -7,17 +7,20 @@
 //! **Two evaluation modes — chain-shape-driven.**
 //!
 //! 1. **No crash observed (happy path).** When the chain does NOT
-//!    carry a `KernelRestartCompleted` event AND has no duplicate
-//!    `SessionVmSpawned` for the in-flight task, the witness passes
-//!    vacuously: there is no crash to recover from, so there is no
-//!    recovery signal to demand. The audit-chain monotonicity
-//!    check still fires — an unreconciled `seq` gap is an
-//!    INV-AUDIT-01 violation regardless of whether a crash was
-//!    expected.
+//!    carry a `KernelRestartCompleted` event, the witness passes
+//!    vacuously: there is no crash to recover from, so there is
+//!    no recovery signal to demand. Multiple `SessionVmSpawned`
+//!    rows for the same task do NOT count as a crash — the
+//!    realistic lifecycle legitimately respawns the executor VM
+//!    after reviewer rejection (see
+//!    `ExecutorRespawnFromReviewRejection`), which is normal
+//!    kernel behaviour and not crash recovery. The audit-chain
+//!    monotonicity check still fires — an unreconciled `seq` gap
+//!    is an INV-AUDIT-01 violation regardless of whether a crash
+//!    was expected.
 //!
 //! 2. **Crash signature present.** When the chain DOES carry a
-//!    `KernelRestartCompleted` event OR multiple `SessionVmSpawned`
-//!    rows for the same in-flight task, the witness asserts the
+//!    `KernelRestartCompleted` event, the witness asserts the
 //!    audit chain shows a **post-crash recovery signal**:
 //!
 //!      * a [`ReconciliationGap`] event the kernel emitted on
@@ -139,26 +142,31 @@ impl CrashRecoveryWitness {
 
     /// Did the kernel actually go through a crash-recovery cycle?
     ///
-    /// We look for either:
-    ///   * `KernelRestartCompleted` anywhere in the chain (the
-    ///     canonical signal a supervisor-driven restart fired and
-    ///     `reconcile_after_supervisor_restart` ran), OR
-    ///   * multiple `SessionVmSpawned` rows for the in-flight task
-    ///     (implicit signal — the substrate respawned the VM after
-    ///     an exit even without a full kernel restart).
+    /// The canonical signal is `KernelRestartCompleted` somewhere
+    /// in the chain (the supervisor-driven restart fired and
+    /// `reconcile_after_supervisor_restart` ran).
     ///
-    /// When neither signature is present the witness has nothing
-    /// to assert: the realistic e2e ran end-to-end without any
-    /// crash and there is no recovery signal to demand. Returning
-    /// `false` here drives the predicate into vacuous-satisfy.
+    /// NOTE — we deliberately do NOT treat
+    /// `spawn_count_for_task > 1` as a crash signature on its
+    /// own. The realistic lifecycle legitimately respawns the
+    /// executor VM whenever the reviewer rejects a turn (see
+    /// `ExecutorRespawnFromReviewRejection` audit events). Those
+    /// respawns are normal kernel behaviour, not crash artifacts,
+    /// and demanding a recovery signal after every one would
+    /// false-positive on every realistic run.
+    ///
+    /// When the canonical signal is absent the witness has
+    /// nothing to assert: the realistic e2e ran end-to-end
+    /// without any crash and there is no recovery signal to
+    /// demand. Returning `false` here drives the predicate into
+    /// vacuous-satisfy.
     fn crash_signature_present(&self, chain: &[AuditEvent]) -> bool {
-        let restart_observed = chain.iter().any(|ev| {
+        chain.iter().any(|ev| {
             matches!(
                 typed(ev),
                 Some(AuditEventKind::KernelRestartCompleted { .. })
             )
-        });
-        restart_observed || self.spawn_count_for_task(chain) > 1
+        })
     }
 
     fn has_recovery_signal(&self, chain: &[AuditEvent]) -> bool {

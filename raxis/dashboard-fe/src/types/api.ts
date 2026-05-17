@@ -52,9 +52,10 @@ export interface InitiativeListEntry {
 //
 // Operator-experience contract: every red Failure pill in the UI
 // MUST be backed by one of these. When the wire ships
-// `failure: null` on a Failed-state entity the FE renders
-// "No reason supplied — kernel bug" so the gap is visible rather
-// than swallowed.
+// `failure: null` on a Failed-state entity the FE renders a calm
+// muted `(no reason recorded)` affordance so the gap is visible
+// without accusing the kernel of a bug in the operator's face —
+// the audit chain already enforces the underlying invariant.
 //
 // `fields` is rendered as a definition list and `artifacts` as
 // click-through links (kernel.stderr.log, worktree path, audit-chain
@@ -250,6 +251,35 @@ export interface OrchestratorGapsResponse {
   generated_at: number;
 }
 
+/// One row in `GET /api/gates/stats`. Mirrors
+/// `raxis_dashboard::data::GateStatRow`.
+///
+/// **Authoring note for FE pickers.** Do NOT compute pass-rate
+/// percentages on the client side and present them as if they
+/// were a server signal — the operator-visible classification
+/// (over-strict gate, weak verifier, …) is a BE concern. Render
+/// the raw counts + the fixup-loop counter and let the operator
+/// reason about the ratio. The Gates page enforces this by
+/// rendering raw counts and a sparkline glyph only.
+export interface GateStatRow {
+  gate_type: string;
+  pass_count: number;
+  fail_count: number;
+  inconclusive_count: number;
+  last_seen_at?: number | null;
+  fixup_loop_count: number;
+}
+
+/// Wire shape for `GET /api/gates/stats`. Mirrors
+/// `raxis_dashboard::data::GateStatsResponse`.
+///
+/// `gates` is alphabetically ordered by `gate_type` so the
+/// rendering loop never has to sort.
+export interface GateStatsResponse {
+  gates: GateStatRow[];
+  generated_at: number;
+}
+
 /// Wire shape for one row of `GET /api/recent-sessions`.
 /// Mirrors `raxis_dashboard::data::RecentSessionEntry`.
 export interface RecentSessionEntry {
@@ -279,11 +309,23 @@ export interface TaskLlmTurnView {
   /// `gpt-4o`). Empty when the response body was non-JSON or
   /// the field was absent.
   model: string;
-  /// `"system"` / `"user"` / `"assistant"` / `"tool"`. Empty
-  /// when the response body envelope does not carry a top-
-  /// level `role` (e.g. OpenAI's `chat.completion`, where
-  /// `role` lives inside `choices[]`).
+  /// **LLM provider role**: `"system"` / `"user"` / `"assistant"`
+  /// / `"tool"`. Empty when the response body envelope does
+  /// not carry a top-level `role` (e.g. OpenAI's
+  /// `chat.completion`, where `role` lives inside
+  /// `choices[]`). Distinct from `agent_role` — provider role
+  /// is the upstream LLM speaker, `agent_role` is which raxis
+  /// session originated the call.
   role: string;
+  /// **Originating agent role**: `"Orchestrator"` /
+  /// `"Executor"` / `"Reviewer"`. Surfaces a per-turn role
+  /// badge in `<TaskLlmTurns>` so operators can tell
+  /// orchestrator planner_fetches apart from executor /
+  /// reviewer rounds at a glance — especially important on
+  /// an initiative's coordinator-task page where all three
+  /// roles can interleave. Optional for back-compat with
+  /// pre-iter65 jsonl records.
+  agent_role?: string | null;
   /// Fully-parsed request payload (typed `unknown` so the FE
   /// renders it generically). `null` when the kernel-side tap
   /// could not capture or parse the bytes.
@@ -454,6 +496,12 @@ export interface DagNode {
   task_id: string;
   title: string;
   state: string;
+  /// Mirror of `TaskView.is_active`: backend sets this when an
+  /// executor/reviewer subtask activation is live for the task.
+  /// The DAG renderer treats `is_active` as Running for tone +
+  /// pulse so mid-execution `Admitted` tasks don't appear stalled.
+  /// Optional for back-compat with older kernels.
+  is_active?: boolean;
 }
 
 export interface DagView {
@@ -587,9 +635,10 @@ export interface SubsystemHealthCard {
   /// Surfaced inline beneath the status pill so the operator
   /// never has to grep kernel.stderr.log to find out why a
   /// reporter is unhappy. `null` ⇒ healthy reporter or kernel
-  /// did not supply a reason (operator-actionable bug — the
-  /// card renders "No reason supplied — kernel bug" in that
-  /// case).
+  /// did not supply a reason — in the latter case the unhealthy
+  /// card renders a calm muted `(no reason recorded)` affordance
+  /// (pointing the operator at the audit chain) rather than a
+  /// loud kernel-bug banner.
   last_error?: string | null;
 }
 

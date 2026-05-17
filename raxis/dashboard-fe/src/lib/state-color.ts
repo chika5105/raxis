@@ -368,12 +368,11 @@ export function toneClasses(tone: StateBadgeTone): string {
 /// event carries `revoked_by` + optional display name; the
 /// reason for revocation lives on the operator action, not on a
 /// kernel-emitted `block_reason`). Including `Revoked` previously
-/// fired `INV-FAILURE-REASON-MANDATORY-01` "No reason supplied"
-/// kernel-bug badges on every revoked session because the
-/// dashboard-kernel data layer correctly emits `failure: None`
-/// for them. Revoked sessions are surfaced via lifecycle
-/// timeline + the audit-chain `SessionRevoked` row, not via
-/// `<FailureReasonPanel>`.
+/// fired an `(no reason recorded)` empty-state on every revoked
+/// session because the dashboard-kernel data layer correctly
+/// emits `failure: None` for them. Revoked sessions are surfaced
+/// via the lifecycle timeline + the audit-chain `SessionRevoked`
+/// row, not via `<FailureReasonPanel>`.
 ///
 /// Anchors: `INV-DASHBOARD-FAILURE-VISIBILITY-01`.
 export function isTerminalFailureState(

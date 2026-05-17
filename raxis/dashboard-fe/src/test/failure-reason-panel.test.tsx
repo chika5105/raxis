@@ -64,11 +64,18 @@ describe("<FailureReasonPanel>", () => {
     expect(screen.getByText(/event/)).toBeInTheDocument();
   });
 
-  it("flags missing reason as kernel bug by default", () => {
+  it("renders a calm `(no reason recorded)` card when reason is missing", () => {
     render(<FailureReasonPanel reason={null} />);
     expect(
-      screen.getByText(/No reason supplied — kernel bug/),
+      screen.getByTestId("failure-no-reason"),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(/\(no reason recorded\)/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/KERNEL BUG/)).toBeNull();
+    expect(
+      screen.queryByText(/INV-FAILURE-REASON-MANDATORY-01/),
+    ).toBeNull();
   });
 
   it("emits absent empty-state when whenMissing=absent", () => {
@@ -164,10 +171,11 @@ describe("<FailurePill>", () => {
     expect(screen.getByText("ReviewerRejected")).toBeInTheDocument();
   });
 
-  it("flags the missing-reason bug case", () => {
+  it("falls back to a calm `(no reason recorded)` pill when reason is missing", () => {
     render(<FailurePill failed reason={null} />);
     expect(
-      screen.getByText(/No reason supplied — kernel bug/),
+      screen.getByText(/\(no reason recorded\)/),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/KERNEL BUG/)).toBeNull();
   });
 });

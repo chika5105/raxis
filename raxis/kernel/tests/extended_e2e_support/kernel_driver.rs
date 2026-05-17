@@ -954,8 +954,13 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          respawn_backoff_ms       = 1000\n\
          max_consecutive_respawns = 5\n\
          \n\
+         # `example.com` admits the iter65 dep-fetch-evidence task's\n\
+         # one HTTPS GET via Path A3; the witness in\n\
+         # `extended_e2e_support::dep_fetch_evidence` pins exactly one\n\
+         # `TproxyAdmissionGranted{{host_or_sni=\"example.com\",port=443}}`\n\
+         # per executor session. RFC-2606 reserved, IANA-maintained.\n\
          [egress]\n\
-         domains = [\"api.anthropic.com\"]\n\
+         domains = [\"api.anthropic.com\", \"example.com\"]\n\
          patterns = []\n\
          \n\
          [[providers]]\n\
@@ -1016,19 +1021,42 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
     // disk; absent binary → skip + eprintln (avoids hanging the
     // test on a broken policy).
     if let Some(verifier_bin) = sibling_verifier_binary(gateway_binary) {
+        // The comment below mirrors the checked-in
+        // `live-e2e/examples/policy.toml` block so an operator
+        // diffing the live runtime config against the example
+        // reads the same prose verbatim. Keep them in lock-step
+        // when either side is edited (the
+        // `examples_policy_carries_no_secret_strings_gate`
+        // regression test pins the example side; the
+        // `iter65_harness_gate_block_mirrors_examples_comment`
+        // test below pins this side).
         let gate_block = format!(
             "\n# ── [[gates]] — witness verifier (iter62 / iter63) ──\n\
              # Real, fast worktree-scanning gate. Source:\n\
-             # `crates/verifier-no-secrets/`.\n\
-             # See `INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01` for\n\
-             # the rationale (this is the live coverage point for the\n\
-             # iter63 recheck-clear paired-write audit row).\n\
+             # `crates/verifier-no-secrets/`. Every `IntegrationMerge`\n\
+             # intent transitions `Admitted → GatesPending` and the kernel\n\
+             # `scheduler/dag.rs::transition_to_admitted` blocks the merge\n\
+             # until a `VerifierWitnessReceived{{gate_type=\"NoSecretStrings\",\n\
+             # verdict=\"Pass\"}}` row lands on the audit chain. See\n\
+             # `INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01` for the rationale\n\
+             # (this is the live coverage point for the iter63 recheck-clear\n\
+             # paired-write audit row) and `INV-GATE-PRECEDENCE-01` for the\n\
+             # kernel's gate-then-merge ordering contract.\n\
              [[gates]]\n\
              gate_type        = \"NoSecretStrings\"\n\
              verifier_command = \"{vb}\"\n\
              max_wall_seconds = 30\n\
              max_memory_bytes = 268435456\n\
-             network_allowed  = false\n",
+             network_allowed  = false\n\
+             # iter65 — tier-2 fallback for the `agent_hint` resolution chain\n\
+             # (`INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01`). The verifier's\n\
+             # `body.agent_hint` (tier 1) is the preferred source — populated\n\
+             # per failure code path by `raxis-verifier-no-secrets`. This\n\
+             # `agent_hint_default` only fires when a verifier author shipped\n\
+             # a Fail / Inconclusive without a wire-valid hint (e.g. an early\n\
+             # build before the verifier was migrated to the typestate SDK).\n\
+             # Required at policy load whenever `[gate_fixup].enabled = true`.\n\
+             agent_hint_default = \"A `NoSecretStrings` gate detected secret-shaped material in your commit. Remove any literal API keys, tokens, or credentials and reference them via env vars or your secret store instead. Re-run your local secret scanner before resubmitting.\"\n",
             vb = verifier_bin.display(),
         );
         body.push_str(&gate_block);
@@ -3416,6 +3444,233 @@ mod tests {
         assert!(
             hit.len() >= "sk-ant-api03-".len() + 20,
             "hit must include the full key body: {hit}"
+        );
+    }
+
+    /// **`INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01` mirror pin.**
+    ///
+    /// The checked-in `live-e2e/examples/policy.toml` MUST carry
+    /// a `[[gates]]` block declaring the `NoSecretStrings`
+    /// witness verifier. An operator reading the example must be
+    /// able to see, in one place, every kernel-side enforcement
+    /// gate the realism harness wires up — otherwise the harness's
+    /// dynamic `enable_gateway_in_policy` injection becomes the
+    /// only place the gate is expressed, and the example drifts
+    /// silently out of sync with what the live kernel actually
+    /// runs (which is what the operator saw in iter65 when the
+    /// `VerifierWitnessReceived` events were present in the audit
+    /// chain but the example carried no gate row).
+    ///
+    /// Mirrors `iter65_harness_gate_block_mirrors_examples_comment`
+    /// below — that test pins the runtime side, this one pins the
+    /// example side, and the two together guarantee the
+    /// example→harness mirror stays bidirectional.
+    #[test]
+    fn examples_policy_carries_no_secret_strings_gate() {
+        let path = realism_workspace_root().join("live-e2e/examples/policy.toml");
+        let body = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "read examples policy.toml at {}: {e}",
+                path.display(),
+            )
+        });
+        let v: toml::Value = toml::from_str(&body).unwrap_or_else(|e| {
+            panic!(
+                "parse examples policy.toml at {} as TOML: {e}",
+                path.display(),
+            )
+        });
+        let gates = v
+            .get("gates")
+            .and_then(|g| g.as_array())
+            .unwrap_or_else(|| {
+                panic!(
+                    "examples policy.toml {} MUST carry a [[gates]] array; \
+                     INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01 requires \
+                     the witness verifier gate be visible to operators",
+                    path.display(),
+                )
+            });
+        let gate_types: Vec<&str> = gates
+            .iter()
+            .filter_map(|g| g.get("gate_type").and_then(|t| t.as_str()))
+            .collect();
+        assert!(
+            gate_types.contains(&"NoSecretStrings"),
+            "examples policy.toml {} MUST declare a [[gates]] row with \
+             gate_type=\"NoSecretStrings\"; got gate_types={gate_types:?}",
+            path.display(),
+        );
+        // Verify the load-bearing knobs are present (not the
+        // PLACEHOLDER value — operators may substitute their own
+        // build paths — but the field MUST exist so the schema
+        // is complete enough to load).
+        let row = gates
+            .iter()
+            .find(|g| g.get("gate_type").and_then(|t| t.as_str()) == Some("NoSecretStrings"))
+            .expect("NoSecretStrings row located above");
+        for required in [
+            "verifier_command",
+            "max_wall_seconds",
+            "max_memory_bytes",
+            "network_allowed",
+            // iter65 — `INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01`
+            // tier-2. Must be present in the example so operators see
+            // the contract before they enable `[gate_fixup]`.
+            "agent_hint_default",
+        ] {
+            assert!(
+                row.get(required).is_some(),
+                "NoSecretStrings gate row in {} is missing `{required}`",
+                path.display(),
+            );
+        }
+        // The `agent_hint_default` value must be a non-empty string
+        // — empty defaults would silently route through to the
+        // defensive gate-name fallback at runtime, and that
+        // fallback is intended to be unreachable in steady state.
+        let default_hint = row
+            .get("agent_hint_default")
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        assert!(
+            !default_hint.trim().is_empty(),
+            "NoSecretStrings agent_hint_default in {} must be a \
+             non-empty string (tier-2 of the agent-hint resolution \
+             chain). Got: {default_hint:?}",
+            path.display(),
+        );
+        // The comment block that explains WHY the gate is wired
+        // is the operator-facing prose; check a key invariant
+        // reference is present so a future "drop the explanation"
+        // diff is caught here.
+        assert!(
+            body.contains("INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01"),
+            "examples policy.toml {} MUST cite \
+             INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01 in the \
+             [[gates]] comment so operators can find the rationale",
+            path.display(),
+        );
+        // iter65 — the example must also cite the new tier-resolution
+        // invariant so operators inspecting policy.toml see the chain
+        // contract documented in-place.
+        assert!(
+            body.contains("INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01"),
+            "examples policy.toml {} MUST cite \
+             INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01 in the \
+             agent_hint_default comment so operators see the \
+             tier-2 fallback contract before enabling [gate_fixup]",
+            path.display(),
+        );
+    }
+
+    /// Mirror pin for the runtime side of the gate block.
+    ///
+    /// `enable_gateway_in_policy` appends the gate block at run
+    /// time, with the same operator-facing comment the example
+    /// carries (so an operator diffing the live kernel's resolved
+    /// policy.toml against the checked-in example reads the same
+    /// prose verbatim). This test reproduces the gate-injection
+    /// path in isolation and asserts the load-bearing markers are
+    /// present — the invariant ID, the gate_type, and the four
+    /// schema fields.
+    ///
+    /// Paired with `examples_policy_carries_no_secret_strings_gate`
+    /// above; together they pin the example↔harness mirror.
+    #[test]
+    fn iter65_harness_gate_block_mirrors_examples_comment() {
+        // Reproduce the harness's gate block with a synthetic
+        // verifier path so the format!() expansion runs without
+        // requiring the real binary on disk.
+        let synthetic_verifier =
+            std::path::PathBuf::from("/synthetic/target/release/raxis-verifier-no-secrets");
+        let gate_block = format!(
+            "\n# ── [[gates]] — witness verifier (iter62 / iter63) ──\n\
+             # Real, fast worktree-scanning gate. Source:\n\
+             # `crates/verifier-no-secrets/`. Every `IntegrationMerge`\n\
+             # intent transitions `Admitted → GatesPending` and the kernel\n\
+             # `scheduler/dag.rs::transition_to_admitted` blocks the merge\n\
+             # until a `VerifierWitnessReceived{{gate_type=\"NoSecretStrings\",\n\
+             # verdict=\"Pass\"}}` row lands on the audit chain. See\n\
+             # `INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01` for the rationale\n\
+             # (this is the live coverage point for the iter63 recheck-clear\n\
+             # paired-write audit row) and `INV-GATE-PRECEDENCE-01` for the\n\
+             # kernel's gate-then-merge ordering contract.\n\
+             [[gates]]\n\
+             gate_type        = \"NoSecretStrings\"\n\
+             verifier_command = \"{vb}\"\n\
+             max_wall_seconds = 30\n\
+             max_memory_bytes = 268435456\n\
+             network_allowed  = false\n\
+             # iter65 — tier-2 fallback for the `agent_hint` resolution chain\n\
+             # (`INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01`). The verifier's\n\
+             # `body.agent_hint` (tier 1) is the preferred source — populated\n\
+             # per failure code path by `raxis-verifier-no-secrets`. This\n\
+             # `agent_hint_default` only fires when a verifier author shipped\n\
+             # a Fail / Inconclusive without a wire-valid hint (e.g. an early\n\
+             # build before the verifier was migrated to the typestate SDK).\n\
+             # Required at policy load whenever `[gate_fixup].enabled = true`.\n\
+             agent_hint_default = \"A `NoSecretStrings` gate detected secret-shaped material in your commit. Remove any literal API keys, tokens, or credentials and reference them via env vars or your secret store instead. Re-run your local secret scanner before resubmitting.\"\n",
+            vb = synthetic_verifier.display(),
+        );
+        // The comment markers MUST be present.
+        for needle in [
+            "witness verifier (iter62 / iter63)",
+            "Real, fast worktree-scanning gate",
+            "INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01",
+            "INV-GATE-PRECEDENCE-01",
+            "scheduler/dag.rs::transition_to_admitted",
+            "VerifierWitnessReceived",
+            // iter65 mirror — the agent-hint comment block must also
+            // be present in the runtime side so the example diff is
+            // byte-for-byte stable.
+            "INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01",
+            "tier-2 fallback for the `agent_hint` resolution chain",
+        ] {
+            assert!(
+                gate_block.contains(needle),
+                "runtime gate block must contain `{needle}` so the\n\
+                 example mirror stays in lock-step with the live\n\
+                 policy.toml the kernel actually loads; got:\n{gate_block}",
+            );
+        }
+        // The block MUST parse as a valid TOML fragment.
+        let parsed: toml::Value = toml::from_str(&gate_block)
+            .expect("runtime gate block must parse as TOML");
+        let gates = parsed
+            .get("gates")
+            .and_then(|g| g.as_array())
+            .expect("runtime gate block parses to a [[gates]] array");
+        assert_eq!(gates.len(), 1, "exactly one [[gates]] row");
+        let row = &gates[0];
+        assert_eq!(
+            row.get("gate_type").and_then(|t| t.as_str()),
+            Some("NoSecretStrings"),
+        );
+        // verifier_command must carry the synthetic path verbatim
+        // — proves the `format!` substitution is wired correctly.
+        assert_eq!(
+            row.get("verifier_command").and_then(|t| t.as_str()),
+            Some(synthetic_verifier.to_string_lossy().as_ref()),
+        );
+        // iter65 — the runtime block must carry the tier-2
+        // `agent_hint_default` so when the operator enables
+        // `[gate_fixup]` the policy passes the per-gate validator
+        // even at first boot.
+        let default_hint = row
+            .get("agent_hint_default")
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        assert!(
+            !default_hint.trim().is_empty(),
+            "runtime gate block must carry a non-empty \
+             agent_hint_default; got: {default_hint:?}",
+        );
+        assert!(
+            default_hint.contains("NoSecretStrings"),
+            "agent_hint_default must reference the gate by name so \
+             the resolved tier-2 critique is gate-self-identifying \
+             when surfaced to the agent",
         );
     }
 

@@ -696,6 +696,30 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         K::VerifierVmForcedShutdown { .. } => Some(High),
         K::WitnessHandlerTimeout { .. } => Some(High),
         K::WitnessOperatorHintSpoofingDetected { .. } => Some(Critical),
+        // iter65 gate-rejection orchestrator-fixup family.
+        //
+        // `GateRejectionAccepted`: a non-Pass gate witness was just
+        // committed AND the operator has a `[gate_fixup]` profile
+        // configured. The orchestrator-driven fixup loop will pick
+        // it up; medium priority because the kernel + orchestrator
+        // are already coordinating recovery (mirrors
+        // `ReviewAggregationCompleted` priority discipline).
+        K::GateRejectionAccepted { .. } => Some(Medium),
+        // `GateRejectionTerminal`: a gate rejection ended in
+        // task-Failed (no profile, budget exhausted, fixup failed).
+        // High priority — the operator now owns the next move
+        // (mirror of the reviewer-rejection-terminal pattern).
+        K::GateRejectionTerminal { .. } => Some(High),
+        // `GateFixupSpawned`: kernel admitted a fixup task on
+        // behalf of the orchestrator. Medium — pure observability
+        // of the fixup chain, paired with the eventual
+        // `GateFixupCompleted` that closes the loop.
+        K::GateFixupSpawned { .. } => Some(Medium),
+        K::GateFixupCompleted { .. } => Some(Medium),
+        // `WitnessMissingAgentHint`: verifier author shipped a weak
+        // hint (tier-1 missing) or wire-invalid hint. Medium
+        // operator-attention signal — actionable but not a page.
+        K::WitnessMissingAgentHint { .. } => Some(Medium),
         K::PlannerMaxTurnsProgressivelyScaled { .. } => None,
         // `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
         // (iter65-review) — every emit of this anchor means an

@@ -1601,6 +1601,9 @@ mod planner_dispatch_log_tests {
             approved: None,
             critique: None,
             resolved_via_escalation: None,
+            sub_task_kind: None,
+            parent_gate_failure_task_id: None,
+            parent_gate_failure_type: None,
             tokens_used: None,
             structured_output: None,
         }

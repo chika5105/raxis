@@ -146,6 +146,16 @@ pub const PLANNER_TASK_PROMPT_FILE_NAME: &str = "task-prompt.txt";
 /// *renamed*. Adding a field is non-breaking.
 pub const KSB_SCHEMA_VERSION: u32 = 1;
 
+/// iter65 — `INV-WITNESS-AGENT-HINT-WIRE-VALID-01` mirror.
+/// Maximum size of the `agent_hint` field carried in
+/// [`GateFixupContext`]. Matches the kernel's witness-handler
+/// constant (`WITNESS_AGENT_HINT_MAX_BYTES`) so the assembler
+/// can defensively bound the hint at projection time without
+/// depending on kernel internals. The witness handler is the
+/// primary enforcement point; this constant is the secondary
+/// bound applied at KSB-render time.
+pub const AGENT_HINT_MAX_BYTES: usize = 8192;
+
 // ---------------------------------------------------------------------------
 // KsbSnapshot — what the kernel projects + the renderer formats
 // ---------------------------------------------------------------------------
@@ -288,6 +298,89 @@ pub struct KsbSnapshot {
     /// Non-breaking addition (per the field-shape contract above).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_critique: Option<String>,
+
+    /// iter65 — `INV-KSB-GATE-FIXUP-CONTEXT-01`. Populated for
+    /// gate-fixup executor tasks only (`tasks.is_gate_fixup = 1`).
+    /// Carries the focused repair-context the fixup executor
+    /// needs: the gate that failed, the verifier-/operator-supplied
+    /// `agent_hint`, the parent task id, the parent's failing
+    /// `evaluation_sha`, and the worktree pointer the fixup
+    /// inherits from the parent's session. Tasks that are not
+    /// gate-fixup MUST leave this field `None` so the KSB shape
+    /// for the steady-state executor / reviewer / orchestrator
+    /// path is unchanged.
+    ///
+    /// **Why a focused block instead of dumping the full DAG.**
+    /// The fixup executor's job is ONE thing — repair the cited
+    /// gate failure. The standard KSB's `dag_rows`, `reviewer_verdicts`,
+    /// `pending_escalations` columns dilute the prompt with state
+    /// the fixup doesn't act on. The focused block keeps the
+    /// signal-to-noise ratio high and pins the role boundary —
+    /// a gate-fixup executor that starts reasoning about
+    /// initiative-level lifecycle decisions is out of contract.
+    ///
+    /// Non-breaking addition (per the field-shape contract above).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_fixup: Option<GateFixupContext>,
+}
+
+// ---------------------------------------------------------------------------
+// GateFixupContext — iter65 fixup-executor KSB block
+// ---------------------------------------------------------------------------
+
+/// Per-session view of the gate failure the fixup executor is
+/// meant to repair. Populated only when `tasks.is_gate_fixup = 1`.
+///
+/// Wire shape under JSON:
+/// ```json
+/// {
+///   "gate_type": "NoSecretStrings",
+///   "agent_hint": "Remove AWS access key from src/auth.rs:42 and reference env var.",
+///   "parent_task_id": "task-7",
+///   "parent_evaluation_sha": "abcdef0123...",
+///   "parent_worktree_pointer": "/var/lib/raxis/worktrees/init-3/task-7",
+///   "attempt_index": 1,
+///   "max_attempts": 3
+/// }
+/// ```
+///
+/// The kernel-side assembler reads these fields from
+/// `tasks.last_gate_type`, `tasks.last_gate_critique`,
+/// `tasks.parent_gate_failure_task_id`, plus a join into the
+/// parent's `tasks` + `sessions` rows. The renderer is
+/// chokepoint-validated against `KSB_DELIMITER_CLOSE` injection
+/// the same way every other text field is.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GateFixupContext {
+    /// `GateType` the parent task failed against. Stable
+    /// canonical name from `raxis_types::GateType::as_str()`.
+    pub gate_type: String,
+    /// Resolved repair hint — the verifier-emitted hint, the
+    /// operator-default hint, or the defensive gate-name template
+    /// per `INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01`. Bounded
+    /// by `WITNESS_AGENT_HINT_MAX_BYTES` (8 KiB).
+    pub agent_hint: String,
+    /// Parent (`is_gate_fixup = 0`) task whose gate failed. The
+    /// fixup executor is allowed to read this task's state via
+    /// the standard kernel facilities; the agent treats it as
+    /// the artifact under repair.
+    pub parent_task_id: String,
+    /// 40-char hex SHA of the parent's `evaluation_sha` at fixup
+    /// spawn time. The fixup commits on top of this SHA so the
+    /// parent's range stays intact.
+    pub parent_evaluation_sha: String,
+    /// Absolute or pointer path the kernel substrate provisions
+    /// the fixup's `/workspace` mount against. Same shape carried
+    /// in `KernelPush::GateRejected.parent_worktree_pointer`.
+    pub parent_worktree_pointer: String,
+    /// 1-based fixup attempt index. First fixup has
+    /// `attempt_index = 1`; subsequent attempts increment.
+    pub attempt_index: u32,
+    /// `[gate_fixup].max_attempts` configured at the time. The
+    /// fixup executor sees `attempt_index` and `max_attempts`
+    /// together so it can budget its repair effort against the
+    /// remaining retry quota.
+    pub max_attempts: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -837,6 +930,25 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
             });
         }
     }
+    // iter65 — defend the `gate_fixup` block. Every text field
+    // (notably `agent_hint`, which is verifier-script-authored)
+    // is scanned for the close delimiter the same way every
+    // other text field in this projection is.
+    if let Some(gf) = &snapshot.gate_fixup {
+        for s in [
+            &gf.gate_type,
+            &gf.agent_hint,
+            &gf.parent_task_id,
+            &gf.parent_evaluation_sha,
+            &gf.parent_worktree_pointer,
+        ] {
+            if s.contains(KSB_DELIMITER_CLOSE) {
+                return Err(KsbError::DelimiterInjection {
+                    field: "gate_fixup",
+                });
+            }
+        }
+    }
 
     let mut buf = String::with_capacity(512 + snapshot.task_description.len());
     buf.push_str(KSB_DELIMITER_OPEN);
@@ -1022,6 +1134,46 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
         } else {
             for line in critique.lines() {
                 buf.push_str("  ");
+                buf.push_str(line);
+                buf.push('\n');
+            }
+        }
+    }
+
+    // iter65 — `INV-KSB-GATE-FIXUP-CONTEXT-01`. The focused
+    // gate-fixup block. Only rendered for the gate-fixup
+    // executor's KSB; non-fixup tasks leave the field `None`
+    // so the wire stays compact for the steady-state path. The
+    // `agent_hint` is rendered as a multi-line indented block
+    // (matching `task_description=` / `last_critique=`) because
+    // the hint is operator-readable text that may exceed one
+    // line; every other field is a single-line key=value
+    // primitive.
+    if let Some(gf) = &snapshot.gate_fixup {
+        buf.push_str("gate_fixup=\n");
+        buf.push_str("  gate_type=");
+        buf.push_str(&gf.gate_type);
+        buf.push('\n');
+        buf.push_str("  parent_task_id=");
+        buf.push_str(&gf.parent_task_id);
+        buf.push('\n');
+        buf.push_str("  parent_evaluation_sha=");
+        buf.push_str(&gf.parent_evaluation_sha);
+        buf.push('\n');
+        buf.push_str("  parent_worktree_pointer=");
+        buf.push_str(&gf.parent_worktree_pointer);
+        buf.push('\n');
+        buf.push_str("  attempt=");
+        buf.push_str(&gf.attempt_index.to_string());
+        buf.push('/');
+        buf.push_str(&gf.max_attempts.to_string());
+        buf.push('\n');
+        buf.push_str("  agent_hint=\n");
+        if gf.agent_hint.is_empty() {
+            buf.push_str("    <empty>\n");
+        } else {
+            for line in gf.agent_hint.lines() {
+                buf.push_str("    ");
                 buf.push_str(line);
                 buf.push('\n');
             }
@@ -1306,6 +1458,21 @@ mod tests {
             credential_ports: vec![],
             capabilities: None,
             last_critique: None,
+            gate_fixup: None,
+        }
+    }
+
+    fn gate_fixup_fixture() -> GateFixupContext {
+        GateFixupContext {
+            gate_type: "NoSecretStrings".to_owned(),
+            agent_hint: "Remove the AWS access key shape from src/auth.rs:42 \
+                         and reference an env var instead."
+                .to_owned(),
+            parent_task_id: "task-7".to_owned(),
+            parent_evaluation_sha: "deadbeefcafebabedeadbeefcafebabedeadbeef".to_owned(),
+            parent_worktree_pointer: "/var/lib/raxis/worktrees/init-3/task-7".to_owned(),
+            attempt_index: 1,
+            max_attempts: 3,
         }
     }
 
@@ -1694,6 +1861,168 @@ mod tests {
             role: role.to_owned(),
             planner_max_turns: max_turns,
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // iter65 — INV-KSB-GATE-FIXUP-CONTEXT-01
+    //
+    // The fixup-executor's KSB MUST carry a focused `gate_fixup=`
+    // block with the gate_type, repair hint, parent linkage, and
+    // attempt counter. Non-fixup tasks MUST NOT emit the block so
+    // the steady-state KSB shape (executor / reviewer / orchestrator)
+    // is unaffected.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Pinned positive case — the focused block appears when
+    /// `gate_fixup` is `Some`. All five primitive lines are
+    /// rendered in the specified order and the `agent_hint`
+    /// block is rendered as a multi-line indented sub-block.
+    #[test]
+    fn render_emits_gate_fixup_block_when_set() {
+        let mut snap = fixture_snapshot();
+        snap.gate_fixup = Some(gate_fixup_fixture());
+        let s = render_ksb(&snap).unwrap();
+        assert!(
+            s.contains("gate_fixup=\n"),
+            "rendered KSB must open a `gate_fixup=` block; got: {s}"
+        );
+        assert!(
+            s.contains("  gate_type=NoSecretStrings\n"),
+            "rendered KSB must carry the gate_type primitive; got: {s}"
+        );
+        assert!(
+            s.contains("  parent_task_id=task-7\n"),
+            "rendered KSB must carry the parent_task_id primitive; got: {s}"
+        );
+        assert!(
+            s.contains("  parent_evaluation_sha=deadbeefcafebabedeadbeefcafebabedeadbeef\n"),
+            "rendered KSB must carry the parent_evaluation_sha primitive; got: {s}"
+        );
+        assert!(
+            s.contains("  parent_worktree_pointer=/var/lib/raxis/worktrees/init-3/task-7\n"),
+            "rendered KSB must carry the parent_worktree_pointer primitive; got: {s}"
+        );
+        assert!(
+            s.contains("  attempt=1/3\n"),
+            "rendered KSB must carry the attempt counter; got: {s}"
+        );
+        assert!(
+            s.contains("  agent_hint=\n"),
+            "rendered KSB must open an indented agent_hint sub-block; got: {s}"
+        );
+        assert!(
+            s.contains("    Remove the AWS access key shape from src/auth.rs:42"),
+            "rendered KSB must indent the agent_hint body; got: {s}"
+        );
+    }
+
+    /// Pinned negative case — non-fixup tasks (`gate_fixup =
+    /// None`) MUST omit the entire block so the wire stays
+    /// compact and the steady-state KSB shape is unchanged.
+    #[test]
+    fn render_omits_gate_fixup_block_for_non_fixup_tasks() {
+        let snap = fixture_snapshot();
+        assert!(snap.gate_fixup.is_none());
+        let s = render_ksb(&snap).unwrap();
+        assert!(
+            !s.contains("gate_fixup="),
+            "non-fixup KSB must NOT emit the `gate_fixup=` block; got: {s}"
+        );
+    }
+
+    /// Empty `agent_hint` strings render as the `<empty>`
+    /// placeholder so the LLM sees a structurally complete
+    /// block even when (defensively) the kernel projection
+    /// produced an empty hint. The renderer never panics on
+    /// empty strings.
+    #[test]
+    fn render_gate_fixup_empty_agent_hint_renders_placeholder() {
+        let mut snap = fixture_snapshot();
+        let mut gf = gate_fixup_fixture();
+        gf.agent_hint = String::new();
+        snap.gate_fixup = Some(gf);
+        let s = render_ksb(&snap).unwrap();
+        assert!(
+            s.contains("agent_hint=\n    <empty>\n"),
+            "empty agent_hint must render as <empty> placeholder; got: {s}"
+        );
+    }
+
+    /// Renderer MUST reject `KSB_DELIMITER_CLOSE` injected via any
+    /// gate-fixup text field. Defense-in-depth: the
+    /// verifier-supplied `agent_hint` is the highest-risk surface
+    /// because it transits operator-controlled verifier scripts.
+    /// The pre-render scan fails the whole render closed.
+    #[test]
+    fn render_rejects_close_delimiter_in_gate_fixup_fields() {
+        for (field_name, mutator) in [
+            (
+                "gate_type",
+                Box::new(|gf: &mut GateFixupContext| {
+                    gf.gate_type = format!("evil{KSB_DELIMITER_CLOSE}")
+                }) as Box<dyn Fn(&mut GateFixupContext)>,
+            ),
+            (
+                "agent_hint",
+                Box::new(|gf: &mut GateFixupContext| {
+                    gf.agent_hint = format!("hint with embedded {KSB_DELIMITER_CLOSE}")
+                }),
+            ),
+            (
+                "parent_task_id",
+                Box::new(|gf: &mut GateFixupContext| {
+                    gf.parent_task_id = format!("p{KSB_DELIMITER_CLOSE}")
+                }),
+            ),
+            (
+                "parent_evaluation_sha",
+                Box::new(|gf: &mut GateFixupContext| {
+                    gf.parent_evaluation_sha = format!("sha{KSB_DELIMITER_CLOSE}")
+                }),
+            ),
+            (
+                "parent_worktree_pointer",
+                Box::new(|gf: &mut GateFixupContext| {
+                    gf.parent_worktree_pointer = format!("/path{KSB_DELIMITER_CLOSE}")
+                }),
+            ),
+        ] {
+            let mut snap = fixture_snapshot();
+            let mut gf = gate_fixup_fixture();
+            mutator(&mut gf);
+            snap.gate_fixup = Some(gf);
+            match render_ksb(&snap).unwrap_err() {
+                KsbError::DelimiterInjection { field } => {
+                    assert_eq!(
+                        field, "gate_fixup",
+                        "delimiter injection in gate_fixup.{field_name} must \
+                         classify as `gate_fixup`, not `{field}`"
+                    );
+                }
+                other => panic!(
+                    "expected DelimiterInjection on gate_fixup.{field_name}, got {other:?}"
+                ),
+            }
+        }
+    }
+
+    /// The JSON wire shape MUST round-trip when `gate_fixup` is
+    /// populated. The kernel-side assembler serializes the
+    /// snapshot to JSON before the substrate hands it to the
+    /// driver; the driver-side deserialization must observe
+    /// every field unchanged. Pinned alongside the existing
+    /// `json_round_trip_produces_identical_render` test for the
+    /// steady-state shape.
+    #[test]
+    fn render_gate_fixup_block_json_round_trips() {
+        let mut snap = fixture_snapshot();
+        snap.gate_fixup = Some(gate_fixup_fixture());
+        let json = serde_json::to_string(&snap).unwrap();
+        let decoded: KsbSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, decoded);
+        let a = render_ksb(&snap).unwrap();
+        let b = render_ksb(&decoded).unwrap();
+        assert_eq!(a, b);
     }
 
     #[test]

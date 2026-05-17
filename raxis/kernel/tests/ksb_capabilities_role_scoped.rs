@@ -269,6 +269,7 @@ fn rendered_capabilities_block_respects_role_scope() {
             credential_ports: vec![],
             capabilities: Some(caps),
             last_critique: None,
+            gate_fixup: None,
         }
     }
 
@@ -377,6 +378,7 @@ fn inv_ksb_max_turns_visibility_01_all_three_roles_carry_planner_max_turns() {
             credential_ports: vec![],
             capabilities: Some(caps),
             last_critique: None,
+            gate_fixup: None,
         }
     }
 
@@ -579,5 +581,6 @@ fn fixture_with_caps(caps: Capabilities, role: &'static str) -> raxis_ksb::KsbSn
         credential_ports: vec![],
         capabilities: Some(caps),
         last_critique: None,
+        gate_fixup: None,
     }
 }

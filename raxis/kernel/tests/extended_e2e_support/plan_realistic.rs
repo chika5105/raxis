@@ -150,6 +150,22 @@ pub const TASK_SERVICE_ROUND_TRIP: &str = super::service_evidence::TASK_SERVICE_
 pub const TASK_CREDENTIAL_SUBSTITUTION_CANARY: &str =
     super::credential_substitution_evidence::TASK_CREDENTIAL_SUBSTITUTION_CANARY;
 
+/// Dep-fetch-evidence executor task id — the first end-to-end
+/// exercise of the kernel's Path A3 mediated-egress stack
+/// (in-VM tproxy → vsock → kernel admission → upstream TCP →
+/// byte tunnel) under a real agent's `python3 http.client` GET
+/// to `https://example.com/`. The executor writes a JSON
+/// evidence file to `out/deps/install-evidence.json` and commits
+/// it; the witness in
+/// [`super::dep_fetch_evidence::DepFetchEvidenceWitness`] pins
+/// (a) `TproxyAdmissionGranted{host_or_sni="example.com",port=443}`
+/// scoped to the executor's session, (b) zero
+/// `TproxyAdmissionDenied` for that host on the same session,
+/// (c) the on-disk evidence carries `http_status=200` +
+/// `body_contains_example_domain=true`.
+pub const TASK_DEP_FETCH_EVIDENCE: &str =
+    super::dep_fetch_evidence::TASK_DEP_FETCH_EVIDENCE;
+
 /// Transparent-proxy real-scripts executor task id (P3-10).
 ///
 /// Companion to `service-round-trip`: the executor is handed a
@@ -256,6 +272,16 @@ pub const TRANSPARENT_PROXY_REALSCRIPTS_PROMPT_MD: &str =
 pub const CREDENTIAL_SUBSTITUTION_CANARY_PROMPT_MD: &str =
     include_str!("../../../live-e2e/seed/prompts/credential_substitution_canary.md");
 
+/// Dep-fetch-evidence prompt. Drives the executor through one
+/// real HTTPS `GET https://example.com/` via Python stdlib
+/// `http.client` and a commit of the parsed evidence to
+/// `out/deps/install-evidence.json`. The prompt body is the
+/// source of truth for the endpoint pinning + the evidence
+/// schema; the matching witness in [`super::dep_fetch_evidence`]
+/// reads the same constants.
+pub const DEP_FETCH_EVIDENCE_PROMPT_MD: &str =
+    include_str!("../../../live-e2e/seed/prompts/dep_fetch_evidence.md");
+
 // ---------------------------------------------------------------------------
 // Plan-TOML builder.
 // ---------------------------------------------------------------------------
@@ -272,6 +298,7 @@ pub fn realistic_plan_toml() -> String {
     let service_rt = SERVICE_ROUND_TRIP_PROMPT_MD;
     let transparent_rt = TRANSPARENT_PROXY_REALSCRIPTS_PROMPT_MD;
     let cred_sub = CREDENTIAL_SUBSTITUTION_CANARY_PROMPT_MD;
+    let dep_fetch = DEP_FETCH_EVIDENCE_PROMPT_MD;
     let mut s = String::new();
     s.push_str(REALISTIC_PLAN_HEADER);
     s.push_str("\n\n");
@@ -314,6 +341,10 @@ pub fn realistic_plan_toml() -> String {
     s.push_str(cred_sub);
     s.push_str("\n\"\"\"\n");
     s.push_str(REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_CREDS);
+    s.push_str("\n\n");
+    s.push_str(REALISTIC_PLAN_DEP_FETCH_EVIDENCE_HEAD);
+    s.push_str(dep_fetch);
+    s.push_str("\n\"\"\"\n");
     s
 }
 
@@ -1034,6 +1065,42 @@ const REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_CREDS: &str = r#"
   proxy_type = "postgres"
   mount_as   = "DATABASE_URL""#;
 
+// -- Dep-fetch-evidence Executor (mediated egress, iter65) ------
+//
+// First end-to-end exercise of Path A3 from inside a real executor
+// agent: one `python3 http.client` HTTPS GET to the IANA-reserved
+// `example.com` page (stable across years, public DNS, deterministic
+// substring `Example Domain` in the body), then commit a small JSON
+// evidence file. No package manager, no second host, no retry loop.
+//
+// `path_allowlist` is tight (`out/deps/`) so a leaky implementation
+// that writes anywhere else will trip
+// `FAIL_TASK_PATH_NOT_ALLOWED` and the witness will see the chain
+// admission go missing. `max_turns = 30` is generous for a
+// mechanical task — `mkdir`, one Python here-doc, `cat`, `git add`,
+// `git commit`, `task_complete` is ~8 turns natural; the slack
+// covers occasional planner retries on transport timeouts.
+//
+// `predecessors` is intentionally empty: the dep-fetch task is
+// independent of the other realism workloads, so it can run in
+// parallel with `materialize-records` / `xfile-refactor` and
+// surface egress wiring breakage early (failing this task does
+// NOT block the rest of the plan; the witness fires terminally
+// at the end of the run alongside the other global witnesses).
+const REALISTIC_PLAN_DEP_FETCH_EVIDENCE_HEAD: &str = r#"# -- Dep-fetch-evidence Executor (Path A3 mediated egress) ----
+[[tasks]]
+task_id            = "dep-fetch-evidence"
+name               = "Fetch example.com over HTTPS and commit evidence JSON (Path A3 mediated egress)"
+session_agent_type = "Executor"
+# Mechanical: mkdir → one python3 http.client GET → write JSON →
+# git add → git commit → task_complete. ~8 turns natural; 30
+# leaves headroom for a single transport-timeout retry. Per
+# `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 30
+path_allowlist     = ["out/deps/"]
+description = """
+"#;
+
 // ---------------------------------------------------------------------------
 // Tests — sanity-check the TOML decodes and pins the task list.
 // ---------------------------------------------------------------------------
@@ -1069,6 +1136,7 @@ mod tests {
             TASK_SERVICE_ROUND_TRIP,
             TASK_TRANSPARENT_PROXY_REALSCRIPTS,
             TASK_CREDENTIAL_SUBSTITUTION_CANARY,
+            TASK_DEP_FETCH_EVIDENCE,
         ] {
             assert!(
                 ids.contains(&needle),

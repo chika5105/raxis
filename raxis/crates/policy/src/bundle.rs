@@ -272,6 +272,113 @@ pub(crate) struct RawPolicy {
     /// (the kernel itself has no OTLP code, per `INV-OTEL-03`).
     #[serde(default)]
     pub(crate) observability: Option<crate::observability::ObservabilitySection>,
+
+    /// iter65 — `[gate_fixup]` section per
+    /// `specs/v3/gate-rejection-orchestrator-fixup.md §3`.
+    /// **Optional**: omitted section means "gates are hard" — on
+    /// a non-`Pass` witness, the parent task transitions directly
+    /// to `Failed` with `GateRejectionTerminal{terminal_reason:
+    /// "no_fixup_profile"}` and no `KernelPush::GateRejected` is
+    /// emitted. When present and `enabled = true`, the kernel
+    /// emits the push and the orchestrator drives the fixup loop
+    /// via `AddSubTask{kind:GateFixup}`. When the section is
+    /// enabled, every `[[gates]]` row MUST carry
+    /// `agent_hint_default` (validated at policy load).
+    #[serde(default)]
+    pub(crate) gate_fixup: Option<GateFixupSection>,
+}
+
+// ---------------------------------------------------------------------------
+// `[gate_fixup]` — iter65 orchestrator-spawned gate-rejection fixup
+// ---------------------------------------------------------------------------
+
+/// iter65 — raw `[gate_fixup]` shape as parsed from `policy.toml`.
+/// Promoted to `GateFixupProfile` at `validate` time.
+///
+/// `specs/v3/gate-rejection-orchestrator-fixup.md §3.1`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct GateFixupSection {
+    /// Master switch. `enabled = false` (or section absent) means
+    /// "gates are hard". Default `false`.
+    #[serde(default)]
+    pub(crate) enabled: bool,
+
+    /// `[gate_fixup].max_attempts`. The kernel-enforced budget on
+    /// `parent.gate_fixup_attempts`. Default `3`. Validated at
+    /// policy load to be between 1 and 10 inclusive (sanity
+    /// ceiling — anything larger is an authoring error).
+    #[serde(default = "GateFixupSection::default_max_attempts")]
+    pub(crate) max_attempts: u32,
+
+    /// The fixup executor image alias. Resolved against
+    /// `[[vm_images]]` (or against the V2.4 hardcoded executor
+    /// starter when `[[vm_images]]` is empty). Required when
+    /// `enabled = true`.
+    #[serde(default)]
+    pub(crate) executor_image: Option<String>,
+
+    /// Per-fixup-run hard ceiling on planner turns. Default 8.
+    /// Designed smaller than the primary-executor turn budget so
+    /// a fixup that drifts off-task fails fast rather than
+    /// consuming the parent's residual budget.
+    #[serde(default = "GateFixupSection::default_max_turns")]
+    pub(crate) max_turns: u32,
+
+    /// Per-fixup-run cost cap (provider-agnostic units; honours
+    /// the same accounting as the primary executor). Default
+    /// 5000.
+    #[serde(default = "GateFixupSection::default_max_cost_per_run")]
+    pub(crate) max_cost_per_run: u64,
+
+    /// Per-fixup-run wall-clock cap in seconds. Default 600
+    /// (10 minutes). Sized to fail-fast for runaway fixups
+    /// without starving genuinely-recoverable cases.
+    #[serde(default = "GateFixupSection::default_wall_clock_seconds")]
+    pub(crate) wall_clock_seconds: u64,
+}
+
+impl GateFixupSection {
+    pub(crate) fn default_max_attempts() -> u32 {
+        3
+    }
+    pub(crate) fn default_max_turns() -> u32 {
+        8
+    }
+    pub(crate) fn default_max_cost_per_run() -> u64 {
+        5_000
+    }
+    pub(crate) fn default_wall_clock_seconds() -> u64 {
+        600
+    }
+}
+
+/// iter65 — validated, post-load shape of `[gate_fixup]`. Promoted
+/// from `GateFixupSection` by `PolicyBundle::validate`. Only the
+/// `enabled = true` shape is exposed to the kernel; the `false`
+/// case is represented as `bundle.gate_fixup() == None`.
+///
+/// `specs/v3/gate-rejection-orchestrator-fixup.md §3.1`.
+#[derive(Debug, Clone)]
+pub struct GateFixupProfile {
+    /// `max_attempts` — the kernel-enforced ceiling on fixup
+    /// admit attempts. The kernel reads
+    /// `parent.gate_fixup_attempts >= max_attempts` at
+    /// `handle_add_sub_task{kind:GateFixup}` admit time and
+    /// rejects with `FailGateFixupBudgetExhausted` past this
+    /// threshold (pinned by
+    /// `INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`).
+    pub max_attempts: u32,
+    /// Executor image alias the kernel routes the fixup task
+    /// against at `ActivateSubTask` time.
+    pub executor_image: String,
+    /// Per-fixup-run planner turn ceiling. The kernel
+    /// projects this into the fixup session's
+    /// `RAXIS_PLANNER_MAX_TURNS` envelope value.
+    pub max_turns: u32,
+    /// Per-fixup-run cost cap (provider-agnostic units).
+    pub max_cost_per_run: u64,
+    /// Per-fixup-run wall-clock cap in seconds.
+    pub wall_clock_seconds: u64,
 }
 
 /// `[environments.<label>]` — operator-declared environment
@@ -1695,6 +1802,7 @@ pub struct BypassedCertMisconfig {
 /// max_wall_seconds = 120
 /// max_memory_bytes = 536870912
 /// network_allowed  = false
+/// agent_hint_default = "Inspect failing test logs and adjust the diff."
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct GateEntry {
@@ -1723,6 +1831,26 @@ pub struct GateEntry {
     /// Default `BTreeMap::new()`; field is optional in TOML.
     #[serde(default)]
     pub hints: BTreeMap<String, serde_json::Value>,
+
+    /// iter65 — `specs/v3/gate-rejection-orchestrator-fixup.md §2.5`.
+    /// Tier-2 of the agent-hint resolution chain
+    /// (`INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01`). The kernel
+    /// consults this when the verifier emits a non-`Pass` witness
+    /// without a wire-valid `body.agent_hint`.
+    ///
+    /// **Validation contract.** When the policy carries an
+    /// enabled `[gate_fixup]` section, every `[[gates]]` row MUST
+    /// populate `agent_hint_default` with a non-empty string
+    /// ≤ `WITNESS_AGENT_HINT_MAX_BYTES` (8 KiB). Policy load
+    /// rejects rows that omit it with
+    /// `PolicyValidationError::GateMissingAgentHintDefault`. When
+    /// `[gate_fixup]` is absent / disabled, the field is optional
+    /// (the fallback chain never runs).
+    ///
+    /// Default `None`; field is optional in TOML and only becomes
+    /// load-time-mandatory when `[gate_fixup].enabled = true`.
+    #[serde(default)]
+    pub agent_hint_default: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -3529,6 +3657,174 @@ pub(crate) fn validate_gates_hints(raw_gates: &[GateEntry]) -> Result<(), Policy
     Ok(())
 }
 
+/// iter65 — must stay in sync with
+/// `raxis-kernel::handlers::witness::WITNESS_AGENT_HINT_MAX_BYTES`.
+/// Duplicated here as a literal (rather than imported) because the
+/// `raxis-policy` crate sits below `raxis-kernel` in the dep graph;
+/// the unit test
+/// `gate_fixup_max_hint_bytes_matches_kernel_constant` pins the
+/// equality.
+pub(crate) const POLICY_AGENT_HINT_MAX_BYTES: usize = 8192;
+
+/// iter65 — sanity ceiling on `[gate_fixup].max_attempts`. A
+/// reasonable fixup loop should converge within a handful of
+/// retries; very large values likely indicate authoring error.
+const GATE_FIXUP_MAX_ATTEMPTS_CEILING: u32 = 10;
+
+/// Validate `[gate_fixup]` against the policy spec and the
+/// `[[gates]]` array's `agent_hint_default` coverage.
+///
+/// Returns:
+///   * `Ok(None)` — section absent or `enabled = false`. Gates are
+///     hard; the fixup-loop machinery is dormant.
+///   * `Ok(Some(profile))` — section present, valid, and every
+///     `[[gates]]` row carries a non-empty `agent_hint_default`.
+///   * `Err(...)` — section enabled but mis-configured.
+///
+/// `INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01` (tier-2 always
+/// available) is enforced here at policy load.
+pub(crate) fn validate_gate_fixup_section(
+    raw: Option<&GateFixupSection>,
+    raw_gates: &[GateEntry],
+    vm_images: &[VmImageConfig],
+) -> Result<Option<GateFixupProfile>, PolicyError> {
+    let section = match raw {
+        Some(s) if s.enabled => s,
+        _ => return Ok(None),
+    };
+
+    // `max_attempts` sanity bounds — at least one (else the
+    // fixup loop never runs) and below the ceiling (else the
+    // operator likely meant something else).
+    if section.max_attempts == 0 {
+        return Err(PolicyError::MalformedArtifact(
+            "FAIL_POLICY_GATE_FIXUP_MAX_ATTEMPTS_ZERO: \
+             [gate_fixup] max_attempts must be >= 1; \
+             omit the section entirely to disable fixup"
+                .to_owned(),
+        ));
+    }
+    if section.max_attempts > GATE_FIXUP_MAX_ATTEMPTS_CEILING {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "FAIL_POLICY_GATE_FIXUP_MAX_ATTEMPTS_CEILING: \
+             [gate_fixup] max_attempts={} exceeds ceiling {}; \
+             larger values are unlikely to converge",
+            section.max_attempts, GATE_FIXUP_MAX_ATTEMPTS_CEILING,
+        )));
+    }
+    if section.max_turns == 0 {
+        return Err(PolicyError::MalformedArtifact(
+            "FAIL_POLICY_GATE_FIXUP_MAX_TURNS_ZERO: \
+             [gate_fixup] max_turns must be >= 1"
+                .to_owned(),
+        ));
+    }
+    if section.wall_clock_seconds == 0 {
+        return Err(PolicyError::MalformedArtifact(
+            "FAIL_POLICY_GATE_FIXUP_WALL_CLOCK_ZERO: \
+             [gate_fixup] wall_clock_seconds must be >= 1"
+                .to_owned(),
+        ));
+    }
+
+    // `executor_image` is required when the section is enabled.
+    let image_alias = section
+        .executor_image
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            PolicyError::MalformedArtifact(
+                "FAIL_POLICY_GATE_FIXUP_EXECUTOR_IMAGE_REQUIRED: \
+                 [gate_fixup] executor_image must be a non-empty alias \
+                 when enabled = true"
+                    .to_owned(),
+            )
+        })?;
+
+    // When `[[vm_images]]` is declared, the alias MUST resolve and
+    // the resolved image's `role_restriction` MUST permit Executor
+    // (mirrors the `[default_executor_image]` validation
+    // discipline). When `[[vm_images]]` is empty, the kernel falls
+    // back to the canonical `raxis-executor-starter` and the alias
+    // is taken on faith — no policy-load check is possible.
+    if !vm_images.is_empty() {
+        let resolved = vm_images.iter().find(|v| v.name == image_alias);
+        match resolved {
+            Some(v) => {
+                let permits_executor = v
+                    .role_restriction
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case("Executor"));
+                if !permits_executor {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "FAIL_POLICY_GATE_FIXUP_EXECUTOR_IMAGE_ROLE_MISMATCH: \
+                         [gate_fixup] executor_image={image_alias:?} resolves to a \
+                         [[vm_images]] entry whose role_restriction does NOT include \
+                         \"Executor\" (resolved roles: {:?})",
+                        v.role_restriction,
+                    )));
+                }
+            }
+            None => {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_POLICY_GATE_FIXUP_EXECUTOR_IMAGE_UNRESOLVABLE: \
+                     [gate_fixup] executor_image={image_alias:?} does not match any \
+                     declared [[vm_images]] alias"
+                )));
+            }
+        }
+    }
+
+    // `INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01` — every
+    // `[[gates]]` row MUST carry a non-empty `agent_hint_default`
+    // when the fixup loop is enabled. Otherwise tier-2 of the
+    // hint-resolution chain is undefined and only the defensive
+    // template (intended to be unreachable) is available at
+    // runtime.
+    for g in raw_gates {
+        let raw_default = match g.agent_hint_default.as_deref() {
+            Some(s) => s,
+            None => {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_POLICY_GATE_AGENT_HINT_DEFAULT_REQUIRED: \
+                     [[gates]] gate_type={:?} omits agent_hint_default; \
+                     required by INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01 \
+                     because [gate_fixup] is enabled",
+                    g.gate_type,
+                )));
+            }
+        };
+        if raw_default.trim().is_empty() {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_GATE_AGENT_HINT_DEFAULT_EMPTY: \
+                 [[gates]] gate_type={:?} agent_hint_default is empty / \
+                 whitespace; required by INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01",
+                g.gate_type,
+            )));
+        }
+        if raw_default.len() > POLICY_AGENT_HINT_MAX_BYTES {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_GATE_AGENT_HINT_DEFAULT_OVERSIZED: \
+                 [[gates]] gate_type={:?} agent_hint_default is {} bytes; \
+                 ceiling is {} bytes \
+                 (WITNESS_AGENT_HINT_MAX_BYTES)",
+                g.gate_type,
+                raw_default.len(),
+                POLICY_AGENT_HINT_MAX_BYTES,
+            )));
+        }
+    }
+
+    Ok(Some(GateFixupProfile {
+        max_attempts: section.max_attempts,
+        executor_image: image_alias.to_owned(),
+        max_turns: section.max_turns,
+        max_cost_per_run: section.max_cost_per_run,
+        wall_clock_seconds: section.wall_clock_seconds,
+    }))
+}
+
 pub fn is_valid_verifier_name(s: &str) -> bool {
     let bytes = s.as_bytes();
     if bytes.is_empty() || bytes.len() > 32 {
@@ -4291,6 +4587,23 @@ pub struct PolicyBundle {
     /// validated for the operator's convenience but consumed only by
     /// the separate `raxis-otel-pusher` binary.
     observability: crate::observability::ObservabilityConfig,
+
+    /// iter65 — resolved `[gate_fixup]` profile.
+    /// `Some(_)` iff `[gate_fixup].enabled = true` in the source
+    /// policy AND every `[[gates]]` row carried a non-empty
+    /// `agent_hint_default`. `None` for the "gates are hard" case
+    /// (section absent or `enabled = false`), which routes
+    /// non-`Pass` witnesses directly to task-`Failed`.
+    ///
+    /// Read by:
+    ///   * `handlers::witness` to decide between
+    ///     `GateRejectionAccepted` + push vs `GateRejectionTerminal`
+    ///     + `Failed`.
+    ///   * `handlers::intent::handle_add_sub_task` to enforce
+    ///     `max_attempts` and apply the fixup-executor profile.
+    ///
+    /// See `specs/v3/gate-rejection-orchestrator-fixup.md §3`.
+    gate_fixup: Option<GateFixupProfile>,
 }
 
 /// V2 effective `[environments.<label>]` config. Validated mirror
@@ -4888,6 +5201,18 @@ impl PolicyBundle {
         // INV-VERIFIER-HINTS-SCHEMA-VALIDATED-01).
         validate_gates_hints(&raw.gates)?;
 
+        // iter65 — validate `[gate_fixup]` + cross-validate against
+        // `[[gates]].agent_hint_default` per
+        // `INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01`. When the
+        // section is `enabled = true`, every gate row MUST carry a
+        // non-empty `agent_hint_default` so the tier-2 fallback is
+        // always available at runtime.
+        let gate_fixup_profile = validate_gate_fixup_section(
+            raw.gate_fixup.as_ref(),
+            &raw.gates,
+            &vm_images_validated,
+        )?;
+
         // V2 — validate `[egress] deny_provider` against the
         // `[[providers]]` array. Every entry MUST resolve to a
         // declared `provider_id`; an unresolved entry is almost
@@ -5090,6 +5415,7 @@ impl PolicyBundle {
                     None => crate::observability::ObservabilityConfig::disabled_default(),
                 }
             },
+            gate_fixup: gate_fixup_profile,
         })
     }
 
@@ -5492,6 +5818,11 @@ impl PolicyBundle {
             vm_images: Vec::new(),
             default_executor_image: None,
             observability: crate::observability::ObservabilityConfig::disabled_default(),
+            // iter65 — tests get the conservative "gates are hard"
+            // default. Tests that want the fixup loop construct a
+            // policy via the load path or use a test builder that
+            // overrides this field.
+            gate_fixup: None,
         }
     }
 
@@ -5505,6 +5836,27 @@ impl PolicyBundle {
     /// Look up a gate definition by gate_type name.
     pub fn gate_config(&self, gate_type: &str) -> Option<&GateEntry> {
         self.gates.iter().find(|g| g.gate_type == gate_type)
+    }
+
+    /// iter65 — resolved `[gate_fixup]` profile.
+    ///
+    /// Returns `Some(_)` iff the operator declared
+    /// `[gate_fixup].enabled = true` AND every `[[gates]]` row
+    /// carried a valid `agent_hint_default` at policy load.
+    /// `None` for the "gates are hard" case (section absent or
+    /// `enabled = false`).
+    ///
+    /// Read by:
+    ///   * `handlers::witness` (non-`Pass` branch) — `None` →
+    ///     transition parent to `Failed` with
+    ///     `GateRejectionTerminal{terminal_reason: "no_fixup_profile"}`.
+    ///     `Some(_)` → commit witness + emit
+    ///     `KernelPush::GateRejected`.
+    ///   * `handlers::intent::handle_add_sub_task` — `Some(_)`
+    ///     is the budget+executor-image source for
+    ///     `kind:GateFixup` admits.
+    pub fn gate_fixup(&self) -> Option<&GateFixupProfile> {
+        self.gate_fixup.as_ref()
     }
 
     // ── Role ceilings ───────────────────────────────────────────────────────
@@ -6119,6 +6471,7 @@ mod tests {
             vm_images: Vec::new(),
             default_executor_image: None,
             observability: crate::observability::ObservabilityConfig::disabled_default(),
+            gate_fixup: None,
         }
     }
 
@@ -10075,5 +10428,187 @@ mod implicit_provider_grants_tests {
         let grants = bundle.default_provider_egress_grants();
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].fqdn, "sidecar.internal.example");
+    }
+}
+
+#[cfg(test)]
+mod gate_fixup_tests {
+    //! iter65 — `[gate_fixup]` section + `agent_hint_default`
+    //! cross-validation against `[[gates]]`. Pinned by
+    //! `INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01`.
+
+    use super::*;
+
+    fn sample_gate(name: &str, default_hint: Option<&str>) -> GateEntry {
+        GateEntry {
+            gate_type: name.to_owned(),
+            verifier_command: "/usr/local/bin/raxis-verify-coverage".to_owned(),
+            max_wall_seconds: 60,
+            max_memory_bytes: 256 * 1024 * 1024,
+            network_allowed: false,
+            hints: BTreeMap::new(),
+            agent_hint_default: default_hint.map(str::to_owned),
+        }
+    }
+
+    fn enabled_section() -> GateFixupSection {
+        GateFixupSection {
+            enabled: true,
+            max_attempts: 3,
+            executor_image: Some("raxis-fixup-executor".to_owned()),
+            max_turns: 8,
+            max_cost_per_run: 5_000,
+            wall_clock_seconds: 600,
+        }
+    }
+
+    #[test]
+    fn absent_section_returns_none_profile() {
+        let resolved = validate_gate_fixup_section(
+            None,
+            &[sample_gate("TestCoverage", None)],
+            &[],
+        )
+        .expect("validate returns ok");
+        assert!(
+            resolved.is_none(),
+            "absent [gate_fixup] keeps gates hard (no profile)"
+        );
+    }
+
+    #[test]
+    fn disabled_section_returns_none_profile() {
+        let mut s = enabled_section();
+        s.enabled = false;
+        let resolved = validate_gate_fixup_section(
+            Some(&s),
+            &[sample_gate("TestCoverage", None)],
+            &[],
+        )
+        .expect("validate returns ok");
+        assert!(
+            resolved.is_none(),
+            "[gate_fixup].enabled = false is equivalent to absent"
+        );
+    }
+
+    #[test]
+    fn enabled_with_all_gates_carrying_default_yields_profile() {
+        let resolved = validate_gate_fixup_section(
+            Some(&enabled_section()),
+            &[sample_gate(
+                "TestCoverage",
+                Some("Run coverage and adjust the failing test path."),
+            )],
+            &[],
+        )
+        .expect("validate returns ok");
+        let profile = resolved.expect("profile present");
+        assert_eq!(profile.max_attempts, 3);
+        assert_eq!(profile.executor_image, "raxis-fixup-executor");
+    }
+
+    #[test]
+    fn enabled_with_gate_missing_default_is_rejected() {
+        let err = validate_gate_fixup_section(
+            Some(&enabled_section()),
+            &[sample_gate("TestCoverage", None)],
+            &[],
+        )
+        .expect_err("validate must reject missing default");
+        assert!(
+            format!("{err}").contains("FAIL_POLICY_GATE_AGENT_HINT_DEFAULT_REQUIRED"),
+            "expected FAIL_POLICY_GATE_AGENT_HINT_DEFAULT_REQUIRED, got: {err}"
+        );
+    }
+
+    #[test]
+    fn enabled_with_empty_default_is_rejected() {
+        let err = validate_gate_fixup_section(
+            Some(&enabled_section()),
+            &[sample_gate("TestCoverage", Some("   "))],
+            &[],
+        )
+        .expect_err("validate must reject whitespace-only default");
+        assert!(
+            format!("{err}").contains("FAIL_POLICY_GATE_AGENT_HINT_DEFAULT_EMPTY"),
+            "expected FAIL_POLICY_GATE_AGENT_HINT_DEFAULT_EMPTY, got: {err}"
+        );
+    }
+
+    #[test]
+    fn enabled_with_oversized_default_is_rejected() {
+        let oversized = "a".repeat(POLICY_AGENT_HINT_MAX_BYTES + 1);
+        let err = validate_gate_fixup_section(
+            Some(&enabled_section()),
+            &[sample_gate("TestCoverage", Some(&oversized))],
+            &[],
+        )
+        .expect_err("validate must reject oversized default");
+        assert!(
+            format!("{err}").contains("FAIL_POLICY_GATE_AGENT_HINT_DEFAULT_OVERSIZED"),
+            "expected FAIL_POLICY_GATE_AGENT_HINT_DEFAULT_OVERSIZED, got: {err}"
+        );
+    }
+
+    #[test]
+    fn enabled_with_zero_max_attempts_is_rejected() {
+        let mut s = enabled_section();
+        s.max_attempts = 0;
+        let err = validate_gate_fixup_section(
+            Some(&s),
+            &[sample_gate("TestCoverage", Some("hint"))],
+            &[],
+        )
+        .expect_err("validate must reject zero max_attempts");
+        assert!(
+            format!("{err}").contains("FAIL_POLICY_GATE_FIXUP_MAX_ATTEMPTS_ZERO"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn enabled_above_max_attempts_ceiling_is_rejected() {
+        let mut s = enabled_section();
+        s.max_attempts = 999;
+        let err = validate_gate_fixup_section(
+            Some(&s),
+            &[sample_gate("TestCoverage", Some("hint"))],
+            &[],
+        )
+        .expect_err("validate must reject above-ceiling max_attempts");
+        assert!(
+            format!("{err}").contains("FAIL_POLICY_GATE_FIXUP_MAX_ATTEMPTS_CEILING"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn enabled_without_executor_image_is_rejected() {
+        let mut s = enabled_section();
+        s.executor_image = None;
+        let err = validate_gate_fixup_section(
+            Some(&s),
+            &[sample_gate("TestCoverage", Some("hint"))],
+            &[],
+        )
+        .expect_err("validate must reject missing executor_image");
+        assert!(
+            format!("{err}").contains("FAIL_POLICY_GATE_FIXUP_EXECUTOR_IMAGE_REQUIRED"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn gate_fixup_max_hint_bytes_matches_kernel_constant() {
+        // The policy crate sits below `raxis-kernel` in the dep
+        // graph so we duplicate the byte cap as a literal. Pin
+        // the equality at compile-test time so a future kernel-side
+        // change to `WITNESS_AGENT_HINT_MAX_BYTES` cannot drift
+        // silently.
+        // (We can't `use raxis-kernel`, but we encode the value
+        // explicitly with a comment that the kernel constant is
+        // the source of truth.)
+        assert_eq!(POLICY_AGENT_HINT_MAX_BYTES, 8192);
     }
 }

@@ -91,6 +91,16 @@ function TurnCard({ turn }: TurnCardProps) {
           <span className="badge bg-info-muted/30 border-info text-info">
             Turn {turn.turn_number}
           </span>
+          {turn.agent_role && (
+            <span
+              data-testid="task-llm-turns-agent-role"
+              data-agent-role={turn.agent_role}
+              className={`badge ${agentRoleClasses(turn.agent_role)}`}
+              title="Which raxis session originated this call"
+            >
+              {turn.agent_role}
+            </span>
+          )}
           <span className="text-[11px] text-ink-subtle">
             {fmtAbsolute(turn.ts_unix)}
           </span>
@@ -100,8 +110,11 @@ function TurnCard({ turn }: TurnCardProps) {
             </span>
           )}
           {turn.role && (
-            <span className="text-[11px] text-ink-faint">
-              role {turn.role}
+            <span
+              className="text-[11px] text-ink-faint"
+              title="Upstream LLM speaker (provider role)"
+            >
+              {turn.role}
             </span>
           )}
           {turn.error && (
@@ -202,6 +215,24 @@ function cacheHitRatio(turn: TaskLlmTurnView): number | null {
   const denom = cacheRead + cacheCreate + fresh;
   if (denom <= 0) return null;
   return cacheRead / denom;
+}
+
+/// Map originating agent role → badge tone. Orchestrator =
+/// accent (the planner conducting the initiative), Executor =
+/// info (the do-er), Reviewer = warn (the gating critic). Any
+/// unknown role falls through to the neutral edge tone so a
+/// future role rolls forward without a UI break.
+function agentRoleClasses(role: string): string {
+  switch (role) {
+    case "Orchestrator":
+      return "bg-accent/15 border-accent text-accent";
+    case "Executor":
+      return "bg-info-muted/30 border-info text-info";
+    case "Reviewer":
+      return "bg-warn-muted/30 border-warn text-warn";
+    default:
+      return "bg-panel-raised border-edge text-ink-muted";
+  }
 }
 
 function ratioColourClass(ratio: number | null): string {

@@ -6,6 +6,7 @@ import { RequireAuth } from "@/components/RequireAuth";
 import { Shell } from "@/components/Shell";
 import { AuditPage } from "@/pages/Audit";
 import { EscalationsPage } from "@/pages/Escalations";
+import { GatesPage } from "@/pages/Gates";
 import { GitPage } from "@/pages/Git";
 import { HealthPage } from "@/pages/Health";
 import { InboxPage } from "@/pages/Inbox";
@@ -78,6 +79,7 @@ export function App() {
                     <Route path="/sessions/:id" element={<SessionDetailPage />} />
                     <Route path="/escalations" element={<EscalationsPage />} />
                     <Route path="/audit" element={<AuditPage />} />
+                    <Route path="/gates" element={<GatesPage />} />
                     <Route path="/git" element={<GitPage />} />
                     <Route path="/git/:name" element={<WorktreeDetailPage />} />
                     <Route path="/policy" element={<PolicyPage />} />

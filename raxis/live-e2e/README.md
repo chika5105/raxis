@@ -186,6 +186,140 @@ with operator-side databases):
 
 ---
 
+## Building the host kernel with the matching trust anchor (`INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01`)
+
+The realistic-scenario / full-lifecycle tests boot a `raxis-kernel`
+host binary that, at compile time, embeds a 32-byte Ed25519
+verifying-key half (`EXPECTED_KERNEL_SIGNING_KEY_BYTES`) used to
+verify the per-role canonical-image manifests
+(`images/raxis-<role>-<kver>.manifest.toml`) that
+`cargo xtask images bake` produces. If the anchor baked into the
+kernel does not match the secret half that signed the manifests,
+the kernel rejects every image at spawn time and the test driver
+panics with `orchestrator_spawn_failed` / `trust_anchor_unpopulated`
+/ "Invalid disk image" — the most common substrate-failure mode
+in fresh-clone live-e2e runs.
+
+### Resolution chain (read by `crates/canonical-images/build.rs`)
+
+First hit wins; later arms only fire when earlier ones return
+empty or unset:
+
+| # | Source | When it fires |
+|---|---|---|
+| 1 | `RAXIS_KERNEL_SIGNING_KEY_HEX` env var (64 lowercase hex chars) | CI / release pipelines; explicit operator override. |
+| 2 | `RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH` env var (absolute path to a 32-byte raw file) | HSM-backed pipelines that hand a path rather than a hex string. |
+| 3 | `<workspace_root>/.git/info/raxis-signing-key/pk.hex` | The per-clone file `cargo xtask images bake` (iter61, `INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01`) and `cargo xtask dev-keys init` both write here. |
+| 4a | All-zero placeholder | `PROFILE=release` AND nothing in arms 1–3. Kernel boots → FATAL `trust_anchor_unpopulated`. (`INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01`.) |
+| 4b | Auto-mint to `.git/info/raxis-signing-key/{sk,pk}.hex` | `PROFILE != release` (dev / test) AND nothing in arms 1–3. The build script generates a fresh keypair and uses the public half. (`INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01`.) |
+
+`cargo xtask images bake` itself resolves arm 1 → 2 → 3 → auto-mint
+(no release-placeholder fallback) and threads the resolved public
+hex into every cargo subprocess it spawns via per-`Command`
+`.env(...)`. The bake's secret half (used to sign the manifests)
+is read from the SAME `.git/info/raxis-signing-key/sk.hex` — so
+as long as the kernel build and the bake agree on which arm to
+read from, the two halves of the keypair match by construction.
+
+### Canonical setup (fresh clone or release-profile live-e2e)
+
+The fool-proof sequence that pins arm 1 (highest priority) so a
+stale cargo cache cannot leave you with a release kernel embedding
+the all-zero placeholder:
+
+```bash
+cd raxis/
+
+# 1. Mint the per-clone dev keypair under .git/info/raxis-signing-key/
+#    if it does not already exist. Idempotent — `cargo xtask images
+#    bake` calls the same helper internally on its first run, but
+#    invoking it explicitly here lets you confirm the file is on
+#    disk BEFORE the kernel build sees it.
+cargo xtask dev-keys init
+
+# 2. Export the public half so build.rs arm 1 picks it up. This
+#    bypasses every cargo-cache foot-gun where a stale release
+#    kernel was built BEFORE the .git/info file existed (arm 3
+#    wouldn't refire until the file's mtime changed).
+export RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat .git/info/raxis-signing-key/pk.hex)"
+
+# 3. Rebuild the host raxis-kernel binary in release with the
+#    matching trust anchor injected. The `cargo:warning=` line on
+#    stderr prints `trust anchor source = env_RAXIS_KERNEL_SIGNING_KEY_HEX`
+#    confirming arm 1 fired.
+cargo build --release -p raxis-kernel
+
+# 4. Bake every canonical image (and stage vmlinux). The bake
+#    threads RAXIS_KERNEL_SIGNING_KEY_HEX through every cargo
+#    subprocess it spawns, so any per-role planner binary that
+#    transitively links `raxis-canonical-images` embeds the same
+#    anchor as the host kernel.
+cargo xtask images bake
+
+# 5. Verify the kernel binary actually carries the fingerprint.
+#    Scans the target/release/raxis-kernel bytes for the 32-byte
+#    public key, asserts the all-zero placeholder is absent, and
+#    cross-checks against the on-disk pk.hex.
+cargo xtask images verify-trust-anchor
+```
+
+For belt-and-suspenders, force the env var into the test invocation
+too so a stale kernel binary on disk gets a cargo-invalidation on
+the test build:
+
+```bash
+RAXIS_LIVE_E2E=1 \
+RAXIS_LIVE_E2E_REALISTIC=1 \
+RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat .git/info/raxis-signing-key/pk.hex)" \
+RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1 \
+  cargo test --release -p raxis-kernel \
+  --test extended_e2e_realistic_scenario \
+  -- --nocapture
+```
+
+### Legacy / shared-across-clones operator flow
+
+`cargo xtask dev-keys init` also accepts `--dir
+$HOME/.config/raxis/keys` (its default) to mint the keypair
+outside the workspace — useful when a developer has multiple
+worktrees that should share one signing key. In that mode the
+arm-3 file under `.git/info/` is NOT created, and the operator
+must wire the env vars themselves:
+
+```bash
+cargo xtask dev-keys init --dir "$HOME/.config/raxis/keys"
+
+export RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat ~/.config/raxis/keys/raxis-dev-signing.pub.hex)"
+export RAXIS_IMAGE_SIGNING_KEY="$HOME/.config/raxis/keys/raxis-dev-signing.key.hex"
+
+cargo build --release -p raxis-kernel
+cargo xtask images bake
+cargo xtask images verify-trust-anchor
+```
+
+This is the flow documented in
+[`specs/v2/release-and-distribution.md §8.1–§8.2`](../specs/v2/release-and-distribution.md).
+
+### Common failure modes and how each surfaces
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| Test driver panics with `orchestrator_spawn_failed` + `trust_anchor_unpopulated` in `kernel.stderr.log` | Release kernel built before any key existed → arm 4a → all-zero placeholder embedded. | Run steps 1–3 above then re-`cargo build --release -p raxis-kernel`. |
+| Kernel boots but every image rejected as "Invalid disk image" / "manifest signature failed" | Kernel was built against keypair A but `cargo xtask images bake` ran against keypair B (e.g. you rotated `.git/info/raxis-signing-key/` between the kernel build and the bake). | Re-run step 3 (rebuild the kernel) after the bake, OR re-run the bake after the kernel build — whichever side is stale. |
+| `cargo xtask images verify-trust-anchor` reports `embedded fingerprint mismatch: ...` | Same as above — kernel binary anchor ≠ on-disk pk.hex. | Rebuild whichever side is stale; `cargo xtask images verify-trust-anchor` should pass before the live-e2e test runs. |
+| `cargo build -p raxis-kernel -vv` reports `trust anchor source = placeholder_release_no_input` | Release build with all four resolution arms empty. | Set `RAXIS_KERNEL_SIGNING_KEY_HEX` OR `cargo xtask dev-keys init` to populate arm 3. |
+| Mid-iter rotation needed | A previous run minted a key you no longer trust. | Delete `.git/info/raxis-signing-key/`, then re-run **all** of steps 1–5. Skipping either the rebuild OR the re-bake leaves you in mismatch. |
+| Kernel boots + LLM 200 OK, then `planner_frame_decode_failed: UnexpectedEnd` → `orchestrator_respawn_ceiling_exceeded` | NOT a trust-anchor issue. Planner binaries inside the per-role images are stale relative to the host `raxis-kernel` — a wire-shape change to a planner ⇄ kernel struct broke bincode round-tripping. The bake's `bake_role_no_op` short-circuit can miss transitive workspace-dep changes. | `cargo xtask images bake --no-cache`. See the dedicated entry in the [Troubleshooting](#planner_frame_decode_failed-bincode-decode-error-unexpectedend--orchestrator_respawn_ceiling_exceeded) section below. |
+
+`INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01` is the
+contract — see `specs/invariants.md` for the formal statement
+and `crates/canonical-images/build.rs` for the resolution-chain
+source of truth. The `cargo:warning=raxis-canonical-images:
+trust anchor source = ...` line on every kernel-crate rebuild
+is the operator-visible diagnostic.
+
+---
+
 ## Run the slices
 
 Selecting individual slices keeps the iteration loop tight:
@@ -729,12 +863,13 @@ seconds. The most common trigger today is an unpopulated
 `EXPECTED_KERNEL_SIGNING_KEY_BYTES`: the kernel can't verify
 the canonical-image manifest, silently degrades to
 `ImageKind::RootfsErofs`, and apple-vz rejects the gzip'd
-initramfs CPIO as "Invalid disk image". Remediation lives
-in `specs/v2/release-and-distribution.md §8.2` — `cargo xtask
-dev-keys init` once per machine, then export
-`RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat
-~/.config/raxis/keys/raxis-dev-signing.pub.hex)"` before
-`cargo build --release -p raxis-kernel`.
+initramfs CPIO as "Invalid disk image". The full
+five-step remediation (mint key → export hex → rebuild
+kernel → bake images → `verify-trust-anchor`) lives in
+the [Building the host kernel with the matching trust
+anchor](#building-the-host-kernel-with-the-matching-trust-anchor-inv-image-bake-kernel-trust-anchor-populated-01)
+section above; `specs/v2/release-and-distribution.md §8.1–§8.2`
+is the normative spec reference.
 
 Mid-flight `session_vm_transient_retry` lines are
 intentionally NOT a fail-fast trigger — those are stalls the
@@ -1076,6 +1211,101 @@ docker exec raxis-e2e-mongo mongosh --quiet \
 
 A successful ping with `{ ok: 1 }` confirms the auth path is
 healthy.
+
+### `planner_frame_decode_failed: bincode decode error: UnexpectedEnd` → `orchestrator_respawn_ceiling_exceeded`
+
+Symptom in `<data_dir>/kernel.stderr.log`:
+
+```text
+{"event":"avf_vm_started",            ...}        # orchestrator microVM up
+{"event":"avf_vsock_connected",       ...}        # vsock bridge attached
+{"event":"orchestrator_respawn_ok",   ...}
+{"event":"planner_fetch_response",  "status_code":200, ...}  # LLM call ok
+{"event":"planner_frame_decode_failed",
+ "error":"bincode decode error: UnexpectedEnd { additional: 1 }", ...}
+{"event":"planner_session_revoked_on_exit", ...}
+{"event":"orchestrator_no_progress_respawn_count_incremented", "count":N, "max":3}
+...
+{"event":"orchestrator_respawn_ceiling_exceeded","attempts":4,"max_attempts":3}
+test realistic_session_lifecycle ... FAILED
+```
+
+This is **not** a kernel crash and **not** a trust-anchor
+mismatch (those surface as `trust_anchor_unpopulated` /
+"Invalid disk image" at the FIRST `avf_vm_started` — see
+the audit-poll fail-fast section above). The microVM boots
+cleanly, the planner posts to Anthropic, the LLM responds
+200 OK, and only THEN does the kernel fail to decode the
+frame the planner-orchestrator inside the microVM tries to
+send back. Repeated respawns hit the same wire shape and
+trip the 3-attempt ceiling.
+
+**Root cause.** The planner binaries baked into
+`<install_dir>/images/raxis-{orchestrator,reviewer,executor,verifier-*}-<kver>.img`
+were cross-compiled from an OLDER source tree than the host
+`raxis-kernel` daemon currently on disk. A breaking
+wire-shape change to a planner ⇄ kernel struct (an added
+field on `KsbSnapshot`, a new `AddSubTask` variant payload,
+an enum reordering on `PlannerIntent`, etc.) breaks bincode
+round-tripping the moment the kernel tries to deserialise
+a frame produced by the older planner.
+
+`cargo xtask images bake`'s default content-addressed
+`bake_role_no_op` arm
+(`reason: "inputs_unchanged_outputs_intact"`) is a known
+load-bearing seam here: when only **transitive** workspace
+dependencies of the planner crates change (`raxis-types`,
+`raxis-ipc`, `raxis-ksb`, `raxis-planner-core`), the
+per-role `bake.json` input hash can still match because the
+input set the bake hashes is narrower than the actual cargo
+build's dependency closure. The bake reports `bake_ok` for
+every role, the staged images stay stale, the next live-e2e
+run fails the way above.
+
+**Fix: force a full rebake.**
+
+```bash
+cargo xtask images bake --no-cache
+```
+
+`--no-cache` bypasses the input-hash short-circuit and
+re-cross-compiles every per-role planner binary against
+the current `target/aarch64-unknown-linux-musl/release/`
+build of the planner crates. The new image `.img` sha256
+will differ from the prior one — that's the signal the
+schema-drift was real:
+
+```text
+{"event":"bake_role_no_op",  "role":"raxis-planner-orchestrator",
+ "img_sha256":"dded0c65..."}              # ← stale
+# after `bake --no-cache`:
+{"event":"bake_role_ok",     "role":"raxis-planner-orchestrator",
+ "img_sha256":"42f501bd..."}              # ← rebuilt against current src
+```
+
+After the rebake, the staged kernel binary the test driver
+runs (`target/release/raxis-kernel`) and the planner
+binaries inside the per-role images now share the same
+wire shape — re-run the realistic e2e test.
+
+**When to suspect this failure mode:**
+
+* You changed any `pub struct` / `pub enum` in
+  `crates/types/`, `crates/ksb/`, `crates/ipc/`, or
+  `crates/planner-core/`, then ran `cargo xtask images
+  bake` and saw `bake_role_no_op` for every role.
+* The previous bake completed in <30 seconds (every role
+  short-circuited) but the kernel was rebuilt in the same
+  shell.
+* `planner_frame_decode_failed` lines appear within
+  seconds of the FIRST `planner_fetch_response 200`, not
+  after a long stall.
+
+**Permanent fix.** Widening `bake.json`'s input set to
+include the closure of `cargo metadata` dependencies for
+each per-role planner crate would close the gap, but is
+out of scope for the per-run remediation. Track under
+`INV-IMAGE-BAKE-INPUT-HASH-DEPS-CLOSURE-01` (TODO).
 
 ---
 

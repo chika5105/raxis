@@ -199,6 +199,26 @@ pub enum PlannerErrorCode {
     /// `integration_merge`.
     #[serde(rename = "FAIL_REVIEW_OUTSTANDING")]
     FailReviewOutstanding,
+
+    /// **V3
+    /// `specs/v3/gate-rejection-orchestrator-fixup.md` §4.3.**
+    /// The orchestrator submitted `AddSubTask{kind: GateFixup}`
+    /// for a parent task whose `gate_fixup_attempts` has already
+    /// reached the `policy.gate_fixup.max_attempts` ceiling.
+    /// **Terminal for this parent task** (the kernel-side
+    /// budget is the single source of truth per
+    /// `INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`); the kernel
+    /// transitions the parent to `Failed` paired with the
+    /// rejection. The orchestrator MUST NOT retry; its only
+    /// recourse is to surface the failure upstream via the
+    /// normal initiative-failure path.
+    /// **Why dedicated, not `FAIL_BUDGET_EXCEEDED`.** The lane
+    /// budget code is retryable-after-rebudget; this code is
+    /// terminal-for-this-parent. The orchestrator's NNSP rule
+    /// for `AddSubTask` keys on this discriminator to know not
+    /// to enter a self-loop.
+    #[serde(rename = "FAIL_GATE_FIXUP_BUDGET_EXHAUSTED")]
+    FailGateFixupBudgetExhausted,
 }
 
 impl PlannerErrorCode {
@@ -210,7 +230,11 @@ impl PlannerErrorCode {
             Self::FailUnknownTask
                 | Self::Unauthorized
                 | Self::FailInitiativeQuarantined
-                | Self::FailWorktreeProvision,
+                | Self::FailWorktreeProvision
+                // V3: terminal-for-this-parent. The orchestrator
+                // MUST NOT retry; the kernel pairs the rejection
+                // with a parent-`Failed` transition.
+                | Self::FailGateFixupBudgetExhausted,
         )
     }
 }
@@ -242,6 +266,7 @@ impl fmt::Display for PlannerErrorCode {
             Self::FailGitApplyPending => "FAIL_GIT_APPLY_PENDING",
             Self::FailWorktreeProvision => "FAIL_WORKTREE_PROVISION",
             Self::FailReviewOutstanding => "FAIL_REVIEW_OUTSTANDING",
+            Self::FailGateFixupBudgetExhausted => "FAIL_GATE_FIXUP_BUDGET_EXHAUSTED",
         };
         f.write_str(s)
     }
@@ -599,6 +624,8 @@ mod tests {
             PlannerErrorCode::FailUnknownTask,
             PlannerErrorCode::Unauthorized,
             PlannerErrorCode::FailInitiativeQuarantined,
+            // V3 — see `is_terminal` docstring.
+            PlannerErrorCode::FailGateFixupBudgetExhausted,
         ];
         for &code in &terminal {
             assert!(
@@ -636,5 +663,25 @@ mod tests {
                  `is_terminal()` returned true"
             );
         }
+    }
+
+    /// V3 — `FAIL_GATE_FIXUP_BUDGET_EXHAUSTED` is wire-stable
+    /// across Display, serde rename, and JSON round-trip. The
+    /// orchestrator's NNSP keys on the literal string, so any
+    /// drift here silently breaks the spawn-loop short-circuit.
+    #[test]
+    fn fail_gate_fixup_budget_exhausted_renders_as_screaming_snake_case() {
+        let code = PlannerErrorCode::FailGateFixupBudgetExhausted;
+        assert_eq!(format!("{code}"), "FAIL_GATE_FIXUP_BUDGET_EXHAUSTED");
+        let json = serde_json::to_string(&code).unwrap();
+        assert_eq!(json, "\"FAIL_GATE_FIXUP_BUDGET_EXHAUSTED\"");
+        let back: PlannerErrorCode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, code);
+        assert!(
+            code.is_terminal(),
+            "FAIL_GATE_FIXUP_BUDGET_EXHAUSTED is terminal-for-this-parent \
+             (see `is_terminal` docstring); flipping this would make the \
+             orchestrator self-loop on a budget already at ceiling"
+        );
     }
 }

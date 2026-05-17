@@ -12,6 +12,19 @@ export interface DagGraphNode {
   task_id: string;
   title: string;
   state: string;
+  /// Backend signals an active subtask activation for this task.
+  /// The graph treats `is_active` as Running for tone, chip label
+  /// and pulse so mid-execution `Admitted` tasks (between VM hops)
+  /// don't visually look stalled. Optional for back-compat.
+  is_active?: boolean;
+}
+
+/// Effective state for tone / chip / pulse derivation: an active
+/// task with FSM state `Admitted` is rendered as Running because
+/// from the operator's perspective an executor IS doing work.
+function effectiveState(node: DagGraphNode): string {
+  if (node.is_active && node.state === "Admitted") return "Running";
+  return node.state;
 }
 
 export interface DagGraphEdge {
@@ -120,6 +133,7 @@ export function DagGraph({
     [activeStates],
   );
   const dimNode = (state: string) => activeSet !== null && !activeSet.has(state);
+  const dimNodeFor = (node: DagGraphNode) => dimNode(effectiveState(node));
 
   const layout = useMemo(() => {
     const g = new dagre.graphlib.Graph({ multigraph: false, compound: false });
@@ -224,8 +238,8 @@ export function DagGraph({
             activeSet !== null &&
             fromNode !== undefined &&
             toNode !== undefined &&
-            !activeSet.has(fromNode.state) &&
-            !activeSet.has(toNode.state);
+            !activeSet.has(effectiveState(fromNode)) &&
+            !activeSet.has(effectiveState(toNode));
           const hoverDim =
             hover !== null && hover !== e.from && hover !== e.to;
           const opacity = edgeDim ? 0.15 : hoverDim ? 0.25 : 0.85;
@@ -244,12 +258,18 @@ export function DagGraph({
 
         {/* Nodes */}
         {layout.nodes.map((n) => {
-          const tone = stateTone(n.state);
+          // `effectiveState` lifts `Admitted + is_active` to
+          // `Running` so the tone, chip label and pulse all
+          // reflect the operator's reality (a live executor) even
+          // while the FSM row hasn't flipped state yet.
+          const eff = effectiveState(n);
+          const tone = stateTone(eff);
           const fill = NODE_FILL_VAR[tone];
           const stroke = NODE_STROKE_VAR[tone];
           const isSelected = selected === n.task_id;
-          const dim = dimNode(n.state);
+          const dim = dimNodeFor(n);
           const hoverDim = hover !== null && hover !== n.task_id;
+          const showPulse = eff === "Running";
           // Filter-dim wins over hover-dim because it's the
           // explicit operator intent ("I want to see Running") vs.
           // an incidental mouseover.
@@ -265,8 +285,10 @@ export function DagGraph({
               style={{ cursor: "pointer" }}
               role="button"
               tabIndex={0}
-              aria-label={`Task ${n.title} (state ${n.state}). Click to focus, double-click to open task page.`}
-              data-status={n.state}
+              aria-label={`Task ${n.title} (state ${eff}). Click to focus, double-click to open task page.`}
+              data-status={eff}
+              data-raw-state={n.state}
+              data-is-active={n.is_active || undefined}
               data-dimmed={dim || undefined}
               onKeyDown={(ev) => {
                 if (ev.key === "Enter" || ev.key === " ") {
@@ -290,13 +312,26 @@ export function DagGraph({
                 stroke={isSelected ? "rgb(var(--c-accent))" : stroke}
                 strokeWidth={isSelected ? 2 : 1}
                 opacity={nodeOpacity}
+                // 1.4s ease-in-out infinite-alternate stroke-pulse
+                // keeps the running affordance in sync with the
+                // state-badge pulse used by `<StateBadge pulse>`
+                // on the detail pages, so the DAG and the lists
+                // throb in unison.
+                style={
+                  showPulse
+                    ? { animation: "raxis-node-pulse 1.4s ease-in-out infinite alternate" }
+                    : undefined
+                }
               />
               <title>
                 {n.title}
                 {"\n"}
                 {n.task_id}
                 {"\n"}
-                state: {n.state}
+                state: {eff}
+                {n.is_active && n.state !== eff
+                  ? `\n(FSM row: ${n.state} · executor active)`
+                  : ""}
               </title>
               {/*
                * State label rendered as a discrete chip in the
@@ -336,7 +371,7 @@ export function DagGraph({
                 fontWeight={700}
                 fontFamily="Inter, system-ui, sans-serif"
               >
-                {shortStateLabel(n.state)}
+                {shortStateLabel(eff)}
               </text>
               <text
                 x={10}

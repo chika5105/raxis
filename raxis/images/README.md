@@ -44,6 +44,25 @@ a network call. Output lands at
 hash, and the Ed25519 signature binding the bundle hash to the kernel
 signing key.
 
+> **The host kernel must be rebuilt against the SAME signing key.**
+> `cargo xtask images bake` signs the manifests with the secret half
+> living at `<workspace>/.git/info/raxis-signing-key/sk.hex` (or the
+> operator-supplied `RAXIS_IMAGE_SIGNING_KEY` path). The host
+> `raxis-kernel` binary embeds the matching public half at compile
+> time via `crates/canonical-images/build.rs`
+> (`INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01`). If the kernel
+> was built BEFORE the keypair existed, it embeds the all-zero
+> placeholder and rejects every manifest at spawn time with
+> `trust_anchor_unpopulated`. The full five-step setup
+> (`dev-keys init` → export hex → `cargo build --release -p
+> raxis-kernel` → `images bake` → `images verify-trust-anchor`) and
+> the four-arm resolution chain the kernel build script reads are
+> documented in
+> [`live-e2e/README.md` — Building the host kernel with the matching
+> trust anchor](../live-e2e/README.md#building-the-host-kernel-with-the-matching-trust-anchor-inv-image-bake-kernel-trust-anchor-populated-01).
+> `specs/v2/release-and-distribution.md §8.1–§8.2` is the normative
+> reference.
+
 `raxis-image-builder` is the underlying crate the bake invokes; it
 remains documented here for the rare case where a developer needs to
 re-sign an existing rootfs without re-running the full pipeline.

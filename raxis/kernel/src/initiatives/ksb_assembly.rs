@@ -289,6 +289,23 @@ pub fn assemble_ksb_snapshot(
         },
     };
 
+    // ── iter65 — `INV-KSB-GATE-FIXUP-CONTEXT-01` ────────────────
+    // Surface the gate-fixup context iff this is the KSB for a
+    // gate-fixup executor task (`tasks.is_gate_fixup = 1`).
+    // Non-fixup tasks (every steady-state executor / reviewer /
+    // orchestrator) leave the field `None` so the wire stays
+    // compact and the steady-state KSB shape is unchanged. The
+    // orchestrator's KSB is never a gate-fixup view (the
+    // orchestrator coordinates fixup spawns; it does not BECOME
+    // one), so we short-circuit that role.
+    let gate_fixup = match inputs.role {
+        KsbRole::Orchestrator => None,
+        KsbRole::Executor | KsbRole::Reviewer => match inputs.task_id {
+            None => None,
+            Some(tid) => read_gate_fixup_context(conn, tid)?,
+        },
+    };
+
     Ok(KsbSnapshot {
         version: KSB_SCHEMA_VERSION,
         initiative_id: inputs.initiative_id.to_owned(),
@@ -307,7 +324,173 @@ pub fn assemble_ksb_snapshot(
         credential_ports: inputs.credential_ports.clone(),
         capabilities,
         last_critique,
+        gate_fixup,
     })
+}
+
+/// iter65 — `INV-KSB-GATE-FIXUP-CONTEXT-01`. Load the focused
+/// gate-fixup context for a fixup executor's KSB. Returns
+/// `Ok(None)` when the task is not a fixup (the common path),
+/// or `Ok(Some(...))` when the task carries `is_gate_fixup = 1`
+/// and all required parent linkage columns are present.
+///
+/// Errors out only on SQL-level failures; missing parent rows
+/// (which would be a structural regression — every fixup task
+/// has a parent by construction) downgrade to a defensive
+/// `Ok(None)` with a kernel-bug stderr line so the spawn path
+/// stays boot-safe rather than refusing to bring up the
+/// session.
+fn read_gate_fixup_context(
+    conn: &rusqlite::Connection,
+    task_id: &str,
+) -> Result<Option<raxis_ksb::GateFixupContext>, rusqlite::Error> {
+    let tasks = raxis_store::Table::Tasks.as_str();
+    // Pull the fixup row.
+    let row: Result<
+        (
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+        ),
+        rusqlite::Error,
+    > = conn.query_row(
+        &format!(
+            "SELECT is_gate_fixup, \
+                    parent_gate_failure_task_id, \
+                    parent_gate_failure_type, \
+                    last_gate_critique, \
+                    last_gate_type, \
+                    COALESCE(gate_fixup_attempts, 0) \
+               FROM {tasks} WHERE task_id = ?1"
+        ),
+        rusqlite::params![task_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+    );
+    let (is_gate_fixup, parent_id_opt, parent_gate_type_opt, _last_critique, last_gate_type, _attempts) =
+        match row {
+            Ok(t) => t,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+    if is_gate_fixup == 0 {
+        return Ok(None);
+    }
+    let parent_id = match parent_id_opt {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"KsbAssemblyGateFixupMissingParent\",\
+                 \"fixup_task_id\":\"{task_id}\"}}",
+            );
+            return Ok(None);
+        }
+    };
+    // Gate-type / critique provenance:
+    //   * The fixup's `parent_gate_failure_type` is the
+    //     authoritative wire value the admit pipeline copied
+    //     across at fixup-spawn time. Prefer it over the
+    //     parent's `last_gate_type` (which could drift if the
+    //     parent fails a different gate after the fixup was
+    //     spawned).
+    //   * The hint, however, lives on the PARENT's
+    //     `last_gate_critique` because the witness handler
+    //     persists the resolved hint on the parent at rejection
+    //     time. The admit pipeline does NOT copy the hint onto
+    //     the fixup row (the parent is the single source of
+    //     truth — keeping the hint in one place avoids drift
+    //     when the operator updates `agent_hint_default`).
+    let gate_type = parent_gate_type_opt
+        .or(last_gate_type)
+        .unwrap_or_else(|| "<unknown>".to_owned());
+
+    // Pull the parent's repair-relevant state.
+    let parent_row: Result<
+        (Option<String>, Option<String>, Option<String>),
+        rusqlite::Error,
+    > = conn.query_row(
+        &format!(
+            "SELECT last_gate_critique, evaluation_sha, session_id \
+               FROM {tasks} WHERE task_id = ?1"
+        ),
+        rusqlite::params![&parent_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    );
+    let (parent_critique, parent_eval_sha, parent_session_id) = match parent_row {
+        Ok(t) => t,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"KsbAssemblyGateFixupParentMissing\",\
+                 \"fixup_task_id\":\"{task_id}\",\"parent_task_id\":\"{parent_id}\"}}",
+            );
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+
+    // Resolve the parent's worktree_root from its session row.
+    let parent_worktree_pointer: String = match parent_session_id.as_deref() {
+        None => String::new(),
+        Some(sid) => {
+            let sessions = raxis_store::Table::Sessions.as_str();
+            conn.query_row(
+                &format!("SELECT worktree_root FROM {sessions} WHERE session_id = ?1"),
+                rusqlite::params![sid],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .unwrap_or(None)
+            .unwrap_or_default()
+        }
+    };
+
+    // Bound the hint to `WITNESS_AGENT_HINT_MAX_BYTES` defensively.
+    // The witness handler already enforces the cap, but if the
+    // operator hand-edits the column in an emergency the prompt
+    // should still render safely.
+    let hint = parent_critique.unwrap_or_default();
+    let bounded_hint = if hint.len() > raxis_ksb::AGENT_HINT_MAX_BYTES {
+        hint[..raxis_ksb::AGENT_HINT_MAX_BYTES].to_owned()
+    } else {
+        hint
+    };
+
+    // `attempt_index` for the prompt is 1-based: the
+    // first fixup is attempt 1 even though the parent's
+    // `gate_fixup_attempts` counter holds the post-admit value.
+    // We use the parent's counter directly here because it has
+    // been incremented at admit time per
+    // `INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`.
+    let parent_attempts: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COALESCE(gate_fixup_attempts, 0) FROM {tasks} WHERE task_id = ?1"
+            ),
+            rusqlite::params![&parent_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let attempt_index = u32::try_from(parent_attempts).unwrap_or(1).max(1);
+
+    Ok(Some(raxis_ksb::GateFixupContext {
+        gate_type,
+        agent_hint: bounded_hint,
+        parent_task_id: parent_id,
+        parent_evaluation_sha: parent_eval_sha.unwrap_or_default(),
+        parent_worktree_pointer,
+        attempt_index,
+        // `max_attempts` is policy-derived; the assembler doesn't
+        // hold a `PolicyBundle` reference here, so we surface the
+        // attempt count without a max ceiling. The renderer prints
+        // `attempt=N/0` if the policy is unset, which the LLM
+        // treats as "no declared ceiling — defer to the kernel's
+        // budget check." The full ceiling is plumbed via the
+        // `KernelPush::GateRejected.max_attempts` field on the
+        // orchestrator side; the executor's view here is the
+        // attempt counter only.
+        max_attempts: 0,
+    }))
 }
 
 /// iter62 — `INV-RETRY-LAST-CRITIQUE-IN-KSB-01`. Read
@@ -1014,6 +1197,11 @@ pub fn fallback_snapshot(initiative_id: &str, task_id: Option<&str>, role: KsbRo
         // the per-task `last_critique` from; the LLM does not
         // surface prior round feedback in the fail-soft path.
         last_critique: None,
+        // iter65 — fallback snapshot has no SQL context to read
+        // gate-fixup linkage. A fixup-executor session that hits
+        // this path is degraded but boot-safe: the LLM sees the
+        // standard non-fixup KSB and its NNSP fallback applies.
+        gate_fixup: None,
     }
 }
 
@@ -1944,6 +2132,123 @@ mod tests {
             critique.as_deref(),
             Some("kernel: empty diff at head ABCD"),
             "validation-rejection retry MUST surface tasks.last_critique"
+        );
+    }
+
+    // ── iter65 — INV-KSB-GATE-FIXUP-CONTEXT-01 projection ────────────────
+
+    /// Non-fixup task (`is_gate_fixup = 0`) MUST surface `None`.
+    /// This is the steady-state path — every executor / reviewer
+    /// activation that is not a fixup goes through this branch
+    /// and the projection MUST leave the KSB compact.
+    #[test]
+    fn gate_fixup_projection_returns_none_for_non_fixup_task() {
+        let (store, _td) = fresh_store();
+        let conn = store.lock_sync();
+        conn.execute_batch(
+            "INSERT INTO initiatives \
+                (initiative_id, state, terminal_criteria_json, \
+                 plan_artifact_sha256, created_at) \
+             VALUES ('init-gf1', 'Executing', '{}', 'deadbeef', 1); \
+             INSERT INTO tasks \
+                (task_id, initiative_id, lane_id, state, actor, \
+                 policy_epoch, admitted_at, transitioned_at, \
+                 actual_cost) \
+             VALUES ('task-plain', 'init-gf1', 'default', \
+                     'Admitted', 'kernel', 1, 1, 1, 0);",
+        )
+        .unwrap();
+        let ctx = read_gate_fixup_context(&conn, "task-plain").unwrap();
+        assert!(
+            ctx.is_none(),
+            "non-fixup task MUST surface gate_fixup=None"
+        );
+    }
+
+    /// Happy path: a fixup task whose parent carries the witness
+    /// handler's `last_gate_critique` + `last_gate_type` MUST
+    /// project a fully-populated `GateFixupContext` with the
+    /// parent linkage, the bounded hint, and the
+    /// worktree pointer resolved through the parent's session
+    /// row.
+    #[test]
+    fn gate_fixup_projection_returns_populated_context_for_fixup_task() {
+        let (store, _td) = fresh_store();
+        let conn = store.lock_sync();
+        conn.execute_batch(
+            "INSERT INTO initiatives \
+                (initiative_id, state, terminal_criteria_json, \
+                 plan_artifact_sha256, created_at) \
+             VALUES ('init-gf2', 'Executing', '{}', 'deadbeef', 1); \
+             INSERT INTO sessions \
+                (session_id, role_id, session_token, sequence_number, \
+                 worktree_root, base_sha, base_tracking_ref, \
+                 lineage_id, fetch_quota, created_at, expires_at, \
+                 revoked, session_agent_type, can_delegate) \
+             VALUES ('sess-parent', 'Planner', 'tok-1', 0, \
+                     '/srv/raxis/wt/parent', NULL, NULL, \
+                     'lin-1', 1000, 1, 3600, 0, 'Executor', 0); \
+             INSERT INTO tasks \
+                (task_id, initiative_id, lane_id, state, actor, \
+                 policy_epoch, admitted_at, transitioned_at, \
+                 actual_cost, evaluation_sha, last_gate_critique, \
+                 last_gate_type, session_id, gate_fixup_attempts) \
+             VALUES ('parent-1', 'init-gf2', 'default', \
+                     'GatesPending', 'kernel', 1, 1, 1, 0, \
+                     'deadbeefcafebabe', \
+                     'Remove the AWS access key shape.', \
+                     'NoSecretStrings', 'sess-parent', 1); \
+             INSERT INTO tasks \
+                (task_id, initiative_id, lane_id, state, actor, \
+                 policy_epoch, admitted_at, transitioned_at, \
+                 actual_cost, is_gate_fixup, \
+                 parent_gate_failure_task_id, \
+                 parent_gate_failure_type) \
+             VALUES ('fixup-1', 'init-gf2', 'default', \
+                     'Running', 'kernel', 1, 1, 1, 0, 1, \
+                     'parent-1', 'NoSecretStrings');",
+        )
+        .unwrap();
+
+        let ctx = read_gate_fixup_context(&conn, "fixup-1")
+            .unwrap()
+            .expect("fixup task MUST surface a Some(GateFixupContext)");
+        assert_eq!(ctx.gate_type, "NoSecretStrings");
+        assert_eq!(ctx.agent_hint, "Remove the AWS access key shape.");
+        assert_eq!(ctx.parent_task_id, "parent-1");
+        assert_eq!(ctx.parent_evaluation_sha, "deadbeefcafebabe");
+        assert_eq!(ctx.parent_worktree_pointer, "/srv/raxis/wt/parent");
+        assert_eq!(
+            ctx.attempt_index, 1,
+            "attempt index must reflect the parent's gate_fixup_attempts counter"
+        );
+    }
+
+    /// Defense-in-depth: a fixup task with NO parent linkage
+    /// (structurally invalid, but the projection must not crash)
+    /// MUST surface `None` so the spawn path can fall back to the
+    /// degraded KSB instead of crashing the substrate boot.
+    #[test]
+    fn gate_fixup_projection_returns_none_when_parent_link_missing() {
+        let (store, _td) = fresh_store();
+        let conn = store.lock_sync();
+        conn.execute_batch(
+            "INSERT INTO initiatives \
+                (initiative_id, state, terminal_criteria_json, \
+                 plan_artifact_sha256, created_at) \
+             VALUES ('init-gf3', 'Executing', '{}', 'deadbeef', 1); \
+             INSERT INTO tasks \
+                (task_id, initiative_id, lane_id, state, actor, \
+                 policy_epoch, admitted_at, transitioned_at, \
+                 actual_cost, is_gate_fixup) \
+             VALUES ('fixup-orphan', 'init-gf3', 'default', \
+                     'Running', 'kernel', 1, 1, 1, 0, 1);",
+        )
+        .unwrap();
+        let ctx = read_gate_fixup_context(&conn, "fixup-orphan").unwrap();
+        assert!(
+            ctx.is_none(),
+            "fixup with NULL parent linkage MUST surface None (defensive boot-safe path)"
         );
     }
 }

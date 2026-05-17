@@ -119,8 +119,13 @@ describe("<TaskLlmTurns>", () => {
     expect(
       screen.getByText("claude-sonnet-4-5-20250929"),
     ).toBeInTheDocument();
-    // Role pill.
-    expect(screen.getByText(/role assistant/)).toBeInTheDocument();
+    // Provider-role marker. iter65 — the literal "role" prefix
+    // was dropped in favour of a `title` tooltip ("Upstream LLM
+    // speaker (provider role)") so the new dedicated agent-role
+    // badge (Orchestrator/Executor/Reviewer) reads cleanly next
+    // to it. The visible text is now just the bare value
+    // (`assistant`).
+    expect(screen.getByText("assistant")).toBeInTheDocument();
     // Parsed response payload renders as JSON in the <pre>; the
     // operator-visible substring of the Anthropic content block
     // tells us the projection landed.
@@ -179,6 +184,50 @@ describe("<TaskLlmTurns>", () => {
     const truncBadge = screen.getByTestId("task-llm-turns-truncation-badge");
     expect(truncBadge.textContent).toMatch(/truncated/);
     expect(truncBadge.textContent).toMatch(/45,?678/);
+  });
+
+  // iter65 — orchestrator-llm-turns: every captured turn carries
+  // an `agent_role` (`"Orchestrator"` | `"Executor"` | `"Reviewer"`)
+  // so the operator can tell which raxis session issued the call
+  // when several roles land in the same coordinator task file.
+  // The kernel-side stamp lives in `planner_fetch.rs::agent_role_label`
+  // (BE pin) — this is the FE pin on the same wire labels.
+  it.each([
+    ["Orchestrator", "border-accent"],
+    ["Executor", "border-info"],
+    ["Reviewer", "border-warn"],
+  ])(
+    "renders the %s agent-role badge with the role-tone class",
+    async (role, expectedToneClass) => {
+      vi.spyOn(dashboardApi.tasks, "llmTurns").mockResolvedValue([
+        turn({ agent_role: role }),
+      ]);
+
+      renderWithProviders(<TaskLlmTurns taskId="task-x" />);
+      await waitFor(() =>
+        expect(screen.getByTestId("task-llm-turns-list")).toBeInTheDocument(),
+      );
+
+      const badge = screen.getByTestId("task-llm-turns-agent-role");
+      expect(badge.getAttribute("data-agent-role")).toBe(role);
+      expect(badge.textContent).toContain(role);
+      expect(badge.className).toContain(expectedToneClass);
+    },
+  );
+
+  it("hides the agent-role badge when the turn carries no role tag", async () => {
+    vi.spyOn(dashboardApi.tasks, "llmTurns").mockResolvedValue([
+      turn({ agent_role: null }),
+    ]);
+
+    renderWithProviders(<TaskLlmTurns taskId="task-x" />);
+    await waitFor(() =>
+      expect(screen.getByTestId("task-llm-turns-list")).toBeInTheDocument(),
+    );
+
+    expect(
+      screen.queryByTestId("task-llm-turns-agent-role"),
+    ).not.toBeInTheDocument();
   });
 
   it("colour codes a poor cache-hit ratio in red", async () => {

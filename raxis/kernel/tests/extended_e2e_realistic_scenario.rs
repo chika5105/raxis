@@ -78,6 +78,7 @@ use extended_e2e_support::{
     audit_chain::AuditChainWitness,
     crash_recovery::CrashRecoveryWitness,
     credential_substitution_evidence::{self as cred_sub_evidence, REAL_PG_PASSWORD},
+    dep_fetch_evidence::{self, DepFetchEvidenceWitness},
     docker_stack::{ensure_extended_stack_up_or_panic, extended_compose_file, COMPOSE_PROJECT},
     kernel_driver::{
         bootstrap_with_custom_cert, build_operator_key, enable_gateway_in_policy,
@@ -97,7 +98,7 @@ use extended_e2e_support::{
     path_allowlist::PathAllowlistPositiveWitness,
     plan_realistic::{
         realistic_plan_toml, TASK_ALLOWLIST_POSITIVE, TASK_CREDENTIAL_SUBSTITUTION_CANARY,
-        TASK_LINT_DEFECT, TASK_MATERIALIZE, TASK_SERVICE_ROUND_TRIP,
+        TASK_DEP_FETCH_EVIDENCE, TASK_LINT_DEFECT, TASK_MATERIALIZE, TASK_SERVICE_ROUND_TRIP,
         TASK_TRANSPARENT_PROXY_REALSCRIPTS, TASK_XFILE_REFACTOR,
     },
     reviewer_substantive_disagreement::ReviewerSubstantiveDisagreementWitness,
@@ -427,6 +428,29 @@ fn realistic_session_lifecycle() {
 
     let crash_witness = CrashRecoveryWitness::new(TASK_MATERIALIZE);
 
+    // iter65 — dep-fetch-evidence witness: pins Path A3 mediated
+    // egress (the kernel admitted the executor's one HTTPS GET to
+    // example.com:443, with the on-disk evidence file landing in
+    // out/deps/install-evidence.json). Locate the executor's
+    // worktree + session id off the chain — same shape as the
+    // other on-disk witnesses above.
+    let dep_fetch_workdir =
+        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, TASK_DEP_FETCH_EVIDENCE);
+    let dep_fetch_session_id = locate_session_id_for_task(&chain, TASK_DEP_FETCH_EVIDENCE)
+        .unwrap_or_else(|| {
+            panic!(
+                "no SessionVmSpawned for {TASK_DEP_FETCH_EVIDENCE}; \
+                    dep-fetch-evidence witness cannot scope its grants"
+            )
+        });
+    eprintln!(
+        "[realism-e2e] dep-fetch-evidence session_id={dep_fetch_session_id}, \
+         workdir={}",
+        dep_fetch_workdir.display(),
+    );
+    let dep_fetch_witness =
+        DepFetchEvidenceWitness::for_realistic_plan(&dep_fetch_session_id, &dep_fetch_workdir);
+
     let global_witnesses: Vec<Box<dyn EnforcementWitness>> = vec![
         Box::new(NoSecurityViolationWitness),
         Box::new(PathAllowlistPositiveWitness::for_realistic_plan(
@@ -434,6 +458,7 @@ fn realistic_session_lifecycle() {
         )),
         Box::new(isolation),
         Box::new(crash_witness),
+        Box::new(dep_fetch_witness),
     ];
     extended_e2e_support::witnesses::assert_all_satisfied(&global_witnesses, &chain);
     eprintln!("[realism-e2e] all chain-side + on-disk witnesses satisfied");
@@ -763,6 +788,25 @@ fn wiring_smoke_test() {
         crash_witness.diagnostic(&crash_chain),
     );
     eprintln!("[realism-e2e] smoke: CrashRecoveryWitness satisfied");
+
+    // DepFetchEvidence: synthetic chain (one A3 grant) + an
+    // evidence file written into a tempdir. Exercises the same
+    // satisfaction path the live-driven flow takes, minus the
+    // network. Iter65.
+    let dep_fetch_tmp = tempfile::tempdir().unwrap();
+    dep_fetch_evidence::write_synthetic_evidence(dep_fetch_tmp.path())
+        .expect("smoke: write_synthetic_evidence");
+    let dep_fetch_chain = dep_fetch_evidence::synthetic_satisfying_chain("sess-dep-fetch-smoke");
+    let dep_fetch_witness = DepFetchEvidenceWitness::for_realistic_plan(
+        "sess-dep-fetch-smoke",
+        dep_fetch_tmp.path(),
+    );
+    assert!(
+        dep_fetch_witness.satisfied_by(&dep_fetch_chain),
+        "smoke: dep-fetch-evidence witness on synthetic chain: {}",
+        dep_fetch_witness.diagnostic(&dep_fetch_chain),
+    );
+    eprintln!("[realism-e2e] smoke: DepFetchEvidenceWitness satisfied");
 
     // ReviewerSubstantiveDisagreement: synthetic chain + a fixture tasks.db.
     let db_path = seed_minimal_tasks_db(

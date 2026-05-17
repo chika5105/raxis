@@ -116,6 +116,16 @@ pub enum WitnessRejectionReason {
     /// can fail the gate uniformly when a budget-exhausted task
     /// still races a witness through.
     TimeBudgetExhausted,
+    /// iter65 — `INV-WITNESS-AGENT-HINT-WIRE-VALID-01`. The
+    /// verifier emitted a `body.agent_hint` field that violates
+    /// the wire contract — either non-string JSON (number,
+    /// object, array, boolean, null) or a string exceeding
+    /// `WITNESS_AGENT_HINT_MAX_BYTES`. Submission rejected;
+    /// token NOT consumed (the verifier is re-spawnable);
+    /// `WitnessMissingAgentHint{reason: "non_string" | "oversized"}`
+    /// audit emitted. `Pass` submissions are exempt from the
+    /// check (the entire `agent_hint` machinery is non-Pass-only).
+    InvalidAgentHint { reason: &'static str },
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +172,32 @@ pub const WITNESS_HANDLER_TIMEOUT_SECS: u64 = 5;
 /// `SpoofedOperatorHints` and emits
 /// `WitnessOperatorHintSpoofingDetected`.
 pub const WITNESS_BODY_OPERATOR_HINTS_KEY: &str = "operator_hints";
+
+/// iter65 — `specs/v3/gate-rejection-orchestrator-fixup.md §2`.
+/// Reserved key in `WitnessSubmission.body` for the verifier-
+/// script-authored agent-facing repair hint. The verifier
+/// populates this on non-`Pass` submissions; the kernel reads it
+/// and (after wire-validity + tier-resolution) propagates it to
+/// `tasks.last_gate_critique`, the `KernelPush::GateRejected`,
+/// and the fixup-executor's KSB.
+///
+/// **Distinct from `operator_hints`.** `operator_hints` is
+/// kernel-injected from policy at commit time and the verifier
+/// MUST NOT set it. `agent_hint` is verifier-script-set and the
+/// kernel MUST NOT inject it from policy at commit time — the
+/// only kernel-side population is fallback resolution
+/// (`agent_hint::resolve`) when the verifier omitted it.
+pub const WITNESS_BODY_AGENT_HINT_KEY: &str = "agent_hint";
+
+/// iter65 — `specs/v3/gate-rejection-orchestrator-fixup.md §2.1`.
+/// Maximum size of a verifier-emitted `agent_hint` string. Matches
+/// the reviewer-critique byte ceiling
+/// (`raxis_types::MAX_CRITIQUE_BYTES / 4`) so orchestrator-side
+/// prompt budgets see consistent bounds whether the critique
+/// came from a reviewer or a gate. Oversized hints are rejected
+/// with `WitnessRejectionReason::InvalidAgentHint{reason: "oversized"}`
+/// per `INV-WITNESS-AGENT-HINT-WIRE-VALID-01`.
+pub const WITNESS_AGENT_HINT_MAX_BYTES: usize = 8192;
 
 // ---------------------------------------------------------------------------
 // handle — public entry point
@@ -301,6 +337,50 @@ async fn handle_inner(
             );
         }
         // Non-Object body: see TODO(iter64) above.
+    }
+
+    // iter65 — `INV-WITNESS-AGENT-HINT-WIRE-VALID-01`.
+    //
+    // Non-`Pass` submissions MUST carry a wire-valid `body.agent_hint`
+    // (UTF-8 string, ≤ `WITNESS_AGENT_HINT_MAX_BYTES`, OR absent
+    // entirely, which falls through to operator-default resolution
+    // post-commit). Wire-invalid hints REJECT the submission BEFORE
+    // any blob write / token consume so the verifier can re-spawn
+    // with a corrected body. `Pass` witnesses are exempt — the
+    // entire `agent_hint` machinery is non-Pass-only by spec.
+    //
+    // We run this AFTER the operator-hint spoofing check so the
+    // spoofing rejection (which is a defense-in-depth wire
+    // contract) and the agent_hint rejection are visited in spec
+    // order and an early-return in either skips the SQL+FS commit.
+    if !matches!(sub.result_class, raxis_types::WitnessResultClass::Pass) {
+        if let crate::handlers::agent_hint::AgentHintWire::Invalid(reason) =
+            crate::handlers::agent_hint::inspect_wire(&sub.body)
+        {
+            let invalid_reason_str = match &reason {
+                WitnessRejectionReason::InvalidAgentHint { reason } => *reason,
+                _ => "wire_invalid",
+            };
+            let _ = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::WitnessMissingAgentHint {
+                    task_id: sub.task_id.as_str().to_owned(),
+                    gate_type: sub.gate_type.as_str().to_owned(),
+                    source: None,
+                    reason: invalid_reason_str.to_owned(),
+                },
+                None,
+                Some(sub.task_id.as_str()),
+                None,
+            );
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"WitnessMissingAgentHint\",\
+                 \"task_id\":\"{}\",\"gate_type\":\"{}\",\
+                 \"reason\":\"{invalid_reason_str}\",\"phase\":\"wire_validity\"}}",
+                sub.task_id.as_str(),
+                sub.gate_type.as_str(),
+            );
+            return Ok(WitnessAck::Rejected { reason });
+        }
     }
 
     // Hash the raw JSON body bytes to get the content-address for the blob.
@@ -481,10 +561,22 @@ async fn handle_inner(
 
     // ── Step 6: Gate-recheck ──────────────────────────────────────────────
     // Only recheck if the witness was a Pass — Fail/Inconclusive can't clear
-    // the gate, so skip the evaluation round-trip for those cases. We return
-    // a distinct ack variant so the planner does not mistake "non-Pass
-    // recorded" for "all gates cleared, you may advance".
+    // the gate, so the non-Pass branch routes into the iter65 gate-rejection
+    // pipeline (agent_hint resolution → `last_gate_critique` persist →
+    // either `GateRejectionTerminal` + `Failed` transition, or
+    // `GateRejectionAccepted` + `KernelPush::GateRejected` to the
+    // orchestrator for fixup). We return a distinct ack variant so the
+    // planner does not mistake "non-Pass recorded" for "all gates
+    // cleared, you may advance".
     if result_class != ResultClass::Pass {
+        process_non_pass_witness(
+            &sub,
+            &run_id,
+            &presented_sha,
+            &task_row,
+            ctx,
+        )
+        .await?;
         eprintln!(
             "{{\"level\":\"info\",\"event\":\"WitnessNonPass\",\
              \"task_id\":\"{}\",\"result_class\":\"{}\"}}",
@@ -715,6 +807,285 @@ async fn gate_recheck(
 }
 
 // ---------------------------------------------------------------------------
+// process_non_pass_witness — iter65 gate-rejection pipeline
+// ---------------------------------------------------------------------------
+//
+// Called from `handle_inner` AFTER the witness commit transaction has
+// landed (token consumed, witness row durable, blob on disk). The
+// witness's `result_class` is `Fail` or `Inconclusive`, so the gate
+// cannot clear; the task stays in `GatesPending` UNLESS the policy
+// has no `[gate_fixup]` profile (in which case we transition to
+// `Failed` with `terminal_reason = "no_fixup_profile"`).
+//
+// Pipeline:
+//   1. Resolve `agent_hint` through the three-tier chain
+//      (`handlers::agent_hint::resolve`):
+//        - tier 1: verifier-emitted `body.agent_hint` (already
+//          wire-validated in `handle_inner`'s pre-commit gate).
+//        - tier 2: operator-supplied `[[gates]].agent_hint_default`.
+//        - tier 3: defensive gate-name template (kernel-bug signal).
+//      Tiers 2/3 emit `WitnessMissingAgentHint{source, reason}`.
+//   2. Persist `tasks.last_gate_critique`, `tasks.last_gate_type`,
+//      and increment `tasks.gate_reject_count` in a single
+//      transaction. Read back `gate_fixup_attempts` + `initiative_id`
+//      to stamp the downstream audit / push.
+//   3. If `[gate_fixup]` is absent from policy: emit
+//      `GateRejectionTerminal{terminal_reason: "no_fixup_profile"}`
+//      and transition the parent `GatesPending → Failed`. Audit
+//      pair-write through `transition_task_with_audit` so the
+//      dashboard observes the FSM flip in real time.
+//   4. If `[gate_fixup]` is present: emit `GateRejectionAccepted`
+//      + enqueue `KernelPush::GateRejected` to the orchestrator's
+//      live session. Budget enforcement happens at
+//      `AddSubTask{kind: GateFixup}` admit, NOT here — see
+//      `INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`.
+//
+// `INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01`,
+// `INV-GATE-REJECTION-PIPELINE-01`.
+async fn process_non_pass_witness(
+    sub: &WitnessSubmission,
+    run_id: &str,
+    presented_sha: &str,
+    task_row: &TaskRowData,
+    ctx: &HandlerContext,
+) -> Result<(), HandlerError> {
+    use crate::handlers::agent_hint as hint;
+
+    // Snapshot policy ONCE so the operator-default lookup and the
+    // gate-fixup-profile branch see the same view (defensive against
+    // a hot-reload landing mid-handler).
+    let policy_snapshot = ctx.policy.load();
+    let operator_default = policy_snapshot
+        .gates()
+        .iter()
+        .find(|g| g.gate_type == sub.gate_type.as_str())
+        .and_then(|g| g.agent_hint_default.as_deref())
+        .map(str::to_owned);
+
+    let wire = hint::inspect_wire(&sub.body);
+    let resolved = hint::resolve(wire, operator_default.as_deref(), sub.gate_type.as_str());
+
+    // Fallback audit — tier 2 or defensive — so the operator dashboard
+    // can surface weak verifier authoring. Tier 1 (verifier-emitted)
+    // is the steady-state and emits NO `WitnessMissingAgentHint`.
+    if resolved.tier != hint::ResolvedTier::Verifier {
+        let source = match resolved.tier {
+            hint::ResolvedTier::OperatorDefault => Some("operator_default".to_owned()),
+            hint::ResolvedTier::GateNameOnly => Some("gate_name_only".to_owned()),
+            hint::ResolvedTier::Verifier => None,
+        };
+        let _ = ctx.audit.emit(
+            raxis_audit_tools::AuditEventKind::WitnessMissingAgentHint {
+                task_id: sub.task_id.as_str().to_owned(),
+                gate_type: sub.gate_type.as_str().to_owned(),
+                source,
+                reason: resolved.fallback_reason.unwrap_or("absent").to_owned(),
+            },
+            None,
+            Some(sub.task_id.as_str()),
+            Some(task_row.initiative_id.as_str()),
+        );
+        if resolved.tier == hint::ResolvedTier::GateNameOnly {
+            // The defensive fallback is unreachable when the policy
+            // validator did its job. Loud kernel-bug log so a
+            // regression surfaces in operator triage instead of
+            // disappearing into a hint we can't trace.
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"KernelBugAgentHintGateNameOnlyFallback\",\
+                 \"task_id\":\"{}\",\"gate_type\":\"{}\",\
+                 \"hint\":\"policy validator should have required agent_hint_default; \
+                            this is a regression\"}}",
+                sub.task_id.as_str(),
+                sub.gate_type.as_str(),
+            );
+        }
+    }
+
+    // Persist `last_gate_critique` / `last_gate_type` + increment
+    // `gate_reject_count`. Read back `gate_fixup_attempts` +
+    // `initiative_id` in the same tx so the audit/push values
+    // come from the post-update snapshot and we do not pay a
+    // second mutex acquisition for two related selects.
+    let store = ctx.store.clone();
+    let task_id_owned = sub.task_id.as_str().to_owned();
+    let gate_type_owned = sub.gate_type.as_str().to_owned();
+    let critique_owned = resolved.critique.clone();
+    let (attempts_now, initiative_id_str): (u32, String) =
+        tokio::task::spawn_blocking(move || -> Result<(u32, String), HandlerError> {
+            let mut conn = store.lock_sync();
+            let tx = conn
+                .transaction()
+                .map_err(|e| HandlerError::Store(e.to_string()))?;
+            tx.execute(
+                &format!(
+                    "UPDATE {TASKS} \
+                       SET last_gate_critique = ?1, \
+                           last_gate_type     = ?2, \
+                           gate_reject_count  = COALESCE(gate_reject_count, 0) + 1 \
+                     WHERE task_id = ?3"
+                ),
+                rusqlite::params![&critique_owned, &gate_type_owned, &task_id_owned],
+            )
+            .map_err(|e| HandlerError::Store(e.to_string()))?;
+            let (raw_attempts, initiative_id): (Option<i64>, String) = tx
+                .query_row(
+                    &format!(
+                        "SELECT gate_fixup_attempts, initiative_id \
+                           FROM {TASKS} WHERE task_id = ?1"
+                    ),
+                    rusqlite::params![&task_id_owned],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|e| HandlerError::Store(e.to_string()))?;
+            tx.commit()
+                .map_err(|e| HandlerError::Store(e.to_string()))?;
+            let attempts = u32::try_from(raw_attempts.unwrap_or(0)).unwrap_or(0);
+            Ok((attempts, initiative_id))
+        })
+        .await
+        .map_err(|e| HandlerError::Store(format!("non-pass critique persist join: {e}")))??;
+
+    // Branch on whether the operator has authorised the kernel to
+    // attempt a fixup loop.
+    let profile = policy_snapshot.gate_fixup();
+    if profile.is_none() {
+        // No `[gate_fixup]` profile — gate rejection is terminal.
+        let _ = ctx.audit.emit(
+            raxis_audit_tools::AuditEventKind::GateRejectionTerminal {
+                task_id: sub.task_id.as_str().to_owned(),
+                gate_type: sub.gate_type.as_str().to_owned(),
+                terminal_reason: "no_fixup_profile".to_owned(),
+                attempts_used: attempts_now,
+            },
+            None,
+            Some(sub.task_id.as_str()),
+            Some(initiative_id_str.as_str()),
+        );
+
+        let task_id_str = sub.task_id.as_str().to_owned();
+        let store_for_transition = ctx.store.clone();
+        let audit_for_transition = ctx.audit.clone();
+        let session_id_for_audit = task_row.session_id.clone();
+        let transition_res = tokio::task::spawn_blocking(move || {
+            use crate::initiatives::task_transitions::{
+                transition_task_with_audit, TransitionActor,
+            };
+            transition_task_with_audit(
+                &task_id_str,
+                TaskState::Failed,
+                Some("gate_rejected_no_fixup_profile"),
+                TransitionActor::Kernel,
+                store_for_transition.as_ref(),
+                audit_for_transition.as_ref(),
+                session_id_for_audit.as_deref(),
+            )
+        })
+        .await
+        .map_err(|e| HandlerError::Store(format!("non-pass terminal transition join: {e}")))?;
+        if let Err(e) = transition_res {
+            // Transition failure is logged but not fatal — the audit
+            // row above already pinned the rejection. A bug here
+            // means the dashboard's per-task FSM lags reality; the
+            // operator can recover via `transition_task`'s
+            // recovery sweep.
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"GateRejectedTerminalTransitionFailed\",\
+                 \"task_id\":\"{}\",\"error\":\"{e}\"}}",
+                sub.task_id.as_str(),
+            );
+        }
+        return Ok(());
+    }
+
+    let profile = profile.expect("profile presence checked one branch up");
+    let max_attempts = profile.max_attempts;
+
+    // Operator-authorised fixup path — emit `GateRejectionAccepted`
+    // so the audit chain pins the orchestrator-side handoff window
+    // BEFORE we attempt push delivery.
+    let _ = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::GateRejectionAccepted {
+            task_id: sub.task_id.as_str().to_owned(),
+            gate_type: sub.gate_type.as_str().to_owned(),
+            evaluation_sha: presented_sha.to_owned(),
+            verifier_run_id: run_id.to_owned(),
+            critique: resolved.critique.clone(),
+            attempt_index: attempts_now,
+            max_attempts,
+        },
+        None,
+        Some(sub.task_id.as_str()),
+        Some(initiative_id_str.as_str()),
+    );
+
+    // Look up the active orchestrator session + the parent's
+    // worktree root inside a single blocking hop so we do not pay
+    // two mutex round-trips here. Falls back to `data_dir` for
+    // worktree when the session row has no override (matches
+    // `gate_recheck`'s contract).
+    let store_for_lookup = ctx.store.clone();
+    let init_id_for_lookup = initiative_id_str.clone();
+    let session_id_for_worktree = task_row.session_id.clone();
+    let data_dir_clone = ctx.data_dir.clone();
+    let (orch_sid_opt, worktree_pointer): (Option<String>, String) =
+        tokio::task::spawn_blocking(move || {
+            let orch_sid = crate::handlers::intent::active_orchestrator_session_id_for_initiative(
+                &init_id_for_lookup,
+                store_for_lookup.as_ref(),
+            );
+            let worktree = resolve_worktree_root_inner(
+                session_id_for_worktree.as_deref(),
+                store_for_lookup.as_ref(),
+                &data_dir_clone,
+            );
+            (orch_sid, worktree.to_string_lossy().into_owned())
+        })
+        .await
+        .map_err(|e| HandlerError::Store(format!("orchestrator-session lookup join: {e}")))?;
+
+    let Some(orch_sid_str) = orch_sid_opt else {
+        // The push is opportunistic. The audit row is the canonical
+        // record per V2.3 push-dispatcher scope; the orchestrator
+        // will see the rejection on the next reconnect's history
+        // replay or on respawn. Mirror the structured-log shape used
+        // by `ReviewAggregationPushSkipped` so forensic tooling
+        // greps cleanly.
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"GateRejectedPushSkipped\",\
+             \"task_id\":\"{}\",\"reason\":\"no_live_orchestrator_session\"}}",
+            sub.task_id.as_str(),
+        );
+        return Ok(());
+    };
+    let Ok(orch_sid) = raxis_types::SessionId::parse(&orch_sid_str) else {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"GateRejectedPushSkipped\",\
+             \"task_id\":\"{}\",\"reason\":\"orchestrator_session_id_parse_failed\"}}",
+            sub.task_id.as_str(),
+        );
+        return Ok(());
+    };
+
+    let push = raxis_types::push::KernelPush::GateRejected {
+        parent_task_id: sub.task_id.clone(),
+        gate_type: sub.gate_type.as_str().to_owned(),
+        critique: resolved.critique.clone(),
+        evaluation_sha: presented_sha.to_owned(),
+        attempt_index: attempts_now,
+        max_attempts,
+        parent_worktree_pointer: worktree_pointer,
+    };
+    let initiative_id_obj = raxis_types::InitiativeId::parse(&initiative_id_str).ok();
+    let _frame = ctx.push_dispatcher.enqueue_with_context(
+        orch_sid,
+        push,
+        unix_now_secs(),
+        initiative_id_obj,
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Task row helper
 // ---------------------------------------------------------------------------
 
@@ -725,8 +1096,14 @@ struct TaskRowData {
     evaluation_sha: Option<String>,
     base_sha: Option<String>,
     session_id: Option<String>,
+    #[allow(dead_code)]
     worktree_root: Option<String>, // denormalised from sessions at admit time (v1 simplification)
+    #[allow(dead_code)]
     lane_id: String,
+    /// iter65 — owning initiative_id, used by the non-Pass branch
+    /// to surface gate-rejection audit rows + push fan-out under
+    /// the correct initiative scope.
+    initiative_id: String,
 }
 
 #[allow(dead_code)]
@@ -748,7 +1125,8 @@ fn load_task_row_in_tx(
     task_id: &str,
 ) -> Result<TaskRowData, HandlerError> {
     conn.query_row(
-        &format!("SELECT state, evaluation_sha, base_sha, session_id, lane_id FROM {TASKS} WHERE task_id = ?1"),
+        &format!("SELECT state, evaluation_sha, base_sha, session_id, lane_id, initiative_id \
+                    FROM {TASKS} WHERE task_id = ?1"),
         rusqlite::params![task_id],
         |row| Ok(TaskRowData {
             state:          row.get(0)?,
@@ -757,6 +1135,7 @@ fn load_task_row_in_tx(
             session_id:     row.get(3)?,
             worktree_root:  None, // resolved via session join below
             lane_id:        row.get(4)?,
+            initiative_id:  row.get(5)?,
         }),
     ).map_err(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => HandlerError::InvalidTask {

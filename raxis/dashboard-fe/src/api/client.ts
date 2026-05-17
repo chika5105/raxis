@@ -27,6 +27,7 @@ import type {
   MarkAllReadResponse,
   MarkReadResponse,
   NotificationView,
+  GateStatsResponse,
   OrchestratorGapsResponse,
   PolicyAdvancement,
   PolicySnapshotView,
@@ -399,6 +400,17 @@ export const dashboardApi = {
       "/api/orchestrator-gaps",
       signal ? { signal } : {},
     ),
+
+  gates: {
+    /// `GET /api/gates/stats` — per-gate rollup of witness
+    /// outcomes + cumulative fixup-loop counter. Powers the
+    /// Gates page. INV-DASHBOARD-GATE-STATS-PER-GATE-ROLLUP-01.
+    stats: (signal?: AbortSignal): Promise<GateStatsResponse> =>
+      apiFetch<GateStatsResponse>(
+        "/api/gates/stats",
+        signal ? { signal } : {},
+      ),
+  },
 
   escalations: {
     list: (signal?: AbortSignal): Promise<EscalationView[]> =>

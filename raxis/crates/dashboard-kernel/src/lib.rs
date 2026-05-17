@@ -1135,6 +1135,140 @@ impl DashboardData for KernelDashboardData {
         })
     }
 
+    /// V3 — `INV-DASHBOARD-GATE-STATS-PER-GATE-ROLLUP-01`.
+    ///
+    /// Roll up `witness_records` by `gate_type`, joining
+    /// `tasks.gate_fixup_attempts` so the dashboard can render
+    /// the fixup-loop dimension without a second round-trip.
+    /// One read-only connection, two grouped scans, no joins
+    /// (we aggregate in two passes and stitch in Rust to keep
+    /// the SQL trivially auditable and to avoid the cartesian
+    /// blow-up of a window-function over both tables).
+    fn gate_stats(&self) -> Result<raxis_dashboard::data::GateStatsResponse, ApiError> {
+        use raxis_dashboard::data::{GateStatRow, GateStatsResponse};
+        let conn = self.open_ro()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        // Pass 1 — per-gate witness counts + last-seen
+        // timestamp. Ordered by gate_type so the rollup is
+        // stable across polls (a sparkline view diffs row-by-
+        // row across requests).
+        let mut stmt = conn
+            .prepare(
+                "SELECT gate_type, result_class, \
+                        COUNT(*) AS n, \
+                        MAX(recorded_at) AS last_seen \
+                   FROM witness_records \
+                  GROUP BY gate_type, result_class \
+                  ORDER BY gate_type",
+            )
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("gate_stats: prepare witness rollup: {e}"),
+            })?;
+        let mut rows_iter = stmt
+            .query_map([], |r| {
+                let gate_type: String = r.get(0)?;
+                let result_class: String = r.get(1)?;
+                let n: i64 = r.get(2)?;
+                let last_seen: i64 = r.get(3)?;
+                Ok((gate_type, result_class, n, last_seen))
+            })
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("gate_stats: query witness rollup: {e}"),
+            })?;
+
+        // Aggregate into a BTreeMap so iteration order is
+        // alphabetically stable — the contract documented in
+        // `DashboardData::gate_stats`'s docstring.
+        let mut acc: std::collections::BTreeMap<String, GateStatRow> =
+            std::collections::BTreeMap::new();
+        while let Some(row) = rows_iter.next() {
+            let (gate_type, result_class, n, last_seen) =
+                row.map_err(|e| ApiError::Internal {
+                    log_only: format!("gate_stats: scan witness row: {e}"),
+                })?;
+            let entry = acc.entry(gate_type.clone()).or_insert_with(|| GateStatRow {
+                gate_type,
+                pass_count: 0,
+                fail_count: 0,
+                inconclusive_count: 0,
+                last_seen_at: None,
+                fixup_loop_count: 0,
+            });
+            let n_u64 = u64::try_from(n).unwrap_or(0);
+            match result_class.as_str() {
+                "Pass" => entry.pass_count = entry.pass_count.saturating_add(n_u64),
+                "Fail" => entry.fail_count = entry.fail_count.saturating_add(n_u64),
+                "Inconclusive" => {
+                    entry.inconclusive_count = entry.inconclusive_count.saturating_add(n_u64);
+                }
+                // Any other `result_class` value would be a DDL
+                // CHECK violation; surface zeros rather than
+                // panic. The check constraint is enforced at
+                // INSERT time so this branch is unreachable in
+                // a non-corrupted DB.
+                _ => {}
+            }
+            // Track the most-recent `recorded_at` across all
+            // outcome classes for this gate.
+            let prev = entry.last_seen_at.unwrap_or(0);
+            if last_seen > prev {
+                entry.last_seen_at = Some(last_seen);
+            }
+        }
+        drop(rows_iter);
+        drop(stmt);
+
+        // Pass 2 — cumulative fixup-loop count per gate. We
+        // sum `tasks.gate_fixup_attempts` grouped by
+        // `last_gate_type`, which is the column the witness
+        // handler populates when a gate rejects. Tasks that
+        // never failed a gate have NULL `last_gate_type` and
+        // are dropped from the rollup by the GROUP BY.
+        let mut stmt2 = conn
+            .prepare(
+                "SELECT last_gate_type, SUM(gate_fixup_attempts) AS attempts \
+                   FROM tasks \
+                  WHERE last_gate_type IS NOT NULL \
+                    AND gate_fixup_attempts > 0 \
+                  GROUP BY last_gate_type",
+            )
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("gate_stats: prepare fixup rollup: {e}"),
+            })?;
+        let mut rows_iter2 = stmt2
+            .query_map([], |r| {
+                let gate_type: String = r.get(0)?;
+                let attempts: i64 = r.get(1)?;
+                Ok((gate_type, attempts))
+            })
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("gate_stats: query fixup rollup: {e}"),
+            })?;
+        while let Some(row) = rows_iter2.next() {
+            let (gate_type, attempts) = row.map_err(|e| ApiError::Internal {
+                log_only: format!("gate_stats: scan fixup row: {e}"),
+            })?;
+            let entry = acc.entry(gate_type.clone()).or_insert_with(|| GateStatRow {
+                gate_type,
+                pass_count: 0,
+                fail_count: 0,
+                inconclusive_count: 0,
+                last_seen_at: None,
+                fixup_loop_count: 0,
+            });
+            entry.fixup_loop_count = u64::try_from(attempts).unwrap_or(0);
+        }
+
+        Ok(GateStatsResponse {
+            gates: acc.into_values().collect(),
+            generated_at: now,
+        })
+    }
+
     /// `INV-DASHBOARD-RECENT-SESSIONS-RING-01`. Surface the
     /// dashboard-kernel `SessionStreamCapture` ring contents so
     /// the FE's RecentSessions view sees ended sessions that
@@ -3238,6 +3372,7 @@ pub fn record_to_view(
         ts_unix: r.at_ms / 1000,
         model,
         role,
+        agent_role: r.agent_role,
         request,
         response,
         input_tokens,

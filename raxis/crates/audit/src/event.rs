@@ -1389,6 +1389,138 @@ pub enum AuditEventKind {
         gate_type: String,
     },
 
+    /// iter65 — `specs/v3/gate-rejection-orchestrator-fixup.md §4.9`.
+    ///
+    /// Emitted after a non-`Pass` `WitnessSubmission` is committed
+    /// AND the operator has a `[gate_fixup]` profile in policy that
+    /// authorises the kernel to attempt a fixup loop. The
+    /// kernel pairs this audit with the `witness_records` insert and
+    /// the `tasks.last_gate_critique` / `tasks.last_gate_type` /
+    /// `tasks.gate_reject_count++` update, then enqueues a
+    /// `KernelPush::GateRejected` for the orchestrator's session
+    /// stream.
+    ///
+    /// **Not paired with a `TaskStateChanged`.** The parent task
+    /// stays in `GatesPending` until either (a) the orchestrator
+    /// emits `AddSubTask{kind:GateFixup}` (which transitions
+    /// `GatesPending → Running` for the fixup task while the
+    /// parent stays parked) or (b) the orchestrator exhausts the
+    /// budget (which triggers `GateRejectionTerminal` +
+    /// `TaskStateChanged { GatesPending → Failed }`).
+    GateRejectionAccepted {
+        task_id: String,
+        gate_type: String,
+        evaluation_sha: String,
+        verifier_run_id: String,
+        /// Resolved critique (verifier-emitted hint, operator
+        /// default, or defensive gate-name fallback). Bounded by
+        /// `WITNESS_AGENT_HINT_MAX_BYTES` (8192).
+        critique: String,
+        /// `gate_fixup_attempts` value AT THE TIME OF THE
+        /// REJECTION. The next fixup attempt (if any) is this +1.
+        attempt_index: u32,
+        /// `[gate_fixup].max_attempts` configured at the time.
+        /// Carried so audit-replay can reconstruct the budget
+        /// without re-reading policy.
+        max_attempts: u32,
+    },
+
+    /// iter65 — `specs/v3/gate-rejection-orchestrator-fixup.md §4.9`.
+    ///
+    /// Emitted when a gate rejection cannot lead to a fixup
+    /// attempt and the parent task transitions to `Failed`.
+    /// Paired with `TaskStateChanged { GatesPending → Failed }`
+    /// in the same SQLite transaction.
+    ///
+    /// `terminal_reason` is exactly one of:
+    /// - `"no_fixup_profile"` — `[gate_fixup]` absent / disabled
+    ///   in policy. First-rejection terminal.
+    /// - `"fixup_budget_exhausted"` — `gate_fixup_attempts ≥
+    ///   max_attempts` at `AddSubTask{kind:GateFixup}` admit time;
+    ///   the orchestrator's spawn was rejected and the kernel
+    ///   transitions the parent.
+    /// - `"fixup_executor_failed"` — every admitted fixup task
+    ///   reached a terminal non-success state without clearing
+    ///   the gate.
+    GateRejectionTerminal {
+        task_id: String,
+        gate_type: String,
+        terminal_reason: String,
+        /// Final `gate_fixup_attempts` count (≤ `max_attempts`).
+        attempts_used: u32,
+    },
+
+    /// iter65 — `specs/v3/gate-rejection-orchestrator-fixup.md §4.9`.
+    ///
+    /// Emitted at `AddSubTask{kind: GateFixup}` admit time, paired
+    /// with the new fixup-task `tasks` row insert and the parent
+    /// task's `gate_fixup_attempts` increment. Carries the parent's
+    /// gate context so audit replay can reconstruct the fixup
+    /// chain without joining `tasks`.
+    GateFixupSpawned {
+        /// Newly-admitted fixup task (`is_gate_fixup = 1`).
+        fixup_task_id: String,
+        /// Parent task whose gate failed (`is_gate_fixup = 0`).
+        parent_task_id: String,
+        gate_type: String,
+        /// Parent's `evaluation_sha` at the time the fixup was
+        /// spawned. The fixup commits against this.
+        parent_evaluation_sha: String,
+        /// Sequence number within the fixup chain. First fixup
+        /// has `attempt_index = 1`.
+        attempt_index: u32,
+    },
+
+    /// iter65 — `specs/v3/gate-rejection-orchestrator-fixup.md §4.9`.
+    ///
+    /// Emitted when a fixup task reaches a terminal state. Paired
+    /// with the fixup task's `TaskStateChanged` in the same
+    /// transaction. `outcome` is exactly one of:
+    /// - `"completed_with_commit"` — fixup made a new commit. The
+    ///   kernel updates the parent's `evaluation_sha` and re-runs
+    ///   `evaluate_claims`.
+    /// - `"completed_no_commit"` — fixup exited successfully
+    ///   without a new commit. Parent's `evaluation_sha`
+    ///   unchanged.
+    /// - `"crashed"` / `"timed_out"` — fixup terminated
+    ///   abnormally. Treated equivalently to `completed_no_commit`
+    ///   for accounting purposes.
+    GateFixupCompleted {
+        fixup_task_id: String,
+        parent_task_id: String,
+        gate_type: String,
+        outcome: String,
+        /// Present iff `outcome == "completed_with_commit"`.
+        new_evaluation_sha: Option<String>,
+    },
+
+    /// iter65 — `specs/v3/gate-rejection-orchestrator-fixup.md §2`.
+    ///
+    /// Emitted when the kernel's `agent_hint` resolution chain
+    /// falls past Tier 1 (verifier-emitted) on a non-`Pass`
+    /// witness commit. `source` is exactly one of:
+    /// - `"operator_default"` — Tier 2 used (`[[gates]].agent_hint_default`).
+    /// - `"gate_name_only"` — defensive fallback used (Tier-2
+    ///   absent due to a regression bypassing policy validation).
+    ///
+    /// **Wire-validity case.** When a verifier emits a non-string
+    /// or oversized `agent_hint`, the kernel rejects the
+    /// submission with `WitnessRejectionReason::InvalidAgentHint`
+    /// (token NOT consumed) AND emits this event with
+    /// `reason ∈ {"non_string", "oversized"}` for operator
+    /// visibility into weak verifier authoring.
+    WitnessMissingAgentHint {
+        task_id: String,
+        gate_type: String,
+        /// `"operator_default"` | `"gate_name_only"` for
+        /// fallback-on-commit; absent for wire-validity rejections
+        /// that did NOT commit a witness row.
+        source: Option<String>,
+        /// `"absent"` | `"empty"` | `"non_string"` | `"oversized"`
+        /// describing what the verifier delivered (or didn't).
+        reason: String,
+    },
+
     /// V2 Step 25 — emitted after a `SubmitReview` SQLite commit, when
     /// the cross-Reviewer aggregator
     /// (`raxis-kernel::initiatives::review_aggregation::
@@ -4514,6 +4646,12 @@ impl AuditEventKind {
             Self::WitnessAccepted { .. } => "WitnessAccepted",
             Self::WitnessRejected { .. } => "WitnessRejected",
             Self::VerifierProcessFailed { .. } => "VerifierProcessFailed",
+            // iter65 gate-rejection orchestrator-fixup family.
+            Self::GateRejectionAccepted { .. } => "GateRejectionAccepted",
+            Self::GateRejectionTerminal { .. } => "GateRejectionTerminal",
+            Self::GateFixupSpawned { .. } => "GateFixupSpawned",
+            Self::GateFixupCompleted { .. } => "GateFixupCompleted",
+            Self::WitnessMissingAgentHint { .. } => "WitnessMissingAgentHint",
             Self::ReviewAggregationCompleted { .. } => "ReviewAggregationCompleted",
             Self::ExecutorRespawnFromReviewRejection { .. } => "ExecutorRespawnFromReviewRejection",
             Self::IntentValidationRejected { .. } => "IntentValidationRejected",

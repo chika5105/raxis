@@ -2,8 +2,9 @@
  * INV-DASHBOARD-FAILURE-VISIBILITY-01 §5.1 + §5.4 + §5.5:
  *   - Failed session with `failure` populated renders the full
  *     `<FailureReasonPanel>` body.
- *   - Failed session with `failure: null` renders the
- *     "No reason supplied — kernel bug" affordance.
+ *   - Failed session with `failure: null` renders the calm
+ *     muted `(no reason recorded)` empty-state affordance —
+ *     never the loud KERNEL BUG banner.
  *   - Healthy session does NOT render the panel.
  *
  * `SessionStream` is mocked because it opens a real EventSource
@@ -91,12 +92,13 @@ describe("<SessionDetailPage> failure rendering", () => {
     );
   });
 
-  it("renders the kernel-bug affordance when a Failed session ships failure=null", async () => {
+  it("renders a calm `(no reason recorded)` affordance when a Failed session ships failure=null", async () => {
     mockSession({ state: "Failed", failure: null });
     renderAt("sess_abc");
     expect(
-      await screen.findByText(/No reason supplied — kernel bug/),
+      await screen.findByText(/\(no reason recorded\)/),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/KERNEL BUG/)).toBeNull();
     expect(screen.queryByTestId("failure-kind")).toBeNull();
   });
 
@@ -105,6 +107,7 @@ describe("<SessionDetailPage> failure rendering", () => {
     renderAt("sess_abc");
     expect(await screen.findByTestId("session-stream-mock")).toBeInTheDocument();
     expect(screen.queryByTestId("failure-kind")).toBeNull();
-    expect(screen.queryByText(/No reason supplied/)).toBeNull();
+    expect(screen.queryByText(/\(no reason recorded\)/)).toBeNull();
+    expect(screen.queryByText(/KERNEL BUG/)).toBeNull();
   });
 });

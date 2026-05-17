@@ -52,6 +52,7 @@ const NAV: NavSection[] = [
     items: [
       { to: "/git", label: "Git Worktrees", glyph: "G" },
       { to: "/audit", label: "Audit Chain", glyph: "A" },
+      { to: "/gates", label: "Gates", glyph: "T" },
     ],
   },
   {
@@ -334,6 +335,7 @@ const SEGMENT_LABELS: Record<string, string> = {
   sessions: "Sessions",
   escalations: "Escalations",
   audit: "Audit",
+  gates: "Gates",
   git: "Git Worktrees",
   policy: "Policy",
   system: "System",

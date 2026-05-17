@@ -6,17 +6,22 @@ import { CopyButton } from "@/components/CopyButton";
 
 interface FailureReasonPanelProps {
   /// Structured failure payload from the backend. Pass `null` /
-  /// `undefined` to surface the "no reason supplied — kernel bug"
-  /// empty state when the parent KNOWS the entity is in a
-  /// terminal-failure state but the backend didn't ship a reason.
-  /// Pass nothing (omit the prop) when the entity isn't failed —
-  /// the panel returns `null` and renders nothing.
+  /// `undefined` to surface a calm "(no reason recorded)" empty
+  /// state when the parent KNOWS the entity is in a terminal-
+  /// failure state but the backend didn't ship a reason. Pass
+  /// nothing (omit the prop) when the entity isn't failed — the
+  /// panel returns `null` and renders nothing.
   reason: FailureInfo | null | undefined;
   /// Controls the empty-state behaviour:
   ///   * "missing-reason-bug" (default for Failed entities) — the
   ///     parent confirms the entity IS in a terminal-failure state
-  ///     so a missing reason is operator-actionable. Render
-  ///     "No reason supplied — kernel bug" so the gap is visible.
+  ///     so a missing reason should still be visible. Renders a
+  ///     muted `(no reason recorded — see audit chain)` card. The
+  ///     enum tag is kept for backward compatibility with callers
+  ///     who imported the literal; the visual treatment is now
+  ///     intentionally low-key (the previous "KERNEL BUG" banner
+  ///     was operator-hostile noise — the audit chain already
+  ///     enforces the underlying invariant).
   ///   * "absent" — the entity is NOT failed; return `null` so the
   ///     panel adds zero visual weight.
   ///   * "no-error-reported" — explicit "no error reported, look
@@ -81,51 +86,40 @@ export function FailureReasonPanel({
     if (whenMissing === "absent") return null;
 
     if (whenMissing === "missing-reason-bug") {
-      const label =
-        "⚠ KERNEL BUG: No reason supplied — kernel bug " +
-        "(INV-FAILURE-REASON-MANDATORY-01 violated)";
+      // Operator-experience contract: the entity IS in a terminal-
+      // failure state so the gap is real, but the dashboard does
+      // NOT accuse the kernel of a bug in the operator's face.
+      // The kernel-side audit chain already enforces
+      // INV-FAILURE-REASON-MANDATORY-01; if it really fired the
+      // forensic trail lives there. Render a calm muted card and
+      // point the operator at the audit chain.
+      const label = "(no reason recorded)";
       const tooltip =
-        "The kernel emitted a terminal-failure transition " +
-        "without a non-empty reason. This violates " +
-        "INV-FAILURE-REASON-MANDATORY-01 — every Failed / " +
-        "Aborted / Cancelled / BlockedRecoveryPending " +
-        "transition MUST carry an operator-actionable reason. " +
-        "Please file a bug against the originating emit site.";
+        "The kernel did not surface a structured reason for this " +
+        "transition. Inspect the audit chain for the originating " +
+        "event and the kernel.stderr.log for any non-structured " +
+        "diagnostics that landed alongside it.";
       return (
         <div
-          role="alert"
-          aria-live="assertive"
+          role="status"
+          aria-live="polite"
           data-failure-empty="missing-reason-bug"
-          data-invariant="INV-FAILURE-REASON-MANDATORY-01"
-          data-testid="failure-kernel-bug"
+          data-testid="failure-no-reason"
           className={clsx(
-            "card border-bad/60 bg-bad/10 p-3 text-sm space-y-1",
+            "card border-edge p-3 text-sm text-ink-muted",
             className,
           )}
         >
           <div className="flex items-start gap-2">
-            <span
-              aria-hidden="true"
-              className="text-bad font-bold leading-none mt-0.5"
-            >
-              !
+            <span aria-hidden="true" className="text-ink-subtle">
+              ⓘ
             </span>
             <div className="min-w-0">
-              <p className="text-xs uppercase tracking-wide text-bad/90 font-medium">
-                Kernel invariant violation
+              <p className="text-xs uppercase tracking-wide text-ink-subtle font-medium">
+                {heading}
               </p>
-              <p
-                className="text-bad break-words font-medium"
-                title={tooltip}
-              >
+              <p className="text-ink-muted break-words" title={tooltip}>
                 {label}
-              </p>
-              <p className="text-[11px] text-ink-muted mt-1">
-                See{" "}
-                <code className="font-mono">
-                  INV-FAILURE-REASON-MANDATORY-01
-                </code>{" "}
-                in <code className="font-mono">specs/invariants.md</code>.
               </p>
             </div>
           </div>
@@ -388,27 +382,41 @@ export function FailurePill({
   className,
 }: FailurePillProps) {
   if (!failed) return null;
+  // When the kernel did not surface a structured reason we fall
+  // back to a calm muted pill (rather than the previous loud
+  // KERNEL BUG affordance) — the underlying invariant lives in
+  // the audit chain, not in the operator's face.
+  const haveReason = Boolean(
+    reason && (reason.message?.trim() || reason.kind?.trim()),
+  );
   const summary = reason?.message?.trim()
     ? truncate(reason.message.trim(), compact ? 60 : 100)
-    : reason?.kind?.trim() || "No reason supplied — kernel bug";
-  const tooltip = reason
-    ? [reason.kind, reason.message].filter(Boolean).join("\n")
-    : "INV-FAILURE-REASON-MANDATORY-01 violated: the kernel " +
-      "emitted a terminal-failure transition without a " +
-      "human-readable reason. Please file a bug against the " +
-      "originating emit site.";
+    : reason?.kind?.trim() || "(no reason recorded)";
+  const tooltip = haveReason
+    ? [reason?.kind, reason?.message].filter(Boolean).join("\n")
+    : "The kernel did not surface a structured reason for this " +
+      "transition. Inspect the audit chain for the originating " +
+      "event.";
   return (
     <span
       className={clsx(
         "inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[12px]",
-        "border-bad/40 bg-bad/10 text-bad",
+        haveReason
+          ? "border-bad/40 bg-bad/10 text-bad"
+          : "border-edge bg-panel-raised text-ink-muted",
         className,
       )}
       title={tooltip}
-      data-failure-kind={reason?.kind ?? "MissingReason"}
+      data-failure-kind={reason?.kind ?? "NoReasonRecorded"}
     >
-      <span aria-hidden="true" className="font-bold">!</span>
-      {!compact && <span className="text-bad/90">Reason:</span>}
+      <span aria-hidden="true" className="font-bold">
+        {haveReason ? "!" : "ⓘ"}
+      </span>
+      {!compact && (
+        <span className={haveReason ? "text-bad/90" : "text-ink-subtle"}>
+          {haveReason ? "Reason:" : "Note:"}
+        </span>
+      )}
       <span className="truncate max-w-[28ch]">{summary}</span>
     </span>
   );

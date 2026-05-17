@@ -91,7 +91,7 @@ describe("<HealthPage> subsystem cards", () => {
     );
   });
 
-  it("renders the kernel-bug affordance when last_error is null on an unhealthy card", async () => {
+  it("renders a calm `(no reason recorded)` affordance when last_error is null on an unhealthy card", async () => {
     mockSubsystems([
       {
         id: "credential-proxy",
@@ -103,7 +103,9 @@ describe("<HealthPage> subsystem cards", () => {
     ]);
     renderPage();
     const errBand = await screen.findByTestId("subsystem-last-error");
-    expect(errBand).toHaveTextContent(/No reason supplied — kernel bug/);
+    expect(errBand).toHaveTextContent(/\(no reason recorded\)/);
+    expect(errBand).not.toHaveTextContent(/KERNEL BUG/);
+    expect(errBand.getAttribute("data-error-missing")).toBe("true");
   });
 
   it("does not render the inline-error band on healthy cards", async () => {

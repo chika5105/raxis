@@ -184,15 +184,13 @@ function SubsystemCard({ card }: { card: SubsystemHealthCard }) {
   const isUnhealthy = card.status === "failing" || card.status === "degraded";
   // Operator-experience contract `INV-DASHBOARD-FAILURE-VISIBILITY-01`:
   // every `failing` / `degraded` card MUST surface its `last_error`.
-  // When the kernel did NOT supply one we render an explicit
-  // operator-actionable bug marker so the gap is visible rather
-  // than silently swallowed by the green dot.
-  const errorText =
-    card.last_error?.trim() ||
-    (isUnhealthy
-      ? "⚠ KERNEL BUG: No reason supplied — kernel bug " +
-        "(INV-FAILURE-REASON-MANDATORY-01 violated)"
-      : "");
+  // When the kernel did NOT supply one we render a calm muted
+  // "(no reason recorded)" affordance so the gap is visible
+  // without screaming "KERNEL BUG" at the operator — the audit
+  // chain already enforces the underlying invariant.
+  const rawError = card.last_error?.trim() ?? "";
+  const errorText = rawError || (isUnhealthy ? "(no reason recorded)" : "");
+  const errorIsMissing = isUnhealthy && rawError.length === 0;
   return (
     <article
       className="card p-3 space-y-2"
@@ -216,12 +214,23 @@ function SubsystemCard({ card }: { card: SubsystemHealthCard }) {
       <p className="text-xs text-ink-muted leading-snug">{card.summary}</p>
       {isUnhealthy && errorText && (
         <div
-          role="alert"
+          role={errorIsMissing ? "status" : "alert"}
           data-testid="subsystem-last-error"
-          className="text-xs rounded border border-bad/40 bg-bad/10 text-bad px-2 py-1.5 whitespace-pre-wrap break-words leading-snug"
-          title={errorText}
+          data-error-missing={errorIsMissing || undefined}
+          className={
+            errorIsMissing
+              ? "text-xs rounded border border-edge bg-panel text-ink-muted px-2 py-1.5 whitespace-pre-wrap break-words leading-snug"
+              : "text-xs rounded border border-bad/40 bg-bad/10 text-bad px-2 py-1.5 whitespace-pre-wrap break-words leading-snug"
+          }
+          title={
+            errorIsMissing
+              ? "The kernel did not surface a structured last_error for this unhealthy subsystem. Inspect the audit chain for the originating event."
+              : errorText
+          }
         >
-          <span className="font-bold mr-1" aria-hidden="true">!</span>
+          <span className="font-bold mr-1" aria-hidden="true">
+            {errorIsMissing ? "ⓘ" : "!"}
+          </span>
           {errorText}
         </div>
       )}

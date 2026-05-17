@@ -2727,6 +2727,9 @@ mod substrate_ipc_tests {
                 resolved_via_escalation: None,
                 tokens_used: None,
                 structured_output: None,
+                sub_task_kind: None,
+                parent_gate_failure_task_id: None,
+                parent_gate_failure_type: None,
             }),
             // ── Dispatched: verifier / WitnessSubmission ──
             M::WitnessSubmission(WitnessSubmission {

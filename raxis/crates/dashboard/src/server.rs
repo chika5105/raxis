@@ -417,6 +417,9 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // Escalations.
         .route("/api/escalations", get(escalations::list::<D>))
         .route("/api/escalations/:id", get(escalations::detail::<D>))
+        // Gates — per-gate rollup for the dashboard's Gates page.
+        // INV-DASHBOARD-GATE-STATS-PER-GATE-ROLLUP-01.
+        .route("/api/gates/stats", get(gates::stats::<D>))
         // Audit + Inbox.
         .route("/api/audit", get(audit::list::<D>))
         // Curated recent-activity feed for the dashboard

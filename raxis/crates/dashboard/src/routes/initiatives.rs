@@ -92,6 +92,13 @@ pub struct DagNode {
     pub title: String,
     /// Task FSM state.
     pub state: String,
+    /// `true` when an executor/reviewer subtask activation is live
+    /// for this task. Mirrors `TaskView::is_active`: the FSM state
+    /// can be `Admitted` while the task is mid-execution between
+    /// VM hops, so the FE renders a Running pill / pulse whenever
+    /// `is_active` is true regardless of the `state` string. See
+    /// `INV-DASHBOARD-RUNNING-STATE-VISIBLE-01`.
+    pub is_active: bool,
 }
 
 /// `GET /api/initiatives/:id/dag`.
@@ -112,6 +119,7 @@ where
             task_id: t.task_id.clone(),
             title: t.title.clone(),
             state: t.state.clone(),
+            is_active: t.is_active,
         })
         .collect();
     Ok(Json(DagView {

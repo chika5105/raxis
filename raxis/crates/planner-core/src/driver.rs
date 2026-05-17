@@ -1540,6 +1540,21 @@ async fn submit_terminal(
                 role,
             });
         }
+        IntentKind::AddSubTask => {
+            // V3 (`specs/v3/gate-rejection-orchestrator-fixup.md` §4.3)
+            // — emitted by the Orchestrator in response to a
+            // `KernelPush::GateRejected` push. The planner-side
+            // submit path is wired by the
+            // `submit_add_subtask_gate_fixup` builder (see
+            // `IntentSubmitter`); reaching this driver arm via the
+            // generic terminal-tool router means the orchestrator
+            // mis-routed an `add_subtask_gate_fixup` tool call.
+            // Surface as a hard `DriverError` so the bug fails loud.
+            return Err(DriverError::UnmappableTerminal {
+                tool_name: "add_subtask_gate_fixup".to_owned(),
+                role,
+            });
+        }
     }
     let _ = role;
     Ok(())
@@ -2322,6 +2337,7 @@ mod tests {
             credential_ports: vec![],
             capabilities: None,
             last_critique: None,
+            gate_fixup: None,
         };
 
         let _ = run_role_session_with_model(

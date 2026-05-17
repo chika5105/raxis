@@ -215,12 +215,38 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
     // sessions because every kernel-mediated fetch dropped
     // task_id on the floor.
     //
-    // The lookup is best-effort: a missing Active row (e.g.
-    // orchestrator-only session, or a transient gap during
-    // session activation) downgrades to `None` so the fetch
-    // still succeeds — capture is best-effort by contract,
-    // never a load-bearing gate on the planner's egress.
-    let task_id_for_observer = lookup_active_task_id_for_session(ctx, &session.session_id).await;
+    // iter65 — `orchestrator-llm-turns`. Orchestrator sessions
+    // have NO `subtask_activations` row (those are scoped to
+    // executor / reviewer subtasks), so the iter62 lookup
+    // returned `None` for every orchestrator planner_fetch and
+    // the dashboard's LLM-turns panel stayed empty for the
+    // most operator-visible session. Fall back to the
+    // session's owning `initiative_id` as the synthetic
+    // coordinator `task_id` (== `initiative_id`, per
+    // `INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01`)
+    // so orchestrator turns land in `<initiative_id>.jsonl`
+    // and the dashboard's TaskDetail page for the coordinator
+    // row renders them through the existing TaskLlmTurns
+    // panel. The `agent_role` stamp (see below) lets the
+    // operator distinguish orchestrator turns from any
+    // executor / reviewer turns that may also have landed in
+    // the same file.
+    //
+    // The lookup remains best-effort: a missing Active row
+    // (transient gap during session activation, or a session
+    // with no `initiative_id` at all) downgrades to `None` so
+    // the fetch still succeeds — capture is best-effort by
+    // contract, never a load-bearing gate on the planner's
+    // egress.
+    let active_task_id =
+        lookup_active_task_id_for_session(ctx, &session.session_id).await;
+    let task_id_for_observer = resolve_observer_task_id(
+        active_task_id,
+        session.session_agent_type,
+        session.initiative_id.as_deref(),
+    );
+
+    let agent_role_for_observer = agent_role_label(session.session_agent_type);
 
     let result = ctx
         .gateway
@@ -234,6 +260,7 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
             timeout_ms,
             session_uuid,
             task_id_for_observer,
+            agent_role_for_observer,
         )
         .await;
 
@@ -491,6 +518,49 @@ async fn resolve_session(
 /// fans `LlmTurnObserver::observe(...)` when the inflight slot
 /// carries a `Some(task_id)`; threading the resolved task_id here
 /// is the load-bearing wiring that closes the iter62 silent-drop.
+/// Pure helper extracted so the orchestrator-fallback for the
+/// `task_id_for_observer` stamp can be unit-tested without the
+/// full `HandlerContext` / tokio scaffold.
+///
+/// Contract:
+///   - if `active_task_id` is `Some`, use it as-is (executor /
+///     reviewer happy path — the planner_fetch caller is bound
+///     to an `Active` `subtask_activations` row).
+///   - otherwise, if the session is an orchestrator AND has an
+///     `initiative_id`, stamp with that `initiative_id` (the
+///     synthetic coordinator task_id == initiative_id — the
+///     turns land on the coordinator's TaskDetail page).
+///   - otherwise, `None` → silent capture-side drop (legacy
+///     contract; the gateway fetch itself still succeeds).
+fn resolve_observer_task_id(
+    active_task_id: Option<String>,
+    agent_type: Option<SessionAgentType>,
+    initiative_id: Option<&str>,
+) -> Option<String> {
+    if let Some(t) = active_task_id {
+        return Some(t);
+    }
+    if matches!(agent_type, Some(SessionAgentType::Orchestrator)) {
+        return initiative_id.map(str::to_owned);
+    }
+    None
+}
+
+/// Pure helper that maps `SessionAgentType` → the role label
+/// stamped onto `LlmTurnRecord.agent_role` so the dashboard can
+/// render a per-turn role badge. Extracted from the handler
+/// body so the projection is unit-testable in isolation and
+/// the wire labels (`"Orchestrator"`, `"Executor"`, `"Reviewer"`)
+/// are pinned by `agent_role_label_*` tests below — the
+/// `TaskLlmTurns` frontend matches on these exact strings.
+fn agent_role_label(agent_type: Option<SessionAgentType>) -> Option<String> {
+    agent_type.map(|t| match t {
+        SessionAgentType::Orchestrator => "Orchestrator".to_owned(),
+        SessionAgentType::Executor => "Executor".to_owned(),
+        SessionAgentType::Reviewer => "Reviewer".to_owned(),
+    })
+}
+
 async fn lookup_active_task_id_for_session(
     ctx: &Arc<HandlerContext>,
     session_id: &str,
@@ -740,6 +810,116 @@ mod tests {
             resolved.is_none(),
             "Completed activation rows must not match the Active filter"
         );
+    }
+
+    // ─── iter65: orchestrator-llm-turns fallback ────────────────
+    //
+    // `resolve_observer_task_id` is the load-bearing helper that
+    // closes the silent-drop on orchestrator planner_fetch calls:
+    // orchestrator sessions never carry an `Active` row in
+    // `subtask_activations`, so without a fallback the captured
+    // `LlmTurnRecord` would be discarded by the
+    // `task_id is None` guard in `gateway/client.rs::pump`.
+
+    /// Executor / reviewer happy path: an Active activation row
+    /// has been resolved upstream, so the helper passes it
+    /// through unchanged regardless of agent type. The
+    /// orchestrator-fallback branch must NEVER overwrite a
+    /// real executor / reviewer task_id with an initiative_id.
+    #[test]
+    fn resolve_observer_task_id_passes_through_active_task_for_executor() {
+        let out = resolve_observer_task_id(
+            Some("task-executor-7".to_owned()),
+            Some(SessionAgentType::Executor),
+            Some("init-ignored"),
+        );
+        assert_eq!(out.as_deref(), Some("task-executor-7"));
+    }
+
+    /// Orchestrator fallback (the iter65 unblock): when the
+    /// lookup returns `None` (orchestrator sessions have no
+    /// Active activation row by design), the helper substitutes
+    /// the session's `initiative_id` so the captured turns land
+    /// on the coordinator task's TaskDetail page
+    /// (task_id == initiative_id for the synthetic coordinator).
+    #[test]
+    fn resolve_observer_task_id_falls_back_to_initiative_id_for_orchestrator() {
+        let out = resolve_observer_task_id(
+            None,
+            Some(SessionAgentType::Orchestrator),
+            Some("init-feeg-2"),
+        );
+        assert_eq!(out.as_deref(), Some("init-feeg-2"));
+    }
+
+    /// Orchestrator with no initiative_id (defensive — should
+    /// never happen in production since the session row's
+    /// `initiative_id` FK is NOT NULL once the orchestrator has
+    /// been bound) returns None rather than panicking.
+    #[test]
+    fn resolve_observer_task_id_orchestrator_without_initiative_id_is_none() {
+        let out = resolve_observer_task_id(
+            None,
+            Some(SessionAgentType::Orchestrator),
+            None,
+        );
+        assert!(out.is_none());
+    }
+
+    /// Executor / reviewer without an Active row legitimately
+    /// have no task scope (e.g. during early session activation).
+    /// The helper MUST NOT fall back to the initiative_id for
+    /// these — that would attribute the executor's mid-init
+    /// gateway probe to the coordinator task and confuse the
+    /// dashboard role attribution.
+    #[test]
+    fn resolve_observer_task_id_executor_without_active_row_is_none() {
+        let out = resolve_observer_task_id(
+            None,
+            Some(SessionAgentType::Executor),
+            Some("init-ignored"),
+        );
+        assert!(out.is_none());
+
+        let out_reviewer = resolve_observer_task_id(
+            None,
+            Some(SessionAgentType::Reviewer),
+            Some("init-ignored"),
+        );
+        assert!(out_reviewer.is_none());
+    }
+
+    /// Untagged session (no `session_agent_type` — legacy V1
+    /// rows) falls back to None even if an initiative_id is
+    /// present. The dashboard role-badge column expects one of
+    /// the three pinned labels; emitting an empty role would
+    /// render an ugly empty pill.
+    #[test]
+    fn resolve_observer_task_id_untagged_session_is_none() {
+        let out = resolve_observer_task_id(None, None, Some("init-ignored"));
+        assert!(out.is_none());
+    }
+
+    /// Pin the exact wire labels emitted by `agent_role_label`.
+    /// The `TaskLlmTurns` FE (dashboard-fe/src/components/
+    /// TaskLlmTurns.tsx) matches case-sensitively on these
+    /// strings to pick the badge color; a typo here would
+    /// silently fall through to the neutral default styling.
+    #[test]
+    fn agent_role_label_pins_wire_strings() {
+        assert_eq!(
+            agent_role_label(Some(SessionAgentType::Orchestrator)).as_deref(),
+            Some("Orchestrator"),
+        );
+        assert_eq!(
+            agent_role_label(Some(SessionAgentType::Executor)).as_deref(),
+            Some("Executor"),
+        );
+        assert_eq!(
+            agent_role_label(Some(SessionAgentType::Reviewer)).as_deref(),
+            Some("Reviewer"),
+        );
+        assert_eq!(agent_role_label(None), None);
     }
 
     /// A real call to `elapsed_ms_clamped` on a freshly-minted

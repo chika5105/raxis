@@ -64,6 +64,7 @@ fn slug(version: u32) -> &'static str {
         20 => "v2_escalations_initiator",
         21 => "v3_tasks_cache_token_usage",
         22 => "v3_subtask_activations_validation_reject_count",
+        23 => "v3_tasks_gate_fixup",
         _ => panic!("no slug registered for migration version {version}"),
     }
 }
@@ -93,6 +94,7 @@ fn render(version: u32) -> String {
         20 => render_migration_20_ddl(),
         21 => render_migration_21_ddl(),
         22 => render_migration_22_ddl(),
+        23 => render_migration_23_ddl(),
         _ => panic!("no renderer registered for migration version {version}"),
     }
 }
@@ -129,7 +131,7 @@ fn wrap_with_header(rendered: &str) -> String {
 }
 
 const VERSIONS: &[u32] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
 ];
 
 /// Drift-detection: every committed `.sql` matches its

@@ -45,8 +45,8 @@ interface AuditMeta {
 /// fields the helper still returns a `FailureInfo` whose `kind` =
 /// `eventKind` so the panel renders the badge + (often empty)
 /// `message`. That triggers the panel's "(no message)" /
-/// "No reason supplied — kernel bug" affordances so the gap is
-/// operator-visible instead of swallowed.
+/// "(no reason recorded)" affordances so the gap is
+/// operator-visible without screaming KERNEL BUG.
 export function failureFromAuditEvent(
   eventKind: string,
   payload: unknown,
@@ -110,11 +110,12 @@ export function failureFromAuditEvent(
     case "NotificationDeliveryFailed": {
       // `INV-FAILURE-REASON-CONCRETE-01` — leave `message`
       // empty when neither `reason` nor `detail` is populated.
-      // The panel's `(no message)` / `⚠ KERNEL BUG` empty-
-      // state then fires, surfacing the gap as a kernel bug
-      // instead of hiding it behind a hedged fallback
-      // placeholder. The forbidden-phrase regex in the
-      // kernel sweep test treats the hedged fallback as a
+      // The panel's `(no message)` / `(no reason recorded)`
+      // empty-states then fire, surfacing the gap as a calm
+      // muted affordance (the audit chain enforces the actual
+      // invariant). Crucially we do NOT plant a hedged
+      // fallback placeholder here — the forbidden-phrase
+      // regex in the kernel sweep test treats those as a
       // concrete-reason violation.
       message = str(obj, "reason") ?? str(obj, "detail") ?? "";
       pushField(fields, "reviewer_session_id", str(obj, "reviewer_session_id"));
@@ -393,9 +394,9 @@ const FAILURE_KINDS = new Set<string>([
 // session terminal) and `OperatorCertRevoked` (deliberate admin
 // action with `reason` already populated). Treating either as a
 // failure-shaped event drove the dashboard to surface clean
-// terminals under "Failure events" and to fire the
-// `INV-FAILURE-REASON-MANDATORY-01` kernel-bug badge on
-// reason-less but-perfectly-fine `SessionRevoked` rows.
+// terminals under "Failure events" and to fire a no-reason
+// empty-state on reason-less but-perfectly-fine `SessionRevoked`
+// rows.
 function looksLikeFailureKind(kind: string): boolean {
   return /(Failed|FailedFinal|Crashed|Denied|Rejected|Refused|Quarantined|Aborted|StallDetected|ProcessFailed|TimedOut)$/.test(
     kind,

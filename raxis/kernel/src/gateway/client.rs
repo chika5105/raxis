@@ -129,6 +129,13 @@ struct Pending {
     /// outbound frame; cost is one `Vec<u8>` clone per fetch
     /// (bounded by the gateway's per-request cap).
     request_body: Vec<u8>,
+    /// Agent role of the originating session, mirrored from
+    /// the `FetchRequest` call site so the response-side
+    /// observer can stamp the captured `LlmTurnRecord` with
+    /// `"Orchestrator"` / `"Executor"` / `"Reviewer"`. `None`
+    /// when the kernel issued the fetch without a planner-
+    /// session attribution (e.g. bootstrap probes).
+    agent_role: Option<String>,
 }
 
 /// Hook invoked by the gateway pump for every successful
@@ -177,6 +184,13 @@ pub trait LlmTurnObserver: Send + Sync {
         request_body_bytes: Option<&[u8]>,
         body_bytes: Option<&[u8]>,
         error: Option<&str>,
+        // iter65 — `agent_role`: originating session role
+        // (`"Orchestrator"` / `"Executor"` / `"Reviewer"`).
+        // `None` when the call site has no role context
+        // (legacy or non-planner-mediated fetches). Distinct
+        // from the provider's `body.role` field which is
+        // extracted downstream from the parsed response.
+        agent_role: Option<&str>,
     );
 }
 
@@ -319,6 +333,14 @@ impl GatewayClient {
         timeout_ms: u32,
         session_id: Option<Uuid>,
         task_id: Option<String>,
+        // iter65 — `agent_role`: originating session role
+        // (`"Orchestrator"` / `"Executor"` / `"Reviewer"`),
+        // forwarded as-is to the [`LlmTurnObserver`] fan-out
+        // so the captured `LlmTurnRecord` carries the role
+        // tag for the dashboard. `None` when the call site
+        // lacks a planner-session attribution (e.g. early
+        // gateway warm-up pings).
+        agent_role: Option<String>,
     ) -> Result<FetchResult, GatewayCallError> {
         let fetch_id = Uuid::new_v4();
         // Clone the correlation ids BEFORE moving them into the
@@ -329,6 +351,7 @@ impl GatewayClient {
         // response → task).
         let task_id_for_inflight = task_id.clone();
         let session_id_for_inflight = session_id;
+        let agent_role_for_inflight = agent_role.clone();
         // iter64 — capture the request body for the
         // observer fan-out so the per-turn dashboard panel can
         // render BOTH sides of the upstream round-trip. One
@@ -365,6 +388,7 @@ impl GatewayClient {
                 task_id: task_id_for_inflight,
                 session_id: session_id_for_inflight,
                 request_body: request_body_for_inflight,
+                agent_role: agent_role_for_inflight,
             }))
             .map_err(|_| GatewayCallError::Unavailable)?;
         }
@@ -450,6 +474,12 @@ async fn pump(
         /// `FetchRequest` so the observer fan-out at response
         /// time can record BOTH sides of the round-trip.
         request_body: Vec<u8>,
+        /// Agent role of the originating session
+        /// (`"Orchestrator"` / `"Executor"` / `"Reviewer"`).
+        /// Stamped onto the captured `LlmTurnRecord` so the
+        /// dashboard can render a role badge per turn. See
+        /// `orchestrator-llm-turns` in the iter65 task queue.
+        agent_role: Option<String>,
     }
 
     let mut inflight: HashMap<Uuid, InflightSlot> = HashMap::new();
@@ -474,6 +504,7 @@ async fn pump(
                             task_id:      pending.task_id,
                             session_id:   pending.session_id,
                             request_body: pending.request_body,
+                            agent_role:   pending.agent_role,
                         });
                         if let Err(e) = write_frame(&mut stream, &pending.payload).await {
                             eprintln!(
@@ -547,6 +578,7 @@ async fn pump(
                                 Some(slot.request_body.as_slice()),
                                 body_bytes.as_deref(),
                                 error.as_deref(),
+                                slot.agent_role.as_deref(),
                             );
                         }
                         let outcome = match error {
@@ -647,6 +679,7 @@ mod tests {
                     5_000,
                     None,
                     None,
+                    None,
                 )
                 .await
         })
@@ -656,9 +689,21 @@ mod tests {
     /// `pump_fans_observer_for_every_response_with_task_id` and
     /// `pump_skips_observer_when_no_task_id` tests below.
     /// Captures every `(task_id, fetch_id, status, request_body_str,
-    /// body_str, error)` tuple it sees so the test can assert on
-    /// order + content.
-    type RecordingRow = (String, Uuid, Option<u16>, String, String, Option<String>);
+    /// body_str, error, agent_role)` tuple it sees so the test can
+    /// assert on order + content.
+    ///
+    /// iter65 — added `agent_role` slot so the orchestrator-llm-turns
+    /// plumb (planner_fetch → gateway.fetch → observer →
+    /// `LlmTurnRecord.agent_role`) is pinned end-to-end here.
+    type RecordingRow = (
+        String,
+        Uuid,
+        Option<u16>,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    );
 
     #[derive(Default)]
     struct RecordingObserver {
@@ -676,6 +721,7 @@ mod tests {
             request_body_bytes: Option<&[u8]>,
             body_bytes: Option<&[u8]>,
             error: Option<&str>,
+            agent_role: Option<&str>,
         ) {
             let request_body = request_body_bytes
                 .map(|b| String::from_utf8_lossy(b).to_string())
@@ -690,6 +736,7 @@ mod tests {
                 request_body,
                 body,
                 error.map(str::to_owned),
+                agent_role.map(str::to_owned),
             ));
         }
     }
@@ -718,6 +765,7 @@ mod tests {
                 5_000,
                 None,
                 Some("task-cap-1".into()),
+                Some("Executor".into()),
             )
             .await
             .expect("fetch must succeed");
@@ -732,6 +780,10 @@ mod tests {
         assert_eq!(seen[0].3, r#"{"model":"claude","messages":[]}"#);
         assert_eq!(seen[0].4, "OK");
         assert!(seen[0].5.is_none());
+        // iter65 — agent_role plumbed end-to-end:
+        // planner_fetch → gateway.fetch → InflightSlot →
+        // pump → observer.
+        assert_eq!(seen[0].6.as_deref(), Some("Executor"));
     }
 
     /// Fetches without a `task_id` (e.g. early gateway warm-up
@@ -760,6 +812,7 @@ mod tests {
                 5_000,
                 None,
                 None, // task_id is None
+                None,
             )
             .await
             .expect("fetch must succeed");
@@ -784,6 +837,7 @@ mod tests {
                 1_000,
                 None,
                 None,
+                None,
             )
             .await;
         assert!(matches!(result, Err(GatewayCallError::Unavailable)));
@@ -806,6 +860,7 @@ mod tests {
                 vec![],
                 vec![],
                 5_000,
+                None,
                 None,
                 None,
             )
@@ -909,6 +964,7 @@ mod tests {
                 1_000,
                 None,
                 None,
+                None,
             )
             .await;
         gw.await.unwrap();
@@ -1006,6 +1062,7 @@ mod tests {
                 vec![],
                 vec![],
                 1_000,
+                None,
                 None,
                 None,
             )

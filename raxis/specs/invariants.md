@@ -1043,6 +1043,280 @@ rejects in release builds with `INVARIANT_FAILURE_REASON_REQUIRED`.
 
 ---
 
+## §19 — Gate rejection and agent-hint contract
+
+Canonical home: [`v3/gate-rejection-orchestrator-fixup.md`](v3/gate-rejection-orchestrator-fixup.md).
+
+### INV-WITNESS-AGENT-HINT-WIRE-VALID-01 — `agent_hint` wire validity is enforced before token consumption
+
+**Statement.** A `WitnessSubmission` whose `body.agent_hint` is
+present but not a JSON string, or whose string length exceeds
+`WITNESS_AGENT_HINT_MAX_BYTES` (8192), MUST be rejected with
+`WitnessRejectionReason::InvalidAgentHint { reason }` and the
+verifier's single-use token MUST NOT be consumed. Absent /
+empty-string `agent_hint` on non-`Pass` is NOT a wire violation —
+it routes through the tier-fallback chain pinned by
+`INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01`. `Pass` submissions
+are exempt from the validity check.
+
+**Justification.** The reserved key carries a structured contract
+that downstream code paths depend on (orchestrator push, fixup
+KSB). Letting a wire-malformed value through corrupts every
+downstream view. Refusing to consume the token preserves the
+existing verifier-respawn semantics (`Inconclusive`-equivalent
+treatment for a malformed payload).
+
+**Scenario.** A verifier emits `body.agent_hint = 42`. The kernel
+detects the non-string and rejects with `InvalidAgentHint`. The
+verifier token is preserved. The kernel re-spawns the verifier
+(via the existing retry path), which now emits a valid string
+hint, and the witness commits.
+
+---
+
+### INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01 — Non-`Pass` witnesses always end up with a persisted (gate_type, critique) pair
+
+**Statement.** When the kernel commits a non-`Pass` witness, it
+MUST persist `tasks.last_gate_critique` and `tasks.last_gate_type`
+through the deterministic three-tier resolution chain: (1)
+verifier-emitted `body.agent_hint`; if absent / empty, (2)
+operator-supplied `[[gates]].agent_hint_default` from policy; if
+absent (only possible after a regression bypasses policy
+validation), (3) a defensive gate-name-only template. Tiers 2 and
+the defensive fallback MUST emit a `WitnessMissingAgentHint
+{ source }` audit event with `source ∈ {"operator_default",
+"gate_name_only"}`.
+
+**Justification.** Downstream code (orchestrator push, fixup KSB)
+assumes a non-empty critique is always available. Falling back
+silently makes weak verifier authoring invisible; refusing the
+commit blocks the operator's ability to observe the failure at
+all. The graceful-degradation + audit-emit pattern preserves
+visibility without making the system brittle.
+
+**Scenario.** A poorly-written verifier emits `Fail` with no
+`agent_hint`. The kernel reads
+`[[gates]].agent_hint_default = "Review the {gate_type} policy..."`
+from policy, persists it as the critique, emits
+`WitnessMissingAgentHint { source: "operator_default" }`, and the
+dashboard surfaces the weak-verifier flag.
+
+---
+
+### INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01 — Gate-fixup retry budget is enforced at `AddSubTask` admit, not duplicated
+
+**Statement.** The `[gate_fixup].max_attempts` budget MUST be
+enforced on exactly one code path: `handle_add_sub_task` when
+`kind == SubTaskKind::GateFixup`. The handler reads
+`parent.gate_fixup_attempts`, compares to policy, and either
+rejects with `FailGateFixupBudgetExhausted` (paired with
+`TaskStateChanged { GatesPending → Failed }` and
+`GateRejectionTerminal { terminal_reason: "fixup_budget_exhausted" }`),
+or inserts a fixup task and increments
+`parent.gate_fixup_attempts` in the same SQLite transaction.
+
+**Justification.** Multi-site budget enforcement (witness handler,
+intent handler, completion hook) is the canonical "off-by-one"
+trap. Centralising the check at admit time means: orchestrator
+can re-issue the push as many times as it wants; only the kernel
+gets to say "enough"; the parent's `Failed` transition lives on
+the same paired write as the rejection.
+
+**Scenario.** Orchestrator receives a fourth `KernelPush::GateRejected`
+and emits `AddSubTask{kind: GateFixup}`. Kernel reads
+`parent.gate_fixup_attempts = 3` ≥ `max_attempts = 3`, rejects
+with `FailGateFixupBudgetExhausted`, transitions parent to
+`Failed`, and emits `GateRejectionTerminal
+{ terminal_reason: "fixup_budget_exhausted" }`. Orchestrator
+receives the `IntentResponse::Failed` and moves on.
+
+---
+
+### INV-DASHBOARD-GATE-STATS-PER-GATE-ROLLUP-01 — `GET /api/gates/stats` exposes a stable per-gate rollup
+
+**Statement.** The dashboard's `GET /api/gates/stats` endpoint
+MUST return one row per `gate_type` observed in
+`witness_records`, alphabetically sorted by `gate_type`, with
+the following fields:
+
+  * `pass_count`, `fail_count`, `inconclusive_count` — counts
+    of each `result_class` over the lifetime of the kernel
+    deployment.
+  * `last_seen_at` — `MAX(recorded_at)` over the gate (Unix
+    seconds), `None` when the gate has never run.
+  * `fixup_loop_count` — `SUM(tasks.gate_fixup_attempts)
+    WHERE tasks.last_gate_type = <gate_type>`. Zero when no
+    gate-fixup loops have been admitted for this gate.
+
+The response envelope MUST carry `generated_at` (server wall
+clock at rollup time). On store-read errors the implementation
+MUST surface `Err(ApiError::Internal)` so a silent zero never
+masks a stuck rollup.
+
+**Justification.** Per-gate stats are the operator's
+fastest signal that a verifier is mis-authored (too many
+false-positives → over-budget fixup loops; too many
+inconclusives → I/O fault in the verifier). Bucketing the
+rollup server-side ensures every consumer (Vitest, e2e
+harness, Grafana scrape) sees the same numbers — the
+frontend never derives its own classification. Stable
+alphabetical ordering lets the FE diff row-by-row across
+polls without reconciling positions.
+
+**Scenario.** Two gates are configured: `NoSecretStrings` and
+`SchemaValid`. The kernel records 12 `Pass` + 3 `Fail`
+witnesses for `NoSecretStrings`, 5 `Pass` for `SchemaValid`.
+Two `Fail`s on `NoSecretStrings` triggered fixup loops that
+together admitted 4 `AddSubTask{GateFixup}` rows. The
+`/api/gates/stats` response contains two rows in this order:
+`{ gate_type: "NoSecretStrings", pass_count: 12, fail_count:
+3, inconclusive_count: 0, last_seen_at: <…>, fixup_loop_count:
+4 }` and `{ gate_type: "SchemaValid", pass_count: 5,
+fail_count: 0, inconclusive_count: 0, last_seen_at: <…>,
+fixup_loop_count: 0 }`.
+
+---
+
+### INV-GATE-FIXUP-ADMIT-ATOMIC-01 — `AddSubTask{GateFixup}` admit is a single transaction
+
+**Statement.** The kernel's `handle_add_sub_task` admit pipeline
+for `kind == SubTaskKind::GateFixup` MUST land its three SQL
+writes in one transaction:
+
+  1. `INSERT INTO tasks (..., is_gate_fixup = 1,
+     parent_gate_failure_task_id, parent_gate_failure_type,
+     evaluation_sha = parent.evaluation_sha)`.
+  2. `INSERT INTO task_dag_edges (predecessor = parent,
+     successor = new fixup task)`.
+  3. `UPDATE tasks SET gate_fixup_attempts = gate_fixup_attempts
+     + 1 WHERE task_id = parent`.
+
+The `GateFixupSpawned` audit row is emitted only after the
+transaction commits successfully and carries the post-bump
+attempt counter as `attempt_index`.
+
+**Justification.** A crash between (1) and (3) leaves the
+parent's budget counter unchanged while a fixup row exists — the
+next `AddSubTask` for the same parent succeeds and the budget
+under-counts. A crash between (1) and (2) leaves a fixup row
+with no DAG edge — the topology query (`SubscribeInitiative
+DagPanel`) silently drops the row. Combining the three writes
+into one tx eliminates both partial-failure modes, and pairing
+the audit emit with the post-commit observation eliminates a
+"ghost spawn" surface that would otherwise survive transaction
+rollback.
+
+**Scenario.** Orchestrator receives `KernelPush::GateRejected`
+and submits `AddSubTask{kind: GateFixup, task_id: "fixup-42",
+parent_gate_failure_task_id: "parent-1", parent_gate_failure_type:
+"NoSecretStrings"}`. Kernel observes parent state `GatesPending`,
+parent `gate_fixup_attempts = 1`, `[gate_fixup].max_attempts =
+3`. Inside one transaction the kernel inserts
+`tasks(fixup-42, ..., is_gate_fixup=1, parent_gate_failure_task_id
+= "parent-1")`, inserts `task_dag_edges(parent-1 → fixup-42)`,
+and updates `parent-1.gate_fixup_attempts = 2`. Post-commit, the
+audit chain carries `GateFixupSpawned { fixup_task_id: "fixup-42",
+parent_task_id: "parent-1", gate_type: "NoSecretStrings",
+parent_evaluation_sha: "<parent SHA>", attempt_index: 2 }`.
+
+---
+
+### INV-GATE-FIXUP-COMPLETION-PROPAGATES-01 — `CompleteTask` on a fixup task always closes the fixup loop
+
+**Statement.** When `handle_complete_task` flips a task with
+`is_gate_fixup = 1` to `Completed`, the kernel MUST emit
+`AuditEventKind::GateFixupCompleted` (carrying
+`fixup_task_id`, `parent_task_id`, `gate_type`, `outcome`,
+`new_evaluation_sha`). When the fixup produced a new commit
+(`outcome == "completed_with_commit"`), the kernel MUST also
+update the parent's `tasks.evaluation_sha` to the new SHA so the
+next gate-evaluation pass runs against the repaired tip.
+
+**Justification.** The fixup loop is observable only through this
+audit row. Without it, the orchestrator sees a normal executor
+`Completed` without knowing whether the gate it was meant to
+repair is now satisfiable, and the parent's `evaluation_sha`
+stays anchored to the original failing SHA — the next witness
+pass would re-fail on the same gate. Pairing the audit emit with
+the parent's SHA update inside the same handler turns "fixup
+done" into a single observable transaction the dashboard can
+render and the orchestrator can route on.
+
+**Scenario.** A `Fail` witness on `NoSecretStrings` triggers a
+fixup task that removes an AWS access key from the diff. The
+fixup commits the repair on top of the parent's failing SHA. On
+`CompleteTask`, the kernel emits `GateFixupCompleted
+{ outcome: "completed_with_commit",
+  new_evaluation_sha: <repaired SHA> }`, updates the parent's
+`evaluation_sha`, and the orchestrator re-emits an admission
+intent against the new SHA. The verifier re-runs against the
+repaired tip and emits a `Pass` witness; the parent advances
+out of `GatesPending`.
+
+---
+
+### INV-PHASE-C-RUNNING-GATES-PENDING-COVERED-01 — Phase C transitions Running into GatesPending whenever pending gates appear
+
+**Statement.** When intent Phase C admits a new intent for a task
+whose evaluation produces a non-empty `pending_gates` set, the
+SQL `tasks.state` MUST be flipped to `GatesPending` regardless of
+whether the entry state is `Admitted` or `Running`. The handler
+records a `TaskTransitionRecord` so the paired
+`AuditEventKind::TaskStateChanged` row reaches the dashboard's
+`SubscribeInitiative` push stream.
+
+**Justification.** Pre-fix, Phase C only flipped the SQL state on
+the `Admitted → GatesPending` edge, even though the FSM
+(`fsm.rs` line 116) explicitly admits `Running → GatesPending`.
+Tasks that admitted a fresh intent while already `Running` (e.g.
+re-spawned executor pushes a second commit, or the witness
+handler re-spawns verifiers on a new HEAD) had their SQL state
+silently left at `Running` while every downstream consumer
+(`evaluate_claims` re-spawn, `tasks.is_blocked()`, recovery
+sweep, dashboard timeline) treated them as `GatesPending` based
+on the separately-maintained `pending_gates` set. The split
+view was observable as the dashboard's per-task FSM appearing
+stuck on `Running` for the duration of the witness wait.
+
+**Scenario.** A `Running` task admits a `ReportProgress` intent
+that touches files newly gated by `[[gates]] gate_type =
+TestCoverage`. The pre-spawn evaluator returns `pending_gates =
+["TestCoverage"]`. Phase C transitions the SQL row to
+`GatesPending`, emits the paired `TaskStateChanged
+{ Running → GatesPending }` audit, and the dashboard observes
+the FSM flip in real time. When the witness arrives and the
+gate clears, the witness handler's gate-recheck path
+transitions `GatesPending → Admitted` and Phase C then
+re-transitions `Admitted → Running` on the next intent.
+
+---
+
+### INV-KSB-GATE-FIXUP-CONTEXT-01 — Fixup-executor KSBs are focused; non-fixup KSBs are unchanged
+
+**Statement.** When the KSB assembler emits a session prelude for
+a task with `is_gate_fixup = 1`, the prelude MUST carry a
+`gate_fixup` block containing `gate_type`, `agent_hint`,
+`parent_task_id`, `parent_evaluation_sha`, and
+`parent_worktree_pointer`. Tasks with `is_gate_fixup = 0` MUST
+NOT carry any gate-rejection state in their KSBs (no critique
+leak from a different task's failed gate).
+
+**Justification.** The fixup executor's whole purpose is to repair
+one specific gate failure; the focused KSB gives it everything it
+needs without diluting the prompt with general initiative
+context. Leaking gate-rejection state into unrelated KSBs makes
+session prompts non-deterministic with respect to which previous
+task was the most recent gate failure — exactly the kind of
+cross-task contamination that the existing KSB shape rules out.
+
+**Scenario.** A primary executor task and a sibling gate-fixup
+task both target the same parent initiative. The primary's KSB
+shows the initiative summary and predecessor completions; the
+fixup's KSB shows the focused `gate_fixup` block with the AWS-key
+hint, the parent's failing evaluation_sha, and nothing else.
+
+---
+
 ## Removed / consolidated invariants
 
 The following invariant IDs appeared in earlier drafts of this file

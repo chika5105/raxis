@@ -264,8 +264,20 @@ export function InitiativeDagPage() {
               </div>
               <div className="mt-3 flex items-center gap-2">
                 <StateBadge
-                  state={focusedNode.state}
-                  pulse={focusedNode.state === "Running"}
+                  // Lift `Admitted + is_active` to `Running` so the
+                  // focus panel matches the chip on the node body
+                  // and the row treatment on `InitiativeDetail` /
+                  // `TaskDetail`. The raw FSM state is still
+                  // available on the node for forensic copy.
+                  state={
+                    focusedNode.is_active && focusedNode.state === "Admitted"
+                      ? "Running"
+                      : focusedNode.state
+                  }
+                  pulse={
+                    focusedNode.state === "Running" ||
+                    Boolean(focusedNode.is_active)
+                  }
                 />
               </div>
               <Link

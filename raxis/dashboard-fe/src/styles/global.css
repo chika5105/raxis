@@ -200,6 +200,18 @@
   }
 }
 
+/*
+ * Running-state pulse for SVG DAG nodes — see
+ * `components/DagGraph.tsx`. The fill / stroke stays the same
+ * (driven by `--c-info-muted` / `--c-info`); only stroke-opacity
+ * eases so a Running node visibly throbs without overwhelming
+ * the rest of the graph.
+ */
+@keyframes raxis-node-pulse {
+  from { stroke-opacity: 1;    }
+  to   { stroke-opacity: 0.45; }
+}
+
 @layer utilities {
   .text-balance {
     text-wrap: balance;

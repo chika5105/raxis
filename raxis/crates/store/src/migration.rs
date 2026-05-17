@@ -48,7 +48,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 22;
+pub const SCHEMA_VERSION: u32 = 23;
 
 /// Apply all pending migrations to `conn`.
 /// Safe to call on every startup — skips already-applied migrations. Returns
@@ -127,6 +127,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 22 {
         apply_migration_22(conn)?;
+    }
+    if current_version < 23 {
+        apply_migration_23(conn)?;
     }
 
     Ok(())
@@ -2564,6 +2567,108 @@ ALTER TABLE {subtask_activations}
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (22, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 23 — iter65 gate-fixup columns on `tasks`.
+// `specs/v3/gate-rejection-orchestrator-fixup.md §4.8`.
+//
+// The orchestrator-spawned gate-fixup loop needs per-parent state
+// to (a) enforce the `[gate_fixup].max_attempts` budget at
+// `AddSubTask` admit time, (b) carry the last gate critique so the
+// fixup KSB has actionable context, and (c) link fixup tasks back
+// to the parent whose gate failed (so the dashboard can render the
+// dashed parent edge and the operator can correlate the chain).
+//
+// Columns added to `tasks`:
+//   * `gate_reject_count`            — total non-Pass gate witnesses
+//                                       this task has received
+//                                       (incremented on every commit).
+//   * `gate_fixup_attempts`          — how many fixup subtasks have
+//                                       been admitted against this
+//                                       task (incremented at
+//                                       `AddSubTask{kind:GateFixup}`
+//                                       admit). Budget check on
+//                                       this column.
+//   * `last_gate_critique`           — agent_hint resolved through
+//                                       the tier chain (verifier →
+//                                       operator default → defensive).
+//                                       NULL on tasks that have never
+//                                       received a non-Pass witness.
+//   * `last_gate_type`               — gate_type paired with the
+//                                       most recent critique. Always
+//                                       present when `last_gate_critique`
+//                                       is present. Pinned by
+//                                       `INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01`.
+//   * `is_gate_fixup`                — `1` for tasks admitted via
+//                                       `AddSubTask{kind:GateFixup}`,
+//                                       else `0`. Drives KSB
+//                                       assembly and dashboard
+//                                       rendering.
+//   * `parent_gate_failure_task_id`  — for `is_gate_fixup=1` rows,
+//                                       the task whose gate
+//                                       rejection spawned this
+//                                       fixup. NULL otherwise.
+//   * `parent_gate_failure_type`     — for `is_gate_fixup=1` rows,
+//                                       the gate_type that
+//                                       rejected. NULL otherwise.
+//
+// One partial index on `parent_gate_failure_task_id WHERE
+// is_gate_fixup=1` so the fixup-completion hook can look up
+// sibling fixups for a parent in O(log n).
+// ---------------------------------------------------------------------------
+
+fn apply_migration_23(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_23_ddl();
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 23 failed: {e}")))
+}
+
+/// The complete migration-23 DDL.
+pub fn render_migration_23_ddl() -> String {
+    let tasks = Table::Tasks.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- iter65 — gate-fixup columns on tasks.
+-- specs/v3/gate-rejection-orchestrator-fixup.md §4.8.
+ALTER TABLE {tasks}
+    ADD COLUMN gate_reject_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE {tasks}
+    ADD COLUMN gate_fixup_attempts INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE {tasks}
+    ADD COLUMN last_gate_critique TEXT;
+
+ALTER TABLE {tasks}
+    ADD COLUMN last_gate_type TEXT;
+
+ALTER TABLE {tasks}
+    ADD COLUMN is_gate_fixup INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE {tasks}
+    ADD COLUMN parent_gate_failure_task_id TEXT;
+
+ALTER TABLE {tasks}
+    ADD COLUMN parent_gate_failure_type TEXT;
+
+-- Partial index: only fixup rows. Fixup-completion hook reads
+-- `WHERE parent_gate_failure_task_id = ? AND is_gate_fixup = 1`.
+CREATE INDEX IF NOT EXISTS idx_tasks_parent_gate_failure
+    ON {tasks} (parent_gate_failure_task_id)
+    WHERE is_gate_fixup = 1;
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (23, strftime('%s', 'now'));
 
 COMMIT;
 "

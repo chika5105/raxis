@@ -69,6 +69,7 @@ fn anthropic_record() -> LlmTurnRecord {
         body_truncated: false,
         original_body_bytes: 770,
         error: None,
+        agent_role: Some("Executor".into()),
     }
 }
 
@@ -131,6 +132,12 @@ fn projection_lifts_anthropic_model_role_and_usage_into_wire_view() {
     assert!(!view.body_truncated);
     assert_eq!(view.original_body_bytes, 770);
     assert!(view.error.is_none());
+
+    // iter65 — `orchestrator-llm-turns`. The kernel stamps
+    // `agent_role` from `session.session_agent_type` at fetch
+    // dispatch; the projection passes it through verbatim so
+    // the dashboard can render a role badge per turn.
+    assert_eq!(view.agent_role.as_deref(), Some("Executor"));
 }
 
 #[test]
@@ -210,6 +217,7 @@ fn projection_maps_openai_prompt_completion_tokens_onto_canonical_slots() {
         body_truncated: false,
         original_body_bytes: 0,
         error: None,
+        agent_role: None,
     };
 
     let view = record_to_view(r, 3);
@@ -236,4 +244,8 @@ fn projection_maps_openai_prompt_completion_tokens_onto_canonical_slots() {
         view.cache_read_input_tokens, None,
         "OpenAI does not expose cache-read; field MUST be None"
     );
+    // iter65 — legacy / unstamped records project to
+    // `agent_role: None` so the dashboard hides the role badge
+    // for them rather than rendering an empty pill.
+    assert_eq!(view.agent_role, None);
 }

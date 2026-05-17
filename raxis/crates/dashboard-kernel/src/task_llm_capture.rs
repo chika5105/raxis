@@ -150,6 +150,18 @@ pub struct LlmTurnRecord {
     /// `None` on success.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub error: Option<String>,
+    /// **Agent role of the originating session** —
+    /// `"Orchestrator"` / `"Executor"` / `"Reviewer"`. Distinct
+    /// from the provider's `body.role` (`"user"` / `"assistant"`
+    /// / `"tool"`) which lives in the parsed response payload.
+    /// This field lets the dashboard render a role badge per
+    /// turn so operators can see at a glance which agent
+    /// produced each call — crucial when an initiative's
+    /// `<initiative_id>.jsonl` interleaves orchestrator planner
+    /// turns with executor/reviewer turns. `None` for legacy
+    /// records that pre-date this field.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_role: Option<String>,
 }
 
 /// Tunables for the per-task capture.
@@ -516,6 +528,7 @@ mod tests {
             body_truncated: false,
             original_body_bytes: body.len() as u64,
             error: None,
+            agent_role: None,
         }
     }
 

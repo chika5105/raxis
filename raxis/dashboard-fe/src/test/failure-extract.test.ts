@@ -33,9 +33,8 @@ describe("isFailureAuditKind", () => {
     // SessionRevoked is a clean operator-driven terminal; the kernel
     // event carries `revoked_by` + display name, not a kernel-bug
     // block_reason. Treating it as a failure flooded the dashboard
-    // "Failure events" feed and tripped the missing-reason
-    // INV-FAILURE-REASON-MANDATORY-01 badge for every revoked
-    // session.
+    // "Failure events" feed and tripped a no-reason empty-state on
+    // every revoked session.
     expect(isFailureAuditKind("SessionRevoked")).toBe(false);
     // OperatorCertRevoked is a deliberate admin action with a
     // populated `reason` — also not a kernel failure.

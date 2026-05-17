@@ -252,6 +252,65 @@ pub struct OrchestratorGapsResponse {
     pub generated_at: i64,
 }
 
+/// One row in `GET /api/gates/stats` — per-`gate_type` rollup of
+/// witness outcomes, with a fixup-loop counter so the dashboard
+/// can render the cumulative health of every operator-configured
+/// `[[gates]]` entry at a glance.
+///
+/// **Why per-gate, not per-task.** Operators iterate on verifier
+/// authoring; the per-task view is too narrow to spot a noisy
+/// `NoSecretStrings` verifier whose false-positive rate is
+/// drifting upward. Bucketing by `gate_type` surfaces the
+/// gate-author signal directly.
+///
+/// **`fixup_loop_count` semantics.** Sum of
+/// `tasks.gate_fixup_attempts` over every task that ran (or is
+/// running) this gate AND for whom the kernel admitted at least
+/// one `AddSubTask{kind: GateFixup}`. This is the "how often did
+/// this gate force the orchestrator into a repair loop?" signal —
+/// a high value relative to `pass_count` is the operator's cue
+/// that the gate is over-strict, the hint is misleading, or the
+/// agent cannot satisfy the gate in this loop budget.
+#[derive(Debug, Clone, Serialize)]
+pub struct GateStatRow {
+    /// Operator-defined gate name (matches
+    /// `[[gates]].gate_type` in `policy.toml`).
+    pub gate_type: String,
+    /// Number of `WitnessResultClass::Pass` outcomes recorded
+    /// in `witness_records` for this gate.
+    pub pass_count: u64,
+    /// Number of `WitnessResultClass::Fail` outcomes recorded.
+    pub fail_count: u64,
+    /// Number of `WitnessResultClass::Inconclusive` outcomes.
+    pub inconclusive_count: u64,
+    /// Unix-seconds timestamp of the most-recent witness for
+    /// this gate (`MAX(witness_records.recorded_at)`). `None`
+    /// when the gate has never run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<i64>,
+    /// Cumulative count of `AddSubTask{kind: GateFixup}` rows
+    /// admitted for this gate (i.e.
+    /// `SUM(tasks.gate_fixup_attempts) WHERE
+    ///  tasks.last_gate_type = <gate_type>`).
+    pub fixup_loop_count: u64,
+}
+
+/// `GET /api/gates/stats` response envelope.
+///
+/// Rendered by the dashboard's Gates page (a minimal table
+/// + sparkline panel). Stable, ordered by `gate_type` so a
+/// future sparkline view can diff row-by-row without
+/// reconciling positions.
+#[derive(Debug, Clone, Serialize)]
+pub struct GateStatsResponse {
+    /// One row per `gate_type` observed in `witness_records`.
+    /// Ordered alphabetically by `gate_type` for stable
+    /// rendering.
+    pub gates: Vec<GateStatRow>,
+    /// Unix-seconds timestamp the rollup was computed.
+    pub generated_at: i64,
+}
+
 /// One row in `GET /api/recent-sessions`. Surfaces sessions the
 /// active list filtered out (revoked / expired) so an operator
 /// can replay what the kernel last did before the session ended.
@@ -692,10 +751,28 @@ pub struct TaskLlmTurnView {
     /// same field name). Empty string when the body is non-JSON
     /// or the field is absent.
     pub model: String,
-    /// Role assignment: `"system"` / `"user"` / `"assistant"` /
-    /// `"tool"`. Lifted from `body.role` for Anthropic; empty
-    /// string when unknown.
+    /// **LLM provider role** assignment: `"system"` / `"user"` /
+    /// `"assistant"` / `"tool"`. Lifted from `body.role` for
+    /// Anthropic; empty string when unknown. Distinct from
+    /// [`Self::agent_role`] below — provider role is the
+    /// upstream LLM speaker, agent role is which raxis agent
+    /// originated the call.
     pub role: String,
+    /// **Originating agent role**: `"Orchestrator"` /
+    /// `"Executor"` / `"Reviewer"`. Set by the kernel-side
+    /// [`raxis_kernel::handlers::planner_fetch`] at fetch-
+    /// dispatch time from
+    /// `session.session_agent_type`. Allows the dashboard to
+    /// render a role badge per turn so operators can tell
+    /// orchestrator planner_fetches apart from executor /
+    /// reviewer rounds at a glance — crucial on an
+    /// initiative's coordinator-task page where all three
+    /// session types may interleave in the same `.jsonl`. `None`
+    /// for legacy records that pre-date this field, or for the
+    /// rare kernel-internal fetch issued without a planner
+    /// session attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_role: Option<String>,
     /// Fully-parsed REQUEST payload as a `serde_json::Value`.
     /// `Value::Null` when the kernel-side tap could not parse
     /// the bytes (or when no request was captured for this
@@ -1606,6 +1683,32 @@ pub trait DashboardData: Send + Sync + 'static {
     fn list_orchestrator_gaps(&self) -> Result<OrchestratorGapsResponse, ApiError> {
         Ok(OrchestratorGapsResponse {
             gaps: Vec::new(),
+            generated_at: 0,
+        })
+    }
+
+    /// V3 — `INV-DASHBOARD-GATE-STATS-PER-GATE-ROLLUP-01`.
+    ///
+    /// Per-gate rollup of witness outcomes + cumulative fixup
+    /// loop count. Default impl returns an empty response so the
+    /// in-memory data layer + older test fixtures continue to
+    /// compile without the new capability. The production
+    /// `KernelDashboardData` overrides this to read the
+    /// `witness_records` + `tasks` tables.
+    ///
+    /// **Authoring contract.**
+    /// - Implementations MUST return rows alphabetically sorted
+    ///   by `gate_type` so a sparkline panel can diff row-by-row
+    ///   across polls.
+    /// - `generated_at` MUST be set to the wall-clock at which
+    ///   the rollup was computed (not 0); callers use it to
+    ///   render a "last refreshed" badge.
+    /// - On store errors the implementation MUST surface
+    ///   `Err(ApiError::Internal)` rather than an empty
+    ///   response — a silent zero would mask a stuck rollup.
+    fn gate_stats(&self) -> Result<GateStatsResponse, ApiError> {
+        Ok(GateStatsResponse {
+            gates: Vec::new(),
             generated_at: 0,
         })
     }
@@ -2992,6 +3095,29 @@ pub mod recent_activity_filter {
         // per-task post-restart status.
         "TaskAutoResumedAfterSupervisorRestart",
         "ExecutorRespawnFromReviewRejection",
+        // 8. iter65 gate-rejection orchestrator-fixup family.
+        // `specs/v3/gate-rejection-orchestrator-fixup.md §4.9`.
+        // These row the operator-facing "what just happened?"
+        // feed for the new fixup loop:
+        //   * Witness verdict surfaced from the kernel-side
+        //     verifier subprocess (already curated; pinned here
+        //     so the loop is visible end-to-end).
+        //   * Acceptance + push to orchestrator on a recoverable
+        //     gate rejection (loop in progress).
+        //   * Terminal failure when the loop ran out of road
+        //     (no profile, budget exhausted, or every fixup
+        //     executor task failed).
+        //   * Spawn + completion anchors for individual fixup
+        //     subtasks — operators need to see attempts as
+        //     they accumulate against the budget.
+        //   * Weak-verifier-author signal (tier-2 fallback fired,
+        //     or wire-invalid agent_hint rejected).
+        "VerifierWitnessReceived",
+        "GateRejectionAccepted",
+        "GateRejectionTerminal",
+        "GateFixupSpawned",
+        "GateFixupCompleted",
+        "WitnessMissingAgentHint",
     ];
 
     /// Returns `true` iff `event_kind` should appear in the

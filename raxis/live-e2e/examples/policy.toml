@@ -140,8 +140,13 @@ spawn_timeout_secs       = 30
 respawn_backoff_ms       = 1000
 max_consecutive_respawns = 5
 
+# `example.com` admits the iter65 dep-fetch-evidence task's
+# one HTTPS GET via Path A3; the witness in
+# `extended_e2e_support::dep_fetch_evidence` pins exactly one
+# `TproxyAdmissionGranted{host_or_sni="example.com",port=443}`
+# per executor session. RFC-2606 reserved, IANA-maintained.
 [egress]
-domains = ["api.anthropic.com"]
+domains = ["api.anthropic.com", "example.com"]
 patterns = []
 
 [[providers]]
@@ -187,6 +192,42 @@ lane_id              = "e2e-realistic-sibling-lane"
 max_concurrent_tasks = 8
 max_cost_per_epoch   = 100000
 priority             = 100
+
+# ── [[gates]] — witness verifier (iter62 / iter63) ──
+# Real, fast worktree-scanning gate. Source:
+# `crates/verifier-no-secrets/`. Every `IntegrationMerge`
+# intent transitions `Admitted → GatesPending` and the kernel
+# `scheduler/dag.rs::transition_to_admitted` blocks the merge
+# until a `VerifierWitnessReceived{gate_type="NoSecretStrings",
+# verdict="Pass"}` row lands on the audit chain. See
+# `INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01` for the rationale
+# (this is the live coverage point for the iter63 recheck-clear
+# paired-write audit row) and `INV-GATE-PRECEDENCE-01` for the
+# kernel's gate-then-merge ordering contract.
+#
+# The `verifier_command` value below is a PLACEHOLDER — at run
+# time the harness in
+# `kernel/tests/extended_e2e_support/kernel_driver.rs::enable_gateway_in_policy`
+# rewrites this line to the absolute path of the
+# `raxis-verifier-no-secrets` binary that sits alongside the
+# kernel build (typically `target/release/raxis-verifier-no-secrets`).
+# Operators running the kernel outside the e2e harness must
+# substitute the absolute path themselves.
+[[gates]]
+gate_type        = "NoSecretStrings"
+verifier_command = "/PLACEHOLDER/path/to/target/release/raxis-verifier-no-secrets"
+max_wall_seconds = 30
+max_memory_bytes = 268435456
+network_allowed  = false
+# iter65 — tier-2 fallback for the `agent_hint` resolution chain
+# (`INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01`). The verifier's
+# `body.agent_hint` (tier 1) is the preferred source — populated
+# per failure code path by `raxis-verifier-no-secrets`. This
+# `agent_hint_default` only fires when a verifier author shipped
+# a Fail / Inconclusive without a wire-valid hint (e.g. an early
+# build before the verifier was migrated to the typestate SDK).
+# Required at policy load whenever `[gate_fixup].enabled = true`.
+agent_hint_default = "A `NoSecretStrings` gate detected secret-shaped material in your commit. Remove any literal API keys, tokens, or credentials and reference them via env vars or your secret store instead. Re-run your local secret scanner before resubmitting."
 
 # ── [observability] (realism-e2e — V3 OTel push) ──
 [observability]

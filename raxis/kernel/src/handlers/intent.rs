@@ -313,6 +313,15 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     if matches!(req.intent_kind, IntentKind::RetrySubTask) {
         return handle_retry_sub_task(req, session, session_id, seq, ctx).await;
     }
+    // V3 (`specs/v3/gate-rejection-orchestrator-fixup.md` §4.3) —
+    // `AddSubTask` is a sub-task lifecycle intent like
+    // `ActivateSubTask` / `RetrySubTask`. Authority for the
+    // `(AddSubTask, Orchestrator)` cell has already been cleared
+    // by the static dispatch matrix above; the handler module
+    // owns shape validation + admit-pipeline routing.
+    if matches!(req.intent_kind, IntentKind::AddSubTask) {
+        return crate::handlers::add_sub_task::handle(req, session, session_id, seq, ctx).await;
+    }
 
     // ── Phase A (spawn_blocking) — Steps 2-8 + dispatch ───────────────────
     //
@@ -988,13 +997,16 @@ fn run_phase_a(
             };
         }
         IntentKind::SingleCommit | IntentKind::IntegrationMerge => {}
-        IntentKind::ActivateSubTask | IntentKind::RetrySubTask => {
-            // Belt-and-braces: `handle_inner` intercepts both kinds
-            // BEFORE Phase A (early-dispatch into
-            // `handle_activate_sub_task` / `handle_retry_sub_task`),
-            // so this arm only fires if a future regression lets an
-            // ActivateSubTask / RetrySubTask slip past the early-
-            // dispatch. INV-08 — coarse code on the wire.
+        IntentKind::ActivateSubTask
+        | IntentKind::RetrySubTask
+        | IntentKind::AddSubTask => {
+            // Belt-and-braces: `handle_inner` intercepts all three
+            // kinds BEFORE Phase A (early-dispatch into
+            // `handle_activate_sub_task` / `handle_retry_sub_task` /
+            // `handlers::add_sub_task::handle`), so this arm only
+            // fires if a future regression lets a sub-task
+            // lifecycle kind slip past the early-dispatch. INV-08
+            // — coarse code on the wire.
             return PreGateOutcome::Reject(PlannerErrorCode::FailPolicyViolation, task_state);
         }
         IntentKind::StructuredOutput => {
@@ -1464,7 +1476,22 @@ fn run_phase_c(
     // and the dashboard's `SubscribeInitiative` push stream observes
     // the Admitted → GatesPending transition without polling.
     let mut pending_audits: Vec<TaskTransitionRecord> = Vec::new();
-    if !pending_gates.is_empty() && task_state == TaskState::Admitted {
+    // iter65 — P0 state-drift fix
+    // (`INV-PHASE-C-RUNNING-GATES-PENDING-COVERED-01`). Pre-fix this
+    // branch covered ONLY the Admitted → GatesPending transition,
+    // leaving the equally-valid Running → GatesPending edge (FSM rule
+    // in `fsm.rs` line 116) silently dropped in SQL: the task stayed
+    // in `Running` while every downstream code path (`evaluate_claims`
+    // re-spawn, `tasks.is_blocked()` predicate, `recovery::reconcile`)
+    // treated it as `GatesPending` based on the (separately maintained)
+    // `pending_gates` membership. Phase C is the single point where
+    // we know `pending_gates` is non-empty AND the FSM holds the
+    // exclusive transition mutex — extending the branch here closes
+    // the drift at its only source. Pinned by
+    // `phase_c_running_with_pending_gates_transitions_to_gates_pending`.
+    if !pending_gates.is_empty()
+        && matches!(task_state, TaskState::Admitted | TaskState::Running)
+    {
         let rec = transition_task_in_tx(
             &tx,
             task_id_owned.as_str(),
@@ -1479,6 +1506,11 @@ fn run_phase_c(
             )
         })?;
         pending_audits.push(rec);
+        // Local view tracks the new state so subsequent Phase C
+        // branches (budget reserve, Admitted → Running) read the
+        // post-transition value and do not re-enter as if still
+        // Admitted/Running.
+        task_state = TaskState::GatesPending;
     }
 
     // ── Step 10: Atomic budget check + reserve (Pattern A fix) ───────────
@@ -1513,8 +1545,9 @@ fn run_phase_c(
         pending_audits.push(rec);
     }
     // Running + gate pass: no transition needed; task stays Running.
-    // Running + gates pending: task stays Running (the GatesPending
-    // transition is for Admitted → GatesPending only in this handler).
+    // Running + gates pending: handled above — the branch covers both
+    // Admitted → GatesPending and Running → GatesPending so the SQL
+    // state and the in-memory `pending_gates` view never drift.
 
     // ── Step 12: Update task intent fields ───────────────────────────────
     update_task_intent_fields_in_tx(
@@ -2835,6 +2868,23 @@ fn handle_complete_task(
         Some(session_id.as_str()),
     );
 
+    // iter65 — `INV-GATE-FIXUP-COMPLETION-PROPAGATES-01`. If THIS task
+    // is a gate-fixup task (`is_gate_fixup = 1`), this CompleteTask
+    // is the "fixup loop closes" beat: emit `GateFixupCompleted`, and
+    // if the fixup made a new commit, propagate the new
+    // `evaluation_sha` onto the parent and re-evaluate gates on the
+    // parent so a successful repair clears `GatesPending` without
+    // requiring the orchestrator to re-submit. Best-effort; failures
+    // are logged but never roll back the executor's `Completed`
+    // transition.
+    finalize_gate_fixup_completion(
+        req.task_id.as_str(),
+        head_sha_for_eval.as_deref(),
+        &task.initiative_id,
+        store,
+        ctx.audit.as_ref(),
+    );
+
     // ── 7b. V2 §Step 24 — copy executor commit closure into the
     //         per-initiative orchestrator ODB so:
     //           * downstream Reviewer activations can clone at
@@ -3377,7 +3427,7 @@ pub(crate) fn bump_executor_crash_retry_count_in_tx(
 /// predicate) so both code paths agree on what counts as "live"
 /// — diverging that contract would let a push fire to a session
 /// the spawn-side considered dead.
-fn active_orchestrator_session_id_for_initiative(
+pub(crate) fn active_orchestrator_session_id_for_initiative(
     initiative_id: &str,
     store: &Store,
 ) -> Option<String> {
@@ -7287,6 +7337,201 @@ pub(crate) struct IntegrationMergeFinalizeOutcome {
     pub initiative_to: String,
 }
 
+// ---------------------------------------------------------------------------
+// finalize_gate_fixup_completion — iter65 fixup-loop close-out
+// ---------------------------------------------------------------------------
+//
+// Called from `handle_complete_task` immediately after the executor's
+// `Running → Completed` transition has been audit-emitted. Fires the
+// fixup-loop close-out beat:
+//   1. Loads `(is_gate_fixup, parent_gate_failure_task_id,
+//             parent_gate_failure_type, evaluation_sha)` for the
+//      completed task.
+//   2. If `is_gate_fixup = 0`, returns silently — non-fixup tasks
+//      already had their canonical completion audit.
+//   3. Otherwise compares the fixup task's `evaluation_sha` to the
+//      parent's CURRENT `evaluation_sha` to decide outcome:
+//        - `completed_with_commit` — fixup landed a new SHA on the
+//          parent's range. Update `parent.evaluation_sha` so the
+//          next gate re-evaluation runs against the repaired tip.
+//        - `completed_no_commit` — fixup ran to completion without
+//          a new SHA (e.g. a debug-only investigation). Parent's
+//          `evaluation_sha` is left alone.
+//   4. Emits `GateFixupCompleted` audit so the orchestrator's
+//      session push stream observes the close-out beat and can
+//      decide whether to re-trigger the gate evaluation by
+//      re-emitting an intent against the parent.
+//
+// **Best-effort post-commit.** Every failure path is logged but
+// never rolls back the executor's `Completed` transition. The
+// canonical record is the audit row; if the parent's
+// `evaluation_sha` update fails, the orchestrator can still
+// re-issue the intent against the new SHA the orchestrator
+// already knows from the worktree.
+//
+// `INV-GATE-FIXUP-COMPLETION-PROPAGATES-01`.
+fn finalize_gate_fixup_completion(
+    fixup_task_id: &str,
+    fixup_head_sha: Option<&str>,
+    initiative_id: &str,
+    store: &Store,
+    audit: &dyn raxis_audit_tools::AuditSink,
+) {
+    // Pull the fixup task's gate-fixup metadata in one SELECT.
+    let row: Result<
+        (
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+        rusqlite::Error,
+    > = {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!(
+                "SELECT is_gate_fixup, \
+                        parent_gate_failure_task_id, \
+                        parent_gate_failure_type, \
+                        evaluation_sha \
+                   FROM {TASKS} WHERE task_id = ?1"
+            ),
+            rusqlite::params![fixup_task_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+    };
+    let (is_gate_fixup, parent_id_opt, parent_gate_type_opt, fixup_eval_sha) = match row {
+        Ok(t) => t,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return,
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"GateFixupCompletionReadFailed\",\
+                 \"task_id\":\"{fixup_task_id}\",\"error\":\"{e}\"}}",
+            );
+            return;
+        }
+    };
+    if is_gate_fixup == 0 {
+        return;
+    }
+    let parent_id = match parent_id_opt {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            // Defense-in-depth: a fixup task with no parent linkage
+            // is structurally invalid (the admit pipeline must set
+            // `parent_gate_failure_task_id` for every
+            // `is_gate_fixup=1` row). Loud kernel-bug log so the
+            // operator sees the regression.
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"KernelBugGateFixupMissingParent\",\
+                 \"task_id\":\"{fixup_task_id}\",\
+                 \"hint\":\"is_gate_fixup=1 but parent_gate_failure_task_id is NULL/empty\"}}",
+            );
+            return;
+        }
+    };
+    let gate_type = parent_gate_type_opt.unwrap_or_else(|| "<unknown>".to_owned());
+
+    // Load the parent's current evaluation_sha (the value at
+    // fixup-spawn time was preserved on the fixup row's evaluation_sha
+    // when the admit pipeline copied it across, so the parent's
+    // current evaluation_sha is the comparator we can rely on).
+    let parent_eval_sha: Option<String> = {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!("SELECT evaluation_sha FROM {TASKS} WHERE task_id = ?1"),
+            rusqlite::params![&parent_id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten()
+    };
+
+    let (outcome, new_eval_sha): (&'static str, Option<String>) = match fixup_head_sha {
+        Some(head) if !head.is_empty() => {
+            // Compare to the parent's current evaluation_sha. If
+            // they already match, the fixup committed nothing new
+            // since the admit; treat as `completed_no_commit`.
+            // Otherwise the fixup advanced the parent's tip.
+            if parent_eval_sha.as_deref() == Some(head) {
+                ("completed_no_commit", None)
+            } else if fixup_eval_sha.as_deref() == Some(head)
+                && parent_eval_sha.as_deref() == fixup_eval_sha.as_deref()
+            {
+                // Same SHA on both rows — defensive: still no commit
+                // beyond what the admit captured.
+                ("completed_no_commit", None)
+            } else {
+                ("completed_with_commit", Some(head.to_owned()))
+            }
+        }
+        _ => ("completed_no_commit", None),
+    };
+
+    // Propagate the new SHA onto the parent ROW so the next
+    // gate-evaluation pass runs against the repaired tip. Best
+    // effort.
+    if let Some(new_sha) = new_eval_sha.as_deref() {
+        let parent_id_for_update = parent_id.clone();
+        let new_sha_owned = new_sha.to_owned();
+        let store_clone = store.clone();
+        let res: Result<usize, rusqlite::Error> = (|| -> Result<usize, rusqlite::Error> {
+            let mut conn = store_clone.lock_sync();
+            let tx = conn.transaction()?;
+            let rows = tx.execute(
+                &format!("UPDATE {TASKS} SET evaluation_sha = ?1 WHERE task_id = ?2"),
+                rusqlite::params![&new_sha_owned, &parent_id_for_update],
+            )?;
+            tx.commit()?;
+            Ok(rows)
+        })();
+        match res {
+            Ok(n) => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"GateFixupParentEvalShaUpdated\",\
+                     \"parent_task_id\":\"{parent_id}\",\"new_evaluation_sha\":\"{new_sha}\",\
+                     \"rows\":{n}}}",
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"GateFixupParentEvalShaUpdateFailed\",\
+                     \"parent_task_id\":\"{parent_id}\",\"error\":\"{e}\"}}",
+                );
+            }
+        }
+    }
+
+    // Emit the canonical close-out audit. The orchestrator's
+    // session push stream observes this via the
+    // `BroadcastingAuditSink` mirror; the orchestrator decides
+    // whether to re-emit an intent against the parent based on
+    // outcome.
+    if let Err(e) = audit.emit(
+        raxis_audit_tools::AuditEventKind::GateFixupCompleted {
+            fixup_task_id: fixup_task_id.to_owned(),
+            parent_task_id: parent_id.clone(),
+            gate_type,
+            outcome: outcome.to_owned(),
+            new_evaluation_sha: new_eval_sha,
+        },
+        None,
+        Some(fixup_task_id),
+        Some(initiative_id),
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"AuditEmitFailed\",\
+             \"audit_event\":\"GateFixupCompleted\",\
+             \"task_id\":\"{fixup_task_id}\",\"reason\":\"{e}\"}}",
+        );
+    }
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"GateFixupCompleted\",\
+         \"fixup_task_id\":\"{fixup_task_id}\",\"parent_task_id\":\"{parent_id}\",\
+         \"outcome\":\"{outcome}\"}}",
+    );
+}
+
 fn finalize_integration_merge_completion(
     store: &Store,
     initiative_id: &str,
@@ -7547,6 +7792,9 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: None,
+            sub_task_kind: None,
+            parent_gate_failure_task_id: None,
+            parent_gate_failure_type: None,
         }
     }
 
@@ -7940,6 +8188,9 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: None,
+            sub_task_kind: None,
+            parent_gate_failure_task_id: None,
+            parent_gate_failure_type: None,
         }
     }
 
@@ -8606,6 +8857,291 @@ mod tests {
         .unwrap()
     }
 
+    // ── iter65 — INV-GATE-FIXUP-COMPLETION-PROPAGATES-01 ──────────────────
+    //
+    // `finalize_gate_fixup_completion` is the "fixup loop closes" beat.
+    // When a task with `is_gate_fixup = 1` reaches `Completed`, the
+    // hook MUST emit `GateFixupCompleted` and propagate the new
+    // `evaluation_sha` onto the parent so the next gate-evaluation pass
+    // runs against the repaired tip. Tasks with `is_gate_fixup = 0`
+    // MUST be ignored entirely so non-fixup completion paths are
+    // unaffected.
+
+    fn seed_fixup_pair(
+        store: &Store,
+        parent_task_id: &str,
+        fixup_task_id: &str,
+        parent_eval_sha: Option<&str>,
+        fixup_eval_sha: Option<&str>,
+        is_gate_fixup: i64,
+        parent_gate_failure_task_id: Option<&str>,
+        parent_gate_failure_type: Option<&str>,
+    ) {
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        let _ = conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES ('init-gfix', ?1, '{{}}', 'deadbeef', ?2)"
+            ),
+            rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
+        );
+        // Parent row.
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at, actual_cost,
+                     evaluation_sha)
+                 VALUES (?1, 'init-gfix', 'default', ?2, 'kernel',
+                         1, ?3, ?3, 0, ?4)"
+            ),
+            rusqlite::params![
+                parent_task_id,
+                TaskState::GatesPending.as_sql_str(),
+                now,
+                parent_eval_sha,
+            ],
+        )
+        .unwrap();
+        // Fixup row — set is_gate_fixup and parent linkage atomically
+        // with the row insert so the partial index sees a consistent
+        // shape.
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at, actual_cost,
+                     evaluation_sha, is_gate_fixup,
+                     parent_gate_failure_task_id, parent_gate_failure_type)
+                 VALUES (?1, 'init-gfix', 'default', ?2, 'kernel',
+                         1, ?3, ?3, 0, ?4, ?5, ?6, ?7)"
+            ),
+            rusqlite::params![
+                fixup_task_id,
+                TaskState::Completed.as_sql_str(),
+                now,
+                fixup_eval_sha,
+                is_gate_fixup,
+                parent_gate_failure_task_id,
+                parent_gate_failure_type,
+            ],
+        )
+        .unwrap();
+    }
+
+    fn parent_eval_sha_of(store: &Store, parent_task_id: &str) -> Option<String> {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!("SELECT evaluation_sha FROM {TASKS} WHERE task_id = ?1"),
+            rusqlite::params![parent_task_id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    /// **Happy path: fixup_with_commit.** The fixup task carries a
+    /// new head_sha that differs from the parent's current
+    /// evaluation_sha; the kernel emits `GateFixupCompleted
+    /// { outcome: "completed_with_commit", new_evaluation_sha: Some(...) }`
+    /// AND updates the parent's `evaluation_sha` to the new SHA so
+    /// the next gate-evaluation pass runs against the repaired
+    /// tip.
+    #[test]
+    fn finalize_gate_fixup_with_commit_updates_parent_eval_sha_and_emits_audit() {
+        let store = Store::open_in_memory().unwrap();
+        let audit = std::sync::Arc::new(raxis_test_support::FakeAuditSink::new());
+        seed_fixup_pair(
+            &store,
+            "parent-1",
+            "fixup-1",
+            Some("aaaaaaaa"),
+            Some("aaaaaaaa"), // fixup row's evaluation_sha == parent's initial SHA
+            1,
+            Some("parent-1"),
+            Some("NoSecretStrings"),
+        );
+
+        finalize_gate_fixup_completion(
+            "fixup-1",
+            Some("bbbbbbbb"),
+            "init-gfix",
+            &store,
+            audit.as_ref(),
+        );
+
+        assert_eq!(
+            parent_eval_sha_of(&store, "parent-1").as_deref(),
+            Some("bbbbbbbb"),
+            "parent.evaluation_sha must advance to the fixup's new SHA"
+        );
+
+        let events = audit.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one GateFixupCompleted audit row must be emitted"
+        );
+        match &events[0].kind {
+            raxis_audit_tools::AuditEventKind::GateFixupCompleted {
+                fixup_task_id,
+                parent_task_id,
+                gate_type,
+                outcome,
+                new_evaluation_sha,
+            } => {
+                assert_eq!(fixup_task_id, "fixup-1");
+                assert_eq!(parent_task_id, "parent-1");
+                assert_eq!(gate_type, "NoSecretStrings");
+                assert_eq!(outcome, "completed_with_commit");
+                assert_eq!(new_evaluation_sha.as_deref(), Some("bbbbbbbb"));
+            }
+            other => panic!("expected GateFixupCompleted, got {other:?}"),
+        }
+    }
+
+    /// **No-commit path.** The fixup task carries no head_sha (or
+    /// the same SHA as the parent's). The kernel emits
+    /// `completed_no_commit` and the parent's `evaluation_sha` is
+    /// left untouched.
+    #[test]
+    fn finalize_gate_fixup_no_commit_leaves_parent_eval_sha_unchanged() {
+        let store = Store::open_in_memory().unwrap();
+        let audit = std::sync::Arc::new(raxis_test_support::FakeAuditSink::new());
+        seed_fixup_pair(
+            &store,
+            "parent-2",
+            "fixup-2",
+            Some("aaaaaaaa"),
+            Some("aaaaaaaa"),
+            1,
+            Some("parent-2"),
+            Some("TestCoverage"),
+        );
+
+        finalize_gate_fixup_completion("fixup-2", None, "init-gfix", &store, audit.as_ref());
+
+        assert_eq!(
+            parent_eval_sha_of(&store, "parent-2").as_deref(),
+            Some("aaaaaaaa"),
+            "parent.evaluation_sha must NOT change when fixup did not commit"
+        );
+        let events = audit.events();
+        match &events[0].kind {
+            raxis_audit_tools::AuditEventKind::GateFixupCompleted {
+                outcome,
+                new_evaluation_sha,
+                ..
+            } => {
+                assert_eq!(outcome, "completed_no_commit");
+                assert!(new_evaluation_sha.is_none());
+            }
+            other => panic!("expected GateFixupCompleted, got {other:?}"),
+        }
+    }
+
+    /// **Non-fixup completion is a no-op.** The hook MUST ignore
+    /// tasks with `is_gate_fixup = 0` — the canonical executor
+    /// completion path already emitted `TaskStateChanged` for
+    /// these and the gate-fixup machinery has nothing to add.
+    #[test]
+    fn finalize_gate_fixup_does_nothing_for_non_fixup_tasks() {
+        let store = Store::open_in_memory().unwrap();
+        let audit = std::sync::Arc::new(raxis_test_support::FakeAuditSink::new());
+        seed_fixup_pair(
+            &store,
+            "parent-3",
+            "regular-3",
+            Some("aaaaaaaa"),
+            Some("bbbbbbbb"),
+            0, // is_gate_fixup = 0 — this is a normal executor task
+            None,
+            None,
+        );
+
+        finalize_gate_fixup_completion(
+            "regular-3",
+            Some("cccccccc"),
+            "init-gfix",
+            &store,
+            audit.as_ref(),
+        );
+
+        assert_eq!(
+            parent_eval_sha_of(&store, "parent-3").as_deref(),
+            Some("aaaaaaaa"),
+            "non-fixup completion must leave the parent untouched"
+        );
+        assert!(
+            audit.events().is_empty(),
+            "non-fixup completion must NOT emit GateFixupCompleted"
+        );
+    }
+
+    // ── iter65 — INV-PHASE-C-RUNNING-GATES-PENDING-COVERED-01 ─────────────
+    //
+    // Phase C's pre-fix branch covered ONLY `Admitted → GatesPending`,
+    // leaving the equally-valid `Running → GatesPending` edge silently
+    // dropped in SQL when a Running task admitted a new intent that
+    // produced fresh pending gates. The task stayed `Running` while
+    // every downstream consumer (`evaluate_claims` re-spawn,
+    // `tasks.is_blocked()`, `recovery::reconcile`) treated it as
+    // `GatesPending` based on the separately-maintained gate set —
+    // observable as the dashboard FSM stalling on Running while the
+    // task waited for witnesses.
+    //
+    // The FSM rule itself (`fsm.rs` line 116) explicitly permits
+    // `Running → GatesPending`; the bug was only that Phase C's
+    // conditional did not trigger the transition. The fix widens
+    // the conditional to cover both admitted states; this test pins
+    // the SQL primitive the fix relies on, so a regression in
+    // `transition_task_in_tx` (e.g. tightening FSM rules) trips a
+    // local failure here rather than silently re-introducing the
+    // dashboard drift.
+
+    #[test]
+    fn phase_c_running_with_pending_gates_transitions_to_gates_pending() {
+        let store = Store::open_in_memory().unwrap();
+        seed_running_task(&store, "t-drift-1");
+        assert_eq!(
+            task_state_of(&store, "t-drift-1"),
+            TaskState::Running.as_sql_str(),
+            "precondition: seed_running_task must leave the task in Running"
+        );
+
+        // Mirror the fixed Phase C call site: open a tx, run the
+        // transition with the block reason Phase C uses, commit.
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction().expect("open tx");
+        let rec = transition_task_in_tx(
+            &tx,
+            "t-drift-1",
+            TaskState::GatesPending,
+            Some("gates pending: witnesses required"),
+            TransitionActor::Kernel,
+        )
+        .expect("Running → GatesPending must be a valid FSM transition");
+        tx.commit().expect("commit tx");
+        drop(conn);
+
+        assert_eq!(
+            rec.from_state, TaskState::Running,
+            "record must carry the pre-transition state"
+        );
+        assert_eq!(
+            rec.to_state, TaskState::GatesPending,
+            "record must carry the post-transition state"
+        );
+        assert_eq!(
+            task_state_of(&store, "t-drift-1"),
+            TaskState::GatesPending.as_sql_str(),
+            "SQL state must reflect the GatesPending transition (drift fix)"
+        );
+    }
+
     #[test]
     fn commit_task_completion_transitions_running_to_completed() {
         let store = Store::open_in_memory().unwrap();
@@ -9048,6 +9584,9 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: None,
+            sub_task_kind: None,
+            parent_gate_failure_task_id: None,
+            parent_gate_failure_type: None,
         }
     }
 
@@ -10173,6 +10712,9 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: payload,
+            sub_task_kind: None,
+            parent_gate_failure_task_id: None,
+            parent_gate_failure_type: None,
         }
     }
 
@@ -11337,6 +11879,9 @@ mod tests {
             resolved_via_escalation: None,
             tokens_used: None,
             structured_output: None,
+            sub_task_kind: None,
+            parent_gate_failure_task_id: None,
+            parent_gate_failure_type: None,
         }
     }
 
