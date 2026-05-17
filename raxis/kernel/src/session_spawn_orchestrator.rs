@@ -3109,8 +3109,22 @@ pub async fn respawn_orchestrator_for_initiative(
             let now_secs = unix_now_secs();
             let expires_at = now_secs + 86_400;
 
-            let conn = store_for_insert.lock_sync();
-            conn.execute(
+            let mut conn = store_for_insert.lock_sync();
+            // ── iter72 — `INV-DASHBOARD-SESSION-OWNS-TASK-AT-MINT-01` ──
+            //
+            // Wrap the session INSERT + coordinator-task bind in a
+            // single transaction so a respawn either fully rotates
+            // `tasks(task_id=initiative_id).session_id` to the new
+            // Orchestrator session OR leaves the prior owner intact
+            // on failure. The dashboard's
+            // `owning_task_for_session(new_orch_session_id)`
+            // depends on this UPDATE landing in lockstep with the
+            // session INSERT; without it, the new Orchestrator's
+            // session-detail card would show empty fields until the
+            // (very rare) `IntegrationMerge` write path on this
+            // coordinator row populates `session_id`.
+            let tx = conn.transaction()?;
+            tx.execute(
                 &format!(
                     "INSERT INTO {sessions} (
                     session_id, role_id, session_token, sequence_number,
@@ -3136,6 +3150,14 @@ pub async fn respawn_orchestrator_for_initiative(
                     init_for_insert,
                 ],
             )?;
+            tx.execute(
+                &format!(
+                    "UPDATE {tasks} SET session_id = ?1 WHERE task_id = ?2",
+                    tasks = Table::Tasks.as_str(),
+                ),
+                rusqlite::params![&session_id_s, &init_for_insert],
+            )?;
+            tx.commit()?;
             Ok(Some(session_id_s))
         })
         .await;

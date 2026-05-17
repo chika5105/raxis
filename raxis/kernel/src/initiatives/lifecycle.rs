@@ -1502,6 +1502,31 @@ fn auto_spawn_orchestrator_session_in_tx(
         }
     })?;
 
+    // ── iter72 — `INV-DASHBOARD-SESSION-OWNS-TASK-AT-MINT-01` ──
+    //
+    // Bind the freshly-admitted coordinator task row (which has
+    // `task_id == initiative_id`) to the freshly-minted Orchestrator
+    // session so the dashboard's `owning_task_for_session`
+    // projection — which joins `sessions.session_id` to
+    // `tasks.session_id` — can render initiative, task, and
+    // cumulative token counts for the Orchestrator card without
+    // waiting for an `IntegrationMerge` to land
+    // `update_task_intent_fields_in_tx`. The Orchestrator never
+    // submits an Executor/Reviewer-style `SingleCommit` intent, so
+    // without this UPDATE the coordinator task row's `session_id`
+    // would stay NULL for the lifetime of the initiative and the
+    // dashboard card would show `—` for Provider / Model / Initiative
+    // / Tokens (the screenshot bug fixed in iter72). `scheduler::
+    // admit_in_tx` writes the row with NULL `session_id`; this
+    // UPDATE binds it before the surrounding `approve_plan`
+    // transaction commits, so the bind is atomic with the
+    // Orchestrator session INSERT above.
+    let tasks_t = Table::Tasks.as_str();
+    tx.execute(
+        &format!("UPDATE {tasks_t} SET session_id = ?1 WHERE task_id = ?2"),
+        rusqlite::params![&session_id_s, initiative_id],
+    )?;
+
     Ok(OrchestratorAutoSpawn {
         session_id: session_id_s,
         lineage_id,
@@ -7692,6 +7717,52 @@ max_concurrent_admissions   = 7
         assert_eq!(
             sig_on_disk, plan_sig,
             "companion .sig artifact must equal the verified signature"
+        );
+    }
+
+    /// iter72 — `INV-DASHBOARD-SESSION-OWNS-TASK-AT-MINT-01`.
+    ///
+    /// After `auto_spawn_orchestrator_session_in_tx` lands, the
+    /// synthetic coordinator task row (whose `task_id ==
+    /// initiative_id`) MUST carry `session_id =
+    /// new_orchestrator_session_id`. Without this bind the
+    /// dashboard's `owning_task_for_session` join returns no row
+    /// for the orchestrator card, and the operator sees Provider /
+    /// Model / Initiative / Tokens collapse to `—` / `0` until
+    /// (and unless) an `IntegrationMerge` lands — which for many
+    /// initiatives never happens.
+    #[test]
+    fn auto_spawn_orchestrator_binds_coordinator_task_session_id_at_mint() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [[tasks]]
+            task_id = "t"
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+        let r =
+            approve_plan_for_test(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry)
+                .unwrap();
+        let orch_sid = r.orchestrator_session_id.expect("orchestrator session minted");
+
+        let conn = store.lock_sync();
+        let coordinator_session_id: Option<String> = conn
+            .query_row(
+                &format!(
+                    "SELECT session_id FROM {} WHERE task_id = ?1",
+                    Table::Tasks.as_str()
+                ),
+                rusqlite::params![&init_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            coordinator_session_id.as_deref(),
+            Some(orch_sid.as_str()),
+            "coordinator task row must be bound to the freshly-minted orchestrator session \
+             at mint time so the dashboard's owning_task_for_session join resolves"
         );
     }
 

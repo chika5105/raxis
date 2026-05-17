@@ -5331,6 +5331,45 @@ async fn handle_activate_sub_task(
                     )
                 })?;
 
+                // ── iter72 — `INV-DASHBOARD-SESSION-OWNS-TASK-AT-MINT-01` ──
+                //
+                // Bind `tasks.session_id` to the freshly-minted
+                // Executor / Reviewer session NOW, inside the same
+                // activation transaction, instead of waiting for the
+                // planner to land a `SingleCommit` /
+                // `StructuredOutput` intent (which is where
+                // `update_task_intent_fields_in_tx` currently
+                // populates this column). The dashboard's
+                // `owning_task_for_session` projection joins
+                // `sessions.session_id` to `tasks.session_id`; any
+                // session that exits before its first commit (or any
+                // session that never commits — e.g. a Reviewer whose
+                // verdict is `RejectChanges`) used to leave the
+                // dashboard's per-session card empty for
+                // `initiative_id` / `task_id` / cumulative token
+                // counts. The wire contract becomes: the moment the
+                // kernel creates a planner session for a task, the
+                // task row is the canonical owner-of-session record.
+                // Re-binding on a later `update_task_intent_fields_in_tx`
+                // is a no-op (same value); on a `RetrySubTask` we
+                // mint a new session and the next activation
+                // overwrites this column, which matches the
+                // semantics of "the most recent activation owns the
+                // task." The update is bounded — a single SQLite
+                // UPDATE on the task PK — and runs inside the same
+                // transaction so any failure rolls back the session
+                // INSERT atomically.
+                tx.execute(
+                    &format!("UPDATE {TASKS} SET session_id = ?1 WHERE task_id = ?2"),
+                    rusqlite::params![new_session_str, task_id],
+                )
+                .map_err(|_| {
+                    ActivateRejection::standard(
+                        PlannerErrorCode::FailPolicyViolation,
+                        TaskState::Admitted,
+                    )
+                })?;
+
                 tx.commit().map_err(|_| {
                     ActivateRejection::standard(
                         PlannerErrorCode::FailPolicyViolation,
