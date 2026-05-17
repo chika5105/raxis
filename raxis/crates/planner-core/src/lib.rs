@@ -113,11 +113,12 @@ pub use driver::{
 pub use error::PlannerError;
 pub use gemini_client::GeminiClient;
 pub use guest_init::{
-    enforce_pid1_or_abort, ensure_cargo_offline_default, init_pid1_a3_egress,
-    init_pid1_filesystem, mount_workspace_shares, parse_virtiofs_mounts, shutdown_or_exit,
-    CargoOfflineDefaultOutcome, PID1_ENFORCEMENT_EXIT_CODE,
-    MountAttempt, MountStatus, VirtioFsMountSpec, WorkspaceMountOutcome, A3_DEFAULT_TPROXY_PORT,
-    A3_TPROXY_PORT_ENV, CARGO_OFFLINE_ENV, VIRTIOFS_MOUNTS_ENV,
+    enforce_pid1_or_abort, ensure_cargo_offline_default, harden_guest_for_agent,
+    init_pid1_a3_egress, init_pid1_filesystem, mount_workspace_shares, parse_virtiofs_mounts,
+    scrub_sensitive_env_for_agent, shutdown_or_exit, CargoOfflineDefaultOutcome,
+    MountAttempt, MountStatus, PID1_ENFORCEMENT_EXIT_CODE, PLANNER_BINARY_PATHS_TO_MASK,
+    SENSITIVE_ENV_VARS_TO_SCRUB, VirtioFsMountSpec, WorkspaceMountOutcome,
+    A3_DEFAULT_TPROXY_PORT, A3_TPROXY_PORT_ENV, CARGO_OFFLINE_ENV, VIRTIOFS_MOUNTS_ENV,
 };
 pub use http_fetch::{
     DirectHttpFetch, HttpFetch, HttpFetchError, HttpFetchRequest, HttpFetchResponse,

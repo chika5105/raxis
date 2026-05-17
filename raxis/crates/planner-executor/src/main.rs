@@ -18,11 +18,11 @@
 //! scaffold.
 
 use raxis_planner_core::{
-    enforce_pid1_or_abort, ensure_cargo_offline_default, hydrate_from_proc_cmdline,
-    init_pid1_a3_egress, init_pid1_filesystem, mount_workspace_shares, park_on_signal,
-    render_boot_log, run_role_session, shutdown_or_exit, BootContext, CargoOfflineDefaultOutcome,
-    DriverError, DriverOutcome, HydrationOutcome, MountStatus, PlannerError, Role,
-    WorkspaceMountOutcome,
+    enforce_pid1_or_abort, ensure_cargo_offline_default, harden_guest_for_agent,
+    hydrate_from_proc_cmdline, init_pid1_a3_egress, init_pid1_filesystem, mount_workspace_shares,
+    park_on_signal, render_boot_log, run_role_session, scrub_sensitive_env_for_agent,
+    shutdown_or_exit, BootContext, CargoOfflineDefaultOutcome, DriverError, DriverOutcome,
+    HydrationOutcome, MountStatus, PlannerError, Role, WorkspaceMountOutcome,
 };
 
 fn main() -> ! {
@@ -88,6 +88,17 @@ fn main() -> ! {
     // `RAXIS_AIRGAP_A3=1` env-var gate was removed.
     init_pid1_a3_egress();
 
+    // Step 3c: `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` —
+    // last-line hardening against an in-VM LLM agent reading
+    // kernel-stamped secrets, re-executing the planner binary,
+    // or powering off the VM out-of-band. See the helper's
+    // docstring for the full taxonomy and
+    // `specs/v3/guest-agent-jailbreak-defense.md` for the
+    // attack-vector replay log. MUST run BEFORE the tokio
+    // runtime spins up so the procfs bind mounts and
+    // `prctl(PR_*)` flags are inherited by every worker thread.
+    harden_guest_for_agent();
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -113,6 +124,12 @@ async fn async_main() -> u8 {
     if let Err(code) = activate_airgap_a3_chokepoint().await {
         return code;
     }
+    // Note: `scrub_sensitive_env_for_agent` is invoked INSIDE
+    // `run()` immediately after `BootContext::from_process` has
+    // pulled `RAXIS_SESSION_TOKEN` etc. into `ctx.env`. Scrubbing
+    // here (before `run()` runs `from_process`) would starve the
+    // BootContext constructor of the env vars it needs to
+    // initialise the per-task kernel transport handshake.
     match run().await {
         Ok(()) => 0,
         Err(e) => {
@@ -338,6 +355,19 @@ fn log_hydration_outcome(outcome: &HydrationOutcome) {
 async fn run() -> Result<(), PlannerError> {
     let ctx = BootContext::from_process(Role::Executor)?;
     eprintln!("{}", render_boot_log(&ctx));
+
+    // `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` — scrub the
+    // session token and sister sensitive env vars from the
+    // process environment now that `BootContext::from_process`
+    // has consumed them into `ctx.env`. The dispatch loop below
+    // passes `ctx.env.clone()` into `run_role_session`, so the
+    // legitimate consumer (kernel-IPC handshake, vsock listener
+    // tasks already kicked off pre-runtime) keeps its values
+    // by-value. The first `BashTool` / `SubprocessTool` child
+    // process the agent spawns now inherits a scrubbed env via
+    // `Command::spawn`, defanging the most common token-recovery
+    // vector (`bash -lc env | grep RAXIS_`).
+    scrub_sensitive_env_for_agent();
 
     let outcome = run_role_session(ctx.role, ctx.args.clone(), ctx.env.clone())
         .await

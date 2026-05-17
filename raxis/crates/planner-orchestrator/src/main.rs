@@ -23,9 +23,10 @@
 //!    See `raxis-planner-core/src/driver.rs` for the env contract.
 
 use raxis_planner_core::{
-    enforce_pid1_or_abort, hydrate_from_proc_cmdline, init_pid1_filesystem, mount_workspace_shares,
-    park_on_signal, render_boot_log, run_role_session, shutdown_or_exit, BootContext, DriverError,
-    DriverOutcome, HydrationOutcome, MountStatus, PlannerError, Role, WorkspaceMountOutcome,
+    enforce_pid1_or_abort, harden_guest_for_agent, hydrate_from_proc_cmdline, init_pid1_filesystem,
+    mount_workspace_shares, park_on_signal, render_boot_log, run_role_session,
+    scrub_sensitive_env_for_agent, shutdown_or_exit, BootContext, DriverError, DriverOutcome,
+    HydrationOutcome, MountStatus, PlannerError, Role, WorkspaceMountOutcome,
 };
 
 fn main() -> ! {
@@ -73,6 +74,17 @@ fn main() -> ! {
     // diagnostic in the audit chain.
     let mount_outcome = mount_workspace_shares();
     log_workspace_mount_outcome(&mount_outcome);
+
+    // Step 4: `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` —
+    // last-line hardening against an in-VM LLM agent reading
+    // kernel-stamped secrets, re-executing the planner binary,
+    // or powering off the VM out-of-band. See
+    // `raxis_planner_core::harden_guest_for_agent`'s docstring
+    // and `specs/v3/guest-agent-jailbreak-defense.md` for the
+    // attack-vector replay log. MUST run BEFORE the tokio
+    // runtime spins up so the procfs bind mounts and `prctl(PR_*)`
+    // flags are inherited by every worker thread.
+    harden_guest_for_agent();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -148,6 +160,20 @@ fn log_hydration_outcome(outcome: &HydrationOutcome) {
 async fn run() -> Result<(), PlannerError> {
     let ctx = BootContext::from_process(Role::Orchestrator)?;
     eprintln!("{}", render_boot_log(&ctx));
+
+    // `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` — scrub the
+    // session token and sister sensitive env vars from the
+    // process environment now that `BootContext::from_process`
+    // has consumed them into `ctx.env`. The orchestrator
+    // dispatches HTTP fetches via `PlannerFetchRequest` over the
+    // kernel-IPC vsock (not the in-VM tproxy), so the only
+    // legitimate post-boot reader of `RAXIS_SESSION_TOKEN` is the
+    // kernel-transport handshake which has already cloned the
+    // value into `ctx.env`. The orchestrator's `BashTool` child
+    // processes now inherit a scrubbed env via `Command::spawn`,
+    // defanging the most common token-recovery vector
+    // (`bash -lc env | grep RAXIS_`).
+    scrub_sensitive_env_for_agent();
 
     let outcome = run_role_session(ctx.role, ctx.args.clone(), ctx.env.clone())
         .await

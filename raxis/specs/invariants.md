@@ -1129,6 +1129,73 @@ breadcrumb via the console-log scraper.
 
 ---
 
+### INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01 — Guest hardening sweep precedes every dispatch
+
+Canonical home: [`v3/guest-agent-jailbreak-defense.md`](v3/guest-agent-jailbreak-defense.md).
+
+**Statement.** Every planner binary (`raxis-executor`,
+`raxis-orchestrator`, `raxis-reviewer`) MUST invoke
+`raxis_planner_core::harden_guest_for_agent` between its
+PID-1-only filesystem mounts (`init_pid1_filesystem`,
+`init_pid1_a3_egress`, `mount_workspace_shares`) and the
+construction of its tokio runtime. It MUST then invoke
+`raxis_planner_core::scrub_sensitive_env_for_agent` inside its
+`run()` async fn between `BootContext::from_process` and
+`run_role_session`. Together these MUST:
+
+1. Bind-mount `/dev/null` over `/proc/cmdline` so reads return
+   EOF (vector V1 — kernel-cmdline env-token recovery).
+2. Set `PR_SET_DUMPABLE = SUID_DUMP_DISABLE` so per-pid procfs
+   entries deny same-uid reads of PID 1's environ / maps /
+   cmdline / exe (vector V2 — `/proc/1/environ` recovery).
+3. Bind-mount `/dev/null` over each canonical planner-binary
+   path in `PLANNER_BINARY_PATHS_TO_MASK` (vector V3 — binary
+   exfiltration / offline analysis).
+4. Drop `CAP_SYS_BOOT` from the bounding set so the agent's
+   bash children cannot `reboot(2)` the VM out-of-band
+   (vector V4 — out-of-band VM kill).
+5. Set `PR_SET_NO_NEW_PRIVS = 1` so future setuid binaries
+   cannot grant privileges across `execve` (vector V5 — setuid
+   drift).
+6. Remove every entry in `SENSITIVE_ENV_VARS_TO_SCRUB` from
+   the process environment AFTER the in-guest listeners have
+   captured their token clones (vector V6 —
+   `Command::spawn`-inheritance leak to the agent's bash).
+
+Every step MUST emit one structured stderr JSON line keyed on
+`step:"guest-harden"` with an `event` discriminant naming the
+specific defense. A verifier reviewer is expected to flag any
+session whose console log lacks the canonical six-line guard
+sequence before the first `step:"planner-boot"` line.
+
+**Justification.** `INV-PLANNER-PID1-ONLY-EXEC-01` closes only
+the *re-exec* sub-vector — the planner binary refuses to start
+if invoked outside PID 1. The wider surface (kernel cmdline
+exposing `raxis.envb64=…`, PID 1 environ readable to any
+root-uid child, planner binary world-readable on disk,
+`reboot(2)` callable from any root child, sensitive env
+inherited by `Command::spawn`) remained open until this
+hardening sweep. Each vector independently lets an in-VM LLM
+agent recover a kernel-stamped secret, exfiltrate code, or
+shut down the VM out-of-band. The sweep closes all six in a
+single PID-1 post-mount hook so the dispatch loop never runs
+against an unhardened guest.
+
+**Scenario.** An executor VM boots. Between
+`init_pid1_a3_egress` and the tokio runtime construction the
+planner's `main` calls `harden_guest_for_agent`; the substrate
+console log records six structured lines (`proc_cmdline_masked`,
+`pr_set_dumpable_disabled`, `planner_binaries_masked`,
+`cap_sys_boot_dropped_from_bounding_set`,
+`pr_set_no_new_privs_enabled`). Inside `run()` the binary
+calls `scrub_sensitive_env_for_agent`; the console log records
+a seventh structured line (`sensitive_env_scrubbed`). The
+agent then dispatches a tool call; the `BashTool` spawns
+`bash -lc 'env | grep RAXIS_'`, which returns no output —
+proving the hardening engaged before the first agent dispatch.
+
+---
+
 ## §19 — Gate rejection and agent-hint contract
 
 Canonical home: [`v3/gate-rejection-orchestrator-fixup.md`](v3/gate-rejection-orchestrator-fixup.md).

@@ -659,6 +659,452 @@ pub fn init_pid1_a3_egress() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Guest hardening — `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01`
+// ---------------------------------------------------------------------------
+
+/// Canonical in-guest paths that hold the planner binary across
+/// every substrate. Hidden by [`harden_guest_for_agent`] so an
+/// in-VM agent's `bash -lc "cat <path>"` returns an empty file
+/// instead of the planner executable. The list is comprehensive
+/// rather than minimal because the canonical image builder
+/// (`cargo xtask images dev-stage`) emits a copy at `/init` AND a
+/// PATH-resolvable copy under `/usr/local/bin/` — masking only one
+/// would leave the other readable.
+pub const PLANNER_BINARY_PATHS_TO_MASK: &[&str] = &[
+    "/init",
+    "/usr/local/bin/raxis-executor",
+    "/usr/local/bin/raxis-orchestrator",
+    "/usr/local/bin/raxis-reviewer",
+    "/usr/local/bin/raxis-verifier-no-secrets",
+];
+
+/// Sensitive env vars that MUST be removed from the process
+/// environment BEFORE the agent's `BashTool` /
+/// [`crate::custom_tools::SubprocessTool`] is allowed to spawn a
+/// child. Each in-guest listener that needs one of these has
+/// already cloned the value into its task locals by the time
+/// [`harden_guest_for_agent`] runs (see
+/// `crates/planner-executor/src/main.rs::activate_airgap_a3_chokepoint`
+/// — it `.clone()`s `RAXIS_SESSION_TOKEN` into the spawned
+/// `accept_loop_a3` and `run_dns_stub` tasks), so removing them
+/// here cannot break the legitimate egress path; it only strips
+/// `Command::spawn` inheritance for the agent's child processes.
+///
+/// Pinned alphabetically so a future addition does not silently
+/// reorder the audit-replay scrub log.
+pub const SENSITIVE_ENV_VARS_TO_SCRUB: &[&str] = &[
+    "RAXIS_AIRGAP_A3_ADMISSION_PORT",
+    "RAXIS_AIRGAP_A3_HOST_CID",
+    "RAXIS_AIRGAP_A3_TUNNEL_PORT",
+    "RAXIS_KERNEL_VSOCK_LISTEN_PORT",
+    "RAXIS_PLANNER_TASK_PROMPT",
+    "RAXIS_PLANNER_TASK_PROMPT_PATH",
+    "RAXIS_SESSION_TOKEN",
+];
+
+/// `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` — last-line
+/// post-PID-1-boot defenses against an in-VM LLM agent reading
+/// kernel-stamped secrets, re-executing the planner binary, or
+/// powering off the VM out-of-band.
+///
+/// ## Why this exists
+///
+/// `enforce_pid1_or_abort` (iter72) closed the most obvious
+/// vector — a child `raxis-executor` re-exec inheriting the
+/// parent's vsock-listener bindings — but the surrounding
+/// surface is wider:
+///
+///   1. **`/proc/cmdline` exposes the kernel-stamped
+///      `raxis.envb64=<base64>` token.** `cat /proc/cmdline` is
+///      not gated by uid; the agent can decode the base64 to
+///      recover `RAXIS_SESSION_TOKEN`,
+///      `RAXIS_KERNEL_VSOCK_LISTEN_PORT`,
+///      `RAXIS_PLANNER_TASK_PROMPT`, etc. With the token in hand
+///      it can dial the kernel's vsock IPC channel directly and
+///      attempt to submit `IntentRequest`s on the parent's behalf
+///      (replay protection + the in-process sequence cursor
+///      bound the damage, but the kernel-side ratelimit + audit
+///      surface still records the attempt). Mitigation: bind-mount
+///      `/dev/null` over `/proc/cmdline` so reads return EOF
+///      regardless of uid. PID 1 has already hydrated its env
+///      from the cmdline before this function runs, so masking is
+///      lossless for the legitimate path.
+///   2. **`/proc/1/environ` echoes the hydrated env.** Same uid
+///      check as everywhere in `/proc/<pid>/`, so a root-uid
+///      `bash` child can read PID 1's environ block. Mitigation:
+///      `prctl(PR_SET_DUMPABLE, 0)` strips the readable bit on
+///      `/proc/1/{environ,maps,cmdline,...}` for anything but
+///      `CAP_SYS_PTRACE` callers. Combined with the cap-set drop
+///      below, this defangs the env-read vector.
+///   3. **`/init` and `/usr/local/bin/raxis-*` are world-readable.**
+///      Even though `enforce_pid1_or_abort` refuses re-exec, the
+///      agent can `cat /init` to read the binary, learn protocol
+///      constants, or transmit it for offline analysis.
+///      Mitigation: bind-mount `/dev/null` over every canonical
+///      planner-binary path. The running PID 1 holds the inode
+///      open via its in-kernel exe descriptor, so masking the
+///      filesystem path has no effect on the executing process —
+///      only on subsequent `open(/init)` calls.
+///   4. **`reboot(LINUX_REBOOT_CMD_*)` is a `CAP_SYS_BOOT`
+///      operation.** A root-uid `bash` child can shutdown the VM
+///      out of band, which the substrate observes as a clean
+///      power-off and the kernel synthesises as
+///      "executor VM exited via clean EOF without a
+///      `PlannerExitNotice`" — a stealth abort. Mitigation: drop
+///      `CAP_SYS_BOOT` from the bounding set via
+///      `prctl(PR_CAPBSET_DROP, …)`. PID 1 itself does not need
+///      `CAP_SYS_BOOT` after this point because
+///      [`shutdown_or_exit`] is the only legitimate caller and it
+///      runs BEFORE `harden_guest_for_agent`'s effects matter
+///      (the planner's `main` runs `shutdown_or_exit` after the
+///      dispatch loop returns; we drop the cap as part of the
+///      pre-dispatch hardening sweep, which means PID 1 itself
+///      can no longer call `reboot(2)`). To keep the clean-exit
+///      path working we therefore drop the cap LAST, AFTER the
+///      bounding-set drop, only from the BOUNDING SET — the
+///      effective + permitted set retains the cap so PID 1 can
+///      still issue the power-off, but every `execve` (which the
+///      bounding set is consulted on) strips it from the child.
+///      Net effect: PID 1 keeps `reboot()`, agent children
+///      cannot acquire `CAP_SYS_BOOT`, no path lets the agent
+///      shutdown the VM.
+///   5. **`prctl(PR_SET_NO_NEW_PRIVS, 1)` defangs setuid binaries
+///      transitively.** If the canonical executor rootfs ever
+///      ships a setuid binary by accident (today it doesn't), the
+///      agent could exec it to acquire host-uid privileges; this
+///      flag is inherited across `execve` and prevents any future
+///      `setuid` bit from elevating privileges.
+///
+/// ## Where this runs
+///
+/// Called from each planner-binary `main` between
+/// `init_pid1_a3_egress` (which installs the iptables REDIRECT
+/// chain that the in-guest tproxy depends on) and the tokio
+/// runtime construction. Subsequent agent-tool subprocess spawns
+/// inherit:
+///   * the cmdline / environ mask from the procfs bind mounts,
+///   * the binary mask from the planner-binary bind mounts,
+///   * the `NO_NEW_PRIVS` flag and the
+///     `CAP_SYS_BOOT`-stripped bounding set (per-execve).
+///
+/// Every step is best-effort + logged. A substrate that pre-
+/// enforces any of these (a future Firecracker variant could ship
+/// procfs already bind-mounted, for example) returns `EBUSY` /
+/// `EEXIST`, which we treat as success.
+///
+/// ## When this is a no-op
+///
+/// PID ≠ 1 on Linux: the SubprocessIsolation host-mode fixture
+/// runs the planner as a normal subprocess, where these mounts
+/// would either fail (no `CAP_SYS_ADMIN` outside a user namespace)
+/// or actively harm the host. Skipping under PID ≠ 1 keeps the
+/// fixture working.
+///
+/// Non-Linux: macOS dev workstations build the workspace but
+/// never run a planner binary natively; the function is a no-op.
+pub fn harden_guest_for_agent() {
+    #[cfg(target_os = "linux")]
+    {
+        if std::process::id() != 1 {
+            return;
+        }
+        linux_harden::mask_proc_cmdline();
+        linux_harden::set_pid1_undumpable();
+        linux_harden::mask_planner_binaries(PLANNER_BINARY_PATHS_TO_MASK);
+        linux_harden::drop_cap_sys_boot_from_bounding_set();
+        linux_harden::set_no_new_privs();
+    }
+}
+
+/// `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` — second-stage
+/// scrub that runs AFTER each in-guest listener has cloned its
+/// secrets into task-local state. Removes
+/// [`SENSITIVE_ENV_VARS_TO_SCRUB`] from the process environment
+/// so subsequent agent-tool subprocess spawns
+/// (`BashTool::execute` → `tokio::process::Command::new("bash")`
+/// or `SubprocessTool::execute` → `Command::new(argv0)`) cannot
+/// inherit them.
+///
+/// MUST run AFTER:
+///   * `hydrate_from_proc_cmdline` (which writes the env from the
+///     cmdline token into the process env), AND
+///   * the in-guest tproxy / DNS stub spawn (each clones
+///     `RAXIS_SESSION_TOKEN` into its `tokio::spawn` body so the
+///     removal here cannot starve the legitimate path).
+///
+/// Idempotent: removing an already-unset variable is a no-op at
+/// the libc layer. Logged via one structured stderr line per
+/// scrubbed key for audit-replay.
+///
+/// ## Safety
+///
+/// Calls `std::env::remove_var`, which is `unsafe` under Rust
+/// 2024 due to multi-threaded env-mutation semantics. The caller
+/// MUST invoke this BEFORE the agent's first tool dispatch fires.
+/// All current call sites
+/// (`raxis-planner-{executor,orchestrator,reviewer}/src/main.rs`)
+/// run this on the tokio runtime's main task, AFTER the
+/// listener-spawning tasks are kicked off but BEFORE the dispatch
+/// loop accepts any model-driven tool call. The agent's tools
+/// `tokio::process::Command::spawn` call observes the post-scrub
+/// env snapshot.
+pub fn scrub_sensitive_env_for_agent() {
+    let mut scrubbed = 0u32;
+    let mut already_unset = 0u32;
+    for &key in SENSITIVE_ENV_VARS_TO_SCRUB {
+        match std::env::var_os(key) {
+            Some(_) => {
+                // SAFETY: documented contract — the caller invokes
+                // this on the main task before the agent's tool
+                // dispatch spawns any child. The tokio runtime
+                // worker pool may exist by this point, but no
+                // worker is concurrently mutating env (env mutation
+                // is single-call-site: only `cmdline_env::apply_*`,
+                // `ensure_cargo_offline_default`, and this
+                // function; the first two run pre-runtime in
+                // `main`, this one runs synchronously between
+                // listener-spawn and dispatch-loop-entry).
+                unsafe {
+                    std::env::remove_var(key);
+                }
+                scrubbed += 1;
+            }
+            None => {
+                already_unset += 1;
+            }
+        }
+    }
+    eprintln!(
+        "{{\"level\":\"info\",\"step\":\"guest-harden\",\
+         \"event\":\"sensitive_env_scrubbed\",\
+         \"scrubbed\":{scrubbed},\"already_unset\":{already_unset},\
+         \"invariant\":\"INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01\"}}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+mod linux_harden {
+    use std::ffi::CString;
+    use std::io;
+
+    /// Bind-mount `/dev/null` over `/proc/cmdline` so any reader
+    /// (including the agent's `bash -lc "cat /proc/cmdline"`)
+    /// observes an empty file instead of the kernel-stamped
+    /// `raxis.envb64=…` token. PID 1 has already hydrated its
+    /// env BEFORE this runs, so masking the filesystem view is
+    /// lossless for the legitimate path.
+    pub(super) fn mask_proc_cmdline() {
+        match bind_mount_dev_null_over("/proc/cmdline") {
+            Ok(()) => eprintln!(
+                "{{\"level\":\"info\",\"step\":\"guest-harden\",\
+                 \"event\":\"proc_cmdline_masked\"}}"
+            ),
+            Err(e) if e.raw_os_error() == Some(libc::EBUSY) => eprintln!(
+                "{{\"level\":\"info\",\"step\":\"guest-harden\",\
+                 \"event\":\"proc_cmdline_already_masked\"}}"
+            ),
+            Err(e) => eprintln!(
+                "{{\"level\":\"warn\",\"step\":\"guest-harden\",\
+                 \"event\":\"proc_cmdline_mask_failed\",\
+                 \"errno\":{}}}",
+                e.raw_os_error().unwrap_or(-1),
+            ),
+        }
+    }
+
+    /// `prctl(PR_SET_DUMPABLE, 0)` — strip the readable bit on
+    /// `/proc/1/environ`, `/proc/1/maps`, `/proc/1/cmdline`,
+    /// `/proc/1/auxv`, `/proc/1/io`, etc. for callers without
+    /// `CAP_SYS_PTRACE`. Default value (1, `SUID_DUMP_USER`) is
+    /// what lets a same-uid `bash` child read PID 1's environ.
+    /// Setting to 0 (`SUID_DUMP_DISABLE`) chmods the per-pid
+    /// procfs entries `0500 root:root`, defeating the read.
+    ///
+    /// The flag is also inherited across `fork` /
+    /// `clone`, so every child the planner spawns from PID 1
+    /// inherits the same protection — which means the agent's
+    /// `bash` tool cannot read its OWN `/proc/self/environ`
+    /// (where the still-hydrated env vars would otherwise leak).
+    pub(super) fn set_pid1_undumpable() {
+        // `SUID_DUMP_DISABLE` = `0` per `<linux/sched/coredump.h>`
+        // (also surfaced as `libc::SUID_DUMP_DISABLE` on glibc
+        // targets, but absent in `libc` for `aarch64-unknown-linux-musl`
+        // — the canonical executor target. Use the raw value so the
+        // helper compiles across every supported Linux target.)
+        const SUID_DUMP_DISABLE: libc::c_ulong = 0;
+        // SAFETY: `prctl` is a thin wrapper around the
+        // `prctl(2)` syscall; `PR_SET_DUMPABLE` is stable in
+        // `libc::PR_SET_DUMPABLE`.
+        let rc = unsafe {
+            libc::prctl(
+                libc::PR_SET_DUMPABLE,
+                SUID_DUMP_DISABLE,
+                0,
+                0,
+                0,
+            )
+        };
+        if rc == 0 {
+            eprintln!(
+                "{{\"level\":\"info\",\"step\":\"guest-harden\",\
+                 \"event\":\"pr_set_dumpable_disabled\"}}"
+            );
+        } else {
+            eprintln!(
+                "{{\"level\":\"warn\",\"step\":\"guest-harden\",\
+                 \"event\":\"pr_set_dumpable_failed\",\
+                 \"errno\":{}}}",
+                io::Error::last_os_error().raw_os_error().unwrap_or(-1),
+            );
+        }
+    }
+
+    /// Bind-mount `/dev/null` over every path in `paths`.
+    /// `cat /init` returns nothing; `cat /usr/local/bin/raxis-*`
+    /// returns nothing. The running planner is unaffected: its
+    /// in-kernel exe descriptor (`/proc/1/exe`) references the
+    /// inode the kernel exec'd, which the bind mount does not
+    /// touch.
+    ///
+    /// We do not `unlink(2)` the binary because a future
+    /// substrate that pre-bind-mounts an immutable rootfs would
+    /// reject unlinks; bind-mounting `/dev/null` is the
+    /// minimum-side-effect operation that works everywhere.
+    ///
+    /// Each missing target (path does not exist) is logged but
+    /// not treated as failure — the canonical image only ships
+    /// the planner-role binary that corresponds to the active
+    /// VM, so 2 of the 5 paths in `paths` are always absent.
+    pub(super) fn mask_planner_binaries(paths: &[&str]) {
+        let mut masked = 0u32;
+        let mut already = 0u32;
+        let mut missing = 0u32;
+        let mut errors = 0u32;
+        for path in paths {
+            if !std::path::Path::new(path).exists() {
+                missing += 1;
+                continue;
+            }
+            match bind_mount_dev_null_over(path) {
+                Ok(()) => masked += 1,
+                Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {
+                    already += 1;
+                }
+                Err(_) => {
+                    errors += 1;
+                }
+            }
+        }
+        eprintln!(
+            "{{\"level\":\"info\",\"step\":\"guest-harden\",\
+             \"event\":\"planner_binaries_masked\",\
+             \"masked\":{masked},\"already\":{already},\
+             \"missing\":{missing},\"errors\":{errors}}}"
+        );
+    }
+
+    /// `prctl(PR_CAPBSET_DROP, CAP_SYS_BOOT)` — strip the
+    /// `CAP_SYS_BOOT` bit from the BOUNDING SET so it cannot be
+    /// re-acquired across `execve`. PID 1's effective set still
+    /// carries the cap (so [`super::shutdown_or_exit`] continues
+    /// to power-off the VM cleanly on terminal exit), but any
+    /// `execve` triggered by the agent's bash tool runs with the
+    /// bounding-set-intersected capability set — i.e. no
+    /// `CAP_SYS_BOOT`, so an agent `bash -c "reboot"` (or any
+    /// equivalent `reboot(2)` syscall from an agent child)
+    /// returns EPERM.
+    pub(super) fn drop_cap_sys_boot_from_bounding_set() {
+        // `CAP_SYS_BOOT` = `22` per `<linux/capability.h>`
+        // (`#define CAP_SYS_BOOT 22`). Not surfaced as a named
+        // constant in `libc` for `aarch64-unknown-linux-musl` —
+        // the canonical executor target — so use the raw value
+        // so the helper compiles across every supported Linux
+        // target. The kernel-side enum is ABI-frozen; the
+        // numeric value is the contract.
+        const CAP_SYS_BOOT: libc::c_ulong = 22;
+        // SAFETY: `prctl` with `PR_CAPBSET_DROP` is a thin
+        // wrapper around the prctl(2) syscall; the constant
+        // `PR_CAPBSET_DROP` is stable in `libc::PR_CAPBSET_DROP`.
+        let rc = unsafe {
+            libc::prctl(
+                libc::PR_CAPBSET_DROP,
+                CAP_SYS_BOOT,
+                0,
+                0,
+                0,
+            )
+        };
+        if rc == 0 {
+            eprintln!(
+                "{{\"level\":\"info\",\"step\":\"guest-harden\",\
+                 \"event\":\"cap_sys_boot_dropped_from_bounding_set\"}}"
+            );
+        } else {
+            eprintln!(
+                "{{\"level\":\"warn\",\"step\":\"guest-harden\",\
+                 \"event\":\"cap_sys_boot_drop_failed\",\
+                 \"errno\":{}}}",
+                io::Error::last_os_error().raw_os_error().unwrap_or(-1),
+            );
+        }
+    }
+
+    /// `prctl(PR_SET_NO_NEW_PRIVS, 1)` — once set, the kernel
+    /// guarantees that no subsequent `execve(2)` (in this
+    /// process or any descendant) can grant privileges that
+    /// were not held at the time of the prctl. Defangs any
+    /// future setuid binary inadvertently shipped in the
+    /// canonical image: the agent can `exec` it, but the suid
+    /// bit is ignored.
+    pub(super) fn set_no_new_privs() {
+        // SAFETY: `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)` is
+        // documented stable since Linux 3.5. The flag is inherited
+        // across `fork`/`clone`/`execve`; once set it cannot be
+        // unset.
+        let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1u64, 0u64, 0u64, 0u64) };
+        if rc == 0 {
+            eprintln!(
+                "{{\"level\":\"info\",\"step\":\"guest-harden\",\
+                 \"event\":\"pr_set_no_new_privs_enabled\"}}"
+            );
+        } else {
+            eprintln!(
+                "{{\"level\":\"warn\",\"step\":\"guest-harden\",\
+                 \"event\":\"pr_set_no_new_privs_failed\",\
+                 \"errno\":{}}}",
+                io::Error::last_os_error().raw_os_error().unwrap_or(-1),
+            );
+        }
+    }
+
+    /// Issue `mount("/dev/null", target, NULL, MS_BIND, NULL)`.
+    /// On success any subsequent `open(target, O_RDONLY)` returns
+    /// EOF on first read; existing fds opened before the mount
+    /// keep their original view.
+    fn bind_mount_dev_null_over(target: &str) -> io::Result<()> {
+        let source = CString::new("/dev/null").expect("static path has no NUL");
+        let target_c =
+            CString::new(target).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        // `mount(2)` requires the `data` arg to be `NULL` for
+        // bind mounts; `flags = MS_BIND`.
+        let rc = unsafe {
+            libc::mount(
+                source.as_ptr(),
+                target_c.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux_a3 {
     use std::fs::OpenOptions;
@@ -1443,5 +1889,127 @@ mod pid1_enforcement_tests {
     #[test]
     fn pid1_enforcement_exit_code_is_126() {
         assert_eq!(PID1_ENFORCEMENT_EXIT_CODE, 126);
+    }
+}
+
+/// `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` — unit tests
+/// pinning the operator-visible defense lists. The actual mount
+/// / prctl side-effects cannot be exercised from a unit test
+/// (the test runner is not PID 1 and lacks `CAP_SYS_ADMIN`); we
+/// pin the visible interface so a future refactor cannot
+/// silently drop a defense.
+#[cfg(test)]
+mod guest_harden_tests {
+    use super::*;
+
+    /// Pin the canonical planner-binary path list so a future
+    /// refactor (renaming a binary, adding a fourth role) MUST
+    /// land a paired update here. The agent's exfiltration surface
+    /// grows in lock-step with the set of binaries the canonical
+    /// image ships; an out-of-band rename would silently widen
+    /// the surface.
+    #[test]
+    fn planner_binary_paths_to_mask_pinned() {
+        assert_eq!(
+            PLANNER_BINARY_PATHS_TO_MASK,
+            &[
+                "/init",
+                "/usr/local/bin/raxis-executor",
+                "/usr/local/bin/raxis-orchestrator",
+                "/usr/local/bin/raxis-reviewer",
+                "/usr/local/bin/raxis-verifier-no-secrets",
+            ],
+            "PLANNER_BINARY_PATHS_TO_MASK is the exfiltration surface; \
+             any change must be paired with a spec update in \
+             specs/v3/guest-agent-jailbreak-defense.md §2.3"
+        );
+    }
+
+    /// Pin the sensitive-env scrub list. Every entry is a kernel-
+    /// stamped value an agent's `bash -lc 'env'` could otherwise
+    /// recover. A future env addition that holds a secret MUST
+    /// land here in the same commit.
+    #[test]
+    fn sensitive_env_vars_to_scrub_pinned() {
+        assert_eq!(
+            SENSITIVE_ENV_VARS_TO_SCRUB,
+            &[
+                "RAXIS_AIRGAP_A3_ADMISSION_PORT",
+                "RAXIS_AIRGAP_A3_HOST_CID",
+                "RAXIS_AIRGAP_A3_TUNNEL_PORT",
+                "RAXIS_KERNEL_VSOCK_LISTEN_PORT",
+                "RAXIS_PLANNER_TASK_PROMPT",
+                "RAXIS_PLANNER_TASK_PROMPT_PATH",
+                "RAXIS_SESSION_TOKEN",
+            ],
+            "SENSITIVE_ENV_VARS_TO_SCRUB is the agent token-recovery \
+             surface; any change must be paired with a spec update \
+             in specs/v3/guest-agent-jailbreak-defense.md §2.6"
+        );
+    }
+
+    /// `RAXIS_SESSION_ID` is intentionally NOT scrubbed — it is the
+    /// kernel-side correlator the agent's tool dispatch needs for
+    /// audit logging. Pin the exclusion so a defence-in-depth
+    /// sweep does not accidentally remove it and break audit
+    /// chain stitching.
+    #[test]
+    fn session_id_is_not_scrubbed() {
+        assert!(
+            !SENSITIVE_ENV_VARS_TO_SCRUB.contains(&"RAXIS_SESSION_ID"),
+            "RAXIS_SESSION_ID is the audit-chain correlator; it must \
+             survive `scrub_sensitive_env_for_agent`. See \
+             specs/v3/guest-agent-jailbreak-defense.md §2.6 final note."
+        );
+    }
+
+    /// On non-Linux + PID ≠ 1 the helper is a no-op: it MUST NOT
+    /// abort the test runner or panic. This is the parity the
+    /// other PID-1-gated helpers in this module honour.
+    #[test]
+    fn harden_guest_for_agent_is_noop_on_non_pid1_or_non_linux() {
+        // No assertion needed — the call returning without
+        // exiting / panicking is itself the witness. On macOS
+        // dev workstations the function falls through the
+        // `cfg(target_os = "linux")` gate; on Linux test runners
+        // PID is ≠ 1 so the PID-1 gate inside also falls
+        // through.
+        harden_guest_for_agent();
+    }
+
+    /// `scrub_sensitive_env_for_agent` MUST be safe to call when
+    /// the env vars are already unset (the legitimate path
+    /// after a second invocation, or the dev workflow where the
+    /// host process never had them set). The function logs each
+    /// case as `already_unset` but does not return an error.
+    #[test]
+    fn scrub_sensitive_env_for_agent_is_idempotent_when_already_unset() {
+        // Snapshot+restore so the test does not bleed env into
+        // sibling tests in the same process.
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let snapshot: Vec<(String, Option<String>)> = SENSITIVE_ENV_VARS_TO_SCRUB
+            .iter()
+            .map(|k| ((*k).to_owned(), std::env::var(k).ok()))
+            .collect();
+        // SAFETY: serialised via the static mutex.
+        for (k, _) in &snapshot {
+            unsafe {
+                std::env::remove_var(k);
+            }
+        }
+        scrub_sensitive_env_for_agent();
+        scrub_sensitive_env_for_agent(); // idempotent second pass
+        // Restore.
+        // SAFETY: serialised via the static mutex.
+        for (k, v) in snapshot {
+            unsafe {
+                match v {
+                    Some(val) => std::env::set_var(&k, val),
+                    None => std::env::remove_var(&k),
+                }
+            }
+        }
     }
 }
