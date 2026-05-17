@@ -454,6 +454,50 @@ pub struct OrchestratorPlanFields {
     /// the initiative declares `true` — Reviewer scaling is
     /// structurally forbidden by `INV-PLANNER-HARNESS-02`.
     pub elastic: Option<bool>,
+
+    /// V3 iter69 — `INV-ORCH-BOUNDED-CONCURRENCY-01`.
+    ///
+    /// Initiative-level cap on how many sub-task activations
+    /// (`subtask_activations.activation_state = 'Active'`) can be
+    /// in flight at the same time inside this initiative. The
+    /// post-exit orchestrator-respawn hook in
+    /// `kernel/src/session_spawn_orchestrator.rs` consults this
+    /// value so the orchestrator can fan out admissible
+    /// independent work in parallel — until iter69 the gate was
+    /// the binary `!active_exists` predicate, which serialised
+    /// every DAG node inside one initiative even when the tasks
+    /// had no edges between them.
+    ///
+    /// **Sourced from `[workspace] max_concurrent_admissions`** in
+    /// `plan.toml`; defaults to
+    /// [`Self::DEFAULT_MAX_CONCURRENT_ADMISSIONS`] (`3`) when the
+    /// field is absent. Validated `1..=Self::MAX_MAX_CONCURRENT_ADMISSIONS`
+    /// (`1..=20`) at admission time —
+    /// [`crate::initiatives::lifecycle::parse_plan_workspace_max_concurrent_admissions`]
+    /// surfaces a `LifecycleError::PlanInvalid` for out-of-range
+    /// or non-integer values so the operator sees the malformed
+    /// section immediately.
+    ///
+    /// **Why this lives on the orchestrator plan fields** (and
+    /// not on a new `initiatives` table column): the registry is
+    /// repopulated at boot from `plan_bundles_v2` (which stores
+    /// the signed plan TOML verbatim), so the value survives a
+    /// kernel restart without a schema migration. The
+    /// in-memory read on the hot path (post-exit hook fires once
+    /// per orchestrator exit) is also cheaper than a SQL round
+    /// trip per decision.
+    ///
+    /// **Why 3 is the default.** Three is the smallest cap that
+    /// permits the realistic-scenario primary plan to dispatch
+    /// its three structurally-independent root executors
+    /// (`materialize-records`, `xfile-refactor`,
+    /// `dep-fetch-evidence`) in parallel without re-introducing
+    /// the iter7 respawn-storm pathology (an LLM session
+    /// loop-rejecting `activate_subtask` intents). Plans that
+    /// know their DAG is wider can opt up to 20; plans that
+    /// want serial dispatch can opt down to 1 (the pre-iter69
+    /// behaviour).
+    pub max_concurrent_admissions: u32,
 }
 
 impl OrchestratorPlanFields {
@@ -462,6 +506,22 @@ impl OrchestratorPlanFields {
     /// historical default. Pinned at the data layer so tests cannot
     /// drift to a different default by mistake.
     pub const DEFAULT_TARGET_REF: &'static str = "refs/heads/main";
+
+    /// V3 iter69 — `INV-ORCH-BOUNDED-CONCURRENCY-01`. Default cap
+    /// on simultaneous `Active` sub-task activations per
+    /// initiative when the plan does not declare a
+    /// `[workspace] max_concurrent_admissions` override. See the
+    /// field-level doc on [`Self::max_concurrent_admissions`]
+    /// for the rationale.
+    pub const DEFAULT_MAX_CONCURRENT_ADMISSIONS: u32 = 3;
+
+    /// V3 iter69 — upper bound on a plan-declared
+    /// `[workspace] max_concurrent_admissions`. Twenty is well
+    /// above any realistic plan width and keeps the validator
+    /// behind a structural ceiling so a malformed plan can't
+    /// declare `max_concurrent_admissions = 2 ** 31 - 1` and
+    /// effectively disable the safety net.
+    pub const MAX_MAX_CONCURRENT_ADMISSIONS: u32 = 20;
 }
 
 impl Default for OrchestratorPlanFields {
@@ -471,6 +531,7 @@ impl Default for OrchestratorPlanFields {
             description: String::new(),
             target_ref: Self::DEFAULT_TARGET_REF.to_owned(),
             elastic: None,
+            max_concurrent_admissions: Self::DEFAULT_MAX_CONCURRENT_ADMISSIONS,
         }
     }
 }
@@ -580,6 +641,32 @@ impl PlanRegistry {
             .read()
             .expect("PlanRegistry orchestrators RwLock poisoned — kernel must abort");
         guard.get(initiative_id).cloned()
+    }
+
+    /// V3 iter69 — `INV-ORCH-BOUNDED-CONCURRENCY-01`.
+    ///
+    /// Resolve the cap on simultaneously-`Active` sub-task
+    /// activations for a given initiative. Used by the post-exit
+    /// orchestrator-respawn hook in
+    /// `session_spawn_orchestrator::spawn_planner_dispatcher`:
+    ///
+    /// > respawn-eligible iff
+    /// >   `pending_exists && active_count < orchestrator_concurrency_cap(...)`.
+    ///
+    /// Falls back to
+    /// [`OrchestratorPlanFields::DEFAULT_MAX_CONCURRENT_ADMISSIONS`]
+    /// (`3`) when:
+    ///
+    ///   * the initiative is unknown to the registry (a regressed
+    ///     `repopulate_from_store` would otherwise wedge the gate
+    ///     at zero — fail-OPEN to the operator default rather than
+    ///     dead-locking the initiative), OR
+    ///   * the plan omitted `[workspace] max_concurrent_admissions`
+    ///     (the typical operator-friendly default).
+    pub fn orchestrator_concurrency_cap(&self, initiative_id: &str) -> u32 {
+        self.orchestrator(initiative_id)
+            .map(|f| f.max_concurrent_admissions)
+            .unwrap_or(OrchestratorPlanFields::DEFAULT_MAX_CONCURRENT_ADMISSIONS)
     }
 
     /// Snapshot every `(task_id, fields)` for the given initiative.
@@ -963,5 +1050,76 @@ mod tests {
         r.insert_orchestrator("init-1", f.clone());
         let got = r.orchestrator("init-1").expect("just inserted");
         assert_eq!(got.description, "Coordinate the migration");
+    }
+
+    // ── V3 iter69 — `INV-ORCH-BOUNDED-CONCURRENCY-01` registry tests
+    //
+    // These tests pin three contracts the post-exit hook relies on:
+    //
+    //   1. The struct-level `Default` carries the documented `3`
+    //      cap. A test fixture that spreads `..Default::default()`
+    //      must therefore inherit the operator default, not `0`.
+    //   2. An unknown initiative resolves to the default — the
+    //      hook fails OPEN to keep an unknown initiative from
+    //      dead-locking, never zero (which would silently wedge the
+    //      gate).
+    //   3. An inserted override round-trips through the
+    //      `orchestrator_concurrency_cap` helper.
+
+    #[test]
+    fn default_orchestrator_fields_carry_documented_concurrency_cap() {
+        let f = OrchestratorPlanFields::default();
+        assert_eq!(
+            f.max_concurrent_admissions,
+            OrchestratorPlanFields::DEFAULT_MAX_CONCURRENT_ADMISSIONS,
+        );
+        // Pin the public constant so a future change cannot silently
+        // shift the operator-facing default — any tweak must update
+        // this test AND the `[workspace] max_concurrent_admissions`
+        // operator docs together.
+        assert_eq!(OrchestratorPlanFields::DEFAULT_MAX_CONCURRENT_ADMISSIONS, 3);
+        assert_eq!(OrchestratorPlanFields::MAX_MAX_CONCURRENT_ADMISSIONS, 20);
+    }
+
+    #[test]
+    fn orchestrator_concurrency_cap_unknown_initiative_falls_back_to_default() {
+        let r = PlanRegistry::new();
+        // The post-exit hook may resolve the cap for an initiative
+        // whose registry entry was never populated (e.g. a regressed
+        // `repopulate_from_store`, or a unit test that exercises the
+        // hook against a partially-seeded registry). Fail OPEN to
+        // the operator default rather than collapse the gate.
+        let cap = r.orchestrator_concurrency_cap("unknown-initiative");
+        assert_eq!(
+            cap,
+            OrchestratorPlanFields::DEFAULT_MAX_CONCURRENT_ADMISSIONS,
+        );
+    }
+
+    #[test]
+    fn orchestrator_concurrency_cap_round_trips_per_initiative_override() {
+        let r = PlanRegistry::new();
+        r.insert_orchestrator(
+            "init-low",
+            OrchestratorPlanFields {
+                max_concurrent_admissions: 1,
+                ..Default::default()
+            },
+        );
+        r.insert_orchestrator(
+            "init-high",
+            OrchestratorPlanFields {
+                max_concurrent_admissions: 12,
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.orchestrator_concurrency_cap("init-low"), 1);
+        assert_eq!(r.orchestrator_concurrency_cap("init-high"), 12);
+        // Sibling initiatives must not share state — a per-initiative
+        // override applies ONLY to its own initiative.
+        assert_eq!(
+            r.orchestrator_concurrency_cap("init-unrelated"),
+            OrchestratorPlanFields::DEFAULT_MAX_CONCURRENT_ADMISSIONS,
+        );
     }
 }

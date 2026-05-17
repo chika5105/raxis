@@ -1076,10 +1076,39 @@ const REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_CREDS: &str = r#"
 // `path_allowlist` is tight (`out/deps/`) so a leaky implementation
 // that writes anywhere else will trip
 // `FAIL_TASK_PATH_NOT_ALLOWED` and the witness will see the chain
-// admission go missing. `max_turns = 30` is generous for a
-// mechanical task — `mkdir`, one Python here-doc, `cat`, `git add`,
-// `git commit`, `task_complete` is ~8 turns natural; the slack
-// covers occasional planner retries on transport timeouts.
+// admission go missing.
+//
+// **Budget sizing (iter69 — supersedes the pre-iter69 30-turn
+// ceiling).** The prompt grew an additional `pip install certifi
+// --report` arm on top of the original `example.com` HTTPS GET so
+// the witness can verify the full multi-host PyPI flow
+// (`pypi.org` index lookup + `files.pythonhosted.org` wheel
+// fetch) end-to-end. Natural turn budget under the new prompt:
+//
+//   mkdir                              1
+//   python3 http.client GET → partial  1
+//   python3 -m pip install certifi     1   (multi-second, network)
+//   python3 merge partial + report     1
+//   cat verify                         1
+//   git add                            1
+//   git commit                         1
+//   task_complete                      1
+//                                      = 8 happy-path turns
+//
+// Real planners burn additional turns on `ls`/`cat` verification
+// checkpoints, on re-reading the partial JSON before merge, and
+// on parsing pip output if the first install hits a transient
+// PyPI 5xx (we observed iter69 attempt-1 exhaust 30 turns
+// without ever reaching task_complete — that surfaced as a
+// `MaxTurnsReached{used:30,limit:30}` premature-exit + a
+// crash-retry cycle). 90 gives ~11× the natural ceiling on the
+// happy path and ~2× headroom on a retry-heavy path, in line
+// with `materialize-records` (150) and `service-round-trip` /
+// `transparent-proxy-realscripts` (60 each, but those don't pip
+// install). Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`; the
+// kernel-side `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`
+// elasticates further on retry (attempt 2 → 135, attempt 3 →
+// 180, both ≤ the 240 hard ceiling).
 //
 // `predecessors` is intentionally empty: the dep-fetch task is
 // independent of the other realism workloads, so it can run in
@@ -1090,13 +1119,14 @@ const REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_CREDS: &str = r#"
 const REALISTIC_PLAN_DEP_FETCH_EVIDENCE_HEAD: &str = r#"# -- Dep-fetch-evidence Executor (Path A3 mediated egress) ----
 [[tasks]]
 task_id            = "dep-fetch-evidence"
-name               = "Fetch example.com over HTTPS and commit evidence JSON (Path A3 mediated egress)"
+name               = "Fetch example.com over HTTPS + pip install certifi from PyPI (Path A3 mediated egress)"
 session_agent_type = "Executor"
-# Mechanical: mkdir → one python3 http.client GET → write JSON →
-# git add → git commit → task_complete. ~8 turns natural; 30
-# leaves headroom for a single transport-timeout retry. Per
+# iter69 — bumped from 30 → 90 to absorb the additional pip
+# install arm (multi-host: pypi.org → files.pythonhosted.org).
+# Happy path is ~8 turns; the 11× headroom covers planner
+# verification checkpoints + a single transient PyPI retry. Per
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
-max_turns          = 30
+max_turns          = 90
 path_allowlist     = ["out/deps/"]
 description = """
 "#;

@@ -838,6 +838,149 @@ pub struct DashboardSession {
     pub expires_at: u64,
 }
 
+/// V3 iter69 — `INV-LIVE-E2E-DASHBOARD-PORT-CLEAR-ON-BOOT-01`.
+///
+/// Operator opt-out env var for the [`pre_flight_clear_dashboard_port`]
+/// pre-flight kill step. When set to `1`, the helper logs the
+/// configured port + the PIDs that would have been killed and
+/// returns without sending any signal. The default (env var
+/// unset) is to actively SIGTERM + SIGKILL any process whose
+/// socket is bound to the configured dashboard port BEFORE the
+/// test kernel attempts to bind it.
+pub const ENV_SKIP_DASHBOARD_PORT_PREFLIGHT: &str = "RAXIS_E2E_SKIP_DASHBOARD_PORT_PREFLIGHT";
+
+/// V3 iter69 — `INV-LIVE-E2E-DASHBOARD-PORT-CLEAR-ON-BOOT-01`.
+///
+/// Active teardown of any process whose listening socket is on
+/// the test-configured dashboard port (default `19820`). Called
+/// transparently from [`mutate_dashboard_block_in_policy`] before
+/// the kernel daemon spawns, so an operator who launches a
+/// second live-e2e run while a previous kernel is still holding
+/// the port does not silently double-bind via macOS
+/// `SO_REUSEPORT` — the new kernel correctly takes ownership of
+/// `127.0.0.1:<port>` and the user's autologin URL works on the
+/// first try.
+///
+/// **Why this lives in the harness, not in `cargo test`'s
+/// teardown.** A previous kernel that crashed (panic, SIGKILL,
+/// `RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1`) leaves its dashboard
+/// port live indefinitely. The next test invocation has no
+/// other natural point to discover-and-kill it; rolling the
+/// pre-flight into `mutate_dashboard_block_in_policy` makes
+/// every dashboard-bound test crate inherit the cleanup for
+/// free.
+///
+/// **Best-effort.** Failures (lsof missing, kill denied) are
+/// logged structurally and never panic — the worst case is the
+/// kernel's subsequent `bind(2)` returning `EADDRINUSE` and the
+/// test surfacing the existing iter21 error message, which is
+/// strictly better than the silent double-bind shape.
+///
+/// **Opt-out.** Set [`ENV_SKIP_DASHBOARD_PORT_PREFLIGHT`]`=1` to
+/// disable the kill step (the helper still logs the configured
+/// port + observed listener PIDs so a CI runner can audit the
+/// pre-flight outcome without disturbing the host).
+pub fn pre_flight_clear_dashboard_port(port: u16) {
+    let skip = std::env::var(ENV_SKIP_DASHBOARD_PORT_PREFLIGHT)
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let pids = listening_pids_on_port(port);
+    if pids.is_empty() {
+        eprintln!(
+            "[dashboard-preflight] port {port} clear (no listeners) — \
+             INV-LIVE-E2E-DASHBOARD-PORT-CLEAR-ON-BOOT-01",
+        );
+        return;
+    }
+    if skip {
+        eprintln!(
+            "[dashboard-preflight] {ENV_SKIP_DASHBOARD_PORT_PREFLIGHT}=1 — \
+             skipping kill step; observed listeners on port {port}: {pids:?}. \
+             The subsequent kernel bind(2) may fail with EADDRINUSE.",
+        );
+        return;
+    }
+    eprintln!(
+        "[dashboard-preflight] port {port} has stale listeners {pids:?} — \
+         sending SIGTERM (then SIGKILL after 1s grace) \
+         per INV-LIVE-E2E-DASHBOARD-PORT-CLEAR-ON-BOOT-01",
+    );
+    for pid in &pids {
+        send_signal_best_effort(*pid, /* sigkill */ false);
+    }
+    // Single short grace window for orderly shutdown — well below
+    // the `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01` envelope.
+    std::thread::sleep(Duration::from_secs(1));
+    let still = listening_pids_on_port(port);
+    if !still.is_empty() {
+        eprintln!(
+            "[dashboard-preflight] port {port} still held by {still:?} after \
+             SIGTERM — escalating to SIGKILL",
+        );
+        for pid in &still {
+            send_signal_best_effort(*pid, /* sigkill */ true);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let remaining = listening_pids_on_port(port);
+    if remaining.is_empty() {
+        eprintln!(
+            "[dashboard-preflight] port {port} cleared successfully — \
+             INV-LIVE-E2E-DASHBOARD-PORT-CLEAR-ON-BOOT-01 satisfied",
+        );
+    } else {
+        eprintln!(
+            "[dashboard-preflight] WARNING: port {port} STILL held by {remaining:?} \
+             after SIGKILL — the kernel's subsequent bind(2) will likely fail \
+             with EADDRINUSE. Manually clear the port and retry.",
+        );
+    }
+}
+
+/// Resolve the list of PIDs holding a listening TCP socket on
+/// `127.0.0.1:<port>`. Returns an empty Vec when:
+///   * `lsof(1)` is not on `PATH` (best-effort skip; the
+///     caller's logs make this explicit).
+///   * No listener matches.
+///   * `lsof` returns non-zero but stderr is suppressed (we do
+///     not pipe stderr through to avoid spurious "permission
+///     denied for kernel_task" noise on macOS).
+fn listening_pids_on_port(port: u16) -> Vec<u32> {
+    // `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` prints one PID per
+    // line; `-n` and `-P` skip DNS / service-name resolution so
+    // the call is fast on a saturated DNS host.
+    let output = std::process::Command::new("lsof")
+        .args([
+            "-nP",
+            &format!("-iTCP:{port}"),
+            "-sTCP:LISTEN",
+            "-t",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+    match output {
+        Ok(out) => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Send SIGTERM (or SIGKILL when `sigkill = true`) to `pid`.
+/// Failures are swallowed — the caller's polling loop is the
+/// source of truth for "did this work" and surfaces the
+/// remediation message itself.
+fn send_signal_best_effort(pid: u32, sigkill: bool) {
+    let sig = if sigkill { "-KILL" } else { "-TERM" };
+    let _ = std::process::Command::new("kill")
+        .args([sig, &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 /// In-place mutation of the genesis-emitted `[dashboard]` block:
 ///
 ///   * change `bind_port    = 9820` → `bind_port    = {test_port}`
@@ -860,12 +1003,23 @@ pub struct DashboardSession {
 /// land the test on the spec default port and silently skip the
 /// `static_dir` injection (no UI served), exactly the failure
 /// mode we are trying to prevent.
+///
+/// **V3 iter69**: invokes [`pre_flight_clear_dashboard_port`] up
+/// front so any stale listener (orphaned `raxis-kernel` from a
+/// prior `RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1` run, leftover
+/// dashboard daemon, etc.) is SIGTERM/SIGKILL'd before the test
+/// kernel attempts to bind. Opt out via
+/// [`ENV_SKIP_DASHBOARD_PORT_PREFLIGHT`]`=1`.
 pub fn mutate_dashboard_block_in_policy(data_dir: &Path) {
+    let port = configured_dashboard_port();
+    // Pre-flight: clear the dashboard port BEFORE we touch the
+    // policy file so a stale listener does not silently shadow
+    // the new kernel's bind on macOS SO_REUSEPORT semantics.
+    pre_flight_clear_dashboard_port(port);
     let policy_path = data_dir.join("policy").join("policy.toml");
     let mut body = std::fs::read_to_string(&policy_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", policy_path.display()));
     const NEEDLE: &str = "bind_port    = 9820\n";
-    let port = configured_dashboard_port();
     let replacement = match locate_dashboard_dist() {
         Some(dist) => {
             let mut s = String::new();
@@ -1482,6 +1636,46 @@ mod tests {
         assert!(
             node_modules_vite_present(tmp.path()),
             "node_modules/.bin/vite presence MUST classify as healthy",
+        );
+    }
+
+    // ── V3 iter69 — `INV-LIVE-E2E-DASHBOARD-PORT-CLEAR-ON-BOOT-01`
+    //
+    // Pin the opt-out env-var name + the empty-listeners
+    // fast-path shape so a regression that renames the env var
+    // or makes the helper hang on a free port surfaces here
+    // rather than at next live-e2e bootstrap.
+
+    #[test]
+    fn inv_live_e2e_dashboard_port_clear_on_boot_01_env_var_name_pinned() {
+        assert_eq!(
+            ENV_SKIP_DASHBOARD_PORT_PREFLIGHT,
+            "RAXIS_E2E_SKIP_DASHBOARD_PORT_PREFLIGHT",
+        );
+    }
+
+    #[test]
+    fn inv_live_e2e_dashboard_port_clear_on_boot_01_listening_pids_returns_empty_on_free_port() {
+        // Bind a fresh ephemeral socket so we *know* the OS just
+        // assigned us a free port, drop the listener, and probe.
+        // The probe must return Vec::new() in <100ms.
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral test port");
+        let port = listener
+            .local_addr()
+            .expect("ephemeral local_addr")
+            .port();
+        drop(listener);
+        let started = Instant::now();
+        let pids = listening_pids_on_port(port);
+        let elapsed = started.elapsed();
+        assert!(
+            pids.is_empty(),
+            "freshly-released ephemeral port {port} must have no listeners, got {pids:?}",
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "listening_pids_on_port must answer in <5s on a free port (got {elapsed:?})",
         );
     }
 

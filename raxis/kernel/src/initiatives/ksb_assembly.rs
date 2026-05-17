@@ -1243,6 +1243,7 @@ mod tests {
                 description: "Drive the typed-enum refactor across the executor lane.".to_owned(),
                 target_ref: "refs/heads/feature/typed-enum".to_owned(),
                 elastic: None,
+                ..Default::default()
             },
         );
     }
@@ -1439,6 +1440,7 @@ mod tests {
                 description: "drive lint-defect to merge".to_owned(),
                 target_ref: "refs/heads/main".to_owned(),
                 elastic: None,
+                ..Default::default()
             },
         );
         registry.insert(
@@ -1640,6 +1642,7 @@ mod tests {
                 description: "drive lint-defect to merge".to_owned(),
                 target_ref: "refs/heads/main".to_owned(),
                 elastic: None,
+                ..Default::default()
             },
         );
         registry.insert(
@@ -1802,6 +1805,7 @@ mod tests {
                 description: "drive lint-defect → lint-runner → review chain".to_owned(),
                 target_ref: "refs/heads/main".to_owned(),
                 elastic: None,
+                ..Default::default()
             },
         );
         for (tid, role) in &[

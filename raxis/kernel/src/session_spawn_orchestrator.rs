@@ -1817,8 +1817,12 @@ pub fn spawn_planner_dispatcher(
         //     ActivateSubTask's orchestrator exited normally).
         //
         // The orchestrator post-exit hook's Mode-A guard
-        // (`pending_exists && !active_exists`) is `false` because
-        // the stranded `Active` activation row blocks the respawn.
+        // (`pending_exists && active_count < cap`, where `cap` is
+        // the per-initiative `max_concurrent_admissions`) is
+        // `false` because the stranded `Active` activation row
+        // does not naturally clear and `pending_exists` is also
+        // false (the orchestrator never produced a fresh
+        // activation after the synthetic failure).
         // No EarlyResponse dispatch fires because no terminal
         // intent arrives. The DAG deadlocks.
         //
@@ -1871,6 +1875,13 @@ pub fn spawn_planner_dispatcher(
         // the entry so a re-spawned session under the same id
         // starts with a clean slate.
         let session_activity_for_post_exit = Arc::clone(&ctx.session_activity);
+        // V3 iter69 — `INV-ORCH-BOUNDED-CONCURRENCY-01`. Clone the
+        // plan-registry handle so the post-exit hook can resolve the
+        // per-initiative `max_concurrent_admissions` cap (sourced
+        // from `[workspace] max_concurrent_admissions`, defaulting
+        // to `OrchestratorPlanFields::DEFAULT_MAX_CONCURRENT_ADMISSIONS`
+        // = 3 when the plan omits the field).
+        let plan_registry_for_post_exit = Arc::clone(&ctx.plan_registry);
         let preflight = tokio::task::spawn_blocking(move || -> Option<PostExitAction> {
             use raxis_store::Table;
             let mut conn = store_for_post_exit.lock_sync();
@@ -1921,29 +1932,77 @@ pub fn spawn_planner_dispatcher(
                         |_| Ok(true),
                     )
                     .unwrap_or(false);
-                let active_exists: bool = conn
+                // V3 iter69 — `INV-ORCH-BOUNDED-CONCURRENCY-01`.
+                //
+                // Until iter69 this hook gated respawn on the binary
+                // `active_exists` predicate: if ANY worker was live,
+                // we never respawned the orchestrator. That made the
+                // orchestrator the single-threaded gatekeeper for
+                // every sub-task in the DAG and serialised
+                // structurally-independent work (e.g. the realistic
+                // scenario's three root executors —
+                // `materialize-records`, `xfile-refactor`, and
+                // `dep-fetch-evidence` — sat behind one another
+                // even though they share no edges).
+                //
+                // We now read the live worker COUNT and gate on
+                // `active_count < cap`, where `cap` is the
+                // operator-declared
+                // `[workspace] max_concurrent_admissions` (or
+                // `OrchestratorPlanFields::DEFAULT_MAX_CONCURRENT_ADMISSIONS`
+                // = 3 when the plan omits the field). The respawn-
+                // storm guard from iter7 is preserved by two
+                // separate mechanisms that remain intact:
+                //
+                //   1. The cap itself: once `cap` workers are
+                //      Active, no further post-exit respawn fires
+                //      until one of them terminates and frees a slot.
+                //   2. The orchestrator-no-progress ceiling
+                //      (`MAX_ORCH_NO_PROGRESS_RESPAWNS`, default 3)
+                //      inside `respawn_orchestrator_for_initiative`,
+                //      which auto-fails the initiative if respawns
+                //      keep firing without ANY task FSM transition.
+                //      Bounded concurrency does not change the
+                //      reset semantics — the counter still resets
+                //      on every legal task transition, which now
+                //      fires more often (one per Admitted →
+                //      Running transition), so the ceiling is
+                //      actually less likely to trip than before.
+                //
+                // `active_exists` (a bool derived from
+                // `active_count > 0`) is still used by Mode A+
+                // below to detect a fully-stranded initiative.
+                let active_count: u32 = conn
                     .query_row(
                         &format!(
-                            "SELECT 1 FROM {sa} \
+                            "SELECT COUNT(1) FROM {sa} \
                                    WHERE initiative_id   = ?1 \
-                                     AND activation_state = 'Active' \
-                                   LIMIT 1",
+                                     AND activation_state = 'Active'",
                             sa = Table::SubtaskActivations.as_str(),
                         ),
                         rusqlite::params![&initiative_id],
-                        |_| Ok(true),
+                        |r| r.get::<_, i64>(0),
                     )
-                    .unwrap_or(false);
-                // INV-RESPAWN-STORM: only respawn from post-exit hook
-                // when there is at least one PendingActivation AND
-                // NO Active worker. An Active worker's terminal
-                // intent (CompleteTask / SubmitReview / ReportFailure)
-                // will trigger an EarlyResponse respawn anyway, and
-                // letting both paths fire ends up in a respawn-storm
-                // when an LLM session keeps emitting rejected
-                // ActivateSubTask intents (live e2e iter 7 reproduced
-                // ~30 respawns in 90s with the unconditional version).
-                if pending_exists && !active_exists {
+                    .ok()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .unwrap_or(0);
+                let active_exists: bool = active_count > 0;
+                let concurrency_cap = plan_registry_for_post_exit
+                    .orchestrator_concurrency_cap(&initiative_id);
+                if pending_exists && active_count < concurrency_cap {
+                    eprintln!(
+                        "{{\"level\":\"info\",\
+                             \"event\":\"orchestrator_post_exit_respawn_trigger\",\
+                             \"initiative_id\":\"{initiative_id}\",\
+                             \"session_id\":\"{session_id}\",\
+                             \"active_count\":{active_count},\
+                             \"concurrency_cap\":{concurrency_cap},\
+                             \"invariant\":\"INV-ORCH-BOUNDED-CONCURRENCY-01\"}}",
+                        session_id = session_for_post_exit,
+                        initiative_id = initiative_id,
+                        active_count = active_count,
+                        concurrency_cap = concurrency_cap,
+                    );
                     return Some(PostExitAction::OrchestratorRespawn { initiative_id });
                 }
                 // ── Mode A+: stranded-initiative respawn.
@@ -1959,7 +2018,7 @@ pub fn spawn_planner_dispatcher(
                 // `StructuredOutput { kind: "diagnostic_flag" }`,
                 // then went idle (planner-boot-error: "dispatch
                 // loop terminated with Idle"). With Mode A's narrow
-                // `pending_exists && !active_exists` predicate, the
+                // `pending_exists && active_count < cap` predicate, the
                 // post-exit hook short-circuits — there is no
                 // PendingActivation row because the kernel rejected
                 // every further RetrySubTask at the ceiling and the
@@ -1971,8 +2030,9 @@ pub fn spawn_planner_dispatcher(
                 //
                 // Mode A+: when the initiative is still in a
                 // non-terminal state (Executing / PendingApproval /
-                // AwaitingApproval / Approved) AND there is neither
-                // Active worker nor PendingActivation, the
+                // AwaitingApproval / Approved) AND `active_count`
+                // is exactly zero AND there is no PendingActivation,
+                // the
                 // orchestrator is the ONLY agent that can move the
                 // initiative toward terminality (ReportFailure on a
                 // Failed task, IntegrationMerge once the DAG is

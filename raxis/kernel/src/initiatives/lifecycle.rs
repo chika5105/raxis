@@ -2725,6 +2725,16 @@ fn parse_plan_orchestrator(
         }
     };
 
+    // V3 iter69 — `INV-ORCH-BOUNDED-CONCURRENCY-01`. Parse the
+    // optional `[workspace] max_concurrent_admissions` plan
+    // override; `None` here means "fall back to
+    // `OrchestratorPlanFields::DEFAULT_MAX_CONCURRENT_ADMISSIONS`"
+    // (`3`). Out-of-range / non-integer values are surfaced as
+    // `PlanInvalid` by the parser so a malformed plan never
+    // populates the registry.
+    let max_concurrent_admissions = parse_plan_workspace_max_concurrent_admissions(plan_toml)?
+        .unwrap_or(crate::initiatives::OrchestratorPlanFields::DEFAULT_MAX_CONCURRENT_ADMISSIONS);
+
     Ok(crate::initiatives::OrchestratorPlanFields {
         cross_cutting_artifacts,
         description,
@@ -2736,6 +2746,7 @@ fn parse_plan_orchestrator(
         // produce a well-formed struct.
         target_ref: crate::initiatives::OrchestratorPlanFields::DEFAULT_TARGET_REF.to_owned(),
         elastic,
+        max_concurrent_admissions,
     })
 }
 
@@ -2906,6 +2917,73 @@ fn parse_plan_workspace_target_ref(plan_toml: &str) -> Result<Option<String>, Li
                 });
             }
             Ok(Some(s.to_owned()))
+        }
+    }
+}
+
+/// V3 iter69 — `INV-ORCH-BOUNDED-CONCURRENCY-01`.
+///
+/// Parse the plan-side `[workspace] max_concurrent_admissions`
+/// field: the operator-declared cap on how many sub-task
+/// activations may be `Active` simultaneously inside this
+/// initiative. The post-exit orchestrator-respawn hook in
+/// `kernel/src/session_spawn_orchestrator.rs` uses the value
+/// (or [`crate::initiatives::OrchestratorPlanFields::DEFAULT_MAX_CONCURRENT_ADMISSIONS`]
+/// when this returns `Ok(None)`) to decide whether to fan out
+/// another orchestrator session for parallel dispatch.
+///
+/// Returns `Ok(None)` when the plan omits the field (the
+/// typical default; the consumer falls back to the registry
+/// default `3`).
+///
+/// Returns `LifecycleError::PlanInvalid` for:
+///
+///   * Non-integer values (`max_concurrent_admissions = "3"` —
+///     a string instead of an integer).
+///   * Out-of-range values
+///     (`< 1` or
+///      `> OrchestratorPlanFields::MAX_MAX_CONCURRENT_ADMISSIONS`).
+///     The lower bound is enforced because `0` would silently
+///     dead-lock the initiative (the gate would never permit a
+///     respawn); the upper bound (`20`) is a structural ceiling
+///     well above any realistic DAG width that keeps a malformed
+///     plan from effectively disabling the safety net.
+///   * Negative integers (TOML integers are `i64`).
+fn parse_plan_workspace_max_concurrent_admissions(
+    plan_toml: &str,
+) -> Result<Option<u32>, LifecycleError> {
+    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| LifecycleError::PlanInvalid {
+        reason: format!("TOML parse error: {e}"),
+    })?;
+
+    let workspace = match doc.get("workspace").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    match workspace.get("max_concurrent_admissions") {
+        None => Ok(None),
+        Some(v) => {
+            let n = v.as_integer().ok_or_else(|| LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[workspace] max_concurrent_admissions must be an integer, got {:?}",
+                    v.type_str(),
+                ),
+            })?;
+            let max = crate::initiatives::OrchestratorPlanFields::MAX_MAX_CONCURRENT_ADMISSIONS;
+            if !(1..=i64::from(max)).contains(&n) {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[workspace] max_concurrent_admissions must be in 1..={max} (got {n}); \
+                         omit the field to apply the default of {default}",
+                        max = max,
+                        default = crate::initiatives::OrchestratorPlanFields::DEFAULT_MAX_CONCURRENT_ADMISSIONS,
+                    ),
+                });
+            }
+            // Safe cast: range-check above guarantees `n` ∈ 1..=max
+            // and `max <= u32::MAX` by construction.
+            Ok(Some(n as u32))
         }
     }
 }
@@ -6772,6 +6850,144 @@ target_ref = "refs/heads/raxis/feature"
             matches!(err, LifecycleError::PlanInvalid { .. }),
             "empty target_ref must surface PlanInvalid, got {err:?}"
         );
+    }
+
+    // ── V3 iter69 — `INV-ORCH-BOUNDED-CONCURRENCY-01` parser tests
+    //
+    // `parse_plan_workspace_max_concurrent_admissions` is the
+    // operator-facing seam: a malformed value (string, out-of-range,
+    // wrong section) must surface as `PlanInvalid` so the operator
+    // sees the diagnostic at `approve_plan` time rather than at
+    // post-exit-hook decision time (when a malformed value would
+    // silently fall back to the default and hide an operator typo).
+
+    #[test]
+    fn parse_plan_workspace_max_concurrent_admissions_reads_value() {
+        let toml = r#"
+[workspace]
+lane_id                     = "default"
+max_concurrent_admissions   = 5
+"#;
+        let r = parse_plan_workspace_max_concurrent_admissions(toml).unwrap();
+        assert_eq!(r, Some(5));
+    }
+
+    #[test]
+    fn parse_plan_workspace_max_concurrent_admissions_missing_returns_none() {
+        let toml = "[workspace]\nlane_id = \"default\"\n";
+        let r = parse_plan_workspace_max_concurrent_admissions(toml).unwrap();
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn parse_plan_workspace_max_concurrent_admissions_no_workspace_section_returns_none() {
+        // A plan that omits the entire `[workspace]` block (e.g. a
+        // unit-test fixture) must report `None` rather than error out
+        // — the missing section is structurally identical to a
+        // declared section that omits the field.
+        let toml = "[plan.initiative]\ndescription = \"x\"\n";
+        let r = parse_plan_workspace_max_concurrent_admissions(toml).unwrap();
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn parse_plan_workspace_max_concurrent_admissions_rejects_zero() {
+        // `0` would silently deadlock the initiative — the gate
+        // becomes `active_count < 0`, which is structurally
+        // unsatisfiable. Reject pre-tx with `PlanInvalid`.
+        let toml = "[workspace]\nlane_id = \"d\"\nmax_concurrent_admissions = 0\n";
+        let err = parse_plan_workspace_max_concurrent_admissions(toml).unwrap_err();
+        assert!(matches!(err, LifecycleError::PlanInvalid { .. }));
+    }
+
+    #[test]
+    fn parse_plan_workspace_max_concurrent_admissions_rejects_above_max() {
+        // Structural ceiling — keep a malformed plan from
+        // effectively disabling the safety net by declaring
+        // `max_concurrent_admissions = 2 ** 31 - 1`.
+        let toml = format!(
+            "[workspace]\nlane_id = \"d\"\nmax_concurrent_admissions = {n}\n",
+            n = crate::initiatives::OrchestratorPlanFields::MAX_MAX_CONCURRENT_ADMISSIONS + 1,
+        );
+        let err = parse_plan_workspace_max_concurrent_admissions(&toml).unwrap_err();
+        assert!(matches!(err, LifecycleError::PlanInvalid { .. }));
+    }
+
+    #[test]
+    fn parse_plan_workspace_max_concurrent_admissions_rejects_negative() {
+        // TOML integers are i64; a negative literal parses but
+        // fails the lower-bound check.
+        let toml = "[workspace]\nlane_id = \"d\"\nmax_concurrent_admissions = -1\n";
+        let err = parse_plan_workspace_max_concurrent_admissions(toml).unwrap_err();
+        assert!(matches!(err, LifecycleError::PlanInvalid { .. }));
+    }
+
+    #[test]
+    fn parse_plan_workspace_max_concurrent_admissions_rejects_string() {
+        let toml = r#"
+[workspace]
+lane_id                     = "d"
+max_concurrent_admissions   = "5"
+"#;
+        let err = parse_plan_workspace_max_concurrent_admissions(toml).unwrap_err();
+        assert!(matches!(err, LifecycleError::PlanInvalid { .. }));
+    }
+
+    #[test]
+    fn parse_plan_workspace_max_concurrent_admissions_accepts_boundary_min() {
+        let toml = "[workspace]\nlane_id = \"d\"\nmax_concurrent_admissions = 1\n";
+        let r = parse_plan_workspace_max_concurrent_admissions(toml).unwrap();
+        assert_eq!(r, Some(1));
+    }
+
+    #[test]
+    fn parse_plan_workspace_max_concurrent_admissions_accepts_boundary_max() {
+        let toml = format!(
+            "[workspace]\nlane_id = \"d\"\nmax_concurrent_admissions = {n}\n",
+            n = crate::initiatives::OrchestratorPlanFields::MAX_MAX_CONCURRENT_ADMISSIONS,
+        );
+        let r = parse_plan_workspace_max_concurrent_admissions(&toml).unwrap();
+        assert_eq!(
+            r,
+            Some(crate::initiatives::OrchestratorPlanFields::MAX_MAX_CONCURRENT_ADMISSIONS)
+        );
+    }
+
+    #[test]
+    fn parse_plan_orchestrator_defaults_max_concurrent_admissions_when_unspecified() {
+        // The orchestrator-fields parser is the single seam that
+        // populates the registry; when the plan omits the field, the
+        // struct must carry the documented `3` default rather than
+        // `0` or an `Option::None`. This pins the contract that
+        // downstream consumers (post-exit hook) can read a numeric
+        // cap unconditionally.
+        let toml = r#"
+[plan.initiative]
+description = "anything non-empty"
+
+[workspace]
+lane_id = "default"
+"#;
+        let fields = parse_plan_orchestrator(toml).unwrap();
+        assert_eq!(
+            fields.max_concurrent_admissions,
+            crate::initiatives::OrchestratorPlanFields::DEFAULT_MAX_CONCURRENT_ADMISSIONS,
+        );
+        assert_eq!(fields.max_concurrent_admissions, 3);
+    }
+
+    #[test]
+    fn parse_plan_orchestrator_propagates_max_concurrent_admissions_override() {
+        let toml = r#"
+[plan.initiative]
+description = "anything non-empty"
+
+[workspace]
+lane_id                     = "default"
+max_concurrent_admissions   = 7
+"#;
+        let fields = parse_plan_orchestrator(toml).unwrap();
+        assert_eq!(fields.max_concurrent_admissions, 7);
     }
 
     #[test]
