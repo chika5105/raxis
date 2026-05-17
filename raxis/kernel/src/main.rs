@@ -50,6 +50,7 @@ mod deadlock_dump;
 // module's own `#[cfg(test)] mod tests`).
 mod breakglass;
 mod elastic;
+mod gate_fixup;
 mod gates;
 mod gateway;
 mod handlers;

@@ -1079,8 +1079,15 @@ async fn process_non_pass_witness(
     let max_attempts = profile.max_attempts;
 
     // Operator-authorised fixup path — emit `GateRejectionAccepted`
-    // so the audit chain pins the orchestrator-side handoff window
-    // BEFORE we attempt push delivery.
+    // so the audit chain pins the kernel-side handoff window BEFORE
+    // we attempt the auto-admit transaction. Pre-iter72 this audit
+    // event paired with a `KernelPush::GateRejected` to the
+    // orchestrator. Iter72 onwards, the kernel directly admits the
+    // fixup task (see `crate::gate_fixup::auto_admit_gate_fixup_task`)
+    // — the orchestrator's role is unchanged, it simply discovers
+    // the new fixup task on its next KSB fetch and `ActivateSubTask`s
+    // it like any other plan task. The audit event still anchors the
+    // forensic chain.
     let _ = ctx.audit.emit(
         raxis_audit_tools::AuditEventKind::GateRejectionAccepted {
             task_id: sub.task_id.as_str().to_owned(),
@@ -1096,71 +1103,144 @@ async fn process_non_pass_witness(
         Some(initiative_id_str.as_str()),
     );
 
-    // Look up the active orchestrator session + the parent's
-    // worktree root inside a single blocking hop so we do not pay
-    // two mutex round-trips here. Falls back to `data_dir` for
-    // worktree when the session row has no override (matches
-    // `gate_recheck`'s contract).
-    let store_for_lookup = ctx.store.clone();
-    let init_id_for_lookup = initiative_id_str.clone();
-    let session_id_for_worktree = task_row.session_id.clone();
-    let data_dir_clone = ctx.data_dir.clone();
-    let (orch_sid_opt, worktree_pointer): (Option<String>, String) =
-        tokio::task::spawn_blocking(move || {
-            let orch_sid = crate::handlers::intent::active_orchestrator_session_id_for_initiative(
-                &init_id_for_lookup,
-                store_for_lookup.as_ref(),
-            );
-            let worktree = resolve_worktree_root_inner(
-                session_id_for_worktree.as_deref(),
-                store_for_lookup.as_ref(),
-                &data_dir_clone,
-            );
-            (orch_sid, worktree.to_string_lossy().into_owned())
-        })
-        .await
-        .map_err(|e| HandlerError::Store(format!("orchestrator-session lookup join: {e}")))?;
+    // ── iter72 — kernel-authoritative auto-admit ──────────────────
+    //
+    // Replaces the V3 `KernelPush::GateRejected` →
+    // `AddSubTask{kind:GateFixup}` round-trip with a direct
+    // kernel-side admission. The kernel owns the budget and the
+    // recipe; the orchestrator is a policy-following dispatcher,
+    // not a policy decision-maker.
+    //
+    // The dispatched `auto_admit_gate_fixup_task` enforces the
+    // budget (`INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`) AND
+    // performs the atomic 3-write admit (`INV-GATE-FIXUP-ADMIT-
+    // ATOMIC-01`). The outcome tells us which terminal branch to
+    // run for the parent task:
+    //
+    //   * Spawned         → leave parent in `GatesPending` (the
+    //                       gate is structurally awaiting the fixup
+    //                       executor's commit; transition happens
+    //                       in the witness-handler arm that fires
+    //                       after the gate re-evaluates).
+    //   * BudgetExhausted → parent transitions to `Failed` with
+    //                       `terminal_reason =
+    //                       gate_rejected_fixup_budget_exhausted`.
+    //   * NoFixupProfile  → unreachable here (we early-returned a
+    //                       few branches up).
+    //   * ParentMissing /
+    //     SqlError        → unrecoverable. Log structured warning
+    //                       and leave parent in `GatesPending`; the
+    //                       maintenance sweep will time it out.
+    let outcome = crate::gate_fixup::auto_admit_gate_fixup_task(
+        ctx,
+        sub.task_id.as_str(),
+        initiative_id_str.as_str(),
+        sub.gate_type.as_str(),
+        attempts_now,
+    )
+    .await;
 
-    let Some(orch_sid_str) = orch_sid_opt else {
-        // The push is opportunistic. The audit row is the canonical
-        // record per V2.3 push-dispatcher scope; the orchestrator
-        // will see the rejection on the next reconnect's history
-        // replay or on respawn. Mirror the structured-log shape used
-        // by `ReviewAggregationPushSkipped` so forensic tooling
-        // greps cleanly.
-        eprintln!(
-            "{{\"level\":\"info\",\"event\":\"GateRejectedPushSkipped\",\
-             \"task_id\":\"{}\",\"reason\":\"no_live_orchestrator_session\"}}",
-            sub.task_id.as_str(),
-        );
-        return Ok(());
-    };
-    let Ok(orch_sid) = raxis_types::SessionId::parse(&orch_sid_str) else {
-        eprintln!(
-            "{{\"level\":\"warn\",\"event\":\"GateRejectedPushSkipped\",\
-             \"task_id\":\"{}\",\"reason\":\"orchestrator_session_id_parse_failed\"}}",
-            sub.task_id.as_str(),
-        );
-        return Ok(());
-    };
+    match outcome {
+        crate::gate_fixup::AutoAdmitOutcome::Spawned {
+            fixup_task_id,
+            attempt_index,
+        } => {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"GateFixupAutoSpawned\",\
+                 \"parent_task_id\":\"{}\",\"fixup_task_id\":\"{}\",\
+                 \"attempt_index\":{},\"max_attempts\":{},\
+                 \"invariant\":\"INV-GATE-FIXUP-ADMIT-ATOMIC-01\"}}",
+                sub.task_id.as_str(),
+                fixup_task_id,
+                attempt_index,
+                max_attempts,
+            );
+            Ok(())
+        }
+        crate::gate_fixup::AutoAdmitOutcome::BudgetExhausted { attempts_used } => {
+            // Terminal-for-this-parent. Pair the
+            // `GateRejectionTerminal` audit row with a `Failed`
+            // FSM transition so the dashboard renders the
+            // fix-budget-exhausted state without needing to join
+            // the audit chain.
+            let _ = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::GateRejectionTerminal {
+                    task_id: sub.task_id.as_str().to_owned(),
+                    gate_type: sub.gate_type.as_str().to_owned(),
+                    terminal_reason: "gate_rejected_fixup_budget_exhausted".to_owned(),
+                    attempts_used,
+                },
+                None,
+                Some(sub.task_id.as_str()),
+                Some(initiative_id_str.as_str()),
+            );
 
-    let push = raxis_types::push::KernelPush::GateRejected {
-        parent_task_id: sub.task_id.clone(),
-        gate_type: sub.gate_type.as_str().to_owned(),
-        critique: resolved.critique.clone(),
-        evaluation_sha: presented_sha.to_owned(),
-        attempt_index: attempts_now,
-        max_attempts,
-        parent_worktree_pointer: worktree_pointer,
-    };
-    let initiative_id_obj = raxis_types::InitiativeId::parse(&initiative_id_str).ok();
-    let _frame = ctx.push_dispatcher.enqueue_with_context(
-        orch_sid,
-        push,
-        unix_now_secs(),
-        initiative_id_obj,
-    );
-    Ok(())
+            let task_id_str = sub.task_id.as_str().to_owned();
+            let store_for_transition = ctx.store.clone();
+            let audit_for_transition = ctx.audit.clone();
+            let session_id_for_audit = task_row.session_id.clone();
+            let transition_res = tokio::task::spawn_blocking(move || {
+                use crate::initiatives::task_transitions::{
+                    transition_task_with_audit, TransitionActor,
+                };
+                transition_task_with_audit(
+                    &task_id_str,
+                    TaskState::Failed,
+                    Some("gate_rejected_fixup_budget_exhausted"),
+                    TransitionActor::Kernel,
+                    store_for_transition.as_ref(),
+                    audit_for_transition.as_ref(),
+                    session_id_for_audit.as_deref(),
+                )
+            })
+            .await
+            .map_err(|e| {
+                HandlerError::Store(format!(
+                    "gate-fixup budget-exhausted transition join: {e}"
+                ))
+            })?;
+            if let Err(e) = transition_res {
+                eprintln!(
+                    "{{\"level\":\"error\",\
+                     \"event\":\"GateFixupBudgetExhaustedTransitionFailed\",\
+                     \"task_id\":\"{}\",\"error\":\"{e}\"}}",
+                    sub.task_id.as_str(),
+                );
+            }
+            Ok(())
+        }
+        crate::gate_fixup::AutoAdmitOutcome::NoFixupProfile => {
+            // Defensive: we already short-circuited the no-profile
+            // case a few branches up. Reaching here would mean the
+            // policy snapshot rotated mid-handler. Mirror the
+            // upstream terminal-transition path so the parent
+            // doesn't dangle in `GatesPending`.
+            eprintln!(
+                "{{\"level\":\"warn\",\
+                 \"event\":\"GateFixupAutoSpawnPolicyRaceDetected\",\
+                 \"task_id\":\"{}\"}}",
+                sub.task_id.as_str(),
+            );
+            Ok(())
+        }
+        crate::gate_fixup::AutoAdmitOutcome::ParentMissing
+        | crate::gate_fixup::AutoAdmitOutcome::SqlError(_) => {
+            let reason = match &outcome {
+                crate::gate_fixup::AutoAdmitOutcome::SqlError(s) => s.clone(),
+                crate::gate_fixup::AutoAdmitOutcome::ParentMissing => {
+                    "parent_missing".to_owned()
+                }
+                _ => unreachable!(),
+            };
+            eprintln!(
+                "{{\"level\":\"error\",\
+                 \"event\":\"GateFixupAutoSpawnFailed\",\
+                 \"task_id\":\"{}\",\"reason\":\"{reason}\"}}",
+                sub.task_id.as_str(),
+            );
+            Ok(())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
