@@ -521,7 +521,7 @@ pub struct WorktreeSnapshotView {
 pub enum WorktreeSnapshotBlobKind {
     /// `git diff <base>..HEAD`. May be truncated.
     Diff,
-    /// `git log <base>..HEAD --format=%H\t%an\t%at\t%s`.
+    /// `git log <base>..HEAD --format=%H\t%an\t%ct\t%s`.
     Log,
     /// `git ls-tree -r HEAD --name-only` — full tracked file
     /// listing at HEAD.
@@ -1430,6 +1430,23 @@ pub struct WorktreeListEntry {
     pub session_id: Option<String>,
     /// Owning task id when `kind == "Session"`, else `None`.
     pub task_id: Option<String>,
+    /// Derived session lifecycle state (`Active`, `Revoked`,
+    /// `Expired`) when `kind == "Session"`, else `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_state: Option<String>,
+    /// Lightweight observed HEAD SHA for operator-allowed main
+    /// roots. Session rows leave this empty to keep the list
+    /// endpoint cheap across hundreds of ephemeral worktrees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_head_sha: Option<String>,
+    /// Lightweight observed branch for main roots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_branch: Option<String>,
+    /// Count of `git status --porcelain=v1` lines for main
+    /// roots. `0` means clean; `None` means the path could not
+    /// be probed or is a session row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_dirty_paths: Option<u32>,
     /// Recorded base SHA (sessions only — `None` when the
     /// session never recorded one or for main roots).
     pub base_sha: Option<String>,
@@ -1468,7 +1485,11 @@ pub struct WorktreeLogEntry {
     pub author: String,
     /// First non-empty line of the commit message (subject).
     pub subject: String,
-    /// Author timestamp in unix seconds (UTC).
+    /// Committer timestamp in unix seconds (UTC). This is the
+    /// system-observed commit time the dashboard should render;
+    /// author dates may be inherited or policy-set by agent
+    /// commits and are not suitable for "when did this happen?"
+    /// UI.
     pub at: i64,
 }
 
@@ -2135,9 +2156,8 @@ pub trait DashboardData: Send + Sync + 'static {
 
     /// List the most-recent N completed / terminated sessions
     /// the dashboard's `SessionStreamCapture` ring is still
-    /// holding. Powers the Recent Sessions view (C3) so an
-    /// operator sees ended sessions previously dropped from the
-    /// active session list.
+    /// holding. Powers compact summary panels; the main sessions
+    /// route now renders live and historical rows on one surface.
     ///
     /// Default impl returns `Ok(vec![])` so older fixtures
     /// continue compiling. Production wires this through the
@@ -2147,7 +2167,8 @@ pub trait DashboardData: Send + Sync + 'static {
     }
 
     /// Sessions newest first. `limit ≤ 200`.
-    /// Active session list. When `initiative_id` is `Some(_)` the
+    /// Durable session list containing both live and historical
+    /// sessions. When `initiative_id` is `Some(_)` the
     /// data layer narrows the result to sessions associated with
     /// that initiative (via the `tasks.session_id` join — the
     /// `sessions` catalog itself does not carry initiative FK).
@@ -4021,6 +4042,10 @@ mod tests {
             path: "/srv/work/raxis".into(),
             session_id: None,
             task_id: None,
+            session_state: None,
+            observed_head_sha: None,
+            observed_branch: None,
+            observed_dirty_paths: None,
             base_sha: Some(from.clone()),
         };
         let detail = WorktreeDetail {

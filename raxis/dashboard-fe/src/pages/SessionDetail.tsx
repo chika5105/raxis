@@ -315,8 +315,8 @@ function SessionLifecycleNotice({
       </div>
       <div className="shrink-0 text-right text-[11px] text-ink-subtle">
         <div>transitioned {fmtRelative(updatedAt)}</div>
-        <Link to="/sessions/recent" className="text-accent hover:underline">
-          also in Recent sessions
+        <Link to="/sessions?scope=past" className="text-accent hover:underline">
+          shown in Sessions
         </Link>
       </div>
     </div>

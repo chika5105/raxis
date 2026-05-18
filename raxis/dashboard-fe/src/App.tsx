@@ -17,7 +17,6 @@ import { LoginPage } from "@/pages/Login";
 import { NotificationsPage } from "@/pages/Notifications";
 import { OverviewPage } from "@/pages/Overview";
 import { PolicyPage } from "@/pages/Policy";
-import { RecentSessionsPage } from "@/pages/RecentSessions";
 import { SessionDetailPage } from "@/pages/SessionDetail";
 import { SessionsPage } from "@/pages/Sessions";
 import { SystemCredentialsPage } from "@/pages/SystemCredentials";
@@ -74,7 +73,7 @@ export function App() {
                     <Route path="/sessions" element={<SessionsPage />} />
                     <Route
                       path="/sessions/recent"
-                      element={<RecentSessionsPage />}
+                      element={<Navigate to="/sessions?scope=past" replace />}
                     />
                     <Route path="/sessions/:id" element={<SessionDetailPage />} />
                     <Route path="/escalations" element={<EscalationsPage />} />

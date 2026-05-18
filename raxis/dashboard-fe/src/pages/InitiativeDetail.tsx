@@ -23,6 +23,7 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
 import {
+  isIntegrationMergeTask,
   isTerminalFailureState,
   taskDisplayId,
 } from "@/lib/state-color";
@@ -42,7 +43,7 @@ import {
   serializeStatusParam,
   toggleStatus,
 } from "@/lib/status-filter";
-import type { TaskView } from "@/types/api";
+import type { TaskView, WorktreeSnapshotView } from "@/types/api";
 
 /// Project an initiative's `TaskView[]` payload onto the
 /// minimal `DagGraphNode[]` shape the embedded DAG renderer
@@ -198,6 +199,11 @@ export function InitiativeDetailPage() {
           heading="Initiative failure reason"
         />
       )}
+
+      <InitiativeIntegrationState
+        initiativeId={init.initiative_id}
+        tasks={init.tasks}
+      />
 
       {/* Clickable status legend — drives a URL-stored `?status=`
        * filter that dims non-matching rows in the task table and
@@ -596,6 +602,170 @@ export function InitiativeDetailPage() {
           </div>
         )}
       </section>
+    </div>
+  );
+}
+
+function InitiativeIntegrationState({
+  initiativeId,
+  tasks,
+}: {
+  initiativeId: string;
+  tasks: TaskView[];
+}) {
+  const integrationTask = useMemo(
+    () => tasks.find((t) => isIntegrationMergeTask(t.task_id, initiativeId)),
+    [initiativeId, tasks],
+  );
+  const q = useQuery({
+    queryKey: ["initiative", initiativeId, "integration-merge-snapshots"],
+    queryFn: ({ signal }) =>
+      dashboardApi.tasks.worktreeSnapshots(
+        integrationTask?.task_id ?? "",
+        signal,
+      ),
+    enabled: Boolean(integrationTask),
+    refetchInterval:
+      integrationTask &&
+      integrationTask.state !== "Completed" &&
+      !isTerminalFailureState(integrationTask.state)
+        ? 6_000
+        : false,
+  });
+
+  if (!integrationTask) return null;
+
+  const snapshots = q.data ?? [];
+  const finalSnapshot =
+    snapshots.find((s) => s.trigger === "IntegrationMerge") ??
+    snapshots.find((s) => s.trigger === "PreGc") ??
+    snapshots[0] ??
+    null;
+
+  return (
+    <section className="card p-4">
+      <header className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="text-sm font-semibold text-ink">
+            Main after integration merge
+          </h2>
+          <p className="text-xs text-ink-muted">
+            Final main-root snapshot captured by the synthetic merge task.
+          </p>
+        </div>
+        <Link
+          to={`/tasks/${integrationTask.task_id}`}
+          className="btn text-xs py-1"
+        >
+          Open merge task
+        </Link>
+      </header>
+
+      {q.isPending ? (
+        <div className="mt-3 text-xs text-ink-subtle">
+          Loading merge snapshot...
+        </div>
+      ) : q.error ? (
+        <div className="mt-3">
+          <ErrorBox error={q.error} onRetry={() => q.refetch()} />
+        </div>
+      ) : finalSnapshot ? (
+        <IntegrationSnapshotSummary snapshot={finalSnapshot} />
+      ) : (
+        <Empty
+          title="No merge snapshot recorded yet."
+          hint="The final main-root state appears here once integration merge captures its worktree snapshot."
+        />
+      )}
+    </section>
+  );
+}
+
+function IntegrationSnapshotSummary({
+  snapshot,
+}: {
+  snapshot: WorktreeSnapshotView;
+}) {
+  const clean = !snapshot.porcelain_blob_sha256;
+  return (
+    <div className="mt-3 grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3 items-start">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+        <MergeField label="Trigger">
+          <span className="badge bg-accent-muted/40 border-accent text-accent">
+            {snapshot.trigger}
+          </span>
+        </MergeField>
+        <MergeField label="Range">
+          <span className="font-mono text-ink-muted">
+            {shortSha(snapshot.base_sha)} to {shortSha(snapshot.head_sha)}
+          </span>
+        </MergeField>
+        <MergeField label="Commits">{snapshot.commit_count}</MergeField>
+        <MergeField label="Working tree">
+          <span
+            className={clsx(
+              "badge",
+              clean
+                ? "bg-ok-muted/20 border-ok text-ok"
+                : "bg-warn-muted/20 border-warn text-warn",
+            )}
+          >
+            {clean ? "Clean" : "Dirty snapshot"}
+          </span>
+        </MergeField>
+      </div>
+      <div className="flex items-center gap-2 text-xs flex-wrap justify-start lg:justify-end">
+        {snapshot.diff_blob_sha256 && (
+          <a
+            className="btn py-1"
+            href={dashboardApi.worktreeSnapshots.blobUrl(
+              snapshot.snapshot_id,
+              "diff",
+            )}
+          >
+            Diff
+          </a>
+        )}
+        {snapshot.log_blob_sha256 && (
+          <a
+            className="btn py-1"
+            href={dashboardApi.worktreeSnapshots.blobUrl(
+              snapshot.snapshot_id,
+              "log",
+            )}
+          >
+            Log
+          </a>
+        )}
+        {snapshot.porcelain_blob_sha256 && (
+          <a
+            className="btn py-1"
+            href={dashboardApi.worktreeSnapshots.blobUrl(
+              snapshot.snapshot_id,
+              "porcelain",
+            )}
+          >
+            Status
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MergeField({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] uppercase tracking-wider text-ink-subtle">
+        {label}
+      </div>
+      <div className="mt-1 text-ink min-w-0">{children}</div>
     </div>
   );
 }

@@ -4,6 +4,8 @@
 //!   * [`active_counts`] — Active vs Revoked vs Expired count for the
 //!     `raxis status` workload-summary block.
 //!   * [`active_list`] — `raxis sessions` paged list.
+//!   * [`list_all`] — dashboard durable list; live and historical
+//!     sessions remain on one surface.
 //!
 //! Note: the kernel does not maintain a per-channel
 //! (planner / gateway / verifier) session-type tag in v1 — every row
@@ -225,6 +227,45 @@ pub fn active_list(conn: &RoConn, limit: usize) -> Result<Vec<SessionRow>, Sessi
     ))?;
     let rows = stmt
         .query_map(rusqlite::params![now_i, limit as i64], |r| {
+            Ok(SessionRow {
+                session_id: r.get(0)?,
+                role_id: r.get(1)?,
+                lineage_id: r.get(2)?,
+                worktree_root: r.get(3)?,
+                sequence_number: r.get::<_, i64>(4)?.max(0) as u64,
+                created_at: r.get::<_, i64>(5)?.max(0) as u64,
+                expires_at: r.get::<_, i64>(6)?.max(0) as u64,
+                revoked: r.get::<_, i64>(7)? != 0,
+                revoked_at: r.get::<_, Option<i64>>(8)?.map(|v| v.max(0) as u64),
+                provider: r.get::<_, Option<String>>(9)?,
+                model: r.get::<_, Option<String>>(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// List sessions regardless of lifecycle state, ordered by the
+/// most recent durable state timestamp.
+///
+/// This is the dashboard's primary list source. Operators should
+/// not have to switch to a separate "recent" surface after a row
+/// transitions from active to revoked/expired; the same session
+/// remains visible with its derived lifecycle state.
+pub fn list_all(conn: &RoConn, limit: usize) -> Result<Vec<SessionRow>, SessionViewError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT session_id, role_id, lineage_id, worktree_root, \
+                sequence_number, created_at, expires_at, revoked, revoked_at, \
+                provider, model \
+         FROM {} \
+         ORDER BY COALESCE(revoked_at, created_at) DESC, \
+                  created_at DESC, \
+                  session_id ASC \
+         LIMIT ?1",
+        Table::Sessions.as_str(),
+    ))?;
+    let rows = stmt
+        .query_map(rusqlite::params![limit as i64], |r| {
             Ok(SessionRow {
                 session_id: r.get(0)?,
                 role_id: r.get(1)?,
@@ -491,6 +532,24 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session_id, "s-active");
         assert!(!rows[0].revoked);
+    }
+
+    #[test]
+    fn list_all_includes_active_expired_and_revoked() {
+        let tmp = fresh_store_with_seed_sessions();
+        let conn = open_ro(tmp.path()).unwrap();
+        let rows = list_all(&conn, 10).unwrap();
+        let ids = rows
+            .iter()
+            .map(|r| r.session_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec!["s-revoked", "s-active", "s-expired"],
+            "dashboard session list must keep historical rows visible"
+        );
+        assert!(rows[0].revoked);
+        assert_eq!(rows[0].revoked_at, Some(150));
     }
 
     // `INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01`: the dashboard

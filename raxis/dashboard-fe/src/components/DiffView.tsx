@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import clsx from "clsx";
 
 import type { WorktreeDiff, WorktreeDiffFile } from "@/types/api";
 
@@ -14,6 +15,8 @@ interface DiffViewProps {
   /// reset.
   defaultOpen?: boolean;
 }
+
+type DiffViewMode = "unified" | "split" | "raw";
 
 /// Unified-diff renderer for a `WorktreeDiff` payload from
 /// `GET /api/git/worktrees/:name/diff[/:range]`. Each file
@@ -32,6 +35,7 @@ interface DiffViewProps {
 /// changes. We display that verbatim — surfacing the
 /// truncation is more useful than hiding it.
 export function DiffView({ diff, defaultOpen = true }: DiffViewProps) {
+  const [mode, setMode] = useState<DiffViewMode>("unified");
   const totals = useMemo(() => {
     let ins = 0;
     let del = 0;
@@ -69,8 +73,28 @@ export function DiffView({ diff, defaultOpen = true }: DiffViewProps) {
     <div className="space-y-4">
       <header className="card p-3 flex items-center gap-3 text-xs flex-wrap">
         <Mono className="text-ink-muted">{shortSha(diff.from_sha)}</Mono>
-        <span className="text-ink-subtle">→</span>
+        <span className="text-ink-subtle">to</span>
         <Mono className="text-ink-muted">{shortSha(diff.to_sha)}</Mono>
+        <div className="inline-flex rounded-md border border-edge bg-panel p-0.5 text-[11px]">
+          <DiffModeButton
+            active={mode === "unified"}
+            onClick={() => setMode("unified")}
+          >
+            Inline
+          </DiffModeButton>
+          <DiffModeButton
+            active={mode === "split"}
+            onClick={() => setMode("split")}
+          >
+            Side by side
+          </DiffModeButton>
+          <DiffModeButton
+            active={mode === "raw"}
+            onClick={() => setMode("raw")}
+          >
+            Raw
+          </DiffModeButton>
+        </div>
         <span className="ml-auto flex items-center gap-3 text-ink-subtle">
           <span>{plural(diff.files.length, "file")}</span>
           <span className="text-ok">+{totals.ins}</span>
@@ -109,6 +133,7 @@ export function DiffView({ diff, defaultOpen = true }: DiffViewProps) {
               <FileDiff
                 key={f.path}
                 file={f}
+                mode={mode}
                 isOpen={open[f.path] ?? defaultOpen}
                 onToggle={() =>
                   setOpen((prev) => ({
@@ -127,11 +152,12 @@ export function DiffView({ diff, defaultOpen = true }: DiffViewProps) {
 
 interface FileDiffProps {
   file: WorktreeDiffFile;
+  mode: DiffViewMode;
   isOpen: boolean;
   onToggle: () => void;
 }
 
-function FileDiff({ file, isOpen, onToggle }: FileDiffProps) {
+function FileDiff({ file, mode, isOpen, onToggle }: FileDiffProps) {
   const rows = useMemo(() => parseUnifiedDiff(file.hunk), [file.hunk]);
   return (
     <div className="card p-0 overflow-hidden" data-file-path={file.path}>
@@ -177,39 +203,140 @@ function FileDiff({ file, isOpen, onToggle }: FileDiffProps) {
             <span className="block px-3 py-2 text-ink-subtle italic">
               (binary or empty diff)
             </span>
+          ) : mode === "split" ? (
+            <SplitDiff rows={rows} />
+          ) : mode === "raw" ? (
+            <RawDiff hunk={file.hunk} />
           ) : (
-            rows.map((row, i) => {
-              const tone =
-                row.kind === "meta"
-                  ? "text-ink-subtle bg-panel"
-                  : row.kind === "add"
-                    ? "text-ok bg-ok-muted/15"
-                    : row.kind === "del"
-                      ? "text-bad bg-bad-muted/15"
-                      : row.kind === "hunk"
-                        ? "text-info bg-info-muted/15 font-semibold"
-                        : "text-ink-muted";
-              return (
-                <div
-                  key={i}
-                  className={`grid grid-cols-[3.25rem_3.25rem_minmax(max-content,1fr)] ${tone}`}
-                >
-                  <span className="select-none text-right pr-2 text-ink-subtle/70 border-r border-edge/60">
-                    {row.oldLine ?? ""}
-                  </span>
-                  <span className="select-none text-right pr-2 text-ink-subtle/70 border-r border-edge/60">
-                    {row.newLine ?? ""}
-                  </span>
-                  <span className="px-3 whitespace-pre">
-                    {row.text || " "}
-                  </span>
-                </div>
-              );
-            })
+            <UnifiedDiff rows={rows} />
           )}
         </div>
       )}
     </div>
+  );
+}
+
+function UnifiedDiff({ rows }: { rows: DiffRow[] }) {
+  return (
+    <>
+      {rows.map((row, i) => (
+        <div
+          key={i}
+          className={clsx(
+            "grid grid-cols-[3.25rem_3.25rem_2rem_minmax(max-content,1fr)] border-l-2",
+            rowTone(row.kind),
+          )}
+        >
+          <span className="select-none text-right pr-2 text-ink-subtle/70 border-r border-edge/60">
+            {row.oldLine ?? ""}
+          </span>
+          <span className="select-none text-right pr-2 text-ink-subtle/70 border-r border-edge/60">
+            {row.newLine ?? ""}
+          </span>
+          <span className="select-none text-center text-ink-subtle/80 border-r border-edge/60">
+            {rowMarker(row)}
+          </span>
+          <span className="px-3 whitespace-pre">{row.text || " "}</span>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function SplitDiff({ rows }: { rows: DiffRow[] }) {
+  const splitRows = useMemo(() => toSplitRows(rows), [rows]);
+  return (
+    <>
+      {splitRows.map((row, i) =>
+        row.kind === "meta" || row.kind === "hunk" ? (
+          <div
+            key={i}
+            className={clsx(
+              "grid grid-cols-[minmax(max-content,1fr)] border-l-2 px-3 py-0.5 whitespace-pre",
+              row.kind === "hunk"
+                ? "text-info bg-info-muted/15 border-info font-semibold"
+                : "text-ink-subtle bg-panel border-edge",
+            )}
+          >
+            {row.text || " "}
+          </div>
+        ) : (
+          <div
+            key={i}
+            className="grid grid-cols-[3.25rem_2rem_minmax(18rem,1fr)_3.25rem_2rem_minmax(18rem,1fr)]"
+          >
+            <span className="select-none text-right pr-2 text-ink-subtle/70 border-r border-edge/60 bg-panel">
+              {row.oldLine ?? ""}
+            </span>
+            <span
+              className={clsx(
+                "select-none text-center border-r border-edge/60",
+                row.oldKind === "del"
+                  ? "text-bad bg-bad-muted/20"
+                  : "text-ink-subtle/70 bg-panel",
+              )}
+            >
+              {row.oldKind === "del" ? "-" : ""}
+            </span>
+            <span
+              className={clsx(
+                "px-3 whitespace-pre border-r border-edge/60",
+                row.oldKind === "del"
+                  ? "text-bad bg-bad-muted/20"
+                  : "text-ink-muted bg-panel",
+              )}
+            >
+              {row.oldText || " "}
+            </span>
+            <span className="select-none text-right pr-2 text-ink-subtle/70 border-r border-edge/60 bg-panel">
+              {row.newLine ?? ""}
+            </span>
+            <span
+              className={clsx(
+                "select-none text-center border-r border-edge/60",
+                row.newKind === "add"
+                  ? "text-ok bg-ok-muted/20"
+                  : "text-ink-subtle/70 bg-panel",
+              )}
+            >
+              {row.newKind === "add" ? "+" : ""}
+            </span>
+            <span
+              className={clsx(
+                "px-3 whitespace-pre",
+                row.newKind === "add"
+                  ? "text-ok bg-ok-muted/20"
+                  : "text-ink-muted bg-panel",
+              )}
+            >
+              {row.newText || " "}
+            </span>
+          </div>
+        ),
+      )}
+    </>
+  );
+}
+
+function RawDiff({ hunk }: { hunk: string }) {
+  return <TerminalDiffBlock diffText={hunk} />;
+}
+
+export function TerminalDiffBlock({ diffText }: { diffText: string }) {
+  return (
+    <>
+      {diffText.split("\n").map((line, i) => {
+        const kind = classifyRawLine(line);
+        return (
+          <div
+            key={i}
+            className={clsx("px-3 whitespace-pre border-l-2", rowTone(kind))}
+          >
+            {line || " "}
+          </div>
+        );
+      })}
+    </>
   );
 }
 
@@ -222,6 +349,17 @@ interface DiffRow {
   kind: DiffRowKind;
 }
 
+interface SplitRow {
+  kind: "meta" | "hunk" | "context" | "change";
+  text: string;
+  oldLine: number | null;
+  newLine: number | null;
+  oldText: string;
+  newText: string;
+  oldKind: DiffRowKind | null;
+  newKind: DiffRowKind | null;
+}
+
 function parseUnifiedDiff(hunk: string): DiffRow[] {
   let oldLine = 0;
   let newLine = 0;
@@ -232,7 +370,17 @@ function parseUnifiedDiff(hunk: string): DiffRow[] {
       newLine = Number(header[2]);
       return { oldLine: null, newLine: null, text, kind: "hunk" };
     }
-    if (text.startsWith("+++") || text.startsWith("---")) {
+    if (
+      text.startsWith("diff --git") ||
+      text.startsWith("index ") ||
+      text.startsWith("new file mode ") ||
+      text.startsWith("deleted file mode ") ||
+      text.startsWith("similarity index ") ||
+      text.startsWith("rename from ") ||
+      text.startsWith("rename to ") ||
+      text.startsWith("+++") ||
+      text.startsWith("---")
+    ) {
       return { oldLine: null, newLine: null, text, kind: "meta" };
     }
     if (text.startsWith("+")) {
@@ -255,4 +403,139 @@ function parseUnifiedDiff(hunk: string): DiffRow[] {
     if (newLine > 0) newLine += 1;
     return row;
   });
+}
+
+function toSplitRows(rows: DiffRow[]): SplitRow[] {
+  const out: SplitRow[] = [];
+  let i = 0;
+  while (i < rows.length) {
+    const row = rows[i];
+    if (row.kind === "meta" || row.kind === "hunk") {
+      out.push({
+        kind: row.kind,
+        text: row.text,
+        oldLine: null,
+        newLine: null,
+        oldText: "",
+        newText: "",
+        oldKind: null,
+        newKind: null,
+      });
+      i += 1;
+      continue;
+    }
+    if (row.kind === "del" || row.kind === "add") {
+      const dels: DiffRow[] = [];
+      const adds: DiffRow[] = [];
+      while (rows[i]?.kind === "del") {
+        dels.push(rows[i]);
+        i += 1;
+      }
+      while (rows[i]?.kind === "add") {
+        adds.push(rows[i]);
+        i += 1;
+      }
+      const n = Math.max(dels.length, adds.length);
+      for (let j = 0; j < n; j += 1) {
+        const oldRow = dels[j] ?? null;
+        const newRow = adds[j] ?? null;
+        out.push({
+          kind: "change",
+          text: "",
+          oldLine: oldRow?.oldLine ?? null,
+          newLine: newRow?.newLine ?? null,
+          oldText: oldRow ? displayCode(oldRow) : "",
+          newText: newRow ? displayCode(newRow) : "",
+          oldKind: oldRow?.kind ?? null,
+          newKind: newRow?.kind ?? null,
+        });
+      }
+      continue;
+    }
+    out.push({
+      kind: "context",
+      text: "",
+      oldLine: row.oldLine,
+      newLine: row.newLine,
+      oldText: displayCode(row),
+      newText: displayCode(row),
+      oldKind: row.kind,
+      newKind: row.kind,
+    });
+    i += 1;
+  }
+  return out;
+}
+
+function displayCode(row: DiffRow): string {
+  if (row.kind === "add" || row.kind === "del") {
+    return row.text.slice(1);
+  }
+  if (row.kind === "context" && row.text.startsWith(" ")) {
+    return row.text.slice(1);
+  }
+  return row.text;
+}
+
+function classifyRawLine(line: string): DiffRowKind {
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+") && !line.startsWith("+++")) return "add";
+  if (line.startsWith("-") && !line.startsWith("---")) return "del";
+  if (
+    line.startsWith("diff --git") ||
+    line.startsWith("index ") ||
+    line.startsWith("new file mode ") ||
+    line.startsWith("deleted file mode ") ||
+    line.startsWith("+++") ||
+    line.startsWith("---")
+  ) {
+    return "meta";
+  }
+  return "context";
+}
+
+function rowTone(kind: DiffRowKind): string {
+  switch (kind) {
+    case "meta":
+      return "text-ink-subtle bg-panel border-edge";
+    case "add":
+      return "text-ok bg-ok-muted/20 border-ok";
+    case "del":
+      return "text-bad bg-bad-muted/20 border-bad";
+    case "hunk":
+      return "text-info bg-info-muted/15 border-info font-semibold";
+    default:
+      return "text-ink-muted bg-panel border-transparent";
+  }
+}
+
+function rowMarker(row: DiffRow): string {
+  if (row.kind === "add") return "+";
+  if (row.kind === "del") return "-";
+  return "";
+}
+
+function DiffModeButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        "rounded px-2.5 py-1",
+        active
+          ? "bg-accent text-white"
+          : "text-ink-muted hover:bg-panel-high hover:text-ink",
+      )}
+    >
+      {children}
+    </button>
+  );
 }

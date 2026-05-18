@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
+import clsx from "clsx";
 
 import { ApiError, dashboardApi } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
@@ -32,7 +33,9 @@ type Tab = "files" | "browse" | "log" | "diff" | "range";
 ///         `GET /api/git/worktrees/:name/file?path=…`. Lets the
 ///         operator inspect any file in the worktree, not just
 ///         the ones the executor touched.
-///       - **Log**: `git log -n 100` against the worktree.
+///       - **Agent commits / Log**: for session worktrees,
+///         `base..HEAD` agent commits; for main roots, recent
+///         repository commits.
 ///       - **Diff vs base**: the same diff the operator sees on
 ///         the Files tab, but expanded inline.
 ///       - **Range diff**: arbitrary sha1..sha2 comparison.
@@ -100,6 +103,10 @@ export function WorktreeDetailPage() {
             <span className="badge bg-info-muted/30 border-info text-info">
               {w.kind}
             </span>
+            <WorktreeLifecyclePill
+              kind={w.kind}
+              sessionState={w.session_state ?? null}
+            />
             <Mono className="text-ink-muted">{w.path}</Mono>
             <CopyButton value={w.path} />
             {w.session_id && (
@@ -107,7 +114,7 @@ export function WorktreeDetailPage() {
                 to={`/sessions/${w.session_id}`}
                 className="text-accent hover:underline"
               >
-                · session {w.session_id.slice(0, 12)}…
+                session {w.session_id.slice(0, 12)}...
               </Link>
             )}
             {w.task_id && (
@@ -115,7 +122,7 @@ export function WorktreeDetailPage() {
                 to={`/tasks/${w.task_id}`}
                 className="text-accent hover:underline"
               >
-                · task {w.task_id}
+                task {w.task_id}
               </Link>
             )}
           </div>
@@ -153,6 +160,9 @@ export function WorktreeDetailPage() {
               )
             }
           />
+          {w.kind !== "Main" && (
+            <Row label="Lifecycle" value={w.session_state ?? "Unknown"} />
+          )}
           {w.status_lines.length > 0 && (
             <Row
               label="Status"
@@ -206,7 +216,7 @@ export function WorktreeDetailPage() {
           Browse
         </TabButton>
         <TabButton active={tab === "log"} onClick={() => setTab("log")}>
-          Log
+          {w.base_sha ? "Agent commits" : "Log"}
         </TabButton>
         <TabButton active={tab === "diff"} onClick={() => setTab("diff")}>
           Diff vs base
@@ -237,7 +247,13 @@ export function WorktreeDetailPage() {
           ) : log.error ? (
             <ErrorBox error={log.error} onRetry={() => log.refetch()} />
           ) : log.data.length === 0 ? (
-            <Empty title="No commits in this worktree." />
+            <Empty
+              title={
+                w.base_sha
+                  ? "No agent commits in this review range."
+                  : "No commits in this worktree."
+              }
+            />
           ) : (
             <ul className="card p-0 overflow-hidden divide-y divide-edge/40">
               {log.data.map((c) => (
@@ -482,6 +498,60 @@ function DiffErrorOrEmpty({
     );
   }
   return <ErrorBox error={error} />;
+}
+
+function WorktreeLifecyclePill({
+  kind,
+  sessionState,
+}: {
+  kind: string;
+  sessionState: string | null;
+}) {
+  const lifecycle =
+    kind === "Main"
+      ? "root"
+      : !sessionState
+        ? "unknown"
+        : isLiveSessionState(sessionState)
+          ? "live"
+          : "past";
+  const label =
+    lifecycle === "root"
+      ? "Root"
+      : lifecycle === "live"
+        ? "Live"
+        : lifecycle === "past"
+          ? "Past"
+          : "Unknown";
+  return (
+    <span
+      className={clsx(
+        "badge text-[11px]",
+        lifecycle === "live" && "bg-ok-muted/20 border-ok text-ok",
+        lifecycle === "past" && "bg-panel-high border-edge text-ink-subtle",
+        lifecycle === "root" && "bg-info-muted/30 border-info text-info",
+        lifecycle === "unknown" && "bg-warn-muted/20 border-warn text-warn",
+      )}
+      title={
+        lifecycle === "root"
+          ? "Operator-allowed repository root"
+          : sessionState
+            ? `Owning session is ${sessionState}`
+            : "Owning session lifecycle was not recorded"
+      }
+    >
+      {label}
+    </span>
+  );
+}
+
+function isLiveSessionState(state: string): boolean {
+  return (
+    state === "Active" ||
+    state === "Running" ||
+    state === "Spawning" ||
+    state === "Paused"
+  );
 }
 
 /// CSS.escape polyfill for older runtimes. The querySelector

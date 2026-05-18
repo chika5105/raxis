@@ -23,15 +23,23 @@ import {
 } from "@/lib/status-filter";
 
 const ROLES = ["All", "Orchestrator", "Executor", "Reviewer"];
+type LifecycleScope = "all" | "live" | "past";
 
 export function SessionsPage() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const initiativeId = params.get("initiative_id") ?? undefined;
+  const scope = parseLifecycleScope(params.get("scope"));
   const activeStatuses = useMemo(
     () => parseStatusParam(params.get("status")),
     [params],
   );
+  const writeScope = (next: LifecycleScope) => {
+    const sp = new URLSearchParams(params);
+    if (next === "all") sp.delete("scope");
+    else sp.set("scope", next);
+    setParams(sp, { replace: true });
+  };
   const writeStatuses = (next: string[]) => {
     const sp = new URLSearchParams(params);
     if (next.length === 0) sp.delete("status");
@@ -85,34 +93,88 @@ export function SessionsPage() {
   }, [q.data, role, search]);
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
-    for (const s of roleSearchFiltered) {
+    for (const s of roleSearchFiltered.filter((s) =>
+      matchesLifecycleScope(s.state, scope),
+    )) {
       c[s.state] = (c[s.state] ?? 0) + 1;
     }
     return c;
+  }, [roleSearchFiltered, scope]);
+  const lifecycleCounts = useMemo(() => {
+    let live = 0;
+    let past = 0;
+    for (const s of roleSearchFiltered) {
+      if (isLiveSessionState(s.state)) live += 1;
+      else past += 1;
+    }
+    return { live, past, all: live + past };
   }, [roleSearchFiltered]);
   const activeSet = new Set(activeStatuses);
   const filterActive = activeStatuses.length > 0;
   // Rows always render — when a status filter is active we dim the
   // non-matching ones (highlight semantics) rather than removing
   // them, matching the user's stated "highlight" intent.
-  const filtered = roleSearchFiltered;
+  const filtered = roleSearchFiltered.filter((s) =>
+    matchesLifecycleScope(s.state, scope),
+  );
 
   return (
     <div className="space-y-4">
       <header className="flex items-end justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-xl font-semibold text-ink">Sessions</h1>
-          <p className="text-sm text-ink-muted">All planner sessions, newest first.</p>
+          <p className="text-sm text-ink-muted">
+            Live and historical planner sessions, newest first.
+          </p>
+          <div className="mt-2 flex items-center gap-2 text-xs text-ink-subtle">
+            <span className="badge bg-panel-high border-edge text-ink-muted">
+              {lifecycleCounts.all} total
+            </span>
+            <span className="badge bg-ok-muted/20 border-ok text-ok">
+              {lifecycleCounts.live} live
+            </span>
+            <span className="badge bg-panel-high border-edge text-ink-subtle">
+              {lifecycleCounts.past} past
+            </span>
+          </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap justify-end">
+          <div className="inline-flex rounded-md border border-edge bg-panel p-0.5 text-xs">
+            <ScopeButton
+              active={scope === "all"}
+              onClick={() => writeScope("all")}
+            >
+              All
+            </ScopeButton>
+            <ScopeButton
+              active={scope === "live"}
+              onClick={() => writeScope("live")}
+            >
+              Live
+            </ScopeButton>
+            <ScopeButton
+              active={scope === "past"}
+              onClick={() => writeScope("past")}
+            >
+              Past
+            </ScopeButton>
+          </div>
           <input
             className="input w-56"
-            placeholder="Search id / provider / model…"
+            placeholder="Search id / provider / model..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
-          <select className="input" value={role} onChange={(e) => setRole(e.target.value)}>
-            {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+          <select
+            className="input"
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+          >
+            {ROLES.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
           </select>
         </div>
       </header>
@@ -171,6 +233,7 @@ export function SessionsPage() {
               <tr>
                 <th className="text-left px-4 py-2 font-medium">Session</th>
                 <th className="text-left px-4 py-2 font-medium">Role</th>
+                <th className="text-left px-4 py-2 font-medium">Lifecycle</th>
                 <th className="text-left px-4 py-2 font-medium">State</th>
                 <th className="text-left px-4 py-2 font-medium">Initiative / Task</th>
                 <th className="text-left px-4 py-2 font-medium">Provider / Model</th>
@@ -183,83 +246,92 @@ export function SessionsPage() {
                 const href = `/sessions/${s.session_id}`;
                 const dimmed = filterActive && !activeSet.has(s.state);
                 return (
-                <tr
-                  key={s.session_id}
-                  tabIndex={0}
-                  data-dimmed={dimmed || undefined}
-                  onClick={() => navigate(href)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      navigate(href);
-                    }
-                  }}
-                  className={clsx(
-                    "border-t border-edge/40 hover:bg-panel-high cursor-pointer",
-                    "focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high transition-opacity",
-                    dimmed && "opacity-40 hover:opacity-90",
-                  )}
-                >
-                  <td className="px-4 py-2">
-                    <Link
-                      to={href}
-                      onClick={(e) => e.stopPropagation()}
-                      className="text-ink hover:text-accent"
-                    >
-                      <Mono>{s.session_id.slice(0, 16)}…</Mono>
-                    </Link>
-                  </td>
-                  <td className="px-4 py-2 text-ink-muted">{s.role}</td>
-                  <td className="px-4 py-2 align-top">
-                    <div className="flex flex-col items-start gap-1">
-                      <StateBadge state={s.state} pulse={s.state === "Running"} />
-                      {isTerminalFailureState(s.state) && (
-                        <FailurePill
-                          failed
-                          reason={s.failure ?? null}
-                          compact
-                        />
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-2 text-xs">
-                    {s.initiative_id && (
+                  <tr
+                    key={s.session_id}
+                    tabIndex={0}
+                    data-dimmed={dimmed || undefined}
+                    onClick={() => navigate(href)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        navigate(href);
+                      }
+                    }}
+                    className={clsx(
+                      "border-t border-edge/40 hover:bg-panel-high cursor-pointer",
+                      "focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high transition-opacity",
+                      dimmed && "opacity-40 hover:opacity-90",
+                    )}
+                  >
+                    <td className="px-4 py-2">
                       <Link
-                        to={`/initiatives/${s.initiative_id}`}
+                        to={href}
                         onClick={(e) => e.stopPropagation()}
-                        className="text-accent hover:underline font-mono"
+                        className="text-ink hover:text-accent"
                       >
-                        {s.initiative_id}
+                        <Mono>{s.session_id.slice(0, 16)}...</Mono>
                       </Link>
-                    )}
-                    {s.task_id && (
-                      <div>
-                        <Link
-                          to={`/tasks/${s.task_id}`}
-                          onClick={(e) => e.stopPropagation()}
-                          className="text-ink-muted hover:text-accent font-mono text-[11px]"
-                        >
-                          {s.task_id}
-                        </Link>
+                    </td>
+                    <td className="px-4 py-2 text-ink-muted">{s.role}</td>
+                    <td className="px-4 py-2 align-top">
+                      <LifecyclePill state={s.state} />
+                    </td>
+                    <td className="px-4 py-2 align-top">
+                      <div className="flex flex-col items-start gap-1">
+                        <StateBadge
+                          state={s.state}
+                          pulse={isLiveSessionState(s.state)}
+                        />
+                        {isTerminalFailureState(s.state) && (
+                          <FailurePill
+                            failed
+                            reason={s.failure ?? null}
+                            compact
+                          />
+                        )}
                       </div>
-                    )}
-                  </td>
-                  <td className="px-4 py-2 text-xs">
-                    <ProviderModelStack
-                      provider={s.provider}
-                      model={s.model}
-                    />
-                  </td>
-                  <td className="px-4 py-2 text-right text-xs text-ink-muted tabular">
-                    <span className="text-ink">{fmtTokens(s.input_tokens + s.output_tokens)}</span>
-                    <div className="text-[10px]">
-                      in {fmtTokens(s.input_tokens)} · out {fmtTokens(s.output_tokens)}
-                    </div>
-                  </td>
-                  <td className="px-4 py-2 text-right text-xs text-ink-muted">
-                    {fmtRelative(s.updated_at)}
-                  </td>
-                </tr>
+                    </td>
+                    <td className="px-4 py-2 text-xs">
+                      {s.initiative_id && (
+                        <Link
+                          to={`/initiatives/${s.initiative_id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-accent hover:underline font-mono"
+                        >
+                          {s.initiative_id}
+                        </Link>
+                      )}
+                      {s.task_id && (
+                        <div>
+                          <Link
+                            to={`/tasks/${s.task_id}`}
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-ink-muted hover:text-accent font-mono text-[11px]"
+                          >
+                            {s.task_id}
+                          </Link>
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-4 py-2 text-xs">
+                      <ProviderModelStack
+                        provider={s.provider}
+                        model={s.model}
+                      />
+                    </td>
+                    <td className="px-4 py-2 text-right text-xs text-ink-muted tabular">
+                      <span className="text-ink">
+                        {fmtTokens(s.input_tokens + s.output_tokens)}
+                      </span>
+                      <div className="text-[10px]">
+                        in {fmtTokens(s.input_tokens)} · out{" "}
+                        {fmtTokens(s.output_tokens)}
+                      </div>
+                    </td>
+                    <td className="px-4 py-2 text-right text-xs text-ink-muted">
+                      {fmtRelative(s.updated_at)}
+                    </td>
+                  </tr>
                 );
               })}
             </tbody>
@@ -267,6 +339,66 @@ export function SessionsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+function parseLifecycleScope(raw: string | null): LifecycleScope {
+  return raw === "live" || raw === "past" ? raw : "all";
+}
+
+function isLiveSessionState(state: string): boolean {
+  return (
+    state === "Active" ||
+    state === "Running" ||
+    state === "Spawning" ||
+    state === "Paused"
+  );
+}
+
+function matchesLifecycleScope(state: string, scope: LifecycleScope): boolean {
+  if (scope === "all") return true;
+  const live = isLiveSessionState(state);
+  return scope === "live" ? live : !live;
+}
+
+function LifecyclePill({ state }: { state: string }) {
+  const live = isLiveSessionState(state);
+  return (
+    <span
+      className={clsx(
+        "badge text-[11px]",
+        live
+          ? "bg-ok-muted/20 border-ok text-ok"
+          : "bg-panel-high border-edge text-ink-subtle",
+      )}
+    >
+      {live ? "Live" : "Past"}
+    </span>
+  );
+}
+
+function ScopeButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        "rounded px-2.5 py-1",
+        active
+          ? "bg-accent text-white"
+          : "text-ink-muted hover:bg-panel-high hover:text-ink",
+      )}
+    >
+      {children}
+    </button>
   );
 }
 

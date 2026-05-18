@@ -263,7 +263,10 @@ fn write_blob(data_dir: &Path, bytes: &[u8]) -> Result<Option<String>, SnapshotE
 struct WorktreeBodies {
     /// `git diff <base>..HEAD` (capped at [`MAX_DIFF_BYTES`]).
     diff: Vec<u8>,
-    /// `git log <base>..HEAD --format=...`
+    /// `git log <base>..HEAD --format=...` using committer
+    /// unix timestamps (`%ct`) so the dashboard shows when the
+    /// system observed/created the agent commit, not a possibly
+    /// inherited author date.
     log: Vec<u8>,
     /// `git ls-tree -r HEAD --name-only` (full tracked file listing).
     tree_listing: Vec<u8>,
@@ -335,10 +338,16 @@ fn capture_bodies(worktree_root: &Path, base_sha: &str) -> Result<WorktreeBodies
 
     let log = run_git(
         worktree_root,
-        &["log", &base_dotdot_head, "--format=%H%x09%an%x09%at%x09%s"],
+        &["log", &base_dotdot_head, "--format=%H%x09%an%x09%ct%x09%s"],
     )?;
-    // Each non-empty line is one commit.
-    let commit_count = log.iter().filter(|&&b| b == b'\n').count() as u32;
+    // Each non-empty line is one commit. Do not count `\n`
+    // bytes directly: git omits the trailing newline for a
+    // single-commit log, which previously rendered one agent
+    // commit as `0 commits`.
+    let commit_count = String::from_utf8_lossy(&log)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count() as u32;
 
     // `git ls-tree -r HEAD --name-only` is the canonical "every
     // tracked file at HEAD" enumeration — used by the dashboard's
@@ -679,6 +688,31 @@ pub fn startup_check(
 mod tests {
     use super::*;
 
+    fn git_ok(dir: &std::path::Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn make_seed_repo() -> Option<tempfile::TempDir> {
+        let dir = tempfile::tempdir().ok()?;
+        for args in [
+            &["init", "-q"][..],
+            &["checkout", "-q", "-B", "main"][..],
+            &["config", "user.email", "raxis-test@example.com"][..],
+            &["config", "user.name", "raxis-test"][..],
+            &["commit", "--allow-empty", "-q", "-m", "seed"][..],
+        ] {
+            if !git_ok(dir.path(), args) {
+                return None;
+            }
+        }
+        Some(dir)
+    }
+
     #[test]
     fn inv_worktree_snapshot_trigger_sql_values_match_check_clause() {
         // INV-WORKTREE-SNAPSHOT-TRIGGER-DOMAIN-01 — the kernel-side
@@ -773,5 +807,38 @@ mod tests {
             result.unwrap_err(),
             SnapshotError::BlobNotFound { .. }
         ));
+    }
+
+    #[test]
+    fn capture_bodies_counts_single_commit_and_uses_committer_time() {
+        let Some(dir) = make_seed_repo() else {
+            eprintln!("skipping: no working git binary on PATH");
+            return;
+        };
+        let base = String::from_utf8_lossy(&run_git(dir.path(), &["rev-parse", "HEAD"]).unwrap())
+            .trim()
+            .to_owned();
+        let status = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .env("GIT_AUTHOR_DATE", "2001-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2023-11-14T22:13:20Z")
+            .args(["commit", "--allow-empty", "-q", "-m", "agent snapshot"])
+            .status()
+            .expect("git commit");
+        if !status.success() {
+            eprintln!("skipping: git commit with explicit dates failed");
+            return;
+        }
+
+        let bodies = capture_bodies(dir.path(), &base).unwrap();
+        assert_eq!(
+            bodies.commit_count, 1,
+            "single-commit logs have no trailing newline; still count them"
+        );
+        let log = String::from_utf8_lossy(&bodies.log);
+        assert!(
+            log.contains("\t1700000000\tagent snapshot"),
+            "snapshot log must use committer/system time, got {log:?}"
+        );
     }
 }

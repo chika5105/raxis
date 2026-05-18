@@ -43,7 +43,6 @@ const NAV: NavSection[] = [
     items: [
       { to: "/initiatives", label: "Initiatives", glyph: "•" },
       { to: "/sessions", label: "Sessions", glyph: "S" },
-      { to: "/sessions/recent", label: "Recent sessions", glyph: "R" },
       { to: "/escalations", label: "Escalations", glyph: "!" },
     ],
   },

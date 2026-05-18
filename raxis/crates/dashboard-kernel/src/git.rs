@@ -321,8 +321,14 @@ pub fn ahead_behind(root: &Path, base: &str) -> Option<(u32, u32)> {
     }
 }
 
-/// `git log -n <limit> --pretty=format:%H%x09%an <%ae>%x09%at%x09%s`.
+/// `git log -n <limit> --pretty=format:%H%x09%an <%ae>%x09%ct%x09%s`.
 /// Returns log entries newest-first.
+///
+/// The timestamp is the **committer** unix timestamp (`%ct`), not
+/// the author timestamp (`%at`). Raxis-authored commits may carry an
+/// inherited or policy-set author date; the dashboard needs the
+/// system-observed commit time so agent commits do not render as
+/// months or years old.
 ///
 /// Surfaces [`GitError::NotARepo`] when the worktree path is not (or
 /// no longer) a git repository. The route layer maps that variant to
@@ -332,16 +338,37 @@ pub fn ahead_behind(root: &Path, base: &str) -> Option<(u32, u32)> {
 /// worktree page for a perfectly expected configuration (e.g.
 /// `main-0` pointing at a parent directory of session worktrees).
 pub fn log_entries(root: &Path, limit: u32) -> Result<Vec<WorktreeLogEntry>, GitError> {
+    log_entries_inner(root, limit, None)
+}
+
+/// `git log <base>..HEAD -n <limit>` for session worktrees.
+/// This is the review-oriented view: only commits created after
+/// the executor's recorded base SHA are shown, so old repository
+/// history does not bury the agent's commits.
+pub fn log_entries_since_base(
+    root: &Path,
+    base: &str,
+    limit: u32,
+) -> Result<Vec<WorktreeLogEntry>, GitError> {
+    log_entries_inner(root, limit, Some(format!("{base}..HEAD")))
+}
+
+fn log_entries_inner(
+    root: &Path,
+    limit: u32,
+    range: Option<String>,
+) -> Result<Vec<WorktreeLogEntry>, GitError> {
     let limit_str = limit.to_string();
-    let (stdout, stderr, code) = run_git(
-        &[
-            "log",
-            "-n",
-            &limit_str,
-            "--pretty=format:%H%x09%an <%ae>%x09%at%x09%s",
-        ],
-        root,
-    )?;
+    let mut args = vec!["log"];
+    if let Some(range) = range.as_deref() {
+        args.push(range);
+    }
+    args.extend([
+        "-n",
+        &limit_str,
+        "--pretty=format:%H%x09%an <%ae>%x09%ct%x09%s",
+    ]);
+    let (stdout, stderr, code) = run_git(&args, root)?;
     if code != 0 {
         if stderr_is_not_a_git_repo(&stderr) {
             return Err(GitError::NotARepo {
@@ -538,6 +565,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn log_entries_use_committer_time_and_range_to_agent_commits() {
+        let Some(dir) = make_seed_repo() else {
+            eprintln!("skipping: no working git binary on PATH");
+            return;
+        };
+        let Some(base) = head_sha(dir.path()) else {
+            eprintln!("skipping: seed repo has no HEAD");
+            return;
+        };
+        let status = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .env("GIT_AUTHOR_DATE", "2001-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2023-11-14T22:13:20Z")
+            .args(["commit", "--allow-empty", "-q", "-m", "agent change"])
+            .status()
+            .expect("git commit");
+        if !status.success() {
+            eprintln!("skipping: git commit with explicit dates failed");
+            return;
+        }
+
+        let rows = log_entries_since_base(dir.path(), &base, 10).expect("range log");
+        assert_eq!(rows.len(), 1, "base..HEAD must show only agent commits");
+        assert_eq!(rows[0].subject, "agent change");
+        assert_eq!(
+            rows[0].at, 1_700_000_000,
+            "dashboard log timestamps must use committer/system time, not author time"
+        );
+    }
+
     /// Helper for the latency-budget witnesses: build a real
     /// git repo in a tempdir with a single seed commit so the
     /// four standard probes (head_sha, branch, status, ahead/
@@ -547,7 +605,8 @@ mod tests {
     fn make_seed_repo() -> Option<tempfile::TempDir> {
         let dir = tempfile::tempdir().ok()?;
         for args in [
-            &["init", "-q", "-b", "main"][..],
+            &["init", "-q"][..],
+            &["checkout", "-q", "-B", "main"][..],
             &["config", "user.email", "raxis-test@example.com"][..],
             &["config", "user.name", "raxis-test"][..],
             &["commit", "--allow-empty", "-q", "-m", "seed"][..],

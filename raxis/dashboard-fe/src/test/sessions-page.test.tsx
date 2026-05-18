@@ -69,7 +69,7 @@ describe("<SessionsPage>", () => {
     expect(screen.getByText("openai-prod")).toBeInTheDocument();
 
     fireEvent.change(
-      screen.getByPlaceholderText("Search id / provider / model…"),
+      screen.getByPlaceholderText("Search id / provider / model..."),
       { target: { value: "openai" } },
     );
 
@@ -77,5 +77,27 @@ describe("<SessionsPage>", () => {
       expect(screen.getByText("openai-prod")).toBeInTheDocument();
       expect(screen.queryByText("anthropic-prod")).toBeNull();
     });
+  });
+
+  it("keeps past sessions on the main sessions page", async () => {
+    vi.spyOn(dashboardApi.sessions, "list").mockResolvedValue([
+      session({}),
+      session({
+        session_id: "sess-revoked-1234567890",
+        state: "Revoked",
+        provider: "anthropic-prod",
+        model: "claude-sonnet-4-5-20250929",
+        task_id: "task-ended",
+      }),
+    ]);
+
+    renderWithProviders(<SessionsPage />);
+
+    expect(await screen.findByText("2 total")).toBeInTheDocument();
+    expect(screen.getByText("1 live")).toBeInTheDocument();
+    expect(screen.getByText("1 past")).toBeInTheDocument();
+    expect(screen.getByText("sess-revoked-123...")).toBeInTheDocument();
+    expect(screen.getAllByText("Revoked").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Past").length).toBeGreaterThan(0);
   });
 });

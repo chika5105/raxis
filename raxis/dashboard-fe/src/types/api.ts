@@ -948,6 +948,10 @@ export interface WorktreeListEntry {
   path: string;
   session_id: string | null;
   task_id: string | null;
+  session_state?: string | null;
+  observed_head_sha?: string | null;
+  observed_branch?: string | null;
+  observed_dirty_paths?: number | null;
   base_sha: string | null;
 }
 

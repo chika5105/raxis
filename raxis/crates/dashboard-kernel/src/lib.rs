@@ -1570,13 +1570,13 @@ impl DashboardData for KernelDashboardData {
 
     /// `INV-DASHBOARD-RECENT-SESSIONS-RING-01`. Surface the
     /// dashboard-kernel `SessionStreamCapture` ring contents so
-    /// the FE's RecentSessions view sees ended sessions that
-    /// the active-list filter dropped on revoke.
+    /// summary panels can show ended sessions alongside the main
+    /// durable sessions table.
     fn list_recent_sessions(&self, limit: u32) -> Result<Vec<RecentSessionEntry>, ApiError> {
         let conn = self.open_ro()?;
         let cap = limit.min(200) as usize;
         // Walk every session row regardless of `revoked` so the
-        // recent-list page surfaces revoked + expired alongside
+        // overview panel can surface revoked + expired alongside
         // active. `active_list` filters to `revoked = 0`; we
         // need the wider set here.
         let mut rows = read_sessions_all_for_recent(&conn, cap);
@@ -1611,14 +1611,25 @@ impl DashboardData for KernelDashboardData {
     ) -> Result<Vec<SessionView>, ApiError> {
         let conn = self.open_ro()?;
         let cap = limit.min(200) as usize;
+        // `initiative_id` is applied through the tasks table below.
+        // Pull a wider durable-session window first so an older but
+        // still-relevant initiative row does not disappear merely
+        // because unrelated sessions are newer.
+        let fetch_cap = if initiative_id.is_some() { 2_000 } else { cap };
         // INV-OBSERVABILITY-DATAPLANE-LATENCY-01.
+        //
+        // List sessions from the durable catalog, not the active-only
+        // projection. A session row must not disappear from the main
+        // dashboard table just because its VM exited and the kernel
+        // revoked the token; the UI renders live vs past as a filter
+        // and badge on one surface.
         let rows = raxis_store::observability::time_query_result(
             self.observability_hub.as_ref(),
             raxis_store::observability::QUERY_CLASS_SESSION_LIST,
-            || raxis_store::views::sessions::active_list(&conn, cap),
+            || raxis_store::views::sessions::list_all(&conn, fetch_cap),
         )
         .map_err(|e| ApiError::Internal {
-            log_only: format!("sessions::active_list: {e}"),
+            log_only: format!("sessions::list_all: {e}"),
         })?;
         // Resolve the optional `?initiative_id=…` filter by
         // walking the initiative's tasks and collecting any
@@ -1626,17 +1637,16 @@ impl DashboardData for KernelDashboardData {
         // itself does not carry an initiative FK — tasks own
         // the link — so this is the only consistent way to
         // narrow without a schema change.
-        let allowed: Option<std::collections::HashSet<String>> =
-            match initiative_id {
-                None => None,
-                Some(i) => {
-                    let tasks = raxis_store::views::tasks::list_by_initiative(&conn, i, 500)
-                        .map_err(|e| ApiError::Internal {
-                            log_only: format!("tasks::list_by_initiative: {e}"),
-                        })?;
-                    Some(tasks.into_iter().filter_map(|t| t.session_id).collect())
-                }
-            };
+        let allowed: Option<std::collections::HashSet<String>> = match initiative_id {
+            None => None,
+            Some(i) => {
+                let tasks = raxis_store::views::tasks::list_by_initiative(&conn, i, 2_000)
+                    .map_err(|e| ApiError::Internal {
+                        log_only: format!("tasks::list_by_initiative: {e}"),
+                    })?;
+                Some(tasks.into_iter().filter_map(|t| t.session_id).collect())
+            }
+        };
         // Pre-load the audit chain so the per-session
         // classifier sees the SessionRevoked rows without a
         // re-walk / re-sort per response.
@@ -1662,6 +1672,7 @@ impl DashboardData for KernelDashboardData {
                 Some(set) => set.contains(&s.session_id),
                 None => true,
             })
+            .take(cap)
             .collect();
         let session_ids: Vec<String> = rows.iter().map(|s| s.session_id.clone()).collect();
         let owning_by_session = owning_tasks_for_sessions(&conn, &session_ids);
@@ -2173,7 +2184,11 @@ impl DashboardData for KernelDashboardData {
                 kind: "worktree-path".into(),
             });
         }
-        git::log_entries(&path, limit.clamp(1, 200)).map_err(map_git_error_to_api)
+        match resolved.summary.base_sha.as_deref() {
+            Some(base) => git::log_entries_since_base(&path, base, limit.clamp(1, 200))
+                .map_err(map_git_error_to_api),
+            None => git::log_entries(&path, limit.clamp(1, 200)).map_err(map_git_error_to_api),
+        }
     }
 
     fn worktree_diff_default(&self, name: &str) -> Result<WorktreeDiff, ApiError> {
@@ -3539,7 +3554,7 @@ struct ResolvedWorktree {
 
 impl KernelDashboardData {
     /// Walk `policy.allowed_worktree_roots()` (kind=Main) +
-    /// the active-session list (kind=Session) and produce a
+    /// the durable session worktree list (kind=Session) and produce a
     /// stable, slug-keyed worktree directory for the route
     /// layer to look up.
     ///
@@ -3560,6 +3575,9 @@ impl KernelDashboardData {
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.clone());
+            let observed = std::path::Path::new(&path)
+                .exists()
+                .then(|| git::probe_worktree_summary(std::path::Path::new(&path), None));
             out.push(ResolvedWorktree {
                 summary: WorktreeListEntry {
                     name: format!("main-{idx}"),
@@ -3572,11 +3590,17 @@ impl KernelDashboardData {
                     path,
                     session_id: None,
                     task_id: None,
+                    session_state: None,
+                    observed_head_sha: observed.as_ref().and_then(|s| s.head_sha.clone()),
+                    observed_branch: observed.as_ref().and_then(|s| s.branch.clone()),
+                    observed_dirty_paths: observed
+                        .as_ref()
+                        .map(|s| u32::try_from(s.status_lines.len()).unwrap_or(u32::MAX)),
                     base_sha: None,
                 },
             });
         }
-        // Session overlay — include both active and recently revoked rows.
+        // Session overlay — include active, revoked, and expired rows.
         //
         // Worktree review is forensic, not just "currently live VM" state:
         // the most useful moment to inspect a diff is often after the
@@ -3588,12 +3612,15 @@ impl KernelDashboardData {
         if let Ok(conn) = self.open_ro() {
             if let Ok(mut stmt) = conn.prepare(&format!(
                 "SELECT s.session_id, s.role_id, s.worktree_root, s.base_sha, \
+                        s.created_at, s.expires_at, s.revoked, s.revoked_at, \
                         (SELECT t.task_id FROM {TBL_TASKS} t \
                           WHERE t.session_id = s.session_id \
                           ORDER BY t.admitted_at DESC LIMIT 1) AS task_id \
                  FROM {TBL_SESSIONS} s \
                  WHERE s.worktree_root IS NOT NULL \
-                 ORDER BY s.created_at DESC \
+                 ORDER BY COALESCE(s.revoked_at, s.created_at) DESC, \
+                          s.created_at DESC, \
+                          s.session_id ASC \
                  LIMIT 500"
             )) {
                 let rows = stmt.query_map([], |r| {
@@ -3602,12 +3629,26 @@ impl KernelDashboardData {
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
                         r.get::<_, Option<String>>(3)?,
-                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, i64>(4)?.max(0) as u64,
+                        r.get::<_, i64>(5)?.max(0) as u64,
+                        r.get::<_, i64>(6)? != 0,
+                        r.get::<_, Option<i64>>(7)?.map(|v| v.max(0) as u64),
+                        r.get::<_, Option<String>>(8)?,
                     ))
                 });
                 if let Ok(rows) = rows {
                     for row in rows.flatten() {
-                        let (session_id, role_id, wt, base_sha, task_id) = row;
+                        let (
+                            session_id,
+                            role_id,
+                            wt,
+                            base_sha,
+                            created_at,
+                            expires_at,
+                            revoked,
+                            revoked_at,
+                            task_id,
+                        ) = row;
                         if wt.trim().is_empty() {
                             continue;
                         }
@@ -3624,6 +3665,12 @@ impl KernelDashboardData {
                                 path: wt,
                                 session_id: Some(session_id),
                                 task_id,
+                                session_state: Some(session_state_from_columns(
+                                    revoked, revoked_at, created_at, expires_at,
+                                )),
+                                observed_head_sha: None,
+                                observed_branch: None,
+                                observed_dirty_paths: None,
                                 base_sha,
                             },
                         });
@@ -3770,14 +3817,23 @@ fn resolve_within_root(
 /// is reported as `Revoked` so the operator sees the deliberate
 /// terminal cause.
 fn session_row_state(s: &raxis_store::views::sessions::SessionRow) -> String {
-    if s.revoked {
+    session_state_from_columns(s.revoked, s.revoked_at, s.created_at, s.expires_at)
+}
+
+fn session_state_from_columns(
+    revoked: bool,
+    _revoked_at: Option<u64>,
+    _created_at: u64,
+    expires_at: u64,
+) -> String {
+    if revoked {
         "Revoked".into()
     } else {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        if s.expires_at <= now {
+        if expires_at <= now {
             "Expired".into()
         } else {
             "Active".into()
