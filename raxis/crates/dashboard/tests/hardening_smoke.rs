@@ -462,7 +462,7 @@ async fn sessions_list_with_initiative_id_filter_narrows_results() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn audit_list_with_initiative_id_filter_narrows_results() {
+async fn audit_list_with_initiative_id_highlights_without_filtering_results() {
     use raxis_dashboard::data::AuditEntryView;
 
     let (handle, base, token, data) = serve_authed_in_memory().await;
@@ -477,6 +477,8 @@ async fn audit_list_with_initiative_id_filter_narrows_results() {
         session_id: None,
         at: 1_700_000_000,
         payload: serde_json::json!({}),
+        is_highlighted: false,
+        highlight_reasons: Vec::new(),
     });
     data.push_audit(AuditEntryView {
         seq: 2,
@@ -487,6 +489,8 @@ async fn audit_list_with_initiative_id_filter_narrows_results() {
         session_id: None,
         at: 1_700_000_001,
         payload: serde_json::json!({}),
+        is_highlighted: false,
+        highlight_reasons: Vec::new(),
     });
 
     let client = reqwest::Client::new();
@@ -500,15 +504,26 @@ async fn audit_list_with_initiative_id_filter_narrows_results() {
         .expect("send");
     assert_eq!(res.status(), 200);
     let rows: serde_json::Value = res.json().await.expect("json");
-    let ids: Vec<&str> = rows
-        .as_array()
-        .unwrap()
+    let arr = rows.as_array().unwrap();
+    let ids: Vec<&str> = arr
         .iter()
         .map(|v| v["initiative_id"].as_str().unwrap_or_default())
         .collect();
-    assert!(
-        ids.iter().all(|i| *i == "init-alpha"),
-        "audit ?initiative_id=… must narrow strictly (got {ids:?})",
+    assert_eq!(
+        ids,
+        vec!["init-beta", "init-alpha"],
+        "audit ?initiative_id=… must keep the kernel-wide chain and only \
+         annotate matching rows (got {ids:?})",
+    );
+    let highlighted: Vec<&str> = arr
+        .iter()
+        .filter(|v| v["is_highlighted"].as_bool().unwrap_or(false))
+        .map(|v| v["initiative_id"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        highlighted,
+        vec!["init-alpha"],
+        "legacy initiative_id query param should highlight matching rows only",
     );
 
     handle.shutdown().await.expect("shutdown");

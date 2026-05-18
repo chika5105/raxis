@@ -10,6 +10,7 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { fmtBytes } from "@/lib/format";
 import { detectMonacoLanguage } from "@/lib/monaco-language";
+import { ensureTomlLanguage } from "@/lib/monaco-toml";
 import { useTheme } from "@/lib/theme-context";
 import type { WorktreeTree, WorktreeTreeEntry } from "@/types/api";
 
@@ -374,6 +375,7 @@ function FileView({ worktreeName, path }: FileViewProps) {
               defaultLanguage={language}
               language={language}
               path={f.path}
+              beforeMount={ensureTomlLanguage}
               theme={monacoTheme}
               value={f.content}
               options={{

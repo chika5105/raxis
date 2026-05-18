@@ -49,6 +49,7 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
 import { Spinner } from "@/components/Spinner";
 import { fmtBytes } from "@/lib/format";
+import { ensureTomlLanguage } from "@/lib/monaco-toml";
 import { useTheme } from "@/lib/theme-context";
 import type {
   CredentialListResponse,
@@ -686,6 +687,7 @@ function RevealedBody({
         <Editor
           height="100%"
           defaultLanguage={detectLanguage(c)}
+          beforeMount={ensureTomlLanguage}
           theme={monacoTheme}
           value={reveal.plaintext}
           options={{
@@ -778,4 +780,3 @@ function useCountdown(deadlineUnixSec: number): number {
 
   return value;
 }
-

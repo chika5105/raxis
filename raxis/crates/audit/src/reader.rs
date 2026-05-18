@@ -73,7 +73,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -301,6 +301,24 @@ impl ChainReader {
             expected_seq: None,
         }
     }
+
+    /// Iterate records newest-first across all segments.
+    ///
+    /// This is intentionally a **display / pagination** helper, not
+    /// a chain verifier: each JSONL row is parsed and projected with
+    /// the same field rules as [`Self::records`], but reverse order
+    /// cannot validate the forward `prev_sha256` linkage without
+    /// first walking the prefix. Use [`verify_chain_full`] when the
+    /// caller needs an integrity verdict. Dashboard tail pagination
+    /// pairs this iterator with the chain-status banner so operators
+    /// get both a fast tail and the kernel-owned integrity state.
+    pub fn records_desc(&self) -> ChainRecordDescIter<'_> {
+        ChainRecordDescIter {
+            owner: self,
+            next_seg_idx: self.segments.len(),
+            current: Vec::new().into_iter(),
+        }
+    }
 }
 
 /// Iterator over every record across every segment.
@@ -382,66 +400,12 @@ impl<'a> Iterator for ChainRecordIter<'a> {
 
             let path = self.owner.segments[self.seg_idx].1.clone();
 
-            // SHA-256 of THE RAW LINE BYTES INCLUDING the trailing
-            // newline. This matches `writer.rs`'s canonicalisation
-            // (a `\n`-terminated UTF-8 line) — drift here is a
-            // chain-break bug.
-            let line_sha256 = {
-                let mut h = Sha256::new();
-                h.update(buf.as_bytes());
-                hex::encode(h.finalize())
-            };
-
-            let parsed_value: serde_json::Value = match serde_json::from_str(trimmed_line_no_nl) {
-                Ok(v) => v,
-                Err(e) => {
-                    return Some(Err(ChainReadError::MalformedRecord {
-                        path,
-                        line_no: self.line_no,
-                        reason: format!("JSON parse: {e}"),
-                    }));
-                }
-            };
-
-            let seq_u64 = parsed_value
-                .get("seq")
-                .and_then(|v| v.as_u64())
-                .ok_or(())
-                .map_err(|_| ChainReadError::MalformedRecord {
-                    path: path.clone(),
-                    line_no: self.line_no,
-                    reason: "missing or non-numeric `seq`".to_owned(),
-                });
-            let seq_u64 = match seq_u64 {
-                Ok(n) => n,
+            let record = match parse_record_line(path.clone(), self.line_no, buf.as_bytes()) {
+                Ok(r) => r,
                 Err(e) => return Some(Err(e)),
             };
-            let event_kind = parsed_value
-                .get("event_kind")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_owned())
-                .ok_or_else(|| ChainReadError::MalformedRecord {
-                    path: path.clone(),
-                    line_no: self.line_no,
-                    reason: "missing or non-string `event_kind`".to_owned(),
-                });
-            let event_kind = match event_kind {
-                Ok(s) => s,
-                Err(e) => return Some(Err(e)),
-            };
-            let this_prev_sha = parsed_value
-                .get("prev_sha256")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_owned())
-                .ok_or_else(|| ChainReadError::MalformedRecord {
-                    path: path.clone(),
-                    line_no: self.line_no,
-                    reason: "missing or non-string `prev_sha256`".to_owned(),
-                });
-            let this_prev_sha = match this_prev_sha {
-                Ok(s) => s,
-                Err(e) => return Some(Err(e)),
-            };
+            let seq_u64 = record.seq;
+            let this_prev_sha = record.prev_sha256.clone();
 
             // Sequence-gap check: the very first record (line_no=1)
             // is the genesis record and must carry seq=0; subsequent
@@ -483,39 +447,182 @@ impl<'a> Iterator for ChainRecordIter<'a> {
                     }));
                 }
             }
-            self.expected_prev_sha256 = Some(line_sha256.clone());
-
-            let emitted_at = parsed_value.get("emitted_at").and_then(|v| v.as_i64());
-            let session_id = parsed_value
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_owned());
-            let task_id = parsed_value
-                .get("task_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_owned());
-            let initiative_id = parsed_value
-                .get("initiative_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_owned());
-
-            let raw_line = trimmed_line_no_nl.to_owned();
-            return Some(Ok(ChainRecord {
-                seq: seq_u64,
-                event_kind,
-                prev_sha256: this_prev_sha,
-                emitted_at,
-                session_id,
-                task_id,
-                initiative_id,
-                line_no: self.line_no,
-                segment_path: path,
-                line_sha256,
-                raw_line,
-                parsed_value: Some(parsed_value),
-            }));
+            self.expected_prev_sha256 = Some(record.line_sha256.clone());
+            return Some(Ok(record));
         }
     }
+}
+
+/// Newest-first iterator over audit records.
+///
+/// Holds at most one segment's decoded line list in memory at a
+/// time. Segment files are append-only JSONL, so this can service
+/// dashboard tail pages by reading the latest segment first instead
+/// of walking from genesis on every request.
+pub struct ChainRecordDescIter<'a> {
+    owner: &'a ChainReader,
+    next_seg_idx: usize,
+    current: std::vec::IntoIter<Result<ChainRecord, ChainReadError>>,
+}
+
+impl<'a> Iterator for ChainRecordDescIter<'a> {
+    type Item = Result<ChainRecord, ChainReadError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(item) = self.current.next() {
+                return Some(item);
+            }
+            if self.next_seg_idx == 0 {
+                return None;
+            }
+            self.next_seg_idx -= 1;
+            let (_, path) = &self.owner.segments[self.next_seg_idx];
+            match load_segment_records_desc(path) {
+                Ok(records) => {
+                    self.current = records.into_iter();
+                }
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
+}
+
+fn load_segment_records_desc(
+    path: &Path,
+) -> Result<Vec<Result<ChainRecord, ChainReadError>>, ChainReadError> {
+    let mut f = File::open(path).map_err(|e| ChainReadError::SegmentOpen {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes)
+        .map_err(|e| ChainReadError::SegmentIo {
+            path: path.to_path_buf(),
+            line_no: 0,
+            source: e,
+        })?;
+
+    let mut lines: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut start = 0usize;
+    let mut line_no = 0u64;
+    for (idx, byte) in bytes.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let raw = &bytes[start..=idx];
+        start = idx + 1;
+        if trimmed_line_bytes(raw).is_empty() {
+            continue;
+        }
+        line_no += 1;
+        lines.push((line_no, raw.to_vec()));
+    }
+    if start < bytes.len() {
+        let raw = &bytes[start..];
+        if !trimmed_line_bytes(raw).is_empty() {
+            line_no += 1;
+            lines.push((line_no, raw.to_vec()));
+        }
+    }
+
+    let mut out = Vec::with_capacity(lines.len());
+    for (line_no, raw) in lines.into_iter().rev() {
+        out.push(parse_record_line(path.to_path_buf(), line_no, &raw));
+    }
+    Ok(out)
+}
+
+fn trimmed_line_bytes(line: &[u8]) -> &[u8] {
+    let without_lf = line.strip_suffix(b"\n").unwrap_or(line);
+    without_lf.strip_suffix(b"\r").unwrap_or(without_lf)
+}
+
+fn parse_record_line(
+    path: PathBuf,
+    line_no: u64,
+    line_bytes: &[u8],
+) -> Result<ChainRecord, ChainReadError> {
+    // SHA-256 of THE RAW LINE BYTES INCLUDING the trailing
+    // newline. This matches `writer.rs`'s canonicalisation
+    // (a `\n`-terminated UTF-8 line) — drift here is a
+    // chain-break bug.
+    let line_sha256 = {
+        let mut h = Sha256::new();
+        h.update(line_bytes);
+        hex::encode(h.finalize())
+    };
+
+    let raw_line = std::str::from_utf8(trimmed_line_bytes(line_bytes))
+        .map_err(|e| ChainReadError::MalformedRecord {
+            path: path.clone(),
+            line_no,
+            reason: format!("UTF-8 parse: {e}"),
+        })?
+        .to_owned();
+
+    let parsed_value: serde_json::Value =
+        serde_json::from_str(&raw_line).map_err(|e| ChainReadError::MalformedRecord {
+            path: path.clone(),
+            line_no,
+            reason: format!("JSON parse: {e}"),
+        })?;
+
+    let seq_u64 = parsed_value
+        .get("seq")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| ChainReadError::MalformedRecord {
+            path: path.clone(),
+            line_no,
+            reason: "missing or non-numeric `seq`".to_owned(),
+        })?;
+    let event_kind = parsed_value
+        .get("event_kind")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
+        .ok_or_else(|| ChainReadError::MalformedRecord {
+            path: path.clone(),
+            line_no,
+            reason: "missing or non-string `event_kind`".to_owned(),
+        })?;
+    let this_prev_sha = parsed_value
+        .get("prev_sha256")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
+        .ok_or_else(|| ChainReadError::MalformedRecord {
+            path: path.clone(),
+            line_no,
+            reason: "missing or non-string `prev_sha256`".to_owned(),
+        })?;
+
+    let emitted_at = parsed_value.get("emitted_at").and_then(|v| v.as_i64());
+    let session_id = parsed_value
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+    let task_id = parsed_value
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+    let initiative_id = parsed_value
+        .get("initiative_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned());
+
+    Ok(ChainRecord {
+        seq: seq_u64,
+        event_kind,
+        prev_sha256: this_prev_sha,
+        emitted_at,
+        session_id,
+        task_id,
+        initiative_id,
+        line_no,
+        segment_path: path,
+        line_sha256,
+        raw_line,
+        parsed_value: Some(parsed_value),
+    })
 }
 
 /// Quick chain-check verdict — used by `raxis status` to summarise
@@ -749,6 +856,19 @@ mod tests {
         assert_eq!(recs[1].event_kind, "KernelStarted");
         // The line_sha of record[0] must equal record[1].prev_sha256.
         assert_eq!(recs[0].line_sha256, recs[1].prev_sha256);
+    }
+
+    #[test]
+    fn records_desc_walks_newest_first_for_tail_pagination() {
+        let tmp = TempDir::new().unwrap();
+        write_four_record_chain(tmp.path());
+        let reader = ChainReader::open(tmp.path()).unwrap();
+        let recs: Vec<_> = reader.records_desc().collect::<Result<_, _>>().unwrap();
+        assert_eq!(
+            recs.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![3, 2, 1, 0]
+        );
+        assert_eq!(recs[3].line_sha256, recs[2].prev_sha256);
     }
 
     #[test]

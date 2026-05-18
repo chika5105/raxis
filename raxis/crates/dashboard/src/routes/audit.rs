@@ -37,14 +37,27 @@ pub struct ListQuery {
     /// Cursor — return entries strictly older than this seq.
     /// Omit on the first page; pass the previous page's last
     /// `seq` to get the next page.
-    #[serde(default)]
+    #[serde(default, alias = "cursor_seq")]
     pub cursor: Option<u64>,
     /// Page size; clamped to `[1, 500]`. Default 100.
     #[serde(default = "default_limit")]
     pub limit: u32,
-    /// Filter by initiative id.
+    /// Highlight rows for this initiative id without filtering
+    /// unrelated kernel-chain rows.
+    #[serde(default)]
+    pub highlight_initiative_id: Option<String>,
+    /// Deprecated alias retained for old dashboard URLs. This is
+    /// highlight-only now; the audit chain remains kernel-wide.
     #[serde(default)]
     pub initiative_id: Option<String>,
+}
+
+impl ListQuery {
+    fn highlight_initiative_id(&self) -> Option<&str> {
+        self.highlight_initiative_id
+            .as_deref()
+            .or(self.initiative_id.as_deref())
+    }
 }
 
 fn default_limit() -> u32 {
@@ -64,7 +77,7 @@ where
     let rows =
         state
             .data
-            .list_audit(q.cursor, q.limit.clamp(1, 500), q.initiative_id.as_deref())?;
+            .list_audit(q.cursor, q.limit.clamp(1, 500), q.highlight_initiative_id())?;
     Ok(Json(rows))
 }
 
@@ -207,5 +220,18 @@ mod tests {
     fn chain_status_query_parses_reverify_true() {
         let q: ChainStatusQuery = serde_json::from_str(r#"{"reverify":true}"#).unwrap();
         assert!(q.reverify);
+    }
+
+    #[test]
+    fn list_query_accepts_cursor_seq_alias() {
+        let q: ListQuery = serde_json::from_str(r#"{"cursor_seq":42,"limit":10}"#).unwrap();
+        assert_eq!(q.cursor, Some(42));
+    }
+
+    #[test]
+    fn list_query_treats_legacy_initiative_id_as_highlight() {
+        let q: ListQuery =
+            serde_json::from_str(r#"{"initiative_id":"init-a","limit":10}"#).unwrap();
+        assert_eq!(q.highlight_initiative_id(), Some("init-a"));
     }
 }

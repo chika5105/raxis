@@ -500,12 +500,18 @@ export const dashboardApi = {
 
   audit: {
     list: (
-      params: { cursor?: number; initiative_id?: string; limit?: number } = {},
+      params: {
+        cursor?: number;
+        highlight_initiative_id?: string;
+        limit?: number;
+      } = {},
       signal?: AbortSignal,
     ): Promise<AuditEntryView[]> => {
       const qs = new URLSearchParams();
       if (params.cursor !== undefined) qs.set("cursor_seq", String(params.cursor));
-      if (params.initiative_id) qs.set("initiative_id", params.initiative_id);
+      if (params.highlight_initiative_id) {
+        qs.set("highlight_initiative_id", params.highlight_initiative_id);
+      }
       if (params.limit !== undefined) qs.set("limit", String(params.limit));
       const suffix = qs.toString() ? `?${qs}` : "";
       return apiFetch<AuditEntryView[]>(`/api/audit${suffix}`, signal ? { signal } : {});

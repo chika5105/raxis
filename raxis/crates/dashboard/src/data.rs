@@ -1204,6 +1204,50 @@ pub struct AuditEntryView {
     pub at: u64,
     /// Full structured payload (JSON).
     pub payload: serde_json::Value,
+    /// True when the row matches the caller's highlight selector.
+    ///
+    /// This is a presentation hint only. `/api/audit` remains a
+    /// kernel-wide chain view; initiative focus must not remove
+    /// unrelated rows from the forensic ledger.
+    #[serde(default)]
+    pub is_highlighted: bool,
+    /// Fields that caused [`Self::is_highlighted`] to be true.
+    /// Kept explicit so the frontend can explain ambiguous rows
+    /// without re-parsing payload JSON in the render hot path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub highlight_reasons: Vec<String>,
+}
+
+impl AuditEntryView {
+    /// Recompute initiative-highlight metadata for this row.
+    ///
+    /// The audit row's top-level `initiative_id` is the canonical
+    /// relation. We also look at `payload.initiative_id` as a
+    /// compatibility bridge for older or specialised audit events
+    /// that carried the initiative only inside their payload.
+    pub fn apply_initiative_highlight(&mut self, highlight_initiative_id: Option<&str>) {
+        self.is_highlighted = false;
+        self.highlight_reasons.clear();
+
+        let Some(want) = highlight_initiative_id.filter(|s| !s.is_empty()) else {
+            return;
+        };
+
+        if self.initiative_id.as_deref() == Some(want) {
+            self.highlight_reasons
+                .push("audit.initiative_id".to_owned());
+        }
+        if self.payload.get("initiative_id").and_then(|v| v.as_str()) == Some(want)
+            && !self
+                .highlight_reasons
+                .iter()
+                .any(|r| r == "payload.initiative_id")
+        {
+            self.highlight_reasons
+                .push("payload.initiative_id".to_owned());
+        }
+        self.is_highlighted = !self.highlight_reasons.is_empty();
+    }
 }
 
 /// Snapshot of the policy bundle the dashboard surfaces (read).
@@ -2051,11 +2095,16 @@ pub trait DashboardData: Send + Sync + 'static {
     /// Paginated audit. `cursor_seq` selects the chain
     /// sequence number to start from (newest first); `limit`
     /// caps the page size at ≤ 500.
+    ///
+    /// `highlight_initiative_id` is presentation metadata only:
+    /// implementations MUST return the kernel-wide audit chain and
+    /// mark matching rows via `AuditEntryView::is_highlighted`
+    /// instead of filtering unrelated rows out of the forensic view.
     fn list_audit(
         &self,
         cursor_seq: Option<u64>,
         limit: u32,
-        initiative_id: Option<&str>,
+        highlight_initiative_id: Option<&str>,
     ) -> Result<Vec<AuditEntryView>, ApiError>;
 
     /// Operator inbox: union of pending escalations + reviews
@@ -2768,7 +2817,7 @@ impl DashboardData for InMemoryDashboardData {
         &self,
         cursor_seq: Option<u64>,
         limit: u32,
-        initiative_id: Option<&str>,
+        highlight_initiative_id: Option<&str>,
     ) -> Result<Vec<AuditEntryView>, ApiError> {
         let g = self.inner.read();
         let mut out: Vec<AuditEntryView> = g
@@ -2778,11 +2827,11 @@ impl DashboardData for InMemoryDashboardData {
                 Some(c) => e.seq < c,
                 None => true,
             })
-            .filter(|e| match initiative_id {
-                Some(i) => e.initiative_id.as_deref() == Some(i),
-                None => true,
-            })
             .cloned()
+            .map(|mut e| {
+                e.apply_initiative_highlight(highlight_initiative_id);
+                e
+            })
             .collect();
         out.sort_by(|a, b| b.seq.cmp(&a.seq));
         out.truncate(limit.min(500) as usize);
@@ -3817,6 +3866,8 @@ mod tests {
                 session_id: None,
                 at: seq,
                 payload: serde_json::json!({"seq": seq}),
+                is_highlighted: false,
+                highlight_reasons: Vec::new(),
             });
         }
         let page1 = d.list_audit(None, 4, None).unwrap();
@@ -3826,6 +3877,34 @@ mod tests {
             .list_audit(Some(page1.last().unwrap().seq), 4, None)
             .unwrap();
         assert_eq!(page2.first().unwrap().seq, 6);
+    }
+
+    #[test]
+    fn list_audit_initiative_focus_highlights_without_filtering_chain() {
+        let d = InMemoryDashboardData::new();
+        for (seq, initiative_id) in [(1, "init-a"), (2, "init-b")] {
+            d.push_audit(AuditEntryView {
+                seq,
+                event_id: format!("ev{seq}"),
+                event_kind: "InitiativeCreated".into(),
+                initiative_id: Some(initiative_id.into()),
+                task_id: None,
+                session_id: None,
+                at: seq,
+                payload: serde_json::json!({}),
+                is_highlighted: false,
+                highlight_reasons: Vec::new(),
+            });
+        }
+
+        let rows = d.list_audit(None, 10, Some("init-a")).unwrap();
+        assert_eq!(rows.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![2, 1]);
+        assert!(!rows[0].is_highlighted);
+        assert!(rows[1].is_highlighted);
+        assert_eq!(
+            rows[1].highlight_reasons,
+            vec!["audit.initiative_id".to_owned()]
+        );
     }
 
     #[test]

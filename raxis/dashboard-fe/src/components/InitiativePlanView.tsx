@@ -15,6 +15,7 @@ import {
   shortFingerprint,
   shortSha,
 } from "@/lib/format";
+import { ensureTomlLanguage } from "@/lib/monaco-toml";
 import { useTheme } from "@/lib/theme-context";
 import type { ApprovalStatus, InitiativePlanView as PlanWire } from "@/types/api";
 
@@ -233,12 +234,8 @@ export function PlanLoadedBody({ plan, monacoTheme }: PlanLoadedBodyProps) {
       >
         <Editor
           height="100%"
-          // Monaco's bundled languages include `ini` but not
-          // `toml`; the policy editor uses `"toml"` and the
-          // Monaco loader resolves it via `monaco-textmate`-
-          // style fallback. Same string here keeps the two
-          // editors visually aligned.
           defaultLanguage="toml"
+          beforeMount={ensureTomlLanguage}
           theme={monacoTheme}
           value={plan.submitted_toml}
           options={{

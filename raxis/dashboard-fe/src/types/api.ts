@@ -645,6 +645,11 @@ export interface AuditEntryView {
   session_id: string | null;
   at: number;
   payload: unknown;
+  /// Presentation hint from the backend. True when the row matches
+  /// the current highlight selector; the API still returns the
+  /// kernel-wide chain.
+  is_highlighted?: boolean;
+  highlight_reasons?: string[];
 }
 
 // Status banner / per-row icons for the audit chain view.

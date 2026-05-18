@@ -1864,30 +1864,10 @@ impl DashboardData for KernelDashboardData {
         &self,
         cursor_seq: Option<u64>,
         limit: u32,
-        initiative_id: Option<&str>,
+        highlight_initiative_id: Option<&str>,
     ) -> Result<Vec<AuditEntryView>, ApiError> {
-        // Walk the audit chain in segment order (oldest → newest)
-        // and keep only the most recent `cap` records that match
-        // the caller's filter, in a bounded ring buffer. Memory
-        // is O(cap) ≤ 500 entries regardless of how long the
-        // chain is, and the iteration is wall-bounded by
-        // `MAX_AUDIT_WALK_RECORDS` so a degenerate chain (e.g.
-        // millions of rows after sustained e2e churn) cannot
-        // pin a request thread for unbounded time.
-        //
-        // Why a ring buffer instead of "collect everything, sort,
-        // paginate": the previous implementation accumulated
-        // every matched record into a Vec, sorted by seq desc,
-        // then sliced. That is O(N) memory + O(N log N) CPU per
-        // request — fine for a 100-event chain, fatal during the
-        // live e2e where the chain grows monotonically and many
-        // operators may hit `/api/audit` concurrently.
-        const MAX_AUDIT_WALK_RECORDS: usize = 200_000;
-
         // INV-OBSERVABILITY-DATAPLANE-LATENCY-07 — the audit
-        // walk is bounded but not free; the dashboard's audit
-        // page can fan out to a 200k-record scan on a long-
-        // lived chain. Tag the entire walk under
+        // tail read is bounded but not free; tag it under
         // `audit_chain_walk` so a slow chain lights up its own
         // series rather than being hidden inside the generic
         // `dashboard_http_request` duration histogram.
@@ -1905,35 +1885,16 @@ impl DashboardData for KernelDashboardData {
                     return Ok(Vec::new());
                 }
 
-                // Bounded sliding window of "newest matched records seen
-                // so far that are strictly older than the cursor".
-                let mut tail: std::collections::VecDeque<AuditEntryView> =
-                    std::collections::VecDeque::with_capacity(cap);
-                let mut walked: usize = 0;
-                for rec in reader.records() {
-                    walked += 1;
-                    if walked > MAX_AUDIT_WALK_RECORDS {
-                        // Hard cap: stop walking. The caller still gets
-                        // the newest matching records seen so far. The
-                        // structured warn line lets ops know the chain
-                        // grew past the per-request budget so they can
-                        // rotate / archive.
-                        eprintln!(
-                            "{{\"level\":\"warn\",\
-                      \"event\":\"dashboard_audit_walk_capped\",\
-                      \"limit_records\":{MAX_AUDIT_WALK_RECORDS}}}"
-                        );
-                        break;
-                    }
+                // Fast newest-first pagination. The audit chain is
+                // still kernel-wide: initiative focus annotates rows
+                // only, never filters unrelated events out of the
+                // forensic ledger.
+                let mut out = Vec::with_capacity(cap);
+                for rec in reader.records_desc() {
                     let rec = match rec {
                         Ok(r) => r,
                         Err(_) => continue, // tolerate one malformed line per spec
                     };
-                    if let Some(want) = initiative_id {
-                        if rec.initiative_id.as_deref() != Some(want) {
-                            continue;
-                        }
-                    }
                     // Cursor filter: caller already saw everything ≥ cursor.
                     if let Some(c) = cursor_seq {
                         if rec.seq >= c {
@@ -1945,7 +1906,7 @@ impl DashboardData for KernelDashboardData {
                         .as_ref()
                         .and_then(|v| v.get("payload").cloned())
                         .unwrap_or(serde_json::Value::Null);
-                    let entry = AuditEntryView {
+                    let mut entry = AuditEntryView {
                         seq: rec.seq,
                         event_id: rec
                             .parsed_value
@@ -1960,18 +1921,16 @@ impl DashboardData for KernelDashboardData {
                         session_id: rec.session_id,
                         at: rec.emitted_at.unwrap_or(0).max(0) as u64,
                         payload,
+                        is_highlighted: false,
+                        highlight_reasons: Vec::new(),
                     };
-                    if tail.len() == cap {
-                        // Drop the oldest matched record we've buffered;
-                        // it falls outside the page-of-newest we'll return.
-                        tail.pop_front();
+                    entry.apply_initiative_highlight(highlight_initiative_id);
+                    out.push(entry);
+                    if out.len() == cap {
+                        break;
                     }
-                    tail.push_back(entry);
                 }
-                // Newest first.
-                let mut matched: Vec<AuditEntryView> = tail.into_iter().collect();
-                matched.reverse();
-                Ok(matched)
+                Ok(out)
             },
         )
     }
@@ -2056,6 +2015,8 @@ impl DashboardData for KernelDashboardData {
                         session_id: r.session_id,
                         at: r.created_at,
                         payload,
+                        is_highlighted: false,
+                        highlight_reasons: Vec::new(),
                     });
                 }
             }
@@ -2077,6 +2038,8 @@ impl DashboardData for KernelDashboardData {
                         "reason":          e.reason,
                         "action_required": e.action_required,
                     }),
+                    is_highlighted: false,
+                    highlight_reasons: Vec::new(),
                 });
             }
         }

@@ -9,6 +9,7 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner, Spinner } from "@/components/Spinner";
 import { fmtAbsolute, shortFingerprint, shortSha } from "@/lib/format";
 import { getStoredProfile } from "@/lib/auth-store";
+import { ensureTomlLanguage } from "@/lib/monaco-toml";
 import { useTheme } from "@/lib/theme-context";
 import type { PolicyAdvancement } from "@/types/api";
 
@@ -176,6 +177,7 @@ export function PolicyPage() {
               <Editor
                 height="100%"
                 defaultLanguage="toml"
+                beforeMount={ensureTomlLanguage}
                 theme={monacoTheme}
                 value={draft ?? ""}
                 onChange={(v) => setDraft(v ?? "")}

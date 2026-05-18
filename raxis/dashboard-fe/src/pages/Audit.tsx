@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
+import clsx from "clsx";
 
 import { dashboardApi } from "@/api/client";
 import { ChainStatusBanner } from "@/components/ChainStatusBanner";
@@ -24,30 +25,63 @@ const PAGE_SIZE = 50;
 
 export function AuditPage() {
   const [params, setParams] = useSearchParams();
-  const initiativeId = params.get("initiative_id") ?? undefined;
+  const highlightInitiativeId =
+    params.get("highlight_initiative_id") ??
+    params.get("initiative_id") ??
+    undefined;
+  const dimUnrelated = (params.get("dim") ?? "1") !== "0";
   const [expanded, setExpanded] = useState<string | null>(null);
-  // Controlled input mirroring the URL's initiative_id filter.
+  // Controlled input mirroring the URL's initiative highlight.
   // The previous implementation used `defaultValue` which only
   // seeds the field on first mount — clicking the "clear" link
   // wiped the URL param but left whatever text the operator
   // had typed, so the visible input lied about the active
-  // filter. Using a controlled state synced from the URL keeps
-  // the input and the filter in lockstep regardless of which
+  // focus. Using a controlled state synced from the URL keeps
+  // the input and the highlight in lockstep regardless of which
   // surface (input, "clear", browser back/forward) drove the
   // change.
-  const [filterDraft, setFilterDraft] = useState(initiativeId ?? "");
+  const [highlightDraft, setHighlightDraft] = useState(highlightInitiativeId ?? "");
   useEffect(() => {
-    setFilterDraft(initiativeId ?? "");
-  }, [initiativeId]);
+    setHighlightDraft(highlightInitiativeId ?? "");
+  }, [highlightInitiativeId]);
+
+  const applyHighlight = (raw: string) => {
+    const v = raw.trim();
+    const sp = new URLSearchParams(params);
+    sp.delete("initiative_id");
+    if (v) sp.set("highlight_initiative_id", v);
+    else {
+      sp.delete("highlight_initiative_id");
+      sp.delete("dim");
+    }
+    setParams(sp);
+  };
+
+  const clearHighlight = () => {
+    const sp = new URLSearchParams(params);
+    sp.delete("initiative_id");
+    sp.delete("highlight_initiative_id");
+    sp.delete("dim");
+    setParams(sp);
+  };
+
+  const setDimUnrelated = (checked: boolean) => {
+    const sp = new URLSearchParams(params);
+    if (checked) sp.delete("dim");
+    else sp.set("dim", "0");
+    setParams(sp, { replace: true });
+  };
 
   const q = useInfiniteQuery({
-    queryKey: ["audit", { initiativeId }],
+    queryKey: ["audit", { highlightInitiativeId }],
     queryFn: ({ pageParam, signal }) =>
       dashboardApi.audit.list(
         {
           limit: PAGE_SIZE,
           ...(pageParam !== undefined ? { cursor: pageParam } : {}),
-          ...(initiativeId ? { initiative_id: initiativeId } : {}),
+          ...(highlightInitiativeId
+            ? { highlight_initiative_id: highlightInitiativeId }
+            : {}),
         },
         signal,
       ),
@@ -56,10 +90,14 @@ export function AuditPage() {
       last.length === PAGE_SIZE ? last[last.length - 1].seq : undefined,
   });
 
+  const all = useMemo(() => q.data?.pages.flat() ?? [], [q.data]);
+  const highlightedCount = useMemo(
+    () => all.filter((a) => rowHighlighted(a, highlightInitiativeId)).length,
+    [all, highlightInitiativeId],
+  );
+
   if (q.isPending) return <PageSpinner />;
   if (q.error) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
-
-  const all = q.data.pages.flat();
 
   return (
     <div className="space-y-4">
@@ -70,36 +108,55 @@ export function AuditPage() {
             Tamper-evident, append-only record of every kernel state change.
           </p>
         </div>
-        <div className="flex gap-2">
+        <form
+          className="flex items-center gap-2 flex-wrap justify-end"
+          onSubmit={(e) => {
+            e.preventDefault();
+            applyHighlight(highlightDraft);
+          }}
+        >
           <input
             className="input w-72"
-            placeholder="Filter by initiative id (press Enter)…"
-            value={filterDraft}
-            onChange={(e) => setFilterDraft(e.target.value)}
+            placeholder="Initiative id"
+            value={highlightDraft}
+            aria-label="Highlight initiative id"
+            onChange={(e) => setHighlightDraft(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
+              if (e.key === "Escape") {
                 e.preventDefault();
-                const v = filterDraft.trim();
-                if (v) setParams({ initiative_id: v });
-                else setParams({});
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                setFilterDraft(initiativeId ?? "");
+                setHighlightDraft(highlightInitiativeId ?? "");
               }
             }}
           />
-        </div>
+          <button type="submit" className="btn">
+            Highlight
+          </button>
+        </form>
       </header>
 
       <ChainStatusBanner />
 
-      {initiativeId && (
-        <div className="text-xs text-ink-muted">
-          Filtered to initiative <Mono pill>{initiativeId}</Mono>{" "}
+      {highlightInitiativeId && (
+        <div className="card px-3 py-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+          <span className="text-ink-muted">
+            Kernel chain: <span className="tabular text-ink">{all.length}</span>{" "}
+            loaded ·{" "}
+            <span className="tabular text-accent">{highlightedCount}</span>{" "}
+            highlighted for <Mono pill>{highlightInitiativeId}</Mono>
+          </span>
+          <label className="inline-flex items-center gap-2 text-ink-muted">
+            <input
+              type="checkbox"
+              className="accent-accent"
+              checked={dimUnrelated}
+              onChange={(e) => setDimUnrelated(e.currentTarget.checked)}
+            />
+            Dim unrelated
+          </label>
           <button
             type="button"
-            onClick={() => setParams({})}
-            className="text-accent hover:underline ml-2"
+            onClick={clearHighlight}
+            className="text-accent hover:underline"
           >
             clear
           </button>
@@ -112,8 +169,13 @@ export function AuditPage() {
         <div className="card p-0 overflow-hidden">
           <ul className="divide-y divide-edge/50">
             {all.map((a) => {
-              const isOpen = expanded === a.event_id;
-              const toggle = () => setExpanded(isOpen ? null : a.event_id);
+              const rowId = String(a.seq);
+              const rowKey = a.event_id || `seq-${a.seq}`;
+              const isOpen = expanded === rowKey;
+              const toggle = () => setExpanded(isOpen ? null : rowKey);
+              const highlighted = rowHighlighted(a, highlightInitiativeId);
+              const dimmed =
+                !!highlightInitiativeId && dimUnrelated && !highlighted;
               const isFailure = isFailureAuditEvent(a.event_kind, a.payload);
               const reason = isFailure
                 ? failureFromAuditEvent(a.event_kind, a.payload, {
@@ -128,12 +190,22 @@ export function AuditPage() {
               // (interactive descendants), so we use
               // role="button" + keyboard handlers on a <div>.
               return (
-                <li key={a.event_id}>
+                <li
+                  key={rowKey}
+                  className={clsx(
+                    "border-l-2 transition-opacity",
+                    highlighted
+                      ? "border-accent bg-accent/5"
+                      : "border-transparent",
+                    dimmed && "opacity-45 hover:opacity-90",
+                  )}
+                  data-highlighted={highlighted || undefined}
+                >
                   <div
                     role="button"
                     tabIndex={0}
                     aria-expanded={isOpen}
-                    aria-controls={`audit-payload-${a.event_id}`}
+                    aria-controls={`audit-payload-${rowId}`}
                     onClick={toggle}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" || e.key === " ") {
@@ -149,9 +221,17 @@ export function AuditPage() {
                     <span className={auditBadgeClasses(a.event_kind)}>
                       {a.event_kind}
                     </span>
+                    {highlighted && (
+                      <span
+                        className="badge bg-accent/10 border-accent/30 text-accent text-[10px]"
+                        title={(a.highlight_reasons ?? []).join(", ")}
+                      >
+                        match
+                      </span>
+                    )}
                     {a.initiative_id && (
                       <Link
-                        to={`/initiatives/${a.initiative_id}`}
+                        to={`/initiatives/${encodeURIComponent(a.initiative_id)}`}
                         onClick={(e) => e.stopPropagation()}
                         className="text-xs text-accent hover:underline font-mono"
                       >
@@ -160,7 +240,7 @@ export function AuditPage() {
                     )}
                     {a.task_id && (
                       <Link
-                        to={`/tasks/${a.task_id}`}
+                        to={`/tasks/${encodeURIComponent(a.task_id)}`}
                         onClick={(e) => e.stopPropagation()}
                         className="text-[11px] text-ink-muted hover:text-accent font-mono"
                       >
@@ -184,7 +264,7 @@ export function AuditPage() {
                   </div>
                   {isOpen && (
                     <div
-                      id={`audit-payload-${a.event_id}`}
+                      id={`audit-payload-${rowId}`}
                       className="px-4 pb-3 pt-1 bg-panel space-y-2"
                     >
                       <div className="text-[11px] text-ink-subtle">
@@ -196,9 +276,7 @@ export function AuditPage() {
                           heading={`Failure event · #${a.seq}`}
                         />
                       )}
-                      <pre className="text-[11px] font-mono text-ink-muted overflow-x-auto scroll-thin max-h-96">
-                        {JSON.stringify(a.payload, null, 2)}
-                      </pre>
+                      <JsonPayload payload={a.payload} />
                     </div>
                   )}
                 </li>
@@ -220,5 +298,34 @@ export function AuditPage() {
         </div>
       )}
     </div>
+  );
+}
+
+function rowHighlighted(
+  row: AuditEntryView,
+  highlightInitiativeId: string | undefined,
+): boolean {
+  if (!highlightInitiativeId) return false;
+  return (
+    row.is_highlighted === true ||
+    row.initiative_id === highlightInitiativeId ||
+    payloadInitiativeId(row.payload) === highlightInitiativeId
+  );
+}
+
+function payloadInitiativeId(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const value = (payload as Record<string, unknown>).initiative_id;
+  return typeof value === "string" ? value : null;
+}
+
+function JsonPayload({ payload }: { payload: unknown }) {
+  const body = useMemo(() => JSON.stringify(payload, null, 2), [payload]);
+  return (
+    <pre className="text-[11px] font-mono text-ink-muted overflow-x-auto scroll-thin max-h-96">
+      {body}
+    </pre>
   );
 }
