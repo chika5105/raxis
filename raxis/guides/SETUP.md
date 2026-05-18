@@ -62,6 +62,11 @@ The wrapper exists because these were the easy-to-miss setup hurdles:
   package-manager work, export, tar extraction, and large cpio packing.
   The bake now emits structured `bake_progress` and
   `bake_role_progress` lines before those long phases.
+- Live e2e source-tree runs auto-build the latest release
+  `raxis-gateway` before policy injection, so operators do not need
+  to export `RAXIS_GATEWAY_BINARY` or risk pointing at stale gateway
+  bits. Set `RAXIS_E2E_SKIP_GATEWAY_AUTO_BUILD=1` only for packaged
+  binary validation.
 - A user-writable `RAXIS_INSTALL_DIR` is easier for development than
   `/usr/local/lib/raxis`, which may require elevated permissions.
 

@@ -295,14 +295,20 @@ binary is absent, the gate is silently skipped and live-e2e runs
 take the fast-path admission — `INV-WITNESS-VERIFIER-LIVE-E2E-
 EXERCISED-01` coverage is then DROPPED for that run.
 
-The default `cargo build --workspace --all-targets` already
-builds `raxis-verifier-no-secrets` (it is a workspace member);
-the explicit invocation is only required when iterating on a
-narrower build:
+The live-e2e harness now auto-builds the latest release
+`raxis-gateway` before injecting `[gateway].binary_path` into the
+bootstrapped policy. This prevents the old failure mode where
+`RAXIS_GATEWAY_BINARY` pointed at a stale binary. Set
+`RAXIS_E2E_SKIP_GATEWAY_AUTO_BUILD=1` only when validating a
+packaged/system-installed gateway, and pair it with an explicit
+`RAXIS_GATEWAY_BINARY=/absolute/path/to/raxis-gateway`.
+
+The default `cargo build --workspace --all-targets` already builds
+`raxis-verifier-no-secrets` (it is a workspace member); the explicit
+verifier invocation is only required when iterating on a narrower
+build:
 
 ```bash
-# Alongside the gateway build the live-e2e harness expects:
-cargo build --release -p raxis-gateway
 cargo build --release -p raxis-verifier-no-secrets
 ```
 

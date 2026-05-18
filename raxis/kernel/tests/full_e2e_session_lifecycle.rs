@@ -82,9 +82,9 @@
 //! # 3. Provide GCP application-default credentials (the GCP
 //! #    credential proxy reads these for upstream IAM tokens).
 //! gcloud auth application-default login
-//! # 4. Build the gateway binary and export its absolute path.
-//! cargo build -p raxis-gateway --release
-//! export RAXIS_GATEWAY_BINARY="$(pwd)/raxis/target/release/raxis-gateway"
+//! # 4. The harness auto-builds the latest release raxis-gateway
+//! #    before policy injection. Set RAXIS_E2E_SKIP_GATEWAY_AUTO_BUILD=1
+//! #    only for packaged-binary validation.
 //! # 5. Point at the install root that holds canonical microVM images
 //! #    + signed manifests (orchestrator-core, executor-starter,
 //! #    reviewer-core, all stamped with the kernel build's signing
@@ -98,6 +98,7 @@
 //! ```
 
 mod common;
+mod extended_e2e_support;
 
 use std::collections::BTreeSet;
 use std::os::unix::net::UnixStream;
@@ -435,39 +436,15 @@ fn require_gcp_adc() {
     );
 }
 
-/// `RAXIS_GATEWAY_BINARY` env var must point to a built `raxis-gateway`
-/// executable. The kernel `Command::new(binary_path)` it (per
-/// `[gateway].binary_path` in policy.toml) the first time a planner
-/// issues a `FetchRequest`. Without it the gateway supervisor will
-/// emit `GatewayQuarantined` after the back-off cap and the planner
-/// will hang on its first LLM call.
-/// Why an env var rather than `cargo build -p raxis-gateway` from
-/// inside the test: spawning a recursive `cargo build` would
-/// contend with the parent `cargo test --workspace` build lock and
-/// can wedge the entire test run for tens of minutes (same reason
-/// the harness's `build_and_locate_kernel` reads `CARGO_BIN_EXE_*`
-/// instead of shelling out).
+/// Resolve the gateway binary for `[gateway].binary_path`.
+///
+/// Source-tree runs auto-build `target/release/raxis-gateway` before
+/// policy injection so a stale operator-provided env var cannot make
+/// the kernel supervise old gateway bits. Packaged-binary validation
+/// can opt out with `RAXIS_E2E_SKIP_GATEWAY_AUTO_BUILD=1` and an
+/// explicit `RAXIS_GATEWAY_BINARY`.
 fn require_gateway_binary() -> PathBuf {
-    let raw = std::env::var("RAXIS_GATEWAY_BINARY").unwrap_or_else(|_| {
-        panic!(
-            "RAXIS_GATEWAY_BINARY env var is required; build the gateway and \
-             export the path:\n  \
-             cargo build -p raxis-gateway --release\n  \
-             export RAXIS_GATEWAY_BINARY=$(pwd)/target/release/raxis-gateway",
-        );
-    });
-    let p = PathBuf::from(&raw);
-    assert!(
-        p.is_absolute(),
-        "RAXIS_GATEWAY_BINARY must be an absolute path (policy validates \
-         `[gateway] binary_path` as absolute); got {raw:?}",
-    );
-    assert!(
-        p.exists(),
-        "RAXIS_GATEWAY_BINARY={raw:?} does not exist; build the gateway:\n  \
-         cargo build -p raxis-gateway --release",
-    );
-    p
+    extended_e2e_support::kernel_driver::require_gateway_binary()
 }
 
 /// `RAXIS_INSTALL_DIR/images/` must contain the three signed canonical

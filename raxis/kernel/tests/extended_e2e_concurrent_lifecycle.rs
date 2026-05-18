@@ -507,20 +507,7 @@ fn require_gcp_adc() {
 }
 
 fn require_gateway_binary() -> PathBuf {
-    let raw = std::env::var("RAXIS_GATEWAY_BINARY").unwrap_or_else(|_| {
-        panic!(
-            "RAXIS_GATEWAY_BINARY env var is required; build the gateway and \
-         export the path:\n  cargo build -p raxis-gateway --release\n  \
-         export RAXIS_GATEWAY_BINARY=$(pwd)/target/release/raxis-gateway",
-        )
-    });
-    let p = PathBuf::from(&raw);
-    assert!(
-        p.is_absolute(),
-        "RAXIS_GATEWAY_BINARY must be absolute; got {raw:?}"
-    );
-    assert!(p.exists(), "RAXIS_GATEWAY_BINARY={raw:?} does not exist");
-    p
+    extended_e2e_support::kernel_driver::require_gateway_binary()
 }
 
 /// Delegates to the shared driver's strengthened preflight (cpio

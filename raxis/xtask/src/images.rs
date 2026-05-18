@@ -1264,8 +1264,8 @@ fn build_one_role(
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"build_all_role_begin\",\
          \"role\":{:?},\"rootfs_dir\":{:?},\
-         \"estimate\":\"10-90 sec per role\",\
-         \"detail\":\"Packing initramfs bytes, enumerating files, signing manifest, and writing image outputs.\"}}",
+         \"estimate\":\"30 sec-5 min per role; executor images can be at the high end\",\
+         \"detail\":\"Packing initramfs bytes, enumerating files, signing manifest, and writing image outputs. This phase can be quiet while compression and install-dir writes complete.\"}}",
         role.workspace_crate(),
         rootfs_dir.display().to_string(),
     );
@@ -1304,8 +1304,8 @@ fn build_one_role(
     bake_role_progress(
         role,
         "pack_initramfs",
-        "10-90 sec depending on rootfs size",
-        "Walking the staged rootfs and writing deterministic cpio.gz bytes; large executor images can be quiet here.",
+        "30 sec-5 min depending on rootfs size and compression speed",
+        "Walking the staged rootfs and writing deterministic cpio.gz bytes; large executor images can be quiet here for several minutes.",
     );
     let cpio_gz = pack_initramfs(&rootfs_dir, inputs.source_date_epoch)?;
 
@@ -1318,8 +1318,8 @@ fn build_one_role(
     bake_role_progress(
         role,
         "write_image_blob",
-        "under 30 sec",
-        "Writing the packed initramfs image into the install directory.",
+        "30 sec-3 min for large images or slow install volumes",
+        "Writing the packed initramfs image into the install directory; large executor images may spend most of this time in filesystem write/fsync.",
     );
     fs::write(&img_path, &cpio_gz).with_context(|| format!("write {}", img_path.display()))?;
 
@@ -3232,8 +3232,8 @@ fn bake_one_role_full(
     bake_role_progress(
         role,
         "pack_sign_outputs",
-        "10-90 sec per role; longer for large executor images",
-        "Packing the staged rootfs, signing manifest.toml, and writing the install-dir image outputs.",
+        "30 sec-6 min per role; longer for large executor images or slow disks",
+        "Packing the staged rootfs, signing manifest.toml, and writing the install-dir image outputs; quiet periods here usually mean compression or image writes are still running.",
     );
     let build_args = BuildAllArgs {
         role: Some(role),

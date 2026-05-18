@@ -40,6 +40,7 @@ use sha2::{Digest, Sha256};
 // `extended_e2e_realistic_scenario.rs`, …) declares at its root.
 // Both test binaries that pull this module in must `mod common;`
 // alongside `mod extended_e2e_support;`.
+use super::harness_timeout::{run_command_output_timeout, BoundedWaitError};
 use super::witnesses::typed;
 use crate::common::kernel_harness::{build_and_locate_kernel, KernelInstance};
 
@@ -51,6 +52,24 @@ pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(60);
 /// the two live-e2e tests can be run back-to-back without
 /// cross-contaminating operator identity in audit attribution.
 pub const REALISTIC_OPERATOR_SEED: [u8; 32] = [0xD0; 32];
+
+/// Operator override: absolute path to a pre-built `raxis-gateway`.
+/// Default live-e2e runs still auto-build the workspace release
+/// gateway first so stale target binaries do not sneak into policy.
+pub const ENV_GATEWAY_BINARY: &str = "RAXIS_GATEWAY_BINARY";
+
+/// Set to `1` only for packaged/system-install validation where the
+/// harness must not invoke cargo. Normal source-tree e2e runs should
+/// leave this unset so the gateway is rebuilt before policy injection.
+pub const ENV_SKIP_GATEWAY_AUTO_BUILD: &str = "RAXIS_E2E_SKIP_GATEWAY_AUTO_BUILD";
+
+/// Optional bounded-wait override for
+/// `cargo build --release -p raxis-gateway`.
+pub const ENV_GATEWAY_BUILD_TIMEOUT_SECS: &str = "RAXIS_E2E_GATEWAY_BUILD_TIMEOUT_SECS";
+
+pub const DEFAULT_GATEWAY_BUILD_TIMEOUT_SECS: u64 = 300;
+pub const MIN_GATEWAY_BUILD_TIMEOUT_SECS: u64 = 60;
+pub const MAX_GATEWAY_BUILD_TIMEOUT_SECS: u64 = 900;
 
 // ---------------------------------------------------------------------------
 // Preflight — every external dependency reachable before we
@@ -104,20 +123,155 @@ pub fn require_gcp_adc() {
 }
 
 pub fn require_gateway_binary() -> PathBuf {
-    let raw = std::env::var("RAXIS_GATEWAY_BINARY").unwrap_or_else(|_| {
+    static GATEWAY_BINARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    GATEWAY_BINARY.get_or_init(resolve_gateway_binary).clone()
+}
+
+fn resolve_gateway_binary() -> PathBuf {
+    let workspace = realism_workspace_root();
+    if !env_flag(ENV_SKIP_GATEWAY_AUTO_BUILD) {
+        return run_cargo_build_gateway_or_panic(&workspace);
+    }
+    locate_existing_gateway_binary(&workspace).unwrap_or_else(|| {
         panic!(
-            "RAXIS_GATEWAY_BINARY env var is required; build the gateway and \
-         export the path:\n  cargo build -p raxis-gateway --release\n  \
-         export RAXIS_GATEWAY_BINARY=$(pwd)/target/release/raxis-gateway",
+            "{ENV_SKIP_GATEWAY_AUTO_BUILD}=1 was set, but no gateway binary \
+             was found.\n\
+             Remediation:\n  \
+             * unset {ENV_SKIP_GATEWAY_AUTO_BUILD} and let live-e2e run:\n      \
+               cargo build --release -p raxis-gateway\n  \
+             * or set {ENV_GATEWAY_BINARY}=/absolute/path/to/raxis-gateway\n  \
+             * or build it manually at target/release/raxis-gateway",
         )
-    });
-    let p = PathBuf::from(&raw);
-    assert!(
-        p.is_absolute(),
-        "RAXIS_GATEWAY_BINARY must be absolute; got {raw:?}"
+    })
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
+}
+
+fn gateway_build_timeout() -> Duration {
+    let raw = std::env::var(ENV_GATEWAY_BUILD_TIMEOUT_SECS)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok());
+    gateway_build_timeout_from_raw(raw)
+}
+
+fn gateway_build_timeout_from_raw(raw: Option<u64>) -> Duration {
+    match raw {
+        Some(v)
+            if (MIN_GATEWAY_BUILD_TIMEOUT_SECS..=MAX_GATEWAY_BUILD_TIMEOUT_SECS).contains(&v) =>
+        {
+            Duration::from_secs(v)
+        }
+        _ => Duration::from_secs(DEFAULT_GATEWAY_BUILD_TIMEOUT_SECS),
+    }
+}
+
+fn convention_gateway_paths(workspace_root: &Path) -> Vec<PathBuf> {
+    let mut out = vec![
+        workspace_root
+            .join("target")
+            .join("release")
+            .join("raxis-gateway"),
+        workspace_root
+            .join("target")
+            .join("debug")
+            .join("raxis-gateway"),
+    ];
+    if let Ok(raw) = std::env::var("RAXIS_INSTALL_DIR") {
+        out.push(PathBuf::from(raw).join("bin").join("raxis-gateway"));
+    }
+    out
+}
+
+fn locate_existing_gateway_binary(workspace_root: &Path) -> Option<PathBuf> {
+    if let Ok(raw) = std::env::var(ENV_GATEWAY_BINARY) {
+        let p = PathBuf::from(&raw);
+        assert!(
+            p.is_absolute(),
+            "{ENV_GATEWAY_BINARY} must be absolute; got {raw:?}"
+        );
+        if p.is_file() {
+            return Some(p);
+        }
+        panic!("{ENV_GATEWAY_BINARY}={raw:?} does not exist or is not a file");
+    }
+    convention_gateway_paths(workspace_root)
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
+fn run_cargo_build_gateway_or_panic(workspace_root: &Path) -> PathBuf {
+    let timeout = gateway_build_timeout();
+    eprintln!(
+        "[realism-e2e] gateway: building latest release gateway with \
+         `cargo build --release -p raxis-gateway` in {} \
+         (bounded by {ENV_GATEWAY_BUILD_TIMEOUT_SECS}={}s). \
+         Set {ENV_SKIP_GATEWAY_AUTO_BUILD}=1 only for packaged binary tests.",
+        workspace_root.display(),
+        timeout.as_secs(),
     );
-    assert!(p.exists(), "RAXIS_GATEWAY_BINARY={raw:?} does not exist");
-    p
+    let started = Instant::now();
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build")
+        .arg("--release")
+        .arg("-p")
+        .arg("raxis-gateway")
+        .current_dir(workspace_root);
+    match run_command_output_timeout(&mut cmd, timeout, "cargo-build-raxis-gateway") {
+        Ok(out) if out.status.success() => {
+            eprintln!(
+                "[realism-e2e] gateway: cargo build --release -p raxis-gateway OK in {:.1}s",
+                started.elapsed().as_secs_f32(),
+            );
+            let bin = workspace_root
+                .join("target")
+                .join("release")
+                .join("raxis-gateway");
+            assert!(
+                bin.is_file(),
+                "cargo reported success but {} is not a file",
+                bin.display(),
+            );
+            bin
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            panic!(
+                "`cargo build --release -p raxis-gateway` exited {:?} \
+                 after {:.1}s.\n--- stdout ---\n{}\n--- stderr ---\n{}\n\
+                 Remediation: fix the gateway build or set \
+                 {ENV_SKIP_GATEWAY_AUTO_BUILD}=1 with {ENV_GATEWAY_BINARY}=/absolute/path/to/a \
+                 known-good packaged gateway.",
+                out.status.code(),
+                started.elapsed().as_secs_f32(),
+                stdout,
+                stderr,
+            );
+        }
+        Err(BoundedWaitError::SpawnFailed { reason, .. }) => {
+            panic!(
+                "cannot spawn `cargo` to build raxis-gateway: {reason}.\n\
+                 Remediation: install Rust + cargo, or set \
+                 {ENV_SKIP_GATEWAY_AUTO_BUILD}=1 and \
+                 {ENV_GATEWAY_BINARY}=/absolute/path/to/raxis-gateway."
+            );
+        }
+        Err(BoundedWaitError::Timeout { timeout, .. }) => {
+            panic!(
+                "`cargo build --release -p raxis-gateway` exceeded {timeout:?}; \
+                 the child was killed. Override with \
+                 {ENV_GATEWAY_BUILD_TIMEOUT_SECS}=<seconds> up to \
+                 {MAX_GATEWAY_BUILD_TIMEOUT_SECS}, or prebuild and set \
+                 {ENV_SKIP_GATEWAY_AUTO_BUILD}=1 plus {ENV_GATEWAY_BINARY}."
+            );
+        }
+        Err(other) => panic!("gateway auto-build wrapper failed: {other}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3071,6 +3225,44 @@ pub fn first_spawn_seq(chain: &[AuditEvent], task_id: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_auto_build_timeout_uses_bounded_defaults() {
+        assert_eq!(
+            gateway_build_timeout_from_raw(None),
+            Duration::from_secs(DEFAULT_GATEWAY_BUILD_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            gateway_build_timeout_from_raw(Some(0)),
+            Duration::from_secs(DEFAULT_GATEWAY_BUILD_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            gateway_build_timeout_from_raw(Some(MIN_GATEWAY_BUILD_TIMEOUT_SECS - 1)),
+            Duration::from_secs(DEFAULT_GATEWAY_BUILD_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            gateway_build_timeout_from_raw(Some(120)),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            gateway_build_timeout_from_raw(Some(MAX_GATEWAY_BUILD_TIMEOUT_SECS + 1)),
+            Duration::from_secs(DEFAULT_GATEWAY_BUILD_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn convention_gateway_paths_prefer_workspace_release_then_debug() {
+        let root = PathBuf::from("/tmp/raxis-workspace");
+        let paths = convention_gateway_paths(&root);
+        assert_eq!(
+            paths[0],
+            PathBuf::from("/tmp/raxis-workspace/target/release/raxis-gateway")
+        );
+        assert_eq!(
+            paths[1],
+            PathBuf::from("/tmp/raxis-workspace/target/debug/raxis-gateway")
+        );
+    }
 
     /// The injected block must be a valid TOML document standalone
     /// (no other sections required) AND its `[observability]`
