@@ -247,6 +247,19 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
 
     let agent_role_for_observer = agent_role_label(session.session_agent_type);
 
+    // Dashboard/provider visibility must not wait for a terminal
+    // IntentReport. A stalled planner_fetch is exactly when the
+    // operator needs the session header to say which provider/model
+    // was in play, so persist the first observation as soon as the
+    // fetch is admitted. The write is best-effort and NULL-coalescing:
+    // it cannot block or rewrite the planner's real egress path.
+    persist_session_provider_model_observation(
+        ctx,
+        session.session_id.as_str(),
+        provider_id_for_fetch_url(ctx.policy.load().as_ref(), &url_for_stall_detection),
+        model_id_for_fetch_request(&url_for_stall_detection, &req.body_bytes),
+    );
+
     let result = ctx
         .gateway
         .fetch(
@@ -468,6 +481,109 @@ fn extract_host_port(url: &str) -> Option<(String, u16)> {
     Some((host.to_owned(), port))
 }
 
+fn provider_id_for_fetch_url(policy: &raxis_policy::PolicyBundle, url: &str) -> Option<String> {
+    let (host, _) = extract_host_port(url)?;
+    let host_lower = host.to_ascii_lowercase();
+    policy
+        .providers()
+        .iter()
+        .find(|p| provider_entry_matches_host(p, &host_lower))
+        .map(|p| p.provider_id.clone())
+}
+
+fn provider_entry_matches_host(p: &raxis_policy::ProviderEntry, host_lower: &str) -> bool {
+    match p.kind.as_str() {
+        "Anthropic" => host_lower == "anthropic.com" || host_lower.ends_with(".anthropic.com"),
+        "OpenAI" => host_lower == "openai.com" || host_lower.ends_with(".openai.com"),
+        "Gemini" => host_lower == "generativelanguage.googleapis.com",
+        "Bedrock" => {
+            host_lower.starts_with("bedrock-runtime.") && host_lower.ends_with(".amazonaws.com")
+        }
+        "http_sidecar" => p
+            .sidecar_endpoint
+            .as_deref()
+            .and_then(endpoint_host)
+            .map(|h| h.eq_ignore_ascii_case(host_lower))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn endpoint_host(endpoint: &str) -> Option<String> {
+    let after_scheme = endpoint.split_once("://")?.1;
+    let host_with_path = after_scheme.split('/').next()?;
+    let host = host_with_path.split(':').next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_owned())
+    }
+}
+
+fn model_id_for_fetch_request(url: &str, body_bytes: &[u8]) -> Option<String> {
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body_bytes) {
+        if let Some(model) = v
+            .get("model")
+            .or_else(|| v.get("model_id"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(model.to_owned());
+        }
+    }
+    model_id_from_url(url)
+}
+
+fn model_id_from_url(url: &str) -> Option<String> {
+    let path = url.split_once("://")?.1.split_once('/')?.1;
+    if let Some(rest) = path.split_once("models/").map(|(_, r)| r) {
+        let model = rest
+            .split([':', '?', '/'])
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if !model.is_empty() {
+            return Some(model.to_owned());
+        }
+    }
+    if let Some(rest) = path.split_once("model/").map(|(_, r)| r) {
+        let model = rest.split(['/', '?']).next().unwrap_or_default().trim();
+        if !model.is_empty() {
+            return Some(model.to_owned());
+        }
+    }
+    None
+}
+
+fn persist_session_provider_model_observation(
+    ctx: &Arc<HandlerContext>,
+    session_id: &str,
+    provider: Option<String>,
+    model: Option<String>,
+) {
+    if provider.as_deref().unwrap_or("").is_empty() && model.as_deref().unwrap_or("").is_empty() {
+        return;
+    }
+    let store = Arc::clone(&ctx.store);
+    let session_id = session_id.to_owned();
+    let _ = tokio::task::spawn_blocking(move || {
+        let conn = store.lock_sync();
+        if let Err(e) = raxis_store::views::sessions::set_session_provider_model_if_unset(
+            &conn,
+            session_id.as_str(),
+            provider.as_deref(),
+            model.as_deref(),
+        ) {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"session_provider_model_observation_failed\",\
+                 \"session_id\":\"{}\",\"reason\":\"{}\"}}",
+                session_id, e,
+            );
+        }
+    });
+}
+
 fn map_fetch_kind(k: PlannerFetchKind) -> FetchKind {
     match k {
         PlannerFetchKind::Inference => FetchKind::Inference,
@@ -683,6 +799,82 @@ mod tests {
         assert_eq!(extract_host_port("not-a-url"), None);
         // Empty host segment after `://` → drop too.
         assert_eq!(extract_host_port("https:///path"), None);
+    }
+
+    #[test]
+    fn model_id_for_fetch_request_lifts_json_and_provider_url_shapes() {
+        assert_eq!(
+            model_id_for_fetch_request(
+                "https://api.anthropic.com/v1/messages",
+                br#"{"model":"claude-sonnet-4-5-20250929"}"#,
+            )
+            .as_deref(),
+            Some("claude-sonnet-4-5-20250929"),
+        );
+        assert_eq!(
+            model_id_for_fetch_request(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent",
+                br#"{"contents":[]}"#,
+            )
+            .as_deref(),
+            Some("gemini-1.5-pro"),
+        );
+        assert_eq!(
+            model_id_for_fetch_request(
+                "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-haiku/invoke",
+                br#"{}"#,
+            )
+            .as_deref(),
+            Some("anthropic.claude-3-haiku"),
+        );
+    }
+
+    fn provider(kind: &str, sidecar_endpoint: Option<&str>) -> raxis_policy::ProviderEntry {
+        raxis_policy::ProviderEntry {
+            provider_id: format!("{kind}-prod"),
+            kind: kind.to_owned(),
+            credentials_file: format!("{kind}.toml"),
+            inference_timeout_ms: 30_000,
+            data_fetch_timeout_ms: 10_000,
+            max_response_bytes: 16 * 1024 * 1024,
+            stream_idle_timeout_ms: None,
+            sidecar_endpoint: sidecar_endpoint.map(str::to_owned),
+            sidecar_hmac_secret: None,
+            sidecar_health_check_path: None,
+            pricing: None,
+        }
+    }
+
+    #[test]
+    fn provider_entry_matches_host_covers_all_model_provider_kinds() {
+        assert!(provider_entry_matches_host(
+            &provider("Anthropic", None),
+            "api.anthropic.com",
+        ));
+        assert!(!provider_entry_matches_host(
+            &provider("Anthropic", None),
+            "evil-anthropic.com",
+        ));
+        assert!(provider_entry_matches_host(
+            &provider("OpenAI", None),
+            "api.openai.com",
+        ));
+        assert!(!provider_entry_matches_host(
+            &provider("OpenAI", None),
+            "fakeopenai.com",
+        ));
+        assert!(provider_entry_matches_host(
+            &provider("Gemini", None),
+            "generativelanguage.googleapis.com",
+        ));
+        assert!(provider_entry_matches_host(
+            &provider("Bedrock", None),
+            "bedrock-runtime.us-east-1.amazonaws.com",
+        ));
+        assert!(provider_entry_matches_host(
+            &provider("http_sidecar", Some("http://127.0.0.1:9100")),
+            "127.0.0.1",
+        ));
     }
 
     /// Regression guard: `Duration::as_millis() -> u128 as u32` wraps

@@ -321,28 +321,57 @@ fn host_of_url(url: &str) -> Option<String> {
 }
 
 /// Map a URL host to the matching `ProviderEntryView`, if any.
-/// v1 mapping table:
-/// - `kind = "Anthropic"` matches any host ending in `anthropic.com`.
-/// - `kind = "OpenAI"`    matches any host ending in `openai.com`.
-/// - All other kinds: no auto-match.
-///   v2 will replace this with an explicit `url_match` field per
-///   `[[providers]]` entry. Until then, the auto-mapping covers the two
-///   providers the spec calls out by name; operators wanting other
-///   providers MUST set `provider_id` on the FetchRequest (a planned
-///   IPC field — currently unused).
+///
+/// The match walks `PolicyView::provider_order`, not the backing
+/// `HashMap`, so duplicate provider kinds resolve deterministically
+/// to the first declaration in policy.toml. That mirrors the kernel's
+/// dashboard-side observation path in `planner_fetch`.
 fn provider_for_host<'a>(view: &'a PolicyView, host: &str) -> Option<&'a ProviderEntryView> {
     let host_lower = host.to_lowercase();
-    for entry in view.providers.values() {
-        let matches = match entry.kind.as_str() {
-            "Anthropic" => host_lower.ends_with("anthropic.com"),
-            "OpenAI" => host_lower.ends_with("openai.com"),
-            _ => false,
+    for provider_id in &view.provider_order {
+        let Some(entry) = view.providers.get(provider_id) else {
+            continue;
         };
-        if matches {
+        if provider_entry_matches_host(entry, &host_lower) {
             return Some(entry);
         }
     }
     None
+}
+
+fn provider_entry_matches_host(entry: &ProviderEntryView, host_lower: &str) -> bool {
+    if entry.kind == "http_sidecar" {
+        return entry
+            .sidecar_endpoint
+            .as_deref()
+            .and_then(endpoint_host)
+            .map(|h| h.eq_ignore_ascii_case(host_lower))
+            .unwrap_or(false);
+    }
+    provider_kind_matches_host(entry.kind.as_str(), host_lower)
+}
+
+fn provider_kind_matches_host(kind: &str, host_lower: &str) -> bool {
+    match kind {
+        "Anthropic" => host_lower == "anthropic.com" || host_lower.ends_with(".anthropic.com"),
+        "OpenAI" => host_lower == "openai.com" || host_lower.ends_with(".openai.com"),
+        "Gemini" => host_lower == "generativelanguage.googleapis.com",
+        "Bedrock" => {
+            host_lower.starts_with("bedrock-runtime.") && host_lower.ends_with(".amazonaws.com")
+        }
+        _ => false,
+    }
+}
+
+fn endpoint_host(endpoint: &str) -> Option<String> {
+    let after_scheme = endpoint.split_once("://")?.1;
+    let host_with_path = after_scheme.split('/').next()?;
+    let host = host_with_path.split(':').next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_owned())
+    }
 }
 
 #[cfg(test)]
@@ -366,11 +395,20 @@ mod tests {
             data_fetch_timeout_ms: 10_000,
             max_response_bytes: 16 * 1024 * 1024,
             stream_idle_timeout_ms: None,
+            sidecar_endpoint: None,
             credentials: ProviderCredentials {
                 api_key: "sk-ant-x".to_owned(),
                 auth_header: "x-api-key".to_owned(),
                 auth_prefix: "".to_owned(),
             },
+        }
+    }
+
+    fn provider_with_id(provider_id: &str, kind: &str) -> ProviderEntryView {
+        ProviderEntryView {
+            provider_id: provider_id.to_owned(),
+            kind: kind.to_owned(),
+            ..anthropic_provider()
         }
     }
 
@@ -382,6 +420,7 @@ mod tests {
             egress_domains: vec![],
             egress_patterns: vec!["*.anthropic.com".to_owned()],
             providers,
+            provider_order: vec!["anthropic-prod".to_owned()],
         }
     }
 
@@ -398,6 +437,52 @@ mod tests {
             session_id: None,
             task_id: None,
         }
+    }
+
+    #[test]
+    fn provider_lookup_uses_policy_declaration_order() {
+        let mut view = view_with_anthropic();
+        view.providers.insert(
+            "anthropic-secondary".to_owned(),
+            provider_with_id("anthropic-secondary", "Anthropic"),
+        );
+        view.provider_order = vec![
+            "anthropic-secondary".to_owned(),
+            "anthropic-prod".to_owned(),
+        ];
+
+        let provider =
+            provider_for_host(&view, "api.anthropic.com").expect("anthropic host must resolve");
+        assert_eq!(
+            provider.provider_id, "anthropic-secondary",
+            "provider lookup must follow policy declaration order, not HashMap iteration",
+        );
+    }
+
+    #[test]
+    fn provider_kind_host_matching_covers_all_model_provider_kinds() {
+        assert!(provider_kind_matches_host("Anthropic", "api.anthropic.com"));
+        assert!(!provider_kind_matches_host(
+            "Anthropic",
+            "evil-anthropic.com",
+        ));
+        assert!(provider_kind_matches_host("OpenAI", "api.openai.com"));
+        assert!(!provider_kind_matches_host("OpenAI", "fakeopenai.com"));
+        assert!(provider_kind_matches_host(
+            "Gemini",
+            "generativelanguage.googleapis.com",
+        ));
+        assert!(provider_kind_matches_host(
+            "Bedrock",
+            "bedrock-runtime.us-east-1.amazonaws.com",
+        ));
+        let sidecar = ProviderEntryView {
+            provider_id: "kombai".to_owned(),
+            kind: "http_sidecar".to_owned(),
+            sidecar_endpoint: Some("http://127.0.0.1:9100".to_owned()),
+            ..anthropic_provider()
+        };
+        assert!(provider_entry_matches_host(&sidecar, "127.0.0.1"));
     }
 
     /// pin the per-provider `stream_idle_timeout_ms`

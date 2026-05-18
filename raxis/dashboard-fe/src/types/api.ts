@@ -309,6 +309,9 @@ export interface TaskLlmTurnView {
   /// `gpt-4o`). Empty when the response body was non-JSON or
   /// the field was absent.
   model: string;
+  /// Best-effort provider label derived from captured request /
+  /// response payloads. Optional for back-compat with older kernels.
+  provider?: string | null;
   /// **LLM provider role**: `"system"` / `"user"` / `"assistant"`
   /// / `"tool"`. Empty when the response body envelope does
   /// not carry a top-level `role` (e.g. OpenAI's

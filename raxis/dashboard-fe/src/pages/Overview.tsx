@@ -350,8 +350,25 @@ export function OverviewPage() {
                         >
                           <Mono>{s.session_id.slice(0, 12)}…</Mono>
                         </Link>
-                        <div className="text-[11px] text-ink-subtle">
-                          {s.provider ?? "—"} · {s.model ?? "—"}
+                        <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                          <span
+                            className={
+                              "badge text-[10px] font-mono " +
+                              (s.provider
+                                ? "bg-accent/10 border-accent/30 text-accent"
+                                : "bg-panel border-edge text-ink-faint")
+                            }
+                            title={
+                              s.provider
+                                ? "Observed provider"
+                                : "Provider not observed yet"
+                            }
+                          >
+                            {s.provider ?? "provider pending"}
+                          </span>
+                          <span className="text-[11px] text-ink-subtle font-mono break-all">
+                            {s.model ?? "model pending"}
+                          </span>
                         </div>
                       </td>
                       <td className="px-4 py-2 text-ink-muted">{s.role}</td>

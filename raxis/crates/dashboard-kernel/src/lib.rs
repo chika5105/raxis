@@ -1686,7 +1686,7 @@ impl DashboardData for KernelDashboardData {
                 // surfaces what the kernel has persisted; the detail
                 // page (`get_session`) pays for the per-task ring
                 // tail and renders the richer view.
-                let view = enrich_session_view_with_owning_task(view, owning, None, None);
+                let view = enrich_session_view_with_owning_task(view, owning, None, None, None);
                 enrich_session_view_with_lifecycle(&audit_chain, view)
             })
             .collect())
@@ -1736,6 +1736,10 @@ impl DashboardData for KernelDashboardData {
             .task_id
             .as_deref()
             .and_then(|tid| latest_model_for_task(self.task_llm_capture.as_ref(), tid));
+        let fallback_provider = owning
+            .task_id
+            .as_deref()
+            .and_then(|tid| latest_provider_for_task(self.task_llm_capture.as_ref(), tid));
         // iter74 — orchestrator-session token visibility. Mirror
         // the model-fallback pattern above and lift cumulative
         // `(input, output)` token totals from the per-task LLM
@@ -1778,8 +1782,13 @@ impl DashboardData for KernelDashboardData {
             annotations: Vec::new(),
             latest_annotation: None,
         };
-        let view =
-            enrich_session_view_with_owning_task(view, owning, fallback_model, fallback_tokens);
+        let view = enrich_session_view_with_owning_task(
+            view,
+            owning,
+            fallback_provider,
+            fallback_model,
+            fallback_tokens,
+        );
         Ok(enrich_session_view_with_lifecycle(&audit_chain, view))
     }
 
@@ -3816,10 +3825,12 @@ pub(crate) fn owning_task_for_session(
 }
 
 /// iter69 — extract a model id from the most-recent LLM turn
-/// capture for the given task. Returns `None` when the capture
-/// is unwired (read-only data dir), the file is missing (task
-/// never round-tripped through the gateway), the latest record's
-/// body is non-JSON, or `body.model` is absent / empty.
+/// capture for the given task. Prefer `response.model`, then fall
+/// back to `request.model` / `request.model_id` so failed upstream
+/// calls still surface the model the planner attempted to use.
+/// Returns `None` when the capture is unwired (read-only data dir),
+/// the file is missing (task never round-tripped through the
+/// gateway), and neither payload carries a model.
 ///
 /// The dashboard calls this from `enrich_session_view_with_owning_task`
 /// when the `sessions.model` column is NULL (the kernel did not
@@ -3836,11 +3847,84 @@ pub(crate) fn latest_model_for_task(
     let cap = capture?;
     let mut recs = cap.tail(task_id, 1);
     let last = recs.pop()?;
-    let body: serde_json::Value = serde_json::from_str(&last.body).ok()?;
-    body.get("model")
+    model_from_turn_record(&last)
+}
+
+/// Best-effort provider fallback for legacy sessions whose
+/// `sessions.provider` column is still NULL. This cannot recover the
+/// policy-level provider id for every historic record (the capture ring
+/// did not store the gateway URL), but it does recover the common direct
+/// provider labels from captured request / response payloads so the detail
+/// page stops rendering a blank provider when the evidence is already on
+/// disk.
+pub(crate) fn latest_provider_for_task(
+    capture: Option<&Arc<TaskLlmCapture>>,
+    task_id: &str,
+) -> Option<String> {
+    let cap = capture?;
+    let mut recs = cap.tail(task_id, 1);
+    let last = recs.pop()?;
+    provider_from_turn_record(&last)
+}
+
+fn model_from_turn_record(last: &crate::LlmTurnRecord) -> Option<String> {
+    let response = serde_json::from_str::<serde_json::Value>(&last.body).ok();
+    let request = serde_json::from_str::<serde_json::Value>(&last.request_body).ok();
+    response
+        .as_ref()
+        .and_then(model_from_json_value)
+        .or_else(|| request.as_ref().and_then(model_from_json_value))
+}
+
+fn provider_from_turn_record(last: &crate::LlmTurnRecord) -> Option<String> {
+    let response = serde_json::from_str::<serde_json::Value>(&last.body).ok();
+    let request = serde_json::from_str::<serde_json::Value>(&last.request_body).ok();
+    provider_from_turn_payloads(request.as_ref(), response.as_ref())
+}
+
+fn model_from_json_value(v: &serde_json::Value) -> Option<String> {
+    v.get("model")
+        .or_else(|| v.get("model_id"))
+        .or_else(|| v.get("model_id_actual"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_owned())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn provider_from_turn_payloads(
+    request: Option<&serde_json::Value>,
+    response: Option<&serde_json::Value>,
+) -> Option<String> {
+    if let Some(provider_id) = request
+        .and_then(|v| v.get("provider_id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(provider_id.to_owned());
+    }
+    let model = response
+        .and_then(model_from_json_value)
+        .or_else(|| request.and_then(model_from_json_value))?;
+    provider_from_model_id(model.as_str())
+}
+
+fn provider_from_model_id(model: &str) -> Option<String> {
+    let m = model.to_ascii_lowercase();
+    if m.starts_with("claude-") {
+        return Some("anthropic".to_owned());
+    }
+    if m.starts_with("gpt-") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") {
+        return Some("openai".to_owned());
+    }
+    if m.starts_with("gemini-") {
+        return Some("gemini".to_owned());
+    }
+    if m.starts_with("anthropic.") || m.starts_with("amazon.") || m.contains(".bedrock.") {
+        return Some("bedrock".to_owned());
+    }
+    None
 }
 
 /// iter74 — sum `usage.input_tokens` / `usage.output_tokens`
@@ -3935,14 +4019,16 @@ pub(crate) fn cumulative_tokens_for_task(
 ///   * `model` — only when the session row carried NULL (the
 ///     kernel had not yet persisted it).
 ///
-/// `provider` is NEVER touched here — it is owned by the kernel
-/// intent handler and read from the `sessions.provider` column,
-/// because the dashboard cannot derive a provider id from the
-/// LLM turn capture (the capture surfaces the model name but not
-/// the policy-level provider id that the planner billed against).
+/// `provider` is populated only when the row itself is NULL and the
+/// caller supplied a legacy capture fallback. The fetch-time kernel
+/// writer is still the authoritative source for policy-level provider
+/// ids; this fallback keeps historic/session-detail rows useful when
+/// the capture ring already contains enough evidence to derive a
+/// best-effort provider label.
 pub(crate) fn enrich_session_view_with_owning_task(
     mut view: raxis_dashboard::data::SessionView,
     owning_task: SessionOwningTask,
+    fallback_provider: Option<String>,
     fallback_model: Option<String>,
     fallback_tokens: Option<(u64, u64)>,
 ) -> raxis_dashboard::data::SessionView {
@@ -3979,6 +4065,9 @@ pub(crate) fn enrich_session_view_with_owning_task(
     }
     if view.model.is_none() {
         view.model = fallback_model;
+    }
+    if view.provider.is_none() {
+        view.provider = fallback_provider;
     }
     view
 }
@@ -4050,13 +4139,13 @@ pub fn record_to_view(
             .unwrap_or(serde_json::Value::Null)
     };
 
-    let (model, role, input_tokens, output_tokens, cache_creation, cache_read) = match &response {
+    let model = model_from_json_value(&response)
+        .or_else(|| model_from_json_value(&request))
+        .unwrap_or_default();
+    let provider = provider_from_turn_payloads(Some(&request), Some(&response));
+
+    let (role, input_tokens, output_tokens, cache_creation, cache_read) = match &response {
         serde_json::Value::Object(_) => {
-            let model = response
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_owned();
             let role = response
                 .get("role")
                 .and_then(|v| v.as_str())
@@ -4095,7 +4184,6 @@ pub fn record_to_view(
                 .and_then(|u| u.get("cache_read_input_tokens").and_then(|v| v.as_u64()))
                 .map(|n| n as u32);
             (
-                model,
                 role,
                 input_tokens,
                 output_tokens,
@@ -4103,13 +4191,14 @@ pub fn record_to_view(
                 cache_read,
             )
         }
-        _ => (String::new(), String::new(), None, None, None, None),
+        _ => (String::new(), None, None, None, None),
     };
 
     raxis_dashboard::data::TaskLlmTurnView {
         turn_number,
         ts_unix: r.at_ms / 1000,
         model,
+        provider,
         role,
         agent_role: r.agent_role,
         request,
@@ -5320,16 +5409,21 @@ mod tests {
             input_tokens: 1234,
             output_tokens: 567,
         };
+        let fallback_provider = Some("anthropic".into());
         let fallback_model = Some("claude-3-5-sonnet".into());
-        let out = enrich_session_view_with_owning_task(view, owning, fallback_model, None);
+        let out = enrich_session_view_with_owning_task(
+            view,
+            owning,
+            fallback_provider,
+            fallback_model,
+            None,
+        );
         assert_eq!(out.initiative_id.as_deref(), Some("init-a"));
         assert_eq!(out.task_id.as_deref(), Some("task-a"));
         assert_eq!(out.input_tokens, 1234);
         assert_eq!(out.output_tokens, 567);
         assert_eq!(out.model.as_deref(), Some("claude-3-5-sonnet"));
-        // `provider` is owned by the kernel intent handler, not
-        // by the fold — the helper MUST NOT touch it.
-        assert_eq!(out.provider, None);
+        assert_eq!(out.provider.as_deref(), Some("anthropic"));
     }
 
     /// When the session's `provider` / `model` columns are
@@ -5360,8 +5454,15 @@ mod tests {
             input_tokens: 1234,
             output_tokens: 567,
         };
+        let fallback_provider = Some("openai".into());
         let fallback_model = Some("claude-3-5-sonnet".into());
-        let out = enrich_session_view_with_owning_task(view, owning, fallback_model, None);
+        let out = enrich_session_view_with_owning_task(
+            view,
+            owning,
+            fallback_provider,
+            fallback_model,
+            None,
+        );
         // All five pre-populated fields must stick.
         assert_eq!(out.initiative_id.as_deref(), Some("init-existing"));
         assert_eq!(out.task_id.as_deref(), Some("task-existing"));
@@ -5435,6 +5536,60 @@ mod tests {
         };
         cap.append("task-a", rec).unwrap();
         assert!(latest_model_for_task(Some(&cap), "task-a").is_none());
+    }
+
+    #[test]
+    fn latest_model_for_task_falls_back_to_request_body_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap =
+            crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default()).unwrap();
+        let rec = crate::LlmTurnRecord {
+            at_ms: 100,
+            task_id: "task-a".into(),
+            session_id: Some("sess-a".into()),
+            fetch_id: "f1".into(),
+            status_code: Some(500),
+            latency_ms: 10,
+            request_body: serde_json::json!({
+                "model": "claude-sonnet-4-5-20250929"
+            })
+            .to_string(),
+            body: "not json".into(),
+            body_truncated: false,
+            original_body_bytes: 0,
+            error: Some("NetworkError".into()),
+            agent_role: None,
+        };
+        cap.append("task-a", rec).unwrap();
+        let m = latest_model_for_task(Some(&cap), "task-a").unwrap();
+        assert_eq!(m, "claude-sonnet-4-5-20250929");
+    }
+
+    #[test]
+    fn latest_provider_for_task_derives_from_captured_payloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap =
+            crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default()).unwrap();
+        let rec = crate::LlmTurnRecord {
+            at_ms: 100,
+            task_id: "task-a".into(),
+            session_id: Some("sess-a".into()),
+            fetch_id: "f1".into(),
+            status_code: Some(200),
+            latency_ms: 10,
+            request_body: serde_json::json!({
+                "model": "claude-sonnet-4-5-20250929"
+            })
+            .to_string(),
+            body: anthropic_turn_body(1, 1),
+            body_truncated: false,
+            original_body_bytes: 0,
+            error: None,
+            agent_role: None,
+        };
+        cap.append("task-a", rec).unwrap();
+        let provider = latest_provider_for_task(Some(&cap), "task-a").unwrap();
+        assert_eq!(provider, "anthropic");
     }
 
     // ── iter74 — `cumulative_tokens_for_task` read-side fallback ────────
@@ -5618,7 +5773,8 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
         };
-        let out = enrich_session_view_with_owning_task(view, owning, None, Some((9_999, 4_321)));
+        let out =
+            enrich_session_view_with_owning_task(view, owning, None, None, Some((9_999, 4_321)));
         assert_eq!(out.input_tokens, 9_999);
         assert_eq!(out.output_tokens, 4_321);
     }
@@ -5654,7 +5810,8 @@ mod tests {
         };
         // Owning-task contribution should land first; the
         // fallback then sees a non-zero view and stays out.
-        let out = enrich_session_view_with_owning_task(view, owning, None, Some((9_999, 4_321)));
+        let out =
+            enrich_session_view_with_owning_task(view, owning, None, None, Some((9_999, 4_321)));
         assert_eq!(out.input_tokens, 1_111);
         assert_eq!(out.output_tokens, 222);
     }

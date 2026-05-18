@@ -106,6 +106,9 @@ describe("<SessionDetailPage> failure rendering", () => {
     mockSession({ state: "Running", failure: null });
     renderAt("sess_abc");
     expect(await screen.findByTestId("session-stream-mock")).toBeInTheDocument();
+    expect(screen.getByTestId("session-detail-provider-badge")).toHaveTextContent(
+      "anthropic",
+    );
     expect(screen.queryByTestId("failure-kind")).toBeNull();
     expect(screen.queryByText(/\(no reason recorded\)/)).toBeNull();
     expect(screen.queryByText(/KERNEL BUG/)).toBeNull();

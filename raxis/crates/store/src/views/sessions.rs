@@ -33,24 +33,21 @@ pub struct SessionRow {
     pub revoked_at: Option<u64>,
     /// iter69 — first observed provider id for this session
     /// (e.g. `"anthropic-prod"`). Populated opportunistically by
-    /// the kernel's intent handler the first time a planner
-    /// `IntentReport.tokens_used.provider_id` lands. `None` for
-    /// sessions that have not yet round-tripped through the
-    /// gateway (orchestrator sessions before their first
-    /// planner_fetch, sessions that short-circuit on a
-    /// deterministic check, V2.5-era sessions that pre-date
-    /// migration 25). Surfaced by the dashboard's session detail
-    /// view; renders "—" when `None`.
+    /// the kernel's planner_fetch handler as soon as the first
+    /// admitted provider call reveals a policy provider, and by the
+    /// intent handler when a planner terminal report carries a
+    /// provider id. `None` for sessions that never round-tripped
+    /// through the gateway, provider kinds the kernel cannot map
+    /// from the URL, or V2.5-era sessions that pre-date migration
+    /// 25. Surfaced by the dashboard's session views; renders "—"
+    /// when `None`.
     pub provider: Option<String>,
-    /// iter69 — most-recently observed model id for this session
-    /// (e.g. `"claude-3-5-sonnet-20241022"`). Populated lazily on
-    /// the dashboard read path by walking the latest LLM turn
-    /// capture for this session (today; a future iteration moves
-    /// the write inline with `record_to_view`). Note: the column
-    /// itself is currently always read-as-NULL by the store layer
-    /// — the dashboard does the enrichment on read so that
-    /// existing pre-iter69 sessions also surface a model badge
-    /// once they emit their next turn. See migration 25.
+    /// iter69 — first observed model id for this session
+    /// (e.g. `"claude-3-5-sonnet-20241022"`). New kernels populate
+    /// this at planner_fetch admission by parsing the outbound
+    /// request body / provider URL. The dashboard detail path still
+    /// has a read-side capture fallback so older rows can surface a
+    /// model badge once they emit a turn. See migration 25.
     pub model: Option<String>,
 }
 

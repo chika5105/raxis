@@ -84,6 +84,11 @@ fn projection_lifts_anthropic_model_role_and_usage_into_wire_view() {
         "model MUST be lifted from response body.model",
     );
     assert_eq!(
+        view.provider.as_deref(),
+        Some("anthropic"),
+        "provider MUST be derived from the captured Anthropic model id",
+    );
+    assert_eq!(
         view.role, "assistant",
         "role MUST be lifted from response body.role",
     );
@@ -162,8 +167,9 @@ fn projection_falls_back_to_value_string_on_response_parse_failure() {
     );
     assert_eq!(
         view.model, "",
-        "model defaults to empty when body is non-JSON"
+        "model defaults to empty when body and request are non-JSON/missing",
     );
+    assert!(view.provider.is_none());
     assert_eq!(
         view.role, "",
         "role defaults to empty when body is non-JSON"
@@ -178,6 +184,18 @@ fn projection_falls_back_to_value_string_on_response_parse_failure() {
     // missing `request_body` deserialize via serde_default to
     // empty string, then project to Null here.
     assert_eq!(view.request, serde_json::Value::Null);
+}
+
+#[test]
+fn projection_uses_request_model_when_response_is_non_json() {
+    let mut r = anthropic_record();
+    r.body = "not json".into();
+
+    let view = record_to_view(r, 8);
+
+    assert_eq!(view.model, "claude-sonnet-4-5-20250929");
+    assert_eq!(view.provider.as_deref(), Some("anthropic"));
+    assert_eq!(view.response, serde_json::Value::String("not json".into()),);
 }
 
 #[test]
@@ -224,6 +242,7 @@ fn projection_maps_openai_prompt_completion_tokens_onto_canonical_slots() {
 
     assert_eq!(view.turn_number, 3);
     assert_eq!(view.model, "gpt-4o-2024-08-06");
+    assert_eq!(view.provider.as_deref(), Some("openai"));
     // OpenAI envelope has no top-level `role`; projection emits "".
     assert_eq!(view.role, "");
     assert_eq!(

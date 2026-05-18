@@ -101,6 +101,15 @@ function TurnCard({ turn }: TurnCardProps) {
               {turn.agent_role}
             </span>
           )}
+          {turn.provider && (
+            <span
+              data-testid="task-llm-turns-provider"
+              className="badge bg-accent/10 border-accent/30 text-accent font-mono text-[11px]"
+              title="Observed LLM provider"
+            >
+              {turn.provider}
+            </span>
+          )}
           <span className="text-[11px] text-ink-subtle">
             {fmtAbsolute(turn.ts_unix)}
           </span>

@@ -155,6 +155,7 @@ mod tests {
             data_fetch_timeout_ms: 10_000,
             max_response_bytes: max_bytes,
             stream_idle_timeout_ms: None,
+            sidecar_endpoint: None,
             credentials: ProviderCredentials {
                 api_key: "sk-test".to_owned(),
                 auth_header: "Authorization".to_owned(),

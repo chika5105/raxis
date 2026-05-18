@@ -73,6 +73,7 @@ export function SessionsPage() {
           s.session_id,
           s.task_id ?? "",
           s.initiative_id ?? "",
+          s.provider ?? "",
           s.model ?? "",
         ]
           .join(" ")
@@ -106,7 +107,7 @@ export function SessionsPage() {
         <div className="flex gap-2">
           <input
             className="input w-56"
-            placeholder="Search id / model…"
+            placeholder="Search id / provider / model…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -172,7 +173,7 @@ export function SessionsPage() {
                 <th className="text-left px-4 py-2 font-medium">Role</th>
                 <th className="text-left px-4 py-2 font-medium">State</th>
                 <th className="text-left px-4 py-2 font-medium">Initiative / Task</th>
-                <th className="text-left px-4 py-2 font-medium">Model</th>
+                <th className="text-left px-4 py-2 font-medium">Provider / Model</th>
                 <th className="text-right px-4 py-2 font-medium">Tokens</th>
                 <th className="text-right px-4 py-2 font-medium">Updated</th>
               </tr>
@@ -243,9 +244,11 @@ export function SessionsPage() {
                       </div>
                     )}
                   </td>
-                  <td className="px-4 py-2 text-xs text-ink-muted font-mono">
-                    {s.provider ?? "—"}
-                    <div className="text-[11px]">{s.model ?? "—"}</div>
+                  <td className="px-4 py-2 text-xs">
+                    <ProviderModelStack
+                      provider={s.provider}
+                      model={s.model}
+                    />
                   </td>
                   <td className="px-4 py-2 text-right text-xs text-ink-muted tabular">
                     <span className="text-ink">{fmtTokens(s.input_tokens + s.output_tokens)}</span>
@@ -263,6 +266,34 @@ export function SessionsPage() {
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+function ProviderModelStack({
+  provider,
+  model,
+}: {
+  provider: string | null | undefined;
+  model: string | null | undefined;
+}) {
+  return (
+    <div className="flex flex-col items-start gap-1 min-w-[9rem]">
+      <span
+        data-testid="session-provider-badge"
+        className={clsx(
+          "badge text-[11px] font-mono",
+          provider
+            ? "bg-accent/10 border-accent/30 text-accent"
+            : "bg-panel border-edge text-ink-faint",
+        )}
+        title={provider ? "Observed provider" : "Provider not observed yet"}
+      >
+        {provider ?? "provider pending"}
+      </span>
+      <span className="max-w-[18rem] break-all font-mono text-[11px] text-ink-muted">
+        {model ?? "model pending"}
+      </span>
     </div>
   );
 }

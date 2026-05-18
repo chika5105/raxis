@@ -38,6 +38,7 @@ function turn(over: Partial<TaskLlmTurnView> = {}): TaskLlmTurnView {
     turn_number: 1,
     ts_unix: 1714500000,
     model: "claude-sonnet-4-5-20250929",
+    provider: "anthropic",
     role: "assistant",
     request: { messages: [{ role: "user", content: "hi" }] },
     response: {
@@ -89,6 +90,9 @@ describe("<TaskLlmTurns>", () => {
     expect(
       screen.getByText("claude-sonnet-4-5-20250929"),
     ).toBeInTheDocument();
+    expect(screen.getByTestId("task-llm-turns-provider")).toHaveTextContent(
+      "anthropic",
+    );
     // 800 cache_read / (800 + 0 + 200) = 0.8 → green badge.
     const ratio = screen.getByTestId("task-llm-turns-cache-hit-ratio");
     expect(ratio.className).toMatch(/border-ok/);

@@ -334,6 +334,7 @@ mod tests {
             data_fetch_timeout_ms: 60_000,
             max_response_bytes: 1_048_576,
             stream_idle_timeout_ms: None,
+            sidecar_endpoint: None,
             credentials: raxis_gateway_substrate::ProviderCredentials {
                 api_key: "k-test".to_owned(),
                 auth_header: "x-api-key".to_owned(),

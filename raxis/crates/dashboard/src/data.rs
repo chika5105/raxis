@@ -912,6 +912,12 @@ pub struct TaskLlmTurnView {
     /// same field name). Empty string when the body is non-JSON
     /// or the field is absent.
     pub model: String,
+    /// Best-effort provider label derived from the captured request
+    /// / response payload. This is a dashboard affordance for older
+    /// records that pre-date kernel-side session provider persistence;
+    /// the canonical policy-level provider id lives on `SessionView`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// **LLM provider role** assignment: `"system"` / `"user"` /
     /// `"assistant"` / `"tool"`. Lifted from `body.role` for
     /// Anthropic; empty string when unknown. Distinct from

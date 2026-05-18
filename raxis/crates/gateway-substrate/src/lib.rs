@@ -78,6 +78,10 @@ pub struct ProviderEntryView {
     /// for those providers; standard generation-tier providers
     /// (Claude, GPT-4) leave it `None`.
     pub stream_idle_timeout_ms: Option<u32>,
+    /// Sidecar-only endpoint host source. `None` for built-in
+    /// providers. The gateway uses this to map a sidecar fetch URL
+    /// back to the policy provider entry deterministically.
+    pub sidecar_endpoint: Option<String>,
     pub credentials: ProviderCredentials,
 }
 

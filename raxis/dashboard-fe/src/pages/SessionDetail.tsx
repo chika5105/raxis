@@ -105,8 +105,15 @@ export function SessionDetailPage() {
           </div>
         </div>
         <div className="card p-3 text-xs space-y-1.5 min-w-[260px]">
-          <Row label="Provider" value={s.provider ?? "—"} mono />
-          <Row label="Model" value={s.model ?? "—"} mono />
+          <Row label="Provider" value={<ProviderBadge provider={s.provider} />} />
+          <Row
+            label="Model"
+            value={
+              <span className="font-mono text-ink-muted break-all">
+                {s.model ?? "model pending"}
+              </span>
+            }
+          />
           <Row
             label="Initiative"
             value={
@@ -403,6 +410,23 @@ function Row({
         {value}
       </span>
     </div>
+  );
+}
+
+function ProviderBadge({ provider }: { provider: string | null | undefined }) {
+  return (
+    <span
+      data-testid="session-detail-provider-badge"
+      className={
+        "badge text-[11px] font-mono " +
+        (provider
+          ? "bg-accent/10 border-accent/30 text-accent"
+          : "bg-panel border-edge text-ink-faint")
+      }
+      title={provider ? "Observed provider" : "Provider not observed yet"}
+    >
+      {provider ?? "provider pending"}
+    </span>
   );
 }
 

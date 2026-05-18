@@ -60,6 +60,14 @@ pub struct PolicyView {
     /// Provider catalogue keyed by `provider_id`. The gateway looks
     /// up the kind + credentials when dispatching a `FetchRequest`.
     pub providers: HashMap<String, ProviderEntryView>,
+    /// Provider ids in the same order they appeared in `policy.toml`.
+    ///
+    /// The gateway sometimes has to derive a provider from the URL host
+    /// (for example `api.anthropic.com` → the first Anthropic provider).
+    /// Iterating a `HashMap` made that selection nondeterministic when
+    /// operators declared more than one provider of the same kind; this
+    /// order vector pins the choice to the policy declaration order.
+    pub provider_order: Vec<String>,
 }
 
 /// Fail-closed reasons `load_policy_view` can return.
@@ -136,6 +144,7 @@ pub fn load_policy_view_with_credential_backend(
 
     let providers_dir = data_dir.join("providers");
     let mut providers = HashMap::with_capacity(bundle.providers().len());
+    let mut provider_order = Vec::with_capacity(bundle.providers().len());
     for entry in bundle.providers() {
         let path = providers_dir.join(&entry.credentials_file);
         let cred_name = credentials_filename_to_name(&entry.credentials_file);
@@ -161,6 +170,7 @@ pub fn load_policy_view_with_credential_backend(
                         source: io,
                     },
                 })?;
+        provider_order.push(entry.provider_id.clone());
         providers.insert(
             entry.provider_id.clone(),
             ProviderEntryView {
@@ -170,6 +180,7 @@ pub fn load_policy_view_with_credential_backend(
                 data_fetch_timeout_ms: entry.data_fetch_timeout_ms,
                 max_response_bytes: entry.max_response_bytes,
                 stream_idle_timeout_ms: entry.stream_idle_timeout_ms,
+                sidecar_endpoint: entry.sidecar_endpoint.clone(),
                 credentials: creds,
             },
         );
@@ -186,6 +197,7 @@ pub fn load_policy_view_with_credential_backend(
         egress_domains: bundle.effective_egress_domains(),
         egress_patterns: bundle.effective_egress_patterns(),
         providers,
+        provider_order,
     })
 }
 
@@ -469,6 +481,7 @@ auth_prefix = ""
             egress_domains: domains.iter().map(|s| s.to_string()).collect(),
             egress_patterns: patterns.iter().map(|s| s.to_string()).collect(),
             providers: HashMap::new(),
+            provider_order: Vec::new(),
         }
     }
 
