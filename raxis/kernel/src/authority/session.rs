@@ -171,11 +171,20 @@ pub fn create_session(
     Ok((session_id, session_token))
 }
 
-/// Look up a session row by `session_id`. Returns `AuthorityError::SessionNotFound`
-/// if no row exists, or `SessionRevoked` / `SessionExpired` where applicable.
-pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, AuthorityError> {
+/// Look up a session row by `session_id` without applying active-session
+/// guards. Returns revoked / expired rows as-is.
+///
+/// Use this only for forensic/read-side paths that need durable metadata
+/// recorded on the session row after the VM has exited, such as a
+/// post-witness gate recheck resolving the executor worktree. Authenticated
+/// request handling should call [`get_session`] so revoked/expired sessions
+/// are rejected.
+pub fn get_session_raw(
+    session_id: &SessionId,
+    store: &Store,
+) -> Result<SessionRow, AuthorityError> {
     let store = store.lock_sync();
-    let row = store
+    store
         .query_row(
             &format!(
                 "SELECT session_id, role_id, session_token, sequence_number,
@@ -212,8 +221,13 @@ pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, 
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => AuthorityError::SessionNotFound,
             other => AuthorityError::Store(raxis_store::StoreError::Rusqlite(other)),
-        })?;
+        })
+}
 
+/// Look up a session row by `session_id`. Returns `AuthorityError::SessionNotFound`
+/// if no row exists, or `SessionRevoked` / `SessionExpired` where applicable.
+pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, AuthorityError> {
+    let row = get_session_raw(session_id, store)?;
     require_active_session_row(row)
 }
 

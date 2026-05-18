@@ -1494,7 +1494,11 @@ fn resolve_worktree_root_inner(
 ) -> PathBuf {
     if let Some(session_id) = session_id {
         if let Ok(sid) = raxis_types::SessionId::parse(session_id) {
-            if let Ok(sess) = crate::authority::session::get_session(&sid, store) {
+            // Gate rechecks and witness snapshots often run after the
+            // producing planner exited cleanly, which revokes its session.
+            // The worktree is still the authoritative review target, so this
+            // read must bypass active-session guards and use the durable row.
+            if let Ok(sess) = crate::authority::session::get_session_raw(&sid, store) {
                 if let Some(wt) = sess.worktree_root {
                     return PathBuf::from(wt);
                 }
@@ -2048,6 +2052,7 @@ mod tests {
 #[cfg(test)]
 mod async_runtime_safety {
     use super::{resolve_worktree_root_inner, resolve_worktree_root_on_blocking_pool};
+    use crate::authority::session::{self, Role, SessionConfig};
     use raxis_store::Store;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2098,6 +2103,35 @@ mod async_runtime_safety {
         .expect("snapshot resolve must not panic on tokio worker");
 
         assert_eq!(resolved, data_dir);
+    }
+
+    /// Regression for the live-e2e NoSecretStrings witness stall:
+    /// verifier callbacks can arrive after the planner session has
+    /// revoked itself on clean exit. The witness handler must still
+    /// recover the recorded worktree root from that durable session
+    /// row; falling back to `data_dir` makes gate recheck run
+    /// `git diff` in the kernel tempdir and strands the task in
+    /// `GatesPending`.
+    #[test]
+    fn resolve_worktree_root_reads_revoked_session_metadata() {
+        let store = Store::open_in_memory().expect("in-memory store");
+        let data_dir = PathBuf::from("/tmp/resolve-revoked-data-dir");
+        let worktree = "/tmp/resolve-revoked-worktree".to_owned();
+        let (session_id, _) = session::create_session(
+            Role::Planner,
+            Some(worktree.clone()),
+            Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+            Some("refs/heads/main".to_owned()),
+            raxis_types::LineageId::new_v4(),
+            &SessionConfig::default(),
+            &store,
+        )
+        .expect("create planner session");
+        session::revoke_session(&session_id, &store).expect("revoke session");
+
+        let resolved = resolve_worktree_root_inner(Some(session_id.as_str()), &store, &data_dir);
+
+        assert_eq!(resolved, PathBuf::from(worktree));
     }
 
     /// **INV-WITNESS-GATE-RECHECK-ASYNC-SAFE-01** witness (negative).

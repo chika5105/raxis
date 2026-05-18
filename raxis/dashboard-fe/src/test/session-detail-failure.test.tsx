@@ -21,7 +21,19 @@ import { SessionDetailPage } from "@/pages/SessionDetail";
 import type { FailureInfo, SessionView } from "@/types/api";
 
 vi.mock("@/components/SessionStream", () => ({
-  SessionStream: () => <div data-testid="session-stream-mock" />,
+  SessionStream: ({
+    historical,
+    annotations,
+  }: {
+    historical?: boolean;
+    annotations?: unknown[];
+  }) => (
+    <div
+      data-testid="session-stream-mock"
+      data-historical={historical ? "true" : "false"}
+      data-annotation-count={String(annotations?.length ?? 0)}
+    />
+  ),
 }));
 
 const FAILURE: FailureInfo = {
@@ -112,5 +124,20 @@ describe("<SessionDetailPage> failure rendering", () => {
     expect(screen.queryByTestId("failure-kind")).toBeNull();
     expect(screen.queryByText(/\(no reason recorded\)/)).toBeNull();
     expect(screen.queryByText(/KERNEL BUG/)).toBeNull();
+  });
+
+  it("keeps a revoked session on the detail page as a historical view", async () => {
+    mockSession({ state: "Revoked", failure: null, updated_at: 1714500300 });
+    renderAt("sess_abc");
+    expect(
+      await screen.findByTestId("session-lifecycle-notice"),
+    ).toHaveTextContent("Session moved to historical view");
+    expect(screen.getByTestId("tab-stream")).toHaveTextContent(
+      "Stream capture",
+    );
+    expect(screen.getByTestId("session-stream-mock")).toHaveAttribute(
+      "data-historical",
+      "true",
+    );
   });
 });

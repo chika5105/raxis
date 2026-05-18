@@ -82,6 +82,7 @@ export function WorktreeDetailPage() {
   if (detail.error)
     return <ErrorBox error={detail.error} onRetry={() => detail.refetch()} />;
   const w = detail.data;
+  const hasReviewBase = Boolean(w.base_sha && w.head_sha);
 
   return (
     <div className="space-y-5">
@@ -165,6 +166,37 @@ export function WorktreeDetailPage() {
         </div>
       </header>
 
+      <section className="rounded-md border border-edge bg-panel p-3 flex items-center gap-3 flex-wrap">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs uppercase tracking-wider text-ink-subtle">
+            Review range
+          </div>
+          <div className="mt-1 flex items-center gap-2 text-sm flex-wrap">
+            {hasReviewBase ? (
+              <>
+                <Mono className="text-ink-muted">{shortSha(w.base_sha)}</Mono>
+                <span className="text-ink-subtle">→</span>
+                <Mono className="text-ink-muted">{shortSha(w.head_sha)}</Mono>
+                <span className="badge bg-ok-muted/20 border-ok text-ok">
+                  ready for review
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="text-ink-muted">
+                  No default comparison range recorded.
+                </span>
+                <span className="badge bg-panel-high border-edge text-ink-subtle">
+                  browse or range diff
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+        {w.base_sha && <CopyButton value={w.base_sha} />}
+        {w.head_sha && <CopyButton value={w.head_sha} />}
+      </section>
+
       {/* Tabs */}
       <div role="tablist" className="flex border-b border-edge text-sm">
         <TabButton active={tab === "files"} onClick={() => setTab("files")}>
@@ -190,6 +222,7 @@ export function WorktreeDetailPage() {
           error={defaultDiff.error}
           data={defaultDiff.data}
           baseSha={w.base_sha}
+          kind={w.kind}
           scrollTo={scrollTo}
           onSelectFile={setScrollTo}
         />
@@ -234,7 +267,11 @@ export function WorktreeDetailPage() {
           {defaultDiff.isPending ? (
             <PageSpinner />
           ) : defaultDiff.error ? (
-            <DiffErrorOrEmpty error={defaultDiff.error} baseSha={w.base_sha} />
+            <DiffErrorOrEmpty
+              error={defaultDiff.error}
+              baseSha={w.base_sha}
+              kind={w.kind}
+            />
           ) : (
             <DiffView diff={defaultDiff.data} />
           )}
@@ -278,6 +315,7 @@ interface FilesTabProps {
   error: unknown;
   data: WorktreeDiffData | undefined;
   baseSha: string | null;
+  kind: string;
   scrollTo: string | null;
   onSelectFile: (path: string | null) => void;
 }
@@ -291,6 +329,7 @@ function FilesTab({
   error,
   data,
   baseSha,
+  kind,
   scrollTo,
   onSelectFile,
 }: FilesTabProps) {
@@ -333,7 +372,7 @@ function FilesTab({
 
   if (isPending) return <PageSpinner />;
   if (error) {
-    return <DiffErrorOrEmpty error={error} baseSha={baseSha} />;
+    return <DiffErrorOrEmpty error={error} baseSha={baseSha} kind={kind} />;
   }
   if (!data) return <PageSpinner />;
   const diff = data;
@@ -407,26 +446,37 @@ function FilesTab({
 function DiffErrorOrEmpty({
   error,
   baseSha,
+  kind,
 }: {
   error: unknown;
   baseSha: string | null;
+  kind: string;
 }) {
   const is404 =
     error instanceof ApiError &&
     error.status === 404 &&
     (error.detail.toLowerCase().includes("default-diff") || baseSha == null);
   if (is404) {
+    const isSession = kind !== "Main";
     return (
       <Empty
         title="This worktree has no recorded base SHA."
         hint={
-          <>
-            The main operator-allowed root tracks{" "}
-            <code className="font-mono">origin/main</code> directly; only
-            session worktrees record a base SHA the executor diffs against. Use
-            the <strong>Range diff</strong> tab to compare two arbitrary commits
-            in this worktree.
-          </>
+          isSession ? (
+            <>
+              This session should normally carry the executor base SHA. Use the{" "}
+              <strong>Browse</strong> tab for file inspection or the{" "}
+              <strong>Range diff</strong> tab while the kernel metadata is being
+              checked.
+            </>
+          ) : (
+            <>
+              The main operator-allowed root tracks{" "}
+              <code className="font-mono">origin/main</code> directly. Use the{" "}
+              <strong>Range diff</strong> tab to compare two arbitrary commits
+              in this worktree.
+            </>
+          )
         }
       />
     );

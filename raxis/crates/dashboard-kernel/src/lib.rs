@@ -3576,28 +3576,58 @@ impl KernelDashboardData {
                 },
             });
         }
-        // Active sessions overlay — pull worktree_root + base_sha
-        // from the read-only sessions view.
+        // Session overlay — include both active and recently revoked rows.
+        //
+        // Worktree review is forensic, not just "currently live VM" state:
+        // the most useful moment to inspect a diff is often after the
+        // executor/reviewer has cleanly exited and revoked its session. The
+        // old path used `views::sessions::active_list`, which dropped those
+        // rows and also omitted `base_sha`, causing session worktrees to render
+        // as browse-only even though the session table had the exact base
+        // needed for a PR-style diff.
         if let Ok(conn) = self.open_ro() {
-            if let Ok(rows) = raxis_store::views::sessions::active_list(&conn, 200) {
-                for s in rows {
-                    let Some(wt) = s.worktree_root else { continue };
-                    let short = if s.session_id.len() >= 12 {
-                        s.session_id[..12].to_owned()
-                    } else {
-                        s.session_id.clone()
-                    };
-                    out.push(ResolvedWorktree {
-                        summary: WorktreeListEntry {
-                            name: format!("session-{short}"),
-                            label: format!("{}:{short}", s.role_id),
-                            kind: "Session".into(),
-                            path: wt,
-                            session_id: Some(s.session_id),
-                            task_id: None,
-                            base_sha: None, // active_list does not surface base_sha today
-                        },
-                    });
+            if let Ok(mut stmt) = conn.prepare(&format!(
+                "SELECT s.session_id, s.role_id, s.worktree_root, s.base_sha, \
+                        (SELECT t.task_id FROM {TBL_TASKS} t \
+                          WHERE t.session_id = s.session_id \
+                          ORDER BY t.admitted_at DESC LIMIT 1) AS task_id \
+                 FROM {TBL_SESSIONS} s \
+                 WHERE s.worktree_root IS NOT NULL \
+                 ORDER BY s.created_at DESC \
+                 LIMIT 500"
+            )) {
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                    ))
+                });
+                if let Ok(rows) = rows {
+                    for row in rows.flatten() {
+                        let (session_id, role_id, wt, base_sha, task_id) = row;
+                        if wt.trim().is_empty() {
+                            continue;
+                        }
+                        let short = if session_id.len() >= 12 {
+                            session_id[..12].to_owned()
+                        } else {
+                            session_id.clone()
+                        };
+                        out.push(ResolvedWorktree {
+                            summary: WorktreeListEntry {
+                                name: format!("session-{short}"),
+                                label: format!("{role_id}:{short}"),
+                                kind: "Session".into(),
+                                path: wt,
+                                session_id: Some(session_id),
+                                task_id,
+                                base_sha,
+                            },
+                        });
+                    }
                 }
             }
         }

@@ -26,6 +26,11 @@ interface SessionStreamProps {
   /// session sees retries / revokes inline rather than only at
   /// the top of the page. `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`.
   annotations?: LA[];
+  /// True when the session row has already left the active set
+  /// (`Revoked`, `Expired`, or another terminal state). In that
+  /// mode an SSE close/error is a normal historical boundary, not
+  /// a broken live connection that should keep reconnecting.
+  historical?: boolean;
 }
 
 type StreamStatus =
@@ -87,6 +92,7 @@ export function SessionStream({
   bufferSize = 1_000,
   flushIntervalMs = 80,
   annotations = [],
+  historical = false,
 }: SessionStreamProps) {
   const [events, setEvents] = useState<StreamEventEnvelope[]>([]);
   const [status, setStatus] = useState<StreamStatus>("connecting");
@@ -205,7 +211,12 @@ export function SessionStream({
     });
     es.addEventListener("closed", () => {
       if (!stopped) {
+        flush();
         setStatus("ended");
+        if (historical) {
+          stopped = true;
+          es.close();
+        }
       }
     });
     es.addEventListener("kernel-shutdown", () => {
@@ -221,6 +232,13 @@ export function SessionStream({
 
     es.onerror = () => {
       if (stopped) return;
+      if (historical) {
+        stopped = true;
+        flush();
+        es.close();
+        setStatus("ended");
+        return;
+      }
       // EventSource transitions: CONNECTING (0) → OPEN (1) →
       // CLOSED (2). CLOSED means the browser gave up; we layer
       // our own backoff on top.
@@ -248,7 +266,14 @@ export function SessionStream({
     // `reconnectAttempt` and `manualReset` participate so that
     // either a backoff-triggered or operator-triggered reconnect
     // tears the old EventSource down and opens a fresh one.
-  }, [sessionId, bufferSize, flushIntervalMs, reconnectAttempt, manualReset]);
+  }, [
+    sessionId,
+    bufferSize,
+    flushIntervalMs,
+    reconnectAttempt,
+    manualReset,
+    historical,
+  ]);
 
   // Auto-scroll if the user is pinned to the bottom.
   useEffect(() => {
@@ -316,7 +341,9 @@ export function SessionStream({
     <div className="card p-0 overflow-hidden flex flex-col">
       <header className="px-3 py-2 border-b border-edge bg-panel-high flex items-center gap-2 text-xs">
         <StatusDot status={status} />
-        <span className="text-ink-muted">{statusLabel(status)}</span>
+        <span className="text-ink-muted">
+          {statusLabel(status, historical)}
+        </span>
         {lagged > 0 && (
           <span
             title="The backend reported the subscriber lagged behind the broadcast. Older events were dropped server-side; the live tail is intact."
@@ -349,7 +376,7 @@ export function SessionStream({
             className="text-ink-subtle hover:text-ink"
             title="Drop the current SSE connection and reattach"
           >
-            Reconnect
+            {historical ? "Reload capture" : "Reconnect"}
           </button>
         </span>
       </header>
@@ -371,10 +398,17 @@ export function SessionStream({
             {status === "missing" ? (
               <>Not authenticated — sign in to view the live stream.</>
             ) : status === "ended" ? (
-              <>
-                Session has no live stream attached (the agent may not have
-                started emitting output yet, or the session has terminated).
-              </>
+              historical ? (
+                <>
+                  No stream frames were captured for this historical session.
+                  Post-mortem and worktree data remain available.
+                </>
+              ) : (
+                <>
+                  Session has no live stream attached (the agent may not have
+                  started emitting output yet, or the session has terminated).
+                </>
+              )
             ) : status === "reconnecting" ? (
               <>Reconnecting to the kernel stream…</>
             ) : (
@@ -401,7 +435,7 @@ export function SessionStream({
   );
 }
 
-function statusLabel(status: StreamStatus): string {
+function statusLabel(status: StreamStatus, historical: boolean): string {
   switch (status) {
     case "connecting":
       return "connecting…";
@@ -412,7 +446,7 @@ function statusLabel(status: StreamStatus): string {
     case "reconnecting":
       return "reconnecting…";
     case "ended":
-      return "stream ended";
+      return historical ? "capture complete" : "stream ended";
     case "missing":
       return "no token";
   }

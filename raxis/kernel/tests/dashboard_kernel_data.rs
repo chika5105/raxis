@@ -420,6 +420,28 @@ async fn worktree_endpoints_surface_real_git_state() {
     // freshly-initialised repo path.
     let policy =
         policy_with_operator_and_roots([0x55u8; 32], vec![], vec![repo.display().to_string()]);
+    {
+        let conn = store.lock().await;
+        let sessions = raxis_store::Table::Sessions.as_str();
+        conn.execute(
+            &format!(
+                "INSERT INTO {sessions} \
+                 (session_id, role_id, session_token, lineage_id, \
+                  worktree_root, base_sha, base_tracking_ref, \
+                  fetch_quota, sequence_number, \
+                  created_at, expires_at, revoked, revoked_at) \
+                 VALUES (?1, 'Planner', ?2, ?3, ?4, ?5, 'refs/heads/main', 1000, 0, 10, 9999999999, 1, 20)"
+            ),
+            rusqlite::params![
+                "11111111-1111-4111-8111-111111111111",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "22222222-2222-4222-8222-222222222222",
+                repo.display().to_string(),
+                base_sha.as_str(),
+            ],
+        )
+        .expect("seed revoked session worktree");
+    }
 
     let data = raxis_dashboard_kernel::KernelDashboardData::new(
         Arc::clone(&store),
@@ -439,6 +461,12 @@ async fn worktree_endpoints_surface_real_git_state() {
         "expected a Main worktree at {}, got {listed:#?}",
         repo.display()
     );
+    let session = listed
+        .iter()
+        .find(|w| w.session_id.as_deref() == Some("11111111-1111-4111-8111-111111111111"))
+        .cloned()
+        .expect("revoked session worktree must remain visible for review");
+    assert_eq!(session.base_sha.as_deref(), Some(base_sha.as_str()));
     let main = listed.iter().find(|w| w.kind == "Main").unwrap().clone();
 
     // 2) Detail returns the head SHA + branch + clean status.
@@ -474,7 +502,15 @@ async fn worktree_endpoints_surface_real_git_state() {
     let b = diff.files.iter().find(|f| f.path == "b.txt").unwrap();
     assert_eq!(b.status, "A");
 
-    // 5) Default-diff fails when no base SHA is recorded for
+    // 5) Session default-diff uses the recorded session base SHA even when
+    //    the session is already revoked.
+    let session_diff = data
+        .worktree_diff_default(&session.name)
+        .expect("session default diff");
+    assert_eq!(session_diff.from_sha, base_sha);
+    assert_eq!(session_diff.to_sha, head_sha);
+
+    // 6) Default-diff fails when no base SHA is recorded for
     //    the main worktree (the listing reports `base_sha = None`
     //    for main roots — operator-recorded base SHAs only flow
     //    through the per-session view).
@@ -486,7 +522,7 @@ async fn worktree_endpoints_surface_real_git_state() {
         "expected NotFound; got {err:?}"
     );
 
-    // 6) Resolution refuses paths outside `allowed_worktree_roots`.
+    // 7) Resolution refuses paths outside `allowed_worktree_roots`.
     let err = data.get_worktree("session-deadbeefdead").unwrap_err();
     assert!(matches!(
         err,

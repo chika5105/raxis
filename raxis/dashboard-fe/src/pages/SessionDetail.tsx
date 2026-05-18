@@ -14,7 +14,7 @@ import { StateBadge } from "@/components/StateBadge";
 import { TaskLlmTurns } from "@/components/TaskLlmTurns";
 import { fmtAbsolute, fmtRelative, fmtTokens } from "@/lib/format";
 import { isTerminalFailureState } from "@/lib/state-color";
-import type { SessionCaptureView } from "@/types/api";
+import type { LifecycleAnnotation, SessionCaptureView } from "@/types/api";
 
 export function SessionDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
@@ -24,12 +24,11 @@ export function SessionDetailPage() {
     queryFn: ({ signal }) => dashboardApi.sessions.get(id, signal),
     refetchInterval: 3_000,
     enabled: id.length > 0,
-    // A terminated (revoked / expired) session that was in the
-    // list at click-time may legitimately 404 on detail under
-    // older kernels that didn't ship
-    // `INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01`. Retrying that
-    // wedges the operator on a generic FAIL screen — we surface
-    // a typed affordance below instead.
+    placeholderData: (prev) => prev,
+    // Unknown sessions should not retry forever. Background
+    // refetch failures are handled below without discarding the
+    // last successful row, so a session that transitions from
+    // active to revoked stays on-screen.
     retry: (count, err) => {
       if (err instanceof ApiError && err.status === 404) return false;
       return count < 2;
@@ -52,17 +51,9 @@ export function SessionDetailPage() {
     return worktrees.data.find((w) => w.session_id === id) ?? null;
   }, [worktrees.data, id]);
 
-  if (q.isPending) return <PageSpinner />;
-  if (q.error) {
-    // `INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01`: a session that
-    // crossed `expires_at` or was revoked between the list fetch
-    // and the detail click currently surfaces as a generic
-    // `FAIL_DASHBOARD_NOT_FOUND`. Once the kernel-side fix lands
-    // (forensic by_id lookup that includes terminated rows), this
-    // path stops firing on those sessions; until then, render a
-    // typed affordance so the operator has somewhere to go
-    // (audit chain filtered by the session) rather than a dead-
-    // end Retry button.
+  const s = q.data;
+  if (!s && q.isPending) return <PageSpinner />;
+  if (!s && q.error) {
     if (q.error instanceof ApiError && q.error.status === 404) {
       return (
         <SessionNotFound sessionId={id} onRetry={() => q.refetch()} />
@@ -70,7 +61,10 @@ export function SessionDetailPage() {
     }
     return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
   }
-  const s = q.data;
+  if (!s) return <PageSpinner />;
+
+  const historical = isHistoricalSessionState(s.state);
+  const refreshError = q.error instanceof Error ? q.error : null;
 
   return (
     <div className="space-y-5">
@@ -99,7 +93,7 @@ export function SessionDetailPage() {
             )}
           </h1>
           <div className="mt-2 flex items-center gap-2 flex-wrap text-xs text-ink-muted">
-            <StateBadge state={s.state} pulse={s.state === "Running"} />
+            <StateBadge state={s.state} pulse={isLiveSessionState(s.state)} />
             <span>created {fmtAbsolute(s.created_at)}</span>
             <span>· updated {fmtRelative(s.updated_at)}</span>
           </div>
@@ -149,6 +143,23 @@ export function SessionDetailPage() {
         </div>
       </header>
 
+      {historical && (
+        <SessionLifecycleNotice
+          state={s.state}
+          updatedAt={s.updated_at}
+        />
+      )}
+
+      {refreshError && (
+        <div
+          className="card border-warn/40 bg-warn-muted/10 px-4 py-3 text-sm text-ink-muted"
+          data-testid="session-detail-stale-refresh"
+        >
+          Showing the last successful session snapshot. The most recent refresh
+          failed with <Mono pill>{refreshError.message}</Mono>.
+        </div>
+      )}
+
       {(isTerminalFailureState(s.state) || s.failure) && (
         <FailureReasonPanel
           reason={s.failure ?? null}
@@ -166,6 +177,8 @@ export function SessionDetailPage() {
       <SessionDetailTabs
         sessionId={s.session_id}
         owningTaskId={s.task_id ?? null}
+        annotations={s.annotations ?? []}
+        historical={historical}
       />
     </div>
   );
@@ -205,9 +218,13 @@ type DetailTab = "stream" | "llm-turns" | "postmortem";
 function SessionDetailTabs({
   sessionId,
   owningTaskId,
+  annotations,
+  historical,
 }: {
   sessionId: string;
   owningTaskId: string | null;
+  annotations: LifecycleAnnotation[];
+  historical: boolean;
 }) {
   const [tab, setTab] = useState<DetailTab>("stream");
   const llmTurnsEnabled = !!owningTaskId;
@@ -223,7 +240,7 @@ function SessionDetailTabs({
           onClick={() => setTab("stream")}
           testId="tab-stream"
         >
-          Live stream
+          {historical ? "Stream capture" : "Live stream"}
         </TabButton>
         <TabButton
           active={tab === "llm-turns"}
@@ -246,12 +263,63 @@ function SessionDetailTabs({
           Post-mortem
         </TabButton>
       </div>
-      {tab === "stream" && <SessionStream sessionId={sessionId} />}
+      {tab === "stream" && (
+        <SessionStream
+          sessionId={sessionId}
+          annotations={annotations}
+          historical={historical}
+        />
+      )}
       {tab === "llm-turns" && owningTaskId && (
         <TaskLlmTurns taskId={owningTaskId} />
       )}
       {tab === "postmortem" && <SessionPostmortemPanel sessionId={sessionId} />}
     </section>
+  );
+}
+
+function isLiveSessionState(state: string): boolean {
+  return (
+    state === "Active" ||
+    state === "Running" ||
+    state === "Spawning" ||
+    state === "Paused"
+  );
+}
+
+function isHistoricalSessionState(state: string): boolean {
+  return !isLiveSessionState(state);
+}
+
+function SessionLifecycleNotice({
+  state,
+  updatedAt,
+}: {
+  state: string;
+  updatedAt: number;
+}) {
+  return (
+    <div
+      className="card border-info/30 bg-info/5 px-4 py-3 flex items-start justify-between gap-4"
+      data-testid="session-lifecycle-notice"
+    >
+      <div className="min-w-0">
+        <div className="flex items-center gap-2 text-sm font-medium text-ink">
+          <StateBadge state={state} />
+          <span>Session moved to historical view</span>
+        </div>
+        <p className="mt-1 text-xs text-ink-muted leading-relaxed">
+          The active VM/session has ended, but this detail page keeps the same
+          stream, LLM turns, post-mortem capture, and worktree links in place.
+        </p>
+      </div>
+      <div className="shrink-0 text-right text-[11px] text-ink-subtle">
+        <div>transitioned {fmtRelative(updatedAt)}</div>
+        <Link to="/sessions/recent" className="text-accent hover:underline">
+          also in Recent sessions
+        </Link>
+      </div>
+    </div>
   );
 }
 

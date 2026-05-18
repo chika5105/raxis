@@ -1132,7 +1132,8 @@ fn read_executor_task_capability_views(
 /// `kernel/src/handlers/intent.rs::classify_batch_candidates`):
 ///
 /// * `tasks.state = 'Admitted'` (post-admission, pre-activation)
-/// * `plan_registry` entry present (defense-in-depth)
+/// * `plan_registry` entry present for an Executor or Reviewer
+///   task (defense-in-depth)
 /// * every `task_dag_edges` predecessor in `tasks.state = 'Completed'`
 /// * latest `subtask_activations.activation_state = 'PendingActivation'`
 ///   (the FSM is parked waiting for an `ActivateSubTask` intent)
@@ -1140,11 +1141,10 @@ fn read_executor_task_capability_views(
 /// The synthetic coordinator row (`task_id == initiative_id`) is
 /// excluded by the outer `task_id != ?1` predicate so the
 /// orchestrator never sees its own bookkeeping row in
-/// `ready_now=[…]`. Reviewer rows are excluded by filtering on
-/// `plan_registry.session_agent_type == Executor` — reviewers are
-/// activated by the kernel's evaluation-sha gate, not by the
-/// orchestrator's `activate_subtask`, so surfacing them as
-/// "ready_now" would be a category error.
+/// `ready_now=[…]`. Reviewer rows MUST be included once their
+/// predecessor executor has stamped `evaluation_sha`; the same
+/// `ActivateSubTask` path provisions reviewer worktrees read-only
+/// at that SHA.
 ///
 /// Order: `(admitted_at ASC, task_id ASC)` — byte-identical to the
 /// kernel's batch-handler sort, so the LLM picking from this list
@@ -1185,11 +1185,15 @@ fn read_ready_now_task_ids(
             Some(f) => f,
             None => continue,
         };
-        // Only executor rows are activatable via `activate_subtask` /
-        // `batch_activate_subtasks`. Reviewer activations are driven
-        // by the kernel's evaluation-sha gate, not by the
-        // orchestrator's intent, so they MUST NOT appear here.
-        if fields.session_agent_type != SessionAgentType::Executor {
+        // Executor and Reviewer rows are activatable via
+        // `activate_subtask` / `batch_activate_subtasks`. The
+        // activation handler has reviewer-specific provisioning that
+        // clones the predecessor executor's `evaluation_sha`, so the
+        // predecessor-Completed predicate below is the readiness gate.
+        if !matches!(
+            fields.session_agent_type,
+            SessionAgentType::Executor | SessionAgentType::Reviewer
+        ) {
             continue;
         }
         // Predecessor closure — mirrors
@@ -2320,7 +2324,7 @@ mod tests {
     /// `task_dag_edges` predecessor in `tasks.state = 'Completed'`
     /// AND the latest `subtask_activations.activation_state ==
     /// 'PendingActivation'` AND `plan_registry.session_agent_type
-    /// == Executor`.
+    /// is Executor or Reviewer.
     #[test]
     fn ready_now_matches_kernel_admission_predicate() {
         let (store, _dir) = fresh_store();
@@ -2331,6 +2335,7 @@ mod tests {
         let blocked_pred = "blocked-pred";
         let no_activation_row = "no-activation-row";
         let reviewer = "reviewer-of-ready-a";
+        let ready_reviewer = "reviewer-of-pred-done";
         let pred_done = "predecessor-completed";
         let gate_parent = "gate-parent";
         let gate_fixup = "gate-fixup";
@@ -2352,6 +2357,7 @@ mod tests {
             (blocked_pred, SessionAgentType::Executor),
             (no_activation_row, SessionAgentType::Executor),
             (reviewer, SessionAgentType::Reviewer),
+            (ready_reviewer, SessionAgentType::Reviewer),
             (gate_parent, SessionAgentType::Executor),
             (gate_fixup, SessionAgentType::Executor),
         ] {
@@ -2402,6 +2408,7 @@ mod tests {
         for (tid, ts) in &[
             (ready_a, 20i64),
             (ready_b, 30i64),
+            (ready_reviewer, 35i64),
             (blocked_pred, 40i64),
             (no_activation_row, 50i64),
             (reviewer, 60i64),
@@ -2440,13 +2447,13 @@ mod tests {
         // Edges:
         //   ready_a   ⟵ pred_done       (pred Completed → ready)
         //   blocked_pred ⟵ ready_a      (pred is Admitted not Completed → NOT ready)
-        //   reviewer  ⟵ ready_a         (pred Admitted → reviewer NOT ready,
-        //                                also reviewer rows are excluded
-        //                                from ready_now by agent-type filter)
+        //   ready_reviewer ⟵ pred_done  (Reviewer with pred Completed → ready)
+        //   reviewer  ⟵ ready_a         (pred Admitted → reviewer NOT ready)
         //   gate_fixup ⟵ gate_parent    (parent is GatesPending but this is a
         //                                fixup-lineage edge → ready)
         for (pred, succ) in &[
             (pred_done, ready_a),
+            (pred_done, ready_reviewer),
             (ready_a, blocked_pred),
             (ready_a, reviewer),
             (gate_parent, gate_fixup),
@@ -2466,11 +2473,13 @@ mod tests {
         //   ready_b       latest = PendingActivation (ADMISSIBLE)
         //   blocked_pred  latest = PendingActivation (would be admissible, but pred not Completed)
         //   no_activation_row  NO row (NOT admissible)
-        //   reviewer      latest = PendingActivation (reviewers excluded by agent-type filter)
+        //   ready_reviewer latest = PendingActivation (ADMISSIBLE reviewer)
+        //   reviewer      latest = PendingActivation (blocked by predecessor)
         //   gate_fixup    latest = PendingActivation (ADMISSIBLE despite parent GatesPending)
         for (tid, state, created_at) in &[
             (ready_a, "PendingActivation", 21i64),
             (ready_b, "PendingActivation", 31i64),
+            (ready_reviewer, "PendingActivation", 36i64),
             (blocked_pred, "PendingActivation", 41i64),
             (reviewer, "PendingActivation", 61i64),
             (gate_fixup, "PendingActivation", 26i64),
@@ -2519,9 +2528,10 @@ mod tests {
             vec![
                 ready_a.to_owned(),
                 gate_fixup.to_owned(),
-                ready_b.to_owned()
+                ready_b.to_owned(),
+                ready_reviewer.to_owned()
             ],
-            "ready_now MUST list only Executor tasks whose latest \
+            "ready_now MUST list only Executor/Reviewer tasks whose latest \
              activation is PendingActivation AND whose predecessors \
              are all Completed except for the parent lineage edge of \
              a gate-fixup task; got: {:?}",
@@ -2537,7 +2547,9 @@ mod tests {
         // Renderer must surface both lines in the orchestrator block.
         let rendered = raxis_ksb::render_ksb(&snap).expect("render");
         assert!(
-            rendered.contains(&format!("ready_now=[{ready_a}, {gate_fixup}, {ready_b}]")),
+            rendered.contains(&format!(
+                "ready_now=[{ready_a}, {gate_fixup}, {ready_b}, {ready_reviewer}]"
+            )),
             "rendered KSB MUST surface `ready_now=[…]` in order; got:\n{rendered}",
         );
         assert!(
