@@ -95,6 +95,7 @@ struct PusherState {
     spans_exported_total: u64,
     metrics_exported_total: u64,
     spans_dropped_total: u64,
+    metrics_dropped_total: u64,
 }
 
 impl Pusher {
@@ -134,6 +135,7 @@ impl Pusher {
                 spans_exported_total: 0,
                 metrics_exported_total: 0,
                 spans_dropped_total: 0,
+                metrics_dropped_total: 0,
             })),
         })
     }
@@ -254,7 +256,7 @@ impl Pusher {
                 Ok(status) if (status == 408 || status == 429 || status >= 500) => {
                     if !self.backoff.should_retry(attempt) {
                         let dropped = pick_batch(state, stream).len();
-                        state.spans_dropped_total += dropped as u64;
+                        record_dropped_frames(state, stream, dropped as u64);
                         events.push(PusherEvent::ExportPermanentFailure {
                             stream,
                             frames: dropped,
@@ -276,7 +278,7 @@ impl Pusher {
                 Ok(status) => {
                     // 4xx other than 408/429 ⇒ config error; drop.
                     let dropped = pick_batch(state, stream).len();
-                    state.spans_dropped_total += dropped as u64;
+                    record_dropped_frames(state, stream, dropped as u64);
                     events.push(PusherEvent::ExportPermanentFailure {
                         stream,
                         frames: dropped,
@@ -288,7 +290,7 @@ impl Pusher {
                 Err(OtlpExportError::Network { reason, .. }) => {
                     if !self.backoff.should_retry(attempt) {
                         let dropped = pick_batch(state, stream).len();
-                        state.spans_dropped_total += dropped as u64;
+                        record_dropped_frames(state, stream, dropped as u64);
                         events.push(PusherEvent::ExportPermanentFailure {
                             stream,
                             frames: dropped,
@@ -375,7 +377,19 @@ impl Pusher {
             spans_exported_total: state.spans_exported_total,
             metrics_exported_total: state.metrics_exported_total,
             spans_dropped_total: state.spans_dropped_total,
+            metrics_dropped_total: state.metrics_dropped_total,
             cursor_lag_segments: 0,
+        }
+    }
+}
+
+fn record_dropped_frames(state: &mut PusherState, stream: Stream, frames: u64) {
+    match stream {
+        Stream::Spans => {
+            state.spans_dropped_total = state.spans_dropped_total.saturating_add(frames)
+        }
+        Stream::Metrics => {
+            state.metrics_dropped_total = state.metrics_dropped_total.saturating_add(frames)
         }
     }
 }

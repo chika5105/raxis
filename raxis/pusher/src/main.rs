@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use raxis_otel_pusher::{
     config::PusherConfig,
     health,
-    otlp::{OtlpClient, OtlpEndpoint, ResourceAttrs},
+    otlp::{OtlpClient, OtlpCompression, OtlpEndpoint, ResourceAttrs},
     run::{Pusher, PusherEvent},
 };
 use raxis_policy::PolicyBundle;
@@ -240,29 +240,62 @@ fn build_client(
             environment: cfg.resource.environment.clone(),
             extra: cfg.resource.extra.clone(),
         },
+        OtlpCompression::from_policy(&cfg.pusher.otlp_compression)?,
     )
 }
 
 fn log_event(ev: &PusherEvent) {
     let json = match ev {
-        PusherEvent::Started => r#"{"event":"otel_pusher_started"}"#.to_owned(),
-        PusherEvent::Stopping => r#"{"event":"otel_pusher_stopping"}"#.to_owned(),
-        PusherEvent::ExportOk { stream, frames, status } => format!(
-            "{{\"event\":\"otel_pusher_export_ok\",\"stream\":\"{:?}\",\"frames\":{},\"status\":{}}}",
-            stream, frames, status,
-        ),
-        PusherEvent::ExportRetry { stream, attempt, reason } => format!(
-            "{{\"event\":\"otel_pusher_export_retry\",\"stream\":\"{:?}\",\"attempt\":{},\"reason\":\"{}\"}}",
-            stream, attempt, reason,
-        ),
-        PusherEvent::ExportPermanentFailure { stream, frames, reason } => format!(
-            "{{\"event\":\"otel_pusher_export_drop\",\"stream\":\"{:?}\",\"frames\":{},\"reason\":\"{}\"}}",
-            stream, frames, reason,
-        ),
-        PusherEvent::SegmentAdvanced { stream, new_segment } => format!(
-            "{{\"event\":\"otel_pusher_segment_advanced\",\"stream\":\"{:?}\",\"new_segment\":\"{}\"}}",
-            stream, new_segment,
-        ),
+        PusherEvent::Started => serde_json::json!({
+            "level": "info",
+            "event": "otel_pusher_started",
+        }),
+        PusherEvent::Stopping => serde_json::json!({
+            "level": "info",
+            "event": "otel_pusher_stopping",
+        }),
+        PusherEvent::ExportOk {
+            stream,
+            frames,
+            status,
+        } => serde_json::json!({
+            "level": "info",
+            "event": "otel_pusher_export_ok",
+            "stream": format!("{stream:?}"),
+            "frames": frames,
+            "status": status,
+        }),
+        PusherEvent::ExportRetry {
+            stream,
+            attempt,
+            reason,
+        } => serde_json::json!({
+            "level": "info",
+            "event": "otel_pusher_export_retry",
+            "stream": format!("{stream:?}"),
+            "attempt": attempt,
+            "reason": reason,
+        }),
+        PusherEvent::ExportPermanentFailure {
+            stream,
+            frames,
+            reason,
+        } => serde_json::json!({
+            "level": "info",
+            "event": "otel_pusher_export_drop",
+            "stream": format!("{stream:?}"),
+            "frames": frames,
+            "reason": reason,
+        }),
+        PusherEvent::SegmentAdvanced {
+            stream,
+            new_segment,
+        } => serde_json::json!({
+            "level": "info",
+            "event": "otel_pusher_segment_advanced",
+            "stream": format!("{stream:?}"),
+            "new_segment": new_segment,
+        }),
     };
-    eprintln!("{{\"level\":\"info\",{}}}", &json[1..json.len() - 1]);
+    eprintln!("{json}");
 }

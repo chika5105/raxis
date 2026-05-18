@@ -40,8 +40,12 @@ pub struct HealthSnapshot {
     pub spans_exported_total: u64,
     /// Total metrics exported across the lifetime of this pusher.
     pub metrics_exported_total: u64,
-    /// Total batches dropped after exhausting retries.
+    /// Total span frames dropped after exhausting retries or a
+    /// non-retriable collector response.
     pub spans_dropped_total: u64,
+    /// Total metric frames dropped after exhausting retries or a
+    /// non-retriable collector response.
+    pub metrics_dropped_total: u64,
     /// Distance (segments) between the cursor's current segment
     /// and the kernel's currently-active segment, summed across
     /// streams.

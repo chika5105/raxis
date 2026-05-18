@@ -35,7 +35,7 @@ use raxis_observability::{
     SpanName,
 };
 use raxis_otel_pusher::config::PusherConfig;
-use raxis_otel_pusher::otlp::{OtlpClient, OtlpEndpoint, ResourceAttrs};
+use raxis_otel_pusher::otlp::{OtlpClient, OtlpCompression, OtlpEndpoint, ResourceAttrs};
 use raxis_otel_pusher::retry::BackoffPolicy;
 use raxis_otel_pusher::run::{Pusher, PusherEvent};
 use raxis_policy::{
@@ -53,6 +53,7 @@ use tokio::sync::Mutex;
 struct FakeCollector {
     addr: std::net::SocketAddr,
     received: Arc<Mutex<Vec<Vec<u8>>>>,
+    encodings: Arc<Mutex<Vec<Option<String>>>>,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -61,7 +62,9 @@ impl FakeCollector {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let received: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let encodings: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
         let received_clone = Arc::clone(&received);
+        let encodings_clone = Arc::clone(&encodings);
         let handle = tokio::spawn(async move {
             let mut idx = 0usize;
             loop {
@@ -70,6 +73,7 @@ impl FakeCollector {
                     Err(_) => break,
                 };
                 let received = Arc::clone(&received_clone);
+                let encodings = Arc::clone(&encodings_clone);
                 let status = status_seq.get(idx).copied().unwrap_or(200);
                 idx = idx.saturating_add(1);
                 tokio::spawn(async move {
@@ -79,6 +83,7 @@ impl FakeCollector {
                     let mut body_buf = Vec::new();
                     let mut tmp = [0u8; 1024];
                     let mut content_length: Option<usize> = None;
+                    let mut content_encoding: Option<String> = None;
                     let mut header_done = false;
                     loop {
                         let n = match stream.read(&mut tmp).await {
@@ -92,10 +97,13 @@ impl FakeCollector {
                                 header_done = true;
                                 let head = std::str::from_utf8(&header_buf[..idx]).unwrap_or("");
                                 for line in head.split("\r\n") {
-                                    if let Some(rest) =
-                                        line.to_ascii_lowercase().strip_prefix("content-length:")
-                                    {
+                                    let lower = line.to_ascii_lowercase();
+                                    if let Some(rest) = lower.strip_prefix("content-length:") {
                                         content_length = rest.trim().parse().ok();
+                                    } else if let Some(rest) =
+                                        lower.strip_prefix("content-encoding:")
+                                    {
+                                        content_encoding = Some(rest.trim().to_owned());
                                     }
                                 }
                                 let body_start = idx + 4;
@@ -113,7 +121,19 @@ impl FakeCollector {
                             }
                         }
                     }
-                    received.lock().await.push(body_buf);
+                    let stored_body = match content_encoding.as_deref() {
+                        Some("gzip") => {
+                            let mut decoder = flate2::read::GzDecoder::new(&body_buf[..]);
+                            let mut decoded = Vec::new();
+                            std::io::Read::read_to_end(&mut decoder, &mut decoded)
+                                .expect("fake collector should decode gzip OTLP request body");
+                            decoded
+                        }
+                        Some(other) => panic!("unsupported content-encoding in test: {other}"),
+                        None => body_buf,
+                    };
+                    encodings.lock().await.push(content_encoding);
+                    received.lock().await.push(stored_body);
                     let resp = format!(
                         "HTTP/1.1 {} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                         status,
@@ -133,12 +153,17 @@ impl FakeCollector {
         Self {
             addr,
             received,
+            encodings,
             handle,
         }
     }
 
     async fn snapshot_bodies(&self) -> Vec<Vec<u8>> {
         self.received.lock().await.clone()
+    }
+
+    async fn snapshot_encodings(&self) -> Vec<Option<String>> {
+        self.encodings.lock().await.clone()
     }
 
     async fn endpoint(&self) -> String {
@@ -222,6 +247,7 @@ fn build_pusher_pieces(
             environment: pcfg.resource.environment.clone(),
             extra: pcfg.resource.extra.clone(),
         },
+        OtlpCompression::Gzip,
     )
     .unwrap();
     (pcfg, client)
@@ -329,8 +355,16 @@ async fn end_to_end_kernel_to_collector_happy_path() {
     let bodies = collector.snapshot_bodies().await;
     assert!(bodies.len() >= 2, "got {} bodies", bodies.len());
     for body in &bodies {
-        assert!(!body.is_empty(), "body should be non-empty protobuf");
+        assert!(
+            !body.is_empty(),
+            "decoded body should be non-empty protobuf"
+        );
     }
+    let encodings = collector.snapshot_encodings().await;
+    assert!(
+        encodings.iter().all(|e| e.as_deref() == Some("gzip")),
+        "pusher should gzip OTLP request bodies in the default test config: {encodings:?}",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -421,7 +455,12 @@ async fn http_4xx_drops_immediately_no_retry() {
 
     let obs = obs_config(&collector.endpoint().await);
     let (cfg, client) = build_pusher_pieces(&obs, tmp.path().to_owned(), "0.1.0");
-    let pusher = Pusher::new(cfg, client).unwrap();
+    let health =
+        raxis_otel_pusher::health::spawn(0, raxis_otel_pusher::health::HealthSnapshot::initial())
+            .await
+            .unwrap();
+    let health_rx = health.snapshot.subscribe();
+    let pusher = Pusher::new(cfg, client).unwrap().with_health(health);
     let mut events = Vec::new();
     for _ in 0..5 {
         events.extend(pusher.tick(true).await);
@@ -442,6 +481,15 @@ async fn http_4xx_drops_immediately_no_retry() {
     assert_eq!(
         retries, 0,
         "4xx should NOT trigger retries; got: {events:?}"
+    );
+    let snapshot = health_rx.borrow().clone();
+    assert!(
+        snapshot.spans_dropped_total >= 1,
+        "span drops must be counted separately in health: {snapshot:?}",
+    );
+    assert!(
+        snapshot.metrics_dropped_total >= 1,
+        "metric drops must be counted separately in health: {snapshot:?}",
     );
 }
 

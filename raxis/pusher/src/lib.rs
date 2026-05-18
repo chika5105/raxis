@@ -48,6 +48,6 @@ pub mod run;
 
 pub use config::PusherConfig;
 pub use cursor::{Cursor, CursorEntry};
-pub use otlp::{OtlpClient, OtlpEndpoint};
+pub use otlp::{OtlpClient, OtlpCompression, OtlpEndpoint};
 pub use reader::{Reader, ReaderError};
 pub use run::{Pusher, PusherEvent};

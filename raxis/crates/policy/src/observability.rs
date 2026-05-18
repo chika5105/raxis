@@ -140,10 +140,12 @@ pub(crate) struct ObservabilityPusherSection {
     /// OTLP collector endpoint (`http://`/`https://`).
     #[serde(default)]
     pub(crate) otlp_endpoint: String,
-    /// `"grpc"` or `"http"`.
+    /// `"http"` in V3. The schema keeps the field explicit so a
+    /// future gRPC implementation can be added without changing the
+    /// operator-facing table shape.
     #[serde(default)]
     pub(crate) otlp_protocol: Option<String>,
-    /// `"none"`, `"gzip"`, or `"zstd"`.
+    /// `"none"` or `"gzip"` in V3.
     #[serde(default)]
     pub(crate) otlp_compression: Option<String>,
     /// Per-batch deadline. Default `"10s"`; range [1s, 60s].
@@ -277,9 +279,9 @@ pub struct ObservabilityResourceConfig {
 pub struct ObservabilityPusherConfig {
     /// OTLP endpoint.
     pub otlp_endpoint: String,
-    /// `"grpc"` or `"http"`.
+    /// `"http"` in V3.
     pub otlp_protocol: String,
-    /// `"none"`, `"gzip"`, `"zstd"`.
+    /// `"none"` or `"gzip"` in V3.
     pub otlp_compression: String,
     /// Per-batch deadline.
     pub otlp_export_timeout: Duration,
@@ -738,24 +740,36 @@ fn validate_pusher(
             "[observability.pusher] otlp_endpoint = {endpoint:?} must start with http:// or https://"
         )));
     }
-    let otlp_protocol = match p.otlp_protocol.as_deref().unwrap_or("grpc") {
-        "grpc" => "grpc".to_owned(),
+    let otlp_protocol = match p.otlp_protocol.as_deref().unwrap_or("http") {
         "http" => "http".to_owned(),
+        "grpc" => {
+            return Err(fail(
+                "FAIL_OBS_OTLP_PROTOCOL_UNSUPPORTED",
+                "[observability.pusher] otlp_protocol = \"grpc\" is reserved for a future \
+                 release; V3 supports \"http\" only"
+                    .to_owned(),
+            ))
+        }
         other => {
             return Err(fail(
                 "FAIL_OBS_OTLP_PROTOCOL",
-                format!(
-            "[observability.pusher] otlp_protocol = {other:?} must be one of {{\"grpc\", \"http\"}}"
-        ),
+                format!("[observability.pusher] otlp_protocol = {other:?} must be \"http\""),
             ))
         }
     };
     let otlp_compression = match p.otlp_compression.as_deref().unwrap_or("gzip") {
         "none" => "none".to_owned(),
         "gzip" => "gzip".to_owned(),
-        "zstd" => "zstd".to_owned(),
+        "zstd" => {
+            return Err(fail(
+                "FAIL_OBS_OTLP_COMPRESSION_UNSUPPORTED",
+                "[observability.pusher] otlp_compression = \"zstd\" is reserved for a future \
+                 release; V3 supports \"none\" and \"gzip\""
+                    .to_owned(),
+            ))
+        }
         other  => return Err(fail("FAIL_OBS_OTLP_COMPRESSION", format!(
-            "[observability.pusher] otlp_compression = {other:?} must be one of {{\"none\", \"gzip\", \"zstd\"}}"
+            "[observability.pusher] otlp_compression = {other:?} must be one of {{\"none\", \"gzip\"}}"
         ))),
     };
     let otlp_export_timeout = match p.otlp_export_timeout.as_deref() {
@@ -1028,8 +1042,8 @@ mod tests {
                 extra: BTreeMap::new(),
             },
             pusher: Some(ObservabilityPusherSection {
-                otlp_endpoint: "https://otlp.example.com:4317".to_owned(),
-                otlp_protocol: Some("grpc".to_owned()),
+                otlp_endpoint: "https://otlp.example.com:4318".to_owned(),
+                otlp_protocol: Some("http".to_owned()),
                 otlp_compression: Some("gzip".to_owned()),
                 otlp_export_timeout: Some("10s".to_owned()),
                 otlp_batch_size: Some(512),
@@ -1060,7 +1074,7 @@ mod tests {
         assert_eq!(cfg.metrics.export_interval, Duration::from_secs(15));
         assert_eq!(cfg.metrics.histogram_buckets.len(), 3);
         let p = cfg.pusher.expect("pusher");
-        assert_eq!(p.otlp_protocol, "grpc");
+        assert_eq!(p.otlp_protocol, "http");
         assert_eq!(p.otlp_compression, "gzip");
         assert_eq!(p.backoff_initial, Duration::from_millis(500));
         assert_eq!(p.backoff_max, Duration::from_secs(30));
@@ -1193,12 +1207,32 @@ mod tests {
     }
 
     #[test]
+    fn pusher_protocol_grpc_is_reserved_but_unsupported() {
+        let mut raw = full_section();
+        raw.pusher.as_mut().unwrap().otlp_protocol = Some("grpc".to_owned());
+        let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_OTLP_PROTOCOL_UNSUPPORTED"))
+        );
+    }
+
+    #[test]
     fn pusher_compression_must_be_known() {
         let mut raw = full_section();
         raw.pusher.as_mut().unwrap().otlp_compression = Some("brotli".to_owned());
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
         assert!(
             matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_OTLP_COMPRESSION"))
+        );
+    }
+
+    #[test]
+    fn pusher_compression_zstd_is_reserved_but_unsupported() {
+        let mut raw = full_section();
+        raw.pusher.as_mut().unwrap().otlp_compression = Some("zstd".to_owned());
+        let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_OTLP_COMPRESSION_UNSUPPORTED"))
         );
     }
 

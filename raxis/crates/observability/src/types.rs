@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 ///   string per the per-key `max_bytes` budget in
 ///   `crate::redact::ATTR_ALLOW_LIST`.
 /// * `I64` — covers durations in milliseconds, byte counts up to
-///   8 EiB, sequence numbers, etc.
+///   `i64::MAX`, sequence numbers, etc. Unsigned conversions
+///   saturate at `i64::MAX` instead of wrapping negative.
 /// * `F64` — covers histogram sums and ratio values. NaN / ±Inf
 ///   are rejected by the redactor at sanitise time.
 /// * `Bool` — flags such as `cached`, `circuit_open`.
@@ -57,7 +58,7 @@ impl From<i64> for AttrValue {
 }
 impl From<u64> for AttrValue {
     fn from(v: u64) -> Self {
-        Self::I64(v as i64)
+        Self::I64(v.min(i64::MAX as u64) as i64)
     }
 }
 impl From<u32> for AttrValue {
@@ -72,7 +73,7 @@ impl From<i32> for AttrValue {
 }
 impl From<usize> for AttrValue {
     fn from(v: usize) -> Self {
-        Self::I64(v as i64)
+        Self::I64(v.min(i64::MAX as usize) as i64)
     }
 }
 impl From<f64> for AttrValue {
@@ -584,7 +585,7 @@ pub enum MetricName {
     // `TokensReport.cache_creation_tokens` /
     // `cache_read_tokens` (`crates/types/src/intent.rs`). The
     // counters mirror the existing `PlannerInferenceTokensTotal`
-    // shape (per-`(provider, model, role)` cumulative counts);
+    // shape (per-`(provider, model, role)` token deltas);
     // the histogram surfaces the per-turn cache-hit ratio so the
     // dashboard can rank tasks by cache effectiveness without
     // re-deriving it from the two counters at query time.
@@ -598,9 +599,9 @@ pub enum MetricName {
     /// `raxis.planner.cache.creation_tokens.total` — Counter (tokens).
     /// Labels: `task_id`, `session_id`, `model`, `role`. Bumped
     /// once per accepted `IntentRequest` carrying a non-zero
-    /// `tokens_used.cache_creation_tokens` delta. Cumulative-
-    /// monotonic per `(task_id, session_id)`; resets only on
-    /// kernel restart per `INV-OTEL-06`.
+    /// `tokens_used.cache_creation_tokens` delta. The pusher exports
+    /// this as a monotonic delta sum; collectors perform any
+    /// cumulative conversion required by their backend.
     PlannerCacheCreationTokens,
     /// `raxis.planner.cache.read_tokens.total` — Counter (tokens).
     /// Same label / emit shape as
@@ -872,20 +873,27 @@ impl MetricName {
             | Self::PlannerCacheCreationTokens
             | Self::PlannerCacheReadTokens => Unit::Tokens,
 
+            Self::CredentialProxyBytesTotal => Unit::Bytes,
+
             Self::SessionsActive | Self::DashboardSseConnectionActive => Unit::Connections,
+
+            Self::KernelUptimeSeconds => Unit::Seconds,
+
+            Self::PlannerCacheHitRatio => Unit::Ratio,
 
             _ => Unit::None,
         }
     }
 }
 
-/// OTel metric type. `Counter` is monotonic-cumulative; `Gauge` is
-/// last-value; `Histogram` carries explicit-boundary buckets.
+/// OTel metric type. `Counter` records monotonic increments, `Gauge`
+/// is last-value, and `Histogram` carries explicit-boundary
+/// observations. The pusher exports counter/histogram frames with
+/// OTLP delta temporality because each kernel frame is one event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricType {
-    /// Monotonic cumulative counter (resets on kernel restart per
-    /// `INV-OTEL-06`).
+    /// Monotonic counter increment.
     Counter,
     /// Distribution histogram with explicit boundaries.
     Histogram,
@@ -901,12 +909,16 @@ pub enum MetricType {
 pub enum Unit {
     /// Milliseconds; histograms default here.
     Milliseconds,
+    /// Seconds.
+    Seconds,
     /// Bytes.
     Bytes,
     /// LLM tokens (input + output).
     Tokens,
     /// Active connections / sessions / sockets.
     Connections,
+    /// Dimensionless ratio.
+    Ratio,
     /// No unit (counters/gauges of cardinal quantities).
     None,
 }
@@ -918,9 +930,11 @@ impl Unit {
     pub fn symbol(&self) -> &'static str {
         match self {
             Self::Milliseconds => "ms",
+            Self::Seconds => "s",
             Self::Bytes => "By",
             Self::Tokens => "{tokens}",
             Self::Connections => "{connections}",
+            Self::Ratio => "1",
             Self::None => "",
         }
     }
@@ -1119,5 +1133,24 @@ mod tests {
             0,
             "saturating sub on inverted timestamps"
         );
+    }
+
+    #[test]
+    fn unsigned_attr_conversion_saturates_instead_of_wrapping() {
+        assert_eq!(AttrValue::from(u64::MAX), AttrValue::I64(i64::MAX));
+        assert_eq!(AttrValue::from(usize::MAX), AttrValue::I64(i64::MAX));
+    }
+
+    #[test]
+    fn metric_units_match_physical_dimensions() {
+        assert_eq!(
+            MetricName::CredentialProxyBytesTotal.default_unit(),
+            Unit::Bytes
+        );
+        assert_eq!(
+            MetricName::KernelUptimeSeconds.default_unit(),
+            Unit::Seconds
+        );
+        assert_eq!(MetricName::PlannerCacheHitRatio.default_unit(), Unit::Ratio);
     }
 }

@@ -381,10 +381,9 @@ pub fn record_planner_inference(
 /// Bumped once per accepted `IntentRequest` carrying a non-zero
 /// `tokens_used.cache_creation_tokens` delta. The recorded value
 /// is the **delta** (newly-cached tokens this turn), NOT the
-/// cumulative running total — the counter is itself cumulative
-/// across turns by the OTel-pusher contract, so passing the delta
-/// keeps the per-emit observation small and the counter
-/// monotone-increasing.
+/// cumulative running total. The pusher exports this per-turn
+/// increment as an OTLP monotonic delta sum, so passing the delta is
+/// the only shape that preserves the ledger without double-counting.
 ///
 /// Labels — `task_id` / `session_id` / `model` / `role` — match the
 /// matching SQL bump in

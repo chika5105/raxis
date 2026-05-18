@@ -56,7 +56,7 @@ V3 ships OTel only after V2's audit invariants are locked, with a strict additiv
 | 2 | **Metrics** (counters / histograms / gauges) for admission latency, gateway round-trip, verifier wall-clock time, token consumption, circuit-breaker state, credential proxy latency, notification delivery, active sessions, audit chain length. | Same. |
 | 3 | **Configuration** in `policy.toml` (`[observability]`) with strict validation. | `crates/policy/src/bundle.rs` (extended). |
 | 4 | **Trait boundary** (`ObservabilityExporter`) so operators with custom backends (Datadog Agent, custom TSDB, in-house gRPC) can plug in without kernel code changes. | `crates/observability/src/exporter.rs`. |
-| 5 | **Sidecar pusher binary** (`raxis-otel-pusher`) that owns the OTLP HTTP/gRPC client, runs as a separate process under its own UID, reads kernel-emitted JSONL spans/metrics from a kernel-controlled ring directory, and pushes them off-host. | New workspace member `pusher/`. |
+| 5 | **Sidecar pusher binary** (`raxis-otel-pusher`) that owns the OTLP HTTP/protobuf client, runs as a separate process under its own UID, reads kernel-emitted JSONL spans/metrics from a kernel-controlled ring directory, and pushes them off-host. | New workspace member `pusher/`. |
 | 6 | **Redaction layer** with a closed attribute allow-list, CI lint, and runtime enforcement. | `crates/observability/src/redact.rs`. |
 | 7 | **Health checks** in `raxis doctor` for OTel reachability and pusher liveness. | `cli/src/commands/doctor.rs` (extended). |
 
@@ -101,13 +101,13 @@ flowchart TD
 
     Dir["/var/lib/raxis/observability/<br/>├── spans-NNNN.jsonl<br/>├── metrics-NNNN.jsonl<br/>└── cursor.toml  (held by pusher)"]
     
-    Pusher["raxis-otel-pusher<br/>(separate process, UID)<br/><br/>- Tails JSONL segments<br/>- Persists cursor file<br/>- Batches per OTLP rules<br/>- HTTPS/gRPC client<br/>- Retries, jitter, backoff"]
+    Pusher["raxis-otel-pusher<br/>(separate process, UID)<br/><br/>- Tails JSONL segments<br/>- Persists cursor file<br/>- Batches per OTLP rules<br/>- OTLP HTTP/protobuf client<br/>- Retries, jitter, backoff"]
     
     Collector["Operator's OTLP collector<br/>(Grafana, Datadog, ...)"]
 
     Kernel -->|Writes| Dir
     Dir -->|Reads| Pusher
-    Pusher -- "OTLP gRPC :4317  or  HTTPS :4318" --> Collector
+    Pusher -- "OTLP HTTP/protobuf :4318" --> Collector
 ```
 
 ### §3.2 Why a separate pusher process
@@ -317,9 +317,9 @@ cluster_id = "us-east-1a"
 # does NOT read these fields; the pusher reads its own copy of
 # policy.toml (or is launched with --config <path>) and validates them
 # the same way. The fields live here so policy validation is one place.
-otlp_endpoint     = "https://otlp.example.com:4317"
-otlp_protocol     = "grpc"               # "grpc" | "http"
-otlp_compression  = "gzip"               # "none" | "gzip" | "zstd"
+otlp_endpoint     = "https://otlp.example.com:4318"
+otlp_protocol     = "http"               # V3 supports HTTP/protobuf only
+otlp_compression  = "gzip"               # "none" | "gzip"
 otlp_export_timeout = "10s"              # per-batch deadline; range [1s, 60s]
 otlp_batch_size   = 512                  # spans/metrics per batch; range [1, 8192]
 otlp_flush_interval = "5s"               # batch boundary; range [100ms, 60s]
@@ -337,7 +337,7 @@ key_file  = ""
 ca_file   = ""
 
 [observability.pusher.headers]
-# Optional static HTTP/gRPC metadata headers (e.g. for vendor auth).
+# Optional static HTTP metadata headers (e.g. for vendor auth).
 # Values reference credential names declared in
 # [[permitted_credentials]] (environment-access-control.md §5.2);
 # the pusher resolves them via the `CredentialBackend` at startup
@@ -364,9 +364,9 @@ x-tenant-id   = "platform"
 | No key in `resource.extra` starts with `raxis.` (case-insensitive); no key collides with reserved OTel resource attribute names (`service.*`, `host.*`, `os.*`, `process.*`). | `FAIL_OBS_RESOURCE_RESERVED` |
 | `resource.extra` keys match `^[a-z][a-z0-9_-]{0,63}$`. | `FAIL_OBS_RESOURCE_KEY_FORMAT` |
 | `resource.extra` values are non-empty UTF-8 strings ≤ 256 bytes. | `FAIL_OBS_RESOURCE_VALUE` |
-| `pusher.otlp_endpoint` is a valid URL with scheme `http://` or `https://`; gRPC endpoints in URI form are accepted. | `FAIL_OBS_OTLP_ENDPOINT` |
-| `pusher.otlp_protocol ∈ {"grpc", "http"}`. | `FAIL_OBS_OTLP_PROTOCOL` |
-| `pusher.otlp_compression ∈ {"none", "gzip", "zstd"}`. | `FAIL_OBS_OTLP_COMPRESSION` |
+| `pusher.otlp_endpoint` is a valid URL with scheme `http://` or `https://`. | `FAIL_OBS_OTLP_ENDPOINT` |
+| `pusher.otlp_protocol = "http"`; `"grpc"` is reserved but rejected until a gRPC pusher implementation lands. | `FAIL_OBS_OTLP_PROTOCOL`, `FAIL_OBS_OTLP_PROTOCOL_UNSUPPORTED` |
+| `pusher.otlp_compression ∈ {"none", "gzip"}`; `"zstd"` is reserved but rejected until request zstd support lands. | `FAIL_OBS_OTLP_COMPRESSION`, `FAIL_OBS_OTLP_COMPRESSION_UNSUPPORTED` |
 | `pusher.otlp_batch_size ∈ [1, 8192]`. | `FAIL_OBS_OTLP_BATCH_SIZE` |
 | `pusher.otlp_flush_interval ∈ [100ms, 60s]`. | `FAIL_OBS_OTLP_FLUSH_INTERVAL` |
 | `pusher.otlp_export_timeout ∈ [1s, 60s]`. | `FAIL_OBS_OTLP_EXPORT_TIMEOUT` |
@@ -664,9 +664,9 @@ Default buckets (ms) are `[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10
 
 introduces a small set of perf-metric outliers whose latency profile spans several decades wider than the global default — kernel respawn (10 ms cold-restart through 5 minute crash-loop back-off) is the canonical example. Operator IPC + kernel↔substrate IPC (slices 4a + 4b) share the IPC-bucket override `[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]` ms — both span sub-millisecond FSM transitions through multi-second handler stalls (signature verification on `approve_plan` for operator IPC; LLM provider RTT on `planner_fetch_request` for substrate IPC). Those metrics use `ObservabilityHub::record_histogram_with_buckets` to declare per-call buckets at the emit site; the per-metric buckets are listed in the relevant `§8` row above. The hub-wide `[observability.metrics.histogram_buckets]` setting remains the single source of truth for every other histogram, so existing dashboards keep rendering against the same cumulative buckets they always have.
 
-### §8.2 Cumulative semantics
+### §8.2 Metric temporality semantics
 
-Counters in V3 are **monotonic per-process**: they reset on kernel restart. The pusher reports them as monotonic counters in OTLP; collectors that compute deltas across restarts do so via the standard OTel `_total` semantic. Process restarts are visible in the audit chain (`KernelStarted` / `KernelStopped`); operators correlating dashboards with restarts use the audit chain timestamps.
+The kernel records metrics as event-style frames: each counter frame is one increment, and each histogram frame is one observation with `count = 1`. The pusher therefore reports counters and histograms with OTLP **delta** temporality and `is_monotonic = true` for counters. The dev collector's Prometheus exporter performs the cumulative conversion Prometheus expects. Process restarts remain visible in the audit chain (`KernelStarted` / `KernelStopped`); operators correlating dashboard resets with restarts use the audit chain timestamps.
 
 ---
 
@@ -976,14 +976,14 @@ WantedBy=multi-user.target
 
 ### §13.2 Metric export
 
-- Cumulative temporality (the OTLP default for sum/histogram).
+- Delta temporality for sums and histograms, matching the kernel's per-event metric frames.
 - One `ResourceMetrics` per batch.
 - Histograms use explicit boundaries (matching `[observability.metrics.histogram_buckets]`).
-- Gauges are sampled once per export interval (the kernel updates the gauge value on each event; the pusher reads the most-recent line for a `(MetricName, labels)` tuple in the segment).
+- Gauges are last-value samples emitted by kernel events and heartbeats.
 
 ### §13.3 Wire compression
 
-`pusher.otlp_compression = "gzip"` (default) is honoured; the pusher delegates to the `tonic`/`reqwest` HTTP client's compression layer. `"zstd"` is supported when the operator's collector advertises it.
+`pusher.otlp_compression = "gzip"` (default) is honoured by gzipping OTLP HTTP/protobuf request bodies and stamping `Content-Encoding: gzip`. `"none"` sends the protobuf body as-is. `"zstd"` is reserved for a future release and is rejected by V3 policy validation.
 
 ---
 
@@ -1018,7 +1018,7 @@ OTel observability is additive. No `R-*` invariant is weakened. R-7 remains the 
 | `INV-OTEL-03` | The kernel does NOT import any OTLP transport library. All OTLP wire-protocol code lives in `raxis-otel-pusher`. | Preserves `INV-CRED-KERNEL-01` egress surface. |
 | `INV-OTEL-04` | Sampling is head-based and decided at span start; child spans inherit the parent's decision. | Deterministic per-trace; no tail-sampling buffer in the kernel. |
 | `INV-OTEL-05` | The `policy.toml [observability.resource.extra]` namespace excludes `raxis.*` and the OTel SDK reserved roots. | Prevents operators from clobbering kernel-pinned resource attributes. |
-| `INV-OTEL-06` | Metric counters are monotonic per-process and reset on kernel restart; cumulative cross-restart aggregation is the collector's responsibility. | Avoids in-kernel persistence of metric state, which would compete with the audit chain as a forensic surface. |
+| `INV-OTEL-06` | Metric counters are emitted as monotonic delta frames; cumulative aggregation is the collector/backend's responsibility. | Avoids in-kernel persistence of metric state, which would compete with the audit chain as a forensic surface. |
 | `INV-OTEL-07` | The pusher cursor advances only after the matching OTLP `Export` ack; pusher crash re-exports the un-acked tail. | At-most-once with idempotent collector — no kernel-side bookkeeping required. |
 | `INV-OTEL-08` | Disk pressure on the observability ring drops frames; it does NOT halt admission or the audit chain. | Audit chain has its own disk-full halt under `host-capacity.md §7`; observability is best-effort by definition. |
 | `INV-OTEL-09` | Authority-side spans are root spans. The kernel never honours a planner-supplied `traceparent` header. | Prevents a compromised planner from forging trace topology. |
@@ -1040,7 +1040,7 @@ V3 OTel test fixtures use **real runtime objects** — no `mock` dispatch indire
 
 ### §16.2 Integration tests
 
-Located in `crates/observability/tests/` and `kernel/tests/`. Each test bootstraps a real `Store`, real `FileAuditSink`, real `ObservabilityHub`, real `RingFileExporter`, and either a real or mock OTLP collector (using `tonic` test-server fixtures).
+Located in `crates/observability/tests/`, `pusher/tests/`, and `kernel/tests/`. Each test bootstraps a real `Store`, real `FileAuditSink`, real `ObservabilityHub`, real `RingFileExporter`, and either a real or mock OTLP/HTTP collector.
 
 | File | Coverage |
 |---|---|
@@ -1049,7 +1049,7 @@ Located in `crates/observability/tests/` and `kernel/tests/`. Each test bootstra
 | `crates/observability/tests/rotation_real_segments.rs` | Emit enough spans to force two rotations; assert `0001.jsonl` is closed atomically and `0002.jsonl` opens at the next boundary. |
 | `crates/observability/tests/disk_pressure_dropping.rs` | Set `max_total_bytes` to 64 KiB; emit 200 KiB of spans; assert (a) no `Err` propagates, (b) `ObservabilityDroppedTotal { reason: "disk_pressure" }` increments, (c) admission still succeeds. |
 | `pusher/tests/cursor_durability.rs` | Drive the pusher against a fixture ring; ack a batch; restart pusher; assert no duplicate export on the wire. |
-| `pusher/tests/otlp_grpc_smoke.rs` | Use `tonic::transport::Server` to host a fake OTLP collector; pusher exports against it; assert the trace_id/span_id round-trip is byte-for-byte. |
+| `pusher/tests/end_to_end.rs` | Use a fake OTLP/HTTP collector; pusher exports protobuf bodies against it, exercises cursor resume, segment rotation, 4xx permanent drops, and 5xx retries. |
 | `pusher/tests/retry_backoff.rs` | Fake collector responds with `503` for 3 attempts then `200`; assert backoff schedule matches `[backoff_initial, *2, *2]` with jitter within bounds. |
 | `kernel/tests/intent_admission_emits_span.rs` | Drive a real `IntentRequest` end-to-end through `mock_planner` → kernel; assert exactly one `IntentAdmission` span lands in the ring with the expected attributes. |
 | `kernel/tests/gateway_fetch_under_intent.rs` | Drive an `InferenceRequest`; assert nested `GatewayFetch` span has the parent `IntentAdmission`'s `span_id`. |
@@ -1087,7 +1087,7 @@ The implementation is staged so each step is independently committable, testable
 | 10 | `kernel/src/notifications/*.rs` | `NotificationDispatch` span + metrics. | `notifications_emit_span`. |
 | 11 | `kernel/src/ipc/operator.rs` | `OperatorIpc` span + per-command labels. | `operator_ipc_emit_span`. |
 | 12 | `kernel/src/handlers/escalation.rs` | `EscalationLifecycle` span; `EscalationsOpen` / `EscalationsClosedTotal` metrics. | `escalation_emit_span`. |
-| 13 | `pusher/` (new workspace member) | `raxis-otel-pusher` binary: cursor, batch, OTLP gRPC/HTTP client, retry/backoff, health endpoint. | `pusher::tests::*`. |
+| 13 | `pusher/` (new workspace member) | `raxis-otel-pusher` binary: cursor, batch, OTLP HTTP/protobuf client, retry/backoff, health endpoint. | `pusher::tests::*`. |
 | 14 | `cli/src/commands/doctor.rs` | `raxis doctor observability` health check. | `doctor_observability_smoke`. |
 | 15 | `kernel/src/main.rs` (final) | Wire `RingFileExporter` into the OTel exporter slot; emit `OtelExporterStarted` audit event on boot. | `observability_boot_emits_audit`. |
 | 16 | `release/` artifacts | `raxis-otel-pusher` packaged in installer; systemd unit; Homebrew formula. | release-engineering smoke. |
@@ -1099,29 +1099,28 @@ The conformance fixture (§16.3) lands alongside Step 2 so any future exporter i
 
 ## §18 — Dependencies
 
-The kernel address space gains:
-
-| Crate | Version | Justification |
-|---|---|---|
-| `phf` | `0.11+` | Compile-time perfect-hash maps for `ATTR_ALLOW_LIST` and `ATTR_DENYLIST`. Already in the workspace's transitive graph; we surface it directly. |
+The kernel address space gains no OTLP transport dependency. It links
+`raxis-observability` only for local typed frames, redaction, bounded
+queueing, and ring-file export.
 
 The pusher address space gains:
 
 | Crate | Version | Justification |
 |---|---|---|
-| `opentelemetry` | `0.26+` | Core OTel API. |
-| `opentelemetry-otlp` | `0.26+` | OTLP gRPC + HTTP exporter. |
-| `opentelemetry_sdk` | `0.26+` | Batch processor + resource detector. |
-| `tonic` | `0.12+` | gRPC transport (already in the workspace via gateway-substrate's transitive graph). |
-| `prost` | `0.13+` | OTLP wire types (transitive through `opentelemetry-otlp`). |
+| `reqwest` | `0.12+` | OTLP HTTP/protobuf POST client over rustls. |
+| `prost` | `0.13+` | Minimal hand-written OTLP protobuf message encoding. |
+| `flate2` | `1.x` | Request-body gzip for `otlp_compression = "gzip"`. |
 
-The kernel does NOT depend on `opentelemetry`, `opentelemetry-otlp`, `tonic`, or `prost`. The CI lint `xtask::deps_check::kernel_excludes_otlp` enforces this — adding any of those names to the kernel's `Cargo.toml` fails the build.
+The kernel does NOT depend on `opentelemetry`, `opentelemetry-otlp`,
+`tonic`, or `prost` for OTLP export. The CI lint
+`xtask::deps_check::kernel_excludes_otlp` enforces this — adding any
+of those names to the kernel's `Cargo.toml` fails the build.
 
 ---
 
 ## §19 — Operator Quick Start
 
-For an operator with an existing OTLP collector at `https://otlp.example.com:4317`:
+For an operator with an existing OTLP/HTTP collector at `https://otlp.example.com:4318`:
 
 1. Set `[observability]` in `policy.toml`:
 
@@ -1130,8 +1129,8 @@ For an operator with an existing OTLP collector at `https://otlp.example.com:431
    enabled = true
 
    [observability.pusher]
-   otlp_endpoint = "https://otlp.example.com:4317"
-   otlp_protocol = "grpc"
+   otlp_endpoint = "https://otlp.example.com:4318"
+   otlp_protocol = "http"
 
    [observability.resource]
    service_name = "raxis-kernel"
@@ -1157,4 +1156,3 @@ For an air-gapped deployment without an OTLP collector: leave `[observability].e
 - **Sampling at the planner / executor egress** — out of scope; agent observability lives in its own trust boundary.
 
 ---
-

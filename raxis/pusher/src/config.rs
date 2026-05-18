@@ -164,7 +164,7 @@ mod tests {
                 extra: BTreeMap::new(),
             },
             pusher: Some(ObservabilityPusherConfig {
-                otlp_endpoint: "https://otlp.example.com:4317".to_owned(),
+                otlp_endpoint: "https://otlp.example.com:4318".to_owned(),
                 otlp_protocol: "http".to_owned(),
                 otlp_compression: "gzip".to_owned(),
                 otlp_export_timeout: Duration::from_secs(10),

@@ -262,6 +262,17 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
         model_id_for_fetch_request(&url_for_stall_detection, &req.body_bytes),
     );
 
+    let provider_label = extract_host_port(&url_for_stall_detection)
+        .map(|(host, _)| host)
+        .unwrap_or_else(|| "unknown".to_owned());
+    let mut fetch_span = ctx.observability.start_span(
+        raxis_observability::SpanName::GatewayFetch,
+        raxis_observability::SpanKind::Client,
+        None,
+    );
+    fetch_span.set_attr("provider", provider_label.as_str());
+    fetch_span.set_attr("cached", false);
+
     let result = ctx
         .gateway
         .fetch(
@@ -286,9 +297,6 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
     // / gateway-cache state live one process boundary further into the
     // gateway subprocess and are not observable here). `status_code` is the
     // upstream HTTP status on success, 0 on every gateway-side failure.
-    let provider_label = extract_host_port(&url_for_stall_detection)
-        .map(|(host, _)| host)
-        .unwrap_or_else(|| "unknown".to_owned());
     let fetch_status_i64: i64 = match &result {
         Ok(fr) => fr.status_code.map(|c| c as i64).unwrap_or(0),
         Err(_) => 0,
@@ -300,6 +308,24 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
         },
         Err(_) => "error",
     };
+    fetch_span.set_attr("status_code", fetch_status_i64);
+    fetch_span.set_attr("latency_ms", latency_ms as i64);
+    if outcome_label == "ok" {
+        fetch_span.set_status(raxis_observability::SpanStatus::Ok, None);
+    } else {
+        fetch_span.set_status(
+            raxis_observability::SpanStatus::Error,
+            Some(
+                result
+                    .as_ref()
+                    .err()
+                    .map(GatewayCallError::category)
+                    .unwrap_or("http_error")
+                    .to_owned(),
+            ),
+        );
+    }
+    fetch_span.end();
     crate::observability::record_gateway_fetch(
         &ctx.observability,
         &provider_label,

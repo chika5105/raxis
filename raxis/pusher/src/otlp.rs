@@ -5,9 +5,8 @@
 //! ## Wire format
 //!
 //! V3 ships **OTLP HTTP/protobuf** as the only export transport.
-//! gRPC is deferred to V3.1; the feature flag is reserved in policy
-//! schema (`otlp_protocol = "grpc" | "http"`) but the runtime
-//! refuses to start when `"grpc"` is selected. The choice keeps
+//! gRPC is deferred to V3.1; the policy validator rejects
+//! `otlp_protocol = "grpc"` before this client is constructed. The choice keeps
 //! the dependency surface small (no `tonic` / `tower-h2` /
 //! `prost-build` in the build graph) while still satisfying the
 //! Prometheus-compatible-collector contract — every Prom-shaped
@@ -33,8 +32,11 @@
 //! writes them to every request.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::time::Duration;
 
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use raxis_observability::types::{MetricData, SpanData};
 use serde::{Deserialize, Serialize};
 
@@ -98,6 +100,28 @@ pub struct ResourceAttrs {
     pub extra: BTreeMap<String, String>,
 }
 
+/// Request-body compression applied to OTLP HTTP/protobuf exports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OtlpCompression {
+    /// Send protobuf bodies as-is.
+    None,
+    /// Gzip-compress protobuf bodies and stamp `Content-Encoding: gzip`.
+    Gzip,
+}
+
+impl OtlpCompression {
+    /// Convert the validated policy string to the runtime enum.
+    pub fn from_policy(value: &str) -> Result<Self, OtlpClientError> {
+        match value {
+            "none" => Ok(Self::None),
+            "gzip" => Ok(Self::Gzip),
+            other => Err(OtlpClientError::UnsupportedCompression {
+                value: other.to_owned(),
+            }),
+        }
+    }
+}
+
 /// OTLP HTTP/protobuf export client. Cheap to clone (`reqwest::Client`
 /// is internally `Arc`).
 #[derive(Debug, Clone)]
@@ -108,6 +132,7 @@ pub struct OtlpClient {
     backoff: BackoffPolicy,
     timeout: Duration,
     resource: ResourceAttrs,
+    compression: OtlpCompression,
 }
 
 impl OtlpClient {
@@ -118,6 +143,7 @@ impl OtlpClient {
         backoff: BackoffPolicy,
         timeout: Duration,
         resource: ResourceAttrs,
+        compression: OtlpCompression,
     ) -> Result<Self, OtlpClientError> {
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -144,6 +170,7 @@ impl OtlpClient {
             backoff,
             timeout,
             resource,
+            compression,
         })
     }
 
@@ -187,12 +214,18 @@ impl OtlpClient {
     }
 
     async fn post_protobuf(&self, url: &str, body: Vec<u8>) -> Result<u16, OtlpExportError> {
+        let (body, content_encoding) = prepare_body(body, self.compression);
         let req = self
             .inner
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
             .timeout(self.timeout)
             .body(body);
+        let req = if let Some(encoding) = content_encoding {
+            req.header(reqwest::header::CONTENT_ENCODING, encoding)
+        } else {
+            req
+        };
         let resp = req.send().await.map_err(|e| OtlpExportError::Network {
             url: url.to_owned(),
             reason: e.to_string(),
@@ -220,17 +253,34 @@ impl OtlpClient {
                 body.truncate(1024);
                 body.push_str("…[truncated]");
             }
-            let body_escaped = body
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r");
-            eprintln!(
-                "{{\"level\":\"warn\",\"event\":\"otel_pusher_export_http_error\",\
-                  \"url\":\"{url}\",\"status\":{status},\"body\":\"{body_escaped}\"}}"
-            );
+            let event = serde_json::json!({
+                "level": "warn",
+                "event": "otel_pusher_export_http_error",
+                "url": url,
+                "status": status,
+                "body": body,
+            });
+            eprintln!("{event}");
         }
         Ok(status)
+    }
+}
+
+fn prepare_body(body: Vec<u8>, compression: OtlpCompression) -> (Vec<u8>, Option<&'static str>) {
+    match compression {
+        OtlpCompression::None => (body, None),
+        OtlpCompression::Gzip => {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+            encoder
+                .write_all(&body)
+                .expect("gzip encoder over Vec should not fail");
+            (
+                encoder
+                    .finish()
+                    .expect("gzip encoder over Vec should finish"),
+                Some("gzip"),
+            )
+        }
     }
 }
 
@@ -252,6 +302,13 @@ pub enum OtlpClientError {
     InvalidHeaderValue {
         /// The header key whose value failed.
         key: String,
+    },
+    /// Policy validation should reject this before the pusher is
+    /// constructed; kept here for tests and defence-in-depth.
+    #[error("otlp client: unsupported request compression {value:?}")]
+    UnsupportedCompression {
+        /// Unsupported compression string.
+        value: String,
     },
 }
 
@@ -732,7 +789,7 @@ mod wire {
                             value: Some(number_data_point::Value::AsDouble(*value)),
                         }],
                         aggregation_temporality:
-                            aggregation_temporality::AggregationTemporality::Cumulative as i32,
+                            aggregation_temporality::AggregationTemporality::Delta as i32,
                         is_monotonic: true,
                     }),
                     (MetricType::Gauge, RxDataPoint::Sum { value }) => metric::Data::Gauge(Gauge {
@@ -766,7 +823,7 @@ mod wire {
                             max: Some(*max),
                         }],
                         aggregation_temporality:
-                            aggregation_temporality::AggregationTemporality::Cumulative as i32,
+                            aggregation_temporality::AggregationTemporality::Delta as i32,
                     }),
                     // Type/datapoint mismatches are filtered upstream by
                     // the redactor; if one slips through we drop it
@@ -908,6 +965,41 @@ mod tests {
     }
 
     #[test]
+    fn encode_metrics_uses_delta_temporality_for_event_records() {
+        let body = wire::encode_metrics(
+            &[sample_counter(), sample_histogram()],
+            "0.1.0",
+            &sample_resource(),
+        );
+        let req: wire::ExportMetricsServiceRequest =
+            prost::Message::decode(&body[..]).expect("round-trip");
+        let metrics = &req.resource_metrics[0].scope_metrics[0].metrics;
+        let counter = &metrics[0];
+        let histogram = &metrics[1];
+
+        match counter.data.as_ref().expect("counter data") {
+            wire::metric::Data::Sum(sum) => {
+                assert_eq!(
+                    sum.aggregation_temporality,
+                    wire::aggregation_temporality::AggregationTemporality::Delta as i32,
+                    "hub emits per-event increments; OTLP temporality must be delta"
+                );
+                assert!(sum.is_monotonic);
+            }
+            _ => panic!("counter encoded as wrong data type"),
+        }
+
+        match histogram.data.as_ref().expect("histogram data") {
+            wire::metric::Data::Histogram(histogram) => assert_eq!(
+                histogram.aggregation_temporality,
+                wire::aggregation_temporality::AggregationTemporality::Delta as i32,
+                "hub emits one-observation histograms; OTLP temporality must be delta"
+            ),
+            _ => panic!("histogram encoded as wrong data type"),
+        }
+    }
+
+    #[test]
     fn histogram_bucket_counts_use_packed_fixed64_wire_format() {
         // Regression for iter49: the OTel collector was returning HTTP
         // 400 on every metrics batch because the `bucket_counts` field
@@ -967,10 +1059,32 @@ mod tests {
             BackoffPolicy::default(),
             Duration::from_secs(1),
             sample_resource(),
+            OtlpCompression::None,
         )
         .unwrap();
         let mut keys = client.header_keys();
         keys.sort();
         assert_eq!(keys, vec!["authorization", "x-tenant-id"]);
+    }
+
+    #[test]
+    fn request_body_gzip_compression_is_applied_when_configured() {
+        let body = b"protobuf-ish payload".repeat(64);
+        let (compressed, encoding) = prepare_body(body.clone(), OtlpCompression::Gzip);
+        assert_eq!(encoding, Some("gzip"));
+        assert_ne!(compressed, body);
+
+        let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+        let mut decoded = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decoded).unwrap();
+        assert_eq!(decoded, body);
+    }
+
+    #[test]
+    fn request_body_none_compression_is_passthrough() {
+        let body = b"protobuf-ish payload".to_vec();
+        let (out, encoding) = prepare_body(body.clone(), OtlpCompression::None);
+        assert_eq!(encoding, None);
+        assert_eq!(out, body);
     }
 }

@@ -38,13 +38,12 @@ toml        = { workspace = true }
 thiserror   = { workspace = true }
 anyhow      = { workspace = true }
 
-# OTLP HTTP/protobuf transport.
-# `reqwest` is already pinned to `rustls-tls` at the workspace root,
-# which gives us a single audited TLS implementation. `gzip` is
-# enabled because the workspace already pulls it in for the
-# gateway, and the OTLP HTTP/protobuf encoding spec recommends
-# gzip compression for large batches.
+# OTLP HTTP/protobuf transport. `reqwest` is already pinned to
+# `rustls-tls` at the workspace root, which gives us a single audited
+# TLS implementation. `flate2` applies request-body gzip when policy
+# asks for it; reqwest's `gzip` feature only handles response decode.
 reqwest     = { workspace = true }
+flate2      = { workspace = true }
 
 # Protobuf encoding for the OTLP HTTP/protobuf wire format.
 # Pinned to 0.13 to match the `prost-types` crate the
