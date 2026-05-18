@@ -73,8 +73,8 @@ const REQUIRED_A3_NFTABLES_CONFIG: &[Requirement] = &[
         any_of: &["CONFIG_NF_TABLES"],
     },
     Requirement {
-        why: "inet/IPv4 nftables family used by the native nft ruleset",
-        any_of: &["CONFIG_NF_TABLES_INET", "CONFIG_NF_TABLES_IPV4"],
+        why: "IPv4 nftables family used by the native `table ip` ruleset",
+        any_of: &["CONFIG_NF_TABLES_IPV4"],
     },
     Requirement {
         why: "connection tracking required by NAT",
@@ -312,9 +312,16 @@ mod tests {
     }
 
     #[test]
-    fn accepts_kernel_version_alternative_for_nftables_family() {
-        let config = valid_config().replace("CONFIG_NF_TABLES_INET=y", "CONFIG_NF_TABLES_IPV4=y");
-        validate_kernel_config_text(&config).unwrap();
+    fn rejects_inet_family_without_ipv4_ruleset_family() {
+        let config =
+            valid_config().replace("CONFIG_NF_TABLES_IPV4=y\n", "CONFIG_NF_TABLES_INET=y\n");
+        let err = validate_kernel_config_text(&config)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("CONFIG_NF_TABLES_IPV4"),
+            "IPv4 family must be named because the guest installs `table ip`: {err}",
+        );
     }
 
     #[test]

@@ -1329,8 +1329,14 @@ mod linux_a3 {
     }
 
     pub(super) fn nft_redirect_ruleset(tproxy_port: u16) -> String {
+        // Use the IPv4 family, not `inet`: the staged guest kernel
+        // validates `CONFIG_NF_TABLES_IPV4=y` and disables IPv6 for
+        // A3, while `CONFIG_NF_TABLES_INET` is optional on older
+        // kernels. Targeting `inet` makes native `nft` fail with
+        // `Operation not supported` even when IPv4 NAT/REDIRECT is
+        // correctly available.
         format!(
-            r#"table inet raxis_a3 {{
+            r#"table ip raxis_a3 {{
   chain output {{
     type nat hook output priority -100; policy accept;
     oifname "lo" return
@@ -1421,6 +1427,7 @@ mod tests_a3 {
     #[test]
     fn a3_nft_ruleset_redirects_tcp_and_dns_while_preserving_loopback() {
         let ruleset = linux_a3::nft_redirect_ruleset(3129);
+        assert!(ruleset.contains("table ip raxis_a3"));
         assert!(ruleset.contains("type nat hook output priority -100"));
         assert!(ruleset.contains("oifname \"lo\" return"));
         assert!(ruleset.contains("ip daddr 127.0.0.0/8 return"));

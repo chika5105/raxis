@@ -1752,7 +1752,7 @@ fn run_export_pipeline(builder: Builder, container_id: &str, rootfs_dir: &Path) 
 //  * **Guest-kernel config validation.** Resolves `--kernel-config`,
 //    a sidecar `vmlinux.config`, or an embedded `IKCONFIG` blob and
 //    rejects kernels that lack built-in nftables NAT/REDIRECT support
-//    for Path A3's `iptables-nft` chain.
+//    for Path A3's native nftables `table ip` chain.
 //    (`INV-GUEST-KERNEL-A3-NFTABLES-01`.)
 //
 //  * A per-role **integrity manifest** at
@@ -3351,7 +3351,7 @@ mod tests {
         "CONFIG_NETFILTER=y\n\
          CONFIG_NETFILTER_NETLINK=y\n\
          CONFIG_NF_TABLES=y\n\
-         CONFIG_NF_TABLES_INET=y\n\
+         CONFIG_NF_TABLES_IPV4=y\n\
          CONFIG_NF_CONNTRACK=y\n\
          CONFIG_NF_NAT=y\n\
          CONFIG_NFT_NAT=y\n\

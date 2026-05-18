@@ -645,7 +645,7 @@ log (`<data_dir>/guests/<session_id>/console.log`):
 {"level":"info","step":"guest-init-a3","event":"ipv6_disabled","scope":"default"}
 {"level":"info","step":"guest-init-a3","event":"ipv6_disabled","scope":"lo"}
 {"level":"info","step":"guest-init-a3","event":"resolv_conf_pointed_at_stub"}
-{"level":"info","step":"guest-init-a3","event":"iptables_redirect_installed","binary":"iptables-nft","tproxy_port":3129}
+{"level":"info","step":"guest-init-a3","event":"nftables_redirect_installed","binary":"/usr/sbin/nft","tproxy_port":3129}
 {"level":"info","step":"guest-harden","event":"proc_cmdline_masked"}
 {"level":"info","step":"guest-harden","event":"pr_set_dumpable_disabled"}
 {"level":"info","step":"guest-harden","event":"planner_binaries_masked","masked":2,"already":0,"missing":3,"errors":0}

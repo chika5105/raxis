@@ -201,7 +201,7 @@ the egress chokepoint at boot — there is no `RAXIS_AIRGAP_A3` gate
 and no cargo feature flag any more. The chokepoint consists of:
 
 ```nft
-table inet raxis_a3 {
+table ip raxis_a3 {
   chain output {
     type nat hook output priority -100; policy accept;
     oifname "lo" return
@@ -211,6 +211,11 @@ table inet raxis_a3 {
   }
 }
 ```
+
+The chain deliberately targets the IPv4 nftables family. Path A3
+disables IPv6 at guest boot, and the bake/dev-kernel preflight
+requires `CONFIG_NF_TABLES_IPV4=y` so a kernel that lacks the exact
+family used by the runtime ruleset is rejected before any VM starts.
 
 ```bash
 # Disable IPv6 — kernel admission is IPv4-only in V2; IPv6 would be a covert channel

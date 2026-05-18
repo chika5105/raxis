@@ -225,7 +225,7 @@ least the following config flags `=y`:
 | `CONFIG_TMPFS`                        | The unpacker mounts the cpio.gz contents into a tmpfs rootfs. |
 
 Path A3 executor egress also requires built-in nftables NAT support
-for the in-guest `iptables-nft` REDIRECT chain. These flags are
+for the in-guest native `table ip` REDIRECT chain. These flags are
 validated by `cargo xtask images dev-kernel` and `cargo xtask images
 bake` under `INV-GUEST-KERNEL-A3-NFTABLES-01`:
 
@@ -234,7 +234,7 @@ bake` under `INV-GUEST-KERNEL-A3-NFTABLES-01`:
 | `CONFIG_NETFILTER`                    | Netfilter core.                                      |
 | `CONFIG_NETFILTER_NETLINK`            | nfnetlink control plane used by nftables generation-id queries. |
 | `CONFIG_NF_TABLES`                    | nftables core.                                       |
-| `CONFIG_NF_TABLES_INET` or `CONFIG_NF_TABLES_IPV4` | Family support used by `iptables-nft`.              |
+| `CONFIG_NF_TABLES_IPV4`               | IPv4 family support used by the native `table ip` ruleset. |
 | `CONFIG_NF_CONNTRACK`                 | Connection tracking required by NAT.                 |
 | `CONFIG_NF_NAT`                       | NAT core.                                            |
 | `CONFIG_NFT_NAT`                      | nftables NAT expression.                             |

@@ -27,13 +27,12 @@ You will need:
      cargo build --release -p raxis-kernel
      ```
 
-  2. **An executor rootfs that ships `iptables`.** The canonical
+  2. **An executor rootfs that ships `nft`.** The canonical
      `images/executor-starter/Containerfile` shipped with this
-     branch already installs `iptables` + `iproute2`. If you use a
-     custom executor image, audit the rootfs for the `iptables-nft`
-     binary; A3 falls back to plain `iptables` if `iptables-nft` is
-     absent, but at least one of them MUST be on `$PATH` inside
-     the guest.
+     branch already installs `nftables` + `iproute2`. If you use a
+     custom executor image, audit the rootfs for the `nft` binary.
+     A3 installs the chokepoint with native nftables so the userspace
+     tool and the validated guest-kernel ABI stay aligned.
 
   3. **A `policy.toml` whose `[egress] domains` / `[egress]
      patterns` cover the upstream hosts the executor's task will
@@ -152,13 +151,13 @@ denied, fix the policy IMMEDIATELY:
 
 ## Failure modes
 
-  * **`iptables` missing from the rootfs.** The PID-1 setup logs
-    `iptables_install_failed` and the in-guest tproxy is
+  * **`nft` missing from the rootfs.** The PID-1 setup logs
+    `nftables_install_failed` and the in-guest tproxy is
     unreachable. Effect: every outbound flow fails with
     ENETUNREACH on the agent side (no NIC). The kernel
     admission gate stays correct; the operator sees a hard
     fail, not a bypass.
-  * **Custom executor image without `iptables`.** Same as above,
+  * **Custom executor image without `nft`.** Same as above,
     plus you should add the package to your image build.
   * **Substrate that pre-mounts `/proc` without IPv6 sysfs
     nodes.** The IPv6 disable step skips silently

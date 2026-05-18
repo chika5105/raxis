@@ -193,5 +193,5 @@ raxis submit plan "$RAXIS_DATA_DIR/plan/plan.toml" --no-dry-run
 | --- | --- |
 | `ERR_ALREADY_INITIALIZED` | You already ran genesis for this data dir. Pick a new data dir or use `--force` only for throwaway dev state. |
 | `trust_anchor_unpopulated` | Run `cargo xtask images bake`, rebuild `raxis-kernel` with `RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat .git/info/raxis-signing-key/pk.hex)"`, then `images verify-trust-anchor`. |
-| guest VM cannot install `iptables-nft` rules | Rebuild/stage a guest kernel with `images/kernel/raxis-guest-a3-netfilter.config`. |
+| guest VM cannot install nftables rules | Rebuild/stage a guest kernel with `images/kernel/raxis-guest-a3-netfilter.config`, then run `cargo xtask images bake --no-cache` so the rootfs and staged kernel are validated together. |
 | setup says a command is deferred | Run the printed command manually; setup is a scaffold, not a key-custody automation. |
