@@ -157,7 +157,8 @@ pub async fn dispatch_loop(
         // reaches cert evaluation (avoids leaking cert state to operators
         // who shouldn't be able to call the op anyway), and BEFORE
         // handler dispatch so a denied request never mutates kernel state.
-        // Cert-less ("legacy") operators pass through silently.
+        // Certs are mandatory in the active policy; unknown or
+        // invalid cert bindings deny before handler dispatch.
         let now_unix = raxis_types::unix_now_secs();
         let bundle_snapshot = ctx.policy.load_full();
         match ctx.cert_enforcer.enforce(

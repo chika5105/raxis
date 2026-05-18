@@ -73,6 +73,9 @@ use raxis_store::{Store, Table};
 const TBL_WITNESS_RECORDS: &str = Table::WitnessRecords.as_str();
 const TBL_WORKTREE_SNAPSHOTS: &str = Table::WorktreeSnapshots.as_str();
 const TBL_TASKS: &str = Table::Tasks.as_str();
+const TBL_TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
+const TBL_SUBTASK_ACTIVATIONS: &str = Table::SubtaskActivations.as_str();
+const TBL_SESSIONS: &str = Table::Sessions.as_str();
 
 mod git;
 pub mod lifecycle;
@@ -4248,9 +4251,11 @@ fn task_row_to_view(
     // see `TaskView::is_active` doc.
     let is_active: bool = conn
         .query_row(
-            "SELECT 1 FROM subtask_activations \
-             WHERE task_id = ?1 AND activation_state = 'Active' \
-             LIMIT 1",
+            &format!(
+                "SELECT 1 FROM {TBL_SUBTASK_ACTIVATIONS} \
+                 WHERE task_id = ?1 AND activation_state = 'Active' \
+                 LIMIT 1"
+            ),
             rusqlite::params![&t.task_id],
             |_| Ok(true),
         )
@@ -4405,7 +4410,7 @@ fn read_review_state(
     task_id: &str,
 ) -> (Option<String>, Option<String>) {
     let row = conn.query_row(
-        "SELECT review_verdict, last_critique FROM tasks WHERE task_id = ?1",
+        &format!("SELECT review_verdict, last_critique FROM {TBL_TASKS} WHERE task_id = ?1"),
         [task_id],
         |r| {
             let v: Option<String> = r.get(0)?;
@@ -4423,10 +4428,10 @@ fn read_activations_for_task(
     task_id: &str,
 ) -> Vec<lifecycle::ActivationRow> {
     let mut out: Vec<lifecycle::ActivationRow> = Vec::new();
-    let Ok(mut stmt) = conn.prepare(
+    let Ok(mut stmt) = conn.prepare(&format!(
         "SELECT activation_id, task_id, activation_state, created_at \
-         FROM subtask_activations WHERE task_id = ?1 ORDER BY created_at ASC",
-    ) else {
+             FROM {TBL_SUBTASK_ACTIVATIONS} WHERE task_id = ?1 ORDER BY created_at ASC"
+    )) else {
         return out;
     };
     let rows = stmt.query_map([task_id], |r| {
@@ -4451,10 +4456,10 @@ fn read_activations_for_task(
 /// global `PendingActivation` set.
 fn read_activations_all(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle::ActivationRow> {
     let mut out: Vec<lifecycle::ActivationRow> = Vec::new();
-    let Ok(mut stmt) = conn.prepare(
+    let Ok(mut stmt) = conn.prepare(&format!(
         "SELECT activation_id, task_id, activation_state, created_at \
-         FROM subtask_activations ORDER BY created_at ASC",
-    ) else {
+             FROM {TBL_SUBTASK_ACTIVATIONS} ORDER BY created_at ASC"
+    )) else {
         return out;
     };
     let rows = stmt.query_map([], |r| {
@@ -4480,7 +4485,9 @@ fn read_activations_all(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle::Activa
 /// a `Completed` state.
 fn read_tasks_with_predecessors(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle::TaskRow> {
     let mut out: Vec<lifecycle::TaskRow> = Vec::new();
-    let Ok(mut stmt) = conn.prepare("SELECT task_id, state, transitioned_at FROM tasks") else {
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT task_id, state, transitioned_at FROM {TBL_TASKS}"
+    )) else {
         return out;
     };
     let rows = stmt.query_map([], |r| {
@@ -4521,9 +4528,9 @@ fn read_predecessors_for_task(
     successor_task_id: &str,
 ) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let Ok(mut stmt) =
-        conn.prepare("SELECT predecessor_task_id FROM task_dag_edges WHERE successor_task_id = ?1")
-    else {
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT predecessor_task_id FROM {TBL_TASK_DAG_EDGES} WHERE successor_task_id = ?1"
+    )) else {
         return out;
     };
     let rows = stmt.query_map([successor_task_id], |r| r.get::<_, String>(0));
@@ -4553,20 +4560,22 @@ fn read_sessions_all_for_recent(
     // Sub-select avoids LEFT JOIN multi-row ambiguity when one
     // session backs multiple tasks. We pick the lowest task_id
     // alphabetically — deterministic for the FE.
-    let sql = "SELECT s.session_id, \
+    let sql = format!(
+        "SELECT s.session_id, \
                        COALESCE(s.session_agent_type, ''), \
                        s.created_at, \
                        s.revoked_at, \
-                       (SELECT t.task_id FROM tasks t \
+                       (SELECT t.task_id FROM {TBL_TASKS} t \
                           WHERE t.session_id = s.session_id \
                           ORDER BY t.task_id ASC LIMIT 1) AS task_id, \
-                       (SELECT t.initiative_id FROM tasks t \
+                       (SELECT t.initiative_id FROM {TBL_TASKS} t \
                           WHERE t.session_id = s.session_id \
                           ORDER BY t.task_id ASC LIMIT 1) AS initiative_id \
-                FROM sessions s \
+                FROM {TBL_SESSIONS} s \
                 ORDER BY COALESCE(s.revoked_at, s.created_at) DESC \
-                LIMIT ?1";
-    let Ok(mut stmt) = conn.prepare(sql) else {
+                LIMIT ?1"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
         return out;
     };
     let rows = stmt.query_map([limit as i64], |r| {

@@ -1070,10 +1070,13 @@ fn read_orchestrator_no_progress_respawn_count(
     conn: &Connection,
     initiative_id: &str,
 ) -> Result<u32, rusqlite::Error> {
-    let sql = "SELECT orchestrator_no_progress_respawn_count \
-                 FROM initiatives WHERE initiative_id = ?1";
+    let sql = format!(
+        "SELECT orchestrator_no_progress_respawn_count \
+           FROM {} WHERE initiative_id = ?1",
+        Table::Initiatives.as_str()
+    );
     let v: Option<i64> = conn
-        .query_row(sql, rusqlite::params![initiative_id], |r| {
+        .query_row(&sql, rusqlite::params![initiative_id], |r| {
             r.get::<_, i64>(0)
         })
         .optional()?;
@@ -1355,11 +1358,14 @@ fn read_reviewer_artifact_task_id(
     initiative_id: &str,
     reviewer_task_id: &str,
 ) -> Result<Option<String>, rusqlite::Error> {
-    let sql = "SELECT predecessor_task_id FROM task_dag_edges \
-               WHERE initiative_id = ?1 AND successor_task_id = ?2 \
-               LIMIT 1";
+    let sql = format!(
+        "SELECT predecessor_task_id FROM {} \
+         WHERE initiative_id = ?1 AND successor_task_id = ?2 \
+         LIMIT 1",
+        Table::TaskDagEdges.as_str()
+    );
     conn.query_row(
-        sql,
+        &sql,
         rusqlite::params![initiative_id, reviewer_task_id],
         |r| r.get::<_, String>(0),
     )
@@ -1416,6 +1422,12 @@ mod tests {
     use raxis_store::Store;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    const INITIATIVES: &str = Table::Initiatives.as_str();
+    const TASKS: &str = Table::Tasks.as_str();
+    const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
+    const SESSIONS: &str = Table::Sessions.as_str();
+    const SUBTASK_ACTIVATIONS: &str = Table::SubtaskActivations.as_str();
 
     fn fresh_store() -> (Arc<Store>, TempDir) {
         let dir = TempDir::new().expect("tempdir");
@@ -1690,10 +1702,12 @@ mod tests {
         // insert the task / edge rows below. Mirrors the seeder in
         // `dag_aggregate_in_realistic_two_executor_plan_is_pending_until_runner_completes`.
         conn.execute(
-            "INSERT INTO initiatives (
+            &format!(
+                "INSERT INTO {INITIATIVES} (
                  initiative_id, state, terminal_criteria_json,
                  plan_artifact_sha256, created_at
-             ) VALUES (?1, 'Executing', '{}', 'sha-test', 0)",
+             ) VALUES (?1, 'Executing', '{{}}', 'sha-test', 0)"
+            ),
             rusqlite::params![init],
         )
         .expect("insert initiative");
@@ -1704,12 +1718,14 @@ mod tests {
             (rev_b, "Reviewer", Some("Rejected")),
         ] {
             conn.execute(
-                "INSERT INTO tasks (
+                &format!(
+                    "INSERT INTO {TASKS} (
                      task_id, initiative_id, lane_id, state, actor,
                      policy_epoch, admitted_at, transitioned_at,
                      evaluation_sha, last_critique, review_verdict
                  ) VALUES (?1, ?2, 'default', 'Completed', 'op',
-                           0, 0, 0, ?3, ?4, ?5)",
+                           0, 0, 0, ?3, ?4, ?5)"
+                ),
                 rusqlite::params![
                     tid, init,
                     if *role == "Executor" { Some(exec_sha) } else { None },
@@ -1722,10 +1738,12 @@ mod tests {
         }
         for rev in &[rev_a, rev_b] {
             conn.execute(
-                "INSERT INTO task_dag_edges (
+                &format!(
+                    "INSERT INTO {TASK_DAG_EDGES} (
                     initiative_id, predecessor_task_id, successor_task_id,
                     predecessor_satisfied
-                 ) VALUES (?1, ?2, ?3, 1)",
+                 ) VALUES (?1, ?2, ?3, 1)"
+                ),
                 rusqlite::params![init, exec, rev],
             )
             .expect("insert dag edge");
@@ -1886,10 +1904,12 @@ mod tests {
         // requires the parent initiative row to exist before we can
         // insert task / edge rows below.
         conn.execute(
-            "INSERT INTO initiatives (
+            &format!(
+                "INSERT INTO {INITIATIVES} (
                  initiative_id, state, terminal_criteria_json,
                  plan_artifact_sha256, created_at
-             ) VALUES (?1, 'Executing', '{}', 'sha-test', 0)",
+             ) VALUES (?1, 'Executing', '{{}}', 'sha-test', 0)"
+            ),
             rusqlite::params![init],
         )
         .expect("insert initiative");
@@ -1904,12 +1924,14 @@ mod tests {
             (rev_b, "Reviewer", None::<&str>),
         ] {
             conn.execute(
-                "INSERT INTO tasks (
+                &format!(
+                    "INSERT INTO {TASKS} (
                      task_id, initiative_id, lane_id, state, actor,
                      policy_epoch, admitted_at, transitioned_at,
                      evaluation_sha, last_critique, review_verdict
                  ) VALUES (?1, ?2, 'default', 'Completed', 'op',
-                           0, 0, 0, ?3, ?4, ?5)",
+                           0, 0, 0, ?3, ?4, ?5)"
+                ),
                 rusqlite::params![
                     tid,
                     init,
@@ -1930,10 +1952,12 @@ mod tests {
         }
         for rev in &[rev_a, rev_b] {
             conn.execute(
-                "INSERT INTO task_dag_edges (
+                &format!(
+                    "INSERT INTO {TASK_DAG_EDGES} (
                     initiative_id, predecessor_task_id, successor_task_id,
                     predecessor_satisfied
-                 ) VALUES (?1, ?2, ?3, 1)",
+                 ) VALUES (?1, ?2, ?3, 1)"
+                ),
                 rusqlite::params![init, exec, rev],
             )
             .expect("insert dag edge");
@@ -2040,10 +2064,12 @@ mod tests {
         // SQLite's deferred-FK enforcement (PRAGMA foreign_keys=ON
         // is set by `Store::open`) does not reject the task inserts.
         conn.execute(
-            "INSERT INTO initiatives (
+            &format!(
+                "INSERT INTO {INITIATIVES} (
                  initiative_id, state, terminal_criteria_json,
                  plan_artifact_sha256, created_at
-             ) VALUES (?1, 'ApprovedPlan', '{}', 'sha-test', 0)",
+             ) VALUES (?1, 'ApprovedPlan', '{{}}', 'sha-test', 0)"
+            ),
             rusqlite::params![init],
         )
         .expect("insert initiative");
@@ -2057,11 +2083,13 @@ mod tests {
             (rev_a, "Admitted", None),
         ] {
             conn.execute(
-                "INSERT INTO tasks (
+                &format!(
+                    "INSERT INTO {TASKS} (
                      task_id, initiative_id, lane_id, state, actor,
                      policy_epoch, admitted_at, transitioned_at,
                      evaluation_sha
-                 ) VALUES (?1, ?2, 'default', ?3, 'op', 0, 0, 0, ?4)",
+                 ) VALUES (?1, ?2, 'default', ?3, 'op', 0, 0, 0, ?4)"
+                ),
                 rusqlite::params![tid, init, state, sha.as_deref()],
             )
             .expect("insert task");
@@ -2071,10 +2099,12 @@ mod tests {
         //   review-lint-defect-A ⟵ lint-runner  (reviewer depends on its runner)
         for (pred, succ) in &[(lint_def, lint_run), (lint_run, rev_a)] {
             conn.execute(
-                "INSERT INTO task_dag_edges (
+                &format!(
+                    "INSERT INTO {TASK_DAG_EDGES} (
                     initiative_id, predecessor_task_id, successor_task_id,
                     predecessor_satisfied
-                 ) VALUES (?1, ?2, ?3, 0)",
+                 ) VALUES (?1, ?2, ?3, 0)"
+                ),
                 rusqlite::params![init, pred, succ],
             )
             .expect("insert dag edge");
@@ -2177,10 +2207,12 @@ mod tests {
 
         let conn = store.lock_sync();
         conn.execute(
-            "INSERT INTO initiatives (
+            &format!(
+                "INSERT INTO {INITIATIVES} (
                  initiative_id, state, terminal_criteria_json,
                  plan_artifact_sha256, created_at
-             ) VALUES (?1, 'ApprovedPlan', '{}', 'sha-test', 0)",
+             ) VALUES (?1, 'ApprovedPlan', '{{}}', 'sha-test', 0)"
+            ),
             rusqlite::params![init],
         )
         .expect("insert initiative");
@@ -2188,19 +2220,23 @@ mod tests {
         // Mirrors what `lifecycle.rs §spawn_orchestrator_session_
         // for_initiative` would insert.
         conn.execute(
-            "INSERT INTO tasks (
+            &format!(
+                "INSERT INTO {TASKS} (
                  task_id, initiative_id, lane_id, state, actor,
                  policy_epoch, admitted_at, transitioned_at
-             ) VALUES (?1, ?1, 'default', 'Admitted', 'kernel', 0, 0, 0)",
+             ) VALUES (?1, ?1, 'default', 'Admitted', 'kernel', 0, 0, 0)"
+            ),
             rusqlite::params![init],
         )
         .expect("insert coordinator row");
         // Real executor task.
         conn.execute(
-            "INSERT INTO tasks (
+            &format!(
+                "INSERT INTO {TASKS} (
                  task_id, initiative_id, lane_id, state, actor,
                  policy_epoch, admitted_at, transitioned_at
-             ) VALUES (?1, ?2, 'default', 'Admitted', 'kernel', 0, 100, 100)",
+             ) VALUES (?1, ?2, 'default', 'Admitted', 'kernel', 0, 100, 100)"
+            ),
             rusqlite::params![exec, init],
         )
         .expect("insert executor row");
@@ -2320,28 +2356,34 @@ mod tests {
 
         let conn = store.lock_sync();
         conn.execute(
-            "INSERT INTO initiatives (
+            &format!(
+                "INSERT INTO {INITIATIVES} (
                  initiative_id, state, terminal_criteria_json,
                  plan_artifact_sha256, created_at
-             ) VALUES (?1, 'Executing', '{}', 'sha', 0)",
+             ) VALUES (?1, 'Executing', '{{}}', 'sha', 0)"
+            ),
             rusqlite::params![init],
         )
         .expect("init");
         // Coordinator row (must be filtered out everywhere).
         conn.execute(
-            "INSERT INTO tasks (task_id, initiative_id, lane_id, state, actor, \
+            &format!(
+                "INSERT INTO {TASKS} (task_id, initiative_id, lane_id, state, actor, \
                                 policy_epoch, admitted_at, transitioned_at) \
-             VALUES (?1, ?1, 'default', 'Admitted', 'kernel', 0, 0, 0)",
+             VALUES (?1, ?1, 'default', 'Admitted', 'kernel', 0, 0, 0)"
+            ),
             rusqlite::params![init],
         )
         .expect("coord");
         // pred_done = Completed (so any successor whose predecessor
         // closure depends on it gets `preds_ready=true`).
         conn.execute(
-            "INSERT INTO tasks (task_id, initiative_id, lane_id, state, actor, \
+            &format!(
+                "INSERT INTO {TASKS} (task_id, initiative_id, lane_id, state, actor, \
                                 policy_epoch, admitted_at, transitioned_at, \
                                 evaluation_sha) \
-             VALUES (?1, ?2, 'default', 'Completed', 'kernel', 0, 10, 10, ?3)",
+             VALUES (?1, ?2, 'default', 'Completed', 'kernel', 0, 10, 10, ?3)"
+            ),
             rusqlite::params![pred_done, init, "a".repeat(40)],
         )
         .expect("pred_done");
@@ -2354,9 +2396,11 @@ mod tests {
             (reviewer, 60i64),
         ] {
             conn.execute(
-                "INSERT INTO tasks (task_id, initiative_id, lane_id, state, actor, \
+                &format!(
+                    "INSERT INTO {TASKS} (task_id, initiative_id, lane_id, state, actor, \
                                     policy_epoch, admitted_at, transitioned_at) \
-                 VALUES (?1, ?2, 'default', 'Admitted', 'kernel', 0, ?3, ?3)",
+                 VALUES (?1, ?2, 'default', 'Admitted', 'kernel', 0, ?3, ?3)"
+                ),
                 rusqlite::params![tid, init, ts],
             )
             .expect("task");
@@ -2373,9 +2417,11 @@ mod tests {
             (ready_a, reviewer),
         ] {
             conn.execute(
-                "INSERT INTO task_dag_edges (initiative_id, predecessor_task_id, \
+                &format!(
+                    "INSERT INTO {TASK_DAG_EDGES} (initiative_id, predecessor_task_id, \
                                               successor_task_id, predecessor_satisfied) \
-                 VALUES (?1, ?2, ?3, 0)",
+                 VALUES (?1, ?2, ?3, 0)"
+                ),
                 rusqlite::params![init, pred, succ],
             )
             .expect("edge");
@@ -2393,11 +2439,13 @@ mod tests {
             (reviewer, "PendingActivation", 61i64),
         ] {
             conn.execute(
-                "INSERT INTO subtask_activations \
+                &format!(
+                    "INSERT INTO {SUBTASK_ACTIVATIONS} \
                     (activation_id, task_id, initiative_id, activation_state, \
                      session_id, crash_retry_count, review_reject_count, \
                      validation_reject_count, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, NULL, 0, 0, 0, ?5)",
+                 VALUES (?1, ?2, ?3, ?4, NULL, 0, 0, 0, ?5)"
+                ),
                 rusqlite::params![format!("act-{tid}"), tid, init, state, created_at],
             )
             .expect("activation");
@@ -2497,33 +2545,41 @@ mod tests {
         // (session_id) resolves at INSERT time. PRAGMA foreign_keys
         // is ON in `Store::open`.
         conn.execute(
-            "INSERT INTO sessions \
+            &format!(
+                "INSERT INTO {SESSIONS} \
                 (session_id, role_id, session_token, lineage_id, \
                  fetch_quota, created_at, expires_at, revoked) \
              VALUES ('11111111-1111-1111-1111-111111111111', 'Executor', \
-                     'tok-iter70-conc', 'lin-iter70-conc', 1000, 1, 9999999999, 0)",
+                     'tok-iter70-conc', 'lin-iter70-conc', 1000, 1, 9999999999, 0)"
+            ),
             [],
         )
         .expect("session");
         conn.execute(
-            "INSERT INTO initiatives (initiative_id, state, terminal_criteria_json, \
+            &format!(
+                "INSERT INTO {INITIATIVES} (initiative_id, state, terminal_criteria_json, \
                                        plan_artifact_sha256, created_at) \
-             VALUES (?1, 'Executing', '{}', 'sha', 0)",
+             VALUES (?1, 'Executing', '{{}}', 'sha', 0)"
+            ),
             rusqlite::params![init],
         )
         .expect("init");
         conn.execute(
-            "INSERT INTO tasks (task_id, initiative_id, lane_id, state, actor, \
+            &format!(
+                "INSERT INTO {TASKS} (task_id, initiative_id, lane_id, state, actor, \
                                 policy_epoch, admitted_at, transitioned_at) \
-             VALUES (?1, ?1, 'default', 'Admitted', 'kernel', 0, 0, 0)",
+             VALUES (?1, ?1, 'default', 'Admitted', 'kernel', 0, 0, 0)"
+            ),
             rusqlite::params![init],
         )
         .expect("coord");
         for (tid, ts) in &[("e-active", 10i64), ("e-pending", 20i64)] {
             conn.execute(
-                "INSERT INTO tasks (task_id, initiative_id, lane_id, state, actor, \
+                &format!(
+                    "INSERT INTO {TASKS} (task_id, initiative_id, lane_id, state, actor, \
                                     policy_epoch, admitted_at, transitioned_at) \
-                 VALUES (?1, ?2, 'default', 'Running', 'kernel', 0, ?3, ?3)",
+                 VALUES (?1, ?2, 'default', 'Running', 'kernel', 0, ?3, ?3)"
+                ),
                 rusqlite::params![tid, init, ts],
             )
             .expect("task");
@@ -2531,23 +2587,27 @@ mod tests {
         // One Active activation row + one PendingActivation row.
         // The active_count helper counts ONLY Active rows.
         conn.execute(
-            "INSERT INTO subtask_activations \
+            &format!(
+                "INSERT INTO {SUBTASK_ACTIVATIONS} \
                 (activation_id, task_id, initiative_id, activation_state, \
                  session_id, crash_retry_count, review_reject_count, \
                  validation_reject_count, created_at, activated_at) \
              VALUES ('act-active', 'e-active', ?1, 'Active', \
                      '11111111-1111-1111-1111-111111111111', \
-                     0, 0, 0, 11, 12)",
+                     0, 0, 0, 11, 12)"
+            ),
             rusqlite::params![init],
         )
         .expect("active");
         conn.execute(
-            "INSERT INTO subtask_activations \
+            &format!(
+                "INSERT INTO {SUBTASK_ACTIVATIONS} \
                 (activation_id, task_id, initiative_id, activation_state, \
                  session_id, crash_retry_count, review_reject_count, \
                  validation_reject_count, created_at) \
              VALUES ('act-pending', 'e-pending', ?1, 'PendingActivation', \
-                     NULL, 0, 0, 0, 21)",
+                     NULL, 0, 0, 0, 21)"
+            ),
             rusqlite::params![init],
         )
         .expect("pending");
@@ -2666,29 +2726,31 @@ mod tests {
         // is ON in `Store::open`, and `execute_batch` auto-commits
         // each statement so deferred-FK semantics do not apply.
         conn.execute(
-            "INSERT INTO sessions \
+            &format!(
+                "INSERT INTO {SESSIONS} \
                 (session_id, role_id, session_token, lineage_id, \
                  fetch_quota, created_at, expires_at, revoked) \
              VALUES ('11111111-1111-1111-1111-111111111111', 'Executor', \
-                     'tok-c7r1', 'lin-c7r1', 1000, 1, 9999999999, 0)",
+                     'tok-c7r1', 'lin-c7r1', 1000, 1, 9999999999, 0)"
+            ),
             [],
         )
         .unwrap();
         // Seed a task with last_critique populated but ZERO retry
         // counters on the most-recent activation row.
-        conn.execute_batch(
-            "INSERT INTO initiatives \
+        conn.execute_batch(&format!(
+            "INSERT INTO {INITIATIVES} \
                 (initiative_id, state, terminal_criteria_json, \
                  plan_artifact_sha256, created_at) \
-             VALUES ('init-c7r1', 'Executing', '{}', 'deadbeef', 1); \
-             INSERT INTO tasks \
+             VALUES ('init-c7r1', 'Executing', '{{}}', 'deadbeef', 1); \
+             INSERT INTO {TASKS} \
                 (task_id, initiative_id, lane_id, state, actor, \
                  policy_epoch, admitted_at, transitioned_at, \
                  actual_cost, last_critique) \
              VALUES ('task-c7r1', 'init-c7r1', 'default', \
                      'Running', 'kernel', 1, 1, 1, 0, \
                      'round-0 critique that should not surface'); \
-             INSERT INTO subtask_activations \
+             INSERT INTO {SUBTASK_ACTIVATIONS} \
                 (activation_id, task_id, initiative_id, \
                  activation_state, session_id, \
                  crash_retry_count, review_reject_count, \
@@ -2697,8 +2759,8 @@ mod tests {
              VALUES ('act-c7r1', 'task-c7r1', 'init-c7r1', \
                      'Active', \
                      '11111111-1111-1111-1111-111111111111', \
-                     0, 0, 0, 1, 2);",
-        )
+                     0, 0, 0, 1, 2);"
+        ))
         .unwrap();
 
         let critique = read_last_critique_for_retry(&conn, "task-c7r1").unwrap();
@@ -2714,27 +2776,27 @@ mod tests {
     fn last_critique_projection_returns_critique_when_review_rejected() {
         let (store, _td) = fresh_store();
         let conn = store.lock_sync();
-        conn.execute_batch(
-            "INSERT INTO initiatives \
+        conn.execute_batch(&format!(
+            "INSERT INTO {INITIATIVES} \
                 (initiative_id, state, terminal_criteria_json, \
                  plan_artifact_sha256, created_at) \
-             VALUES ('init-c7r2', 'Executing', '{}', 'deadbeef', 1); \
-             INSERT INTO tasks \
+             VALUES ('init-c7r2', 'Executing', '{{}}', 'deadbeef', 1); \
+             INSERT INTO {TASKS} \
                 (task_id, initiative_id, lane_id, state, actor, \
                  policy_epoch, admitted_at, transitioned_at, \
                  actual_cost, last_critique) \
              VALUES ('task-c7r2', 'init-c7r2', 'default', \
                      'Admitted', 'kernel', 1, 1, 1, 0, \
                      'round-0 reviewer feedback'); \
-             INSERT INTO subtask_activations \
+             INSERT INTO {SUBTASK_ACTIVATIONS} \
                 (activation_id, task_id, initiative_id, \
                  activation_state, session_id, \
                  crash_retry_count, review_reject_count, \
                  validation_reject_count, created_at) \
              VALUES ('act-c7r2', 'task-c7r2', 'init-c7r2', \
                      'PendingActivation', NULL, \
-                     0, 1, 0, 1);",
-        )
+                     0, 1, 0, 1);"
+        ))
         .unwrap();
 
         let critique = read_last_critique_for_retry(&conn, "task-c7r2").unwrap();
@@ -2752,27 +2814,27 @@ mod tests {
     fn last_critique_projection_returns_critique_when_validation_rejected() {
         let (store, _td) = fresh_store();
         let conn = store.lock_sync();
-        conn.execute_batch(
-            "INSERT INTO initiatives \
+        conn.execute_batch(&format!(
+            "INSERT INTO {INITIATIVES} \
                 (initiative_id, state, terminal_criteria_json, \
                  plan_artifact_sha256, created_at) \
-             VALUES ('init-c7r3', 'Executing', '{}', 'deadbeef', 1); \
-             INSERT INTO tasks \
+             VALUES ('init-c7r3', 'Executing', '{{}}', 'deadbeef', 1); \
+             INSERT INTO {TASKS} \
                 (task_id, initiative_id, lane_id, state, actor, \
                  policy_epoch, admitted_at, transitioned_at, \
                  actual_cost, last_critique) \
              VALUES ('task-c7r3', 'init-c7r3', 'default', \
                      'Admitted', 'kernel', 1, 1, 1, 0, \
                      'kernel: empty diff at head ABCD'); \
-             INSERT INTO subtask_activations \
+             INSERT INTO {SUBTASK_ACTIVATIONS} \
                 (activation_id, task_id, initiative_id, \
                  activation_state, session_id, \
                  crash_retry_count, review_reject_count, \
                  validation_reject_count, created_at) \
              VALUES ('act-c7r3', 'task-c7r3', 'init-c7r3', \
                      'PendingActivation', NULL, \
-                     0, 0, 1, 1);",
-        )
+                     0, 0, 1, 1);"
+        ))
         .unwrap();
 
         let critique = read_last_critique_for_retry(&conn, "task-c7r3").unwrap();
@@ -2793,18 +2855,18 @@ mod tests {
     fn gate_fixup_projection_returns_none_for_non_fixup_task() {
         let (store, _td) = fresh_store();
         let conn = store.lock_sync();
-        conn.execute_batch(
-            "INSERT INTO initiatives \
+        conn.execute_batch(&format!(
+            "INSERT INTO {INITIATIVES} \
                 (initiative_id, state, terminal_criteria_json, \
                  plan_artifact_sha256, created_at) \
-             VALUES ('init-gf1', 'Executing', '{}', 'deadbeef', 1); \
-             INSERT INTO tasks \
+             VALUES ('init-gf1', 'Executing', '{{}}', 'deadbeef', 1); \
+             INSERT INTO {TASKS} \
                 (task_id, initiative_id, lane_id, state, actor, \
                  policy_epoch, admitted_at, transitioned_at, \
                  actual_cost) \
              VALUES ('task-plain', 'init-gf1', 'default', \
-                     'Admitted', 'kernel', 1, 1, 1, 0);",
-        )
+                     'Admitted', 'kernel', 1, 1, 1, 0);"
+        ))
         .unwrap();
         let ctx = read_gate_fixup_context(&conn, "task-plain").unwrap();
         assert!(ctx.is_none(), "non-fixup task MUST surface gate_fixup=None");
@@ -2820,12 +2882,12 @@ mod tests {
     fn gate_fixup_projection_returns_populated_context_for_fixup_task() {
         let (store, _td) = fresh_store();
         let conn = store.lock_sync();
-        conn.execute_batch(
-            "INSERT INTO initiatives \
+        conn.execute_batch(&format!(
+            "INSERT INTO {INITIATIVES} \
                 (initiative_id, state, terminal_criteria_json, \
                  plan_artifact_sha256, created_at) \
-             VALUES ('init-gf2', 'Executing', '{}', 'deadbeef', 1); \
-             INSERT INTO sessions \
+             VALUES ('init-gf2', 'Executing', '{{}}', 'deadbeef', 1); \
+             INSERT INTO {SESSIONS} \
                 (session_id, role_id, session_token, sequence_number, \
                  worktree_root, base_sha, base_tracking_ref, \
                  lineage_id, fetch_quota, created_at, expires_at, \
@@ -2833,7 +2895,7 @@ mod tests {
              VALUES ('sess-parent', 'Planner', 'tok-1', 0, \
                      '/srv/raxis/wt/parent', NULL, NULL, \
                      'lin-1', 1000, 1, 3600, 0, 'Executor', 0); \
-             INSERT INTO tasks \
+             INSERT INTO {TASKS} \
                 (task_id, initiative_id, lane_id, state, actor, \
                  policy_epoch, admitted_at, transitioned_at, \
                  actual_cost, evaluation_sha, last_gate_critique, \
@@ -2843,7 +2905,7 @@ mod tests {
                      'deadbeefcafebabe', \
                      'Remove the AWS access key shape.', \
                      'NoSecretStrings', 'sess-parent', 1); \
-             INSERT INTO tasks \
+             INSERT INTO {TASKS} \
                 (task_id, initiative_id, lane_id, state, actor, \
                  policy_epoch, admitted_at, transitioned_at, \
                  actual_cost, is_gate_fixup, \
@@ -2851,8 +2913,8 @@ mod tests {
                  parent_gate_failure_type) \
              VALUES ('fixup-1', 'init-gf2', 'default', \
                      'Running', 'kernel', 1, 1, 1, 0, 1, \
-                     'parent-1', 'NoSecretStrings');",
-        )
+                     'parent-1', 'NoSecretStrings');"
+        ))
         .unwrap();
 
         let ctx = read_gate_fixup_context(&conn, "fixup-1")
@@ -2877,18 +2939,18 @@ mod tests {
     fn gate_fixup_projection_returns_none_when_parent_link_missing() {
         let (store, _td) = fresh_store();
         let conn = store.lock_sync();
-        conn.execute_batch(
-            "INSERT INTO initiatives \
+        conn.execute_batch(&format!(
+            "INSERT INTO {INITIATIVES} \
                 (initiative_id, state, terminal_criteria_json, \
                  plan_artifact_sha256, created_at) \
-             VALUES ('init-gf3', 'Executing', '{}', 'deadbeef', 1); \
-             INSERT INTO tasks \
+             VALUES ('init-gf3', 'Executing', '{{}}', 'deadbeef', 1); \
+             INSERT INTO {TASKS} \
                 (task_id, initiative_id, lane_id, state, actor, \
                  policy_epoch, admitted_at, transitioned_at, \
                  actual_cost, is_gate_fixup) \
              VALUES ('fixup-orphan', 'init-gf3', 'default', \
-                     'Running', 'kernel', 1, 1, 1, 0, 1);",
-        )
+                     'Running', 'kernel', 1, 1, 1, 0, 1);"
+        ))
         .unwrap();
         let ctx = read_gate_fixup_context(&conn, "fixup-orphan").unwrap();
         assert!(

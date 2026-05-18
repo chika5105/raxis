@@ -550,7 +550,7 @@ SUBCOMMANDS:
     plan approve <initiative_id>
         Approve a pending initiative, admitting all tasks to the scheduler.
 
-    plan reject <initiative_id>
+    plan reject <initiative_id> [--reason <text>]
         Reject a pending initiative without instantiating tasks.
 
     plan validate <plan.toml>

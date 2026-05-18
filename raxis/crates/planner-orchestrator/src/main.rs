@@ -17,16 +17,14 @@
 //!    `gap-b1-planner-binary-wiring`.
 //! 5. **Scaffold mode** — when the live-mode contract is unmet (the
 //!    V2.3 default for the kernel mock-planner harness), the binary
-//!    parks on Ctrl-C / SIGTERM exactly like the V2.3 scaffold did.
-//!    The behaviour is bit-for-bit identical, so no kernel
-//!    integration test changes were required to land V2.4.
+//!    fails closed when the kernel-stamped prompt contract is missing.
 //!    See `raxis-planner-core/src/driver.rs` for the env contract.
 
 use raxis_planner_core::{
     enforce_pid1_or_abort, harden_guest_for_agent, hydrate_from_proc_cmdline, init_pid1_filesystem,
-    mount_workspace_shares, park_on_signal, render_boot_log, run_role_session,
-    scrub_sensitive_env_for_agent, shutdown_or_exit, BootContext, DriverError, DriverOutcome,
-    HydrationOutcome, MountStatus, PlannerError, Role, WorkspaceMountOutcome,
+    mount_workspace_shares, render_boot_log, run_role_session, scrub_sensitive_env_for_agent,
+    shutdown_or_exit, BootContext, DriverError, DriverOutcome, HydrationOutcome, MountStatus,
+    PlannerError, Role, WorkspaceMountOutcome,
 };
 
 fn main() -> ! {
@@ -182,14 +180,9 @@ async fn run() -> Result<(), PlannerError> {
         .map_err(driver_to_planner_error)?;
 
     match outcome {
-        DriverOutcome::Scaffold => {
-            // V2.3 scaffold behaviour preserved when the kernel did
-            // not stamp `RAXIS_PLANNER_TASK_PROMPT`. The kernel
-            // mock-planner harness depends on this — do not remove
-            // without coordinating with `kernel/tests/mock_planner_*`.
-            park_on_signal().await;
-            Ok(())
-        }
+        DriverOutcome::Scaffold => Err(PlannerError::DriverFailure(
+            "driver returned retired Scaffold outcome; prompt contract was not stamped".to_owned(),
+        )),
         DriverOutcome::Completed { tool_name } => {
             eprintln!(
                 "{{\"level\":\"info\",\"step\":\"planner-completed\",\

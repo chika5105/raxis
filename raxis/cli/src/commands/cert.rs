@@ -535,7 +535,9 @@ mod list {
         }
 
         if rows.is_empty() {
-            println!("No operator certificates installed (this is the legacy / cert-less flow).");
+            println!(
+                "No operator certificates installed. Generate or install a cert before booting a production policy."
+            );
             return Ok(());
         }
         // Header row pinned to a fixed column shape for grep-friendly output.

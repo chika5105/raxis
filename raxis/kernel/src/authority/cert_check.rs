@@ -10,11 +10,9 @@
 // gate and the actual handler dispatch. For every authenticated
 // operator request:
 //
-//   1. Resolve the operator's cert (if any) from the active
-//      `PolicyBundle`.
-//      - No cert ⇒ legacy path; pass-through with no audit emit (the
-//        legacy detection event was already emitted at policy load).
-//      - Cert present ⇒ fall through to step 2.
+//   1. Resolve the operator's cert from the active `PolicyBundle`.
+//      Certs are mandatory for every operator entry; a missing
+//      policy entry denies closed.
 //
 //   2. Compute the four-zone status from `raxis_crypto::cert::cert_status`.
 //
@@ -78,9 +76,8 @@ use crate::authority::revocations::RevocationStore;
 /// cert for op-fp expired 14 days ago, rotate via `raxis policy sign`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CertGuard {
-    /// Pass-through. The cert is either Active, Expiring, Grace,
-    /// AlwaysActiveEmergency, OR the operator is on the legacy
-    /// (cert-less) flow. The dispatcher proceeds with the handler.
+    /// Pass-through. The cert is Active, Expiring, Grace, or
+    /// AlwaysActiveEmergency. The dispatcher proceeds with the handler.
     Allow,
 
     /// Reject. The dispatcher MUST short-circuit with a wire error
@@ -172,16 +169,20 @@ impl CertEnforcer {
         let epoch_id = bundle.epoch();
         let entry = match bundle.operator_entry(operator_fingerprint) {
             Some(e) => e,
-            // Operator not in policy. The dispatcher's earlier
-            // `verify_response` step already rejects unknown
-            // fingerprints; reaching this point with `None` would
-            // be a kernel invariant violation. Return Allow (fail-
-            // open) and let the downstream handler's own auth
-            // check surface the missing-operator error — that's
-            // the consistent failure mode for "invariant violation
-            // in cert_check" (which we'd rather not turn into
-            // FAIL_CERT_*).
-            None => return CertGuard::Allow,
+            // Defense-in-depth: authentication and the permitted_ops
+            // gate should already have rejected an operator absent
+            // from the active policy, but the cert gate is the last
+            // pre-dispatch authority boundary. Deny closed rather
+            // than letting a policy-epoch race or auth regression
+            // fall through to a mutating handler.
+            None => {
+                return CertGuard::Deny {
+                    wire_code: "FAIL_OPERATOR_NOT_IN_POLICY",
+                    wire_detail: format!(
+                        "operator {operator_fingerprint} is not present in the active policy"
+                    ),
+                };
+            }
         };
 
         // Cert is mandatory (INV-CERT-01 / INV-CERT-02): every
@@ -632,16 +633,18 @@ mod tests {
         );
     }
 
-    // ── Unknown fingerprint (kernel invariant — fail-open) ─────────
+    // ── Unknown fingerprint (kernel invariant — deny closed) ───────
 
     #[test]
-    fn unknown_fingerprint_returns_allow_so_handler_can_surface_real_error() {
+    fn unknown_fingerprint_denies_closed() {
         let (enf, sink) = enforcer_with_sink();
         let b = PolicyBundle::for_tests_with_operators(vec![]);
-        assert_eq!(
-            enf.enforce("no-such-fp", "AbortTask", &b, sink.as_ref(), 0),
-            CertGuard::Allow
-        );
+        match enf.enforce("no-such-fp", "AbortTask", &b, sink.as_ref(), 0) {
+            CertGuard::Deny { wire_code, .. } => {
+                assert_eq!(wire_code, "FAIL_OPERATOR_NOT_IN_POLICY")
+            }
+            other => panic!("unknown policy operator must deny closed, got {other:?}"),
+        }
         assert!(sink.event_kinds().is_empty());
     }
 }

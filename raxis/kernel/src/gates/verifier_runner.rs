@@ -1949,6 +1949,144 @@ mod stub_round_trip {
         let _ = std::fs::remove_file(&socket_path);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn token_binding_mismatch_returns_rejected_without_consuming_token() {
+        let _guard = acquire_global_lock();
+
+        let stub_bin = build_and_locate_stub();
+        let store: Arc<raxis_store::Store> = Arc::new(mem_store());
+        let tmp = TempDir::new().expect("tempdir");
+        let witness_dir = tmp.path().join("witness");
+        std::fs::create_dir_all(&witness_dir).expect("mkdir witness");
+
+        let actual_task_id = format!("task-{}", uuid::Uuid::new_v4().simple());
+        let token_task_id = format!("task-{}", uuid::Uuid::new_v4().simple());
+        let evaluation_sha = "aaaaaaaa11111111bbbbbbbb22222222cccccccc".to_owned();
+        seed_task_in_gates_pending(&store, &actual_task_id, &evaluation_sha).await;
+        seed_task_in_gates_pending(&store, &token_task_id, &evaluation_sha).await;
+
+        let socket_path = std::env::temp_dir().join(format!(
+            "rxstubbind-{}.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
+        let _ = std::fs::remove_file(&socket_path);
+
+        let cfg = VerifierConfig {
+            verifier_binary_path: stub_bin.clone(),
+            verifier_token_ttl_secs: 60,
+            verifier_cpu_secs: 30,
+            verifier_memory_bytes: 1 << 30,
+            verifier_max_wall_secs: 5,
+            max_concurrent_verifiers: DEFAULT_MAX_CONCURRENT_VERIFIERS,
+            kernel_socket_path: socket_path.display().to_string(),
+            hints: BTreeMap::new(),
+            verifier_runtime: VerifierRuntimeConfig::default(),
+        };
+
+        let ctx = handler_ctx(store.clone(), witness_dir.clone());
+        let server_socket = socket_path.clone();
+        let server_handle =
+            tokio::spawn(async move { run_one_witness_round_trip(server_socket, ctx).await });
+
+        // Token is valid, unexpired, and FK-backed, but scoped to a
+        // different task/gate than the submitted witness envelope.
+        let returned_run_id = uuid::Uuid::new_v4().to_string();
+        let raw_token = {
+            let store_inner = store.clone();
+            let run_id = returned_run_id.clone();
+            let task_id = token_task_id.clone();
+            let eval_sha = evaluation_sha.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::authority::verifier_token::issue_verifier_token(
+                    &run_id,
+                    &task_id,
+                    "other-gate",
+                    &eval_sha,
+                    cfg.verifier_token_ttl_secs,
+                    store_inner.as_ref(),
+                )
+            })
+            .await
+            .expect("issue_verifier_token join")
+            .expect("issue_verifier_token must succeed against in-mem store")
+        };
+
+        let stub_exit = std::process::Command::new(&stub_bin)
+            .env("RAXIS_VERIFIER_TOKEN", &raw_token)
+            .env("RAXIS_TASK_ID", &actual_task_id)
+            .env("RAXIS_GATE_TYPE", "test-gate")
+            .env("RAXIS_EVALUATION_SHA", &evaluation_sha)
+            .env("RAXIS_KERNEL_SOCKET", socket_path.display().to_string())
+            .env("RAXIS_WORKTREE_ROOT", tmp.path().display().to_string())
+            .env("RAXIS_STUB_RESULT_CLASS", "Pass")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .expect("spawn raxis-verifier-stub");
+
+        assert_eq!(
+            stub_exit.status.code(),
+            Some(1),
+            "stub MUST exit Rejected(1) on token binding mismatch, got {}; stderr: {}",
+            stub_exit
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "<signalled>".to_owned()),
+            String::from_utf8_lossy(&stub_exit.stderr)
+        );
+
+        let handler_result = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle)
+            .await
+            .expect("server task did not finish within 5s")
+            .expect("server task panicked");
+        let ack = handler_result.expect("witness handler returned Err on binding mismatch");
+        match ack {
+            witness_handler::WitnessAck::Rejected { reason } => {
+                let r = format!("{reason:?}");
+                assert!(
+                    r.contains("TokenBindingMismatch"),
+                    "expected TokenBindingMismatch reason, got {r:?}"
+                );
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+
+        let count: i64 = {
+            let conn = store.lock().await;
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM {WITNESS_RECORDS} WHERE task_id = ?1"),
+                rusqlite::params![&actual_task_id],
+                |row| row.get(0),
+            )
+            .expect("count witness_records")
+        };
+        assert_eq!(
+            count, 0,
+            "binding rejection path must NOT write a witness_records row; got {count}"
+        );
+
+        let unconsumed: i64 = {
+            let conn = store.lock().await;
+            conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {VERIFIER_RUN_TOKENS}
+                     WHERE task_id = ?1 AND consumed = 0 AND consumed_at IS NULL"
+                ),
+                rusqlite::params![&token_task_id],
+                |row| row.get(0),
+            )
+            .expect("count unconsumed tokens")
+        };
+        assert_eq!(
+            unconsumed, 1,
+            "binding rejection consumed the token (unconsumed count = {unconsumed})"
+        );
+
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
     // No process-global env helpers: every `RAXIS_STUB_*` knob this
     // module needs reaches the stub via `Command::env()` on the child
     // (see step 7 above), so we never touch `std::env::set_var` and

@@ -26,6 +26,18 @@ use crate::authority::keys::AuthorityError;
 
 const VRT: &str = Table::VerifierRunTokens.as_str();
 
+/// Row-level binding carried by a validated verifier token. The
+/// witness handler must compare these fields against the submitted
+/// envelope before accepting evidence; a verifier token is scoped to
+/// exactly one `(task_id, gate_type, evaluation_sha)` tuple.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedVerifierToken {
+    pub verifier_run_id: String,
+    pub task_id: String,
+    pub gate_type: String,
+    pub evaluation_sha: String,
+}
+
 /// Issue a new verifier run token for `run_id`.
 ///
 /// Returns the raw token hex (64 chars). The kernel stores only the SHA-256
@@ -102,6 +114,19 @@ pub fn validate_verifier_token_in_tx(
     conn: &rusqlite::Connection,
     raw_token: &str,
 ) -> Result<String, AuthorityError> {
+    validate_verifier_token_row_in_tx(conn, raw_token).map(|row| row.verifier_run_id)
+}
+
+/// Validate a raw token and return the row binding minted with it.
+///
+/// This is the preferred witness-intake API. The token is a bearer
+/// credential, but it is not a free-floating capability: the kernel
+/// minted it for one verifier run over one task/gate/evaluation. Callers
+/// must reject submissions whose envelope does not match this row.
+pub fn validate_verifier_token_row_in_tx(
+    conn: &rusqlite::Connection,
+    raw_token: &str,
+) -> Result<ValidatedVerifierToken, AuthorityError> {
     // Reject malformed hex up-front rather than collapsing to an empty buffer
     // (which would let a presented token of "" hash to the SHA-256 of empty
     // and accidentally match a malformed row). On any decode error we return
@@ -110,11 +135,31 @@ pub fn validate_verifier_token_in_tx(
     let token_hash = sha256_hex(&raw_bytes);
     let now = unix_now_secs();
 
-    let (run_id, expires_at, consumed): (String, i64, i64) = conn
+    let (run_id, task_id, gate_type, evaluation_sha, expires_at, consumed): (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+    ) = conn
         .query_row(
-            &format!("SELECT verifier_run_id, expires_at, consumed FROM {VRT} WHERE token_hash=?1"),
+            &format!(
+                "SELECT verifier_run_id, task_id, gate_type, evaluation_sha, expires_at, consumed
+                   FROM {VRT}
+                  WHERE token_hash=?1"
+            ),
             rusqlite::params![&token_hash],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => AuthorityError::TokenNotFound,
@@ -124,11 +169,16 @@ pub fn validate_verifier_token_in_tx(
     if consumed != 0 {
         return Err(AuthorityError::TokenConsumed);
     }
-    if expires_at < now {
+    if expires_at <= now {
         return Err(AuthorityError::TokenExpired);
     }
 
-    Ok(run_id)
+    Ok(ValidatedVerifierToken {
+        verifier_run_id: run_id,
+        task_id,
+        gate_type,
+        evaluation_sha,
+    })
 }
 
 /// Consume a verifier token — set `consumed_at = now()`.
@@ -173,5 +223,77 @@ pub fn consume_verifier_token_in_tx(
         Err(AuthorityError::TokenConsumed)
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed_token_task(store: &Store, task_id: &str) {
+        let conn = store.lock_sync();
+        let initiatives = Table::Initiatives.as_str();
+        let tasks = Table::Tasks.as_str();
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {initiatives}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES ('init-verifier-token-tests', 'Executing', '{{}}', 'sha', 1)"
+            ),
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO {tasks}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at)
+                 VALUES (?1, 'init-verifier-token-tests', 'default',
+                         'GatesPending', 'kernel', 1, 1, 1)"
+            ),
+            rusqlite::params![task_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_row_returns_task_gate_and_evaluation_binding() {
+        let store = Store::open_in_memory().unwrap();
+        seed_token_task(&store, "task-bind");
+        let raw = issue_verifier_token("run-bind", "task-bind", "coverage", "abc123", 60, &store)
+            .unwrap();
+
+        let conn = store.lock_sync();
+        let row = validate_verifier_token_row_in_tx(&conn, &raw).unwrap();
+        assert_eq!(
+            row,
+            ValidatedVerifierToken {
+                verifier_run_id: "run-bind".to_owned(),
+                task_id: "task-bind".to_owned(),
+                gate_type: "coverage".to_owned(),
+                evaluation_sha: "abc123".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn token_expiring_at_current_second_is_expired() {
+        let store = Store::open_in_memory().unwrap();
+        seed_token_task(&store, "task-now");
+        let raw =
+            issue_verifier_token("run-now", "task-now", "tests", "sha-now", 60, &store).unwrap();
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!("UPDATE {VRT} SET expires_at = ?1 WHERE verifier_run_id = 'run-now'"),
+                rusqlite::params![unix_now_secs()],
+            )
+            .unwrap();
+        }
+
+        let conn = store.lock_sync();
+        let err = validate_verifier_token_row_in_tx(&conn, &raw).unwrap_err();
+        assert!(matches!(err, AuthorityError::TokenExpired));
     }
 }

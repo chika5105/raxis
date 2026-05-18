@@ -43,7 +43,7 @@
 use std::sync::Arc;
 
 use raxis_policy::PlanSigningSection;
-use raxis_store::Store;
+use raxis_store::{Store, Table};
 use rusqlite::TransactionBehavior;
 use tokio::sync::oneshot;
 
@@ -248,9 +248,14 @@ mod tests {
     /// Count rows in `plan_bundle_nonces_seen`.
     fn nonce_row_count(store: &Store) -> i64 {
         let conn = store.lock_sync();
-        conn.query_row("SELECT COUNT(*) FROM plan_bundle_nonces_seen", [], |r| {
-            r.get(0)
-        })
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {}",
+                Table::PlanBundleNoncesSeen.as_str()
+            ),
+            [],
+            |r| r.get(0),
+        )
         .unwrap()
     }
 

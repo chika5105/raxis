@@ -30,6 +30,9 @@ use raxis_types::{EscalationClass, EscalationId, EscalationStatus, SessionId};
 use thiserror::Error;
 
 const ESCALATIONS: &str = Table::Escalations.as_str();
+const INITIATIVES: &str = Table::Initiatives.as_str();
+const SESSIONS: &str = Table::Sessions.as_str();
+const TASKS: &str = Table::Tasks.as_str();
 
 /// Reasons the escalation link in `IntentRequest.resolved_via_escalation`
 /// fails Check 6b. Each variant maps to a distinct error code so the
@@ -199,36 +202,44 @@ mod tests {
         // predicates.
         let g = store.lock_sync();
         g.execute(
-            "INSERT OR IGNORE INTO initiatives \
+            &format!(
+                "INSERT OR IGNORE INTO {INITIATIVES} \
              (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
-             VALUES ('init-1', 'Executing', '{}', 'sha-1', 1)",
+             VALUES ('init-1', 'Executing', '{{}}', 'sha-1', 1)"
+            ),
             [],
         )
         .unwrap();
         g.execute(
-            "INSERT OR IGNORE INTO sessions \
+            &format!(
+                "INSERT OR IGNORE INTO {SESSIONS} \
              (session_id, role_id, session_token, lineage_id, fetch_quota, \
               created_at, expires_at, revoked) \
-             VALUES (?1, 'planner', 'tok', 'lin-1', 0, 1, 9999, 0)",
+             VALUES (?1, 'planner', 'tok', 'lin-1', 0, 1, 9999, 0)"
+            ),
             [session],
         )
         .unwrap();
         g.execute(
-            "INSERT OR IGNORE INTO tasks \
+            &format!(
+                "INSERT OR IGNORE INTO {TASKS} \
              (task_id, initiative_id, lane_id, state, actor, \
               policy_epoch, admitted_at, transitioned_at) \
-             VALUES ('task-1', 'init-1', 'default', 'Running', 'op', 1, 1, 1)",
+             VALUES ('task-1', 'init-1', 'default', 'Running', 'op', 1, 1, 1)"
+            ),
             [],
         )
         .unwrap();
 
         g.execute(
-            "INSERT INTO escalations \
+            &format!(
+                "INSERT INTO {ESCALATIONS} \
              (escalation_id, session_id, task_id, lineage_id, initiative_id, \
               class, requested_scope_json, justification, idempotency_key, \
               status, created_at, timeout_at) \
              VALUES (?1, ?2, 'task-1', 'lin-1', 'init-1', \
-                     ?3, '{}', 'why', ?1, ?4, 1, 9999)",
+                     ?3, '{{}}', 'why', ?1, ?4, 1, 9999)"
+            ),
             rusqlite::params![esc_id, session, class, status],
         )
         .unwrap();

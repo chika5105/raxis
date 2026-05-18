@@ -6,12 +6,10 @@
 //! 1. Parses the env-contract the kernel stamps at spawn time
 //!    (`RAXIS_KERNEL_PLANNER_SOCKET`, `RAXIS_PLANNER_TASK_PROMPT`,
 //!    optional `RAXIS_MODEL_ID`, etc.).
-//! 2. Falls back to the scaffold "park on signal" behaviour when
-//!    the contract is **not** populated, so the existing kernel
-//!    integration tests + V2 boot path continue to work
-//!    bit-for-bit. The toggle is "is `RAXIS_PLANNER_TASK_PROMPT`
-//!    present and non-empty?" — if no, the binary parks; if yes,
-//!    the binary runs the agent loop.
+//! 2. Fails closed when the prompt part of the contract is missing.
+//!    Older scaffold parking is intentionally no longer reachable from
+//!    the live entrypoint because it masks kernel spawn-contract bugs
+//!    as quiet VM idleness.
 //! 3. Builds the role-specific tool registry, the
 //!    [`crate::dispatch::DispatchLoop`], and an
 //!    [`crate::intent::IntentSubmitter`] over a UDS connection to
@@ -45,7 +43,7 @@
 //! | Variable                       | Required for live mode? | Default                              | Purpose                                    |
 //! |--------------------------------|-------------------------|--------------------------------------|--------------------------------------------|
 //! | `RAXIS_SESSION_TOKEN`          | yes (already in [`crate::BootEnv`]) | —                          | Session-auth token for the kernel UDS      |
-//! | `RAXIS_PLANNER_TASK_PROMPT`    | **yes — toggle**        | absent ⇒ scaffold/park               | Seed user message for the dispatch loop     |
+//! | `RAXIS_PLANNER_TASK_PROMPT`    | yes                     | absent ⇒ hard error                  | Seed user message for the dispatch loop     |
 //! | `RAXIS_PLANNER_KSB`            | no (test-only fallback) | absent ⇒ NNSP-only system prompt     | JSON-encoded [`raxis_ksb::KsbSnapshot`] §2.4 |
 //! | `RAXIS_KERNEL_PLANNER_SOCKET`  | yes (live mode only)    | —                                    | UDS path to `<data_dir>/sockets/planner.sock` |
 //! | `RAXIS_PLANNER_BASE_URL`       | no                      | `https://api.anthropic.com`          | Model API base URL — tests override         |
@@ -53,16 +51,8 @@
 //! | `RAXIS_WORKSPACE_PATH`         | no                      | `/workspace`                         | Tool sandbox root                           |
 //! | `RAXIS_PLANNER_MAX_TURNS`      | no                      | `50`                                 | Hard turn ceiling per session               |
 //! | `RAXIS_PLANNER_MAX_TOKENS`     | no                      | `4096`                               | Per-request `max_tokens`                    |
-//! When `RAXIS_PLANNER_TASK_PROMPT` is **absent or empty**, the
-//! driver returns [`DriverOutcome::Scaffold`] without contacting
-//! the kernel. The binary's `main` then parks on Ctrl-C/SIGTERM
-//! exactly as the V2.3 scaffold did. This means:
-//! * Existing kernel integration tests (mock-planner harness, the
-//!   `kernel/tests/mock_planner_end_to_end.rs` battery, the
-//!   `live-e2e` slices that don't yet stamp the contract) keep
-//!   passing without any changes.
-//! * The kernel can flip a session into live mode on a per-spawn
-//!   basis by populating `extra_env` — no rebuild required.
+//! When `RAXIS_PLANNER_TASK_PROMPT[_PATH]` is **absent or empty**,
+//! the driver returns a hard error before contacting the kernel.
 //! ## Why the driver makes direct HTTPS calls (not gateway IPC)
 //! Per `peripherals.md §3.2` the planner role binary's
 //! `AnthropicClient` makes an *unauthenticated* HTTPS call against
@@ -249,9 +239,9 @@ impl PlannerRuntimeEnv {
 /// What the binary's `main` does next after [`run_role_session`].
 #[derive(Debug)]
 pub enum DriverOutcome {
-    /// `RAXIS_PLANNER_TASK_PROMPT` was unset / empty — V2 scaffold
-    /// path. The binary's `main` parks on signal exactly like the
-    /// V2.3 scaffolds did.
+    /// Retired scaffold path. Live role binaries treat this as a hard
+    /// driver failure; the variant is retained only so historical exit
+    /// mapping tests and external callers keep a stable enum surface.
     Scaffold,
     /// Dispatch loop terminated; the matching terminal intent was
     /// submitted to the kernel and accepted. Process exits 0.
@@ -294,6 +284,16 @@ pub enum DriverOutcome {
 /// [`crate::PlannerError::exit_code`] in the binary's `main`.
 #[derive(Debug, Error)]
 pub enum DriverError {
+    /// The kernel did not stamp a non-empty task prompt via
+    /// `RAXIS_PLANNER_TASK_PROMPT_PATH` or `RAXIS_PLANNER_TASK_PROMPT`.
+    /// This is a spawn-contract violation; failing closed prevents a
+    /// missing prompt from turning into an idle scaffold VM.
+    #[error(
+        "missing planner task prompt: kernel must set RAXIS_PLANNER_TASK_PROMPT_PATH \
+         or RAXIS_PLANNER_TASK_PROMPT"
+    )]
+    TaskPromptMissing,
+
     /// None of the kernel-stamped transport env vars were set when
     /// the driver was launched in live mode (UDS path,
     /// VSock CID/port, or VSock listen-port). At least one is
@@ -385,9 +385,8 @@ pub enum DriverError {
 /// `main()` after it has parsed argv + env into a
 /// [`crate::BootContext`].
 /// Behaviour matrix:
-/// 1. If `RAXIS_PLANNER_TASK_PROMPT` is **unset or empty**, returns
-///    `Ok(`[`DriverOutcome::Scaffold`]`)` immediately. The role
-///    binary's `main` parks on signal.
+/// 1. If `RAXIS_PLANNER_TASK_PROMPT[_PATH]` is **unset or empty**,
+///    returns [`DriverError::TaskPromptMissing`] immediately.
 /// 2. Otherwise, runs the full dispatch loop end-to-end. The loop
 ///    resolves the model id (`RAXIS_MODEL_ID` or
 ///    [`crate::DEFAULT_MODEL`]) through the registry, connects to
@@ -446,15 +445,13 @@ where
     // `missing value for flag: --initiative-id` boot failures.
     // See `raxis_types::planner_env::PLANNER_TASK_PROMPT_PATH_ENV`
     // for the full rationale.
-    // INV-DRIVER-01: scaffold/park is the *only* behaviour for a
-    // session whose seed prompt was not stamped via either channel.
-    // We MUST NOT synthesise a default prompt here — that would let
-    // a mis-configured kernel boot a planner against a runaway
-    // model with no operator-supplied instructions, which is
-    // exactly what the env-contract defends against.
+    // INV-DRIVER-01: a session whose seed prompt was not stamped via
+    // either channel fails closed. We MUST NOT synthesize a default
+    // prompt or park as a scaffold here — both would let a kernel
+    // spawn-contract regression masquerade as normal guest idleness.
     let task_prompt = match read_task_prompt(&f) {
         Some(p) => p,
-        None => return Ok(DriverOutcome::Scaffold),
+        None => return Err(DriverError::TaskPromptMissing),
     };
 
     // Resolve the kernel transport config from the same env-reader
@@ -696,16 +693,14 @@ where
 ///      mount (`raxis_ksb::PLANNER_KSB_GUEST_MOUNT` /
 ///      `raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME`). A non-empty
 ///      env value but a missing / unreadable / empty file surfaces
-///      a structured-log warn and returns `None` — the driver
-///      falls back to scaffold/park rather than booting against an
-///      empty / inconsistent prompt.
-///   2. **`RAXIS_PLANNER_TASK_PROMPT` (inline env).** Legacy
-///      in-process delivery, used by subprocess-isolation tests
-///      and pre-V2.6 kernel revisions. Empty → `None` (treated
+///      a structured-log warn and returns `None`; the caller turns
+///      that into [`DriverError::TaskPromptMissing`].
+///   2. **`RAXIS_PLANNER_TASK_PROMPT` (inline env).** Inline
+///      delivery used by tests and substrates without a prompt
+///      sidecar. Empty → `None` (treated
 ///      same as unset per pre-existing
 ///      `var = |k| f(k).filter(|v| !v.is_empty())` semantics).
-///   3. Neither set → `None` (driver returns
-///      [`DriverOutcome::Scaffold`] without contacting the kernel).
+///   3. Neither set → `None`.
 fn read_task_prompt<F: Fn(&str) -> Option<String>>(f: &F) -> Option<String> {
     let var = |k: &str| f(k).filter(|v| !v.is_empty());
 
@@ -1751,10 +1746,9 @@ fn pick_str(v: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Park on Ctrl-C / SIGTERM. The role binary's `main` calls this
-/// when [`run_role_session`] returns
-/// [`DriverOutcome::Scaffold`] — preserves the V2.3 scaffold
-/// behaviour bit-for-bit.
+/// Park on Ctrl-C / SIGTERM. Retained for external test harnesses that
+/// still need the old placeholder process behaviour; live role binaries
+/// no longer call it on missing prompt contracts.
 pub async fn park_on_signal() {
     let _ = tokio::signal::ctrl_c().await;
     // Belt-and-braces: a 5 ms sleep so a SIGTERM-driven shutdown
@@ -2605,9 +2599,9 @@ mod tests {
         );
     }
 
-    /// When no KSB snapshot is
-    /// supplied (test fixtures, legacy boot path), the driver falls
-    /// back to the NNSP-only system prompt. The KSB delimiters MUST
+    /// When no KSB snapshot is supplied by the lower-level test
+    /// helper, the driver falls back to the NNSP-only system prompt.
+    /// The KSB delimiters MUST
     /// NOT appear, otherwise downstream parsers would mistake an
     /// empty placeholder for a real kernel-state block.
     #[tokio::test]
@@ -2669,14 +2663,12 @@ mod tests {
         );
     }
 
-    /// Driver returns `Scaffold` when `RAXIS_PLANNER_TASK_PROMPT`
-    /// is unset — the kernel's V2.3 mock-planner harness keeps
-    /// working bit-for-bit. Hermetic via `_with_env_fn` so the
-    /// test never touches process-global env (the workspace lints
-    /// `unsafe_code = deny` and `std::env::set_var` is now unsafe
-    /// on stable).
+    /// Driver fails closed when `RAXIS_PLANNER_TASK_PROMPT[_PATH]`
+    /// is unset. Hermetic via `_with_env_fn` so the test never
+    /// touches process-global env (the workspace lints `unsafe_code
+    /// = deny` and `std::env::set_var` is now unsafe on stable).
     #[tokio::test]
-    async fn run_role_session_scaffolds_when_task_prompt_absent() {
+    async fn run_role_session_errors_when_task_prompt_absent() {
         let env = BootEnv {
             session_token: "tok".to_owned(),
         };
@@ -2684,10 +2676,10 @@ mod tests {
             initiative_id: "init-A".to_owned(),
             task_id: Some("task-1".to_owned()),
         };
-        let outcome = run_role_session_with_env_fn(Role::Executor, args, env, |_| None)
+        let err = run_role_session_with_env_fn(Role::Executor, args, env, |_| None)
             .await
-            .unwrap();
-        assert!(matches!(outcome, DriverOutcome::Scaffold));
+            .unwrap_err();
+        assert!(matches!(err, DriverError::TaskPromptMissing));
     }
 
     /// `read_task_prompt` prefers the `…_PATH` sidecar channel
@@ -2724,15 +2716,15 @@ mod tests {
     }
 
     /// `read_task_prompt` returns `None` when both channels are
-    /// unset — surfaces as `DriverOutcome::Scaffold` upstream.
+    /// unset — surfaces as `DriverError::TaskPromptMissing` upstream.
     #[test]
     fn read_task_prompt_returns_none_when_both_channels_unset() {
         assert!(read_task_prompt(&|_: &str| None).is_none());
     }
 
-    /// Empty sidecar file is a kernel-side regression we refuse
-    /// to mask — return `None` so the driver scaffolds rather than
-    /// boots against an empty user message.
+    /// Empty sidecar file is a kernel-side regression we refuse to
+    /// mask — return `None` so the live driver errors rather than
+    /// booting against an empty user message.
     #[test]
     fn read_task_prompt_returns_none_for_empty_sidecar_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -2751,7 +2743,7 @@ mod tests {
     }
 
     /// Missing sidecar file (env points at a path that does not
-    /// exist) returns `None`. Defensive — better to scaffold than
+    /// exist) returns `None`. Defensive — better to fail closed than
     /// to boot against a guessed prompt.
     #[test]
     fn read_task_prompt_returns_none_for_missing_sidecar_file() {
@@ -2837,7 +2829,7 @@ mod tests {
     /// Confirm that the driver fails fast on a clearly malformed
     /// base URL (no protocol prefix). The check fires *before* any
     /// HTTP construction, so the error is deterministic. Hermetic
-    /// via `_with_env_fn` — see scaffold test rationale above.
+    /// via `_with_env_fn` so it does not touch process-global env.
     #[tokio::test]
     async fn run_role_session_rejects_base_url_without_scheme() {
         let env_fn = |k: &str| match k {

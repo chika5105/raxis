@@ -469,7 +469,7 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
                     match tokio::task::spawn_blocking(move || {
                         let conn = store_for_lookup.lock_sync();
                         conn.query_row(
-                            "SELECT initiative_id FROM tasks WHERE task_id = ?1",
+                            &format!("SELECT initiative_id FROM {TASKS} WHERE task_id = ?1"),
                             rusqlite::params![&task_id_for_lookup],
                             |r| r.get::<_, String>(0),
                         )
@@ -3838,7 +3838,7 @@ fn handle_submit_review(
         let conn_for_lane = store.lock_sync();
         conn_for_lane
             .query_row(
-                "SELECT lane_id FROM tasks WHERE task_id = ?1",
+                &format!("SELECT lane_id FROM {TASKS} WHERE task_id = ?1"),
                 rusqlite::params![req.task_id.as_str()],
                 |r| r.get::<_, String>(0),
             )
@@ -3850,7 +3850,7 @@ fn handle_submit_review(
         let conn_for_init = store.lock_sync();
         conn_for_init
             .query_row(
-                "SELECT initiative_id FROM tasks WHERE task_id = ?1",
+                &format!("SELECT initiative_id FROM {TASKS} WHERE task_id = ?1"),
                 rusqlite::params![req.task_id.as_str()],
                 |r| r.get::<_, String>(0),
             )
@@ -7295,13 +7295,13 @@ async fn handle_retry_sub_task(
             // correct behaviour for crash retries.
             if from_review_rejection_admit {
                 let reviewer_task_ids: Vec<String> = {
-                    let mut stmt = tx.prepare(
+                    let mut stmt = tx.prepare(&format!(
                         "SELECT t.task_id \
-                           FROM task_dag_edges e \
-                           JOIN tasks t ON t.task_id = e.successor_task_id \
+                           FROM {TASK_DAG_EDGES} e \
+                           JOIN {TASKS} t ON t.task_id = e.successor_task_id \
                           WHERE e.predecessor_task_id = ?1 \
                             AND t.review_verdict IS NOT NULL"
-                    ).map_err(|_| {
+                    )).map_err(|_| {
                         emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
                         (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
                     })?;
@@ -9124,12 +9124,14 @@ mod tests {
         let conn = store.lock_sync();
         let now = unix_now_secs();
         let _ = conn.execute(
-            "INSERT OR IGNORE INTO sessions (
+            &format!(
+                "INSERT OR IGNORE INTO {SESSIONS} (
                 session_id, role_id, session_token, sequence_number,
                 worktree_root, base_sha, base_tracking_ref,
                 lineage_id, fetch_quota, created_at, expires_at, revoked,
                 session_agent_type, can_delegate, initiative_id
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,0,'init-int')",
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,0,'init-int')"
+            ),
             rusqlite::params![
                 "11111111-1111-1111-1111-111111111111",
                 "Planner",

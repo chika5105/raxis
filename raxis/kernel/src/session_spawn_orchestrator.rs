@@ -73,7 +73,7 @@ use raxis_isolation::{EgressTier, ImageBody, ImageSignature, SessionToken, Verif
 use raxis_session_spawn::{
     SessionSpawnService, SpawnError, SpawnHandle, SpawnRequest, TerminationReport,
 };
-use raxis_store::Store;
+use raxis_store::{Store, Table};
 use raxis_types::clock::unix_now_secs;
 use thiserror::Error;
 
@@ -645,7 +645,10 @@ async fn spawn_orchestrator_for_initiative(
                     .map_err(|e| e.to_string())?;
             let token: String = conn
                 .query_row(
-                    "SELECT session_token FROM sessions WHERE session_id = ?1",
+                    &format!(
+                        "SELECT session_token FROM {} WHERE session_id = ?1",
+                        Table::Sessions.as_str()
+                    ),
                     rusqlite::params![&session_id_for_read],
                     |row| row.get(0),
                 )
@@ -782,11 +785,14 @@ async fn spawn_orchestrator_for_initiative(
         tokio::task::spawn_blocking(move || -> Result<(), rusqlite::Error> {
             let conn = store_for_update.lock_sync();
             conn.execute(
-                "UPDATE sessions
+                &format!(
+                    "UPDATE {}
                     SET worktree_root      = ?1,
                         base_sha           = ?2,
                         base_tracking_ref  = ?3
                   WHERE session_id = ?4",
+                    Table::Sessions.as_str()
+                ),
                 rusqlite::params![
                     worktree_root_str,
                     base_sha_str,
@@ -803,7 +809,7 @@ async fn spawn_orchestrator_for_initiative(
             ))
         })?
         .map_err(|e| {
-            OrchestratorSpawnError::StoreRead(format!("UPDATE sessions worktree_root failed: {e}",))
+            OrchestratorSpawnError::StoreRead(format!("session worktree_root update failed: {e}",))
         })?;
     }
 
@@ -1613,8 +1619,11 @@ pub fn spawn_planner_dispatcher(
         let revoke_result = tokio::task::spawn_blocking(move || {
             let conn = store.lock_sync();
             conn.execute(
-                "UPDATE sessions SET revoked = 1, revoked_at = ?1 \
-                  WHERE session_id = ?2 AND revoked = 0",
+                &format!(
+                    "UPDATE {} SET revoked = 1, revoked_at = ?1 \
+                      WHERE session_id = ?2 AND revoked = 0",
+                    Table::Sessions.as_str()
+                ),
                 rusqlite::params![raxis_types::clock::unix_now_secs(), session_for_revoke,],
             )
         })
@@ -3754,10 +3763,13 @@ fn populate_planner_max_turns_env_or_insert(
 /// base ceiling.
 pub(crate) fn read_crash_retry_count_for_task(conn: &rusqlite::Connection, task_id: &str) -> u32 {
     use rusqlite::OptionalExtension;
-    let sql = "SELECT crash_retry_count FROM subtask_activations \
-               WHERE task_id = ?1 ORDER BY created_at DESC LIMIT 1";
+    let sql = format!(
+        "SELECT crash_retry_count FROM {} \
+         WHERE task_id = ?1 ORDER BY created_at DESC LIMIT 1",
+        Table::SubtaskActivations.as_str()
+    );
     match conn
-        .query_row(sql, rusqlite::params![task_id], |r| r.get::<_, i64>(0))
+        .query_row(&sql, rusqlite::params![task_id], |r| r.get::<_, i64>(0))
         .optional()
     {
         Ok(Some(n)) => u32::try_from(n).unwrap_or(0),
@@ -4821,7 +4833,10 @@ pub async fn spawn_executor_for_task(
                     .map_err(|e| e.to_string())?;
             let token: String = conn
                 .query_row(
-                    "SELECT session_token FROM sessions WHERE session_id = ?1",
+                    &format!(
+                        "SELECT session_token FROM {} WHERE session_id = ?1",
+                        Table::Sessions.as_str()
+                    ),
                     rusqlite::params![&session_id_for_read],
                     |row| row.get(0),
                 )

@@ -489,6 +489,7 @@ fn evaluate_pre_spawn(
 
 #[cfg(test)]
 mod auto_claim_tests {
+    use raxis_store::Table;
     use raxis_types::SubmittedClaim;
 
     use crate::gates::policy_lookup::ClaimType;
@@ -527,10 +528,13 @@ mod auto_claim_tests {
         // without exploding (the test layer is `#[cfg(test)]` only —
         // production code never reaches here).
         let initiative_id = format!("init-{}", task_id);
+        let initiatives = Table::Initiatives.as_str();
         conn.execute(
-            "INSERT OR IGNORE INTO initiatives (initiative_id, state, \
+            &format!(
+                "INSERT OR IGNORE INTO {initiatives} (initiative_id, state, \
              terminal_criteria_json, plan_artifact_sha256, created_at) \
-             VALUES (?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?)"
+            ),
             rusqlite::params![
                 initiative_id,
                 "ApprovedPlan",
@@ -541,10 +545,13 @@ mod auto_claim_tests {
         )
         .expect("seed_witness initiatives insert");
 
+        let tasks = Table::Tasks.as_str();
         conn.execute(
-            "INSERT OR IGNORE INTO tasks (task_id, initiative_id, lane_id, state, \
+            &format!(
+                "INSERT OR IGNORE INTO {tasks} (task_id, initiative_id, lane_id, state, \
              actor, policy_epoch, admitted_at, transitioned_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            ),
             rusqlite::params![
                 task_id,
                 initiative_id,
@@ -558,10 +565,13 @@ mod auto_claim_tests {
         )
         .expect("seed_witness tasks insert");
 
+        let verifier_tokens = Table::VerifierRunTokens.as_str();
         conn.execute(
-            "INSERT INTO verifier_run_tokens (verifier_run_id, task_id, gate_type, \
+            &format!(
+                "INSERT INTO {verifier_tokens} (verifier_run_id, task_id, gate_type, \
              evaluation_sha, token_hash, issued_at, expires_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?)"
+            ),
             rusqlite::params![
                 run_id,
                 task_id,

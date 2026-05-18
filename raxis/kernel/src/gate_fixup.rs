@@ -67,6 +67,7 @@
 use std::sync::Arc;
 
 use raxis_audit_tools::AuditEventKind;
+use raxis_store::Table;
 use rusqlite::Connection;
 
 use crate::ipc::context::HandlerContext;
@@ -120,10 +121,12 @@ pub(crate) fn admit_fixup_task_in_tx(
     now_secs: i64,
 ) -> Result<AdmitOutcome, AdmitError> {
     let tx = conn.transaction().map_err(|_| AdmitError::SqlError)?;
+    let tasks = Table::Tasks.as_str();
+    let dag_edges = Table::TaskDagEdges.as_str();
 
     let parent_eval_sha: Option<String> = tx
         .query_row(
-            "SELECT evaluation_sha FROM tasks WHERE task_id = ?1",
+            &format!("SELECT evaluation_sha FROM {tasks} WHERE task_id = ?1"),
             rusqlite::params![parent_task_id],
             |r| r.get(0),
         )
@@ -132,7 +135,8 @@ pub(crate) fn admit_fixup_task_in_tx(
 
     let inserted = tx
         .execute(
-            "INSERT INTO tasks \
+            &format!(
+                "INSERT INTO {tasks} \
                (task_id, initiative_id, lane_id, state, \
                 actor, policy_epoch, admitted_at, \
                 transitioned_at, actual_cost, \
@@ -140,7 +144,8 @@ pub(crate) fn admit_fixup_task_in_tx(
                 parent_gate_failure_task_id, \
                 parent_gate_failure_type) \
              VALUES (?1, ?2, 'default', 'Admitted', \
-                     'kernel', 0, ?3, ?3, 0, ?4, 1, ?5, ?6)",
+                     'kernel', 0, ?3, ?3, 0, ?4, 1, ?5, ?6)"
+            ),
             rusqlite::params![
                 new_task_id,
                 initiative_id,
@@ -160,18 +165,22 @@ pub(crate) fn admit_fixup_task_in_tx(
     }
 
     tx.execute(
-        "INSERT INTO task_dag_edges \
+        &format!(
+            "INSERT INTO {dag_edges} \
            (initiative_id, predecessor_task_id, \
             successor_task_id, predecessor_satisfied) \
-         VALUES (?1, ?2, ?3, 0)",
+         VALUES (?1, ?2, ?3, 0)"
+        ),
         rusqlite::params![initiative_id, parent_task_id, new_task_id],
     )
     .map_err(|_| AdmitError::SqlError)?;
 
     let new_attempts: i64 = parent_attempts_pre + 1;
     tx.execute(
-        "UPDATE tasks SET gate_fixup_attempts = ?1 \
-          WHERE task_id = ?2",
+        &format!(
+            "UPDATE {tasks} SET gate_fixup_attempts = ?1 \
+              WHERE task_id = ?2"
+        ),
         rusqlite::params![new_attempts, parent_task_id],
     )
     .map_err(|_| AdmitError::SqlError)?;

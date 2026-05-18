@@ -58,6 +58,7 @@ use std::sync::Arc;
 use raxis_audit_tools::AuditEventKind;
 use raxis_egress_admission::StallSignal;
 use raxis_ipc::message::FetchKind;
+use raxis_store::Table;
 use raxis_types::{PlannerFetchKind, PlannerFetchRequest, PlannerFetchResponse, SessionAgentType};
 use uuid::Uuid;
 
@@ -703,10 +704,13 @@ fn lookup_active_task_id_for_session_sync(
 ) -> Option<String> {
     let conn = store.lock_sync();
     conn.query_row(
-        "SELECT task_id FROM subtask_activations \
-              WHERE session_id = ?1 \
-                AND activation_state = 'Active' \
-              LIMIT 1",
+        &format!(
+            "SELECT task_id FROM {} \
+                  WHERE session_id = ?1 \
+                    AND activation_state = 'Active' \
+                  LIMIT 1",
+            Table::SubtaskActivations.as_str()
+        ),
         rusqlite::params![session_id],
         |row| row.get::<_, String>(0),
     )
@@ -915,22 +919,26 @@ mod tests {
     fn seed_active_activation(task_id: &str, session_id: &str) -> raxis_store::Store {
         let store = raxis_store::Store::open_in_memory().unwrap();
         let conn = store.lock_sync();
+        let initiatives = Table::Initiatives.as_str();
+        let tasks = Table::Tasks.as_str();
+        let sessions = Table::Sessions.as_str();
+        let activations = Table::SubtaskActivations.as_str();
         conn.execute_batch(&format!(
-            "INSERT INTO initiatives \
+            "INSERT INTO {initiatives} \
                 (initiative_id, state, terminal_criteria_json, \
                  plan_artifact_sha256, created_at) \
              VALUES ('init-c5', 'Executing', '{{}}', 'deadbeef', 1); \
-             INSERT INTO tasks \
+             INSERT INTO {tasks} \
                 (task_id, initiative_id, lane_id, state, actor, \
                  policy_epoch, admitted_at, transitioned_at, actual_cost) \
              VALUES ('{task_id}', 'init-c5', 'default', 'Running', \
                      'kernel', 1, 1, 1, 0); \
-             INSERT INTO sessions \
+             INSERT INTO {sessions} \
                 (session_id, role_id, session_token, lineage_id, \
                  fetch_quota, created_at, expires_at, revoked) \
              VALUES ('{session_id}', 'Executor', 'tok-c5-{session_id}', \
                      'lin-c5', 1000, 1, 9999999999, 0); \
-             INSERT INTO subtask_activations \
+             INSERT INTO {activations} \
                 (activation_id, task_id, initiative_id, \
                  activation_state, session_id, created_at, activated_at) \
              VALUES ('act-c5', '{task_id}', 'init-c5', 'Active', \
@@ -976,28 +984,32 @@ mod tests {
     fn lookup_active_task_id_for_session_ignores_completed_rows() {
         let store = raxis_store::Store::open_in_memory().unwrap();
         let conn = store.lock_sync();
-        conn.execute_batch(
-            "INSERT INTO initiatives \
+        let initiatives = Table::Initiatives.as_str();
+        let tasks = Table::Tasks.as_str();
+        let sessions = Table::Sessions.as_str();
+        let activations = Table::SubtaskActivations.as_str();
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives} \
                 (initiative_id, state, terminal_criteria_json, \
                  plan_artifact_sha256, created_at) \
-             VALUES ('init-c5b', 'Executing', '{}', 'deadbeef', 1); \
-             INSERT INTO tasks \
+             VALUES ('init-c5b', 'Executing', '{{}}', 'deadbeef', 1); \
+             INSERT INTO {tasks} \
                 (task_id, initiative_id, lane_id, state, actor, \
                  policy_epoch, admitted_at, transitioned_at, actual_cost) \
              VALUES ('task-completed', 'init-c5b', 'default', \
                      'Completed', 'kernel', 1, 1, 2, 0); \
-             INSERT INTO sessions \
+             INSERT INTO {sessions} \
                 (session_id, role_id, session_token, lineage_id, \
                  fetch_quota, created_at, expires_at, revoked) \
              VALUES ('sess-c5b', 'Executor', 'tok-c5b', 'lin-c5b', \
                      1000, 1, 9999999999, 0); \
-             INSERT INTO subtask_activations \
+             INSERT INTO {activations} \
                 (activation_id, task_id, initiative_id, \
                  activation_state, session_id, created_at, \
                  activated_at, terminated_at) \
              VALUES ('act-c5b', 'task-completed', 'init-c5b', \
-                     'Completed', 'sess-c5b', 1, 2, 3);",
-        )
+                     'Completed', 'sess-c5b', 1, 2, 3);"
+        ))
         .unwrap();
         drop(conn);
 

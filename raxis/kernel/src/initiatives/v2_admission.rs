@@ -848,7 +848,7 @@ mod tests {
         let conn = store.lock_sync();
         let state: String = conn
             .query_row(
-                "SELECT state FROM initiatives WHERE initiative_id=?1",
+                &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
                 rusqlite::params!["init-happy-1"],
                 |r| r.get(0),
             )
@@ -856,7 +856,7 @@ mod tests {
         assert_eq!(state, "Draft");
         let bundle_sha_blob: Vec<u8> = conn
             .query_row(
-                "SELECT plan_bundle_sha256 FROM initiatives WHERE initiative_id=?1",
+                &format!("SELECT plan_bundle_sha256 FROM {INITIATIVES} WHERE initiative_id=?1"),
                 rusqlite::params!["init-happy-1"],
                 |r| r.get(0),
             )
@@ -1149,7 +1149,7 @@ mod tests {
         // initiative — sealing only happens on the success path.
         let count: i64 = tx
             .query_row(
-                "SELECT COUNT(*) FROM initiatives WHERE initiative_id=?1",
+                &format!("SELECT COUNT(*) FROM {INITIATIVES} WHERE initiative_id=?1"),
                 rusqlite::params!["init-bad-toml"],
                 |r| r.get(0),
             )

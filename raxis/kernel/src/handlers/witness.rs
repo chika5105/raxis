@@ -96,6 +96,17 @@ pub enum WitnessRejectionReason {
     /// sub.evaluation_sha != task.evaluation_sha. Spec §2.3 witness.rs:
     /// "no witness write, no token consume, no WitnessAccepted audit".
     EvaluationShaMismatch { expected: String, presented: String },
+    /// The verifier token was valid but was minted for a different
+    /// `(task_id, gate_type, evaluation_sha)` tuple than the envelope
+    /// presented. Token is NOT consumed and no witness row is written.
+    TokenBindingMismatch {
+        expected_task_id: String,
+        expected_gate_type: String,
+        expected_evaluation_sha: String,
+        presented_task_id: String,
+        presented_gate_type: String,
+        presented_evaluation_sha: String,
+    },
     /// The task is not in GatesPending state — the submission arrived too late
     /// (task already recovered/aborted) or for the wrong task state.
     TaskNotGatesPending { current_state: String },
@@ -436,7 +447,11 @@ async fn handle_inner(
             run_id: String,
             task_row: TaskRowData,
         },
-        Rejected(WitnessRejectionReason),
+        Rejected {
+            run_id: String,
+            initiative_id: Option<String>,
+            reason: WitnessRejectionReason,
+        },
     }
 
     let presented_sha_for_closure = presented_sha.clone();
@@ -465,12 +480,11 @@ async fn handle_inner(
 
             // Step 1 (in-tx): validate token. If it fails for any reason, the
             // transaction rolls back on drop — no witness row is committed.
-            let run_id =
-                verifier_token::validate_verifier_token_in_tx(&tx, &raw_token).map_err(|e| {
-                    HandlerError::Unauthorized {
-                        reason: e.to_string(),
-                    }
+            let token_row = verifier_token::validate_verifier_token_row_in_tx(&tx, &raw_token)
+                .map_err(|e| HandlerError::Unauthorized {
+                    reason: e.to_string(),
                 })?;
+            let run_id = token_row.verifier_run_id.clone();
 
             // Step 2 (in-tx): load task row + binding check. Re-checking inside
             // the transaction (vs a pre-tx read) closes the TOCTOU window
@@ -480,21 +494,43 @@ async fn handle_inner(
             let task_row = load_task_row_in_tx(&tx, &task_id_owned)?;
             if task_row.state != TaskState::GatesPending.as_sql_str() {
                 drop(tx); // rollback — token is NOT consumed.
-                return Ok(CommitOutcome::Rejected(
-                    WitnessRejectionReason::TaskNotGatesPending {
+                return Ok(CommitOutcome::Rejected {
+                    run_id,
+                    initiative_id: Some(task_row.initiative_id),
+                    reason: WitnessRejectionReason::TaskNotGatesPending {
                         current_state: task_row.state,
                     },
-                ));
+                });
             }
             let stored_sha = task_row.evaluation_sha.clone().unwrap_or_default();
             if presented_sha_for_closure != stored_sha {
                 drop(tx);
-                return Ok(CommitOutcome::Rejected(
-                    WitnessRejectionReason::EvaluationShaMismatch {
+                return Ok(CommitOutcome::Rejected {
+                    run_id,
+                    initiative_id: Some(task_row.initiative_id),
+                    reason: WitnessRejectionReason::EvaluationShaMismatch {
                         expected: stored_sha,
                         presented: presented_sha_for_closure,
                     },
-                ));
+                });
+            }
+            if token_row.task_id != task_id_owned
+                || token_row.gate_type != gate_type_owned
+                || token_row.evaluation_sha != presented_sha_for_closure
+            {
+                drop(tx);
+                return Ok(CommitOutcome::Rejected {
+                    run_id,
+                    initiative_id: Some(task_row.initiative_id),
+                    reason: WitnessRejectionReason::TokenBindingMismatch {
+                        expected_task_id: token_row.task_id,
+                        expected_gate_type: token_row.gate_type,
+                        expected_evaluation_sha: token_row.evaluation_sha,
+                        presented_task_id: task_id_owned,
+                        presented_gate_type: gate_type_owned,
+                        presented_evaluation_sha: presented_sha_for_closure,
+                    },
+                });
             }
 
             // Step 3 (in-tx): insert witness index row.
@@ -530,8 +566,32 @@ async fn handle_inner(
 
     let (run_id, task_row) = match outcome {
         CommitOutcome::Accepted { run_id, task_row } => (run_id, task_row),
-        CommitOutcome::Rejected(reason) => return Ok(WitnessAck::Rejected { reason }),
+        CommitOutcome::Rejected {
+            run_id,
+            initiative_id,
+            reason,
+        } => {
+            emit_witness_rejected(
+                ctx,
+                &run_id,
+                sub.task_id.as_str(),
+                initiative_id.as_deref(),
+                &reason,
+            );
+            return Ok(WitnessAck::Rejected { reason });
+        }
     };
+
+    emit_witness_accepted(
+        ctx,
+        &run_id,
+        sub.task_id.as_str(),
+        sub.gate_type.as_str(),
+        result_class.as_str(),
+        &presented_sha,
+        task_row.session_id.as_deref(),
+        Some(task_row.initiative_id.as_str()),
+    );
 
     // FOLLOWUP-E / INV-VERIFIER-AUDIT-PAIRED-WRITE-01 — emit the canonical
     // `VerifierWitnessReceived` audit row once the witness has been
@@ -1369,6 +1429,70 @@ fn lookup_policy_hints(
         .unwrap_or_default()
 }
 
+fn emit_witness_accepted(
+    ctx: &HandlerContext,
+    run_id: &str,
+    task_id: &str,
+    gate_type: &str,
+    result_class: &str,
+    evaluation_sha: &str,
+    session_id: Option<&str>,
+    initiative_id: Option<&str>,
+) {
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::WitnessAccepted {
+            verifier_run_id: run_id.to_owned(),
+            task_id: task_id.to_owned(),
+            gate_type: gate_type.to_owned(),
+            result_class: result_class.to_owned(),
+            evaluation_sha: evaluation_sha.to_owned(),
+        },
+        session_id,
+        Some(task_id),
+        initiative_id,
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"WitnessAcceptedAuditEmitFailed\",\
+             \"run_id\":\"{run_id}\",\"task_id\":\"{task_id}\",\"error\":\"{e}\"}}"
+        );
+    }
+}
+
+fn emit_witness_rejected(
+    ctx: &HandlerContext,
+    run_id: &str,
+    task_id: &str,
+    initiative_id: Option<&str>,
+    reason: &WitnessRejectionReason,
+) {
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::WitnessRejected {
+            verifier_run_id: run_id.to_owned(),
+            task_id: task_id.to_owned(),
+            reason: witness_rejection_reason_code(reason).to_owned(),
+        },
+        None,
+        Some(task_id),
+        initiative_id,
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"WitnessRejectedAuditEmitFailed\",\
+             \"run_id\":\"{run_id}\",\"task_id\":\"{task_id}\",\"error\":\"{e}\"}}"
+        );
+    }
+}
+
+fn witness_rejection_reason_code(reason: &WitnessRejectionReason) -> &'static str {
+    match reason {
+        WitnessRejectionReason::EvaluationShaMismatch { .. } => "EvaluationShaMismatch",
+        WitnessRejectionReason::TokenBindingMismatch { .. } => "TokenBindingMismatch",
+        WitnessRejectionReason::TaskNotGatesPending { .. } => "TaskNotGatesPending",
+        WitnessRejectionReason::SpoofedOperatorHints => "SpoofedOperatorHints",
+        WitnessRejectionReason::TimeBudgetExhausted => "TimeBudgetExhausted",
+        WitnessRejectionReason::InvalidAgentHint { reason } => reason,
+    }
+}
+
 fn map_result_class(rc: raxis_types::WitnessResultClass) -> ResultClass {
     match rc {
         raxis_types::WitnessResultClass::Pass => ResultClass::Pass,
@@ -1404,6 +1528,29 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn token_binding_mismatch_reason_is_distinct_and_audit_stable() {
+        let reason = WitnessRejectionReason::TokenBindingMismatch {
+            expected_task_id: "task-a".to_owned(),
+            expected_gate_type: "tests".to_owned(),
+            expected_evaluation_sha: "sha-a".to_owned(),
+            presented_task_id: "task-b".to_owned(),
+            presented_gate_type: "coverage".to_owned(),
+            presented_evaluation_sha: "sha-b".to_owned(),
+        };
+        assert_eq!(
+            witness_rejection_reason_code(&reason),
+            "TokenBindingMismatch"
+        );
+        assert_ne!(
+            reason,
+            WitnessRejectionReason::EvaluationShaMismatch {
+                expected: "sha-a".to_owned(),
+                presented: "sha-b".to_owned(),
+            }
+        );
     }
 
     /// iter63-followups.md Item 1 (D) —

@@ -19,6 +19,7 @@ use crate::initiatives::LifecycleError;
 
 const TASKS: &str = Table::Tasks.as_str();
 const SUBTASK_ACTIVATIONS: &str = Table::SubtaskActivations.as_str();
+const SESSIONS: &str = Table::Sessions.as_str();
 
 /// Actor that triggered the transition (for audit).
 #[derive(Debug, Clone)]
@@ -570,12 +571,14 @@ mod tests {
         // Seed a session row so the activation's CHECK constraint
         // (`Active ⇒ session_id IS NOT NULL`) holds.
         conn.execute(
-            "INSERT INTO sessions (
+            &format!(
+                "INSERT INTO {SESSIONS} (
                 session_id, role_id, session_token, sequence_number,
                 worktree_root, base_sha, base_tracking_ref,
                 lineage_id, fetch_quota, created_at, expires_at, revoked,
                 session_agent_type, can_delegate, initiative_id
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,0,'init-fsm')",
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,0,'init-fsm')"
+            ),
             rusqlite::params![
                 "11111111-1111-1111-1111-111111111111",
                 "Planner",

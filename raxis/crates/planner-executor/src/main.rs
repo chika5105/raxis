@@ -13,16 +13,15 @@
 //!
 //! V2.4 lifecycle: the driver delegates to
 //! [`raxis_planner_core::run_role_session`] which runs the full
-//! dispatch loop end-to-end when `RAXIS_PLANNER_TASK_PROMPT` is
-//! set. Otherwise the binary parks on signal exactly like the V2.3
-//! scaffold.
+//! dispatch loop end-to-end when the kernel-stamped prompt contract
+//! is present, and fails closed when it is not.
 
 use raxis_planner_core::{
     enforce_pid1_or_abort, ensure_cargo_offline_default, harden_guest_for_agent,
     hydrate_from_proc_cmdline, init_pid1_a3_egress, init_pid1_filesystem, mount_workspace_shares,
-    park_on_signal, render_boot_log, run_role_session, scrub_sensitive_env_for_agent,
-    shutdown_or_exit, BootContext, CargoOfflineDefaultOutcome, DriverError, DriverOutcome,
-    HydrationOutcome, MountStatus, PlannerError, Role, WorkspaceMountOutcome,
+    render_boot_log, run_role_session, scrub_sensitive_env_for_agent, shutdown_or_exit,
+    BootContext, CargoOfflineDefaultOutcome, DriverError, DriverOutcome, HydrationOutcome,
+    MountStatus, PlannerError, Role, WorkspaceMountOutcome,
 };
 
 fn main() -> ! {
@@ -405,10 +404,9 @@ async fn run() -> Result<(), PlannerError> {
         .map_err(driver_to_planner_error)?;
 
     match outcome {
-        DriverOutcome::Scaffold => {
-            park_on_signal().await;
-            Ok(())
-        }
+        DriverOutcome::Scaffold => Err(PlannerError::DriverFailure(
+            "driver returned retired Scaffold outcome; prompt contract was not stamped".to_owned(),
+        )),
         DriverOutcome::Completed { tool_name } => {
             eprintln!(
                 "{{\"level\":\"info\",\"step\":\"planner-completed\",\
