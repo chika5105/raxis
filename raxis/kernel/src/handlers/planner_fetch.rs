@@ -63,7 +63,7 @@ use raxis_types::{PlannerFetchKind, PlannerFetchRequest, PlannerFetchResponse, S
 use uuid::Uuid;
 
 use crate::authority::session::get_active_session_by_token;
-use crate::gateway::client::GatewayCallError;
+use crate::gateway::client::{FetchResult, GatewayCallError};
 use crate::ipc::context::HandlerContext;
 
 /// Hard ceiling on per-attempt timeout — matches the gateway's
@@ -88,6 +88,46 @@ mod errors {
     pub const GATEWAY_UNAVAILABLE: &str = "GatewayUnavailable";
     pub const NETWORK_ERROR: &str = "NetworkError";
     pub const TIMEOUT_EXCEEDED: &str = "TimeoutExceeded";
+}
+
+/// Closed-cardinality failure taxonomy for gateway-backed provider
+/// telemetry. The planner still receives the stable wire error
+/// strings above; this label is for operator dashboards so a host-
+/// provider outage is visible without asking the planner to spend
+/// another turn explaining a generic `NetworkError`.
+fn gateway_failure_class(result: &Result<FetchResult, GatewayCallError>) -> &'static str {
+    match result {
+        Ok(fr) => match fr.status_code {
+            Some(code) if (200..400).contains(&code) => "none",
+            Some(408 | 429) => "provider_retryable_http",
+            Some(code) if code >= 500 => "provider_retryable_http",
+            Some(code) if (400..500).contains(&code) => "provider_client_http",
+            Some(_) => "provider_http_other",
+            None => "gateway_protocol",
+        },
+        Err(GatewayCallError::GatewayError(msg)) => match msg.as_str() {
+            "NetworkError" => "host_provider_network",
+            "TimeoutExceeded" => "host_provider_timeout",
+            "DomainNotAllowed" => "policy_denied",
+            "ResponseTooLarge" => "response_too_large",
+            "PolicyReloadFailed" => "policy_reload_failed",
+            _ => "gateway_error_other",
+        },
+        Err(GatewayCallError::Unavailable) => "gateway_unavailable",
+        Err(GatewayCallError::Dropped) => "gateway_dropped",
+        Err(GatewayCallError::Timeout { .. }) => "gateway_response_timeout",
+        Err(GatewayCallError::UnexpectedReply) => "gateway_protocol",
+    }
+}
+
+fn gateway_outcome_label(result: &Result<FetchResult, GatewayCallError>) -> &'static str {
+    match result {
+        Ok(fr) => match fr.status_code {
+            Some(code) if (200..400).contains(&code) => "ok",
+            _ => "error",
+        },
+        Err(_) => "error",
+    }
 }
 
 /// Saturating conversion of `Instant::elapsed()` to the wire-level
@@ -301,13 +341,8 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
         Ok(fr) => fr.status_code.map(|c| c as i64).unwrap_or(0),
         Err(_) => 0,
     };
-    let outcome_label: &str = match &result {
-        Ok(fr) => match fr.status_code {
-            Some(code) if (200..400).contains(&code) => "ok",
-            _ => "error",
-        },
-        Err(_) => "error",
-    };
+    let outcome_label = gateway_outcome_label(&result);
+    let failure_class = gateway_failure_class(&result);
     fetch_span.set_attr("status_code", fetch_status_i64);
     fetch_span.set_attr("latency_ms", latency_ms as i64);
     if outcome_label == "ok" {
@@ -331,6 +366,8 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
         &provider_label,
         None,
         fetch_status_i64,
+        outcome_label,
+        failure_class,
         latency_ms as i64,
         false,
         None,
@@ -380,6 +417,7 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
         &ctx.observability,
         &provider_label,
         outcome_label,
+        failure_class,
         gateway_upstream_ms,
     );
 
@@ -764,6 +802,53 @@ mod tests {
         assert_eq!(errors::GATEWAY_UNAVAILABLE, "GatewayUnavailable");
         assert_eq!(errors::NETWORK_ERROR, "NetworkError");
         assert_eq!(errors::TIMEOUT_EXCEEDED, "TimeoutExceeded");
+    }
+
+    fn fetch_result(status_code: Option<u16>) -> FetchResult {
+        FetchResult {
+            fetch_id: Uuid::nil(),
+            status_code,
+            headers: Vec::new(),
+            body_bytes: None,
+            latency_ms: 1,
+        }
+    }
+
+    #[test]
+    fn gateway_failure_class_distinguishes_host_provider_transients() {
+        assert_eq!(
+            gateway_failure_class(&Err(GatewayCallError::GatewayError(
+                "NetworkError".to_owned()
+            ))),
+            "host_provider_network"
+        );
+        assert_eq!(
+            gateway_failure_class(&Err(GatewayCallError::GatewayError(
+                "TimeoutExceeded".to_owned()
+            ))),
+            "host_provider_timeout"
+        );
+        assert_eq!(
+            gateway_failure_class(&Ok(fetch_result(Some(429)))),
+            "provider_retryable_http"
+        );
+        assert_eq!(
+            gateway_failure_class(&Err(GatewayCallError::GatewayError(
+                "DomainNotAllowed".to_owned()
+            ))),
+            "policy_denied"
+        );
+    }
+
+    #[test]
+    fn gateway_outcome_label_is_success_only_for_2xx_3xx() {
+        assert_eq!(gateway_outcome_label(&Ok(fetch_result(Some(200)))), "ok");
+        assert_eq!(gateway_outcome_label(&Ok(fetch_result(Some(302)))), "ok");
+        assert_eq!(gateway_outcome_label(&Ok(fetch_result(Some(500)))), "error");
+        assert_eq!(
+            gateway_outcome_label(&Err(GatewayCallError::Unavailable)),
+            "error"
+        );
     }
 
     #[test]

@@ -31,20 +31,31 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Gateway upstream p95 (ms) by provider",
+      "title": "Gateway upstream p95 (ms) by provider / outcome",
       "gridPos": { "x": 0, "y": 8, "w": 24, "h": 9 },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (provider, le) (rate(raxis_gateway_upstream_duration_milliseconds_bucket[5m])))", "legendFormat": "{{provider}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.95, sum by (provider, outcome, failure_class, le) (rate(raxis_gateway_upstream_duration_milliseconds_bucket[5m])))", "legendFormat": "{{provider}} {{outcome}} {{failure_class}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
     },
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Gateway fetch rate (req/s) by status_code",
+      "title": "Gateway fetch rate (req/s) by provider / failure",
       "gridPos": { "x": 0, "y": 17, "w": 24, "h": 8 },
       "targets": [
-        { "expr": "sum by (status_code) (rate(raxis_gateway_fetch_total[1m]))", "legendFormat": "{{status_code}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (provider, failure_class, status_code) (rate(raxis_gateway_fetch_total[1m]))", "legendFormat": "{{provider}} {{failure_class}} status={{status_code}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Host-provider transient failures",
+      "description": "Classifies gateway/provider failures without changing planner retry budgets. NetworkError from the host gateway is labelled host_provider_network; TimeoutExceeded is labelled host_provider_timeout.",
+      "gridPos": { "x": 0, "y": 25, "w": 24, "h": 8 },
+      "targets": [
+        { "expr": "sum by (provider, failure_class) (rate(raxis_gateway_fetch_total{failure_class=~\"host_provider_.*|provider_retryable_http|gateway_.*\"}[5m]))", "legendFormat": "{{provider}} {{failure_class}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
     }

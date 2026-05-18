@@ -195,6 +195,10 @@ mod tests {
             cfg.cursor_path,
             dir.path().join("observability/cursor.toml")
         );
+        assert_eq!(
+            cfg.events_path,
+            dir.path().join("observability/pusher-events.jsonl")
+        );
         assert_eq!(cfg.kernel_version, "0.1.0");
         assert_eq!(cfg.batch_size(), 512);
     }

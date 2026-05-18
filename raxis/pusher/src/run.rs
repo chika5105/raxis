@@ -37,6 +37,16 @@ use crate::retry::BackoffPolicy;
 pub enum PusherEvent {
     /// Pusher started a fresh boot.
     Started,
+    /// Pusher reached argument parsing but could not enter the main
+    /// tick loop. Written before exit so the dashboard can
+    /// distinguish "never launched" from "launched and failed
+    /// during startup".
+    StartupFailure {
+        /// Stable startup stage.
+        stage: String,
+        /// Operator-safe failure reason.
+        reason: String,
+    },
     /// One OTLP export round succeeded with a non-empty batch.
     ExportOk {
         /// Stream the batch targeted.

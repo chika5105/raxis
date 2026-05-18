@@ -78,6 +78,7 @@ fn build_base_rootfs_fixture(dst: &Path) {
         "usr/bin/git",
         "usr/bin/curl",
         "usr/bin/wget",
+        "usr/sbin/nft",
         "usr/bin/node",
         "usr/bin/python3",
         "usr/bin/make",

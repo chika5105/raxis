@@ -14,7 +14,7 @@
       "title": "Budget reserved by lane",
       "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (lane) (raxis_budget_reserved)", "legendFormat": "{{lane}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (lane_id) (raxis_budget_reserved)", "legendFormat": "{{lane_id}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
@@ -24,7 +24,7 @@
       "title": "Budget exceeded events / sec",
       "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (lane) (rate(raxis_budget_exceeded_total[1m]))", "legendFormat": "{{lane}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (lane_id) (rate(raxis_budget_exceeded_total[1m]))", "legendFormat": "{{lane_id}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
     },

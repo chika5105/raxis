@@ -693,6 +693,62 @@ mod tests {
         );
     }
 
+    fn dashboard_dir() -> PathBuf {
+        std::env::var("CARGO_MANIFEST_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .parent()
+            .unwrap()
+            .join("observability/grafana/dashboards")
+    }
+
+    #[test]
+    fn grafana_dashboards_are_valid_json_and_include_otel_pipeline() {
+        let mut saw_otel = false;
+        for entry in std::fs::read_dir(dashboard_dir()).expect("dashboard dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("read dashboard json");
+            let json: serde_json::Value = serde_json::from_str(&body)
+                .unwrap_or_else(|e| panic!("{} must parse as JSON: {e}", path.display()));
+            if json.get("uid").and_then(|v| v.as_str()) == Some("raxis-05-otel-pipeline") {
+                saw_otel = true;
+            }
+        }
+        assert!(
+            saw_otel,
+            "observability pusher health card links to raxis-05-otel-pipeline; \
+             the provisioned dashboard JSON must exist"
+        );
+    }
+
+    #[test]
+    fn grafana_dashboards_do_not_use_stale_metric_labels() {
+        for entry in std::fs::read_dir(dashboard_dir()).expect("dashboard dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("read dashboard json");
+            assert!(
+                !body.contains("sum by (kind)")
+                    && !body.contains("sum by (kind,")
+                    && !body.contains("{{kind}}"),
+                "{} uses stale audit label `kind`; kernel emits `event_kind`",
+                path.display()
+            );
+            assert!(
+                !body.contains("sum by (lane)")
+                    && !body.contains("sum by (lane,")
+                    && !body.contains("{{lane}}"),
+                "{} uses stale budget label `lane`; kernel emits `lane_id`",
+                path.display()
+            );
+        }
+    }
+
     #[test]
     fn parse_str_flag_supports_space_form() {
         let args = vec![

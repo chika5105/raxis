@@ -84,7 +84,7 @@
       "title": "Audit append rate (events/s)",
       "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (kind) (rate(raxis_audit_event_append_total[1m]))", "legendFormat": "{{kind}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (event_kind) (rate(raxis_audit_event_append_total[1m]))", "legendFormat": "{{event_kind}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }

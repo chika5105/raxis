@@ -63,6 +63,8 @@ pub fn record_gateway_fetch(
     provider: &str,
     model: Option<&str>,
     status_code: i64,
+    outcome: &str,
+    failure_class: &str,
     latency_ms: i64,
     cached: bool,
     tokens_in: Option<i64>,
@@ -73,6 +75,8 @@ pub fn record_gateway_fetch(
     }
     let mut labels = redact::attrs([
         ("provider", provider),
+        ("outcome", outcome),
+        ("failure_class", failure_class),
         ("status_code", "0"), // overwritten below as I64
         ("cached", "false"),  // overwritten below as Bool
     ]);
@@ -661,12 +665,17 @@ pub fn record_gateway_upstream(
     hub: &ObservabilityHub,
     provider: &str,
     outcome: &str,
+    failure_class: &str,
     duration_ms: i64,
 ) {
     if !hub.enabled() {
         return;
     }
-    let labels = redact::attrs([("provider", provider), ("outcome", outcome)]);
+    let labels = redact::attrs([
+        ("provider", provider),
+        ("outcome", outcome),
+        ("failure_class", failure_class),
+    ]);
     hub.record_histogram(
         MetricName::GatewayUpstreamDuration,
         labels,
@@ -3109,7 +3118,7 @@ mod latency_metrics_wired_witness_tests {
     #[test]
     fn gateway_upstream_helper_lands_observed_sample() {
         let (hub, exp) = enabled_hub();
-        record_gateway_upstream(&hub, "api.anthropic.com", "ok", 567);
+        record_gateway_upstream(&hub, "api.anthropic.com", "ok", "none", 567);
         hub.flush();
         let metrics = exp.metrics();
         let count = metrics
@@ -3224,7 +3233,7 @@ mod latency_metrics_wired_witness_tests {
     fn wired_helpers_pass_redactor_allowlist() {
         let (hub, _exp) = enabled_hub();
         record_planner_inference(&hub, "p", "m", "ok", false, 1, 0, 0);
-        record_gateway_upstream(&hub, "p", "ok", 1);
+        record_gateway_upstream(&hub, "p", "ok", "none", 1);
         record_audit_event_append(&hub, "K", "ok", 1, Some(1));
         record_audit_chain_length(&hub, 1);
         hub.flush();

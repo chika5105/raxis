@@ -1,0 +1,98 @@
+{
+  "title": "raxis | 05 OTel pipeline",
+  "uid": "raxis-05-otel-pipeline",
+  "tags": ["raxis", "otel", "observability", "pusher"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Collector scrape health",
+      "description": "Prometheus scrape health for the OTel collector's Raxis exposition endpoint and collector self-metrics endpoint.",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 4 },
+      "targets": [
+        { "expr": "min(up{job=~\"raxis-otel|otel-collector-internal\"})", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Accepted metric points / sec",
+      "description": "Collector-side OTLP receiver throughput from raxis-otel-pusher.",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 4 },
+      "targets": [
+        { "expr": "sum(rate(otelcol_receiver_accepted_metric_points{receiver=\"otlp\"}[1m]))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Dropped / refused points",
+      "description": "Any non-zero value means the collector is rejecting or dropping telemetry before it reaches Prometheus.",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 4 },
+      "targets": [
+        { "expr": "sum(rate(otelcol_receiver_refused_metric_points{receiver=\"otlp\"}[5m])) + sum(rate(otelcol_processor_dropped_metric_points[5m])) + sum(rate(otelcol_exporter_send_failed_metric_points[5m]))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.001 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Collector OTLP metric flow",
+      "description": "Accepted/refused receiver points and Prometheus exporter send failures. This catches missing-data issues outside the kernel before operators trust the dashboards.",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum(rate(otelcol_receiver_accepted_metric_points{receiver=\"otlp\"}[1m]))", "legendFormat": "accepted", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "sum(rate(otelcol_receiver_refused_metric_points{receiver=\"otlp\"}[1m]))", "legendFormat": "refused", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "sum(rate(otelcol_exporter_send_failed_metric_points[1m]))", "legendFormat": "export failed", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Kernel observability drops",
+      "description": "Kernel-side redaction/queue drops before the pusher sees a frame. Redaction failures usually mean a metric label drifted from the closed allow-list.",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (drop_reason) (rate(raxis_observability_dropped_total[1m]))", "legendFormat": "{{drop_reason}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Prometheus scrape status",
+      "description": "`up` by scrape job for the observability pipeline.",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 7 },
+      "targets": [
+        { "expr": "up{job=~\"raxis-otel|otel-collector-internal|prometheus\"}", "legendFormat": "{{job}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    }
+  ]
+}

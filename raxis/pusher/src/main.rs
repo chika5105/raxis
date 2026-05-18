@@ -43,6 +43,11 @@ async fn main() -> ExitCode {
     let bundle = match raxis_policy::load_policy(&args.config_path) {
         Ok((b, _bytes, _sha)) => b,
         Err(e) => {
+            let event_logger = PusherEventLogger::new(default_events_path(&args.data_dir));
+            event_logger.log(&PusherEvent::StartupFailure {
+                stage: "policy_load".to_owned(),
+                reason: e.to_string(),
+            });
             eprintln!(
                 "{{\"level\":\"error\",\"event\":\"otel_pusher_policy_load_failed\",\
                   \"reason\":\"{e}\"}}"
@@ -54,6 +59,11 @@ async fn main() -> ExitCode {
     let cfg = match build_config(&bundle, &args, kernel_version.clone()) {
         Ok(c) => c,
         Err(e) => {
+            let event_logger = PusherEventLogger::new(default_events_path(&args.data_dir));
+            event_logger.log(&PusherEvent::StartupFailure {
+                stage: "config".to_owned(),
+                reason: e.to_string(),
+            });
             eprintln!(
                 "{{\"level\":\"error\",\"event\":\"otel_pusher_config_invalid\",\
                   \"reason\":\"{e}\"}}"
@@ -63,6 +73,14 @@ async fn main() -> ExitCode {
     };
 
     if cfg.pusher.otlp_protocol != "http" {
+        let event_logger = PusherEventLogger::new(cfg.events_path.clone());
+        event_logger.log(&PusherEvent::StartupFailure {
+            stage: "protocol".to_owned(),
+            reason: format!(
+                "unsupported otlp_protocol {}; V3 supports http only",
+                cfg.pusher.otlp_protocol
+            ),
+        });
         eprintln!(
             "{{\"level\":\"error\",\"event\":\"otel_pusher_unsupported_protocol\",\
               \"protocol\":\"{}\",\"detail\":\"V3 supports otlp_protocol=http only; gRPC \
@@ -72,9 +90,14 @@ async fn main() -> ExitCode {
         return ExitCode::from(78);
     }
 
+    let event_logger = PusherEventLogger::new(cfg.events_path.clone());
     let client = match build_client(&cfg) {
         Ok(c) => c,
         Err(e) => {
+            event_logger.log(&PusherEvent::StartupFailure {
+                stage: "client_init".to_owned(),
+                reason: e.to_string(),
+            });
             eprintln!(
                 "{{\"level\":\"error\",\"event\":\"otel_pusher_client_init_failed\",\
                   \"reason\":\"{e}\"}}"
@@ -86,6 +109,10 @@ async fn main() -> ExitCode {
     let pusher = match Pusher::new(cfg.clone(), client) {
         Ok(p) => p,
         Err(e) => {
+            event_logger.log(&PusherEvent::StartupFailure {
+                stage: "pusher_init".to_owned(),
+                reason: e.to_string(),
+            });
             eprintln!(
                 "{{\"level\":\"error\",\"event\":\"otel_pusher_init_failed\",\
                   \"reason\":\"{e}\"}}"
@@ -123,7 +150,6 @@ async fn main() -> ExitCode {
         cfg.data_dir.display(),
         cfg.pusher.otlp_protocol,
     );
-    let event_logger = PusherEventLogger::new(cfg.events_path.clone());
     event_logger.log(&PusherEvent::Started);
 
     // Tick loop with SIGTERM/SIGINT shutdown.
@@ -151,6 +177,10 @@ async fn main() -> ExitCode {
     }
     event_logger.log(&PusherEvent::Stopping);
     ExitCode::SUCCESS
+}
+
+fn default_events_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("observability").join("pusher-events.jsonl")
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +307,12 @@ fn pusher_event_json(ev: &PusherEvent) -> serde_json::Value {
             "level": "info",
             "event": "otel_pusher_started",
         }),
+        PusherEvent::StartupFailure { stage, reason } => serde_json::json!({
+            "level": "error",
+            "event": "otel_pusher_startup_failed",
+            "stage": stage,
+            "reason": reason,
+        }),
         PusherEvent::Stopping => serde_json::json!({
             "level": "info",
             "event": "otel_pusher_stopping",
@@ -364,12 +400,27 @@ mod tests {
         let logger = PusherEventLogger::new(path.clone());
 
         logger.log(&PusherEvent::Started);
+        logger.log(&PusherEvent::StartupFailure {
+            stage: "client_init".to_owned(),
+            reason: "connection refused".to_owned(),
+        });
         logger.log(&PusherEvent::Stopping);
 
         let body = std::fs::read_to_string(path).expect("event log");
         let lines: Vec<&str> = body.lines().collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("\"event\":\"otel_pusher_started\""));
-        assert!(lines[1].contains("\"event\":\"otel_pusher_stopping\""));
+        assert!(lines[1].contains("\"event\":\"otel_pusher_startup_failed\""));
+        assert!(lines[1].contains("\"stage\":\"client_init\""));
+        assert!(lines[2].contains("\"event\":\"otel_pusher_stopping\""));
+    }
+
+    #[test]
+    fn default_events_path_matches_health_card_contract() {
+        let root = PathBuf::from("/tmp/raxis-data");
+        assert_eq!(
+            default_events_path(&root),
+            PathBuf::from("/tmp/raxis-data/observability/pusher-events.jsonl")
+        );
     }
 }

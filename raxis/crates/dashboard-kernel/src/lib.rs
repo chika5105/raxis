@@ -3277,6 +3277,8 @@ fn classify_observability_pusher(
     const FRESH_SECS: u64 = 60;
     let kernel_side_fresh = kernel_side_mtime > 0 && age_kernel <= FRESH_SECS;
     let pusher_ever_ran = pusher_mtime > 0;
+    let age_pusher = now_s.saturating_sub(pusher_mtime);
+    let pusher_events_fresh = pusher_mtime > 0 && age_pusher <= FRESH_SECS;
     let details = vec![
         SubsystemDetailRow {
             label: "Ring root".into(),
@@ -3295,11 +3297,20 @@ fn classify_observability_pusher(
             value: format_health_time(pusher_mtime, now_s),
         },
     ];
-    let (status, summary, last_observed_at) = if kernel_side_fresh && pusher_ever_ran {
+    let (status, summary, last_observed_at) = if kernel_side_fresh && pusher_events_fresh {
         (
             "ok",
             format!("Kernel ring written {age_kernel}s ago; pusher events file present."),
             kernel_side_mtime.max(pusher_mtime),
+        )
+    } else if kernel_side_fresh && pusher_ever_ran {
+        (
+            "degraded",
+            format!(
+                "Kernel ring fresh ({age_kernel}s) but pusher events are stale \
+                 (last write {age_pusher}s ago) — pusher binary may have exited."
+            ),
+            kernel_side_mtime,
         )
     } else if kernel_side_fresh {
         (
@@ -3406,8 +3417,25 @@ fn mtime_of(path: &std::path::Path) -> Option<u64> {
 /// stack provisioned — the FE hides the button.
 fn grafana_dashboard_url(slug: &str) -> Option<String> {
     let base = std::env::var("RAXIS_GRAFANA_BASE_URL").ok()?;
+    grafana_dashboard_url_from_base(&base, slug)
+}
+
+fn grafana_dashboard_url_from_base(base: &str, slug: &str) -> Option<String> {
     let trimmed = base.trim_end_matches('/');
-    Some(format!("{trimmed}/d/raxis-{slug}"))
+    let uid = match slug {
+        "kernel" => "raxis-00-overview",
+        "observability" => "raxis-05-otel-pipeline",
+        "sessions" => "raxis-20-lifecycle",
+        "audit" => "raxis-30-audit",
+        "planner" => "raxis-40-planner",
+        "credentials" => "raxis-50-credential-proxies",
+        "egress" => "raxis-60-egress",
+        "dashboard" => "raxis-70-dashboard",
+        "budget" => "raxis-80-budget-reviewer",
+        "git" => "raxis-90-git",
+        _ => return None,
+    };
+    Some(format!("{trimmed}/d/{uid}"))
 }
 
 /// Wall-clock now in milliseconds-since-Unix-epoch. The audit
@@ -5389,6 +5417,56 @@ mod tests {
             "health card details must not expose raw unix timestamps: {:?}",
             card.details
         );
+    }
+
+    #[test]
+    fn pusher_card_is_degraded_when_events_file_is_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let obs_root = tmp.path().join("observability");
+        std::fs::create_dir_all(obs_root.join("spans")).unwrap();
+        let span_path = obs_root.join("spans").join("seg-001.bin");
+        let pusher_path = obs_root.join("pusher-events.jsonl");
+        std::fs::write(&span_path, b"x").unwrap();
+        std::fs::write(&pusher_path, b"{}").unwrap();
+        let base = 1_700_000_000u64;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&pusher_path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(base))
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&span_path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(base + 120))
+            .unwrap();
+
+        let mut cfg = disabled_obs_config();
+        cfg.enabled = true;
+        let card = classify_observability_pusher(tmp.path(), &cfg, base + 121);
+
+        assert_eq!(card.status, "degraded", "summary={}", card.summary);
+        assert!(card.summary.contains("pusher events are stale"));
+        assert!(card.last_observed_at > 0);
+    }
+
+    #[test]
+    fn grafana_deep_links_resolve_to_provisioned_dashboard_uids() {
+        let base = "http://127.0.0.1:3000/";
+        assert_eq!(
+            grafana_dashboard_url_from_base(base, "observability").as_deref(),
+            Some("http://127.0.0.1:3000/d/raxis-05-otel-pipeline")
+        );
+        assert_eq!(
+            grafana_dashboard_url_from_base(base, "audit").as_deref(),
+            Some("http://127.0.0.1:3000/d/raxis-30-audit")
+        );
+        assert_eq!(
+            grafana_dashboard_url_from_base(base, "egress").as_deref(),
+            Some("http://127.0.0.1:3000/d/raxis-60-egress")
+        );
+        assert!(grafana_dashboard_url_from_base(base, "unknown").is_none());
     }
 
     // ── iter69 — kernel main-loop heartbeat parsing ─────────────────────
