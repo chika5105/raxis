@@ -1146,7 +1146,9 @@ mod tests {
         // `sleep` orphan and breaking the pid-alive assertion.
         let _g = crate::common::keep_alive::lock_keep_running_env();
         let prior = std::env::var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT").ok();
+        let prior_alias = std::env::var("RAXIS_KEEP_ALIVE").ok();
         std::env::remove_var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT");
+        std::env::remove_var("RAXIS_KEEP_ALIVE");
         // Spawn `sleep 9999` directly so we avoid depending on a
         // built `raxis-otel-pusher` for the supervision witness.
         // The supervisor's contract is process-supervision, not
@@ -1188,6 +1190,9 @@ mod tests {
         let _ = std::fs::remove_file(&log_path);
         if let Some(v) = prior {
             std::env::set_var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT", v);
+        }
+        if let Some(v) = prior_alias {
+            std::env::set_var("RAXIS_KEEP_ALIVE", v);
         }
     }
 

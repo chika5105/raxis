@@ -239,7 +239,7 @@ bake` under `INV-GUEST-KERNEL-A3-NFTABLES-01`:
 | `CONFIG_NF_NAT`                       | NAT core.                                            |
 | `CONFIG_NFT_NAT`                      | nftables NAT expression.                             |
 | `CONFIG_NFT_REDIR`                    | nftables REDIRECT expression for the tproxy chain.   |
-| `CONFIG_NFT_CHAIN_NAT`                | Base NAT chain support for the `nat OUTPUT` hook.    |
+| `CONFIG_NFT_CHAIN_NAT` or folded into `CONFIG_NFT_NAT` | Base NAT chain support for the `nat OUTPUT` hook. Newer kernels may build `nft_chain_nat.o` from `CONFIG_NFT_NAT` without exposing a separate Kconfig symbol. |
 
 The canonical fragment lives at
 `images/kernel/raxis-guest-a3-netfilter.config`; merge it into your

@@ -143,6 +143,65 @@ fn mark_fixup_attempts(store: &Store, task_id: &str, gate_type: &str, attempts: 
     .unwrap();
 }
 
+fn seed_pending_gate_token(
+    store: &Store,
+    task_id: &str,
+    initiative_id: &str,
+    gate_type: &str,
+    issued_at: i64,
+    run_id: &str,
+) {
+    let conn = store.lock_sync();
+    let init_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM initiatives WHERE initiative_id = ?1",
+            rusqlite::params![initiative_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    if init_exists == 0 {
+        conn.execute(
+            "INSERT INTO initiatives \
+                (initiative_id, state, terminal_criteria_json, \
+                 plan_artifact_sha256, created_at) \
+             VALUES (?1, 'Executing', '{}', 'deadbeef', 1)",
+            rusqlite::params![initiative_id],
+        )
+        .unwrap();
+    }
+    let task_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE task_id = ?1",
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    if task_exists == 0 {
+        conn.execute(
+            "INSERT INTO tasks \
+                (task_id, initiative_id, lane_id, state, actor, \
+                 policy_epoch, admitted_at, transitioned_at, actual_cost) \
+             VALUES (?1, ?2, 'default', 'GatesPending', 'kernel', 0, 1, 1, 0)",
+            rusqlite::params![task_id, initiative_id],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO verifier_run_tokens \
+            (verifier_run_id, task_id, gate_type, evaluation_sha, \
+             token_hash, issued_at, expires_at, consumed, consumed_at) \
+         VALUES (?1, ?2, ?3, 'deadbeef', ?4, ?5, 9999, 0, NULL)",
+        rusqlite::params![
+            run_id,
+            task_id,
+            gate_type,
+            format!("tokhash-{run_id}"),
+            issued_at
+        ],
+    )
+    .unwrap();
+}
+
 #[test]
 fn gate_stats_empty_kernel_returns_empty_array_with_generated_at() {
     let (data, _store, _td) = fixture_kernel_data();
@@ -157,6 +216,60 @@ fn gate_stats_empty_kernel_returns_empty_array_with_generated_at() {
         "generated_at MUST be the server wall clock (Unix-seconds), got {}",
         resp.generated_at
     );
+}
+
+#[test]
+fn dag_gate_summaries_include_pending_verifier_tokens_without_witness_rows() {
+    let (data, store, _td) = fixture_kernel_data();
+    seed_pending_gate_token(
+        &store,
+        "task-pending",
+        "init-pending",
+        "NoSecretStrings",
+        120,
+        "pending-run-1",
+    );
+
+    let map = data
+        .list_dag_gate_summaries("init-pending")
+        .expect("dag summaries");
+    let chips = map
+        .get("task-pending")
+        .expect("pending verifier token must surface as a gate chip");
+    assert_eq!(chips.len(), 1);
+    assert_eq!(chips[0].gate_type, "NoSecretStrings");
+    assert_eq!(chips[0].latest_verdict, "Pending");
+    assert_eq!(chips[0].recorded_at, 120);
+}
+
+#[test]
+fn dag_gate_summaries_use_latest_token_or_witness_per_gate() {
+    let (data, store, _td) = fixture_kernel_data();
+    seed_witness(
+        &store,
+        "task-latest",
+        "init-latest",
+        "NoSecretStrings",
+        "Pass",
+        100,
+        "completed-run-1",
+    );
+    seed_pending_gate_token(
+        &store,
+        "task-latest",
+        "init-latest",
+        "NoSecretStrings",
+        200,
+        "pending-run-2",
+    );
+
+    let map = data
+        .list_dag_gate_summaries("init-latest")
+        .expect("dag summaries");
+    let chips = map.get("task-latest").expect("task summary");
+    assert_eq!(chips.len(), 1);
+    assert_eq!(chips[0].latest_verdict, "Pending");
+    assert_eq!(chips[0].recorded_at, 200);
 }
 
 #[test]

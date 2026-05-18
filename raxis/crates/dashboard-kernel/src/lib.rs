@@ -71,6 +71,7 @@ use raxis_store::{Store, Table};
 // that touches `kernel.db`. These are `const &'static str` so they
 // compose seamlessly with `format!` in `prepare()` strings.
 const TBL_WITNESS_RECORDS: &str = Table::WitnessRecords.as_str();
+const TBL_VERIFIER_RUN_TOKENS: &str = Table::VerifierRunTokens.as_str();
 const TBL_WORKTREE_SNAPSHOTS: &str = Table::WorktreeSnapshots.as_str();
 const TBL_TASKS: &str = Table::Tasks.as_str();
 const TBL_TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
@@ -1213,18 +1214,15 @@ impl DashboardData for KernelDashboardData {
     /// (we aggregate in two passes and stitch in Rust to keep
     /// the SQL trivially auditable and to avoid the cartesian
     /// blow-up of a window-function over both tables).
-    /// iter68 PR 4 — per-task latest-verdict-per-gate rollup for
-    /// every task in `initiative_id`.
+    /// Per-task latest state per mechanical witness gate for every
+    /// task in `initiative_id`.
     ///
-    /// One scan over `witness_records JOIN tasks` using a window
-    /// function isn't portable to all SQLite builds; instead we
-    /// use the classic "latest row per group" pattern:
-    /// `GROUP BY (task_id, gate_type)` taking
-    /// `MAX(recorded_at)` and then a self-join to fetch the
-    /// matching `result_class`. SQLite's bare-column-from-GROUP-BY
-    /// extension would be simpler but is not enabled in
-    /// raxis-store's `rusqlite` build profile, so we go the
-    /// portable route.
+    /// This intentionally starts from `verifier_run_tokens`, not
+    /// `witness_records`, so a gate appears in the DAG as soon as
+    /// the kernel spawns the verifier. If a matching witness row
+    /// exists, its `result_class` wins; otherwise the verdict is
+    /// `"Pending"`. The FE renders these as dashed gate nodes rather
+    /// than hiding them in a tiny dot strip.
     fn list_dag_gate_summaries(
         &self,
         initiative_id: &str,
@@ -1232,23 +1230,18 @@ impl DashboardData for KernelDashboardData {
         std::collections::HashMap<String, Vec<raxis_dashboard::data::DagGateVerdictChip>>,
         ApiError,
     > {
-        use std::collections::HashMap;
+        use std::collections::{BTreeMap, HashMap};
         let conn = self.open_ro()?;
         let sql = format!(
-            "SELECT w.task_id, w.gate_type, w.result_class, w.recorded_at \
-             FROM {TBL_WITNESS_RECORDS} w \
-             JOIN ( \
-               SELECT task_id, gate_type, MAX(recorded_at) AS rec \
-               FROM {TBL_WITNESS_RECORDS} \
-               WHERE task_id IN ( \
-                 SELECT task_id FROM {TBL_TASKS} WHERE initiative_id = ?1 \
-               ) \
-               GROUP BY task_id, gate_type \
-             ) latest \
-               ON w.task_id = latest.task_id \
-              AND w.gate_type = latest.gate_type \
-              AND w.recorded_at = latest.rec \
-             ORDER BY w.task_id, w.gate_type"
+            "SELECT v.task_id, v.gate_type, \
+                    COALESCE(w.result_class, 'Pending') AS latest_verdict, \
+                    COALESCE(w.recorded_at, v.issued_at) AS observed_at \
+             FROM {TBL_VERIFIER_RUN_TOKENS} v \
+             JOIN {TBL_TASKS} t ON t.task_id = v.task_id \
+             LEFT JOIN {TBL_WITNESS_RECORDS} w \
+                    ON w.verifier_run_id = v.verifier_run_id \
+             WHERE t.initiative_id = ?1 \
+             ORDER BY v.task_id, v.gate_type, observed_at ASC"
         );
         let mut stmt = conn.prepare(&sql).map_err(|e| ApiError::Internal {
             log_only: format!("dag_gate_summaries prepare: {e}"),
@@ -1269,11 +1262,21 @@ impl DashboardData for KernelDashboardData {
             })?;
         let mut out: HashMap<String, Vec<raxis_dashboard::data::DagGateVerdictChip>> =
             HashMap::new();
+        let mut grouped: HashMap<
+            String,
+            BTreeMap<String, raxis_dashboard::data::DagGateVerdictChip>,
+        > = HashMap::new();
         for r in rows {
             let (task_id, chip) = r.map_err(|e| ApiError::Internal {
                 log_only: format!("dag_gate_summaries row: {e}"),
             })?;
-            out.entry(task_id).or_default().push(chip);
+            grouped
+                .entry(task_id)
+                .or_default()
+                .insert(chip.gate_type.clone(), chip);
+        }
+        for (task_id, by_gate) in grouped {
+            out.insert(task_id, by_gate.into_values().collect());
         }
         Ok(out)
     }
@@ -3280,16 +3283,16 @@ fn classify_observability_pusher(
             value: ring_root.display().to_string(),
         },
         SubsystemDetailRow {
-            label: "Spans mtime (unix-s)".into(),
-            value: spans_mtime.to_string(),
+            label: "Spans last write".into(),
+            value: format_health_time(spans_mtime, now_s),
         },
         SubsystemDetailRow {
-            label: "Metrics mtime (unix-s)".into(),
-            value: metrics_mtime.to_string(),
+            label: "Metrics last write".into(),
+            value: format_health_time(metrics_mtime, now_s),
         },
         SubsystemDetailRow {
-            label: "Pusher events mtime (unix-s)".into(),
-            value: pusher_mtime.to_string(),
+            label: "Pusher events last write".into(),
+            value: format_health_time(pusher_mtime, now_s),
         },
     ];
     let (status, summary, last_observed_at) = if kernel_side_fresh && pusher_ever_ran {
@@ -3328,6 +3331,34 @@ fn classify_observability_pusher(
         summary,
         details,
         last_observed_at,
+    }
+}
+
+fn format_health_time(unix_s: u64, now_s: u64) -> String {
+    if unix_s == 0 {
+        return "never".to_owned();
+    }
+    let age = now_s.saturating_sub(unix_s);
+    if age < 60 {
+        return format!("{} ago", plural_unit(age, "second"));
+    }
+    let minutes = age / 60;
+    if minutes < 60 {
+        return format!("{} ago", plural_unit(minutes, "minute"));
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return format!("{} ago", plural_unit(hours, "hour"));
+    }
+    let days = hours / 24;
+    format!("{} ago", plural_unit(days, "day"))
+}
+
+fn plural_unit(n: u64, singular: &str) -> String {
+    if n == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{n} {singular}s")
     }
 }
 
@@ -5351,6 +5382,13 @@ mod tests {
         let card = classify_observability_pusher(tmp.path(), &cfg, now_s);
         assert_eq!(card.status, "ok", "summary={}", card.summary);
         assert!(card.last_observed_at > 0);
+        assert!(
+            card.details
+                .iter()
+                .all(|d| !d.label.contains("unix") && !d.value.chars().all(|c| c.is_ascii_digit())),
+            "health card details must not expose raw unix timestamps: {:?}",
+            card.details
+        );
     }
 
     // ── iter69 — kernel main-loop heartbeat parsing ─────────────────────

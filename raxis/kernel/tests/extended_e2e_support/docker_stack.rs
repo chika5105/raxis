@@ -15,8 +15,8 @@
 //!
 //! 1. Probes `docker compose -p raxis-live-e2e-test ps --format
 //!    json` (bounded by `DOCKER_PROBE_TIMEOUT`, 30 s).
-//! 2. If every service is `running` AND `healthy` (or running
-//!    with no healthcheck), returns `Ok(())`.
+//! 2. If every extended-stack service is present, `running`, and
+//!    `healthy` (or running with no healthcheck), returns `Ok(())`.
 //! 3. Otherwise auto-brings-up the stack via `docker compose
 //!    -p raxis-live-e2e-test -f <extended-compose-file> up -d
 //!    --wait` (bounded by `DOCKER_BRINGUP_TIMEOUT`, 240 s).
@@ -62,6 +62,22 @@ pub const ENV_NO_AUTO_DOCKER: &str = "RAXIS_LIVE_E2E_NO_AUTO_DOCKER";
 /// Magic token included in the fail-fast message for grep-friendly
 /// CI scrape pipelines.
 pub const STACK_DOWN_TOKEN: &str = "RAXIS_LIVE_E2E_DOCKER_STACK_DOWN";
+
+/// Services the realistic extended scenario needs before it can
+/// spend LLM tokens. The compose project is shared with the
+/// observability-only helper, so "some healthy services in the
+/// project" is not enough.
+pub const EXTENDED_REQUIRED_SERVICES: &[&str] = &[
+    "postgres",
+    "mongodb",
+    "redis",
+    "smtp",
+    "mysql",
+    "mssql",
+    "otel-collector",
+    "prometheus",
+    "grafana",
+];
 
 /// Operator opt-out env var for the image pre-pull stage. When set
 /// (any non-empty value), [`ensure_compose_images_cached_or_pull`]
@@ -294,7 +310,10 @@ fn probe_stack_health(project: &str) -> Result<StackProbe, DockerStackError> {
         });
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    Ok(parse_compose_ps(&stdout))
+    Ok(parse_compose_ps_requiring(
+        &stdout,
+        EXTENDED_REQUIRED_SERVICES,
+    ))
 }
 
 /// Parse `docker compose ps --format json` output. v2 emits one
@@ -302,6 +321,15 @@ fn probe_stack_health(project: &str) -> Result<StackProbe, DockerStackError> {
 /// We accept both to insulate the harness from the operator's
 /// docker version drift.
 pub fn parse_compose_ps(stdout: &str) -> StackProbe {
+    parse_compose_ps_requiring(stdout, &[])
+}
+
+/// Parse `docker compose ps --format json` output and optionally
+/// require a specific service set to be present. This catches the
+/// shared-project footgun where `cargo xtask observability up`
+/// leaves only Grafana/Prometheus/OTel healthy under the same
+/// `raxis-live-e2e-test` namespace.
+pub fn parse_compose_ps_requiring(stdout: &str, required_services: &[&str]) -> StackProbe {
     let mut services: Vec<serde_json::Value> = Vec::new();
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
@@ -334,13 +362,17 @@ pub fn parse_compose_ps(stdout: &str) -> StackProbe {
     let mut total = 0usize;
     let mut ok = 0usize;
     let mut bad: Vec<String> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     for svc in &services {
         total += 1;
-        let name = svc
-            .get("Name")
-            .or_else(|| svc.get("Service"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("<unnamed>");
+        let service = svc.get("Service").and_then(|v| v.as_str());
+        let name = svc.get("Name").and_then(|v| v.as_str());
+        let label = service.or(name).unwrap_or("<unnamed>");
+        if let Some(service) = service {
+            seen.insert(service.to_owned());
+        } else if let Some(name) = name {
+            seen.insert(name.to_owned());
+        }
         let state = svc.get("State").and_then(|v| v.as_str()).unwrap_or("");
         let health = svc.get("Health").and_then(|v| v.as_str()).unwrap_or("");
         let is_running = state == "running";
@@ -352,10 +384,19 @@ pub fn parse_compose_ps(stdout: &str) -> StackProbe {
         if is_running && is_health_ok {
             ok += 1;
         } else {
-            bad.push(format!("{name} (State={state:?}, Health={health:?})",));
+            bad.push(format!("{label} (State={state:?}, Health={health:?})",));
         }
     }
-    let healthy = bad.is_empty() && ok == total && total > 0;
+    let missing: Vec<&str> = required_services
+        .iter()
+        .copied()
+        .filter(|service| !seen.contains(*service))
+        .collect();
+    for service in &missing {
+        bad.push(format!("{service} (missing from compose project)"));
+    }
+    let required_ok = required_services.is_empty() || missing.is_empty();
+    let healthy = bad.is_empty() && ok == total && total > 0 && required_ok;
     let summary = if healthy {
         format!("{ok}/{total} services running + healthy")
     } else {
@@ -1038,6 +1079,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_compose_ps_requiring_flags_observability_only_subset() {
+        let out = "\
+            {\"Name\":\"raxis-e2e-otel\",\"Service\":\"otel-collector\",\"State\":\"running\",\"Health\":\"healthy\"}\n\
+            {\"Name\":\"raxis-e2e-prom\",\"Service\":\"prometheus\",\"State\":\"running\",\"Health\":\"healthy\"}\n\
+            {\"Name\":\"raxis-e2e-grafana\",\"Service\":\"grafana\",\"State\":\"running\",\"Health\":\"healthy\"}\n\
+        ";
+        let p = parse_compose_ps_requiring(out, EXTENDED_REQUIRED_SERVICES);
+        assert!(!p.healthy, "summary: {}", p.summary);
+        assert!(
+            p.summary
+                .contains("postgres (missing from compose project)"),
+            "summary: {}",
+            p.summary
+        );
+        assert!(
+            p.summary.contains("mongodb (missing from compose project)"),
+            "summary: {}",
+            p.summary
+        );
+    }
+
+    #[test]
+    fn parse_compose_ps_requiring_accepts_full_extended_set() {
+        let out = EXTENDED_REQUIRED_SERVICES
+            .iter()
+            .map(|service| {
+                format!(
+                    "{{\"Name\":\"raxis-e2e-{service}\",\"Service\":\"{service}\",\"State\":\"running\",\"Health\":\"healthy\"}}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let p = parse_compose_ps_requiring(&out, EXTENDED_REQUIRED_SERVICES);
+        assert!(p.healthy, "summary: {}", p.summary);
+    }
+
+    #[test]
     fn parse_compose_ps_empty_means_not_healthy() {
         let p = parse_compose_ps("");
         assert!(!p.healthy);
@@ -1305,6 +1383,7 @@ mod tests {
     }
 
     const KEEP_RUNNING_ENV: &str = "RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT";
+    const KEEP_RUNNING_ALIAS_ENV: &str = "RAXIS_KEEP_ALIVE";
     const KEEP_RUNNING_TOUCH: &str = "KEEP_RUNNING";
 
     /// `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01` (compose-stack arm) —
@@ -1317,6 +1396,7 @@ mod tests {
     fn compose_stack_drop_runs_teardown_when_no_keep_alive_signal() {
         let _g = keep_alive_env_lock();
         let _env = SetEnvGuard::unset(KEEP_RUNNING_ENV);
+        let _env_alias = SetEnvGuard::unset(KEEP_RUNNING_ALIAS_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         // No env, no touch file, teardown_on_drop=true → run.
         assert!(should_run_compose_teardown(true, Some(tmp.path())));
@@ -1336,6 +1416,7 @@ mod tests {
 
         // Env-var arm.
         let _env = SetEnvGuard::set(KEEP_RUNNING_ENV, "1");
+        let _env_alias = SetEnvGuard::unset(KEEP_RUNNING_ALIAS_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(
             !should_run_compose_teardown(true, Some(tmp.path())),
@@ -1346,9 +1427,11 @@ mod tests {
             "env-var arm MUST gate teardown off even without work_dir",
         );
         drop(_env);
+        drop(_env_alias);
 
         // Touch-file arm.
         let _env = SetEnvGuard::unset(KEEP_RUNNING_ENV);
+        let _env_alias = SetEnvGuard::unset(KEEP_RUNNING_ALIAS_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(tmp.path().join(KEEP_RUNNING_TOUCH), b"").expect("write touch file");
         assert!(
@@ -1356,10 +1439,12 @@ mod tests {
             "touch-file arm MUST gate teardown off",
         );
         drop(_env);
+        drop(_env_alias);
 
         // CLI-flag arm. Hold the bit on for the duration of the
         // assertion; the guard restores prior state on drop.
         let _env = SetEnvGuard::unset(KEEP_RUNNING_ENV);
+        let _env_alias = SetEnvGuard::unset(KEEP_RUNNING_ALIAS_ENV);
         let _cli = crate::common::keep_alive::CliFlagGuard::set(true);
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(
@@ -1368,6 +1453,7 @@ mod tests {
         );
         drop(_cli);
         drop(_env);
+        drop(_env_alias);
 
         // Behavioural witness against the actual Drop impl: under
         // env-var keep-alive, the guard's Drop MUST set its
@@ -1376,6 +1462,7 @@ mod tests {
         // invoked because the gate fires before the subprocess
         // spawn.
         let _env = SetEnvGuard::set(KEEP_RUNNING_ENV, "1");
+        let _env_alias = SetEnvGuard::unset(KEEP_RUNNING_ALIAS_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         let probe = {
             let g = ComposeStackGuard::for_extended_stack()

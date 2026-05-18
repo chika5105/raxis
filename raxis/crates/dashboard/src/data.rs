@@ -399,15 +399,17 @@ pub struct GateStatRow {
 /// the latest witness verdict per `(task_id, gate_type)` —
 /// historical verdicts live on the per-task witness panel.
 ///
-/// `latest_verdict` is one of `"Pass" | "Fail" | "Inconclusive"`
-/// (matches `WitnessResultClass`). Adding a fourth class requires
-/// a parallel edit on the FE chip palette so the new verdict has
-/// a colour assignment.
+/// `latest_verdict` is one of `"Pending" | "Pass" | "Fail" |
+/// "Inconclusive"`. `Pending` comes from an issued verifier token
+/// that has not produced a witness row yet; the other three match
+/// `WitnessResultClass`. Adding another class requires a parallel
+/// edit on the FE chip palette so the new verdict has a colour
+/// assignment.
 #[derive(Debug, Clone, Serialize)]
 pub struct DagGateVerdictChip {
     /// The gate this verdict applies to (e.g. `tests`, `coverage`).
     pub gate_type: String,
-    /// One of `"Pass" | "Fail" | "Inconclusive"`.
+    /// One of `"Pending" | "Pass" | "Fail" | "Inconclusive"`.
     pub latest_verdict: String,
     /// Unix-seconds wall-clock of the latest witness for this gate.
     pub recorded_at: i64,
@@ -2054,11 +2056,11 @@ pub trait DashboardData: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
-    /// iter68 PR 4 — per-task latest-verdict-per-gate rollup for
-    /// every task in `initiative_id`. Returns a map
+    /// Per-task latest-state-per-gate rollup for every task in
+    /// `initiative_id`. Returns a map
     /// `task_id → Vec<DagGateVerdictChip>`. Used by the DAG handler
-    /// to attach colour-coded gate chips to each `DagNode` without
-    /// issuing N queries (one per task).
+    /// to attach explicit witness-gate nodes to each `DagNode`
+    /// without issuing N queries (one per task).
     ///
     /// Default impl returns an empty map; production wires this
     /// through `KernelDashboardData::list_dag_gate_summaries`
@@ -2066,8 +2068,9 @@ pub trait DashboardData: Send + Sync + 'static {
     ///
     /// **Wire contract.** Each `Vec<DagGateVerdictChip>` is
     /// alphabetically ordered by `gate_type` so the FE renders
-    /// chips in a stable column order. Tasks with no witnesses
-    /// are absent from the map (callers default to `Vec::new()`).
+    /// dashed gate nodes in a stable column order. Tasks with no
+    /// verifier token or witness are absent from the map (callers
+    /// default to `Vec::new()`).
     fn list_dag_gate_summaries(
         &self,
         _initiative_id: &str,

@@ -611,6 +611,13 @@ where
                     Ok(ack) => {
                         let latency_ms = started.elapsed().as_millis() as u64;
                         planner_dispatch_log::witness_response(&task_id_for_log, &ack, latency_ms);
+                        let should_respawn_after_gate_clear = matches!(
+                            &ack,
+                            handlers::witness::WitnessAck::Accepted {
+                                remaining_gates,
+                                ..
+                            } if remaining_gates.is_empty()
+                        );
                         // Map domain WitnessAck → wire IpcMessage::WitnessAck.
                         //
                         // The wire shape (`accepted: bool, reason: Option<String>`)
@@ -659,6 +666,44 @@ where
                             "WitnessAck",
                         )
                         .await?;
+                        if should_respawn_after_gate_clear {
+                            let ctx_for_respawn = Arc::clone(&ctx);
+                            let task_for_respawn = task_id_for_log.clone();
+                            tokio::spawn(async move {
+                                let store_for_lookup = Arc::clone(&ctx_for_respawn.store);
+                                let task_for_lookup = task_for_respawn.clone();
+                                let initiative_id = tokio::task::spawn_blocking(move || {
+                                    let conn = store_for_lookup.lock_sync();
+                                    conn.query_row(
+                                        &format!(
+                                            "SELECT initiative_id FROM {tasks} WHERE task_id = ?1",
+                                            tasks = raxis_store::Table::Tasks.as_str(),
+                                        ),
+                                        rusqlite::params![&task_for_lookup],
+                                        |r| r.get::<_, String>(0),
+                                    )
+                                    .ok()
+                                })
+                                .await
+                                .ok()
+                                .flatten();
+                                if let Some(initiative_id) = initiative_id {
+                                    let _ = crate::session_spawn_orchestrator::respawn_orchestrator_for_initiative(
+                                        &initiative_id,
+                                        ctx_for_respawn,
+                                        false,
+                                    )
+                                    .await;
+                                } else {
+                                    eprintln!(
+                                        "{{\"level\":\"warn\",\
+                                         \"event\":\"WitnessGateClearRespawnSkipped\",\
+                                         \"reason\":\"task_lookup_miss\",\
+                                         \"task_id\":\"{task_for_respawn}\"}}",
+                                    );
+                                }
+                            });
+                        }
                     }
                     Err(e) => {
                         // HandlerError: transport/auth-level failure.

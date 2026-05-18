@@ -129,8 +129,12 @@ fn default_auth_prefix() -> String {
 /// derive them too — dispatch tests assert against specific variants.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum BackendError {
-    /// Network reachability / TLS / DNS / connection refused.
-    #[error("upstream unreachable: {reason}")]
+    /// Host-side gateway reachability / TLS / DNS / connection refused.
+    ///
+    /// This is the kernel/gateway process dialing the model provider
+    /// from the host. It is not evidence that a guest VM has a NIC or
+    /// raw internet access.
+    #[error("host provider upstream unreachable: {reason}")]
     Upstream { reason: String },
     /// The configured per-request timeout fired.
     #[error("upstream timeout after {timeout_ms} ms")]

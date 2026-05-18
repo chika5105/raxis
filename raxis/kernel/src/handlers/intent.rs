@@ -1642,7 +1642,7 @@ fn run_phase_c(
     // proves the parent exists by Step 3) surfaces as a hard reject
     // instead of a silently-lost flag that would let a second merge
     // race the recovery on next boot.
-    if matches!(intent_kind, IntentKind::IntegrationMerge) {
+    if matches!(intent_kind, IntentKind::IntegrationMerge) && pending_gates.is_empty() {
         let updated = raxis_store::views::initiatives::set_git_apply_pending(
             &tx,
             pre_state.task.initiative_id.as_str(),
@@ -1753,7 +1753,7 @@ fn run_phase_c(
     // and emits a typed `MergeFastForwardFailed` audit event when
     // it fails so a future recovery pass has the durable signal it
     // needs).
-    if matches!(intent_kind, IntentKind::IntegrationMerge) {
+    if matches!(intent_kind, IntentKind::IntegrationMerge) && pending_gates.is_empty() {
         let initiative_id_owned = pre_state.task.initiative_id.clone();
         let (operator_assisted, escalation_id) = match pre_state.resolved_via_escalation.as_ref() {
             Some(id) => (true, Some(id.as_str().to_owned())),

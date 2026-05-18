@@ -12,7 +12,7 @@
 //! enters the [`Pusher::tick`] loop. SIGTERM / SIGINT triggers a
 //! clean shutdown that flushes one final batch and exits 0.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use raxis_otel_pusher::{
@@ -123,6 +123,8 @@ async fn main() -> ExitCode {
         cfg.data_dir.display(),
         cfg.pusher.otlp_protocol,
     );
+    let event_logger = PusherEventLogger::new(cfg.events_path.clone());
+    event_logger.log(&PusherEvent::Started);
 
     // Tick loop with SIGTERM/SIGINT shutdown.
     let mut interval = tokio::time::interval(cfg.flush_interval());
@@ -137,7 +139,7 @@ async fn main() -> ExitCode {
             }
             _ = interval.tick() => {
                 let events = pusher.tick(true).await;
-                for e in events { log_event(&e); }
+                for e in events { event_logger.log(&e); }
             }
         }
     }
@@ -145,9 +147,9 @@ async fn main() -> ExitCode {
     // Final drain.
     let final_events = pusher.tick(true).await;
     for e in final_events {
-        log_event(&e);
+        event_logger.log(&e);
     }
-    log_event(&PusherEvent::Stopping);
+    event_logger.log(&PusherEvent::Stopping);
     ExitCode::SUCCESS
 }
 
@@ -244,7 +246,32 @@ fn build_client(
     )
 }
 
-fn log_event(ev: &PusherEvent) {
+struct PusherEventLogger {
+    path: PathBuf,
+}
+
+impl PusherEventLogger {
+    fn new(path: PathBuf) -> Self {
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"otel_pusher_events_dir_create_failed\",\
+                     \"path\":\"{}\",\"reason\":\"{e}\"}}",
+                    parent.display(),
+                );
+            }
+        }
+        Self { path }
+    }
+
+    fn log(&self, ev: &PusherEvent) {
+        let json = pusher_event_json(ev);
+        eprintln!("{json}");
+        append_event_jsonl(&self.path, &json);
+    }
+}
+
+fn pusher_event_json(ev: &PusherEvent) -> serde_json::Value {
     let json = match ev {
         PusherEvent::Started => serde_json::json!({
             "level": "info",
@@ -297,5 +324,52 @@ fn log_event(ev: &PusherEvent) {
             "new_segment": new_segment,
         }),
     };
-    eprintln!("{json}");
+    json
+}
+
+fn append_event_jsonl(path: &Path, json: &serde_json::Value) {
+    use std::io::Write;
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"otel_pusher_events_append_failed\",\
+                 \"path\":\"{}\",\"reason\":\"{e}\"}}",
+                path.display(),
+            );
+            return;
+        }
+    };
+    if let Err(e) = writeln!(file, "{json}") {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"otel_pusher_events_write_failed\",\
+             \"path\":\"{}\",\"reason\":\"{e}\"}}",
+            path.display(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_logger_appends_jsonl_for_dashboard_health_card() {
+        let td = tempfile::TempDir::new().expect("tempdir");
+        let path = td.path().join("observability/pusher-events.jsonl");
+        let logger = PusherEventLogger::new(path.clone());
+
+        logger.log(&PusherEvent::Started);
+        logger.log(&PusherEvent::Stopping);
+
+        let body = std::fs::read_to_string(path).expect("event log");
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"event\":\"otel_pusher_started\""));
+        assert!(lines[1].contains("\"event\":\"otel_pusher_stopping\""));
+    }
 }

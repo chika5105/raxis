@@ -12,16 +12,18 @@ export interface DagGraphNode {
   task_id: string;
   title: string;
   state: string;
+  node_kind?: "task" | "gate";
+  parent_task_id?: string;
+  gate_type?: string;
+  latest_verdict?: string;
   /// Backend signals an active subtask activation for this task.
   /// The graph treats `is_active` as Running for tone, chip label
   /// and pulse so mid-execution `Admitted` tasks (between VM hops)
   /// don't visually look stalled. Optional for back-compat.
   is_active?: boolean;
-  /// iter68 PR 4 — latest-verdict-per-gate rollup. The DAG
-  /// renders one colour-coded dot per gate beneath the
-  /// `task_id` row so operators can pivot on "which task has a
-  /// failing gate" at a glance, without drilling into the
-  /// per-task witness panel.
+  /// Latest state per mechanical witness gate. The DAG renders
+  /// these as dashed gate nodes attached to this task so gates are
+  /// part of the graph, not hidden in a tiny decoration.
   gate_verdict_summary?: Array<{
     gate_type: string;
     latest_verdict: string;
@@ -101,21 +103,6 @@ interface DagGraphProps {
 
 const NODE_W = 200;
 const NODE_H = 80;
-/// iter68 PR 4 — radius of the per-gate verdict dot rendered
-/// in the bottom-left strip of each node.
-const GATE_DOT_R = 4;
-/// Horizontal pitch between gate dots. Each dot takes up 12 px
-/// (2 r + gap) so a node fits ~14 chips before clipping; rare
-/// in practice (tasks have 1–3 gates).
-const GATE_DOT_PITCH = 12;
-/// Colours for `WitnessResultClass` rendered as gate dots. Same
-/// semantic-token language the verdict pills + state badges use,
-/// so colour-blind operators get a consistent palette.
-const GATE_DOT_COLOR: Record<string, string> = {
-  Pass: "rgb(var(--c-ok))",
-  Fail: "rgb(var(--c-bad))",
-  Inconclusive: "rgb(var(--c-warn))",
-};
 // State chip occupies a fixed slot in the top-right of the
 // node. The chip width is sized to fit a 10-char uppercase
 // label at fontSize 9 bold — `shortStateLabel` (in
@@ -160,6 +147,8 @@ export function DagGraph({
   const dimNode = (state: string) => activeSet !== null && !activeSet.has(state);
   const dimNodeFor = (node: DagGraphNode) => dimNode(effectiveState(node));
 
+  const expanded = useMemo(() => expandGateNodes(nodes, edges), [nodes, edges]);
+
   const layout = useMemo(() => {
     const g = new dagre.graphlib.Graph({ multigraph: false, compound: false });
     g.setGraph({ rankdir, nodesep: 24, ranksep: 60, marginx: 16, marginy: 16 });
@@ -168,11 +157,11 @@ export function DagGraph({
     // Only edges whose endpoints exist in `nodes` get rendered —
     // a stale edge from a deleted task would otherwise blow up
     // `dagre.layout`.
-    const nodeIds = new Set(nodes.map((n) => n.task_id));
-    nodes.forEach((n) => {
+    const nodeIds = new Set(expanded.nodes.map((n) => n.task_id));
+    expanded.nodes.forEach((n) => {
       g.setNode(n.task_id, { width: NODE_W, height: NODE_H, label: n.title });
     });
-    const safeEdges = edges.filter(
+    const safeEdges = expanded.edges.filter(
       (e) => nodeIds.has(e.from) && nodeIds.has(e.to),
     );
     safeEdges.forEach((e) => {
@@ -180,7 +169,7 @@ export function DagGraph({
     });
     dagre.layout(g);
 
-    const placedNodes = nodes.map((n) => {
+    const placedNodes = expanded.nodes.map((n) => {
       const meta = g.node(n.task_id);
       const cx = meta?.x ?? 0;
       const cy = meta?.y ?? 0;
@@ -213,7 +202,7 @@ export function DagGraph({
       width: naturalW,
       height: naturalH,
     };
-  }, [nodes, edges, height, rankdir]);
+  }, [expanded, height, rankdir]);
 
   // The viewBox MUST match the laid-out extent so dagre's
   // coordinates render at scale; the SVG height is the larger
@@ -257,8 +246,8 @@ export function DagGraph({
           // matching nodes still pull their wiring forward. Hover
           // de-emphasis still wins when the operator is mousing
           // over a specific node.
-          const fromNode = nodes.find((n) => n.task_id === e.from);
-          const toNode = nodes.find((n) => n.task_id === e.to);
+          const fromNode = expanded.nodes.find((n) => n.task_id === e.from);
+          const toNode = expanded.nodes.find((n) => n.task_id === e.to);
           const edgeDim =
             activeSet !== null &&
             fromNode !== undefined &&
@@ -275,6 +264,7 @@ export function DagGraph({
               fill="none"
               stroke="rgb(var(--c-ink-subtle))"
               strokeWidth={1.4}
+              strokeDasharray={e.kind === "gate" ? "4 4" : undefined}
               markerEnd="url(#arrow)"
               opacity={opacity}
             />
@@ -291,10 +281,16 @@ export function DagGraph({
           const tone = stateTone(eff);
           const fill = NODE_FILL_VAR[tone];
           const stroke = NODE_STROKE_VAR[tone];
-          const isSelected = selected === n.task_id;
+          const isGate = n.node_kind === "gate";
+          const isSelected =
+            selected === n.task_id || (isGate && selected === n.parent_task_id);
           const dim = dimNodeFor(n);
           const hoverDim = hover !== null && hover !== n.task_id;
           const showPulse = eff === "Running";
+          const selectId = isGate ? n.parent_task_id : n.task_id;
+          const chipLabel = isGate
+            ? (n.latest_verdict ?? "Pending").toUpperCase()
+            : shortStateLabel(eff);
           // Filter-dim wins over hover-dim because it's the
           // explicit operator intent ("I want to see Running") vs.
           // an incidental mouseover.
@@ -303,14 +299,19 @@ export function DagGraph({
             <g
               key={n.task_id}
               transform={`translate(${n.x}, ${n.y})`}
-              onClick={() => onSelect?.(n.task_id)}
-              onDoubleClick={() => onActivate?.(n.task_id)}
+              onClick={() => selectId && onSelect?.(selectId)}
+              onDoubleClick={() => selectId && onActivate?.(selectId)}
               onMouseEnter={() => setHover(n.task_id)}
               onMouseLeave={() => setHover(null)}
               style={{ cursor: "pointer" }}
               role="button"
               tabIndex={0}
-              aria-label={`Task ${n.title} (state ${eff}). Click to focus, double-click to open task page.`}
+              aria-label={
+                isGate
+                  ? `Witness gate ${n.gate_type ?? n.title} for task ${n.parent_task_id} (${n.latest_verdict ?? "Pending"}). Click to focus the task, double-click to open task page.`
+                  : `Task ${n.title} (state ${eff}). Click to focus, double-click to open task page.`
+              }
+              data-node-kind={n.node_kind ?? "task"}
               data-status={eff}
               data-raw-state={n.state}
               data-is-active={n.is_active || undefined}
@@ -321,10 +322,10 @@ export function DagGraph({
                   // Enter = activate (open task page) when wired,
                   // else fall back to onSelect so the operator can
                   // still focus the node with the keyboard.
-                  if (onActivate) {
-                    onActivate(n.task_id);
-                  } else if (onSelect) {
-                    onSelect(n.task_id);
+                  if (selectId && onActivate) {
+                    onActivate(selectId);
+                  } else if (selectId && onSelect) {
+                    onSelect(selectId);
                   }
                 }
               }}
@@ -336,6 +337,7 @@ export function DagGraph({
                 fill={fill}
                 stroke={isSelected ? "rgb(var(--c-accent))" : stroke}
                 strokeWidth={isSelected ? 2 : 1}
+                strokeDasharray={isGate ? "7 5" : undefined}
                 opacity={nodeOpacity}
                 // 1.4s ease-in-out infinite-alternate stroke-pulse
                 // keeps the running affordance in sync with the
@@ -349,11 +351,11 @@ export function DagGraph({
                 }
               />
               <title>
-                {n.title}
+                {isGate ? `Witness gate: ${n.gate_type ?? n.title}` : n.title}
                 {"\n"}
-                {n.task_id}
+                {isGate ? `task: ${n.parent_task_id}` : n.task_id}
                 {"\n"}
-                state: {eff}
+                {isGate ? `verdict: ${n.latest_verdict ?? "Pending"}` : `state: ${eff}`}
                 {n.is_active && n.state !== eff
                   ? `\n(FSM row: ${n.state} · executor active)`
                   : ""}
@@ -396,7 +398,7 @@ export function DagGraph({
                 fontWeight={700}
                 fontFamily="Inter, system-ui, sans-serif"
               >
-                {shortStateLabel(eff)}
+                {chipLabel}
               </text>
               <text
                 x={10}
@@ -406,7 +408,7 @@ export function DagGraph({
                 fontWeight={500}
                 fontFamily="Inter, system-ui, sans-serif"
               >
-                {truncate(n.title, TITLE_MAX_CHARS)}
+                {truncate(isGate ? `Gate: ${n.gate_type ?? n.title}` : n.title, TITLE_MAX_CHARS)}
               </text>
               <text
                 x={10}
@@ -415,39 +417,8 @@ export function DagGraph({
                 fontSize={10}
                 fontFamily="JetBrains Mono, ui-monospace, monospace"
               >
-                {n.task_id.length > 20
-                  ? `${n.task_id.slice(0, 20)}…`
-                  : n.task_id}
+                {displayNodeId(n, isGate)}
               </text>
-              {/* iter68 PR 4 — gate verdict dots. One colour-
-                  coded dot per gate ordered alphabetically by
-                  gate_type (server-side stable sort). Hovering
-                  the dot in a real browser surfaces the gate +
-                  verdict + recorded_at via `<title>` (no JS;
-                  SVG-native tooltip). */}
-              {n.gate_verdict_summary?.map((chip, idx) => {
-                const cx = 10 + GATE_DOT_R + idx * GATE_DOT_PITCH;
-                const cy = n.h - 12;
-                const colour =
-                  GATE_DOT_COLOR[chip.latest_verdict] ??
-                  "rgb(var(--c-ink-subtle))";
-                return (
-                  <g key={`${n.task_id}-${chip.gate_type}-${idx}`}>
-                    <circle
-                      cx={cx}
-                      cy={cy}
-                      r={GATE_DOT_R}
-                      fill={colour}
-                      stroke="rgb(var(--c-panel))"
-                      strokeWidth={0.75}
-                    >
-                      <title>
-                        {`${chip.gate_type}: ${chip.latest_verdict}`}
-                      </title>
-                    </circle>
-                  </g>
-                );
-              })}
             </g>
           );
         })}
@@ -483,4 +454,55 @@ export function DagGraph({
 
 function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+function displayNodeId(n: DagGraphNode, isGate: boolean): string {
+  if (isGate) {
+    const parent = n.parent_task_id ?? "";
+    return parent.length > 20 ? `${parent.slice(0, 20)}…` : parent;
+  }
+  return n.task_id.length > 20 ? `${n.task_id.slice(0, 20)}…` : n.task_id;
+}
+
+interface ExpandedDagEdge extends DagGraphEdge {
+  kind?: "task" | "gate";
+}
+
+function expandGateNodes(
+  nodes: DagGraphNode[],
+  edges: DagGraphEdge[],
+): { nodes: DagGraphNode[]; edges: ExpandedDagEdge[] } {
+  const outNodes: DagGraphNode[] = [];
+  const outEdges: ExpandedDagEdge[] = [...edges];
+  for (const n of nodes) {
+    outNodes.push({ ...n, node_kind: n.node_kind ?? "task" });
+    for (const chip of n.gate_verdict_summary ?? []) {
+      const gateId = `${n.task_id}::gate::${chip.gate_type}`;
+      outNodes.push({
+        task_id: gateId,
+        title: chip.gate_type,
+        state: gateState(chip.latest_verdict),
+        node_kind: "gate",
+        parent_task_id: n.task_id,
+        gate_type: chip.gate_type,
+        latest_verdict: chip.latest_verdict,
+      });
+      outEdges.push({ from: n.task_id, to: gateId, kind: "gate" });
+    }
+  }
+  return { nodes: outNodes, edges: outEdges };
+}
+
+function gateState(verdict: string): string {
+  switch (verdict) {
+    case "Pass":
+      return "Completed";
+    case "Fail":
+      return "Failed";
+    case "Pending":
+    case "Inconclusive":
+      return "GatesPending";
+    default:
+      return "GatesPending";
+  }
 }

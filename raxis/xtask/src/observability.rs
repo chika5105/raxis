@@ -44,8 +44,8 @@
 //!       only.
 //!     - `--full`: bring up the entire live-e2e compose stack (every
 //!       upstream-service container PLUS the observability triple).
-//!       Useful for operators who want the realistic scenario worth
-//!       of metric emission, not just an empty Prometheus.
+//!       Uses `docker-compose.extended.e2e.yml` so the realistic
+//!       scenario's seeded Postgres/Mongo fixtures converge too.
 //!     - `--no-open`: skip the auto-browser-open step.
 //!     - `--detach-only`: skip the URL print + open even when stdout
 //!       is a TTY; used by callers that just want the side-effect.
@@ -151,7 +151,11 @@ fn run_up(tail: &[String]) -> Result<()> {
     let detach_only = tail.iter().any(|a| a == "--detach-only");
     let full = tail.iter().any(|a| a == "--full");
 
-    let compose_file = find_compose_file().context("locate live-e2e compose file")?;
+    let compose_file = if full {
+        find_extended_compose_file().context("locate extended live-e2e compose file")?
+    } else {
+        find_compose_file().context("locate live-e2e compose file")?
+    };
     eprintln!(
         "==> observability up: compose-file={} project={} mode={}",
         compose_file.display(),
@@ -576,6 +580,24 @@ fn find_compose_file() -> Result<PathBuf> {
     anyhow::ensure!(
         candidate.exists(),
         "expected live-e2e compose file at {} (CARGO_MANIFEST_DIR={})",
+        candidate.display(),
+        manifest_dir.display(),
+    );
+    Ok(candidate)
+}
+
+fn find_extended_compose_file() -> Result<PathBuf> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let candidate = manifest_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("CARGO_MANIFEST_DIR has no parent: {manifest_dir:?}"))?
+        .join("live-e2e")
+        .join("docker-compose.extended.e2e.yml");
+    anyhow::ensure!(
+        candidate.exists(),
+        "expected extended live-e2e compose file at {} (CARGO_MANIFEST_DIR={})",
         candidate.display(),
         manifest_dir.display(),
     );

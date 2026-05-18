@@ -85,16 +85,16 @@ flowchart TD
     subgraph GuestVM["Guest VM (no virtio-net)"]
         direction TB
         Agent["bash, agent code, custom tool"]
-        Iptables["iptables nat<br/>REDIRECT --to-port 3129<br/>REDIRECT UDP/53 → 127.0.0.1:53"]
+        Nftables["nftables nat OUTPUT<br/>redirect TCP → :3129<br/>redirect UDP/53 → :53"]
         
         TproxyTcp["raxis-tproxy<br/>(TCP redir)"]
         TproxyDns["raxis-tproxy<br/>(DNS stub :53)"]
         
         Vsock["AF_VSOCK to (VMADDR_CID_HOST, port)"]
 
-        Agent -- "TCP connect evil.example:443" --> Iptables
-        Iptables --> TproxyTcp
-        Iptables --> TproxyDns
+        Agent -- "TCP connect evil.example:443" --> Nftables
+        Nftables --> TproxyTcp
+        Nftables --> TproxyDns
         
         TproxyTcp -- "① peek SNI<br/>② admission req" --> Vsock
         TproxyDns -- "① DNS query<br/>② resolve req" --> Vsock
@@ -200,13 +200,19 @@ PID 1 inside every Linux executor guest unconditionally installs
 the egress chokepoint at boot — there is no `RAXIS_AIRGAP_A3` gate
 and no cargo feature flag any more. The chokepoint consists of:
 
+```nft
+table inet raxis_a3 {
+  chain output {
+    type nat hook output priority -100; policy accept;
+    oifname "lo" return
+    ip daddr 127.0.0.0/8 return
+    ip protocol tcp redirect to :3129
+    udp dport 53 redirect to :53
+  }
+}
+```
+
 ```bash
-# Redirect all outbound TCP (except loopback) to raxis-tproxy
-iptables -t nat -A OUTPUT -p tcp ! -d 127.0.0.1/32 -j REDIRECT --to-port 3129
-
-# Redirect outbound UDP DNS to the in-guest stub
-iptables -t nat -A OUTPUT -p udp --dport 53 -j REDIRECT --to-port 53
-
 # Disable IPv6 — kernel admission is IPv4-only in V2; IPv6 would be a covert channel
 echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
 echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6
@@ -248,7 +254,7 @@ deletion. The kernel always compiles in `handlers::tproxy_admit`
 and `handlers::dns_resolve`, the session-spawn path always emits
 `EgressTier::Mediated` for Executor (`EgressTier::None` for
 Orchestrator and Reviewer), and PID 1 inside the guest
-unconditionally installs the iptables REDIRECT, the
+unconditionally installs the nftables REDIRECT, the
 `disable_ipv6` sysctls, and the `/etc/resolv.conf →
 127.0.0.1` pin.
 

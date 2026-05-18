@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 
@@ -294,9 +294,29 @@ function FilesTab({
   scrollTo,
   onSelectFile,
 }: FilesTabProps) {
+  const [fileSearch, setFileSearch] = useState("");
   // When the operator clicks a file in the tree, scroll the
   // matching anchor on the right pane into view.
   const inlineRef = useRef<HTMLDivElement>(null);
+  const filteredDiff = useMemo(() => {
+    if (!data) return undefined;
+    const needle = fileSearch.trim().toLowerCase();
+    if (!needle) return data;
+    return {
+      ...data,
+      files: data.files.filter((f) => f.path.toLowerCase().includes(needle)),
+    };
+  }, [data, fileSearch]);
+  const visibleStats = useMemo(() => {
+    const files = filteredDiff?.files ?? [];
+    return files.reduce(
+      (acc, f) => ({
+        insertions: acc.insertions + f.insertions,
+        deletions: acc.deletions + f.deletions,
+      }),
+      { insertions: 0, deletions: 0 },
+    );
+  }, [filteredDiff]);
   useEffect(() => {
     if (!scrollTo) return;
     const el = inlineRef.current?.querySelector<HTMLDivElement>(
@@ -317,6 +337,7 @@ function FilesTab({
   }
   if (!data) return <PageSpinner />;
   const diff = data;
+  const reviewDiff = filteredDiff ?? diff;
 
   return (
     <div className="space-y-3">
@@ -328,13 +349,44 @@ function FilesTab({
       ) : (
         <div className="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-4">
           <aside className="card p-3 self-start xl:sticky xl:top-2 max-h-[80vh] overflow-y-auto scroll-thin">
-            <header className="text-xs text-ink-subtle uppercase tracking-wider mb-2">
-              Changed files · {plural(diff.files.length, "file")}
+            <header className="mb-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-ink-subtle uppercase tracking-wider">
+                  Changed files
+                </span>
+                <span className="text-xs text-ink-muted">
+                  {plural(reviewDiff.files.length, "file")}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="badge bg-ok-muted/20 border-ok text-ok">
+                  +{visibleStats.insertions}
+                </span>
+                <span className="badge bg-bad-muted/20 border-bad text-bad">
+                  -{visibleStats.deletions}
+                </span>
+              </div>
+              <input
+                className="input w-full text-xs"
+                placeholder="Filter changed files..."
+                value={fileSearch}
+                onChange={(e) => setFileSearch(e.target.value)}
+              />
             </header>
-            <RepoFileTree diff={diff} onSelect={onSelectFile} />
+            {reviewDiff.files.length === 0 ? (
+              <div className="text-xs text-ink-subtle py-3">
+                No changed files match this filter.
+              </div>
+            ) : (
+              <RepoFileTree diff={reviewDiff} onSelect={onSelectFile} />
+            )}
           </aside>
           <div ref={inlineRef} className="space-y-3">
-            <DiffView diff={diff} />
+            {reviewDiff.files.length === 0 ? (
+              <Empty title="No diffs match the current file filter." />
+            ) : (
+              <DiffView diff={reviewDiff} />
+            )}
             <p className="text-[11px] text-ink-subtle italic">
               Showing files the executor touched relative to the base SHA. Use
               the <strong>Browse</strong> tab to inspect any file in the

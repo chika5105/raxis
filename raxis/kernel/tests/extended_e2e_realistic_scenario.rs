@@ -102,7 +102,10 @@ use extended_e2e_support::{
         TASK_TRANSPARENT_PROXY_REALSCRIPTS, TASK_XFILE_REFACTOR,
     },
     reviewer_substantive_disagreement::ReviewerSubstantiveDisagreementWitness,
-    seeds::{MONGO_HOST_PORT, PG_HOST_PORT},
+    seeds::{
+        preflight_or_panic as preflight_seed_fixtures, reseed_both_or_panic, MONGO_HOST_PORT,
+        PG_HOST_PORT,
+    },
     service_evidence::{
         assert_mssql_round_trip, assert_mysql_round_trip, collect_active_witness_failures,
         render_failures, seed_mongodb, seed_mssql, seed_mysql, seed_postgres, seed_redis,
@@ -118,7 +121,7 @@ use common::dashboard::{
     configured_dashboard_port, mutate_dashboard_block_in_policy, open_dashboard_with_autologin,
 };
 use common::keep_alive::{
-    keep_running_after_exit_with_workdir, print_keep_alive_banner, ComposeStackBanner,
+    keep_running_after_exit_with_workdir, OwnedComposeStackBanner, PostRunKeepAliveGuard,
 };
 use common::tier3_artifacts::Tier3Reporter;
 
@@ -184,6 +187,8 @@ fn realistic_session_lifecycle() {
     // every external-process spawn is bounded; the bring-up
     // itself runs through `harness_timeout::run_command_output_timeout`.
     ensure_extended_stack_up_or_panic();
+    reseed_both_or_panic();
+    preflight_seed_fixtures();
     require_tcp_reachable(PG_HOST_PORT, "Postgres docker container");
     require_tcp_reachable(MONGO_HOST_PORT, "MongoDB docker container");
     require_anthropic_dev_key();
@@ -321,6 +326,17 @@ fn realistic_session_lifecycle() {
     kernel.wait_until_ready_or_panic(READY_DEADLINE);
     eprintln!("[realism-e2e] kernel daemon up, accepting operator IPC");
 
+    let dashboard_port = configured_dashboard_port();
+    let _keep_alive_guard = PostRunKeepAliveGuard::new(
+        "realism-e2e",
+        kernel.data_dir().to_path_buf(),
+        Some(dashboard_port),
+        Some(OwnedComposeStackBanner {
+            project: COMPOSE_PROJECT.to_owned(),
+            compose_file: extended_compose_file(),
+        }),
+    );
+
     // ── Auto-locate-or-build + supervise + smoke-probe the
     //    `raxis-otel-pusher` sidecar (V3 §12 / V3 §4.2). Hard-fails
     //    with `OTEL_PUSHER_VIOLATION_TOKEN` per
@@ -352,7 +368,6 @@ fn realistic_session_lifecycle() {
     //    pass headless on CI / SSH. The URL is also threaded
     //    into the Tier-3 reporter so the post-run artifact block
     //    surfaces it for offline triage.
-    let dashboard_port = configured_dashboard_port();
     if let Some(url) = open_dashboard_with_autologin(&signing_key, dashboard_port, "realism-e2e") {
         tier3.set_dashboard_url(url);
     }
@@ -697,16 +712,8 @@ fn realistic_session_lifecycle() {
             "[realism-e2e] keep-alive flag active; skipped graceful kernel \
              shutdown + post-mortem chain walk so dashboard / AVF guests / \
              otel-pusher / docker-compose stack stay live for operator \
-             inspection"
-        );
-        let compose_file = extended_compose_file();
-        print_keep_alive_banner(
-            kernel.data_dir(),
-            Some(dashboard_port),
-            Some(ComposeStackBanner {
-                project: COMPOSE_PROJECT,
-                compose_file: &compose_file,
-            }),
+             inspection; post-run hold guard will keep the harness process \
+             alive long enough for the dashboard to remain connected"
         );
     }
 

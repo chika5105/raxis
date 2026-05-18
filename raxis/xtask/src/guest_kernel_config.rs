@@ -1,15 +1,15 @@
 //! Guest-kernel config validation shared by `cargo xtask images
 //! dev-kernel` and `cargo xtask images bake`.
 //!
-//! Path A3's in-guest chokepoint installs an iptables-nft NAT
-//! REDIRECT chain during PID-1 setup. Seeing `/usr/sbin/iptables-nft`
-//! on the rootfs is not enough: the guest kernel must also expose
-//! the nfnetlink/nftables ABI and the NAT/REDIRECT expressions the
+//! Path A3's in-guest chokepoint installs a native nftables NAT
+//! REDIRECT chain during PID-1 setup. Seeing `/usr/sbin/nft` on
+//! the rootfs is not enough: the guest kernel must also expose the
+//! nfnetlink/nftables ABI and the NAT/REDIRECT expressions the
 //! userspace binary targets. This module makes that an image-bake
 //! invariant instead of discovering it minutes later as:
 //!
 //! ```text
-//! iptables v1.8.x (nf_tables): Could not fetch rule set generation id
+//! Error: Could not process rule: Operation not supported
 //! ```
 
 use std::collections::BTreeMap;
@@ -73,7 +73,7 @@ const REQUIRED_A3_NFTABLES_CONFIG: &[Requirement] = &[
         any_of: &["CONFIG_NF_TABLES"],
     },
     Requirement {
-        why: "inet/IPv4 nftables family used by iptables-nft",
+        why: "inet/IPv4 nftables family used by the native nft ruleset",
         any_of: &["CONFIG_NF_TABLES_INET", "CONFIG_NF_TABLES_IPV4"],
     },
     Requirement {
@@ -94,7 +94,7 @@ const REQUIRED_A3_NFTABLES_CONFIG: &[Requirement] = &[
     },
     Requirement {
         why: "base NAT chain support for the nat OUTPUT hook",
-        any_of: &["CONFIG_NFT_CHAIN_NAT"],
+        any_of: &["CONFIG_NFT_CHAIN_NAT", "CONFIG_NFT_NAT"],
     },
 ];
 
@@ -158,7 +158,7 @@ pub fn validate_kernel_config_text(text: &str) -> Result<()> {
     }
     bail!(
         "{INVARIANT} VIOLATED: guest kernel config is missing built-in \
-         nftables/netfilter support required by Path A3 iptables-nft. \
+         nftables/netfilter support required by Path A3 native nftables. \
          Missing built-in options:\n  - {}\n\n\
          Rebuild the guest kernel with {REQUIRED_FRAGMENT_PATH} merged \
          into the kernel .config (built in, not modules), then stage it \
@@ -314,6 +314,12 @@ mod tests {
     #[test]
     fn accepts_kernel_version_alternative_for_nftables_family() {
         let config = valid_config().replace("CONFIG_NF_TABLES_INET=y", "CONFIG_NF_TABLES_IPV4=y");
+        validate_kernel_config_text(&config).unwrap();
+    }
+
+    #[test]
+    fn accepts_newer_kernel_folded_nft_chain_nat_support() {
+        let config = valid_config().replace("CONFIG_NFT_CHAIN_NAT=y\n", "");
         validate_kernel_config_text(&config).unwrap();
     }
 

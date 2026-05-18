@@ -634,58 +634,78 @@ async fn handle_inner(
             }
         };
         if let Some(base_sha) = task_row.base_sha.clone() {
-            let worktree_root = resolve_worktree_root(&task_row, ctx);
-            let store_for_snap = ctx.store.clone();
-            let data_dir_for_snap = ctx.data_dir.clone();
-            let task_id_for_snap = sub.task_id.as_str().to_owned();
-            let session_for_snap = task_row.session_id.clone();
-            let initiative_for_snap = task_row.initiative_id.clone();
-            let snap_res = tokio::task::spawn_blocking(move || {
-                crate::worktree_snapshot::snapshot_worktree(
-                    &store_for_snap,
-                    &data_dir_for_snap,
-                    crate::worktree_snapshot::SnapshotInput {
-                        task_id: task_id_for_snap,
-                        session_id: session_for_snap,
-                        initiative_id: Some(initiative_for_snap),
-                        trigger,
-                        worktree_root,
-                        base_sha,
-                    },
-                )
-            })
-            .await;
-            match snap_res {
-                Ok(Ok(rec)) => {
+            let worktree_root = match resolve_worktree_root_on_blocking_pool(
+                task_row.session_id.clone(),
+                ctx.store.clone(),
+                ctx.data_dir.clone(),
+            )
+            .await
+            {
+                Ok(path) => Some(path),
+                Err(e) => {
                     eprintln!(
-                        "{{\"level\":\"info\",\"event\":\"WorktreeSnapshotted\",\
+                        "{{\"level\":\"warn\",\"event\":\"WorktreeSnapshotRootResolveFailed\",\
+                         \"trigger\":\"{}\",\"task_id\":\"{}\",\"error\":\"{}\"}}",
+                        trigger.as_sql_str(),
+                        sub.task_id.as_str(),
+                        e,
+                    );
+                    None
+                }
+            };
+            if let Some(worktree_root) = worktree_root {
+                let store_for_snap = ctx.store.clone();
+                let data_dir_for_snap = ctx.data_dir.clone();
+                let task_id_for_snap = sub.task_id.as_str().to_owned();
+                let session_for_snap = task_row.session_id.clone();
+                let initiative_for_snap = task_row.initiative_id.clone();
+                let snap_res = tokio::task::spawn_blocking(move || {
+                    crate::worktree_snapshot::snapshot_worktree(
+                        &store_for_snap,
+                        &data_dir_for_snap,
+                        crate::worktree_snapshot::SnapshotInput {
+                            task_id: task_id_for_snap,
+                            session_id: session_for_snap,
+                            initiative_id: Some(initiative_for_snap),
+                            trigger,
+                            worktree_root,
+                            base_sha,
+                        },
+                    )
+                })
+                .await;
+                match snap_res {
+                    Ok(Ok(rec)) => {
+                        eprintln!(
+                            "{{\"level\":\"info\",\"event\":\"WorktreeSnapshotted\",\
                          \"trigger\":\"{}\",\"task_id\":\"{}\",\
                          \"snapshot_id\":\"{}\",\"head_sha\":\"{}\",\
                          \"commit_count\":{}}}",
-                        trigger.as_sql_str(),
-                        sub.task_id.as_str(),
-                        rec.snapshot_id,
-                        rec.head_sha,
-                        rec.commit_count,
-                    );
-                }
-                Ok(Err(e)) => {
-                    eprintln!(
-                        "{{\"level\":\"warn\",\"event\":\"WorktreeSnapshotFailed\",\
+                            trigger.as_sql_str(),
+                            sub.task_id.as_str(),
+                            rec.snapshot_id,
+                            rec.head_sha,
+                            rec.commit_count,
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"WorktreeSnapshotFailed\",\
                          \"trigger\":\"{}\",\"task_id\":\"{}\",\"error\":\"{}\"}}",
-                        trigger.as_sql_str(),
-                        sub.task_id.as_str(),
-                        e,
-                    );
-                }
-                Err(e) => {
-                    eprintln!(
-                        "{{\"level\":\"warn\",\"event\":\"WorktreeSnapshotJoinError\",\
+                            trigger.as_sql_str(),
+                            sub.task_id.as_str(),
+                            e,
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"WorktreeSnapshotJoinError\",\
                          \"trigger\":\"{}\",\"task_id\":\"{}\",\"error\":\"{}\"}}",
-                        trigger.as_sql_str(),
-                        sub.task_id.as_str(),
-                        e,
-                    );
+                            trigger.as_sql_str(),
+                            sub.task_id.as_str(),
+                            e,
+                        );
+                    }
                 }
             }
         }
@@ -750,16 +770,12 @@ async fn gate_recheck(
     // "Cannot block the current thread from within a runtime" panic
     // the iter63 fix wrapped `gates::evaluate_pre_spawn` against.
     // Mirror the Phase-A spawn_blocking pattern at this site too.
-    let worktree_root = {
-        let store = ctx.store.clone();
-        let session_id = task_row.session_id.clone();
-        let data_dir = ctx.data_dir.clone();
-        tokio::task::spawn_blocking(move || -> PathBuf {
-            resolve_worktree_root_inner(session_id.as_deref(), store.as_ref(), &data_dir)
-        })
-        .await
-        .map_err(|e| HandlerError::Store(format!("worktree_root resolve join: {e}")))?
-    };
+    let worktree_root = resolve_worktree_root_on_blocking_pool(
+        task_row.session_id.clone(),
+        ctx.store.clone(),
+        ctx.data_dir.clone(),
+    )
+    .await?;
 
     // Re-derive touched_paths using the stored base/head SHAs.
     // This mirrors exactly what handlers/intent.rs computed at intent time.
@@ -1450,6 +1466,18 @@ fn resolve_worktree_root(task_row: &TaskRowData, ctx: &HandlerContext) -> PathBu
     )
 }
 
+async fn resolve_worktree_root_on_blocking_pool(
+    session_id: Option<String>,
+    store: std::sync::Arc<raxis_store::Store>,
+    data_dir: std::path::PathBuf,
+) -> Result<PathBuf, HandlerError> {
+    tokio::task::spawn_blocking(move || -> PathBuf {
+        resolve_worktree_root_inner(session_id.as_deref(), store.as_ref(), &data_dir)
+    })
+    .await
+    .map_err(|e| HandlerError::Store(format!("worktree_root resolve join: {e}")))
+}
+
 /// Pure-sync helper: same as `resolve_worktree_root` but takes the
 /// pieces it needs as primitives so the witness handler can hand them
 /// to `tokio::task::spawn_blocking` without borrowing the
@@ -2019,7 +2047,7 @@ mod tests {
 // rather than re-introducing the production crash.
 #[cfg(test)]
 mod async_runtime_safety {
-    use super::resolve_worktree_root_inner;
+    use super::{resolve_worktree_root_inner, resolve_worktree_root_on_blocking_pool};
     use raxis_store::Store;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2036,19 +2064,39 @@ mod async_runtime_safety {
         let store = Arc::new(Store::open_in_memory().expect("in-memory store"));
         let data_dir = PathBuf::from("/tmp/resolve-async-safe");
 
-        let resolved: PathBuf = tokio::task::spawn_blocking({
-            let store = Arc::clone(&store);
-            let data_dir = data_dir.clone();
-            move || resolve_worktree_root_inner(None, store.as_ref(), &data_dir)
-        })
-        .await
-        .expect("resolve spawn_blocking join");
+        let resolved: PathBuf =
+            resolve_worktree_root_on_blocking_pool(None, Arc::clone(&store), data_dir.clone())
+                .await
+                .expect("resolve spawn_blocking join");
 
         // Falls back to data_dir when no session row is provided. The
         // point of the test is that the call returned at all — pre-fix
         // the iter66.1 bug shape was an unconditional panic at
         // `Store::lock_sync` before the function body could even
         // SELECT.
+        assert_eq!(resolved, data_dir);
+    }
+
+    /// Regression for the live-e2e sibling-initiative stall: the
+    /// witness handler's pre-recheck worktree snapshot path also
+    /// resolves the task worktree after `WitnessAccepted`. That path
+    /// must use the same blocking-pool helper as `gate_recheck` or a
+    /// passing mechanical witness panics before it can clear
+    /// `GatesPending`.
+    #[tokio::test]
+    async fn snapshot_path_worktree_resolve_uses_blocking_pool() {
+        let store = Arc::new(Store::open_in_memory().expect("in-memory store"));
+        let data_dir = PathBuf::from("/tmp/resolve-snapshot-safe");
+        let session_id_str = raxis_types::SessionId::new_v4().to_string();
+
+        let resolved = resolve_worktree_root_on_blocking_pool(
+            Some(session_id_str),
+            Arc::clone(&store),
+            data_dir.clone(),
+        )
+        .await
+        .expect("snapshot resolve must not panic on tokio worker");
+
         assert_eq!(resolved, data_dir);
     }
 

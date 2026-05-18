@@ -117,7 +117,7 @@ use raxis_types::{BundleArtifact, OperatorFingerprint, PlanBundle};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use common::keep_alive::{keep_running_after_exit_with_workdir, print_keep_alive_banner};
+use common::keep_alive::{keep_running_after_exit_with_workdir, PostRunKeepAliveGuard};
 use common::kernel_harness::{acquire_test_lock, build_and_locate_kernel, KernelInstance};
 use common::tier3_artifacts::Tier3Reporter;
 
@@ -282,6 +282,12 @@ fn full_session_lifecycle() {
     //    collision / missing `open(1)` is logged and skipped, never
     //    fatal — the test must still pass headless on CI / SSH.
     let dashboard_port = configured_dashboard_port();
+    let _keep_alive_guard = PostRunKeepAliveGuard::new(
+        "e2e",
+        kernel.data_dir().to_path_buf(),
+        Some(dashboard_port),
+        None,
+    );
     if let Some(url) = open_dashboard_with_autologin(&signing_key, dashboard_port) {
         tier3.set_dashboard_url(url);
     }
@@ -346,15 +352,9 @@ fn full_session_lifecycle() {
         eprintln!(
             "[e2e] keep-alive flag active; skipped graceful kernel shutdown \
              + post-mortem chain walk so dashboard / AVF guests / \
-             docker-compose stack stay live for operator inspection"
+             docker-compose stack stay live for operator inspection; \
+             post-run hold guard will keep the harness process alive"
         );
-        // `full_e2e_session_lifecycle` does not import
-        // `extended_e2e_support`, so we let the banner fall back
-        // to the generic `cargo xtask observability ps / down`
-        // surface for the compose stack (the
-        // `live-e2e/docker-compose.e2e.yml` project the
-        // `raxis-live-e2e-test` namespace owns).
-        print_keep_alive_banner(kernel.data_dir(), Some(dashboard_port), None);
     }
 
     // Tier-3 artifact-block parity with the realistic-scenario

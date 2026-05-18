@@ -526,13 +526,16 @@ interface ProgressProps {
   total: number;
 }
 
-function Progress({ completed, failed, total }: ProgressProps) {
-  const pct =
-    total === 0 ? 0 : Math.round(((completed + failed) / total) * 100);
+export function Progress({ completed, failed, total }: ProgressProps) {
+  const pct = total === 0 ? 0 : Math.round((completed / total) * 100);
   const okPct = total === 0 ? 0 : (completed / total) * 100;
   const failPct = total === 0 ? 0 : (failed / total) * 100;
+  const terminal = completed + failed;
   return (
-    <div className="inline-block w-32 align-middle">
+    <div
+      className="inline-block w-36 align-middle"
+      aria-label={`${completed} completed, ${failed} failed, ${total - terminal} still open out of ${total} tasks`}
+    >
       <div className="flex items-center gap-2 justify-end">
         <div className="text-xs text-ink-muted tabular">{pct}%</div>
         <div className="flex-1 h-1.5 rounded-full bg-edge overflow-hidden flex">
@@ -541,7 +544,7 @@ function Progress({ completed, failed, total }: ProgressProps) {
         </div>
       </div>
       <div className="text-[10px] text-ink-subtle text-right mt-0.5">
-        {completed}/{total}
+        {completed}/{total} done
         {failed > 0 && <span className="text-bad"> · {failed} failed</span>}
       </div>
     </div>

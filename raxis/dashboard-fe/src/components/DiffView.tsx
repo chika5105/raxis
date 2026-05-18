@@ -132,6 +132,7 @@ interface FileDiffProps {
 }
 
 function FileDiff({ file, isOpen, onToggle }: FileDiffProps) {
+  const rows = useMemo(() => parseUnifiedDiff(file.hunk), [file.hunk]);
   return (
     <div className="card p-0 overflow-hidden" data-file-path={file.path}>
       <header
@@ -171,32 +172,87 @@ function FileDiff({ file, isOpen, onToggle }: FileDiffProps) {
         <span className="text-bad">−{file.deletions}</span>
       </header>
       {isOpen && (
-        <pre className="font-mono text-[11.5px] leading-relaxed overflow-x-auto scroll-thin px-0">
+        <div className="font-mono text-[11.5px] leading-relaxed overflow-x-auto scroll-thin">
           {file.hunk.length === 0 ? (
             <span className="block px-3 py-2 text-ink-subtle italic">
               (binary or empty diff)
             </span>
           ) : (
-            file.hunk.split("\n").map((line, i) => {
+            rows.map((row, i) => {
               const tone =
-                line.startsWith("+++") || line.startsWith("---")
+                row.kind === "meta"
                   ? "text-ink-subtle bg-panel"
-                  : line.startsWith("+")
+                  : row.kind === "add"
                     ? "text-ok bg-ok-muted/15"
-                    : line.startsWith("-")
+                    : row.kind === "del"
                       ? "text-bad bg-bad-muted/15"
-                      : line.startsWith("@@")
+                      : row.kind === "hunk"
                         ? "text-info bg-info-muted/15 font-semibold"
                         : "text-ink-muted";
               return (
-                <span key={i} className={`block px-3 ${tone}`}>
-                  {line || " "}
-                </span>
+                <div
+                  key={i}
+                  className={`grid grid-cols-[3.25rem_3.25rem_minmax(max-content,1fr)] ${tone}`}
+                >
+                  <span className="select-none text-right pr-2 text-ink-subtle/70 border-r border-edge/60">
+                    {row.oldLine ?? ""}
+                  </span>
+                  <span className="select-none text-right pr-2 text-ink-subtle/70 border-r border-edge/60">
+                    {row.newLine ?? ""}
+                  </span>
+                  <span className="px-3 whitespace-pre">
+                    {row.text || " "}
+                  </span>
+                </div>
               );
             })
           )}
-        </pre>
+        </div>
       )}
     </div>
   );
+}
+
+type DiffRowKind = "meta" | "hunk" | "add" | "del" | "context";
+
+interface DiffRow {
+  oldLine: number | null;
+  newLine: number | null;
+  text: string;
+  kind: DiffRowKind;
+}
+
+function parseUnifiedDiff(hunk: string): DiffRow[] {
+  let oldLine = 0;
+  let newLine = 0;
+  return hunk.split("\n").map((text) => {
+    const header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
+    if (header) {
+      oldLine = Number(header[1]);
+      newLine = Number(header[2]);
+      return { oldLine: null, newLine: null, text, kind: "hunk" };
+    }
+    if (text.startsWith("+++") || text.startsWith("---")) {
+      return { oldLine: null, newLine: null, text, kind: "meta" };
+    }
+    if (text.startsWith("+")) {
+      const row = { oldLine: null, newLine, text, kind: "add" as const };
+      newLine += 1;
+      return row;
+    }
+    if (text.startsWith("-")) {
+      const row = { oldLine, newLine: null, text, kind: "del" as const };
+      oldLine += 1;
+      return row;
+    }
+    const row = {
+      oldLine: oldLine || null,
+      newLine: newLine || null,
+      text,
+      kind: "context" as const,
+    };
+    if (oldLine > 0) oldLine += 1;
+    if (newLine > 0) newLine += 1;
+    return row;
+  });
 }

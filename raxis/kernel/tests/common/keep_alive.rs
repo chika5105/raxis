@@ -9,9 +9,11 @@
 //! surfaces compose:
 //!
 //!   1. **Env var (primary)** — [`ENV_KEEP_RUNNING_AFTER_EXIT`]
-//!      `=1`/`=true`/`=yes` (case-insensitive) activates. Empty,
-//!      `0`, `false`, `no`, unset all leave it off. Easiest to
-//!      compose with `cargo test`:
+//!      `=1`/`=true`/`=yes` (case-insensitive) activates. The
+//!      short operator alias [`ENV_KEEP_ALIVE_ALIAS`] is accepted
+//!      too because older runbooks used `RAXIS_KEEP_ALIVE=1`.
+//!      Empty, `0`, `false`, `no`, unset all leave it off. Easiest
+//!      to compose with `cargo test`:
 //!
 //!      ```bash
 //!      RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1 cargo test --release \
@@ -43,10 +45,13 @@
 //! the `KernelInstance::Drop` SIGKILL, the `OtelPusherSupervisor::
 //! Drop` SIGTERM-then-SIGKILL, the `Tier3Reporter::Drop`
 //! `remove_dir_all(<data_dir>)` cleanup branch under
-//! `RAXIS_E2E_KEEP=0`) MUST be skipped. The test still emits its
-//! ACTUAL verdict code — keep-alive does NOT change pass/fail
-//! signaling, only what happens to the spawned services after
-//! the verdict is known.
+//! `RAXIS_E2E_KEEP=0`) MUST be skipped. The test process then
+//! stays alive for [`DEFAULT_KEEP_ALIVE_DURATION_SECS`] seconds
+//! (override with [`ENV_KEEP_ALIVE_DURATION_SECS`] or the older
+//! [`ENV_KEEP_ALIVE_DURATION_SECS_ALIAS`]) so the kernel's
+//! dashboard and stderr pipe remain valid after either success or
+//! failure. The test still emits its ACTUAL verdict code after the
+//! hold window — keep-alive does NOT turn a failure into success.
 //!
 //! ## What stays running, what does not
 //!
@@ -91,8 +96,9 @@
 
 #![allow(dead_code)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 // ─── Operator-facing surface ─────────────────────────────────────
 
@@ -103,6 +109,32 @@ use std::sync::atomic::{AtomicBool, Ordering};
 ///     --test extended_e2e_realistic_scenario -- --nocapture
 /// ```
 pub const ENV_KEEP_RUNNING_AFTER_EXIT: &str = "RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT";
+
+/// Short operator alias used by the older live-e2e runbook:
+///
+/// ```bash
+/// RAXIS_KEEP_ALIVE=1 RAXIS_KEEP_ALIVE_DURATION_SECS=7200 cargo test ...
+/// ```
+///
+/// The canonical env var above remains preferred in docs, but the
+/// alias keeps the live run ergonomic and avoids a silent false
+/// negative when an operator copies an older command line.
+pub const ENV_KEEP_ALIVE_ALIAS: &str = "RAXIS_KEEP_ALIVE";
+
+/// Canonical post-run hold duration override.
+pub const ENV_KEEP_ALIVE_DURATION_SECS: &str = "RAXIS_E2E_KEEP_ALIVE_DURATION_SECS";
+
+/// Short duration alias paired with [`ENV_KEEP_ALIVE_ALIAS`].
+pub const ENV_KEEP_ALIVE_DURATION_SECS_ALIAS: &str = "RAXIS_KEEP_ALIVE_DURATION_SECS";
+
+/// Default post-run hold when keep-alive is active and no duration
+/// env var is set. Two hours matches the live-e2e operator runbook.
+pub const DEFAULT_KEEP_ALIVE_DURATION_SECS: u64 = 7_200;
+
+/// Defensive cap so a typo like `999999999999` does not pin a
+/// developer test process for months. A full day is enough for
+/// overnight post-mortem inspection while still bounded.
+pub const MAX_KEEP_ALIVE_DURATION_SECS: u64 = 86_400;
 
 /// Filename the helper looks for under `<work_dir>` to flip the
 /// flag from another shell mid-run.
@@ -213,6 +245,7 @@ pub fn keep_running_after_exit() -> bool {
 
 fn keep_running_via_env() -> bool {
     parse_truthy_env_value(std::env::var(ENV_KEEP_RUNNING_AFTER_EXIT).ok().as_deref())
+        || parse_truthy_env_value(std::env::var(ENV_KEEP_ALIVE_ALIAS).ok().as_deref())
 }
 
 /// Full read: env var OR CLI flag OR touch-file
@@ -237,6 +270,90 @@ pub fn keep_running_after_exit_with_workdir(work_dir: Option<&Path>) -> bool {
     // older targets. Either way a Drop site cannot panic from
     // here.
     touch.try_exists().unwrap_or_else(|_| touch.exists())
+}
+
+/// Resolve the post-run hold duration in seconds. The canonical
+/// env var wins over the short alias when both are set.
+pub fn keep_alive_duration_secs() -> u64 {
+    parse_duration_secs_env(std::env::var(ENV_KEEP_ALIVE_DURATION_SECS).ok().as_deref())
+        .or_else(|| {
+            parse_duration_secs_env(
+                std::env::var(ENV_KEEP_ALIVE_DURATION_SECS_ALIAS)
+                    .ok()
+                    .as_deref(),
+            )
+        })
+        .unwrap_or(DEFAULT_KEEP_ALIVE_DURATION_SECS)
+}
+
+fn parse_duration_secs_env(value: Option<&str>) -> Option<u64> {
+    let raw = value?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let parsed = raw.parse::<u64>().ok()?;
+    Some(parsed.min(MAX_KEEP_ALIVE_DURATION_SECS))
+}
+
+/// Owned compose-stack metadata for [`PostRunKeepAliveGuard`].
+#[derive(Debug, Clone)]
+pub struct OwnedComposeStackBanner {
+    pub project: String,
+    pub compose_file: PathBuf,
+}
+
+/// RAII guard that keeps the live-e2e harness process alive after
+/// the test reaches a terminal verdict. It is intentionally tiny:
+/// every cleanup owner still gates its own teardown through
+/// [`keep_running_after_exit_with_workdir`], while this guard
+/// preserves the parent process and stderr reader thread long
+/// enough for the dashboard to remain useful after success OR
+/// panic.
+pub struct PostRunKeepAliveGuard {
+    label: &'static str,
+    work_dir: PathBuf,
+    dashboard_port: Option<u16>,
+    compose_stack: Option<OwnedComposeStackBanner>,
+}
+
+impl PostRunKeepAliveGuard {
+    pub fn new(
+        label: &'static str,
+        work_dir: PathBuf,
+        dashboard_port: Option<u16>,
+        compose_stack: Option<OwnedComposeStackBanner>,
+    ) -> Self {
+        Self {
+            label,
+            work_dir,
+            dashboard_port,
+            compose_stack,
+        }
+    }
+}
+
+impl Drop for PostRunKeepAliveGuard {
+    fn drop(&mut self) {
+        if !keep_running_after_exit_with_workdir(Some(&self.work_dir)) {
+            return;
+        }
+        let compose_stack = self.compose_stack.as_ref().map(|cs| ComposeStackBanner {
+            project: cs.project.as_str(),
+            compose_file: cs.compose_file.as_path(),
+        });
+        print_keep_alive_banner(&self.work_dir, self.dashboard_port, compose_stack);
+
+        let secs = keep_alive_duration_secs();
+        eprintln!(
+            "[{}] keep-alive hold: keeping harness process alive for {}s \
+             so dashboard/kernel state remains inspectable (set {}=0 for \
+             no hold; Ctrl-C when finished)",
+            self.label, secs, ENV_KEEP_ALIVE_DURATION_SECS,
+        );
+        if secs > 0 {
+            std::thread::sleep(Duration::from_secs(secs));
+        }
+    }
 }
 
 // ─── Operator-facing banner ──────────────────────────────────────
@@ -392,6 +509,7 @@ mod tests {
     fn keep_running_after_exit_default_is_false() {
         let _g = lock();
         let _env = SetEnvGuard::unset(ENV_KEEP_RUNNING_AFTER_EXIT);
+        let _env_alias = SetEnvGuard::unset(ENV_KEEP_ALIVE_ALIAS);
         let _cli = CliFlagGuard::set(false);
         let tmp = tempfile::tempdir().expect("tempdir");
         // No env, no CLI bit, no touch-file → off.
@@ -406,6 +524,7 @@ mod tests {
     fn keep_running_after_exit_env_var_activates() {
         let _g = lock();
         let _cli = CliFlagGuard::set(false);
+        let _env_alias = SetEnvGuard::unset(ENV_KEEP_ALIVE_ALIAS);
         // Truthy spellings.
         for v in ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON"] {
             let _env = SetEnvGuard::set(ENV_KEEP_RUNNING_AFTER_EXIT, v);
@@ -427,6 +546,21 @@ mod tests {
             !keep_running_after_exit(),
             "unset env var MUST NOT activate keep-alive",
         );
+    }
+
+    /// Short alias activation — older live-e2e runbooks used
+    /// `RAXIS_KEEP_ALIVE=1`. Keep supporting it explicitly so
+    /// copy-pasted operator commands do not silently disable
+    /// post-mortem state retention.
+    #[test]
+    fn keep_running_after_exit_short_alias_activates() {
+        let _g = lock();
+        let _env = SetEnvGuard::unset(ENV_KEEP_RUNNING_AFTER_EXIT);
+        let _env_alias = SetEnvGuard::set(ENV_KEEP_ALIVE_ALIAS, "1");
+        let _cli = CliFlagGuard::set(false);
+        assert!(keep_running_after_exit());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(keep_running_after_exit_with_workdir(Some(tmp.path())));
     }
 
     /// Pure-parser witness: every truthy / falsy token resolves
@@ -463,6 +597,7 @@ mod tests {
     fn keep_running_after_exit_touch_file_activates() {
         let _g = lock();
         let _env = SetEnvGuard::unset(ENV_KEEP_RUNNING_AFTER_EXIT);
+        let _env_alias = SetEnvGuard::unset(ENV_KEEP_ALIVE_ALIAS);
         let _cli = CliFlagGuard::set(false);
         let tmp = tempfile::tempdir().expect("tempdir");
         // Before the touch file exists, no activation.
@@ -483,6 +618,7 @@ mod tests {
     fn keep_running_after_exit_cli_flag_activates() {
         let _g = lock();
         let _env = SetEnvGuard::unset(ENV_KEEP_RUNNING_AFTER_EXIT);
+        let _env_alias = SetEnvGuard::unset(ENV_KEEP_ALIVE_ALIAS);
         let _cli = CliFlagGuard::set(true);
         // Env unset, no touch file, but CLI bit on → keep-alive on.
         assert!(keep_running_after_exit());
@@ -504,7 +640,48 @@ mod tests {
             ENV_KEEP_RUNNING_AFTER_EXIT,
             "RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT",
         );
+        assert_eq!(ENV_KEEP_ALIVE_ALIAS, "RAXIS_KEEP_ALIVE");
+        assert_eq!(
+            ENV_KEEP_ALIVE_DURATION_SECS,
+            "RAXIS_E2E_KEEP_ALIVE_DURATION_SECS",
+        );
+        assert_eq!(
+            ENV_KEEP_ALIVE_DURATION_SECS_ALIAS,
+            "RAXIS_KEEP_ALIVE_DURATION_SECS",
+        );
         assert_eq!(KEEP_RUNNING_TOUCH_FILE, "KEEP_RUNNING");
+    }
+
+    /// Duration parsing is bounded and alias-aware. The canonical
+    /// env var wins so a caller can override an older shell alias
+    /// without first unsetting it.
+    #[test]
+    fn keep_alive_duration_secs_uses_canonical_then_alias_then_default() {
+        let _g = lock();
+        let _dur = SetEnvGuard::unset(ENV_KEEP_ALIVE_DURATION_SECS);
+        let _dur_alias = SetEnvGuard::unset(ENV_KEEP_ALIVE_DURATION_SECS_ALIAS);
+        assert_eq!(keep_alive_duration_secs(), DEFAULT_KEEP_ALIVE_DURATION_SECS);
+        drop(_dur);
+        drop(_dur_alias);
+
+        let _dur = SetEnvGuard::unset(ENV_KEEP_ALIVE_DURATION_SECS);
+        let _dur_alias = SetEnvGuard::set(ENV_KEEP_ALIVE_DURATION_SECS_ALIAS, "12");
+        assert_eq!(keep_alive_duration_secs(), 12);
+        drop(_dur);
+        drop(_dur_alias);
+
+        let _dur = SetEnvGuard::set(ENV_KEEP_ALIVE_DURATION_SECS, "7");
+        let _dur_alias = SetEnvGuard::set(ENV_KEEP_ALIVE_DURATION_SECS_ALIAS, "12");
+        assert_eq!(keep_alive_duration_secs(), 7);
+        drop(_dur);
+        drop(_dur_alias);
+
+        let _dur = SetEnvGuard::set(
+            ENV_KEEP_ALIVE_DURATION_SECS,
+            &(MAX_KEEP_ALIVE_DURATION_SECS + 1).to_string(),
+        );
+        let _dur_alias = SetEnvGuard::unset(ENV_KEEP_ALIVE_DURATION_SECS_ALIAS);
+        assert_eq!(keep_alive_duration_secs(), MAX_KEEP_ALIVE_DURATION_SECS);
     }
 
     /// `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01` Drop-side witness —
@@ -534,6 +711,7 @@ mod tests {
 
         // Default (no signal): teardown MUST run.
         let _env = SetEnvGuard::unset(ENV_KEEP_RUNNING_AFTER_EXIT);
+        let _env_alias = SetEnvGuard::unset(ENV_KEEP_ALIVE_ALIAS);
         let _cli = CliFlagGuard::set(false);
         let tmp = tempfile::tempdir().expect("tempdir");
         let tore_down = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -552,6 +730,7 @@ mod tests {
 
         // Env-var on: teardown MUST be skipped.
         let _env = SetEnvGuard::set(ENV_KEEP_RUNNING_AFTER_EXIT, "1");
+        let _env_alias = SetEnvGuard::unset(ENV_KEEP_ALIVE_ALIAS);
         let _cli = CliFlagGuard::set(false);
         let tmp = tempfile::tempdir().expect("tempdir");
         let tore_down = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -566,10 +745,12 @@ mod tests {
             "env-var branch MUST skip teardown (RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1)",
         );
         drop(_env);
+        drop(_env_alias);
         drop(_cli);
 
         // Touch-file on, env unset: teardown MUST be skipped.
         let _env = SetEnvGuard::unset(ENV_KEEP_RUNNING_AFTER_EXIT);
+        let _env_alias = SetEnvGuard::unset(ENV_KEEP_ALIVE_ALIAS);
         let _cli = CliFlagGuard::set(false);
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(tmp.path().join(KEEP_RUNNING_TOUCH_FILE), b"").expect("write touch file");
@@ -585,11 +766,13 @@ mod tests {
             "touch-file branch MUST skip teardown (work_dir/KEEP_RUNNING present)",
         );
         drop(_env);
+        drop(_env_alias);
         drop(_cli);
 
         // CLI-flag on, env unset, no touch file: teardown MUST
         // be skipped. Composes with the other signals via OR.
         let _env = SetEnvGuard::unset(ENV_KEEP_RUNNING_AFTER_EXIT);
+        let _env_alias = SetEnvGuard::unset(ENV_KEEP_ALIVE_ALIAS);
         let _cli = CliFlagGuard::set(true);
         let tmp = tempfile::tempdir().expect("tempdir");
         let tore_down = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -600,6 +783,31 @@ mod tests {
             };
         }
         assert!(!tore_down.get(), "CLI-flag branch MUST skip teardown",);
+    }
+
+    /// The post-run guard must be safe on the panic/unwind path:
+    /// with keep-alive active and duration set to zero, Drop emits
+    /// its banner and returns immediately instead of hanging the
+    /// unit suite.
+    #[test]
+    fn post_run_keep_alive_guard_drop_respects_zero_duration() {
+        let _g = lock();
+        let _env = SetEnvGuard::set(ENV_KEEP_RUNNING_AFTER_EXIT, "1");
+        let _env_alias = SetEnvGuard::unset(ENV_KEEP_ALIVE_ALIAS);
+        let _dur = SetEnvGuard::set(ENV_KEEP_ALIVE_DURATION_SECS, "0");
+        let _dur_alias = SetEnvGuard::unset(ENV_KEEP_ALIVE_DURATION_SECS_ALIAS);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        {
+            let _guard = PostRunKeepAliveGuard::new(
+                "keep-alive-test",
+                tmp.path().to_path_buf(),
+                Some(19820),
+                Some(OwnedComposeStackBanner {
+                    project: "raxis-live-e2e-test".to_owned(),
+                    compose_file: PathBuf::from("/tmp/synthetic-compose.yml"),
+                }),
+            );
+        }
     }
 
     /// Banner emission MUST NOT panic on any reasonable input

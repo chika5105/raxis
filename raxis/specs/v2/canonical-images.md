@@ -647,7 +647,7 @@ staging in one idempotent pipeline. The driver:
    explicit `--kernel-config <.config>`, a sidecar
    `vmlinux.config`, or an embedded `CONFIG_IKCONFIG` blob, then
    requires built-in nftables NAT/REDIRECT support for Path A3's
-   `iptables-nft` REDIRECT chain. The canonical fragment is
+   native `nft` REDIRECT chain. The canonical fragment is
    `images/kernel/raxis-guest-a3-netfilter.config`, and all required
    options must be built in (`=y`) because the initramfs does not
    stage kernel modules. (`INV-GUEST-KERNEL-A3-NFTABLES-01`.)

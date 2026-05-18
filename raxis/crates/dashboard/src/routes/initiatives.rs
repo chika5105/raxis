@@ -99,10 +99,11 @@ pub struct DagNode {
     /// `is_active` is true regardless of the `state` string. See
     /// `INV-DASHBOARD-RUNNING-STATE-VISIBLE-01`.
     pub is_active: bool,
-    /// iter68 PR 4 — latest-verdict-per-gate rollup so the FE can
-    /// render a colour-coded chip strip under each node. Empty
-    /// when the task has no witnesses yet. Stable-ordered by
-    /// `gate_type`.
+    /// Latest gate state per gate so the FE can render witness gates
+    /// as first-class dashed DAG nodes. Includes both issued-but-not-
+    /// answered verifier tokens (`latest_verdict = "Pending"`) and
+    /// durable witness rows (`Pass` / `Fail` / `Inconclusive`).
+    /// Empty when no verifier has been spawned for the task.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gate_verdict_summary: Vec<crate::data::DagGateVerdictChip>,
 }

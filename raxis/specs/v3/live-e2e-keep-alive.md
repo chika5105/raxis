@@ -40,6 +40,14 @@ RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1 cargo test --release \
     --test extended_e2e_realistic_scenario -- --nocapture
 ```
 
+The older short spelling remains accepted for operator runbooks that
+already use it:
+
+```bash
+RAXIS_KEEP_ALIVE=1 RAXIS_KEEP_ALIVE_DURATION_SECS=7200 cargo test --release \
+    --test extended_e2e_realistic_scenario -- --nocapture
+```
+
 | Value (case-insensitive)                     | Activates? |
 | --------------------------------------------- | ---------- |
 | `1`, `true`, `yes`, `on`                      | yes        |
@@ -67,6 +75,21 @@ For test binaries that take args. The current `cargo test`-driven binaries do no
 
 OR — any one signal activates. None of them dominate the others; a future maintainer who flipped this to AND would trip the `keep_running_after_exit_cli_flag_activates` and `keep_running_after_exit_touch_file_activates` witnesses.
 
+### 2.5 Post-run hold duration
+
+When keep-alive is active, the harness keeps its own process alive
+after success or failure so the kernel dashboard, stderr reader, and
+sidecars remain connected for inspection. The default hold is 7200
+seconds. Override it with:
+
+```bash
+RAXIS_E2E_KEEP_ALIVE_DURATION_SECS=1800
+```
+
+The short alias `RAXIS_KEEP_ALIVE_DURATION_SECS` is accepted too.
+`0` skips the sleep while still skipping teardown. Values above one
+day are clamped to 86400 seconds.
+
 ---
 
 ## 3. What stays running, what tears down
@@ -85,9 +108,11 @@ OR — any one signal activates. None of them dominate the others; a future main
 
 ### 3.3 What this flag does NOT guarantee
 
-- **Survival of the kernel and otel-pusher subprocesses past `cargo test` exit.** When `cargo test` exits, the parent process holds the read end of the kernel's `Stdio::piped()` stderr; the next stderr write from the kernel may receive `SIGPIPE` and terminate the daemon. Operators who want true "leave the test, walk away, come back hours later" survival should:
-  - Run the test under `setsid` / `nohup`, OR
-  - Keep the test process alive in the foreground (the keep-alive flag is for inspection during a single operator session, not background daemonisation).
+- **Unbounded daemonisation after the hold window.** Keep-alive is a bounded
+  post-mortem hold, not a process supervisor. Once the hold duration
+  elapses, `cargo test` exits with the real verdict and any orphaned
+  child process survival is best-effort. Production deployments use
+  launchd / systemd / ECS instead.
 - **Compose-stack survival across host reboots.** The compose stack uses named volumes (`{project}_prometheus_data`, `{project}_grafana_data`) that survive `docker compose down` but not host reboots if the volumes are wiped externally.
 
 ---
@@ -147,6 +172,7 @@ The keep-alive flag is read at every site where the harness would otherwise issu
 | Site                                                            | File                                                                       | Default behaviour                                                                                    | Keep-alive behaviour |
 | --------------------------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | -------------------- |
 | `kernel.shutdown_with(SIGTERM, …)` + post-mortem chain walk     | `kernel/tests/extended_e2e_realistic_scenario.rs`, `full_e2e_session_lifecycle.rs` | sends SIGTERM, asserts kernel exits cleanly, walks audit chain                                       | skipped, banner printed instead |
+| `PostRunKeepAliveGuard::Drop`                                   | `kernel/tests/common/keep_alive.rs`                                    | no-op                                                                                               | prints the post-mortem banner and sleeps for the configured hold duration |
 | `KernelInstance::Drop`                                          | `kernel/tests/common/kernel_harness.rs`                                    | SIGKILLs kernel if still alive (panic-path safety net)                                               | skipped              |
 | `OtelPusherSupervisor::Drop`                                    | `kernel/tests/extended_e2e_support/otel_pusher.rs`                         | SIGTERM-then-SIGKILL the pusher (500 ms grace)                                                       | skipped (child forgotten so no destructor fires) |
 | `Tier3Reporter::Drop` cleanup branch                            | `kernel/tests/common/tier3_artifacts.rs`                                   | `remove_dir_all(<data_dir>)` when `RAXIS_E2E_KEEP=0` AND success                                     | skipped, log line announces "keep-running flag active; RAXIS_E2E_KEEP=0 ignored" |
@@ -164,6 +190,9 @@ Pinned in `kernel/tests/common/keep_alive.rs::tests` and `kernel/tests/extended_
 | --------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | `keep_running_after_exit_default_is_false`                | `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01` — absent any signal, helper returns false |
 | `keep_running_after_exit_env_var_activates`               | every truthy/falsy spelling of the env var                                    |
+| `keep_running_after_exit_short_alias_activates`            | `RAXIS_KEEP_ALIVE=1` activates the same keep-alive path                         |
+| `keep_alive_duration_secs_uses_canonical_then_alias_then_default` | duration env precedence, default, and one-day clamp                         |
+| `post_run_keep_alive_guard_drop_respects_zero_duration`    | post-run guard is safe to run from Drop and respects `duration=0`              |
 | `parse_truthy_env_value_canonical_cases`                  | pure parser, every truthy/falsy spelling                                     |
 | `keep_running_after_exit_touch_file_activates`            | `<work_dir>/KEEP_RUNNING` activation                                          |
 | `keep_running_after_exit_cli_flag_activates`              | CLI bit OR'd with env / touch                                                |
@@ -190,6 +219,10 @@ The flag exists for one reason: an operator running `cargo test ... extended_e2e
 ```bash
 # Run the realism-e2e iter and keep everything live for post-mortem.
 RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1 cargo test --release \
+    -p raxis-kernel --test extended_e2e_realistic_scenario -- --nocapture
+
+# Older short spelling accepted by the harness too:
+RAXIS_KEEP_ALIVE=1 RAXIS_KEEP_ALIVE_DURATION_SECS=7200 cargo test --release \
     -p raxis-kernel --test extended_e2e_realistic_scenario -- --nocapture
 
 # Mid-run (in another shell), flip the flag without restarting:

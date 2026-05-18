@@ -127,4 +127,34 @@ describe("<DagGraph> is_active plumbing", () => {
     expect(t1.getAttribute("data-dimmed")).toBe("true");
     expect(t2.getAttribute("data-dimmed")).toBeNull();
   });
+
+  it("renders mechanical witness gates as dashed DAG nodes", () => {
+    const { container } = render(
+      <DagGraph
+        nodes={[
+          {
+            task_id: "T1",
+            title: "merge",
+            state: "GatesPending",
+            gate_verdict_summary: [
+              {
+                gate_type: "NoSecretStrings",
+                latest_verdict: "Pending",
+                recorded_at: 1_700_000_000,
+              },
+            ],
+          },
+        ]}
+        edges={[]}
+      />,
+    );
+
+    const gate = container.querySelector(
+      'g[data-node-kind="gate"][data-status="GatesPending"]',
+    )!;
+    expect(gate).toBeTruthy();
+    expect(gate.getAttribute("aria-label")).toMatch(/Witness gate NoSecretStrings/);
+    const gateBody = gate.querySelector("rect")!;
+    expect(gateBody.getAttribute("stroke-dasharray")).toBe("7 5");
+  });
 });

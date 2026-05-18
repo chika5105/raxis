@@ -131,11 +131,22 @@ Two compose files live in this directory:
   `docker-compose.e2e.yml`: same upstream-service blocks plus the
   observability triple (otel-collector / prometheus / grafana on
   the same `127.0.0.1:4318` / `:9090` / `:3000` ports), and
-  additionally pre-seeds `appdb.seeded_docs` and
-  `raxis_e2e.seeded_rows` for `kernel/tests/extended_e2e_*.rs`.
+  additionally pre-seeds `raxis_e2e_mongo.seeded_docs` and
+  `raxis_e2e_pg.seeded_rows` for `kernel/tests/extended_e2e_*.rs`.
   It publishes the same ports on the same loopback addresses so
   a slice configured for one works against the other unchanged
   and dashboards populate end-to-end either way.
+
+For the realistic extended scenario, prefer:
+
+```bash
+cargo xtask observability up --full --no-open
+```
+
+The `--full` path uses the extended compose file and converges the
+seeded service stack. The harness also re-applies the Postgres and
+Mongo seed scripts at startup so a long-running base stack cannot
+masquerade as a ready extended stack.
 
 > **Path A3 / Mediated egress.** After the Tier1Tproxy deletion
 > (TODO `tier1-deletion-fold-into-cleanup-sweep`) every executor /
@@ -997,6 +1008,20 @@ transparent-proxy witness in **two** modes:
    Stages the scripts into the executor's worktree, lets the
    real LLM-driven Executor task run them through the credential
    proxies, then asserts the chain + worktree against the witness.
+
+For an interactive live run where the dashboard should remain
+available after either success or failure, add keep-alive:
+
+```bash
+RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 \
+RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1 RAXIS_E2E_KEEP_ALIVE_DURATION_SECS=7200 \
+  cargo test -p raxis-kernel \
+    --test extended_e2e_realistic_scenario \
+    realistic_session_lifecycle -- --nocapture --test-threads=1
+```
+
+The older short aliases `RAXIS_KEEP_ALIVE=1` and
+`RAXIS_KEEP_ALIVE_DURATION_SECS=7200` are accepted too.
 
 ---
 

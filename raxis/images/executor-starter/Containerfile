@@ -45,11 +45,11 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     gnupg \
     grep \
     iproute2 \
-    iptables \
     jq \
     less \
     make \
     netcat-openbsd \
+    nftables \
     procps \
     sed \
     tar \
@@ -59,22 +59,18 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Path A3 universal-airgap (`specs/v2/airgap-architecture.md §6`)
-# requires `iptables` inside the guest to install the `nat OUTPUT`
-# REDIRECT chain at PID-1 setup time. Debian bookworm ships
-# `iptables-nft` as the default backend (xtables-nft variant);
-# `cargo xtask images dev-kernel` / `images bake` now validate that
-# the staged guest kernel has built-in nftables NAT/REDIRECT support
-# before the image can boot with this rootfs. The legacy backend
-# remains installed by the same Debian package as a last-ditch
-# operator diagnostic, but the canonical path is nftables. `iproute2`
-# is pulled in for the cred-proxy loopback-forwarder + the A3 stub if
-# a future operator wants to debug the chain interactively.
+# requires native `nft` inside the guest to install the `nat OUTPUT`
+# REDIRECT chain at PID-1 setup time. We do not use the iptables
+# compatibility frontends: the canonical guest kernel is validated
+# for built-in nftables NAT/REDIRECT support, and native nftables
+# avoids xtables extension drift. `iproute2` is pulled in for the
+# cred-proxy loopback-forwarder + the A3 stub if a future operator
+# wants to debug the chain interactively.
 #
 # These packages add ~5 MB to the canonical executor rootfs and
 # are unconditionally enabled because the kernel-side `EgressTier`
 # selection is the cgroup that decides whether they are
-# load-bearing — under the default-off path the iptables binary
-# is present but never invoked.
+# load-bearing.
 
 # Node 20 LTS via NodeSource.
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \

@@ -595,11 +595,10 @@ pub fn init_pid1_filesystem() {
             // Musl libc's `execvp` then falls back to a default
             // search path of `/usr/local/bin:/bin:/usr/bin` — which
             // does NOT include `/usr/sbin`, where Debian ships
-            // iptables, ip, sysctl, etc. Bare-name `Command::new("X")`
-            // calls would silently miss those binaries (the
-            // forensic case was `iptables` in `install_iptables_redirect`,
-            // which produced a 15-minute executor wedge before the
-            // planner-IPC idle watchdog reaped the VM).
+            // nft, ip, sysctl, etc., and does NOT include
+            // `/root/.cargo/bin`, where the executor starter image
+            // installs Rust via rustup. Bare-name `Command::new("X")`
+            // calls would silently miss those binaries.
             // Synthesising a defensive PATH here is cheap (one
             // `set_var`), idempotent, and short-circuits any future
             // bare-name spawn that lands inside the agent VM. The
@@ -615,13 +614,13 @@ pub fn init_pid1_filesystem() {
                 unsafe {
                     std::env::set_var(
                         "PATH",
-                        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                        "/root/.cargo/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                     );
                 }
                 eprintln!(
                     "{{\"level\":\"info\",\"step\":\"guest-init\",\
                      \"event\":\"pid1_default_path_set\",\
-                     \"value\":\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"}}"
+                     \"value\":\"/root/.cargo/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"}}"
                 );
             }
         }
@@ -634,12 +633,12 @@ pub fn init_pid1_filesystem() {
 // ---------------------------------------------------------------------------
 
 /// Env var consumed by [`init_pid1_a3_egress`] to size the
-/// iptables REDIRECT chain that catches outbound TCP from agent
+/// nftables REDIRECT chain that catches outbound TCP from agent
 /// processes. Default `3129` matches
 /// `raxis_tproxy::linux::bind_default_listener`.
 pub const A3_TPROXY_PORT_ENV: &str = "RAXIS_AIRGAP_A3_TPROXY_PORT";
 
-/// Default in-guest port the iptables REDIRECT chain forwards
+/// Default in-guest port the nftables REDIRECT chain forwards
 /// outbound TCP to. Mirrors `raxis_tproxy::linux::bind_default_listener`.
 pub const A3_DEFAULT_TPROXY_PORT: u16 = 3129;
 
@@ -666,16 +665,19 @@ pub const A3_DEFAULT_TPROXY_PORT: u16 = 3129;
 ///      every `getaddrinfo` through `127.0.0.1:53` — i.e. the
 ///      in-guest DNS stub that fans queries out over vsock to
 ///      the kernel-side resolver.
-///   3. Install `iptables -t nat OUTPUT` REDIRECT rules to send
+///   3. Install native nftables `nat OUTPUT` REDIRECT rules to send
 ///      outbound TCP to the local tproxy listener
 ///      (`127.0.0.1:<tproxy_port>`). UDP port 53 is REDIRECTed
-///      to the local DNS stub on port 53.
+///      to the local DNS stub on port 53. The canonical path uses
+///      native nftables (`nft -f -`) instead of the xtables
+///      compatibility frontend, which removes the iptables-nft
+///      extension mismatch that showed up in live e2e.
 ///
 /// Failures on any individual step are logged but non-fatal:
 /// the kernel-side admission listener is the load-bearing
 /// chokepoint (`INV-NETISO-A3-VSOCK-CHOKEPOINT-01`) and refuses
 /// every connection that arrives from a guest with no admission
-/// token. A botched iptables install therefore degrades to
+/// token. A botched nftables install therefore degrades to
 /// "guest cannot reach the network at all" rather than "guest
 /// has bypassed the chokepoint".
 pub fn init_pid1_a3_egress() {
@@ -690,7 +692,7 @@ pub fn init_pid1_a3_egress() {
             .unwrap_or(A3_DEFAULT_TPROXY_PORT);
         linux_a3::disable_ipv6_via_sysfs();
         linux_a3::write_resolv_conf_for_stub();
-        linux_a3::install_iptables_redirect(tproxy_port);
+        linux_a3::install_nftables_redirect(tproxy_port);
     }
 }
 
@@ -814,7 +816,7 @@ pub const SENSITIVE_ENV_VARS_TO_SCRUB: &[&str] = &[
 /// ## Where this runs
 ///
 /// Called from each planner-binary `main` between
-/// `init_pid1_a3_egress` (which installs the iptables REDIRECT
+/// `init_pid1_a3_egress` (which installs the nftables REDIRECT
 /// chain that the in-guest tproxy depends on) and the tokio
 /// runtime construction. Subsequent agent-tool subprocess spawns
 /// inherit:
@@ -1271,143 +1273,125 @@ mod linux_a3 {
         );
     }
 
-    /// Shell out to `iptables` (`iptables-nft` or
-    /// `iptables-legacy`, whichever is on PATH) to install the
-    /// A3 REDIRECT chain. We try each binary candidate in turn
-    /// because the canonical executor rootfs may ship either —
-    /// the `images/executor-starter/Containerfile` is the
-    /// authoritative source of truth.
-    pub(super) fn install_iptables_redirect(tproxy_port: u16) {
-        // RULES — applied in order. Each rule is a list of argv
-        // tokens; empty list = end of rules.
-        //
-        // 1. Skip the cred-proxy loopback range (already on
-        //    127.0.0.1, which is INPUT not OUTPUT — we let it
-        //    through unconditionally).
-        // 2. REDIRECT outbound TCP (any dest, any port) to the
-        //    in-guest tproxy listener.
-        // 3. REDIRECT outbound UDP port 53 (DNS) to the in-guest
-        //    DNS stub on port 53.
-        let tproxy_port_s = tproxy_port.to_string();
-        let rules: Vec<Vec<&str>> = vec![
-            // Don't REDIRECT traffic that is already loopback —
-            // the cred-proxy loopback forwarder and the DNS stub
-            // both bind 127.0.0.1.
-            vec!["-t", "nat", "-A", "OUTPUT", "-o", "lo", "-j", "RETURN"],
-            // Default-deny REJECT-as-RST equivalent is implicit:
-            // anything that doesn't hit one of the REDIRECT rules
-            // below has no upstream NIC anyway (substrate gave us
-            // EgressTier::Mediated), so connect(2) returns
-            // ENETUNREACH / EHOSTUNREACH which surfaces to the
-            // agent's libc as a clean failure.
-            vec![
-                "-t",
-                "nat",
-                "-A",
-                "OUTPUT",
-                "-p",
-                "tcp",
-                "!",
-                "-d",
-                "127.0.0.1/32",
-                "-j",
-                "REDIRECT",
-                "--to-ports",
-                &tproxy_port_s,
-            ],
-            vec![
-                "-t",
-                "nat",
-                "-A",
-                "OUTPUT",
-                "-p",
-                "udp",
-                "--dport",
-                "53",
-                "!",
-                "-d",
-                "127.0.0.1/32",
-                "-j",
-                "REDIRECT",
-                "--to-ports",
-                "53",
-            ],
-        ];
-
-        // iter73 regression note: the executor VM's PID 1 starts
-        // with `HOME=/ TERM=linux` only — no PATH. Musl libc's
-        // `execvp` default search path is
-        // `"/usr/local/bin:/bin:/usr/bin"` which does NOT include
-        // `/usr/sbin`, where Debian's iptables package installs
-        // its binaries. A bare-name `Command::new("iptables")`
-        // therefore fails with ENOENT and the REDIRECT chain
-        // never installs, leaving the agent's network egress
-        // hanging in TCP-connect retransmission until the kernel
-        // watchdog reaps the VM ~15 min later. We mitigate by
-        // trying canonical absolute paths first; the bare-name
-        // entries remain as a last-resort fallback for substrates
-        // whose iptables ships under a different prefix. See
-        // `specs/v3/iter73-networking-dry-run-trace.md` for the
-        // full forensic walkthrough.
+    /// Shell out to native `nft` to install the A3 REDIRECT chain.
+    ///
+    /// We deliberately avoid the iptables compatibility frontends:
+    /// the live-e2e failure mode was an xtables REDIRECT extension
+    /// mismatch even though the kernel had nftables core support.
+    /// Native nftables keeps the userspace/kernel contract aligned
+    /// with the Kconfig fragment validated during bake.
+    pub(super) fn install_nftables_redirect(tproxy_port: u16) {
+        let ruleset = nft_redirect_ruleset(tproxy_port);
         let binaries: &[&str] = &[
-            "/usr/sbin/iptables-nft",
-            "/sbin/iptables-nft",
-            "/usr/sbin/iptables-legacy",
-            "/sbin/iptables-legacy",
-            "/usr/sbin/iptables",
-            "/sbin/iptables",
-            "iptables-nft",
-            "iptables-legacy",
-            "iptables",
+            "/usr/sbin/nft",
+            "/sbin/nft",
+            "/usr/bin/nft",
+            "/bin/nft",
+            "nft",
         ];
         let mut installed_any = false;
         for binary in binaries {
-            let mut ok = true;
-            for argv in &rules {
-                let status = std::process::Command::new(binary).args(argv).status();
-                match status {
-                    Ok(s) if s.success() => {}
-                    Ok(s) => {
-                        eprintln!(
-                            "{{\"level\":\"warn\",\"step\":\"guest-init-a3\",\
-                              \"event\":\"iptables_rule_failed\",\
-                              \"binary\":{binary:?},\"argv\":{argv:?},\
-                              \"exit\":{:?}}}",
-                            s.code(),
-                        );
-                        ok = false;
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "{{\"level\":\"info\",\"step\":\"guest-init-a3\",\
-                              \"event\":\"iptables_binary_missing\",\
-                              \"binary\":{binary:?},\"err\":{:?}}}",
-                            e.to_string(),
-                        );
-                        ok = false;
-                        break;
-                    }
+            match run_nft_ruleset(binary, &ruleset) {
+                Ok(()) => {
+                    installed_any = true;
+                    eprintln!(
+                        "{{\"level\":\"info\",\"step\":\"guest-init-a3\",\
+                          \"event\":\"nftables_redirect_installed\",\
+                          \"binary\":{binary:?},\"tproxy_port\":{tproxy_port}}}"
+                    );
+                    break;
                 }
-            }
-            if ok {
-                installed_any = true;
-                eprintln!(
-                    "{{\"level\":\"info\",\"step\":\"guest-init-a3\",\
-                      \"event\":\"iptables_redirect_installed\",\
-                      \"binary\":{binary:?},\"tproxy_port\":{tproxy_port}}}"
-                );
-                break;
+                Err(NftInstallError::Missing { reason }) => {
+                    eprintln!(
+                        "{{\"level\":\"info\",\"step\":\"guest-init-a3\",\
+                          \"event\":\"nft_binary_missing\",\
+                          \"binary\":{binary:?},\"err\":{reason:?}}}"
+                    );
+                }
+                Err(NftInstallError::Failed { reason }) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"step\":\"guest-init-a3\",\
+                          \"event\":\"nftables_install_candidate_failed\",\
+                          \"binary\":{binary:?},\"err\":{reason:?}}}"
+                    );
+                }
             }
         }
         if !installed_any {
             eprintln!(
                 "{{\"level\":\"warn\",\"step\":\"guest-init-a3\",\
-                  \"event\":\"iptables_install_failed\",\
+                  \"event\":\"nftables_install_failed\",\
                   \"note\":\"egress will fail closed — substrate has no NIC \
                   and the in-guest tproxy listener is unreachable from \
-                  agent processes without the REDIRECT chain\"}}"
+                  agent processes without the nftables REDIRECT chain\"}}"
             );
+        }
+    }
+
+    pub(super) fn nft_redirect_ruleset(tproxy_port: u16) -> String {
+        format!(
+            r#"table inet raxis_a3 {{
+  chain output {{
+    type nat hook output priority -100; policy accept;
+    oifname "lo" return
+    ip daddr 127.0.0.0/8 return
+    ip protocol tcp redirect to :{tproxy_port}
+    udp dport 53 redirect to :53
+  }}
+}}
+"#
+        )
+    }
+
+    enum NftInstallError {
+        Missing { reason: String },
+        Failed { reason: String },
+    }
+
+    fn run_nft_ruleset(binary: &str, ruleset: &str) -> Result<(), NftInstallError> {
+        let mut child = std::process::Command::new(binary)
+            .arg("-f")
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    NftInstallError::Missing {
+                        reason: e.to_string(),
+                    }
+                } else {
+                    NftInstallError::Failed {
+                        reason: e.to_string(),
+                    }
+                }
+            })?;
+        match child.stdin.take() {
+            Some(mut stdin) => {
+                if let Err(e) = stdin.write_all(ruleset.as_bytes()) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(NftInstallError::Failed {
+                        reason: format!("stdin write failed: {e}"),
+                    });
+                }
+            }
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(NftInstallError::Failed {
+                    reason: "stdin unavailable".to_owned(),
+                });
+            }
+        }
+        let status = child.wait().map_err(|e| NftInstallError::Failed {
+            reason: format!("wait failed: {e}"),
+        })?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(NftInstallError::Failed {
+                reason: format!("exit {:?}", status.code()),
+            })
         }
     }
 }
@@ -1431,6 +1415,18 @@ mod tests_a3 {
         // port assignments to the guest.
         assert_eq!(A3_TPROXY_PORT_ENV, "RAXIS_AIRGAP_A3_TPROXY_PORT");
         assert_eq!(A3_DEFAULT_TPROXY_PORT, 3129);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a3_nft_ruleset_redirects_tcp_and_dns_while_preserving_loopback() {
+        let ruleset = linux_a3::nft_redirect_ruleset(3129);
+        assert!(ruleset.contains("type nat hook output priority -100"));
+        assert!(ruleset.contains("oifname \"lo\" return"));
+        assert!(ruleset.contains("ip daddr 127.0.0.0/8 return"));
+        assert!(ruleset.contains("ip protocol tcp redirect to :3129"));
+        assert!(ruleset.contains("udp dport 53 redirect to :53"));
+        assert!(!ruleset.contains("iptables"));
     }
 }
 

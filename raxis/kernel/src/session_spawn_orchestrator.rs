@@ -2138,6 +2138,55 @@ pub fn spawn_planner_dispatcher(
                 let active_exists: bool = active_count > 0;
                 let concurrency_cap =
                     plan_registry_for_post_exit.orchestrator_concurrency_cap(&initiative_id);
+                let gates_pending_exists: bool = conn
+                    .query_row(
+                        &format!(
+                            "SELECT 1 FROM {tasks}
+                              WHERE initiative_id = ?1
+                                AND state = 'GatesPending'
+                              LIMIT 1",
+                            tasks = Table::Tasks.as_str(),
+                        ),
+                        rusqlite::params![&initiative_id],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                if gates_pending_exists {
+                    eprintln!(
+                        "{{\"level\":\"info\",\
+                             \"event\":\"orchestrator_respawn_skipped\",\
+                             \"initiative_id\":\"{initiative_id}\",\
+                             \"session_id\":\"{session_id}\",\
+                             \"reason\":\"gates_pending\",\
+                             \"invariant\":\"INV-ORCH-WAIT-FOR-MECHANICAL-WITNESS-01\"}}",
+                        session_id = session_for_post_exit,
+                        initiative_id = initiative_id,
+                    );
+                    return None;
+                }
+                let orchestrator_idled_while_workers_active = active_exists
+                    && matches!(
+                        exit_notice_for_synth.as_ref(),
+                        Some(raxis_types::PlannerExitOutcome::IdleNoTerminalIntent { .. })
+                    );
+                if orchestrator_idled_while_workers_active {
+                    eprintln!(
+                        "{{\"level\":\"info\",\
+                             \"event\":\"orchestrator_respawn_skipped\",\
+                             \"initiative_id\":\"{initiative_id}\",\
+                             \"session_id\":\"{session_id}\",\
+                             \"reason\":\"active_workers_after_idle\",\
+                             \"active_count\":{active_count},\
+                             \"concurrency_cap\":{concurrency_cap},\
+                             \"invariant\":\"INV-ORCH-NNSP-ACTIVE-WORKERS-NOT-NO-PROGRESS-01\"}}",
+                        session_id = session_for_post_exit,
+                        initiative_id = initiative_id,
+                        active_count = active_count,
+                        concurrency_cap = concurrency_cap,
+                    );
+                    return None;
+                }
+
                 if pending_exists && active_count < concurrency_cap {
                     eprintln!(
                         "{{\"level\":\"info\",\
@@ -2641,7 +2690,7 @@ pub async fn respawn_orchestrator_for_initiative(
     let store_for_check = Arc::clone(&ctx.store);
     let init_for_check = initiative_id.to_owned();
     let preflight =
-        tokio::task::spawn_blocking(move || -> Result<(bool, bool), rusqlite::Error> {
+        tokio::task::spawn_blocking(move || -> Result<(bool, bool, u32), rusqlite::Error> {
             let conn = store_for_check.lock_sync();
             let is_executing: bool = conn
                 .query_row(
@@ -2679,18 +2728,47 @@ pub async fn respawn_orchestrator_for_initiative(
                     |_| Ok(true),
                 )
                 .unwrap_or(false);
-            Ok((is_executing, active_orchestrator))
+            let active_worker_count: u32 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(1) FROM {activations}
+                          WHERE initiative_id     = ?1
+                            AND activation_state  = 'Active'",
+                        activations = Table::SubtaskActivations.as_str(),
+                    ),
+                    rusqlite::params![&init_for_check],
+                    |r| r.get::<_, i64>(0),
+                )
+                .ok()
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(0);
+            Ok((is_executing, active_orchestrator, active_worker_count))
         })
         .await
         .ok()
         .and_then(Result::ok)
-        .unwrap_or((false, false));
+        .unwrap_or((false, false, 0));
 
-    let (is_executing, active_orchestrator) = preflight;
+    let (is_executing, active_orchestrator, active_worker_count) = preflight;
     if !is_executing {
         eprintln!(
             "{{\"level\":\"info\",\"event\":\"orchestrator_respawn_skipped\",\
              \"initiative_id\":\"{initiative_id}\",\"reason\":\"not_executing\"}}",
+        );
+        return None;
+    }
+    if active_orchestrator {
+        // Common case for tightly-clustered DAG events — e.g. the
+        // executor's `task_complete` admission, then a reviewer's
+        // `submit_review` admission, fire within milliseconds and
+        // the prior orchestrator session has not been revoked yet.
+        // This is not no-progress; a live coordinator already owns
+        // the next decision.
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"orchestrator_respawn_skipped\",\
+             \"initiative_id\":\"{initiative_id}\",\
+             \"reason\":\"orchestrator_already_active\",\
+             \"invariant\":\"INV-ORCH-NNSP-ACTIVE-ORCHESTRATOR-NOT-NO-PROGRESS-01\"}}",
         );
         return None;
     }
@@ -2751,6 +2829,15 @@ pub async fn respawn_orchestrator_for_initiative(
              \"invariant\":\"INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01\"}}",
         );
     }
+    if active_worker_count > 0 {
+        eprintln!(
+            "{{\"level\":\"info\",\
+             \"event\":\"orchestrator_respawn_active_workers_no_count_increment\",\
+             \"initiative_id\":\"{initiative_id}\",\
+             \"active_worker_count\":{active_worker_count},\
+             \"invariant\":\"INV-ORCH-NNSP-ACTIVE-WORKERS-NOT-NO-PROGRESS-01\"}}",
+        );
+    }
 
     // When `predecessor_was_capacity_pressure` is true, we skip the
     // SQLite-side increment + ceiling evaluation transaction
@@ -2759,7 +2846,7 @@ pub async fn respawn_orchestrator_for_initiative(
     // subsequent honest no-progress respawn (e.g. an actual rejected
     // RetrySubTask after the slot frees) walks the counter from its
     // pre-existing value rather than from a polluted starting point.
-    let skip_ceiling_check = predecessor_was_capacity_pressure;
+    let skip_ceiling_check = predecessor_was_capacity_pressure || active_worker_count > 0;
     let ceiling_outcome = if skip_ceiling_check {
         Some((
             crate::orch_respawn_ceiling::CeilingOutcome::Permitted {
@@ -3097,22 +3184,6 @@ pub async fn respawn_orchestrator_for_initiative(
                 max = crate::orch_respawn_ceiling::MAX_ORCH_NO_PROGRESS_RESPAWNS,
             );
         }
-    }
-
-    if active_orchestrator {
-        // Common case for tightly-clustered DAG events — e.g. the
-        // executor's `task_complete` admission, then a reviewer's
-        // `submit_review` admission, fire within milliseconds and
-        // the prior orchestrator session has not been revoked yet.
-        // The next reviewer/executor admission will trigger another
-        // re-spawn check; if THAT one finds no live orchestrator,
-        // it picks up the work.
-        eprintln!(
-            "{{\"level\":\"info\",\"event\":\"orchestrator_respawn_skipped\",\
-             \"initiative_id\":\"{initiative_id}\",\
-             \"reason\":\"orchestrator_already_active\"}}",
-        );
-        return None;
     }
 
     // ── Step 2: read the operator-authored task prompt for this

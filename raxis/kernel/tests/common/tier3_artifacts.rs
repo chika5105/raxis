@@ -601,7 +601,9 @@ mod tests {
         // Force the keep-running flag off — a sibling test could
         // have left it set, and Tier3Reporter::Drop honours it.
         let prior_kr = std::env::var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT").ok();
+        let prior_kr_alias = std::env::var("RAXIS_KEEP_ALIVE").ok();
         std::env::remove_var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT");
+        std::env::remove_var("RAXIS_KEEP_ALIVE");
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
@@ -619,6 +621,9 @@ mod tests {
         if let Some(v) = prior_kr {
             std::env::set_var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT", v);
         }
+        if let Some(v) = prior_kr_alias {
+            std::env::set_var("RAXIS_KEEP_ALIVE", v);
+        }
         assert!(data.exists(), "data dir must be kept on the failure path");
     }
 
@@ -629,7 +634,9 @@ mod tests {
         // Force the keep-running flag off — a sibling test could
         // have left it set, and Tier3Reporter::Drop honours it.
         let prior_kr = std::env::var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT").ok();
+        let prior_kr_alias = std::env::var("RAXIS_KEEP_ALIVE").ok();
         std::env::remove_var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT");
+        std::env::remove_var("RAXIS_KEEP_ALIVE");
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
@@ -645,6 +652,9 @@ mod tests {
         }
         if let Some(v) = prior_kr {
             std::env::set_var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT", v);
+        }
+        if let Some(v) = prior_kr_alias {
+            std::env::set_var("RAXIS_KEEP_ALIVE", v);
         }
         assert!(
             !data.exists(),

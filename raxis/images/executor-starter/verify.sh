@@ -23,6 +23,7 @@ for required in \
     "/usr/bin/git" \
     "/usr/bin/curl" \
     "/usr/bin/wget" \
+    "/usr/sbin/nft" \
     "/usr/bin/node" \
     "/usr/bin/python3" \
     "/usr/bin/make"; do

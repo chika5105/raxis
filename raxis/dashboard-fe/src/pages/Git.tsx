@@ -1,3 +1,4 @@
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -10,27 +11,66 @@ import { shortSha } from "@/lib/format";
 
 export function GitPage() {
   const navigate = useNavigate();
+  const [search, setSearch] = useState("");
   const q = useQuery({
     queryKey: ["worktrees"],
     queryFn: ({ signal }) => dashboardApi.git.list(signal),
     refetchInterval: 10_000,
   });
 
+  const items = q.data ?? [];
+  const filtered = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) return items;
+    return items.filter((w) =>
+      [
+        w.name,
+        w.label,
+        w.kind,
+        w.path,
+        w.session_id ?? "",
+        w.task_id ?? "",
+        w.base_sha ?? "",
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle),
+    );
+  }, [items, search]);
+  const sessionCount = items.filter((w) => w.kind !== "Main").length;
+
   if (q.isPending) return <PageSpinner />;
   if (q.error) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
-  const items = q.data;
 
   return (
     <div className="space-y-4">
-      <header>
-        <h1 className="text-xl font-semibold text-ink">Git Worktrees</h1>
-        <p className="text-sm text-ink-muted">
-          Operator-allowed roots and per-session VM clones.
-        </p>
+      <header className="flex items-end justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="text-xl font-semibold text-ink">Git Worktrees</h1>
+          <p className="text-sm text-ink-muted">
+            Review session changes with file lists and PR-style diffs.
+          </p>
+          <div className="mt-2 flex items-center gap-2 text-xs text-ink-subtle">
+            <span className="badge bg-panel-high border-edge text-ink-muted">
+              {items.length} total
+            </span>
+            <span className="badge bg-info-muted/30 border-info text-info">
+              {sessionCount} session
+            </span>
+          </div>
+        </div>
+        <input
+          className="input w-72"
+          placeholder="Search path / session / task…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+        />
       </header>
 
       {items.length === 0 ? (
         <Empty title="No worktrees registered." />
+      ) : filtered.length === 0 ? (
+        <Empty title="No worktrees match your search." />
       ) : (
         <div className="card p-0 overflow-hidden">
           <table className="w-full text-sm">
@@ -41,10 +81,11 @@ export function GitPage() {
                 <th className="text-left px-4 py-2 font-medium">Path</th>
                 <th className="text-left px-4 py-2 font-medium">Session / Task</th>
                 <th className="text-left px-4 py-2 font-medium">Base</th>
+                <th className="text-right px-4 py-2 font-medium">Review</th>
               </tr>
             </thead>
             <tbody>
-              {items.map((w) => {
+              {filtered.map((w) => {
                 const href = `/git/${encodeURIComponent(w.name)}`;
                 return (
                 <tr
@@ -111,6 +152,15 @@ export function GitPage() {
                   </td>
                   <td className="px-4 py-2.5 font-mono text-[11px] text-ink-muted">
                     {shortSha(w.base_sha)}
+                  </td>
+                  <td className="px-4 py-2.5 text-right">
+                    <Link
+                      to={href}
+                      onClick={(e) => e.stopPropagation()}
+                      className="btn text-xs py-1"
+                    >
+                      Open review
+                    </Link>
                   </td>
                 </tr>
                 );

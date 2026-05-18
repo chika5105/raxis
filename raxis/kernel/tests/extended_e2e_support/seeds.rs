@@ -26,6 +26,7 @@ pub const PG_HOST_PORT: &str = "127.0.0.1:54399";
 pub const MONGO_HOST_PORT: &str = "127.0.0.1:27399";
 pub const PG_USER: &str = "raxis_test";
 pub const PG_PASSWORD: &str = "raxis_test_pass";
+pub const PG_BOOTSTRAP_DATABASE: &str = "raxis_e2e";
 pub const PG_DATABASE: &str = "raxis_e2e_pg";
 pub const MONGO_USER: &str = "raxis_test";
 pub const MONGO_PASSWORD: &str = "raxis_test_pass";
@@ -285,7 +286,7 @@ pub fn reseed_both_or_panic() {
         .env("PGPASSWORD", PG_PASSWORD)
         .arg("--quiet")
         .arg(format!(
-            "postgresql://{PG_USER}@127.0.0.1:54399/{PG_DATABASE}"
+            "postgresql://{PG_USER}@127.0.0.1:54399/{PG_BOOTSTRAP_DATABASE}"
         ))
         .arg("-f")
         .arg(&pg_script);
