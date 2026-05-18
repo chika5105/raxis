@@ -75,19 +75,9 @@ impl Tool for VmCapabilitiesTool {
     }
 
     fn description(&self) -> &'static str {
-        "Discover what is pre-installed in the current VM — \
-         binaries on PATH, Python interpreter + importable \
-         packages, Node + global packages, Rust / Go toolchains, \
-         credential-proxy env vars, and workdir filesystem state. \
-         Returns deterministic JSON. Use this BEFORE writing \
-         scripts that import modules or invoke binaries — egress \
-         is gated by the kernel allowlist, so `pip install` / \
-         `npm install` / `cargo install` / `go get` will fail. \
-         The full manifest is also summarised in the system \
-         prompt's `## VM Environment` block; this tool is the \
-         recourse for finer queries (e.g. \"is `numpy` \
-         available?\" via `{\"filter\": {\"python_package\": \
-         \"numpy\"}}`)."
+        "Return deterministic JSON for installed binaries/runtimes/packages, \
+         credential-proxy env names, and workdir state. Use for focused \
+         capability checks; package installs usually fail without egress."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -96,10 +86,7 @@ impl Tool for VmCapabilitiesTool {
             "properties": {
                 "categories": {
                     "type":        "array",
-                    "description": "Subset of capabilities to return. \
-                                    Defaults to [\"all\"]. Categories \
-                                    not listed are returned in their \
-                                    empty / null form.",
+                    "description": "Subset to return; defaults to all.",
                     "items": {
                         "type": "string",
                         "enum": [
@@ -114,34 +101,19 @@ impl Tool for VmCapabilitiesTool {
                     "properties": {
                         "binary_name": {
                             "type":        "string",
-                            "description": "Filter `binaries` to those \
-                                            whose name CONTAINS this \
-                                            substring (case-sensitive).",
+                            "description": "Substring filter for binary names.",
                         },
                         "python_package": {
                             "type":        "string",
-                            "description": "Look up exactly one Python \
-                                            package by name; the response's \
-                                            `python.packages` is reduced \
-                                            to the matching entry (if \
-                                            absent from dist-info, an \
-                                            entry with `version=\"\"` and \
-                                            `importable` set from a live \
-                                            `python3 -c \"import <pkg>\"` \
-                                            probe is returned).",
+                            "description": "Look up one Python package.",
                         },
                         "node_package": {
                             "type":        "string",
-                            "description": "Look up exactly one Node \
-                                            global package by name.",
+                            "description": "Look up one global Node package.",
                         },
                         "env_var": {
                             "type":        "string",
-                            "description": "Look up exactly one env var \
-                                            by name. Kernel-private vars \
-                                            (RAXIS_VSOCK_LOOPBACK_PLAN, \
-                                            RAXIS_SESSION_TOKEN, …) are \
-                                            never returned regardless.",
+                            "description": "Look up one non-private env var.",
                         },
                     }
                 }

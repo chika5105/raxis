@@ -316,10 +316,8 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &'static str {
-        "Read the contents of a file in the workspace. \
-         The path argument is interpreted relative to the workspace \
-         root; absolute paths and `..` segments are rejected. \
-         Files larger than 1 MiB are truncated."
+        "Read a workspace-relative file. Rejects absolute paths and `..`; \
+         files over 1 MiB are truncated."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -381,10 +379,8 @@ impl Tool for EditFileTool {
         "edit_file"
     }
     fn description(&self) -> &'static str {
-        "Write the given UTF-8 `contents` to the workspace file at \
-         `path` (creating parent directories as needed). Overwrites \
-         existing content. Use `read_file` first to inspect before \
-         overwriting."
+        "Overwrite/create a workspace-relative UTF-8 file. Use `read_file` \
+         before replacing existing content."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -472,9 +468,8 @@ impl Tool for BashTool {
         "bash"
     }
     fn description(&self) -> &'static str {
-        "Run a bash command in the workspace. Returns stdout + \
-         stderr (each capped at 64 KiB) and the exit code. Path \
-         relative paths are resolved against the workspace root."
+        "Run `bash -lc` in the workspace. Returns exit code plus stdout/stderr \
+         capped at 64 KiB each."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -575,10 +570,8 @@ impl Tool for GrepSearchTool {
         "grep_search"
     }
     fn description(&self) -> &'static str {
-        "Run `grep -rn <pattern> [<path>]` over the workspace and \
-         return matching lines. `path` defaults to the workspace \
-         root. Matches are returned with `relpath:line:content` \
-         shape; output is capped at 64 KiB."
+        "Search with `grep -rn <pattern> [path]` under the workspace. \
+         Returns `relpath:line:content`, capped at 64 KiB."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -664,9 +657,8 @@ impl Tool for GitCommitTool {
         "git_commit"
     }
     fn description(&self) -> &'static str {
-        "Stage all workspace changes (`git add -A`) and commit them \
-         with the given message. Returns the new HEAD short SHA on \
-         success. The reviewer role does not have this tool."
+        "Stage all workspace changes and commit. Returns the full 40-char \
+         HEAD SHA. Executor-only."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -675,9 +667,7 @@ impl Tool for GitCommitTool {
             "properties": {
                 "message": {
                     "type":        "string",
-                    "description": "Commit message (1-line summary; \
-                                    extended body MAY follow on a \
-                                    blank-line-separated paragraph).",
+                    "description": "Commit message.",
                 }
             }
         })
@@ -863,11 +853,8 @@ impl Tool for SleepTool {
         "sleep"
     }
     fn description(&self) -> &'static str {
-        "Pause execution for `seconds` seconds without consuming any \
-         model inference turn. Use to wait for an external process \
-         (CI build, database migration, deployment rollout) to \
-         finish. Per-call and cumulative limits are enforced by the \
-         policy; exceeding them returns a structured error."
+        "Wait `seconds` without another model call. Policy and 600s hard caps \
+         apply; disabled/over-cap calls return structured errors."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -878,15 +865,11 @@ impl Tool for SleepTool {
                     "type":        "integer",
                     "minimum":     0,
                     "maximum":     SLEEP_TOOL_HARD_MAX_SECONDS,
-                    "description": "How long to sleep, in whole seconds. \
-                                   Subject to policy `max_seconds_per_call` and \
-                                   the kernel's 600s hard cap.",
+                    "description": "Whole seconds; policy plus 600s hard cap.",
                 },
                 "reason": {
                     "type":        "string",
-                    "description": "Optional human-readable reason \
-                                   (e.g. `\"waiting for CI\"`) — \
-                                   surfaced in the audit chain.",
+                    "description": "Optional audit-visible reason.",
                 }
             }
         })
@@ -1008,14 +991,8 @@ impl Tool for StructuredOutputTool {
         "structured_output"
     }
     fn description(&self) -> &'static str {
-        "Emit a typed mid-session structured output to the kernel: \
-         a progress report, a diagnostic flag, or a task summary. \
-         NON-TERMINAL — the session continues. Use this to surface \
-         operator-actionable signals (test counts, severity-tagged \
-         findings, hand-off summaries) without consuming a commit \
-         intent. Each session has a hard cap on the number of \
-         structured outputs it can emit; over-cap submissions return \
-         a structured error."
+        "NON-TERMINAL: send progress_report, diagnostic_flag, or task_summary \
+         to the kernel. Use for operator-visible status; over-cap returns an error."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1025,69 +1002,54 @@ impl Tool for StructuredOutputTool {
                 "kind": {
                     "type":        "string",
                     "enum":        ["progress_report", "diagnostic_flag", "task_summary"],
-                    "description": "Which structured output variant to emit. \
-                                   The remaining required fields depend on \
-                                   this discriminator.",
+                    "description": "Variant; other fields depend on it.",
                 },
                 "files_modified": {
                     "type":  "array",
                     "items": { "type": "string" },
-                    "description": "progress_report only: workspace-relative \
-                                   paths the executor has touched so far.",
+                    "description": "progress_report: changed paths.",
                 },
                 "tests_passing": {
                     "type":    "integer",
                     "minimum": 0,
-                    "description": "progress_report only: tests that passed \
-                                   in the most-recent run.",
+                    "description": "progress_report: passing test count.",
                 },
                 "tests_failing": {
                     "type":    "integer",
                     "minimum": 0,
-                    "description": "progress_report only: tests that failed \
-                                   in the most-recent run.",
+                    "description": "progress_report: failing test count.",
                 },
                 "confidence": {
                     "type":    "number",
                     "minimum": 0.0,
                     "maximum": 1.0,
-                    "description": "progress_report only: self-reported \
-                                   confidence in `[0.0, 1.0]`. Out-of-range \
-                                   values are clamped, not rejected.",
+                    "description": "progress_report: confidence 0..1.",
                 },
                 "severity": {
                     "type":        "string",
                     "enum":        ["info", "warning", "critical"],
-                    "description": "diagnostic_flag only: severity drives \
-                                   notification routing.",
+                    "description": "diagnostic_flag: info/warning/critical.",
                 },
                 "message": {
                     "type":        "string",
-                    "description": "diagnostic_flag only: operator-facing \
-                                   message. Capped at 1024 bytes; longer \
-                                   payloads are truncated, not rejected.",
+                    "description": "diagnostic_flag: operator-facing message.",
                 },
                 "evidence": {
                     "type":        "string",
-                    "description": "diagnostic_flag only (optional): file path \
-                                   or `path:line` reference to the relevant \
-                                   source location.",
+                    "description": "diagnostic_flag: optional path or path:line.",
                 },
                 "commit_sha": {
                     "type":        "string",
-                    "description": "task_summary only: 40-char hex commit SHA.",
+                    "description": "task_summary: 40-char commit SHA.",
                 },
                 "changed_paths": {
                     "type":  "array",
                     "items": { "type": "string" },
-                    "description": "task_summary only: workspace-relative paths \
-                                   the executor authored.",
+                    "description": "task_summary: changed paths.",
                 },
                 "approach": {
                     "type":        "string",
-                    "description": "task_summary only: one-paragraph rationale \
-                                   (capped at 2048 bytes; longer payloads are \
-                                   truncated).",
+                    "description": "task_summary: short rationale.",
                 }
             }
         })
@@ -1259,11 +1221,8 @@ impl Tool for TaskCompleteTool {
         "task_complete"
     }
     fn description(&self) -> &'static str {
-        "TERMINAL — call this exactly once when you have committed \
-         the changes that satisfy the task description. The session \
-         ends as soon as you call this. `head_sha` is the 40-char \
-         hex SHA of the commit you just produced (typically the \
-         output of the `git_commit` tool)."
+        "TERMINAL — finish after committing the task. `head_sha` is the \
+         full 40-char SHA, usually from `git_commit`."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1299,12 +1258,8 @@ impl Tool for ReportFailureTool {
         "report_failure"
     }
     fn description(&self) -> &'static str {
-        "TERMINAL — call this when you have determined you cannot \
-         complete the task. Provide a one-paragraph `justification` \
-         the operator can act on. The session ends after this call. \
-         Prefer `report_failure` over silently giving up: the kernel \
-         records the rationale in the audit chain and surfaces it to \
-         the operator."
+        "TERMINAL — cannot complete the task. Provide one actionable \
+         paragraph; the kernel records it."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1341,10 +1296,8 @@ impl Tool for SingleCommitTool {
         "single_commit"
     }
     fn description(&self) -> &'static str {
-        "TERMINAL — submit a single-commit advance from `base_sha` \
-         to `head_sha`. Use this when you have a base/head pair to \
-         publish that does NOT need the task_complete `head_sha`-only \
-         shape. The session ends after this call."
+        "TERMINAL — publish an explicit full-hex `base_sha` to `head_sha` \
+         pair, then end."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1387,12 +1340,8 @@ impl Tool for SubmitReviewTool {
         "submit_review"
     }
     fn description(&self) -> &'static str {
-        "TERMINAL — submit your review verdict for the executor's \
-         most-recent commit. `approved = true` means the commit \
-         satisfies the task; `approved = false` rejects it. \
-         `critique` is optional context the executor may use on a \
-         follow-up attempt (capped at 4 KiB by the kernel). Call this \
-         exactly once."
+        "TERMINAL — submit the review verdict. `approved=false` should include \
+         an actionable critique (kernel cap 4 KiB)."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1436,15 +1385,8 @@ impl Tool for ActivateSubtaskTool {
         "activate_subtask"
     }
     fn description(&self) -> &'static str {
-        "TERMINAL — activate one ready sub-task by its task id. \
-         The valid ids are the `task_id` column of rows in the KSB \
-         `dag=` block whose `state` is `pending` AND whose \
-         predecessors (per the plan) are all `complete`. Call this \
-         exactly once per turn; the kernel spawns the corresponding \
-         executor (or reviewer) session and returns control. After \
-         the activation lands, the next orchestrator turn will see \
-         the updated DAG state and can decide whether to activate \
-         another task, retry one, or call `integration_merge`."
+        "TERMINAL — activate one id from KSB `capabilities.ready_now=[...]`. \
+         The kernel spawns the executor/reviewer session."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1455,9 +1397,7 @@ impl Tool for ActivateSubtaskTool {
                     "type":        "string",
                     "minLength":   1,
                     "maxLength":   128,
-                    "description": "Task id from the KSB `dag=` block. \
-                                    MUST exactly match one of the \
-                                    listed rows; case-sensitive."
+                    "description": "Exact task id from `ready_now`."
                 }
             }
         })
@@ -1508,25 +1448,9 @@ impl Tool for BatchActivateSubtasksTool {
         "batch_activate_subtasks"
     }
     fn description(&self) -> &'static str {
-        "TERMINAL — propose a SET of ready sub-task ids for \
-         admission in a single turn. The kernel decides which \
-         candidates win the available concurrency headroom \
-         (kernel-side sort `(admitted_at ASC, task_id ASC)`) \
-         and returns a per-id outcome for every submitted id. \
-         The valid ids are the `task_id` column of rows in the \
-         KSB `dag=` block whose `state` is `pending` AND whose \
-         predecessors (per the plan) are all `complete`. List \
-         every candidate you want this turn — the kernel ignores \
-         order and picks what fits. A typo / hallucinated id \
-         surfaces as a per-id `UnknownTask` outcome and does NOT \
-         poison the other ids in the same batch. Use this \
-         instead of singular `activate_subtask` whenever you \
-         have two or more admissible candidates in the same \
-         turn. Call this exactly once per turn; the kernel \
-         spawns the corresponding executor (or reviewer) \
-         sessions in parallel and returns control. The \
-         orchestrator's next turn will see the updated DAG \
-         state."
+        "TERMINAL — propose multiple ids from `capabilities.ready_now=[...]`. \
+         Kernel admits what fits `headroom`, ignores input order, and returns \
+         per-id outcomes. Prefer this for two or more ready ids."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1541,17 +1465,9 @@ impl Tool for BatchActivateSubtasksTool {
                         "type":      "string",
                         "minLength": 1,
                         "maxLength": 128,
-                        "description": "Task id from the KSB \
-                                        `dag=` block. \
-                                        MUST exactly match one \
-                                        of the listed rows; \
-                                        case-sensitive."
+                        "description": "Exact task id from `ready_now`."
                     },
-                    "description": "Set of candidate task ids to \
-                                    propose for admission. The \
-                                    kernel ignores input order \
-                                    and picks what fits the \
-                                    available headroom."
+                    "description": "Candidate ready ids; order ignored."
                 }
             }
         })
@@ -1576,27 +1492,11 @@ impl Tool for RetrySubtaskTool {
         "retry_subtask"
     }
     fn description(&self) -> &'static str {
-        "TERMINAL — first half of a TWO-INTENT retry. Inserts a \
-         fresh `PendingActivation` row that supersedes the prior \
-         failed/reviewer-rejected activation. **The kernel does \
-         NOT spawn the new executor (or reviewer) VM here.** Your \
-         decision-cycle session will exit after this call; the \
-         kernel respawns a fresh orchestrator that MUST call \
-         `activate_subtask` against the same `subtask_task_id` to \
-         actually spawn the VM for the freshly-minted row. Use this \
-         when a row's `state` in the KSB `dag=` block is `failed` \
-         (Executor crash / `report_failure`) OR `completed` carrying \
-         `aggregate=AtLeastOneRejected` (Reviewer-rejection retry), \
-         AND the matching `capabilities.tasks[*]` row reports \
-         `retry_admissible=true`. If `retry_admissible=false` with \
-         `reason=\"prior state PendingActivation; …\"`, a prior \
-         `retry_subtask` already landed — call `activate_subtask` \
-         on this turn instead (the kernel will REJECT another \
-         `retry_subtask` with `FAIL_INVALID_REQUEST` and burn one \
-         of your `orch_no_progress_respawns=` budget slots; chaining \
-         this rejection eventually trips \
-         `orchestrator_respawn_ceiling_exceeded` and fails the \
-         initiative). Call exactly once per turn."
+        "TERMINAL — create a fresh PendingActivation retry for a failed or \
+         `aggregate=AtLeastOneRejected` task when KSB says \
+         `retry_admissible=true`. It does NOT spawn the VM; next turn must \
+         `activate_subtask`. If reason is `prior state PendingActivation`, \
+         activate instead. Bad retries burn `orch_no_progress_respawns=`."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1633,12 +1533,8 @@ impl Tool for IntegrationMergeTool {
         "integration_merge"
     }
     fn description(&self) -> &'static str {
-        "TERMINAL — fast-forward the initiative's `target_ref` from \
-         `base_sha` to `head_sha`. Call this exactly once when EVERY \
-         executor row in the KSB `dag=` block has `state = complete` \
-         AND every reviewer row has `state = complete`. The session \
-         ends after this call; the kernel records the merge as the \
-         initiative's terminal event."
+        "TERMINAL — fast-forward `target_ref` from full-hex `base_sha` to \
+         `head_sha` after all executors/reviewers are complete and accepted."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1657,9 +1553,7 @@ impl Tool for IntegrationMergeTool {
                     "minLength":   40,
                     "maxLength":   40,
                     "pattern":     "^[0-9a-f]{40}$",
-                    "description": "40-char lowercase-hex head SHA \
-                                    (the merge result the kernel will \
-                                    fast-forward to)."
+                    "description": "40-char lowercase-hex head SHA."
                 }
             }
         })
@@ -2185,6 +2079,24 @@ mod tests {
                 .is_some(),
             "orchestrator _with_sleep registry MUST include vm_capabilities",
         );
+    }
+
+    #[test]
+    fn advertised_tool_descriptions_stay_compact() {
+        for (role, registry) in [
+            ("executor", build_executor_registry()),
+            ("reviewer", build_reviewer_registry()),
+            ("orchestrator", build_orchestrator_registry()),
+        ] {
+            for spec in registry.to_specs() {
+                assert!(
+                    spec.description.len() <= 512,
+                    "{role} tool `{}` description is too large: {} bytes",
+                    spec.name,
+                    spec.description.len()
+                );
+            }
+        }
     }
 
     #[test]

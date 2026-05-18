@@ -65,7 +65,6 @@ members = [
     "crates/verifier",
     "crates/domain",
     "crates/domain-git",
-    "crates/prompts",
     "crates/canonical-images",
     "crates/dev-signing-key",
     "crates/image-manifest",
@@ -280,7 +279,6 @@ raxis-verifier-stub     = { path = "crates/verifier-stub" }
 raxis-verifier          = { path = "crates/verifier" }
 raxis-domain            = { path = "crates/domain" }
 raxis-domain-git        = { path = "crates/domain-git" }
-raxis-prompts           = { path = "crates/prompts" }
 raxis-canonical-images  = { path = "crates/canonical-images" }
 # Per-clone dev signing keypair autogen + on-disk discovery for the
 # canonical-image trust anchor. Shared between the kernel-side

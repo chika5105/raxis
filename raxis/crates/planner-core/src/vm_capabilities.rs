@@ -1041,10 +1041,9 @@ fn git_head_sha(cwd: &Path) -> Option<String> {
 // System-prompt hint
 // ---------------------------------------------------------------------------
 
-/// Render the manifest into a one-paragraph system-prompt hint the
-/// LLM sees on its first turn. Keep this short (≤ ~1.5 KiB on a
-/// canonical executor manifest); the structured `vm_capabilities`
-/// tool is the recourse for finer queries.
+/// Render the manifest into a compact system-prompt hint the LLM sees
+/// on its first turn. Keep this short; the structured
+/// `vm_capabilities` tool is the recourse for finer queries.
 ///
 /// The hint advertises:
 ///
@@ -1060,7 +1059,7 @@ fn git_head_sha(cwd: &Path) -> Option<String> {
 /// * The "no outbound network — `pip install` will fail" warning.
 pub fn build_capability_hint(m: &CapabilityManifest) -> String {
     let mut s = String::with_capacity(2048);
-    s.push_str("## VM Environment\n\n");
+    s.push_str("## VM Environment\n");
 
     let role = match m.image_role {
         ImageRole::Executor => "executor",
@@ -1069,9 +1068,9 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
         ImageRole::Byo => "byo (operator-published)",
         ImageRole::Unknown => "unknown",
     };
-    s.push_str(&format!("Image role: {role}"));
+    s.push_str(&format!("role={role}"));
     if let Some(digest) = &m.image_digest {
-        s.push_str(&format!(" (digest {digest})"));
+        s.push_str(&format!(" digest={digest}"));
     }
     s.push('\n');
 
@@ -1098,9 +1097,9 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
         langs.push(format!("Go ({go})"));
     }
     if !langs.is_empty() {
-        s.push_str(&format!("Languages: {}\n", langs.join(", ")));
+        s.push_str(&format!("langs={}\n", langs.join(", ")));
     } else {
-        s.push_str("Languages: (none detected)\n");
+        s.push_str("langs=<none>\n");
     }
 
     // Python packages — TOP curated subset (DB clients first).
@@ -1113,17 +1112,14 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
             CURATED_PYTHON,
         );
         s.push_str(&format!(
-            "Pre-installed Python packages: {}\n",
+            "python_pkgs={}\n",
             if curated.is_empty() {
-                format!(
-                    "(none of common DB/util set; full count {})",
-                    py.packages.len()
-                )
+                format!("<none-curated>; total={}", py.packages.len())
             } else if py.packages.len() > curated.len() {
                 format!(
-                    "{} (+ {} others; query `vm_capabilities` for full list)",
+                    "{}; +{} others",
                     curated.join(", "),
-                    py.packages.len() - curated.len(),
+                    py.packages.len() - curated.len()
                 )
             } else {
                 curated.join(", ")
@@ -1134,19 +1130,14 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
     // Node global packages.
     if let Some(node) = &m.node {
         if node.global_packages.is_empty() {
-            s.push_str(
-                "Pre-installed Node packages: (none — `npm install` BLOCKED by egress unless allowed)\n",
-            );
+            s.push_str("node_pkgs=<none>\n");
         } else {
             let listed: Vec<String> = node
                 .global_packages
                 .iter()
                 .map(|p| format!("{} {}", p.name, p.version))
                 .collect();
-            s.push_str(&format!(
-                "Pre-installed Node packages: {}\n",
-                listed.join(", ")
-            ));
+            s.push_str(&format!("node_pkgs={}\n", listed.join(", ")));
         }
     }
 
@@ -1160,7 +1151,7 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
     );
     if !avail_binaries.is_empty() {
         s.push_str(&format!(
-            "Available binaries: {}\n",
+            "bins={}\n",
             avail_binaries
                 .iter()
                 .map(|kv| {
@@ -1187,7 +1178,7 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
         .collect();
     if !cred_env.is_empty() {
         s.push_str(&format!(
-            "Credential-proxy env vars: {}\n",
+            "credential_env={}\n",
             cred_env
                 .iter()
                 .map(|k| k.as_str())
@@ -1199,32 +1190,24 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
     // Workdir.
     let fs = &m.filesystem;
     s.push_str(&format!(
-        "Workdir: {} ({}{}{})\n",
+        "workdir={} {}{}{}\n",
         fs.workdir,
-        if fs.git_initialized {
-            "git-initialized"
-        } else {
-            "no .git"
-        },
+        if fs.git_initialized { "git" } else { "no_git" },
         if fs.workdir_languages_detected.is_empty() {
             String::new()
         } else {
-            format!(", languages: {}", fs.workdir_languages_detected.join("/"),)
+            format!(" langs={}", fs.workdir_languages_detected.join("/"),)
         },
         match &fs.head_commit {
-            Some(sha) => format!(", head {}", &sha[..sha.len().min(12)]),
+            Some(sha) => format!(" head={}", &sha[..sha.len().min(12)]),
             None => String::new(),
         },
     ));
 
-    s.push('\n');
     s.push_str(
-        "No outbound network — `pip install` / `npm install` / `cargo install` / \
-         `go get` will fail (egress is gated by the kernel allowlist; package \
-         mirrors are not proxied). Use the pre-installed packages above. For \
-         finer queries call the `vm_capabilities` tool (e.g. to check whether \
-         `numpy` is available, pass `{ \"filter\": { \"python_package\": \
-         \"numpy\" } }`).",
+        "No outbound network: `pip install` / `npm install` / `cargo install` / \
+         `go get` usually fail unless policy allows egress. Use preinstalled \
+         packages; call `vm_capabilities` for focused queries.",
     );
     s
 }

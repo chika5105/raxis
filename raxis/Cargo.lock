@@ -3974,13 +3974,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "raxis-prompts"
-version = "0.1.0"
-dependencies = [
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "raxis-runtime"
 version = "0.1.0"
 dependencies = [
