@@ -898,25 +898,27 @@ impl DashboardData for KernelDashboardData {
             .max()
             .unwrap_or(row.created_at);
         let mut tasks = Vec::with_capacity(task_rows.len());
-        let mut edges: Vec<DagEdge> = Vec::new();
+        let edges = raxis_store::views::tasks::dag_edges_for_initiative(&conn, id)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|e| DagEdge {
+                        from: e.predecessor_task_id,
+                        to: e.successor_task_id,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         // Pre-load the audit chain ONCE for the whole initiative
-        // so per-task classification doesn't re-walk per row.
+        // and index it so per-task classification doesn't
+        // re-filter / re-sort the same chain per row.
         let audit_chain = collect_lifecycle_audit_rows(&self.audit_dir);
+        let audit_index = LifecycleAuditIndex::new(&audit_chain);
         for t in &task_rows {
-            // Pull DAG edges (downstream) for the edge list.
-            if let Ok(downstream) = raxis_store::views::tasks::dag_edges_for_task(
+            tasks.push(task_row_to_view_with_lifecycle_indexed(
                 &conn,
-                &t.task_id,
-                raxis_store::views::tasks::EdgeDirection::Downstream,
-            ) {
-                for e in downstream {
-                    edges.push(DagEdge {
-                        from: t.task_id.clone(),
-                        to: e.other_task_id,
-                    });
-                }
-            }
-            tasks.push(task_row_to_view_with_lifecycle(&conn, &audit_chain, t));
+                &audit_index,
+                t,
+            ));
         }
         let title =
             raxis_store::views::plan_fields::reveal_initiative_meta(&conn, &row.initiative_id)
@@ -959,10 +961,11 @@ impl DashboardData for KernelDashboardData {
     fn list_tasks(&self, initiative_id: &str) -> Result<Vec<TaskView>, ApiError> {
         let conn = self.open_ro()?;
         // Pre-load the audit chain ONCE per request so the
-        // per-row classifier can pick out task-scoped slices
-        // without re-walking the chain per task.
+        // per-row classifier can use task-scoped slices without
+        // re-walking / re-sorting the chain per task.
         // `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`.
         let audit_chain = collect_lifecycle_audit_rows(&self.audit_dir);
+        let audit_index = LifecycleAuditIndex::new(&audit_chain);
         // INV-OBSERVABILITY-DATAPLANE-LATENCY-01.
         let rows = raxis_store::observability::time_query_result(
             self.observability_hub.as_ref(),
@@ -974,7 +977,7 @@ impl DashboardData for KernelDashboardData {
         })?;
         Ok(rows
             .iter()
-            .map(|t| task_row_to_view_with_lifecycle(&conn, &audit_chain, t))
+            .map(|t| task_row_to_view_with_lifecycle_indexed(&conn, &audit_index, t))
             .collect())
     }
 
@@ -1586,8 +1589,10 @@ impl DashboardData for KernelDashboardData {
         // Annotate every row with the session's final lifecycle
         // event from the audit chain.
         let audit_chain = collect_lifecycle_audit_rows(&self.audit_dir);
+        let audit_index = LifecycleAuditIndex::new(&audit_chain);
         for row in rows.iter_mut() {
-            let anns = lifecycle::classify_for_session(&audit_chain, &row.session_id);
+            let anns =
+                lifecycle::classify_for_session_rows(audit_index.session_rows(&row.session_id));
             row.final_annotation = anns.into_iter().last();
             // Capture-bytes from the file ring on disk.
             let path = self.stream_capture.session_path(&row.session_id);
@@ -1631,8 +1636,9 @@ impl DashboardData for KernelDashboardData {
             };
         // Pre-load the audit chain so the per-session
         // classifier sees the SessionRevoked rows without a
-        // re-walk per response.
+        // re-walk / re-sort per response.
         let audit_chain = collect_lifecycle_audit_rows(&self.audit_dir);
+        let audit_index = LifecycleAuditIndex::new(&audit_chain);
         // iter69 — owning-task enrichment for the list view.
         // The list page renders per-row `initiative_id` /
         // `task_id` / token totals; pre-iter69 every row
@@ -1647,16 +1653,23 @@ impl DashboardData for KernelDashboardData {
         // side fallback (latest LLM turn capture) is deferred to
         // the *detail* path to keep the list cheap on a long
         // session catalog.
-        Ok(rows
+        let rows: Vec<_> = rows
             .into_iter()
             .filter(|s| match &allowed {
                 Some(set) => set.contains(&s.session_id),
                 None => true,
             })
+            .collect();
+        let session_ids: Vec<String> = rows.iter().map(|s| s.session_id.clone()).collect();
+        let owning_by_session = owning_tasks_for_sessions(&conn, &session_ids);
+        Ok(rows
+            .into_iter()
             .map(|s| {
                 let state = session_row_state(&s);
-                let owning =
-                    owning_task_for_session(&conn, s.session_id.as_str()).unwrap_or_default();
+                let owning = owning_by_session
+                    .get(&s.session_id)
+                    .cloned()
+                    .unwrap_or_default();
                 let view = SessionView {
                     session_id: s.session_id,
                     role: s.role_id,
@@ -1690,7 +1703,7 @@ impl DashboardData for KernelDashboardData {
                 // page (`get_session`) pays for the per-task ring
                 // tail and renders the richer view.
                 let view = enrich_session_view_with_owning_task(view, owning, None, None, None);
-                enrich_session_view_with_lifecycle(&audit_chain, view)
+                enrich_session_view_with_lifecycle_indexed(&audit_index, view)
             })
             .collect())
     }
@@ -3790,6 +3803,57 @@ pub(crate) fn owning_task_for_session(
     }
 }
 
+/// Batch form of [`owning_task_for_session`] for session lists.
+/// The SQL orders rows so the first row encountered for a
+/// `session_id` is the same "most recently transitioned task"
+/// that the scalar helper would return.
+fn owning_tasks_for_sessions(
+    conn: &rusqlite::Connection,
+    session_ids: &[String],
+) -> std::collections::HashMap<String, SessionOwningTask> {
+    let mut out: std::collections::HashMap<String, SessionOwningTask> =
+        std::collections::HashMap::new();
+    if session_ids.is_empty() {
+        return out;
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(session_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT session_id, initiative_id, task_id, \
+                cumulative_input_tokens, cumulative_output_tokens \
+         FROM {tasks} \
+         WHERE session_id IN ({placeholders}) \
+         ORDER BY session_id ASC, transitioned_at DESC, task_id ASC",
+        tasks = raxis_store::Table::Tasks.as_str(),
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return out;
+    };
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(session_ids.iter().map(String::as_str)),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                SessionOwningTask {
+                    initiative_id: r.get::<_, Option<String>>(1)?,
+                    task_id: r.get::<_, Option<String>>(2)?,
+                    input_tokens: r.get::<_, i64>(3)?.max(0) as u64,
+                    output_tokens: r.get::<_, i64>(4)?.max(0) as u64,
+                },
+            ))
+        },
+    );
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            let (session_id, owning) = row;
+            out.entry(session_id).or_insert(owning);
+        }
+    }
+    out
+}
+
 /// iter69 — extract a model id from the most-recent LLM turn
 /// capture for the given task. Prefer `response.model`, then fall
 /// back to `request.model` / `request.model_id` so failed upstream
@@ -4336,6 +4400,34 @@ fn task_row_to_view_with_lifecycle(
     view
 }
 
+/// Indexed variant for list surfaces. The DB lookups stay
+/// task-scoped, but audit-chain work is O(rows) once per request
+/// instead of O(rows × tasks).
+fn task_row_to_view_with_lifecycle_indexed(
+    conn: &raxis_store::ro::RoConn,
+    audit_index: &LifecycleAuditIndex<'_>,
+    t: &raxis_store::views::tasks::TaskRow,
+) -> TaskView {
+    let mut view = task_row_to_view(conn, t);
+    let activations = read_activations_for_task(conn, &t.task_id);
+    let (review_verdict, last_critique) = read_review_state(conn, &t.task_id);
+    let annotations = lifecycle::classify_for_task_rows(
+        audit_index.task_rows(&t.task_id),
+        &t.task_id,
+        &activations,
+        last_critique.as_deref(),
+    );
+    let latest = annotations.last().cloned();
+    let panel =
+        extract_reviewer_panel_results_from_rows(audit_index.reviewer_panel_rows(&t.task_id));
+    view.annotations = annotations;
+    view.latest_annotation = latest;
+    view.review_verdict = review_verdict;
+    view.last_critique = last_critique;
+    view.reviewer_panel_results = panel;
+    view
+}
+
 /// Lifecycle-aware projection for [`SessionView`]. Mirrors
 /// [`task_row_to_view_with_lifecycle`] for the per-session
 /// timeline (operator-revoke vs self-exit, initiative-block).
@@ -4344,6 +4436,18 @@ fn enrich_session_view_with_lifecycle(
     mut view: SessionView,
 ) -> SessionView {
     let annotations = lifecycle::classify_for_session(audit_chain, &view.session_id);
+    view.latest_annotation = annotations.last().cloned();
+    view.annotations = annotations;
+    view
+}
+
+/// Indexed variant for session list/recent surfaces.
+fn enrich_session_view_with_lifecycle_indexed(
+    audit_index: &LifecycleAuditIndex<'_>,
+    mut view: SessionView,
+) -> SessionView {
+    let annotations =
+        lifecycle::classify_for_session_rows(audit_index.session_rows(&view.session_id));
     view.latest_annotation = annotations.last().cloned();
     view.annotations = annotations;
     view
@@ -4400,6 +4504,77 @@ fn collect_lifecycle_audit_rows(audit_dir: &Path) -> Vec<lifecycle::AuditRow> {
         });
     }
     out
+}
+
+/// Per-request index over lifecycle audit rows.
+///
+/// `collect_lifecycle_audit_rows` already pays the I/O cost once;
+/// this index keeps list endpoints from repeatedly scanning and
+/// sorting the same in-memory chain for each task/session row.
+struct LifecycleAuditIndex<'a> {
+    by_task: std::collections::HashMap<&'a str, Vec<&'a lifecycle::AuditRow>>,
+    by_session: std::collections::HashMap<&'a str, Vec<&'a lifecycle::AuditRow>>,
+    reviewer_panel_by_executor: std::collections::HashMap<&'a str, Vec<&'a lifecycle::AuditRow>>,
+}
+
+impl<'a> LifecycleAuditIndex<'a> {
+    fn new(chain: &'a [lifecycle::AuditRow]) -> Self {
+        let mut out = Self {
+            by_task: std::collections::HashMap::new(),
+            by_session: std::collections::HashMap::new(),
+            reviewer_panel_by_executor: std::collections::HashMap::new(),
+        };
+        for row in chain {
+            if let Some(task_id) = row.task_id.as_deref() {
+                Self::push_dedup(&mut out.by_task, task_id, row);
+            }
+            for key in ["task_id", "parent_task_id", "fixup_task_id"] {
+                if let Some(task_id) = payload_str(row, key) {
+                    Self::push_dedup(&mut out.by_task, task_id, row);
+                }
+            }
+            if let Some(session_id) = row.session_id.as_deref() {
+                Self::push_dedup(&mut out.by_session, session_id, row);
+            }
+            if let Some(executor_task_id) = payload_str(row, "executor_task_id") {
+                Self::push_dedup(&mut out.reviewer_panel_by_executor, executor_task_id, row);
+            }
+        }
+        out
+    }
+
+    fn task_rows(&self, task_id: &str) -> &[&'a lifecycle::AuditRow] {
+        self.by_task.get(task_id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    fn session_rows(&self, session_id: &str) -> &[&'a lifecycle::AuditRow] {
+        self.by_session
+            .get(session_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn reviewer_panel_rows(&self, executor_task_id: &str) -> &[&'a lifecycle::AuditRow] {
+        self.reviewer_panel_by_executor
+            .get(executor_task_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn push_dedup(
+        map: &mut std::collections::HashMap<&'a str, Vec<&'a lifecycle::AuditRow>>,
+        key: &'a str,
+        row: &'a lifecycle::AuditRow,
+    ) {
+        let rows = map.entry(key).or_default();
+        if rows.last().map(|prev| prev.seq) != Some(row.seq) {
+            rows.push(row);
+        }
+    }
+}
+
+fn payload_str<'a>(row: &'a lifecycle::AuditRow, key: &str) -> Option<&'a str> {
+    row.payload.get(key).and_then(|v| v.as_str())
 }
 
 /// Read `tasks.review_verdict` and `tasks.last_critique` for the
@@ -4485,6 +4660,7 @@ fn read_activations_all(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle::Activa
 /// a `Completed` state.
 fn read_tasks_with_predecessors(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle::TaskRow> {
     let mut out: Vec<lifecycle::TaskRow> = Vec::new();
+    let mut predecessors_by_successor = read_predecessors_by_successor(conn);
     let Ok(mut stmt) = conn.prepare(&format!(
         "SELECT task_id, state, transitioned_at FROM {TBL_TASKS}"
     )) else {
@@ -4505,11 +4681,9 @@ fn read_tasks_with_predecessors(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle
             } else {
                 None
             };
-            // Predecessor edges per task — we issue one prepared
-            // statement per task to keep the per-row work
-            // bounded. The DAG fanout is small (≤10s of edges
-            // per task in practice) so this is cheap.
-            let preds = read_predecessors_for_task(conn, &task_id);
+            let preds = predecessors_by_successor
+                .remove(&task_id)
+                .unwrap_or_default();
             out.push(lifecycle::TaskRow {
                 task_id,
                 state,
@@ -4521,22 +4695,26 @@ fn read_tasks_with_predecessors(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle
     out
 }
 
-/// Read predecessor task ids for `successor_task_id` from the
-/// `task_dag_edges` table.
-fn read_predecessors_for_task(
+/// Read every DAG predecessor edge in one pass and group by
+/// successor. This keeps the orchestrator-gap dashboard endpoint
+/// from doing one SQLite query per task while preserving stable
+/// predecessor ordering inside each task.
+fn read_predecessors_by_successor(
     conn: &raxis_store::ro::RoConn,
-    successor_task_id: &str,
-) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     let Ok(mut stmt) = conn.prepare(&format!(
-        "SELECT predecessor_task_id FROM {TBL_TASK_DAG_EDGES} WHERE successor_task_id = ?1"
+        "SELECT successor_task_id, predecessor_task_id \
+         FROM {TBL_TASK_DAG_EDGES} \
+         ORDER BY successor_task_id ASC, predecessor_task_id ASC"
     )) else {
         return out;
     };
-    let rows = stmt.query_map([successor_task_id], |r| r.get::<_, String>(0));
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
     if let Ok(rows) = rows {
         for row in rows.flatten() {
-            out.push(row);
+            let (successor, predecessor) = row;
+            out.entry(successor).or_default().push(predecessor);
         }
     }
     out
@@ -4620,20 +4798,24 @@ fn extract_reviewer_panel_results(
     audit_chain: &[lifecycle::AuditRow],
     executor_task_id: &str,
 ) -> Vec<ReviewerPanelEntry> {
+    let rows: Vec<&lifecycle::AuditRow> = audit_chain
+        .iter()
+        .filter(|row| {
+            row.payload.get("executor_task_id").and_then(|v| v.as_str()) == Some(executor_task_id)
+        })
+        .collect();
+    extract_reviewer_panel_results_from_rows(&rows)
+}
+
+fn extract_reviewer_panel_results_from_rows(
+    rows: &[&lifecycle::AuditRow],
+) -> Vec<ReviewerPanelEntry> {
     let mut out: Vec<ReviewerPanelEntry> = Vec::new();
-    for row in audit_chain.iter() {
+    for row in rows.iter() {
         match row.event_kind.as_str() {
             "ReviewAggregationCompleted" => {
                 // Inspect every "reviewer_results" entry for
                 // this executor's aggregation row.
-                let exec_target = row
-                    .payload
-                    .get("executor_task_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if exec_target != executor_task_id {
-                    continue;
-                }
                 if let Some(arr) = row
                     .payload
                     .get("reviewer_results")
@@ -4661,14 +4843,6 @@ fn extract_reviewer_panel_results(
                 }
             }
             "SubmitReview" | "ReviewerSubmittedVerdict" => {
-                let exec_target = row
-                    .payload
-                    .get("executor_task_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if exec_target != executor_task_id {
-                    continue;
-                }
                 let reviewer_task_id = row
                     .task_id
                     .clone()

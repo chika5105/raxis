@@ -322,6 +322,15 @@ pub struct DagEdgeRow {
     pub predecessor_satisfied: bool,
 }
 
+/// One DAG edge under an initiative. This is the compact graph
+/// projection dashboard/CLI surfaces use when they need the whole
+/// initiative DAG rather than one task's neighbourhood.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitiativeDagEdgeRow {
+    pub predecessor_task_id: String,
+    pub successor_task_id: String,
+}
+
 /// Direction of the [`DagEdgeRow`] vs. the queried task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeDirection {
@@ -364,6 +373,32 @@ pub fn dag_edges_for_task(
                 other_task_id: r.get(0)?,
                 other_task_state: r.get(1)?,
                 predecessor_satisfied: r.get::<_, i64>(2)? != 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// All DAG edges for one initiative in one indexed query. Prefer
+/// this over calling [`dag_edges_for_task`] in a loop when rendering
+/// an initiative-level graph.
+pub fn dag_edges_for_initiative(
+    conn: &RoConn,
+    initiative_id: &str,
+) -> Result<Vec<InitiativeDagEdgeRow>, TaskViewError> {
+    let sql = format!(
+        "SELECT predecessor_task_id, successor_task_id \
+         FROM {edges} \
+         WHERE initiative_id = ?1 \
+         ORDER BY predecessor_task_id, successor_task_id",
+        edges = Table::TaskDagEdges.as_str(),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params![initiative_id], |r| {
+            Ok(InitiativeDagEdgeRow {
+                predecessor_task_id: r.get(0)?,
+                successor_task_id: r.get(1)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -681,6 +716,21 @@ mod tests {
         assert!(!by_id["t-3"].predecessor_satisfied);
         assert_eq!(by_id["t-2"].other_task_state, "Running");
         assert_eq!(by_id["t-3"].other_task_state, "BlockedRecoveryPending");
+    }
+
+    #[test]
+    fn dag_edges_for_initiative_returns_whole_graph_in_order() {
+        let (tmp, _) = fresh_store_with_seed_dag();
+        let conn = open_ro(tmp.path()).unwrap();
+        let rows = dag_edges_for_initiative(&conn, "init-1").unwrap();
+        let pairs: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| (r.predecessor_task_id.as_str(), r.successor_task_id.as_str()))
+            .collect();
+        assert_eq!(pairs, vec![("t-1", "t-2"), ("t-1", "t-3"), ("t-2", "t-3")]);
+        assert!(dag_edges_for_initiative(&conn, "missing")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

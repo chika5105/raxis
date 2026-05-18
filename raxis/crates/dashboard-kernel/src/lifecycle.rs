@@ -145,14 +145,30 @@ pub fn classify_for_task(
     activations: &[ActivationRow],
     last_critique: Option<&str>,
 ) -> Vec<LifecycleAnnotation> {
-    let mut out: Vec<LifecycleAnnotation> = Vec::new();
-
     // Sort audit by seq so the pairing scan is monotonic.
     let mut chain: Vec<&AuditRow> = audit_chain
         .iter()
         .filter(|r| audit_row_mentions_task(r, task_id))
         .collect();
     chain.sort_by_key(|r| r.seq);
+    classify_for_task_rows(&chain, task_id, activations, last_critique)
+}
+
+/// Walk a pre-filtered, `seq`-ordered audit-chain slice for one
+/// task and emit the same lifecycle annotations as
+/// [`classify_for_task`].
+///
+/// This is the dashboard list/detail fast path: callers that
+/// already indexed the audit chain can avoid re-filtering and
+/// re-sorting the full chain once per task. The caller must pass
+/// only rows that mention `task_id`, in monotonic `seq` order.
+pub fn classify_for_task_rows(
+    chain: &[&AuditRow],
+    task_id: &str,
+    activations: &[ActivationRow],
+    last_critique: Option<&str>,
+) -> Vec<LifecycleAnnotation> {
+    let mut out: Vec<LifecycleAnnotation> = Vec::new();
 
     // Pending pair state: most-recent
     // `ReviewAggregationCompleted{AtLeastOneRejected}` for this
@@ -560,12 +576,22 @@ pub fn classify_for_session(
     audit_chain: &[AuditRow],
     session_id: &str,
 ) -> Vec<LifecycleAnnotation> {
-    let mut out: Vec<LifecycleAnnotation> = Vec::new();
     let mut chain: Vec<&AuditRow> = audit_chain
         .iter()
         .filter(|r| r.session_id.as_deref() == Some(session_id))
         .collect();
     chain.sort_by_key(|r| r.seq);
+    classify_for_session_rows(&chain)
+}
+
+/// Walk a pre-filtered, `seq`-ordered audit-chain slice for one
+/// session and emit the same lifecycle annotations as
+/// [`classify_for_session`].
+///
+/// Callers that already indexed audit rows by `session_id` use
+/// this to avoid scanning the whole audit chain once per list row.
+pub fn classify_for_session_rows(chain: &[&AuditRow]) -> Vec<LifecycleAnnotation> {
+    let mut out: Vec<LifecycleAnnotation> = Vec::new();
 
     for row in chain.iter() {
         match row.event_kind.as_str() {

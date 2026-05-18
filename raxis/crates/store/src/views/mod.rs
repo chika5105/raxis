@@ -107,7 +107,8 @@ pub use sessions::{SessionRow, SessionStateCounts};
 pub use signed_plan_artifacts::{SignedPlanArtifactHeader, SignedPlanArtifactViewError};
 pub use structured_outputs::{StructuredOutputRow, StructuredOutputViewError};
 pub use tasks::{
-    BlockingEdgeRow, DagEdgeRow, EdgeDirection, ReadyTaskRow, TaskRow, TaskStateCounts,
+    BlockingEdgeRow, DagEdgeRow, EdgeDirection, InitiativeDagEdgeRow, ReadyTaskRow, TaskRow,
+    TaskStateCounts,
 };
 pub use verifier_tokens::VerifierTokenRow;
 pub use witnesses::WitnessRow;

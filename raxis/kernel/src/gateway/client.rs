@@ -42,6 +42,7 @@
 //! are read out of order via `fetch_id` correlation.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -148,18 +149,10 @@ struct Pending {
     /// The observer uses this to attribute one task's records
     /// to the specific VM that produced them.
     session_id: Option<Uuid>,
-    /// Request body bytes, cloned from the outbound
-    /// `FetchRequest` so the response-side observer fan-out can
-    /// surface BOTH sides of the upstream round-trip. The
-    /// earlier capture only carried the response, leaving
-    /// the dashboard's per-turn panel rendering half-conversations
-    /// (operators couldn't see what the planner asked for —
-    /// crucial when debugging a malformed prompt or a stale
-    /// system message). Kept on the inflight slot so the
-    /// observer fan-out path doesn't have to re-deserialize the
-    /// outbound frame; cost is one `Vec<u8>` clone per fetch
-    /// (bounded by the gateway's per-request cap).
-    request_body: Vec<u8>,
+    /// Request body bytes, cloned from the outbound `FetchRequest`
+    /// only when an observer is installed. Normal deployments with
+    /// LLM-turn capture disabled avoid the clone entirely.
+    request_body: Option<Vec<u8>>,
     /// Agent role of the originating session, mirrored from
     /// the `FetchRequest` call site so the response-side
     /// observer can stamp the captured `LlmTurnRecord` with
@@ -197,8 +190,8 @@ pub trait LlmTurnObserver: Send + Sync {
     /// `request_body_bytes` is the raw upstream REQUEST body
     /// the gateway just wrote on the kernel's behalf — captured
     /// so the per-turn dashboard panel can surface both sides
-    /// of the round-trip (iter64 wire-shape fix). Always
-    /// `Some(slice)` (possibly empty) for valid `FetchRequest`s.
+    /// of the round-trip (iter64 wire-shape fix). `None` means
+    /// request-body capture was disabled for this connection.
     ///
     /// `body_bytes` is the raw response body the gateway
     /// received from the upstream (or `None` on error). The
@@ -282,6 +275,9 @@ struct Inner {
     /// installed (matches every earlier deployment); the
     /// pump's hot path stays branch-light when absent.
     observer: Mutex<Option<Arc<dyn LlmTurnObserver>>>,
+    /// Lock-free fast path for fetch callers deciding whether they
+    /// need to clone request bodies for observer fan-out.
+    observer_enabled: AtomicBool,
 }
 
 impl GatewayClient {
@@ -319,6 +315,7 @@ impl GatewayClient {
     /// `install_connection` (gateway respawn) inherits the
     /// previously-installed observer transparently.
     pub async fn install_observer(&self, observer: Arc<dyn LlmTurnObserver>) {
+        self.inner.observer_enabled.store(true, Ordering::Release);
         *self.inner.observer.lock().await = Some(observer);
     }
 
@@ -384,12 +381,16 @@ impl GatewayClient {
         let task_id_for_inflight = task_id.clone();
         let session_id_for_inflight = session_id;
         let agent_role_for_inflight = agent_role.clone();
-        // iter64 — capture the request body for the
-        // observer fan-out so the per-turn dashboard panel can
-        // render BOTH sides of the upstream round-trip. One
-        // Vec<u8> clone per fetch; bounded by the gateway's
-        // per-request body cap.
-        let request_body_for_inflight = body_bytes.clone();
+        // iter64 — capture the request body for observer fan-out so
+        // the per-turn dashboard panel can render BOTH sides of the
+        // upstream round-trip. This is deliberately conditional:
+        // without an observer, cloning every LLM request body is pure
+        // hot-path allocator/memory-bandwidth cost.
+        let request_body_for_inflight = if self.inner.observer_enabled.load(Ordering::Acquire) {
+            Some(body_bytes.clone())
+        } else {
+            None
+        };
         let payload = GatewayMessage::FetchRequest {
             gateway_token,
             fetch_id,
@@ -556,9 +557,8 @@ async fn pump(
         task_id: Option<String>,
         session_id: Option<Uuid>,
         /// iter64 — request body cloned from the outbound
-        /// `FetchRequest` so the observer fan-out at response
-        /// time can record BOTH sides of the round-trip.
-        request_body: Vec<u8>,
+        /// `FetchRequest` only when observer capture is enabled.
+        request_body: Option<Vec<u8>>,
         /// Agent role of the originating session
         /// (`"Orchestrator"` / `"Executor"` / `"Reviewer"`).
         /// Stamped onto the captured `LlmTurnRecord` so the
@@ -705,7 +705,7 @@ async fn pump(
                                 fetch_id,
                                 status_code,
                                 latency_ms,
-                                Some(slot.request_body.as_slice()),
+                                slot.request_body.as_deref(),
                                 body_bytes.as_deref(),
                                 error.as_deref(),
                                 slot.agent_role.as_deref(),
