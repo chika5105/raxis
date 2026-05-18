@@ -107,3 +107,52 @@ fn opt_in_env_var_engages_loop_and_writes_sentinel() {
     assert_eq!(sentinel["sub_state"], "CircuitOpen");
     assert_eq!(sentinel["last_restart_reason"], "DeadlockDetected");
 }
+
+#[test]
+fn reset_circuit_breaker_requires_confirmation_for_noninteractive_callers() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("supervisor_state.json");
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "recent_restart_unix_ts": [1_000, 1_001, 1_002, 1_003],
+            "tripped": true,
+            "last_failure_reason": "DeadlockDetected"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let supervisor = supervisor_binary();
+    let without_yes = Command::new(&supervisor)
+        .arg("reset-circuit-breaker")
+        .arg("--data-dir")
+        .arg(dir.path())
+        .output()
+        .expect("run reset-circuit-breaker without --yes");
+    assert!(
+        !without_yes.status.success(),
+        "noninteractive reset without --yes must fail closed",
+    );
+    let still_tripped: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(still_tripped["tripped"], true);
+
+    let with_yes = Command::new(&supervisor)
+        .arg("reset-circuit-breaker")
+        .arg("--yes")
+        .arg("--data-dir")
+        .arg(dir.path())
+        .output()
+        .expect("run reset-circuit-breaker --yes");
+    assert!(
+        with_yes.status.success(),
+        "reset with --yes should succeed, stderr: {}",
+        String::from_utf8_lossy(&with_yes.stderr),
+    );
+    let reset: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(reset["tripped"], false);
+    assert_eq!(reset["recent_restart_unix_ts"].as_array().unwrap().len(), 0);
+}

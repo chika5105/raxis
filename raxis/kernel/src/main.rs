@@ -993,15 +993,12 @@ async fn main() {
             // `TaskAutoResumedAfterSupervisorRestart` events from
             // the SAME boot share this string, so the dashboard
             // can group them as a single restart episode. Falls
-            // back to "supervisor-restart-unknown-N" if either
-            // sentinel field is absent (forward-compat — older
-            // supervisor revisions may omit one or both fields).
-            let ts = s.attempt_n.map(|n| n as i64).unwrap_or(0);
-            // The sentinel does not currently surface a
-            // last_restart_unix_ts on its `SentinelView` — use
-            // `unix_now` as a reasonable proxy bounded to this
-            // boot (the restart's wall-clock `unix_now`).
-            format!("supervisor-restart-{}-{}", unix_now, ts.max(1))
+            // back to this boot's wallclock if either sentinel
+            // field is absent (forward-compat — older supervisor
+            // revisions may omit one or both fields).
+            let ts = s.last_restart_unix_ts.unwrap_or(unix_now as i64);
+            let attempt = s.attempt_n.unwrap_or(1).max(1);
+            format!("supervisor-restart-{ts}-{attempt}")
         });
         let outcome = restart_lifecycle::rehydrate_restart_context(
             inner_audit.as_ref(),
@@ -1204,6 +1201,19 @@ async fn main() {
                         summary_path.display(),
                     );
                 }
+            }
+        }
+
+        if outcome.kernel_restart_completed_emits > 0 {
+            match restart_lifecycle::mark_restart_sentinel_rehydrated(&sentinel_path) {
+                Ok(true) => eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"restart_lifecycle_sentinel_marked_healthy\"}}"
+                ),
+                Ok(false) => {}
+                Err(e) => eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"restart_lifecycle_sentinel_mark_healthy_failed\",\
+                     \"reason\":\"{e}\"}}"
+                ),
             }
         }
     }

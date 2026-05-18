@@ -3757,6 +3757,7 @@ dependencies = [
  "glob",
  "hex",
  "libc",
+ "nix 0.27.1",
  "parking_lot",
  "raxis-artifact-store",
  "raxis-audit-tools",

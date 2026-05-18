@@ -6,9 +6,9 @@
 that detects deadlocks, panics, and OOM kills, then auto-restarts
 the kernel with a circuit breaker so a buggy kernel cannot loop
 forever. The dashboard shows the operator a banner during
-restarts. Operator-initiated `SIGTERM`/`SIGINT`/`SIGKILL`/`SIGHUP`
-are always respected — the supervisor never overrides operator
-intent.
+restarts. Operator-initiated `SIGTERM`/`SIGINT`/`SIGHUP`, plus
+`raxis-supervisor stop --force`, are always respected — the
+supervisor never overrides operator intent.
 
 This recipe covers the four operator-facing surfaces:
 opt-in, status query, manual stop, and JWT-secret rotation.
@@ -51,10 +51,14 @@ the env var, the supervisor:
 
 1. Spawns `raxis-kernel` as a child process.
 2. Writes `<data_dir>/kernel_lifecycle_status.json` (the
-   sentinel file) at every state transition.
+   sentinel file) at every state transition and heartbeats it
+   while the kernel child is alive.
 3. On unclean exit (deadlock = exit 70, panic = exit 101+,
    crash signal, OOM kill), classifies the cause and decides
-   whether to restart.
+   whether to restart. A raw `kill -9 <kernel_pid>` is
+   indistinguishable from OOM from the supervisor's point of
+   view; use `raxis-supervisor stop --force` for operator force
+   stops.
 4. Tracks attempts in a sliding window
    (`<data_dir>/supervisor_state.json`) — default 3 attempts in
    60 s. After the 3rd failure, the breaker opens and the
@@ -106,6 +110,8 @@ The same data is served to the dashboard at
 
 ```bash
 raxis-supervisor stop
+# ... urgent shutdown:
+raxis-supervisor stop --force
 # ... or:
 kill -TERM <supervisor_pid>
 ```
@@ -127,6 +133,11 @@ Either form respects the operator-signal contract
 In neither case will the supervisor restart the kernel — operator
 intent overrides every recovery path.
 
+`stop --force` writes a one-shot force request, sends catchable
+SIGTERM to the supervisor, and lets the supervisor SIGKILL the
+kernel child itself. It does not SIGKILL the supervisor, so the
+final `Halted{OperatorStopForced}` sentinel is still written.
+
 ---
 
 ## 4. Reset the circuit breaker after investigating
@@ -138,7 +149,11 @@ audit chain for `KernelDeadlockDetected` /
 
 ```bash
 raxis-supervisor reset-circuit-breaker
-# Resets <data_dir>/supervisor_state.json
+# prompts on a terminal
+
+raxis-supervisor reset-circuit-breaker --yes
+# non-interactive reset of <data_dir>/supervisor_state.json
+
 raxis-supervisor start
 ```
 

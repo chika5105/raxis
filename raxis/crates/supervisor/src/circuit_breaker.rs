@@ -19,6 +19,8 @@
 // via tempfile + rename.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +28,27 @@ use crate::{DEFAULT_MAX_ATTEMPTS, DEFAULT_RESTART_WINDOW_SECS};
 
 /// Breaker filename per `self-healing-supervisor.md §4.3`.
 pub const STATE_FILENAME: &str = "supervisor_state.json";
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn unique_temp_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(STATE_FILENAME);
+    let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    parent.join(format!(
+        ".{filename}.{}.{}.{}.tmp",
+        std::process::id(),
+        nanos,
+        counter
+    ))
+}
 
 /// On-disk persisted breaker state.
 ///
@@ -198,8 +221,14 @@ impl CircuitBreaker {
                 format!("supervisor state serialization failed: {e}"),
             )
         })?;
-        let tmp = self.state_path.with_extension("json.tmp");
-        std::fs::write(&tmp, &bytes)?;
+        let tmp = unique_temp_path(&self.state_path);
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.flush()?;
+            f.sync_all()?;
+        }
         std::fs::rename(&tmp, &self.state_path)?;
         Ok(())
     }

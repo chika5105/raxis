@@ -54,6 +54,17 @@ fn await_sentinel_halted(
     None
 }
 
+fn await_file(path: &std::path::Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 fn send_sigterm(pid: u32) {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
@@ -126,6 +137,7 @@ fn slow_sigterm_kernel_triggers_sigkill_escalation_and_operator_stop_forced() {
     let dir = tempfile::tempdir().unwrap();
     let supervisor = supervisor_binary();
     let kernel = fake_child("slow_sigterm");
+    let ready_file = dir.path().join("slow-sigterm.ready");
     let mut child = Command::new(&supervisor)
         .arg("start")
         .arg("--data-dir")
@@ -134,10 +146,14 @@ fn slow_sigterm_kernel_triggers_sigkill_escalation_and_operator_stop_forced() {
         .arg(&kernel)
         .env("RAXIS_SUPERVISOR_AUTO_RESTART", "1")
         .env("RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS", "1")
+        .env("SUPERVISOR_FAKE_READY_FILE", &ready_file)
         .spawn()
         .expect("spawn supervisor");
 
-    std::thread::sleep(Duration::from_millis(800));
+    assert!(
+        await_file(&ready_file, Duration::from_secs(10)),
+        "fake child must install SIGTERM ignore handler before test sends SIGTERM",
+    );
     send_sigterm(child.id());
 
     // Grace 1s + slack — supervisor escalates to SIGKILL after
@@ -154,5 +170,60 @@ fn slow_sigterm_kernel_triggers_sigkill_escalation_and_operator_stop_forced() {
         sentinel.sub_state.as_deref(),
         Some("OperatorStopForced"),
         "supervisor MUST record OperatorStopForced when grace expired and SIGKILL was used",
+    );
+}
+
+/// `raxis-supervisor stop --force` must not SIGKILL the supervisor
+/// directly: SIGKILL is uncatchable, so that would skip final
+/// sentinel writes and can orphan the kernel child. The command
+/// writes a force-stop request, wakes the supervisor with SIGTERM,
+/// and the supervisor performs the child SIGKILL itself.
+#[test]
+fn stop_force_requests_child_sigkill_and_preserves_final_sentinel() {
+    let dir = tempfile::tempdir().unwrap();
+    let supervisor = supervisor_binary();
+    let kernel = fake_child("slow_sigterm");
+    let mut child = Command::new(&supervisor)
+        .arg("start")
+        .arg("--data-dir")
+        .arg(dir.path())
+        .arg("--kernel-binary")
+        .arg(&kernel)
+        .env("RAXIS_SUPERVISOR_AUTO_RESTART", "1")
+        .env("RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS", "30")
+        .spawn()
+        .expect("spawn supervisor");
+
+    std::thread::sleep(Duration::from_millis(800));
+    let output = Command::new(&supervisor)
+        .arg("stop")
+        .arg("--force")
+        .arg("--data-dir")
+        .arg(dir.path())
+        .output()
+        .expect("run supervisor stop --force");
+    assert!(
+        output.status.success(),
+        "stop --force should return success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let sentinel = await_sentinel_halted(dir.path(), Duration::from_secs(15))
+        .expect("supervisor must halt after stop --force");
+    let status = child
+        .wait()
+        .expect("supervisor child must exit cleanly within deadline");
+
+    assert_eq!(status.code(), Some(0));
+    assert_eq!(sentinel.status, "Halted");
+    assert_eq!(
+        sentinel.sub_state.as_deref(),
+        Some("OperatorStopForced"),
+        "force stop must be recorded as OperatorStopForced",
+    );
+    assert_eq!(
+        sentinel.last_restart_reason.as_deref(),
+        Some("CleanExit"),
+        "force stop is operator intent and must not be classified as OomKilled/restartable",
     );
 }

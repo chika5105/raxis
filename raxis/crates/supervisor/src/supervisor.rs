@@ -8,8 +8,10 @@
 // design doc):
 //
 //   loop {
-//     write_sentinel(Healthy);
 //     spawn child;
+//     write_sentinel(Healthy), unless preserving Restarting for
+//       the replacement kernel's boot-time rehydration;
+//     heartbeat the sentinel while child lives;
 //     wait for child OR shutdown_notify;
 //     if shutdown_notify fired:
 //       set intentional_shutdown
@@ -50,7 +52,9 @@ use serde_json::json;
 use crate::circuit_breaker::{CircuitBreaker, RecordOutcome};
 use crate::classify::{classify_exit_status, Outcome};
 use crate::log::SupervisorLog;
-use crate::sentinel::{write_sentinel, Sentinel};
+use crate::sentinel::{
+    clear_force_stop_request, consume_force_stop_request, update_sentinel, write_sentinel, Sentinel,
+};
 use crate::signal::IntentionalShutdownFlag;
 use crate::{DEFAULT_MAX_ATTEMPTS, DEFAULT_RESTART_WINDOW_SECS, DEFAULT_SHUTDOWN_GRACE_SECS};
 
@@ -130,6 +134,103 @@ fn unix_now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+fn child_alive_sentinel(
+    cfg: &SupervisorConfig,
+    breaker: &CircuitBreaker,
+    supervisor_pid: u32,
+    kernel_pid: u32,
+    last_exit_code: i32,
+    current: std::io::Result<Option<Sentinel>>,
+    log: &SupervisorLog,
+) -> Sentinel {
+    let now = unix_now_secs();
+    match current {
+        Ok(Some(mut s)) if s.status == "Restarting" => {
+            // Preserve restart metadata until the child kernel has
+            // rehydrated it into the audit chain and acknowledged by
+            // marking the sentinel Healthy.
+            s.supervisor_pid = supervisor_pid;
+            s.kernel_pid = kernel_pid;
+            s.updated_at_unix_secs = now;
+            s
+        }
+        Ok(_) => Sentinel {
+            schema_version: 1,
+            status: "Healthy".to_owned(),
+            sub_state: None,
+            attempt_n: breaker.state().attempts_in_window(now, cfg.window_secs),
+            max_attempts: cfg.max_attempts,
+            last_restart_unix_ts: breaker
+                .state()
+                .recent_restart_unix_ts
+                .last()
+                .copied()
+                .unwrap_or(0),
+            last_restart_reason: breaker.state().last_failure_reason.clone(),
+            prev_run_exit_code: Some(last_exit_code),
+            attempts_in_window: breaker.state().attempts_in_window(now, cfg.window_secs),
+            window_secs: cfg.window_secs,
+            supervisor_pid,
+            kernel_pid,
+            updated_at_unix_secs: now,
+        },
+        Err(e) => {
+            log.emit(
+                "warn",
+                "kernel_lifecycle_sentinel_read_failed_before_alive_write",
+                &json!({ "reason": e.to_string() }),
+            );
+            Sentinel {
+                schema_version: 1,
+                status: "Healthy".to_owned(),
+                sub_state: None,
+                attempt_n: breaker.state().attempts_in_window(now, cfg.window_secs),
+                max_attempts: cfg.max_attempts,
+                last_restart_unix_ts: breaker
+                    .state()
+                    .recent_restart_unix_ts
+                    .last()
+                    .copied()
+                    .unwrap_or(0),
+                last_restart_reason: breaker.state().last_failure_reason.clone(),
+                prev_run_exit_code: Some(last_exit_code),
+                attempts_in_window: breaker.state().attempts_in_window(now, cfg.window_secs),
+                window_secs: cfg.window_secs,
+                supervisor_pid,
+                kernel_pid,
+                updated_at_unix_secs: now,
+            }
+        }
+    }
+}
+
+fn write_child_alive_sentinel(
+    cfg: &SupervisorConfig,
+    breaker: &CircuitBreaker,
+    supervisor_pid: u32,
+    kernel_pid: u32,
+    last_exit_code: i32,
+    log: &SupervisorLog,
+) {
+    if let Err(e) = update_sentinel(&cfg.data_dir, |current| {
+        child_alive_sentinel(
+            cfg,
+            breaker,
+            supervisor_pid,
+            kernel_pid,
+            last_exit_code,
+            current,
+            log,
+        )
+    }) {
+        log.emit(
+            "warn",
+            "kernel_lifecycle_sentinel_write_failed",
+            &json!({ "reason": e.to_string() }),
+        );
+    }
+}
+
 /// Run the supervisor's spawn-wait-classify-decide loop until
 /// either the operator stops the kernel or the circuit breaker
 /// trips. Returns a [`SupervisorRunReport`] for observability.
@@ -147,6 +248,13 @@ pub async fn run_supervisor_loop(
 ) -> std::io::Result<SupervisorRunReport> {
     use tokio::process::Command;
     let supervisor_pid = std::process::id();
+    if let Err(e) = clear_force_stop_request(&cfg.data_dir) {
+        log.emit(
+            "warn",
+            "stale_force_stop_request_clear_failed",
+            &json!({ "reason": e.to_string() }),
+        );
+    }
     let mut breaker =
         CircuitBreaker::load_or_default(&cfg.data_dir, cfg.max_attempts, cfg.window_secs);
     if breaker.is_tripped() {
@@ -227,54 +335,64 @@ pub async fn run_supervisor_loop(
         let kernel_pid = child.id().unwrap_or(0);
         child_runs_observed = child_runs_observed.saturating_add(1);
 
-        let now = unix_now_secs();
-        let healthy = Sentinel {
-            schema_version: 1,
-            status: "Healthy".to_owned(),
-            sub_state: None,
-            attempt_n: breaker.state().attempts_in_window(now, cfg.window_secs),
-            max_attempts: cfg.max_attempts,
-            last_restart_unix_ts: breaker
-                .state()
-                .recent_restart_unix_ts
-                .last()
-                .copied()
-                .unwrap_or(0),
-            last_restart_reason: breaker.state().last_failure_reason.clone(),
-            prev_run_exit_code: Some(last_exit_code),
-            attempts_in_window: breaker.state().attempts_in_window(now, cfg.window_secs),
-            window_secs: cfg.window_secs,
+        write_child_alive_sentinel(
+            &cfg,
+            &breaker,
             supervisor_pid,
             kernel_pid,
-            updated_at_unix_secs: now,
-        };
-        let _ = write_sentinel(&cfg.data_dir, &healthy);
+            last_exit_code,
+            log.as_ref(),
+        );
         log.emit(
             "info",
             "kernel_spawned",
             &json!({ "kernel_pid": kernel_pid, "child_run": child_runs_observed }),
         );
 
-        // Wait for the child OR the shutdown signal.
-        let waited_outcome: WaitedOutcome = tokio::select! {
-            biased;
-            _ = shutdown_rx.notified() => {
-                log.emit(
-                    "info",
-                    "shutdown_signal_observed",
-                    &json!({ "kernel_pid": kernel_pid }),
-                );
-                forward_signal_and_wait(
-                    &mut child,
-                    &intent_flag,
-                    cfg.shutdown_grace_secs,
-                    log.as_ref(),
-                ).await
+        // Wait for the child OR the shutdown signal, refreshing
+        // the sentinel while the child is alive so long-running
+        // healthy kernels do not look stale to the dashboard.
+        let mut sentinel_heartbeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        sentinel_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let waited_outcome: WaitedOutcome = loop {
+            let outcome = tokio::select! {
+                biased;
+                _ = shutdown_rx.notified() => {
+                    log.emit(
+                        "info",
+                        "shutdown_signal_observed",
+                        &json!({ "kernel_pid": kernel_pid }),
+                    );
+                    Some(forward_signal_and_wait(
+                        &mut child,
+                        &intent_flag,
+                        cfg.shutdown_grace_secs,
+                        &cfg.data_dir,
+                        log.as_ref(),
+                    ).await)
+                }
+                res = child.wait() => Some(match res {
+                    Ok(status) => WaitedOutcome::Exited(status),
+                    Err(e) => WaitedOutcome::WaitErr(e),
+                }),
+                _ = sentinel_heartbeat.tick() => {
+                    write_child_alive_sentinel(
+                        &cfg,
+                        &breaker,
+                        supervisor_pid,
+                        kernel_pid,
+                        last_exit_code,
+                        log.as_ref(),
+                    );
+                    None
+                }
+            };
+            if let Some(outcome) = outcome {
+                break outcome;
             }
-            res = child.wait() => match res {
-                Ok(status) => WaitedOutcome::Exited(status),
-                Err(e) => WaitedOutcome::WaitErr(e),
-            },
         };
 
         let (status_for_classify, force_used) = match waited_outcome {
@@ -456,6 +574,7 @@ async fn forward_signal_and_wait(
     child: &mut tokio::process::Child,
     intent_flag: &IntentionalShutdownFlag,
     shutdown_grace_secs: u64,
+    data_dir: &std::path::Path,
     log: &SupervisorLog,
 ) -> WaitedOutcome {
     use nix::sys::signal::Signal;
@@ -470,6 +589,27 @@ async fn forward_signal_and_wait(
             }
         }
     };
+    if consume_force_stop_request(data_dir) {
+        log.emit(
+            "warn",
+            "force_stop_request_observed",
+            &serde_json::json!({ "kernel_pid": pid, "action": "send_sigkill" }),
+        );
+        if let Err(e) = crate::signal::send_signal(pid, Signal::SIGKILL) {
+            log.emit(
+                "error",
+                "kernel_sigkill_failed",
+                &serde_json::json!({ "kernel_pid": pid, "reason": e.to_string() }),
+            );
+        }
+        return match child.wait().await {
+            Ok(status) => WaitedOutcome::ForwardedSignalThenExited {
+                status,
+                force_used: true,
+            },
+            Err(e) => WaitedOutcome::WaitErr(e),
+        };
+    }
     if let Err(e) = crate::signal::send_signal(pid, Signal::SIGTERM) {
         log.emit(
             "warn",

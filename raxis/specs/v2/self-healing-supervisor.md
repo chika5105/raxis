@@ -56,7 +56,7 @@
 | 2.6 | **Mechanism vs root cause.** | Production should *prevent* deadlocks via `INV-LOCK-01..07`, not paper over them. **Mitigation:** every restart emits a `Critical`-severity audit event AND writes a forensic lock-graph dump engineers can analyse post-hoc to fix the underlying deadlock. Default-off opt-in (`RAXIS_SUPERVISOR_AUTO_RESTART=1`) ensures dev / live-e2e still surfaces every wedge as a hard exit (no auto-restart can mask a regression). |
 | 2.7 | **Complexity vs invariant integrity.** | The supervisor adds a new failure surface — supervisor bugs are now possible. **Mitigation:** the supervisor crate is small (target ≤ 500 LOC), single-responsibility (spawn child / classify exit / decide restart), has its own witness tests (one per row of the §4.4 exit-code table), opt-in via env var initially, and the kernel's existing audit chain is the source of truth for what happened (the supervisor's structured stderr log is forensic evidence, not authoritative). |
 | 2.8 | **Half-flushed audit writes.** | A deadlocked kernel might be holding the audit-write mutex when the watcher fires — emitting `KernelDeadlockDetected` *through* the audit pipeline could deadlock the watcher itself. **Mitigation:** the watcher writes its forensic dump to a sibling file (`<data_dir>/deadlock_dump_<unix_ts>.json`) WITHOUT going through the kernel's own audit machinery. The supervisor reads the dump on the next boot and the kernel synthesises `KernelDeadlockDetected` into the chain AFTER the recovery sweep completes (so the chain hash stays continuous and the audit-write mutex is freshly initialised). The watcher's *best-effort* in-process emit is allowed but never depended on. |
-| 2.9 | **Supervisor masks operator intent.** | This is among the worst UX bugs a self-healing system can have: turning `Ctrl+C` into "stop, then auto-restart 200 ms later" is infuriating, hard to diagnose, and erodes trust. It also breaks OS-level service management — `launchctl stop` and `systemctl stop` both send `SIGTERM`, and the supervisor MUST honour that for the deferred `system-daemon` work to compose. **Mitigation:** the operator-signal contract in §4.4 — supervisor installs SIGTERM / SIGINT handlers, sets an `intentional_shutdown` flag, forwards the signal to the kernel, waits up to `RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS` (default 30 s), and never restarts after a SIGTERM / SIGINT exit (regardless of whether the supervisor or an external actor sent the signal). Witness invariants `INV-SUPERVISOR-SIGTERM-RESPECT-01` / `INV-SUPERVISOR-SIGINT-RESPECT-01` / `INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01` / `INV-SUPERVISOR-SHUTDOWN-GRACE-01` make it mechanically enforced. |
+| 2.9 | **Supervisor masks operator intent.** | This is among the worst UX bugs a self-healing system can have: turning `Ctrl+C` into "stop, then auto-restart 200 ms later" is infuriating, hard to diagnose, and erodes trust. It also breaks OS-level service management — `launchctl stop` and `systemctl stop` both send `SIGTERM`, and the supervisor MUST honour that for the deferred `system-daemon` work to compose. **Mitigation:** the operator-signal contract in §4.4 — supervisor installs SIGTERM / SIGINT / SIGHUP handlers, sets an `intentional_shutdown` flag, forwards shutdown to the kernel, waits up to `RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS` (default 30 s), and never restarts after an operator-intent exit. Witness invariants `INV-SUPERVISOR-SIGTERM-RESPECT-01` / `INV-SUPERVISOR-SIGINT-RESPECT-01` / `INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01` / `INV-SUPERVISOR-SHUTDOWN-GRACE-01` make it mechanically enforced. |
 
 ---
 
@@ -366,14 +366,14 @@ crates/supervisor/
 │   ├── sentinel.rs              # KernelLifecycleStatus + atomic write
 │   ├── child.rs                 # tokio::process::Command spawn + wait
 │   ├── classify.rs              # exit-code → SupervisorAction (the §4.4 table)
-│   ├── signal.rs                # SIGTERM / SIGINT handler + intentional_shutdown flag
+│   ├── signal.rs                # SIGTERM / SIGINT / SIGHUP handler + intentional_shutdown flag
 │   └── log.rs                   # structured stderr log (kernel-shaped JSON lines)
 └── tests/
     ├── exit_classification.rs   # one test per row of the §4.4 table
     ├── circuit_breaker.rs       # 4 restarts in 60s → halt-circuit-open
     ├── sentinel_round_trip.rs   # write + read sentinel atomically
     ├── sigterm_respect.rs       # INV-SUPERVISOR-SIGTERM-RESPECT-01
-    ├── sigint_respect.rs        # INV-SUPERVISOR-SIGINT-RESPECT-01
+    ├── supervisor_signal_witness.rs # signal + shutdown-grace witnesses
     └── shutdown_grace.rs        # INV-SUPERVISOR-SHUTDOWN-GRACE-01
 ```
 
@@ -381,8 +381,10 @@ crates/supervisor/
 
 ```text
 loop {
-    sentinel.write(KernelLifecycleStatus::Healthy { booted_at_unix_secs: now });
-    let outcome = spawn_kernel_and_wait().await;
+    let child = spawn_kernel().await;
+    sentinel.write_child_alive_preserving_restart_handoff(child.pid);
+    heartbeat_sentinel_every_5s_while_child_lives();
+    let outcome = wait_for_child_or_operator_shutdown(child).await;
     let action = classify(outcome, intentional_shutdown.load());
     match action {
         SupervisorAction::Restart { reason } => {
@@ -401,6 +403,12 @@ loop {
                 max_attempts: SUPERVISOR_RESTART_MAX_ATTEMPTS,
                 last_restart_unix_ts: now,
             });
+            // The next child kernel reads this Restarting sentinel
+            // during boot, emits KernelRestart{Initiated,Completed},
+            // auto-resumes swept work, then marks the same sentinel
+            // Healthy under the shared sentinel lock. Until that
+            // acknowledgement lands, supervisor heartbeats preserve
+            // Restarting so the restart context cannot be lost.
             // No sleep — the kernel's own boot is the throttle. The
             // circuit breaker bounds total attempts.
             continue;
@@ -426,51 +434,53 @@ loop {
   ```json
   {
     "schema_version": 1,
-    "recent_restarts": [
-      { "unix_ts": 1714500000, "reason": "DeadlockDetected" },
-      { "unix_ts": 1714500015, "reason": "DeadlockDetected" }
+    "recent_restart_unix_ts": [
+      1714500000,
+      1714500015
     ],
-    "circuit_open_at_unix_ts": null
+    "tripped": false,
+    "last_failure_reason": "DeadlockDetected"
   }
   ```
-* Reset path: `raxis-supervisor reset-circuit-breaker` truncates `recent_restarts` and clears `circuit_open_at_unix_ts`. Requires `--yes` or interactive `y/N` confirmation.
+* Reset path: `raxis-supervisor reset-circuit-breaker --yes` truncates `recent_restart_unix_ts` and clears `tripped`. Without `--yes`, interactive terminals prompt for `y/N`; non-interactive callers fail closed.
 * On supervisor restart (e.g. a launchd respawn of the supervisor itself), the file is read at startup so the breaker survives supervisor restarts — operator intent persists across both layers.
 
 ### §4.4 Exit-code classification (`INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01`)
 
 The supervisor classifies each kernel exit per the table below.
 The `intentional_shutdown` flag is the source of truth for any
-signaled exit: any kernel exit observed after this flag is true is
-operator-intent regardless of underlying exit code.
+exit observed after an operator stop request. Once this flag is
+true, every later kernel exit is operator-intent regardless of
+underlying exit code or signal.
 
 | Child outcome | Supervisor sent the signal? | Action | Sentinel state | Rationale |
 |---|---|---|---|---|
-| `WEXITSTATUS = 0` | n/a | **NO restart** | `Halted (clean)`, supervisor exit 0 | operator-initiated clean shutdown via `raxis` CLI / IPC |
+| `WEXITSTATUS = 0` | n/a | **NO restart** | `Halted (OperatorStop)`, supervisor exit 0 | clean kernel shutdown; operator must explicitly start it again |
 | `WEXITSTATUS = 70` | n/a | restart with circuit breaker | `Restarting (DeadlockDetected)` | deadlock detector tripped (§3.2) |
 | `WEXITSTATUS != 0 && != 70` | n/a | restart with circuit breaker | `Restarting (PanicAbort)` | unexpected crash (panic, abort, BOOT_ERR_*) |
-| `WIFSIGNALED + SIGTERM` | YES (operator → supervisor → kernel) | **NO restart** | `Halted (operator-terminated)`, supervisor exit 0 | operator-initiated, loop completes |
-| `WIFSIGNALED + SIGTERM` | NO (external init system / `kill -TERM`) | **NO restart** | `Halted (external-sigterm)`, supervisor exit 0 | external actor killed kernel; treated as operator intent |
-| `WIFSIGNALED + SIGINT` | n/a (universally Ctrl+C) | **NO restart** | `Halted (operator-interrupt)`, supervisor exit 0 | SIGINT is universally Ctrl+C; never restart |
-| `WIFSIGNALED + SIGKILL` | NO (someone went `kill -9`) | **NO restart** | `Halted (external-sigkill)`, supervisor exit 0 | someone bypassed graceful shutdown; never undo |
+| `WIFSIGNALED + SIGTERM` | YES (operator → supervisor → kernel) | **NO restart** | `Halted (OperatorStop)`, supervisor exit 0 | operator-initiated, loop completes |
+| `WIFSIGNALED + SIGTERM` | NO (external init system / `kill -TERM`) | **NO restart** | `Halted (OperatorStop)`, supervisor exit 0 | external actor killed kernel; treated as operator intent |
+| `WIFSIGNALED + SIGINT` | n/a (universally Ctrl+C) | **NO restart** | `Halted (OperatorStop)`, supervisor exit 0 | SIGINT is universally Ctrl+C; never restart |
+| `WIFSIGNALED + SIGKILL` | NO (OOM-killer or someone killed only the child) | restart with circuit breaker | `Restarting (OomKilled)` | supervisor cannot reliably distinguish OOM from `kill -9 <kernel_pid>`; operators who want force-stop must use `raxis-supervisor stop --force`, which sets shutdown intent before SIGKILL |
 | `WIFSIGNALED + SIGKILL` | YES (shutdown-grace-timeout escalation) | per the original cause | `Restarting` or `Halted` | the SIGKILL was the supervisor's escalation step; classification follows the original cause that started the shutdown. If `intentional_shutdown == true`, halt; else, treat as crash and restart. |
 | `WIFSIGNALED + SIGABRT/SIGSEGV/SIGBUS` | n/a | restart with circuit breaker | `Restarting (SignalCrash)` | kernel crashed itself; same path as exit 70 |
-| `WIFSIGNALED + SIGHUP` | n/a | log + ignore for now | unchanged | reserved for forward-compat "reload config"; not a restart trigger, not a shutdown trigger |
+| supervisor receives `SIGHUP` | YES | **NO restart** | `Halted (OperatorStop)` | controlling-terminal hangup / service-manager stop intent; supervisor forwards shutdown to the child rather than masking it |
+| child exits from direct `SIGHUP` | NO | restart with circuit breaker | `Restarting (SignalCrash)` | a direct child hangup bypassed the supervisor's operator-intent channel, so treat it as an abnormal crash |
 | `WIFSIGNALED + any other signal` | n/a | restart with circuit breaker | `Restarting (SignalCrash)` | conservative: any unrecognised signal that killed the kernel is treated as a crash |
 
 ### §4.5 Operator-signal contract (`INV-SUPERVISOR-SIGTERM-RESPECT-01`, `INV-SUPERVISOR-SIGINT-RESPECT-01`, `INV-SUPERVISOR-SHUTDOWN-GRACE-01`)
 
 The supervisor installs handlers for `SIGTERM`, `SIGINT`, and `SIGHUP` BEFORE spawning the kernel child:
 
-1. **`SIGTERM` / `SIGINT` received.** Atomically set:
+1. **`SIGTERM` / `SIGINT` / `SIGHUP` received.** Atomically set:
     * `intentional_shutdown = true`
-    * `signal_origin = "operator-terminated"` (for SIGTERM) or `"operator-interrupt"` (for SIGINT)
 2. **Forward** the signal to the kernel child via `nix::sys::signal::kill(child_pid, signal)`. The kernel's own signal handlers (`signal::ctrl_c` in `kernel/src/main.rs`) flow the shutdown through `dashboard::DashboardServer::serve_with_shutdown` and the IPC graceful-drain seam ([`dashboard-hardening.md §1.5`](dashboard-hardening.md)).
 3. **Wait** up to `RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS` (default `30`) for the kernel to exit naturally.
 4. **Escalation.** If the grace deadline expires AND the kernel is still alive:
     * Log a structured `KernelGracefulShutdownTimedOut { grace_secs, child_pid }` line on supervisor stderr.
     * Send `SIGKILL` to the kernel child. (Per §4.4 row "supervisor SENT SIGKILL", classification follows the original cause — `intentional_shutdown == true` → halt.)
 5. **Wait** for the kernel exit, classify per the §4.4 table, write the final sentinel state, supervisor exits `0`.
-6. **`SIGHUP`** is logged + ignored. Forward-compat reserved for "reload config".
+6. **`SIGHUP`** follows the same operator-intent halt path as SIGTERM. A future reload flow must use a distinct command path so it does not weaken the shutdown contract.
 
 The `intentional_shutdown` flag is **load-bearing**: any kernel exit observed after it flips to `true` is operator-intent, regardless of the kernel's actual exit code (a kernel that segfaults in the middle of its graceful-shutdown cleanup still classifies as a `Halted` outcome, not `Restarting (SignalCrash)`, because the operator has already declared intent).
 
@@ -482,9 +492,8 @@ Path: `<data_dir>/kernel_lifecycle_status.json`. Atomic write via `tempfile + re
 {
   "schema_version": 1,
   "status": "Healthy" | "Restarting" | "Halted",
-  "sub_state": "Clean" | "OperatorTerminated" | "OperatorInterrupt"
-              | "ExternalSigterm" | "ExternalSigkill" | "CircuitOpen"
-              | null,
+  "sub_state": "OperatorStop" | "OperatorStopForced"
+              | "CircuitOpen" | "SupervisorGone" | null,
   "attempt_n": 0,
   "max_attempts": 3,
   "last_restart_unix_ts": 0,
@@ -497,8 +506,9 @@ Path: `<data_dir>/kernel_lifecycle_status.json`. Atomic write via `tempfile + re
 }
 ```
 
+* Writes use unique temp files, `fsync`, and `rename`; read-modify-write transitions share `<data_dir>/.kernel_lifecycle_status.lock` between supervisor and kernel so restart handoff cannot race with heartbeat writes.
 * `status = "Healthy"`: the kernel child is alive; `kernel_pid` carries the live PID.
-* `status = "Restarting"`: the kernel exited and the supervisor is about to spawn a replacement; `last_restart_reason` carries the §4.4 classification.
+* `status = "Restarting"`: the kernel exited and the supervisor is about to spawn, or has just spawned, a replacement; `last_restart_reason` carries the §4.4 classification until the replacement kernel rehydrates it into the audit chain and marks the sentinel `Healthy`.
 * `status = "Halted"`: the supervisor has decided not to restart; `sub_state` carries which row of the §4.4 table caused the halt.
 
 ### §4.7 Stderr log
@@ -528,9 +538,9 @@ raxis-supervisor reset-circuit-breaker [--yes]
 
 * `start` — spawn the supervisor as a foreground process. Writes its own PID to `<data_dir>/supervisor.pid` so `stop` can find it without an environment dance. Spawns the kernel child, enters the §4.2 loop. Honours `RAXIS_SUPERVISOR_AUTO_RESTART=1` (default off; without it the supervisor logs a one-line warning and exits `0` immediately, leaving operator-managed restart unchanged — this is the `INV-SUPERVISOR-OPT-IN-01` gate).
 * `stop` — read `<data_dir>/supervisor.pid`, send `SIGTERM` to the supervisor PID. The supervisor's signal handler (§4.5) takes over from there.
-* `stop --force` — same as `stop`, but if the kernel is still alive after `5` seconds, escalate to `SIGKILL` to the supervisor (which forwards to the kernel). Tightens the §4.5 grace deadline for the urgent-shutdown case.
+* `stop --force` — writes a one-shot `<data_dir>/supervisor_force_stop.request`, then sends catchable `SIGTERM` to the supervisor. The supervisor consumes the request, sets shutdown intent, sends `SIGKILL` directly to the kernel child, writes `Halted (OperatorStopForced)`, and exits `0`. It never sends `SIGKILL` to the supervisor process itself, because that would bypass final sentinel/audit cleanup.
 * `status` — read `<data_dir>/kernel_lifecycle_status.json` + `<data_dir>/supervisor_state.json`, print a human-readable summary of (a) the current sentinel state, (b) the circuit-breaker state, (c) the last 10 restart timestamps + reasons.
-* `reset-circuit-breaker` — operator override: clear `recent_restarts` + `circuit_open_at_unix_ts` in `supervisor_state.json`. Requires `--yes` or interactive `y/N` confirmation. Emits a structured supervisor log line `{"event":"CircuitBreakerReset","operator":"<uid>"}`.
+* `reset-circuit-breaker` — operator override: clear `recent_restart_unix_ts` + `tripped` in `supervisor_state.json`. Requires `--yes` or interactive `y/N` confirmation; non-interactive callers without `--yes` fail closed. Emits a structured supervisor log line `{"event":"circuit_breaker_reset","confirmed":true}`.
 
 ### §4.9 Opt-in (`INV-SUPERVISOR-OPT-IN-01`)
 
@@ -552,9 +562,8 @@ New endpoint `GET /api/health/kernel-lifecycle`. Wire shape mirrors the on-disk 
 {
   "fresh": true | false,
   "status": "Healthy" | "Restarting" | "Halted",
-  "sub_state": "Clean" | "OperatorTerminated" | "OperatorInterrupt"
-              | "ExternalSigterm" | "ExternalSigkill" | "CircuitOpen"
-              | null,
+  "sub_state": "OperatorStop" | "OperatorStopForced"
+              | "CircuitOpen" | "SupervisorGone" | null,
   "attempt_n": 0,
   "max_attempts": 3,
   "last_restart_unix_ts": 0,
@@ -567,7 +576,7 @@ New endpoint `GET /api/health/kernel-lifecycle`. Wire shape mirrors the on-disk 
 }
 ```
 
-`fresh = true` when the sentinel file has been updated within the last `15` seconds (a stale sentinel implies the supervisor itself is wedged or absent — render as `Halted (sentinel-stale)` operator-side).
+`fresh = true` when the sentinel file has been updated within the last `15` seconds. The supervisor heartbeats the sentinel every `5` seconds while the kernel child lives; a stale sentinel therefore implies the supervisor itself is wedged or absent — render as `Halted (sentinel-stale)` operator-side.
 
 ### §5.2 Handler
 
@@ -589,11 +598,8 @@ Per-state render contract:
 |---|---|---|---|
 | `Healthy` | (no banner) | — | — |
 | `Restarting` | yellow | `Kernel restarting (attempt N/3)` | `<reason> — automatic restart in progress (last exit at <ts>)` |
-| `Halted (Clean)` | grey | `Kernel shut down cleanly at <ts>` | `Restart with raxis-supervisor start` (copy-able command) |
-| `Halted (OperatorTerminated)` | grey | `Kernel terminated by operator at <ts>` | `Restart with raxis-supervisor start` (copy-able command) |
-| `Halted (OperatorInterrupt)` | grey | `Kernel interrupted (Ctrl+C) at <ts>` | `Restart with raxis-supervisor start` (copy-able command) |
-| `Halted (ExternalSigterm)` | grey | `Kernel terminated externally at <ts> (SIGTERM)` | `Supervisor not restarting per operator-signal contract. Restart with raxis-supervisor start` |
-| `Halted (ExternalSigkill)` | grey | `Kernel terminated externally at <ts> (SIGKILL)` | `Supervisor not restarting per operator-signal contract. Restart with raxis-supervisor start` |
+| `Halted (OperatorStop)` | grey | `Kernel stopped by operator` | `Restart with raxis-supervisor start` (copy-able command) |
+| `Halted (OperatorStopForced)` | grey | `Kernel force-killed by operator (grace exceeded)` | `Restart with raxis-supervisor start` (copy-able command) |
 | `Halted (CircuitOpen)` | red | `Circuit breaker tripped after N crashes in 60 s` | `Manual intervention required: raxis-supervisor reset-circuit-breaker` (copy-able) |
 | `Halted (sentinel-stale)` | amber | `Supervisor sentinel stale (last update <ts>)` | `Supervisor process may be wedged; check journal / launchd logs` |
 
@@ -642,12 +648,12 @@ Launchd / systemd spawns `raxis-kernel` directly; the in-kernel deadlock detecto
 | Invariant | Witness test | File |
 |---|---|---|
 | `INV-SUPERVISOR-RESTART-AUDIT-01` | spawn a kernel that exits 70 with a forensic dump, restart, verify next boot's audit chain has `KernelDeadlockDetected → KernelStarted → KernelRestartCompleted` and `verify-chain` is hash-clean | `raxis/kernel/tests/deadlock_supervisor_handoff.rs::deadlock_dump_rehydrates_into_audit_chain_and_chain_stays_clean` |
-| `INV-SUPERVISOR-CIRCUIT-BREAKER-01` | spawn a fake child that exits 70 four times in 10 s; verify supervisor halts on attempt 4 with `CircuitOpen` sub-state and a `KernelRestartHaltedCircuitOpen` (synthesised on next boot if/when the operator clears) | `raxis/crates/supervisor/tests/circuit_breaker.rs::four_failures_in_window_open_circuit` |
-| `INV-SUPERVISOR-OPT-IN-01` | invoke `raxis-supervisor start` without `RAXIS_SUPERVISOR_AUTO_RESTART=1`; verify supervisor logs the gate and exits 0 with no kernel child spawned | `raxis/crates/supervisor/tests/opt_in_gate.rs::no_env_var_means_no_supervision` |
-| `INV-SUPERVISOR-SIGTERM-RESPECT-01` | spawn fake child, send SIGTERM to supervisor, verify supervisor forwards to child, child exits, supervisor exits 0 with sentinel `Halted (OperatorTerminated)` and NO replacement child spawned | `raxis/crates/supervisor/tests/sigterm_respect.rs::sigterm_to_supervisor_propagates_and_halts` |
-| `INV-SUPERVISOR-SIGINT-RESPECT-01` | same shape with SIGINT; verify sentinel `Halted (OperatorInterrupt)` | `raxis/crates/supervisor/tests/sigint_respect.rs::sigint_to_supervisor_propagates_and_halts` |
-| `INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01` | one sub-test per row of the §4.4 table; assert `classify(outcome, intentional_shutdown) == expected_action` for each | `raxis/crates/supervisor/tests/exit_classification.rs::*` |
-| `INV-SUPERVISOR-SHUTDOWN-GRACE-01` | spawn fake child that takes 5 s to exit on SIGTERM; supervisor with `RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS=10` MUST NOT escalate to SIGKILL within those 5 s; assert child exited via SIGTERM (not SIGKILL) and sentinel reflects the operator-signal classification | `raxis/crates/supervisor/tests/shutdown_grace.rs::supervisor_waits_full_grace_before_sigkill` |
+| `INV-SUPERVISOR-CIRCUIT-BREAKER-01` | spawn a fake child that exits 70 four times in 10 s; verify supervisor halts on attempt 4 with `CircuitOpen` sub-state and a `KernelRestartHaltedCircuitOpen` (synthesised on next boot if/when the operator clears) | `raxis/crates/supervisor/tests/supervisor_classifier_witness.rs::exit_70_restarts_until_breaker_trips` |
+| `INV-SUPERVISOR-OPT-IN-01` | invoke `raxis-supervisor start` without `RAXIS_SUPERVISOR_AUTO_RESTART=1`; verify pass-through mode writes no sentinel or breaker state | `raxis/crates/supervisor/tests/supervisor_opt_in_witness.rs::passthrough_when_opt_in_env_var_unset_writes_no_sentinel` |
+| `INV-SUPERVISOR-SIGTERM-RESPECT-01` | spawn fake child, send SIGTERM to supervisor, verify supervisor forwards to child, child exits, supervisor exits 0 with sentinel `Halted (OperatorStop)` and NO replacement child spawned | `raxis/crates/supervisor/tests/supervisor_signal_witness.rs::external_sigterm_to_supervisor_forwards_to_kernel_and_halts_no_restart` |
+| `INV-SUPERVISOR-SIGINT-RESPECT-01` | same shape with SIGINT; verify sentinel `Halted (OperatorStop)` and no replacement child spawned | `raxis/crates/supervisor/tests/supervisor_signal_witness.rs` |
+| `INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01` | one sub-test per row of the §4.4 table; assert `classify(outcome, intentional_shutdown) == expected_action` for each | `raxis/crates/supervisor/src/classify.rs::*` |
+| `INV-SUPERVISOR-SHUTDOWN-GRACE-01` | spawn fake child that ignores SIGTERM; supervisor escalates to SIGKILL after grace and records `OperatorStopForced` | `raxis/crates/supervisor/tests/supervisor_signal_witness.rs::slow_sigterm_kernel_triggers_sigkill_escalation_and_operator_stop_forced` |
 | `INV-DASHBOARD-KERNEL-LIFECYCLE-01` | write sentinel `Restarting (DeadlockDetected, attempt 1/3)`, mount `KernelLifecycleBanner`, assert it renders the yellow banner within 5 s; mutate sentinel to `Halted (CircuitOpen)`, assert it transitions to red within the next 5 s | `raxis/dashboard-fe/src/components/banners/__tests__/KernelLifecycleBanner.test.tsx` + `raxis/crates/dashboard/tests/kernel_lifecycle_endpoint.rs` |
 
 ---

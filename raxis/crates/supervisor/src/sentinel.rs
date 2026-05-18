@@ -17,18 +17,101 @@
 // A file on a shared `<data_dir>/` works for both readers without
 // inventing a new IPC channel.
 //
-// **Atomicity.** Every write is a `tempfile + rename` so a
-// reader never sees a partial file. The sibling tempfile
-// (`.kernel_lifecycle_status.json.tmp`) is filtered out by the
-// kernel + dashboard readers (they expect the canonical
-// filename).
+// **Atomicity.** Every write is a unique `tempfile + rename` so a
+// reader never sees a partial file. Read-modify-write transitions
+// also take a small advisory lock because both the supervisor and
+// the replacement kernel may update this file during restart
+// handoff.
 
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 /// Sentinel filename per `self-healing-supervisor.md §4.6`.
 pub const SENTINEL_FILENAME: &str = "kernel_lifecycle_status.json";
+
+/// Advisory lock filename shared with `kernel/src/restart_lifecycle.rs`.
+const SENTINEL_LOCK_FILENAME: &str = ".kernel_lifecycle_status.lock";
+
+/// One-shot force-stop request filename. `raxis-supervisor stop
+/// --force` writes this file, then sends SIGTERM to the supervisor.
+/// The supervisor can catch SIGTERM, consume this request, and send
+/// SIGKILL to the kernel child while still writing a final sentinel.
+pub const FORCE_STOP_REQUEST_FILENAME: &str = "supervisor_force_stop.request";
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(unix)]
+struct SentinelLockGuard(File);
+
+#[cfg(not(unix))]
+struct SentinelLockGuard;
+
+#[cfg(unix)]
+impl Drop for SentinelLockGuard {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        let _ = nix::fcntl::flock(self.0.as_raw_fd(), nix::fcntl::FlockArg::Unlock);
+    }
+}
+
+#[cfg(unix)]
+fn lock_sentinel(data_dir: &Path) -> std::io::Result<SentinelLockGuard> {
+    use std::os::fd::AsRawFd;
+
+    std::fs::create_dir_all(data_dir)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(data_dir.join(SENTINEL_LOCK_FILENAME))?;
+    nix::fcntl::flock(lock.as_raw_fd(), nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    Ok(SentinelLockGuard(lock))
+}
+
+#[cfg(not(unix))]
+fn lock_sentinel(_data_dir: &Path) -> std::io::Result<SentinelLockGuard> {
+    Ok(SentinelLockGuard)
+}
+
+fn unique_temp_path(data_dir: &Path, filename: &str) -> PathBuf {
+    let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    data_dir.join(format!(
+        ".{filename}.{}.{}.{}.tmp",
+        std::process::id(),
+        nanos,
+        counter
+    ))
+}
+
+fn write_sentinel_unlocked(data_dir: &Path, sentinel: &Sentinel) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(data_dir)?;
+    let final_path = data_dir.join(SENTINEL_FILENAME);
+    let tmp_path = unique_temp_path(data_dir, SENTINEL_FILENAME);
+    let bytes = serde_json::to_vec_pretty(sentinel).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("sentinel serialization failed: {e}"),
+        )
+    })?;
+    {
+        use std::io::Write;
+        let mut f = File::create(&tmp_path)?;
+        f.write_all(&bytes)?;
+        f.flush()?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, &final_path)?;
+    Ok(final_path)
+}
 
 /// Top-level supervisor-reported status. Wire-pinned PascalCase
 /// strings — both the kernel reader and the dashboard FE match
@@ -164,33 +247,49 @@ impl Sentinel {
 
 /// Write `sentinel` to `<data_dir>/kernel_lifecycle_status.json`
 /// atomically. Per `self-healing-supervisor.md §4.6` this
-/// function is the ONLY supported path for sentinel mutation; the
-/// supervisor binary calls it on every state transition.
+/// function is the supervisor-side supported path for sentinel
+/// mutation; the replacement kernel has a matching locked writer
+/// for the restart-rehydrated acknowledgement.
 pub fn write_sentinel(data_dir: &Path, sentinel: &Sentinel) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(data_dir)?;
-    let final_path = data_dir.join(SENTINEL_FILENAME);
-    let tmp_path = data_dir.join(format!(".{SENTINEL_FILENAME}.tmp"));
-    let bytes = serde_json::to_vec_pretty(sentinel).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("sentinel serialization failed: {e}"),
-        )
-    })?;
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp_path)?;
-        f.write_all(&bytes)?;
-        f.flush()?;
-        f.sync_all()?;
+    let _guard = lock_sentinel(data_dir)?;
+    write_sentinel_unlocked(data_dir, sentinel)
+}
+
+/// Atomically read the current sentinel under the shared
+/// supervisor/kernel lock, build a replacement, and publish it via
+/// rename before releasing the lock. Use this for transitions whose
+/// output depends on the prior sentinel state.
+pub fn update_sentinel<F>(data_dir: &Path, build: F) -> std::io::Result<PathBuf>
+where
+    F: FnOnce(std::io::Result<Option<Sentinel>>) -> Sentinel,
+{
+    let _guard = lock_sentinel(data_dir)?;
+    let current = read_sentinel_unlocked(data_dir);
+    let next = build(current);
+    write_sentinel_unlocked(data_dir, &next)
+}
+
+/// Atomically update an existing sentinel under the shared lock.
+/// Returns `Ok(None)` when no sentinel exists yet.
+pub fn update_existing_sentinel<F>(data_dir: &Path, build: F) -> std::io::Result<Option<PathBuf>>
+where
+    F: FnOnce(Sentinel) -> Sentinel,
+{
+    let _guard = lock_sentinel(data_dir)?;
+    match read_sentinel_unlocked(data_dir)? {
+        Some(current) => write_sentinel_unlocked(data_dir, &build(current)).map(Some),
+        None => Ok(None),
     }
-    std::fs::rename(&tmp_path, &final_path)?;
-    Ok(final_path)
 }
 
 /// Read the current sentinel back from disk. Returns
 /// `Ok(None)` if the file is absent (expected on first boot
 /// before the supervisor has had a chance to write anything).
 pub fn read_sentinel(data_dir: &Path) -> std::io::Result<Option<Sentinel>> {
+    read_sentinel_unlocked(data_dir)
+}
+
+fn read_sentinel_unlocked(data_dir: &Path) -> std::io::Result<Option<Sentinel>> {
     match std::fs::read(data_dir.join(SENTINEL_FILENAME)) {
         Ok(bytes) => {
             let s: Sentinel = serde_json::from_slice(&bytes).map_err(|e| {
@@ -204,6 +303,65 @@ pub fn read_sentinel(data_dir: &Path) -> std::io::Result<Option<Sentinel>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// Atomically write a force-stop request for the running supervisor.
+/// This is intentionally a file rather than a custom signal because
+/// POSIX SIGKILL is not catchable; the supervisor needs a catchable
+/// SIGTERM wakeup plus a durable "force" bit it can read before
+/// forwarding shutdown to the child kernel.
+pub fn write_force_stop_request(data_dir: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(data_dir)?;
+    let final_path = data_dir.join(FORCE_STOP_REQUEST_FILENAME);
+    let tmp_path = unique_temp_path(data_dir, FORCE_STOP_REQUEST_FILENAME);
+    {
+        use std::io::Write;
+        let mut f = File::create(&tmp_path)?;
+        let body = format!(
+            "{{\"schema_version\":1,\"requested_at_unix_secs\":{}}}\n",
+            unix_now_secs()
+        );
+        f.write_all(body.as_bytes())?;
+        f.flush()?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp_path, &final_path)?;
+    Ok(final_path)
+}
+
+/// Remove any stale force-stop request. Used at supervisor startup
+/// so a crash between request creation and signal delivery cannot
+/// make a future unrelated stop unexpectedly forceful.
+pub fn clear_force_stop_request(data_dir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(data_dir.join(FORCE_STOP_REQUEST_FILENAME)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Consume the force-stop request if present. Returns `true` when
+/// the current shutdown should skip SIGTERM grace and send SIGKILL
+/// to the child kernel immediately.
+pub fn consume_force_stop_request(data_dir: &Path) -> bool {
+    match std::fs::remove_file(data_dir.join(FORCE_STOP_REQUEST_FILENAME)) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"force_stop_request_consume_failed\",\
+                 \"reason\":\"{e}\"}}"
+            );
+            false
+        }
+    }
+}
+
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -269,5 +427,23 @@ mod tests {
         .unwrap();
         let back = read_sentinel(dir.path()).expect("read").expect("present");
         assert_eq!(back.status, "Healthy");
+    }
+
+    #[test]
+    fn force_stop_request_is_one_shot() {
+        let dir = tempdir().unwrap();
+        let path = write_force_stop_request(dir.path()).expect("write request");
+        assert!(path.ends_with(FORCE_STOP_REQUEST_FILENAME));
+        assert!(consume_force_stop_request(dir.path()));
+        assert!(!consume_force_stop_request(dir.path()));
+    }
+
+    #[test]
+    fn clear_force_stop_request_is_idempotent() {
+        let dir = tempdir().unwrap();
+        clear_force_stop_request(dir.path()).expect("clear missing");
+        write_force_stop_request(dir.path()).expect("write request");
+        clear_force_stop_request(dir.path()).expect("clear present");
+        assert!(!consume_force_stop_request(dir.path()));
     }
 }

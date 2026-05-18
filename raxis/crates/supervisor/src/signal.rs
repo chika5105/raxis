@@ -8,11 +8,10 @@
 // **Why `intentional_shutdown` is load-bearing.** When the
 // kernel exits because the supervisor sent SIGTERM, the exit-
 // status discriminator alone (`status.signal() == Some(15)`) is
-// NOT enough to know whether the operator intended this — an
-// EXTERNAL `kill -TERM <kernel_pid>` would produce the same exit
-// status. The supervisor MUST distinguish those cases so it can
-// respect operator intent (no auto-restart) when the operator
-// sent the signal but auto-restart on a deadlock-induced exit.
+// NOT enough to know whether the operator intended this. The
+// supervisor therefore treats every exit observed after this flag
+// flips as operator intent, even if the kernel reports a panic,
+// deadlock exit code, or crash signal during shutdown cleanup.
 //
 // `intentional_shutdown` is set to `true` BEFORE the supervisor
 // sends SIGTERM / SIGINT / SIGKILL to its child kernel. The

@@ -27,12 +27,56 @@
 
 #![forbid(unsafe_code)]
 
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use serde::Deserialize;
 
 use crate::deadlock_dump;
+
+const SENTINEL_LOCK_FILENAME: &str = ".kernel_lifecycle_status.lock";
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct SentinelLockGuard(File);
+
+impl Drop for SentinelLockGuard {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        let _ = nix::fcntl::flock(self.0.as_raw_fd(), nix::fcntl::FlockArg::Unlock);
+    }
+}
+
+fn lock_sentinel_parent(parent: &Path) -> std::io::Result<SentinelLockGuard> {
+    use std::os::fd::AsRawFd;
+
+    std::fs::create_dir_all(parent)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(parent.join(SENTINEL_LOCK_FILENAME))?;
+    nix::fcntl::flock(lock.as_raw_fd(), nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    Ok(SentinelLockGuard(lock))
+}
+
+fn unique_temp_path(parent: &Path, filename: &str) -> PathBuf {
+    let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    parent.join(format!(
+        ".{filename}.{}.{}.{}.tmp",
+        std::process::id(),
+        nanos,
+        counter
+    ))
+}
 
 /// Outcome of a rehydration pass. Useful for tests + future
 /// metrics surfaces; the kernel's `main.rs` only reads
@@ -126,6 +170,72 @@ pub fn read_sentinel_any_status(sentinel_path: &Path) -> Option<SentinelView> {
             None
         }
     }
+}
+
+/// Mark a consumed `Restarting` sentinel as `Healthy` after the
+/// kernel has copied the restart context into the audit chain.
+///
+/// The supervisor preserves `status = "Restarting"` across the
+/// replacement spawn so the child kernel can read the prior exit
+/// reason. Once the kernel has rehydrated that context, this helper
+/// acknowledges the handoff by flipping only the liveness fields and
+/// preserving the restart metadata for dashboards.
+pub fn mark_restart_sentinel_rehydrated(sentinel_path: &Path) -> std::io::Result<bool> {
+    let parent = sentinel_path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sentinel path has no parent",
+        )
+    })?;
+    let _guard = lock_sentinel_parent(parent)?;
+    let bytes = match std::fs::read(sentinel_path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("sentinel deserialization failed: {e}"),
+        )
+    })?;
+    if value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s != "Restarting")
+        .unwrap_or(true)
+    {
+        return Ok(false);
+    }
+    value["status"] = serde_json::Value::String("Healthy".to_owned());
+    value["sub_state"] = serde_json::Value::Null;
+    value["kernel_pid"] = serde_json::Value::Number(serde_json::Number::from(std::process::id()));
+    value["updated_at_unix_secs"] =
+        serde_json::Value::Number(serde_json::Number::from(unix_now_secs()));
+
+    let tmp = unique_temp_path(parent, "kernel_lifecycle_status.json");
+    let out = serde_json::to_vec_pretty(&value).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("sentinel serialization failed: {e}"),
+        )
+    })?;
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&out)?;
+        f.flush()?;
+        f.sync_all()?;
+    }
+    std::fs::rename(tmp, sentinel_path)?;
+    Ok(true)
+}
+
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Synthesise the V2.5 restart-lifecycle audit events into the
@@ -647,6 +757,63 @@ mod tests {
             ],
         );
         verify_chain_clean(&audit_dir);
+    }
+
+    #[test]
+    fn mark_restart_sentinel_rehydrated_preserves_restart_metadata() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path();
+        let sentinel_path = data_dir.join("kernel_lifecycle_status.json");
+        let sentinel_json = serde_json::json!({
+            "schema_version": 1,
+            "status": "Restarting",
+            "attempt_n": 2,
+            "max_attempts": 3,
+            "last_restart_unix_ts": 1_714_500_010,
+            "last_restart_reason": "DeadlockDetected",
+            "prev_run_exit_code": 70,
+            "attempts_in_window": 2,
+            "window_secs": 60,
+            "supervisor_pid": 12345,
+            "kernel_pid": 0,
+            "updated_at_unix_secs": 1_714_500_010,
+            "future_field": "preserved"
+        });
+        std::fs::write(&sentinel_path, serde_json::to_vec(&sentinel_json).unwrap()).unwrap();
+
+        assert!(mark_restart_sentinel_rehydrated(&sentinel_path).unwrap());
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&sentinel_path).unwrap()).unwrap();
+
+        assert_eq!(value["status"], "Healthy");
+        assert!(value["sub_state"].is_null());
+        assert_eq!(value["last_restart_reason"], "DeadlockDetected");
+        assert_eq!(value["prev_run_exit_code"], 70);
+        assert_eq!(value["future_field"], "preserved");
+        assert_eq!(value["kernel_pid"], std::process::id());
+    }
+
+    #[test]
+    fn mark_restart_sentinel_rehydrated_ignores_non_restarting_status() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path();
+        let sentinel_path = data_dir.join("kernel_lifecycle_status.json");
+        std::fs::write(
+            &sentinel_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "status": "Healthy",
+                "kernel_pid": 123,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(!mark_restart_sentinel_rehydrated(&sentinel_path).unwrap());
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&sentinel_path).unwrap()).unwrap();
+        assert_eq!(value["status"], "Healthy");
+        assert_eq!(value["kernel_pid"], 123);
     }
 
     /// Sentinel + dump together → reason is `DeadlockDetected`

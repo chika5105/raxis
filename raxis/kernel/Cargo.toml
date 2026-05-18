@@ -222,6 +222,7 @@ base64          = "0.22"
 # libc transitively; pinning it here makes the dependency
 # explicit so the kernel is self-contained.
 libc            = "0.2"
+nix             = { version = "0.27", default-features = false, features = ["fs"] }
 
 # Concrete isolation substrates — platform-gated. The kernel's
 # `select_isolation_backend` (`isolation_select.rs`) builds the

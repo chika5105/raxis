@@ -15,6 +15,9 @@ fn main() {
     unsafe {
         sigaction(Signal::SIGTERM, &action).expect("ignore SIGTERM");
     }
+    if let Ok(path) = std::env::var("SUPERVISOR_FAKE_READY_FILE") {
+        std::fs::write(path, b"ready\n").expect("write ready marker");
+    }
     std::thread::sleep(std::time::Duration::from_secs(120));
     std::process::exit(0);
 }

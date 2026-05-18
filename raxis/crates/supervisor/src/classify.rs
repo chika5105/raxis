@@ -4,17 +4,16 @@
 // `INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01`.
 //
 // The classifier is a pure function of `(exit_status,
-// supervisor_sent_signal)`. It does NOT consult the wallclock /
+// intentional_shutdown)`. It does NOT consult the wallclock /
 // circuit breaker — those are higher-layer decisions. The only
 // thing this module decides is "what kind of exit was that?".
 //
 // Per `INV-SUPERVISOR-SIGTERM-RESPECT-01` /
-// `INV-SUPERVISOR-SIGINT-RESPECT-01`, signaled exits are split by
-// whether the supervisor itself sent the signal (the
-// `intentional_shutdown` flag in `signal.rs`). The "external SIGTERM /
-// SIGINT" case is treated as operator intent and produces
-// `Outcome::CleanExit { restart: false }` — auto-restart never
-// overrides operator intent.
+// `INV-SUPERVISOR-SIGINT-RESPECT-01`, every exit observed after
+// the supervisor's intentional-shutdown flag is set is operator
+// intent. That includes a kernel that exits 70, panics, or
+// segfaults during shutdown cleanup. Auto-restart never overrides
+// operator intent.
 //
 // **Cross-platform note.** The signal-decoding helpers below use
 // `std::os::unix::process::ExitStatusExt::signal()` which is
@@ -135,29 +134,41 @@ impl Outcome {
 }
 
 /// Classify a child `ExitStatus` into an [`Outcome`] given
-/// whether the supervisor itself sent the terminating signal
-/// (the `intentional_shutdown` flag — see `signal.rs`).
+/// whether the supervisor itself initiated shutdown (the
+/// `intentional_shutdown` flag — see `signal.rs`).
 ///
 /// **Decision table** (mirror of
 /// `self-healing-supervisor.md §4.4`):
 ///
-/// | child exit       | supervisor sent signal? | outcome              |
-/// |------------------|-------------------------|----------------------|
-/// | WEXITSTATUS = 0  | n/a                     | `CleanExit{0}`       |
-/// | WEXITSTATUS = 70 | n/a                     | `DeadlockDetected`   |
-/// | WEXITSTATUS = N  | n/a (N ≠ 0, 70)         | `PanicAbort{N}`      |
-/// | SIGTERM / SIGINT | yes                     | `CleanExit{128+sig}` |
-/// | SIGTERM / SIGINT | no                      | `OperatorSignalExit` |
-/// | SIGKILL          | yes                     | `CleanExit{128+9}`   |
-/// | SIGKILL          | no                      | `OomKilled`          |
-/// | SIGSEGV/BUS/ABRT | n/a                     | `SignalCrash`        |
+/// | child exit       | intentional shutdown? | outcome              |
+/// |------------------|-----------------------|----------------------|
+/// | anything         | yes                   | `CleanExit{status}`  |
+/// | WEXITSTATUS = 0  | no                    | `CleanExit{0}`       |
+/// | WEXITSTATUS = 70 | no                    | `DeadlockDetected`   |
+/// | WEXITSTATUS = N  | no (N != 0, 70)       | `PanicAbort{N}`      |
+/// | SIGTERM / SIGINT | no                    | `OperatorSignalExit` |
+/// | SIGKILL          | no                    | `OomKilled`          |
+/// | SIGSEGV/BUS/ABRT | no                    | `SignalCrash`        |
 #[cfg(unix)]
-pub fn classify_exit_status(status: ExitStatus, supervisor_sent_signal: bool) -> Outcome {
+pub fn classify_exit_status(status: ExitStatus, intentional_shutdown: bool) -> Outcome {
+    if intentional_shutdown {
+        return Outcome::CleanExit {
+            prev_run_exit_code: status_to_shell_code(status),
+        };
+    }
     if let Some(code) = status.code() {
         return classify_exit_code(code);
     }
     let signal = status.signal().unwrap_or(0);
-    classify_signal(signal, supervisor_sent_signal)
+    classify_signal(signal, false)
+}
+
+#[cfg(unix)]
+fn status_to_shell_code(status: ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    128_i32.saturating_add(status.signal().unwrap_or(0))
 }
 
 /// Code-only classification (no signal context). Useful for
@@ -205,13 +216,16 @@ pub fn classify_signal(signal: i32, supervisor_sent_signal: bool) -> Outcome {
                 Outcome::OomKilled { prev_run_exit_code }
             }
         }
-        // Crash signals — the supervisor never sends these, so
-        // the `supervisor_sent_signal` flag is moot. Always
-        // `SignalCrash`.
-        6 | 7 | 10 | 11 => Outcome::SignalCrash {
-            prev_run_exit_code,
-            signal,
-        },
+        6 | 7 | 10 | 11 => {
+            if supervisor_sent_signal {
+                Outcome::CleanExit { prev_run_exit_code }
+            } else {
+                Outcome::SignalCrash {
+                    prev_run_exit_code,
+                    signal,
+                }
+            }
+        }
         // Unknown signal — treat as `SignalCrash` so the
         // supervisor still restarts (better to over-restart on a
         // novel signal than miss an OOM the kernel renames at
@@ -333,22 +347,64 @@ mod tests {
     }
 
     #[test]
-    fn crash_signals_are_signal_crash_regardless_of_intent() {
+    fn crash_signals_restart_without_shutdown_intent() {
         for sig in [6, 7, 10, 11] {
-            for supervisor_sent in [true, false] {
-                let o = classify_signal(sig, supervisor_sent);
-                match o {
-                    Outcome::SignalCrash {
-                        prev_run_exit_code,
-                        signal,
-                    } => {
-                        assert_eq!(prev_run_exit_code, 128 + sig);
-                        assert_eq!(signal, sig);
-                    }
-                    other => panic!("expected SignalCrash, got {other:?}"),
+            let o = classify_signal(sig, false);
+            match o {
+                Outcome::SignalCrash {
+                    prev_run_exit_code,
+                    signal,
+                } => {
+                    assert_eq!(prev_run_exit_code, 128 + sig);
+                    assert_eq!(signal, sig);
                 }
-                assert!(classify_signal(sig, supervisor_sent).restart_eligible());
+                other => panic!("expected SignalCrash, got {other:?}"),
             }
+            assert!(o.restart_eligible());
         }
+    }
+
+    #[test]
+    fn shutdown_intent_overrides_crash_signal_classification() {
+        for sig in [6, 7, 10, 11] {
+            let o = classify_signal(sig, true);
+            assert_eq!(
+                o,
+                Outcome::CleanExit {
+                    prev_run_exit_code: 128 + sig
+                }
+            );
+            assert!(!o.restart_eligible());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_intent_overrides_exit_code_classification() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let deadlock_status = std::process::ExitStatus::from_raw(70 << 8);
+        assert_eq!(
+            classify_exit_status(deadlock_status, true),
+            Outcome::CleanExit {
+                prev_run_exit_code: 70
+            }
+        );
+
+        let panic_status = std::process::ExitStatus::from_raw(101 << 8);
+        assert_eq!(
+            classify_exit_status(panic_status, true),
+            Outcome::CleanExit {
+                prev_run_exit_code: 101
+            }
+        );
+
+        let sigsegv_status = std::process::ExitStatus::from_raw(11);
+        assert_eq!(
+            classify_exit_status(sigsegv_status, true),
+            Outcome::CleanExit {
+                prev_run_exit_code: 139
+            }
+        );
     }
 }

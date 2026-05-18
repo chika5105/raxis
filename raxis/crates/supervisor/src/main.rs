@@ -17,24 +17,29 @@
 //       stays unchanged).
 //
 //   * `raxis-supervisor stop [--data-dir <path>] [--force]`
-//       Sends SIGTERM (or SIGKILL with `--force`) to the running
-//       supervisor. Reads the supervisor PID from the sentinel
-//       file (`<data_dir>/kernel_lifecycle_status.json` ->
-//       `supervisor_pid`).
+//       Sends SIGTERM to the running supervisor. With `--force`,
+//       writes a one-shot request file first; the supervisor catches
+//       SIGTERM and sends SIGKILL to the kernel child itself so it can
+//       still write a final sentinel. Reads the supervisor PID from
+//       the sentinel file (`<data_dir>/kernel_lifecycle_status.json`
+//       -> `supervisor_pid`).
 //
 //   * `raxis-supervisor status [--data-dir <path>]`
 //       Pretty-prints the current sentinel file.
 //
 //   * `raxis-supervisor reset-circuit-breaker [--data-dir <path>]`
 //       Clears the breaker state (`<data_dir>/supervisor_state.json`)
-//       so the supervisor will spawn the kernel again.
+//       after `--yes` or an interactive confirmation so the
+//       supervisor will spawn the kernel again.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use raxis_supervisor::circuit_breaker::CircuitBreaker;
 use raxis_supervisor::log::SupervisorLog;
-use raxis_supervisor::sentinel::{read_sentinel, write_sentinel, Sentinel};
+use raxis_supervisor::sentinel::{
+    read_sentinel, update_existing_sentinel, write_force_stop_request, Sentinel,
+};
 use raxis_supervisor::signal::{install_handlers, IntentionalShutdownFlag};
 use raxis_supervisor::supervisor::{run_supervisor_loop, FinalOutcome, SupervisorConfig};
 use raxis_supervisor::{
@@ -59,6 +64,7 @@ fn print_usage_and_exit(code: i32) -> ! {
          OPTIONS:\n  \
          --data-dir <PATH>           Override RAXIS_DATA_DIR / ~/.raxis\n  \
          --kernel-binary <PATH>      Override RAXIS_SUPERVISOR_KERNEL_BINARY\n\
+         --yes                       Confirm reset-circuit-breaker non-interactively\n\
          \n\
          ENVIRONMENT:\n  \
          RAXIS_SUPERVISOR_AUTO_RESTART=1   Opt-in to auto-restart\n  \
@@ -97,6 +103,7 @@ struct ParsedArgs {
     data_dir: Option<PathBuf>,
     kernel_binary: Option<PathBuf>,
     force: bool,
+    yes: bool,
     kernel_args: Vec<String>,
 }
 
@@ -128,6 +135,9 @@ fn parse_args() -> ParsedArgs {
             }
             "--force" => {
                 out.force = true;
+            }
+            "--yes" => {
+                out.yes = true;
             }
             "start" | "stop" | "status" | "reset-circuit-breaker" => {
                 if out.subcommand.is_some() {
@@ -166,7 +176,7 @@ async fn main() {
         "start" => cmd_start(&args, &data_dir, &kernel_binary).await,
         "stop" => cmd_stop(&data_dir, args.force),
         "status" => cmd_status(&data_dir),
-        "reset-circuit-breaker" => cmd_reset_breaker(&data_dir),
+        "reset-circuit-breaker" => cmd_reset_breaker(&data_dir, args.yes),
         other => {
             eprintln!("unknown subcommand: {other}");
             print_usage_and_exit(2);
@@ -188,7 +198,7 @@ async fn cmd_start(
     // identical to running `raxis-kernel` directly.
     let opt_in = std::env::var(ENV_OPT_IN).map(|v| v == "1").unwrap_or(false);
     if !opt_in {
-        return one_shot_passthrough(kernel_binary, &args.kernel_args).await;
+        return one_shot_passthrough(kernel_binary, &args.kernel_args);
     }
 
     let log = match SupervisorLog::open(data_dir) {
@@ -260,40 +270,58 @@ async fn cmd_start(
 }
 
 /// One-shot passthrough used when the opt-in env var is unset.
-/// Spawns the kernel as a child and forwards its exit code.
-/// Same behaviour as running `raxis-kernel` directly.
-async fn one_shot_passthrough(kernel_binary: &std::path::Path, kernel_args: &[String]) -> i32 {
-    let mut cmd = tokio::process::Command::new(kernel_binary);
-    cmd.args(kernel_args);
-    match cmd.spawn() {
-        Ok(mut child) => match child.wait().await {
-            Ok(status) => status.code().unwrap_or_else(|| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::ExitStatusExt;
-                    128_i32.saturating_add(status.signal().unwrap_or(0))
-                }
-                #[cfg(not(unix))]
-                {
+/// On Unix this uses `exec`, replacing the supervisor process with
+/// the kernel process. That is the only signal-correct way to make
+/// opt-out mode behave like running `raxis-kernel` directly.
+#[cfg(unix)]
+fn one_shot_passthrough(kernel_binary: &std::path::Path, kernel_args: &[String]) -> i32 {
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new(kernel_binary)
+        .args(kernel_args)
+        .exec();
+    eprintln!(
+        "{{\"level\":\"error\",\"event\":\"kernel_exec_failed\",\
+         \"reason\":\"{err}\"}}"
+    );
+    1
+}
+
+#[cfg(not(unix))]
+fn one_shot_passthrough(kernel_binary: &std::path::Path, kernel_args: &[String]) -> i32 {
+    let rt = tokio::runtime::Runtime::new().expect("build passthrough runtime");
+    rt.block_on(async {
+        let mut cmd = tokio::process::Command::new(kernel_binary);
+        cmd.args(kernel_args);
+        match cmd.spawn() {
+            Ok(mut child) => match child.wait().await {
+                Ok(status) => status.code().unwrap_or_else(|| {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::ExitStatusExt;
+                        128_i32.saturating_add(status.signal().unwrap_or(0))
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        1
+                    }
+                }),
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"kernel_wait_failed\",\
+                     \"reason\":\"{e}\"}}"
+                    );
                     1
                 }
-            }),
+            },
             Err(e) => {
                 eprintln!(
-                    "{{\"level\":\"error\",\"event\":\"kernel_wait_failed\",\
-                     \"reason\":\"{e}\"}}"
+                    "{{\"level\":\"error\",\"event\":\"kernel_spawn_failed\",\
+                 \"reason\":\"{e}\"}}"
                 );
                 1
             }
-        },
-        Err(e) => {
-            eprintln!(
-                "{{\"level\":\"error\",\"event\":\"kernel_spawn_failed\",\
-                 \"reason\":\"{e}\"}}"
-            );
-            1
         }
-    }
+    })
 }
 
 #[cfg(unix)]
@@ -317,16 +345,21 @@ fn cmd_stop(data_dir: &std::path::Path, force: bool) -> i32 {
         eprintln!("supervisor_pid is 0 in sentinel; nothing to signal");
         return 1;
     }
-    let signal = if force {
-        Signal::SIGKILL
-    } else {
-        Signal::SIGTERM
-    };
-    match raxis_supervisor::signal::send_signal(sentinel.supervisor_pid, signal) {
+    if force {
+        if let Err(e) = write_force_stop_request(data_dir) {
+            eprintln!("write force-stop request failed: {e}");
+            return 1;
+        }
+    }
+    match raxis_supervisor::signal::send_signal(sentinel.supervisor_pid, Signal::SIGTERM) {
         Ok(()) => {
             println!(
                 "sent {} to supervisor pid {}",
-                if force { "SIGKILL" } else { "SIGTERM" },
+                if force {
+                    "force-stop request + SIGTERM"
+                } else {
+                    "SIGTERM"
+                },
                 sentinel.supervisor_pid,
             );
             0
@@ -390,7 +423,29 @@ fn cmd_status(data_dir: &std::path::Path) -> i32 {
     }
 }
 
-fn cmd_reset_breaker(data_dir: &std::path::Path) -> i32 {
+fn confirm_reset_breaker(yes: bool) -> bool {
+    if yes {
+        return true;
+    }
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        eprintln!("reset-circuit-breaker requires --yes when stdin is not a terminal");
+        return false;
+    }
+    eprint!("Reset supervisor circuit breaker and allow the kernel to spawn again? [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim(), "y" | "Y" | "yes" | "YES")
+}
+
+fn cmd_reset_breaker(data_dir: &std::path::Path, yes: bool) -> i32 {
+    if !confirm_reset_breaker(yes) {
+        eprintln!("circuit breaker reset aborted");
+        return 1;
+    }
     let mut breaker = CircuitBreaker::load_with_defaults(data_dir);
     breaker.reset();
     match breaker.save() {
@@ -398,11 +453,18 @@ fn cmd_reset_breaker(data_dir: &std::path::Path) -> i32 {
             // Also clear the sentinel sub_state so the dashboard
             // banner clears immediately (the supervisor itself
             // will re-write `Healthy` on its next spawn).
-            if let Ok(Some(mut s)) = read_sentinel(data_dir) {
+            let _ = update_existing_sentinel(data_dir, |mut s| {
                 if s.sub_state.as_deref() == Some("CircuitOpen") {
                     s.sub_state = Some("OperatorStop".to_owned());
-                    let _ = write_sentinel(data_dir, &s);
                 }
+                s
+            });
+            if let Ok(log) = SupervisorLog::open(data_dir) {
+                log.emit(
+                    "info",
+                    "circuit_breaker_reset",
+                    &serde_json::json!({ "confirmed": true }),
+                );
             }
             println!("circuit breaker cleared");
             0
