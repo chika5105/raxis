@@ -3,9 +3,8 @@
 #
 # Outcome (after this script runs):
 #
-#   - `main` is restricted: only the repository OWNER (the personal
-#     user account that owns the repo) can push directly. Every other
-#     contributor must open a PR.
+#   - `main` is restricted: only chika5105 can push or merge.
+#     Every other contributor must open a PR.
 #   - PRs to `main` REQUIRE these CI checks to pass before merge:
 #       * spec-graph                          (cargo xtask spec-graph --strict)
 #       * build-images / cargo check + test   (matrix: ubuntu-22.04, macos-14)
@@ -16,23 +15,21 @@
 #         checkbox in the PR description is ticked; the agreement itself
 #         lives at raxis/CLA.md and the checkbox is part of the PR
 #         template at .github/PULL_REQUEST_TEMPLATE.md).
+#   - PRs to `main` REQUIRE CODEOWNER approval. `.github/CODEOWNERS`
+#     names only @chika5105, so another approval does not satisfy the
+#     merge gate.
 #   - Force-pushes are disabled.
 #   - Branch deletions are disabled.
-#   - Even repo admins/owners are NOT subject to status-check enforcement
-#     (`enforce_admins=false`) so the owner can land an emergency
-#     hotfix without satisfying the matrix when the matrix itself is
-#     broken. This is the conventional escape hatch; the OWNER's
-#     direct-push privilege is the *primary* escape hatch.
+#   - Repo admins/owners ARE subject to this protection
+#     (`enforce_admins=true`) so the branch behaves the same way for
+#     everyone.
 #
 # Why this design:
 #
-#   - GitHub's only mechanism to bound "who can push directly" on a
-#     branch is the `restrictions` block (paid plans only on private
-#     repos; available on public repos for free). Personal-account
-#     repos automatically grant push to the owner; the `restrictions`
-#     block therefore reduces to "no one EXCEPT the owner". For a
-#     personal account, an empty `restrictions.users` array
-#     EXCLUDES contributors but PRESERVES owner access.
+#   - GitHub's branch-protection API gates direct pushes/merges via
+#     the `restrictions` block and gates PR approval via required
+#     CODEOWNER review. Keeping both pointed at chika5105 makes the
+#     rule auditable and explicit.
 #
 #   - This is configured idempotently via `gh api`. Re-running the
 #     script is a no-op (PUT is the API verb).
@@ -41,6 +38,9 @@
 #
 #   - `gh auth status` — authenticated as the repo owner (chika5105).
 #   - `jq` — available on PATH.
+#   - GitHub branch protection is available for the repo. If the repo
+#     is private, GitHub may require GitHub Pro/Team/Enterprise; public
+#     repos can enable this on the free plan.
 #
 # Usage:
 #
@@ -58,6 +58,7 @@
 set -euo pipefail
 
 OWNER_REPO="${OWNER_REPO:-chika5105/raxis}"
+OWNER_USER="${OWNER_USER:-chika5105}"
 BRANCH="${BRANCH:-main}"
 
 if ! command -v gh >/dev/null 2>&1; then
@@ -72,8 +73,8 @@ fi
 # Verify the calling user is the repo owner. Direct-push restriction
 # is only meaningful if the script is run by the owner.
 ME="$(gh api user -q .login)"
-if [ "${ME}" != "chika5105" ]; then
-    echo "warn: current gh user is '${ME}', not 'chika5105'." >&2
+if [ "${ME}" != "${OWNER_USER}" ]; then
+    echo "warn: current gh user is '${ME}', not '${OWNER_USER}'." >&2
     echo "      Branch protection on a personal-account repo can only" >&2
     echo "      be configured by the owner. The PUT will fail with 403" >&2
     echo "      unless you switch accounts via 'gh auth switch'." >&2
@@ -94,16 +95,32 @@ declare -a REQUIRED_CHECKS=(
 )
 
 # Build the JSON body from the array safely via jq.
-JSON_BODY="$(jq -n --argjson checks "$(printf '%s\n' "${REQUIRED_CHECKS[@]}" \
+JSON_BODY="$(jq -n \
+    --arg owner "${OWNER_USER}" \
+    --argjson checks "$(printf '%s\n' "${REQUIRED_CHECKS[@]}" \
     | jq -R . | jq -s .)" '{
     required_status_checks: {
         strict: true,
         checks: ($checks | map({context: ., app_id: -1}))
     },
-    enforce_admins: false,
-    required_pull_request_reviews: null,
+    enforce_admins: true,
+    required_pull_request_reviews: {
+        dismissal_restrictions: {
+            users: [$owner],
+            teams: []
+        },
+        dismiss_stale_reviews: true,
+        require_code_owner_reviews: true,
+        required_approving_review_count: 1,
+        require_last_push_approval: true,
+        bypass_pull_request_allowances: {
+            users: [],
+            teams: [],
+            apps: []
+        }
+    },
     restrictions: {
-        users: [],
+        users: [$owner],
         teams: [],
         apps:  []
     },
@@ -117,17 +134,25 @@ JSON_BODY="$(jq -n --argjson checks "$(printf '%s\n' "${REQUIRED_CHECKS[@]}" \
 }')"
 
 echo "applying protection to ${OWNER_REPO}:${BRANCH} ..."
+echo "  owner approver/merger: ${OWNER_USER}"
 echo "  required checks:"
 for c in "${REQUIRED_CHECKS[@]}"; do
     printf '    %s\n' "$c"
 done
 
-echo "${JSON_BODY}" | gh api \
-    --method PUT \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "repos/${OWNER_REPO}/branches/${BRANCH}/protection" \
-    --input -
+if ! echo "${JSON_BODY}" | gh api \
+        --method PUT \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "repos/${OWNER_REPO}/branches/${BRANCH}/protection" \
+        --input -; then
+    echo >&2
+    echo "error: GitHub rejected the branch-protection update." >&2
+    echo "       For private repos, branch protection may require GitHub Pro," >&2
+    echo "       Team, or Enterprise. Make the repo public or enable the plan" >&2
+    echo "       feature, then re-run this script." >&2
+    exit 1
+fi
 
 echo
 echo "ok: protection applied. Verify:"

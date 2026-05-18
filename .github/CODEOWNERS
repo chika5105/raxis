@@ -1,0 +1,3 @@
+# Branch protection on `main` requires CODEOWNER review.
+# Keep this file narrow: Chika is the sole approver and merge owner.
+* @chika5105

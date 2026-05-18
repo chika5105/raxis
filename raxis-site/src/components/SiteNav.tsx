@@ -2,8 +2,19 @@ import Link from "next/link";
 import { ThemeToggle } from "./ThemeToggle";
 import { Wordmark } from "./Wordmark";
 
-const NAV_LINKS: Array<{ href: string; label: string }> = [
+type NavLink = {
+  href: string;
+  label: string;
+  external?: boolean;
+};
+
+const NAV_LINKS: NavLink[] = [
   { href: "/", label: "Home" },
+  {
+    href: "https://paypal.me/chikajinanwa",
+    label: "Buy me a coffee",
+    external: true,
+  },
   { href: "/paradigm", label: "Paradigm" },
   { href: "/threat-model", label: "Threat model" },
   { href: "/reference", label: "Reference" },
@@ -13,6 +24,27 @@ const NAV_LINKS: Array<{ href: string; label: string }> = [
   { href: "/investors", label: "Investors" },
 ];
 
+function NavItem({ link, className }: { link: NavLink; className: string }) {
+  if (link.external) {
+    return (
+      <a
+        href={link.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={className}
+      >
+        {link.label}
+      </a>
+    );
+  }
+
+  return (
+    <Link href={link.href} className={className}>
+      {link.label}
+    </Link>
+  );
+}
+
 export function SiteNav() {
   return (
     <header className="sticky top-0 z-40 border-b border-[var(--rule)] bg-[var(--bg)]/85 backdrop-blur supports-[backdrop-filter]:bg-[var(--bg)]/70">
@@ -20,23 +52,21 @@ export function SiteNav() {
         <Link href="/" aria-label="Raxis home" className="flex items-center gap-2">
           <Wordmark />
         </Link>
-        <nav aria-label="Primary" className="hidden md:block">
+        <nav aria-label="Primary" className="hidden xl:block">
           <ul className="flex items-center gap-4 whitespace-nowrap">
             {NAV_LINKS.map((l) => (
               <li key={l.href}>
-                <Link
-                  href={l.href}
+                <NavItem
+                  link={l}
                   className="text-sm text-[var(--muted)] hover:text-[var(--fg)] transition"
-                >
-                  {l.label}
-                </Link>
+                />
               </li>
             ))}
           </ul>
         </nav>
         <div className="flex items-center gap-4">
           <a
-          href="https://docs.google.com/forms/d/e/1FAIpQLScnVmQUI-PEX-eykhXFdmcLPgxjfqGsKai4N6BRmSnozr--Vw/viewform?usp=publish-editor"
+            href="https://docs.google.com/forms/d/e/1FAIpQLScnVmQUI-PEX-eykhXFdmcLPgxjfqGsKai4N6BRmSnozr--Vw/viewform?usp=publish-editor"
             target="_blank"
             rel="noopener noreferrer"
             className="hidden sm:inline-flex items-center text-sm text-[var(--muted)] hover:text-[var(--fg)] transition"
@@ -74,17 +104,15 @@ export function SiteNav() {
           <ThemeToggle />
         </div>
       </div>
-      {/* Mobile nav */}
-      <div className="md:hidden border-t border-[var(--rule)]">
+      {/* Compact nav */}
+      <div className="xl:hidden border-t border-[var(--rule)]">
         <ul className="mx-auto flex max-w-5xl gap-5 overflow-x-auto px-4 py-2 text-sm">
           {NAV_LINKS.map((l) => (
             <li key={l.href} className="shrink-0">
-              <Link
-                href={l.href}
+              <NavItem
+                link={l}
                 className="text-[var(--muted)] hover:text-[var(--fg)]"
-              >
-                {l.label}
-              </Link>
+              />
             </li>
           ))}
           <li className="shrink-0">

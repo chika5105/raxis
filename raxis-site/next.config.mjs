@@ -11,10 +11,8 @@ const nextConfig = {
   // Bundle the vendored docs mirror into the Vercel deployment so that the
   // filesystem backend is available as a fallback when the GitHub API is down.
   // sync-docs.mjs populates vendor/raxis-docs/ during `prebuild`.
-  experimental: {
-    outputFileTracingIncludes: {
-      "/(.*)/": ["./vendor/raxis-docs/**/*"],
-    },
+  outputFileTracingIncludes: {
+    "/(.*)/": ["./vendor/raxis-docs/**/*"],
   },
   typedRoutes: false,
 };

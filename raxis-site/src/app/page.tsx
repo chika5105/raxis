@@ -474,7 +474,7 @@ function CreatorSection() {
                 href="/about"
                 className="text-base text-[var(--fg)] hover:text-accent underline underline-offset-4 decoration-[var(--rule)] hover:decoration-accent transition"
               >
-                Learn more about me →
+                Learn more
               </Link>
             </div>
             <div className="mt-6 flex flex-wrap items-center gap-6 text-sm">
