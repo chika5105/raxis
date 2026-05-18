@@ -14,20 +14,20 @@
       "title": "Inference latency p50/p95 (ms) by model",
       "gridPos": { "x": 0, "y": 0, "w": 24, "h": 9 },
       "targets": [
-        { "expr": "histogram_quantile(0.50, sum by (model, le) (rate(raxis_planner_inference_duration_milliseconds_bucket[5m])))", "legendFormat": "{{model}} p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "expr": "histogram_quantile(0.95, sum by (model, le) (rate(raxis_planner_inference_duration_milliseconds_bucket[5m])))", "legendFormat": "{{model}} p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.50, sum by (model, le) (sum_over_time(raxis_planner_inference_duration_milliseconds_bucket[$__range])))", "legendFormat": "{{model}} p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (model, le) (sum_over_time(raxis_planner_inference_duration_milliseconds_bucket[$__range])))", "legendFormat": "{{model}} p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
     },
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Tokens / sec by direction",
+      "title": "Tokens total by direction",
       "gridPos": { "x": 0, "y": 9, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (direction) (rate(raxis_planner_inference_tokens_total[1m]))", "legendFormat": "{{direction}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (direction) (sum_over_time(raxis_planner_inference_tokens_total[$__range]))", "legendFormat": "{{direction}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "tokens/s" }, "overrides": [] }
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
     {
       "id": 3,
@@ -35,7 +35,7 @@
       "title": "Tool-call latency p95 (ms) by tool_name",
       "gridPos": { "x": 12, "y": 9, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (tool_name, le) (rate(raxis_planner_tool_call_duration_milliseconds_bucket[5m])))", "legendFormat": "{{tool_name}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.95, sum by (tool_name, le) (sum_over_time(raxis_planner_tool_call_duration_milliseconds_bucket[$__range])))", "legendFormat": "{{tool_name}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
     },
@@ -45,18 +45,18 @@
       "title": "Retries by attempt",
       "gridPos": { "x": 0, "y": 17, "w": 24, "h": 8 },
       "targets": [
-        { "expr": "sum by (attempt, final_outcome) (rate(raxis_planner_retry_total[5m]))", "legendFormat": "attempt {{attempt}} {{final_outcome}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (attempt, final_outcome) (sum_over_time(raxis_planner_retry_total[$__range]))", "legendFormat": "attempt {{attempt}} {{final_outcome}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
     {
       "id": 5,
       "type": "timeseries",
-      "title": "LLM blind-ask rate (inadmissible / total)",
+      "title": "LLM blind-ask ratio (inadmissible / total), selected range",
       "description": "Leading indicator that the KSB-capabilities envelope is reaching the planner. Should trend toward zero as the LLM stops blind-asking for inadmissible intents. iter44.",
       "gridPos": { "x": 0, "y": 25, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum(rate(raxis_intent_admit_predicate_evaluated_total{admissible=\"false\"}[5m])) / clamp_min(sum(rate(raxis_intent_admit_predicate_evaluated_total[5m])), 1e-9)", "legendFormat": "blind-ask rate", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum(sum_over_time(raxis_intent_admit_predicate_evaluated_total{admissible=\"false\"}[$__range])) / clamp_min(sum(sum_over_time(raxis_intent_admit_predicate_evaluated_total[$__range])), 1e-9)", "legendFormat": "blind-ask ratio", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] }
     },
@@ -67,9 +67,9 @@
       "description": "Per-reason breakdown of the blind-ask rate; the closed lexicon is { ok, retry_inadmissible, budget_exhausted, unknown_lane, other }. iter44.",
       "gridPos": { "x": 12, "y": 25, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (intent_kind, reason) (rate(raxis_intent_admit_predicate_evaluated_total{admissible=\"false\"}[5m]))", "legendFormat": "{{intent_kind}} {{reason}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (intent_kind, reason) (sum_over_time(raxis_intent_admit_predicate_evaluated_total{admissible=\"false\"}[$__range]))", "legendFormat": "{{intent_kind}} {{reason}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     }
   ]
 }

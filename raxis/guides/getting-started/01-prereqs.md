@@ -178,6 +178,51 @@ Reference:
 
 ## Build from source
 
+For a fresh local build, the canonical path is the one-shot setup
+wrapper:
+
+```bash
+cd /path/to/raxis/raxis
+export RAXIS_INSTALL_DIR="$HOME/.raxis-install"
+
+cargo xtask source-setup \
+  --install-dir "$RAXIS_INSTALL_DIR" \
+  --kernel-from-file /path/to/vmlinux \
+  --kernel-config /path/to/vmlinux.config
+```
+
+If the guest kernel is distributed as a prebuilt artifact, pin the
+download instead:
+
+```bash
+cargo xtask source-setup \
+  --install-dir "$RAXIS_INSTALL_DIR" \
+  --kernel-url https://example.com/vmlinux-aarch64 \
+  --kernel-sha256 <64-hex-digest> \
+  --kernel-config /path/to/vmlinux.config
+```
+
+Use `--no-cache` after changing guest binaries, verifier binaries, or
+rootfs inputs and you want to force every role through the full bake.
+Use `--dry-run` to see the exact phase plan first.
+
+| Phase | First-run expectation |
+|---|---:|
+| Host prereqs | 2-20 min |
+| Release host tools | 3-15 min |
+| Dashboard frontend | 1-6 min |
+| Prebuilt guest kernel stage | 1-10 min when `--kernel-url` is used |
+| Guest image bake | 10-45 min with `--no-cache` |
+| Trust-anchored host kernel rebuild | 2-10 min |
+| Verify/codesign | under 1 min |
+
+That command wraps the manual sequence below and handles the setup
+details that caused previous drift: guest `vmlinux` is staged and
+checked against the nftables config, the image-signing key under
+`.git/info/raxis-signing-key/` is kept in sync with the host kernel
+build, macOS AVF codesign is applied, and the bake prints progress
+before long quiet Docker/Cargo/cpio phases.
+
 Once `cargo xtask dev-prereqs` (macOS) or `cargo xtask linux-prereqs`
 (Linux) is green, the workspace should build with the checked-in lock:
 
@@ -212,7 +257,7 @@ Dashboard frontend build:
 
 ```bash
 cd dashboard-fe
-npm install
+npm ci
 npm run build
 ```
 

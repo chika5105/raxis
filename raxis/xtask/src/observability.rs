@@ -750,6 +750,76 @@ mod tests {
     }
 
     #[test]
+    fn grafana_raxis_dashboards_are_post_run_friendly() {
+        for entry in std::fs::read_dir(dashboard_dir()).expect("dashboard dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("read dashboard json");
+            if path.file_name().and_then(|s| s.to_str()) == Some("05-otel-pipeline.json") {
+                continue;
+            }
+            for forbidden in [
+                "rate(raxis_",
+                "increase(raxis_",
+                "sum_over_time()",
+                "sum(raxis_session_active)",
+                "sum by (role) (raxis_session_active)",
+                "max(raxis_audit_chain_length)",
+                "sum by (route) (raxis_dashboard_sse_connection_active)",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "{} contains live-only PromQL `{forbidden}`; Raxis dashboards must stay useful after keep-alive runs when the pusher has stopped",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn credential_proxy_dashboard_separates_latency_from_failures() {
+        let path = dashboard_dir().join("50-credential-proxies.json");
+        let body = std::fs::read_to_string(&path).expect("read credential proxy dashboard");
+        assert!(
+            body.contains(
+                "raxis_credential_proxy_connection_duration_milliseconds_bucket{outcome=\\\"ok\\\"}"
+            ),
+            "connection latency p95 must filter to successful handshakes so zero-duration failures do not distort the latency panel",
+        );
+        assert!(
+            body.contains("raxis_credential_proxy_connection_total"),
+            "connection failures must remain visible through an attempts-by-outcome panel",
+        );
+    }
+
+    #[test]
+    fn dataplane_ipc_frame_panels_do_not_call_socket_wait_request_latency() {
+        let path = dashboard_dir().join("95-dataplane-bottlenecks.json");
+        let body = std::fs::read_to_string(&path).expect("read dataplane dashboard");
+        assert!(
+            !body.contains("IPC frame stage duration"),
+            "low-level frame stage panel title must not imply all stages are request latency",
+        );
+        assert!(
+            body.contains("IPC frame low-level codec latency")
+                && body.contains("stage=~\\\"encode|decode\\\""),
+            "codec work should be split from socket wait/backpressure",
+        );
+        assert!(
+            body.contains("IPC frame low-level socket latency/occupancy")
+                && body.contains("stage=~\\\"read|write\\\""),
+            "read/write stages should be labelled as socket wait/backpressure occupancy",
+        );
+        assert!(
+            body.contains("KernelSubstrateIpcRoundtripDuration")
+                && body.contains("role/message_kind"),
+            "dashboard copy should direct operators to the higher-level round-trip metric for true request latency",
+        );
+    }
+
+    #[test]
     fn parse_str_flag_supports_space_form() {
         let args = vec![
             "--dashboard".to_string(),

@@ -544,6 +544,49 @@ For operators wanting to build RAXIS from source rather than use pre-built binar
 
 ### 9.3 Build invocation
 
+The canonical development/e2e setup path is the one-shot wrapper:
+
+```bash
+git clone https://github.com/chika5105/raxis
+cd raxis/raxis
+
+export RAXIS_INSTALL_DIR="$HOME/.raxis-install"
+cargo xtask source-setup \
+  --install-dir "$RAXIS_INSTALL_DIR" \
+  --kernel-from-file /path/to/vmlinux \
+  --kernel-config /path/to/vmlinux.config
+```
+
+Pinned prebuilt guest kernels use the URL/SHA variant:
+
+```bash
+cargo xtask source-setup \
+  --install-dir "$RAXIS_INSTALL_DIR" \
+  --kernel-url https://example.com/vmlinux-aarch64 \
+  --kernel-sha256 <64-hex-digest> \
+  --kernel-config /path/to/vmlinux.config
+```
+
+`source-setup` runs host prerequisites, release host tools, dashboard
+frontend build, guest image bake, the trust-anchored `raxis-kernel`
+rebuild, trust-anchor verification, and macOS codesign. It emits a
+JSON plan and a `source_setup_step_begin` line before each phase. A
+first clean machine should expect roughly: 2-20 min for host prereqs,
+3-15 min for host tools, 1-6 min for the dashboard, 1-10 min when
+staging a pinned prebuilt guest kernel, 10-45 min for a `--no-cache`
+guest image bake, 2-10 min for the final kernel rebuild, and under
+1 min for verify/codesign.
+
+The guest-kernel and trust-anchor details are part of the contract:
+`vmlinux` is staged at `$RAXIS_INSTALL_DIR/kernel/vmlinux`, its
+validated config is staged at `$RAXIS_INSTALL_DIR/kernel/vmlinux.config`,
+the config must satisfy
+`images/kernel/raxis-guest-a3-netfilter.config`, and the host
+`raxis-kernel` must embed the same public image-signing key used by the
+baked manifests.
+
+Manual equivalent:
+
 ```bash
 git clone https://github.com/chika5105/raxis
 cd raxis/raxis
@@ -565,7 +608,7 @@ cargo build --release --locked \
 
 # Build the dashboard frontend when serving the dashboard UI.
 cd dashboard-fe
-npm install
+npm ci
 npm run build
 ```
 

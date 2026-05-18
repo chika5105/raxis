@@ -14,19 +14,19 @@
       "title": "Allowlist check p95 (ms)",
       "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (le) (rate(raxis_egress_allowlist_check_duration_milliseconds_bucket[5m])))", "legendFormat": "p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.95, sum by (le) (sum_over_time(raxis_egress_allowlist_check_duration_milliseconds_bucket[$__range])))", "legendFormat": "p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
     },
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Blocked egress / sec by reason",
+      "title": "Blocked egress total by reason",
       "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (reason) (rate(raxis_egress_allowlist_block_total[1m]))", "legendFormat": "{{reason}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (reason) (sum_over_time(raxis_egress_allowlist_block_total[$__range]))", "legendFormat": "{{reason}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
     {
       "id": 3,
@@ -34,19 +34,19 @@
       "title": "Gateway upstream p95 (ms) by provider / outcome",
       "gridPos": { "x": 0, "y": 8, "w": 24, "h": 9 },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (provider, outcome, failure_class, le) (rate(raxis_gateway_upstream_duration_milliseconds_bucket[5m])))", "legendFormat": "{{provider}} {{outcome}} {{failure_class}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.95, sum by (provider, outcome, failure_class, le) (sum_over_time(raxis_gateway_upstream_duration_milliseconds_bucket[$__range])))", "legendFormat": "{{provider}} {{outcome}} {{failure_class}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
     },
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Gateway fetch rate (req/s) by provider / failure",
+      "title": "Gateway fetch events by provider / failure",
       "gridPos": { "x": 0, "y": 17, "w": 24, "h": 8 },
       "targets": [
-        { "expr": "sum by (provider, failure_class, status_code) (rate(raxis_gateway_fetch_total[1m]))", "legendFormat": "{{provider}} {{failure_class}} status={{status_code}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (provider, failure_class, status_code) (sum_over_time(raxis_gateway_fetch_total[$__range]))", "legendFormat": "{{provider}} {{failure_class}} status={{status_code}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
     {
       "id": 5,
@@ -55,9 +55,9 @@
       "description": "Classifies gateway/provider failures without changing planner retry budgets. NetworkError from the host gateway is labelled host_provider_network; TimeoutExceeded is labelled host_provider_timeout.",
       "gridPos": { "x": 0, "y": 25, "w": 24, "h": 8 },
       "targets": [
-        { "expr": "sum by (provider, failure_class) (rate(raxis_gateway_fetch_total{failure_class=~\"host_provider_.*|provider_retryable_http|gateway_.*\"}[5m]))", "legendFormat": "{{provider}} {{failure_class}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (provider, failure_class) (sum_over_time(raxis_gateway_fetch_total{failure_class=~\"host_provider_.*|provider_retryable_http|gateway_.*\"}[$__range]))", "legendFormat": "{{provider}} {{failure_class}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     }
   ]
 }

@@ -20,7 +20,7 @@
 //! - Every helper MUST be cheap — never allocate when the hub is
 //!   disabled.
 
-use raxis_observability::{redact, MetricName, ObservabilityHub};
+use raxis_observability::{redact, AttrValue, MetricName, ObservabilityHub};
 
 /// Record one `raxis.intent.admission.{total,duration}` data point
 /// for an intent that has just left the kernel pipeline. Called once
@@ -2543,11 +2543,13 @@ pub const GATEWAY_STAGE_DNS: &str = "dns";
 pub const GATEWAY_STAGE_TLS: &str = "tls";
 pub const GATEWAY_STAGE_TPROXY_ADMIT: &str = "tproxy_admit";
 pub const GATEWAY_STAGE_FIRST_BYTE: &str = "first_byte";
+pub const GATEWAY_STAGE_UPSTREAM_ROUNDTRIP: &str = "upstream_roundtrip";
 pub const GATEWAY_STAGES: &[&str] = &[
     GATEWAY_STAGE_DNS,
     GATEWAY_STAGE_TLS,
     GATEWAY_STAGE_TPROXY_ADMIT,
     GATEWAY_STAGE_FIRST_BYTE,
+    GATEWAY_STAGE_UPSTREAM_ROUNDTRIP,
 ];
 
 /// `raxis.gateway.stage.duration` — per-stage breakdown of the
@@ -2572,6 +2574,30 @@ pub fn record_gateway_stage(
         labels,
         duration_ms.max(0) as f64,
     );
+}
+
+/// `raxis.budget.reserved` — current reserved lane cost after a
+/// successful reservation / release mutation.
+pub fn record_budget_reserved(hub: &ObservabilityHub, lane_id: &str, reserved_cost: i64) {
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("lane_id", lane_id)]);
+    hub.record_gauge(
+        MetricName::BudgetReserved,
+        labels,
+        reserved_cost.max(0) as f64,
+    );
+}
+
+/// `raxis.budget.exceeded.total` — budget admission reject by lane.
+pub fn record_budget_exceeded(hub: &ObservabilityHub, lane_id: &str, kind: &str) {
+    if !hub.enabled() {
+        return;
+    }
+    let mut labels = redact::attrs([("lane_id", lane_id)]);
+    labels.insert("reason".to_owned(), AttrValue::Str(kind.to_owned()));
+    hub.record_counter(MetricName::BudgetExceededTotal, labels, 1.0);
 }
 
 /// Closed lexicon of FSM kinds.
@@ -3133,6 +3159,51 @@ mod latency_metrics_wired_witness_tests {
             count >= 1,
             "expected ≥1 GatewayUpstreamDuration sample, got {count} \
              (helper is dead — INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02 broken)"
+        );
+    }
+
+    #[test]
+    fn gateway_stage_helper_lands_observed_sample() {
+        let (hub, exp) = enabled_hub();
+        record_gateway_stage(
+            &hub,
+            "api.anthropic.com",
+            GATEWAY_STAGE_UPSTREAM_ROUNDTRIP,
+            "ok",
+            567,
+        );
+        hub.flush();
+        let count = exp
+            .metrics()
+            .iter()
+            .filter(|m| m.name == MetricName::GatewayStageDuration)
+            .filter_map(|m| match &m.datapoint {
+                DataPoint::Histo { count, .. } => Some(*count),
+                _ => None,
+            })
+            .sum::<u64>();
+        assert!(
+            count >= 1,
+            "expected >=1 GatewayStageDuration sample, got {count}"
+        );
+    }
+
+    #[test]
+    fn budget_helpers_land_observed_samples() {
+        let (hub, exp) = enabled_hub();
+        record_budget_reserved(&hub, "default", 42);
+        record_budget_exceeded(&hub, "default", "CostLimit");
+        hub.flush();
+        let metrics = exp.metrics();
+        assert!(
+            metrics.iter().any(|m| m.name == MetricName::BudgetReserved),
+            "BudgetReserved gauge helper must emit a sample"
+        );
+        assert!(
+            metrics
+                .iter()
+                .any(|m| m.name == MetricName::BudgetExceededTotal),
+            "BudgetExceededTotal counter helper must emit a sample"
         );
     }
 

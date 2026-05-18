@@ -14,19 +14,19 @@
       "title": "HTTP request p95 (ms) by route",
       "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (route, le) (rate(raxis_dashboard_http_request_duration_milliseconds_bucket[5m])))", "legendFormat": "{{route}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.95, sum by (route, le) (sum_over_time(raxis_dashboard_http_request_duration_milliseconds_bucket[$__range])))", "legendFormat": "{{route}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
     },
     {
       "id": 2,
       "type": "timeseries",
-      "title": "HTTP requests / sec by route / status",
+      "title": "HTTP requests, selected range by route / status",
       "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (route, http_status) (rate(raxis_dashboard_http_request_duration_milliseconds_count[1m]))", "legendFormat": "{{route}} {{http_status}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (route, http_status) (sum_over_time(raxis_dashboard_http_request_duration_milliseconds_count[$__range]))", "legendFormat": "{{route}} {{http_status}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
     {
       "id": 3,
@@ -34,7 +34,7 @@
       "title": "Active SSE connections by route",
       "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (route) (raxis_dashboard_sse_connection_active)", "legendFormat": "{{route}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (route) (last_over_time(raxis_dashboard_sse_connection_active[$__range]))", "legendFormat": "{{route}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
@@ -44,7 +44,7 @@
       "title": "SSE backpressure lag p95 (ms)",
       "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (route, le) (rate(raxis_dashboard_sse_lag_duration_milliseconds_bucket[5m])))", "legendFormat": "{{route}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.95, sum by (route, le) (sum_over_time(raxis_dashboard_sse_lag_duration_milliseconds_bucket[$__range])))", "legendFormat": "{{route}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
     }

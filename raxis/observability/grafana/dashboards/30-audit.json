@@ -13,7 +13,7 @@
       "type": "stat",
       "title": "Chain length",
       "gridPos": { "x": 0, "y": 0, "w": 8, "h": 4 },
-      "targets": [{ "expr": "max(raxis_audit_chain_length)", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }],
+      "targets": [{ "expr": "max(max_over_time(raxis_audit_chain_length[$__range]))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
     {
@@ -21,15 +21,15 @@
       "type": "stat",
       "title": "Pending unconfirmed",
       "gridPos": { "x": 8, "y": 0, "w": 8, "h": 4 },
-      "targets": [{ "expr": "max(raxis_audit_chain_lag)", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }],
+      "targets": [{ "expr": "max(max_over_time(raxis_audit_chain_lag[$__range]))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
     {
       "id": 3,
       "type": "stat",
-      "title": "fsync failures (5m)",
+      "title": "fsync failures (selected range)",
       "gridPos": { "x": 16, "y": 0, "w": 8, "h": 4 },
-      "targets": [{ "expr": "sum(increase(raxis_audit_fsync_failure_total[5m]))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }],
+      "targets": [{ "expr": "sum(sum_over_time(raxis_audit_fsync_failure_total[$__range]))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }],
       "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] }
     },
     {
@@ -38,9 +38,9 @@
       "title": "Append latency p50/p95/p99 (ms)",
       "gridPos": { "x": 0, "y": 4, "w": 12, "h": 9 },
       "targets": [
-        { "expr": "histogram_quantile(0.50, sum by (le) (rate(raxis_audit_event_append_duration_milliseconds_bucket[5m])))", "legendFormat": "p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "expr": "histogram_quantile(0.95, sum by (le) (rate(raxis_audit_event_append_duration_milliseconds_bucket[5m])))", "legendFormat": "p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "expr": "histogram_quantile(0.99, sum by (le) (rate(raxis_audit_event_append_duration_milliseconds_bucket[5m])))", "legendFormat": "p99", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.50, sum by (le) (sum_over_time(raxis_audit_event_append_duration_milliseconds_bucket[$__range])))", "legendFormat": "p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (le) (sum_over_time(raxis_audit_event_append_duration_milliseconds_bucket[$__range])))", "legendFormat": "p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.99, sum by (le) (sum_over_time(raxis_audit_event_append_duration_milliseconds_bucket[$__range])))", "legendFormat": "p99", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
     },
@@ -50,17 +50,17 @@
       "title": "Confirmation latency p95 (Phase-B paired writes, ms)",
       "gridPos": { "x": 12, "y": 4, "w": 12, "h": 9 },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (event_kind, le) (rate(raxis_audit_event_confirmed_duration_milliseconds_bucket[5m])))", "legendFormat": "{{event_kind}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.95, sum by (event_kind, le) (sum_over_time(raxis_audit_event_confirmed_duration_milliseconds_bucket[$__range])))", "legendFormat": "{{event_kind}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
     },
     {
       "id": 20,
       "type": "timeseries",
-      "title": "Append rate by kind",
+      "title": "Append events by kind",
       "gridPos": { "x": 0, "y": 13, "w": 24, "h": 8 },
-      "targets": [{ "expr": "sum by (event_kind) (rate(raxis_audit_event_append_total[1m]))", "legendFormat": "{{event_kind}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }],
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+      "targets": [{ "expr": "sum by (event_kind) (sum_over_time(raxis_audit_event_append_total[$__range]))", "legendFormat": "{{event_kind}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     }
   ]
 }

@@ -239,6 +239,33 @@ fn default_target_triple() -> &'static str {
     }
 }
 
+fn bake_progress(step: &str, estimate: &str, detail: &str) {
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "level": "info",
+            "event": "bake_progress",
+            "step": step,
+            "estimate": estimate,
+            "detail": detail,
+        })
+    );
+}
+
+fn bake_role_progress(role: Role, step: &str, estimate: &str, detail: &str) {
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "level": "info",
+            "event": "bake_role_progress",
+            "role": role.workspace_crate(),
+            "step": step,
+            "estimate": estimate,
+            "detail": detail,
+        })
+    );
+}
+
 // ---------------------------------------------------------------------------
 // dev-stage
 // ---------------------------------------------------------------------------
@@ -441,7 +468,9 @@ pub fn run_dev_stage(argv: &[String]) -> Result<()> {
 fn dev_stage(args: &DevStageArgs) -> Result<()> {
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"dev_stage_begin\",\
-         \"role\":{:?},\"target\":{:?},\"workspace_root\":{:?}}}",
+         \"role\":{:?},\"target\":{:?},\"workspace_root\":{:?},\
+         \"estimate\":\"1-8 min on a clean target\",\
+         \"detail\":\"Cargo is cross-compiling the guest PID-1 binary; dependency builds can be quiet.\"}}",
         args.role.workspace_crate(),
         args.target,
         args.workspace_root.display().to_string(),
@@ -475,6 +504,12 @@ fn dev_stage(args: &DevStageArgs) -> Result<()> {
         &args.target,
     ]);
     apply_trust_anchor_env(&mut cmd, args.kernel_signing_key_hex.as_deref());
+    bake_role_progress(
+        args.role,
+        "cross_compile_guest_binary",
+        "1-8 min on a clean target",
+        "Running cargo build for the guest role. Silence here usually means Cargo is compiling dependencies.",
+    );
     let status = cmd
         .status()
         .context("failed to spawn cargo for cross-compile; is the toolchain on $PATH?")?;
@@ -1228,7 +1263,9 @@ fn build_one_role(
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"build_all_role_begin\",\
-         \"role\":{:?},\"rootfs_dir\":{:?}}}",
+         \"role\":{:?},\"rootfs_dir\":{:?},\
+         \"estimate\":\"10-90 sec per role\",\
+         \"detail\":\"Packing initramfs bytes, enumerating files, signing manifest, and writing image outputs.\"}}",
         role.workspace_crate(),
         rootfs_dir.display().to_string(),
     );
@@ -1264,6 +1301,12 @@ fn build_one_role(
     handle_staged_binary_freshness(role, args)?;
 
     // Assemble the cpio.gz bytes with the initramfs-builder.
+    bake_role_progress(
+        role,
+        "pack_initramfs",
+        "10-90 sec depending on rootfs size",
+        "Walking the staged rootfs and writing deterministic cpio.gz bytes; large executor images can be quiet here.",
+    );
     let cpio_gz = pack_initramfs(&rootfs_dir, inputs.source_date_epoch)?;
 
     // Write the .img blob to <install_dir>/images/<stem>-<kver>.img.
@@ -1272,6 +1315,12 @@ fn build_one_role(
         stem = role.artefact_stem(),
         kver = inputs.kernel_version,
     ));
+    bake_role_progress(
+        role,
+        "write_image_blob",
+        "under 30 sec",
+        "Writing the packed initramfs image into the install directory.",
+    );
     fs::write(&img_path, &cpio_gz).with_context(|| format!("write {}", img_path.display()))?;
 
     // Compute the .img digest for the manifest.
@@ -1290,12 +1339,24 @@ fn build_one_role(
         );
     }
 
+    bake_role_progress(
+        role,
+        "enumerate_rootfs_manifest",
+        "10-60 sec depending on file count",
+        "Walking the staged rootfs to build the manifest file list; big tooling images can make this look idle.",
+    );
     // Walk the staging tree and turn it into ManifestFile entries.
     let files = enumerate_rootfs(&rootfs_dir)?;
     let signing_fp_hex = hex::encode(fingerprint_signing_key(&signing_key.verifying_key()));
     let mut m = assemble_manifest(&inputs, files, signing_fp_hex, img_sha256_hex)?;
 
     // Sign + write the .manifest.toml sibling.
+    bake_role_progress(
+        role,
+        "sign_manifest",
+        "under 10 sec",
+        "Signing the assembled manifest.toml with the bake signing key.",
+    );
     raxis_image_builder::sign_manifest(&mut m, signing_key)?;
 
     let manifest_path = images_dir.join(format!(
@@ -1548,7 +1609,8 @@ fn bake_one_role(
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"bake_rootfs_begin\",\
          \"role\":{:?},\"builder\":{:?},\"platform\":{:?},\
-         \"containerfile\":{:?}}}",
+         \"containerfile\":{:?},\"estimate\":\"2-15 min on first run\",\
+         \"detail\":\"The OCI builder may pull base images and run package-manager commands; sparse output is normal.\"}}",
         role.workspace_crate(),
         builder.binary(),
         platform,
@@ -1565,6 +1627,12 @@ fn bake_one_role(
     // suffix once the bake pipeline grows multi-version support; for
     // now a fixed `:dev` is enough since each role bakes one image.
     let tag = format!("raxis-rootfs-{}:dev", role.images_subdir());
+    bake_role_progress(
+        role,
+        "rootfs_builder_build",
+        "2-15 min on first run",
+        "Running the OCI builder. Base-image pulls and apt/apk installs can sit quiet before printing progress.",
+    );
     let build_status = Command::new(builder.binary())
         .args([
             "build",
@@ -1601,6 +1669,12 @@ fn bake_one_role(
     //    `podman` and `buildah` use the same shape. We always remove
     //    the container in Step 4 even on failure paths so a panic
     //    here does not leak named containers.
+    bake_role_progress(
+        role,
+        "rootfs_container_create",
+        "under 30 sec",
+        "Creating a throwaway container so its filesystem can be exported.",
+    );
     let create_out = Command::new(builder.binary())
         .args(["create", "--platform", platform, &tag])
         .output()
@@ -1645,6 +1719,12 @@ fn bake_one_role(
     }
     fs::create_dir_all(&rootfs_dir).with_context(|| format!("create {}", rootfs_dir.display()))?;
 
+    bake_role_progress(
+        role,
+        "rootfs_export_extract",
+        "1-10 min for large rootfs images",
+        "Streaming builder export directly into tar extraction; large executor images may not print while bytes move.",
+    );
     let extract_result = run_export_pipeline(builder, &container_id, &rootfs_dir);
 
     // ── Step 4: always remove the throwaway container. We swallow
@@ -2847,6 +2927,9 @@ fn print_bake_help() {
          binaries, packs signed initramfs images, and stages the Linux guest-kernel\n\
          binary at <install_dir>/kernel/vmlinux so the substrate can boot\n\
          from a fresh install dir on first try.\n\
+         Emits `bake_progress` / `bake_role_progress` JSON lines before\n\
+         long quiet phases such as base-image pulls, package installs,\n\
+         tar export/extract, Rust cross-compile, and cpio packing.\n\
          \n\
          Defaults:\n  \
          --role             every canonical role (orchestrator, reviewer,\n                     \
@@ -2914,10 +2997,20 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
         "workspace_root": args.workspace_root.display().to_string(),
     });
     eprintln!("{begin_payload}");
+    bake_progress(
+        "plan",
+        "under 5 sec",
+        "Resolved bake roles and install paths. Clean bakes can be long; following progress events name each quiet phase before it starts.",
+    );
 
     // 0. Ensure the per-clone dev signing keypair under
     //    `.git/info/raxis-signing-key/` exists (autogen on first
     //    run). INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01.
+    bake_progress(
+        "signing_key",
+        "under 5 sec",
+        "Ensuring the per-clone development signing key exists under .git/info/raxis-signing-key.",
+    );
     let keypair = ensure_dev_signing_keypair(&args.workspace_root)?;
     if keypair.generated_now {
         eprintln!(
@@ -2940,6 +3033,11 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
     //     mutating process-level `std::env` — concurrent xtask
     //     invocations no longer race on the variable.
     //     INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01.
+    bake_progress(
+        "trust_anchor",
+        "under 5 sec",
+        "Resolving the public image-signing trust anchor that every bake Cargo subprocess will inherit.",
+    );
     let resolved_anchor = trust_anchor::resolve_signing_key_pk_hex(&args.workspace_root)
         .map_err(anyhow::Error::new)
         .context(
@@ -2962,6 +3060,11 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
     let pk_hex_for_children = resolved_anchor.pk_hex.clone();
 
     // 1. Preflight (pure-read; fails closed before any mutation).
+    bake_progress(
+        "preflight",
+        "under 30 sec",
+        "Checking builder availability, musl target/linker, signing key, role manifests, vmlinux, and nftables-capable kernel config before mutating outputs.",
+    );
     let outcome = preflight_bake_inputs(
         &args.workspace_root,
         &args.install_dir,
@@ -2977,6 +3080,11 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
     //    per-role bakes. This way every per-role manifest can
     //    record the vmlinux SHA in its `inputs` block, binding
     //    image to guest-kernel pair.
+    bake_progress(
+        "stage_vmlinux",
+        "under 30 sec",
+        "Copying/validating the Linux guest kernel and staging its validated .config sidecar.",
+    );
     let vmlinux_sha = apply_vmlinux_resolution(
         &args.install_dir,
         &outcome.vmlinux,
@@ -2999,6 +3107,11 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
     // the umbrella `bake` driver's load order.
 
     // 4. Per-role bake.
+    bake_progress(
+        "role_bakes",
+        "10-45 min with --no-cache; seconds-minutes when unchanged",
+        "Processing each selected role: rootfs build when needed, guest binary cross-compile, initramfs pack/sign, and bake manifest write.",
+    );
     for role in &args.roles {
         bake_one_role_full(*role, args, &outcome, &vmlinux_sha, &pk_hex_for_children)?;
     }
@@ -3048,6 +3161,12 @@ fn bake_one_role_full(
     vmlinux_sha: &str,
     kernel_signing_key_hex: &str,
 ) -> Result<()> {
+    bake_role_progress(
+        role,
+        "fingerprint_inputs",
+        "under 30 sec for small roles; longer for large rootfs trees",
+        "Hashing source inputs and prior outputs to decide whether this role can be skipped.",
+    );
     let kernel_version = read_kernel_version_for(&args.workspace_root, role)?;
 
     let inputs_now = compute_bake_inputs(
@@ -3075,7 +3194,9 @@ fn bake_one_role_full(
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"bake_role_begin\",\
-         \"role\":{:?},\"kernel_version\":{:?}}}",
+         \"role\":{:?},\"kernel_version\":{:?},\
+         \"estimate\":\"2-20 min for rebuilt rootfs roles; under 2 min for binary-only roles\",\
+         \"detail\":\"Role will run rootfs build if required, cross-compile, pack, sign, and write a bake manifest.\"}}",
         role.workspace_crate(),
         kernel_version,
     );
@@ -3108,6 +3229,12 @@ fn bake_one_role_full(
         .with_context(|| format!("dev-stage for role {role:?} (bake driver)"))?;
 
     // ── Step 3: build-all (pack + sign).
+    bake_role_progress(
+        role,
+        "pack_sign_outputs",
+        "10-90 sec per role; longer for large executor images",
+        "Packing the staged rootfs, signing manifest.toml, and writing the install-dir image outputs.",
+    );
     let build_args = BuildAllArgs {
         role: Some(role),
         install_dir: args.install_dir.clone(),
@@ -3172,6 +3299,12 @@ fn bake_one_role_full(
     };
 
     let dest = BakeManifest::path(&args.install_dir, role, &kernel_version);
+    bake_role_progress(
+        role,
+        "write_bake_manifest",
+        "under 5 sec",
+        "Writing the bake.json integrity manifest used for fast no-op rebuilds.",
+    );
     manifest.write_atomic(&dest)?;
 
     eprintln!(

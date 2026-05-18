@@ -62,6 +62,16 @@ use crate::observability::record_intent_admission;
 use crate::scheduler::budget;
 use crate::vcs::diff::CommitSha;
 
+fn record_lane_budget_reserved_snapshot(ctx: &HandlerContext, lane_id: &str) {
+    if let Ok(status) = budget::current_budget(lane_id, ctx.store.as_ref()) {
+        crate::observability::record_budget_reserved(
+            &ctx.observability,
+            lane_id,
+            status.reserved_cost as i64,
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // handle — public entry point (infallible outer wrapper)
 // ---------------------------------------------------------------------------
@@ -1578,15 +1588,34 @@ fn run_phase_c(
     // same Phase C transaction, eliminating the pre-fix TOCTOU window
     // where two concurrent intents could both pass `check_budget` before
     // either ran `consume_budget`, over-committing the lane.
+    let mut budget_reserved_after_commit: Option<(String, u64)> = None;
     if task_state == TaskState::Admitted && pending_gates.is_empty() {
-        budget::reserve_budget_in_tx(
+        match budget::reserve_budget_in_tx(
             &tx,
             &pre_state.task.lane_id,
             task_id_owned.as_str(),
             pre_state.estimated_cost,
             policy,
-        )
-        .map_err(|_| (PlannerErrorCode::FailBudgetExceeded, task_state))?;
+        ) {
+            Ok(()) => {
+                if let Ok(status) =
+                    crate::scheduler::lane::get_lane_status_in_tx(&tx, &pre_state.task.lane_id)
+                {
+                    budget_reserved_after_commit =
+                        Some((pre_state.task.lane_id.clone(), status.reserved_cost));
+                }
+            }
+            Err(e) => {
+                if let crate::scheduler::SchedulerError::BudgetExceeded { kind } = &e {
+                    crate::observability::record_budget_exceeded(
+                        &ctx.observability,
+                        &pre_state.task.lane_id,
+                        kind,
+                    );
+                }
+                return Err((PlannerErrorCode::FailBudgetExceeded, task_state));
+            }
+        }
     }
 
     // ── Step 11: FSM transition via task_transitions (INV-INIT-04) ───────
@@ -1661,6 +1690,13 @@ fn run_phase_c(
     tx.commit()
         .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
     drop(conn);
+    if let Some((lane_id, reserved_cost)) = budget_reserved_after_commit {
+        crate::observability::record_budget_reserved(
+            &ctx.observability,
+            &lane_id,
+            reserved_cost as i64,
+        );
+    }
 
     // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` post-commit emit —
     // every captured FSM transition becomes an
@@ -2378,6 +2414,7 @@ fn handle_report_failure(
     //
     // block_reason carries the planner's justification for operator review.
     let mut pending_audits: Vec<TaskTransitionRecord> = Vec::new();
+    let mut lane_id_released: Option<String> = None;
     {
         let mut conn = store.lock_sync();
         let tx = conn
@@ -2459,10 +2496,14 @@ fn handle_report_failure(
                 );
                 return Err((PlannerErrorCode::FailTaskNotRunning, task_state));
             }
+            lane_id_released = Some(lane_id.to_owned());
         }
 
         tx.commit()
             .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+    }
+    if let Some(lane_id) = lane_id_released.as_deref() {
+        record_lane_budget_reserved_snapshot(ctx, lane_id);
     }
 
     // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` post-commit emit —
@@ -2910,6 +2951,7 @@ fn handle_complete_task(
         store,
     )
     .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+    record_lane_budget_reserved_snapshot(ctx, &task.lane_id);
 
     // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — post-commit emit of the
     // Running → Completed `TaskStateChanged`. Without this the audit chain

@@ -110,7 +110,34 @@ manual.
 RAXIS is written in Rust. The full requirements are in
 [`guides/getting-started/01-prereqs.md`](guides/getting-started/01-prereqs.md)
 and [`specs/v2/system-requirements.md §9`](specs/v2/system-requirements.md#9-building-from-source).
-Run the platform prerequisite command first:
+For a fresh source build, use the one-shot setup wrapper:
+
+```bash
+# From the raxis/ workspace root
+export RAXIS_INSTALL_DIR="$HOME/.raxis-install"
+cargo xtask source-setup \
+  --install-dir "$RAXIS_INSTALL_DIR" \
+  --kernel-from-file /path/to/vmlinux \
+  --kernel-config /path/to/vmlinux.config
+```
+
+Pinned prebuilt guest kernel variant:
+
+```bash
+cargo xtask source-setup \
+  --install-dir "$RAXIS_INSTALL_DIR" \
+  --kernel-url https://example.com/vmlinux-aarch64 \
+  --kernel-sha256 <64-hex-digest> \
+  --kernel-config /path/to/vmlinux.config
+```
+
+First-run expectations: host prereqs 2-20 min, host tools 3-15 min,
+dashboard 1-6 min, pinned guest-kernel stage 1-10 min when used, guest
+image bake 10-45 min with `--no-cache`, final kernel rebuild 2-10 min,
+verify/codesign under 1 min. The command prints structured progress
+before long quiet Docker/Cargo/cpio phases.
+
+Manual path:
 
 ```bash
 # From the raxis/ workspace root
@@ -155,7 +182,7 @@ Dashboard frontend:
 
 ```bash
 cd dashboard-fe
-npm install
+npm ci
 npm run build
 cd ..
 ```

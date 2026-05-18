@@ -73,13 +73,13 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Kernel observability drops",
+      "title": "Kernel observability drops (selected range)",
       "description": "Kernel-side redaction/queue drops before the pusher sees a frame. Redaction failures usually mean a metric label drifted from the closed allow-list.",
       "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (drop_reason) (rate(raxis_observability_dropped_total[1m]))", "legendFormat": "{{drop_reason}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (drop_reason) (sum_over_time(raxis_observability_dropped_total[$__range]))", "legendFormat": "{{drop_reason}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
     },
     {

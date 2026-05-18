@@ -3,6 +3,71 @@
 Use this page for the shortest current path from a clean checkout to a
 bootable local install.
 
+## 0. One-Shot Source Setup
+
+For a fresh development/e2e host, prefer the one-shot wrapper. It
+runs the host prereq checks, builds the release host tools, builds the
+dashboard, bakes guest images, rebuilds `raxis-kernel` with the same
+image-signing trust anchor, verifies that trust anchor, and ad-hoc
+codesigns the kernel on macOS.
+
+```bash
+cd /path/to/raxis/raxis
+export RAXIS_INSTALL_DIR="$HOME/.raxis-install"
+
+cargo xtask source-setup \
+  --install-dir "$RAXIS_INSTALL_DIR" \
+  --kernel-from-file /path/to/vmlinux \
+  --kernel-config /path/to/vmlinux.config \
+  --no-cache
+```
+
+Pinned prebuilt kernel variant:
+
+```bash
+cargo xtask source-setup \
+  --install-dir "$RAXIS_INSTALL_DIR" \
+  --kernel-url https://example.com/vmlinux-aarch64 \
+  --kernel-sha256 <64-hex-digest> \
+  --kernel-config /path/to/vmlinux.config
+```
+
+Use `--dry-run` first to print the plan without changing the host.
+Add `--with-observability` when you also want the local OTel,
+Prometheus, and Grafana stack started.
+
+| Phase | First-run expectation | What is happening |
+|---|---:|---|
+| Host prereqs | 2-20 min | Installs/verifies Rust musl target, OpenSSL 3, linker config, AVF codesign/firewall on macOS, or KVM/vsock/cgroup checks on Linux. |
+| Host tools | 3-15 min | Builds `raxis-cli`, `raxis-gateway`, `raxis-otel-pusher`, and `raxis-supervisor` in release mode. |
+| Dashboard | 1-6 min | Runs `npm ci` and `npm run build` in `dashboard-fe/`. |
+| Prebuilt guest kernel | 1-10 min when `--kernel-url` is used | Downloads pinned `vmlinux`, checks SHA-256, validates the nftables config, and stages the sidecar. |
+| Guest image bake | 10-45 min with `--no-cache` | Validates/stages `vmlinux`, checks its nftables `.config`, pulls/builds rootfs layers, cross-compiles guest binaries, packs and signs initramfs images. |
+| Host kernel | 2-10 min | Rebuilds `raxis-kernel` with the bake's public trust anchor. |
+| Verify/sign | under 1 min | Verifies the embedded trust anchor and codesigns the AVF kernel binary on macOS. |
+
+The wrapper exists because these were the easy-to-miss setup hurdles:
+
+- The guest Linux kernel is separate from the role images. It must be
+  staged as `<install_dir>/kernel/vmlinux`, and its config must include
+  the nftables/netfilter symbols in
+  `images/kernel/raxis-guest-a3-netfilter.config`.
+- `cargo xtask images bake` mints or reuses a per-clone image-signing
+  key under `.git/info/raxis-signing-key/`. The host `raxis-kernel`
+  must then be rebuilt with the matching public key and verified.
+- macOS AVF requires the kernel binary to be codesigned with
+  `release/raxis.entitlements`, and the firewall allowlist avoids the
+  recurring incoming-connection prompt.
+- Docker, Podman, or Buildah can be quiet during base-image pulls,
+  package-manager work, export, tar extraction, and large cpio packing.
+  The bake now emits structured `bake_progress` and
+  `bake_role_progress` lines before those long phases.
+- A user-writable `RAXIS_INSTALL_DIR` is easier for development than
+  `/usr/local/lib/raxis`, which may require elevated permissions.
+
+The remaining sections show the same flow by hand for operators who
+want to inspect or repeat individual phases.
+
 ## 1. Host Prereqs
 
 Source builds require:
@@ -67,7 +132,7 @@ Build the dashboard frontend when you plan to serve the dashboard UI:
 
 ```bash
 cd dashboard-fe
-npm install
+npm ci
 npm run build
 cd ..
 ```
@@ -192,6 +257,6 @@ raxis submit plan "$RAXIS_DATA_DIR/plan/plan.toml" --no-dry-run
 | Symptom | Fix |
 | --- | --- |
 | `ERR_ALREADY_INITIALIZED` | You already ran genesis for this data dir. Pick a new data dir or use `--force` only for throwaway dev state. |
-| `trust_anchor_unpopulated` | Run `cargo xtask images bake`, rebuild `raxis-kernel` with `RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat .git/info/raxis-signing-key/pk.hex)"`, then `images verify-trust-anchor`. |
-| guest VM cannot install nftables rules | Rebuild/stage a guest kernel with `images/kernel/raxis-guest-a3-netfilter.config`, then run `cargo xtask images bake --no-cache` so the rootfs and staged kernel are validated together. |
+| `trust_anchor_unpopulated` | Run `cargo xtask source-setup` or the manual sequence: `images bake`, rebuild `raxis-kernel` with `RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat .git/info/raxis-signing-key/pk.hex)"`, then `images verify-trust-anchor`. |
+| guest VM cannot install nftables rules | Stage a guest kernel whose `.config` includes `images/kernel/raxis-guest-a3-netfilter.config`, then run `cargo xtask source-setup --no-cache` or `cargo xtask images bake --no-cache` so rootfs outputs and the staged kernel are validated together. |
 | setup says a command is deferred | Run the printed command manually; setup is a scaffold, not a key-custody automation. |

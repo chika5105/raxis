@@ -24,7 +24,7 @@
       "description": "Per-frame operator UDS dispatch latency (kernel-side handler dispatch). Source: `OperatorIpcDuration` histogram. iter44 / INV-OBS-OPERATOR-IPC-COVERAGE-01.",
       "gridPos": { "x": 0, "y": 1, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (command_kind, le) (rate(raxis_operator_ipc_duration_milliseconds_bucket[5m])))", "legendFormat": "{{command_kind}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.95, sum by (command_kind, le) (sum_over_time(raxis_operator_ipc_duration_milliseconds_bucket[$__range])))", "legendFormat": "{{command_kind}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
@@ -32,23 +32,23 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Operator IPC: dispatches / sec by command_kind / accepted",
+      "title": "Operator IPC: dispatches total by command_kind / accepted",
       "description": "Rate of operator UDS frames the kernel processed. Stacked by command_kind so the operator can see which command class is hot. `accepted=false` iff the response was `OperatorResponse::Error`. Source: `OperatorIpcTotal`.",
       "gridPos": { "x": 12, "y": 1, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (command_kind, accepted) (rate(raxis_operator_ipc_total[1m]))", "legendFormat": "{{command_kind}} accepted={{accepted}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (command_kind, accepted) (sum_over_time(raxis_operator_ipc_total[$__range]))", "legendFormat": "{{command_kind}} accepted={{accepted}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "stacking": { "mode": "normal", "group": "A" }, "fillOpacity": 25 } }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "stacking": { "mode": "normal", "group": "A" }, "fillOpacity": 25 } }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
     },
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Operator IPC: rejection rate (accepted=false / total)",
+      "title": "Operator IPC: rejection ratio (accepted=false / total), selected range",
       "description": "Fraction of operator dispatches the kernel rejected. Sustained non-zero values point at a misconfigured CLI build, an epoch mismatch, or a fail-closed gate firing. Drill down into the `accepted` series above to see which command_kind is being rejected.",
       "gridPos": { "x": 0, "y": 9, "w": 12, "h": 7 },
       "targets": [
-        { "expr": "sum(rate(raxis_operator_ipc_total{accepted=\"false\"}[5m])) / clamp_min(sum(rate(raxis_operator_ipc_total[5m])), 1e-9)", "legendFormat": "rejection rate", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum(sum_over_time(raxis_operator_ipc_total{accepted=\"false\"}[$__range])) / clamp_min(sum(sum_over_time(raxis_operator_ipc_total[$__range])), 1e-9)", "legendFormat": "rejection ratio", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
@@ -60,7 +60,7 @@
       "description": "Tail latency for operator dispatches. Spikes here signal handler back-pressure (e.g. signature verification on the critical path of `approve_plan`).",
       "gridPos": { "x": 12, "y": 9, "w": 12, "h": 7 },
       "targets": [
-        { "expr": "histogram_quantile(0.99, sum by (command_kind, le) (rate(raxis_operator_ipc_duration_milliseconds_bucket[5m])))", "legendFormat": "{{command_kind}} p99", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.99, sum by (command_kind, le) (sum_over_time(raxis_operator_ipc_duration_milliseconds_bucket[$__range])))", "legendFormat": "{{command_kind}} p99", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
@@ -80,7 +80,7 @@
       "description": "Wall-clock from frame received → response written, per `kernel/src/ipc/server.rs::drive_planner_stream` arm. Source: `KernelSubstrateIpcRoundtripDuration` histogram. iter44 / INV-OBS-IPC-ROUNDTRIP-COVERAGE-01.",
       "gridPos": { "x": 0, "y": 17, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (role, message_kind, le) (rate(raxis_kernel_substrate_ipc_roundtrip_duration_milliseconds_bucket[5m])))", "legendFormat": "{{role}}/{{message_kind}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.95, sum by (role, message_kind, le) (sum_over_time(raxis_kernel_substrate_ipc_roundtrip_duration_milliseconds_bucket[$__range])))", "legendFormat": "{{role}}/{{message_kind}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
@@ -88,13 +88,13 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Substrate IPC: messages / sec by role / message_kind",
+      "title": "Substrate IPC: messages, selected range by role / message_kind",
       "description": "Frame throughput across the kernel ↔ substrate vsock chokepoint. Stacked by role so the operator can see whether planner inference frames, verifier witnesses, or gateway-fetch frames are dominating. Source: `KernelSubstrateIpcMessagesTotal`.",
       "gridPos": { "x": 12, "y": 17, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (role, message_kind) (rate(raxis_kernel_substrate_ipc_messages_total[1m]))", "legendFormat": "{{role}}/{{message_kind}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (role, message_kind) (sum_over_time(raxis_kernel_substrate_ipc_messages_total[$__range]))", "legendFormat": "{{role}}/{{message_kind}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "stacking": { "mode": "normal", "group": "A" }, "fillOpacity": 25 } }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "stacking": { "mode": "normal", "group": "A" }, "fillOpacity": 25 } }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
     },
     {
@@ -104,7 +104,7 @@
       "description": "Per-role inflight gauge (incremented at frame-received, decremented when the handler arm returns). Persistent non-zero values mean the kernel is mid-handler on stalled frames — pivot from here to the kernel log to find the slow handler. Source: `KernelSubstrateIpcInflight`.",
       "gridPos": { "x": 0, "y": 25, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (role) (raxis_kernel_substrate_ipc_inflight)", "legendFormat": "{{role}} inflight", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (role) (last_over_time(raxis_kernel_substrate_ipc_inflight[$__range]))", "legendFormat": "{{role}} inflight", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
@@ -116,7 +116,7 @@
       "description": "Tail latency on the substrate IPC chokepoint. iter44 inference frames (planner/intent_request, planner/planner_fetch_request) typically dominate; tail spikes on verifier/witness_submission point at slow witness verification.",
       "gridPos": { "x": 12, "y": 25, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "histogram_quantile(0.99, sum by (role, message_kind, le) (rate(raxis_kernel_substrate_ipc_roundtrip_duration_milliseconds_bucket[5m])))", "legendFormat": "{{role}}/{{message_kind}} p99", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.99, sum by (role, message_kind, le) (sum_over_time(raxis_kernel_substrate_ipc_roundtrip_duration_milliseconds_bucket[$__range])))", "legendFormat": "{{role}}/{{message_kind}} p99", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
@@ -124,13 +124,13 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Substrate IPC: counter ↔ histogram parity (per-role rate diff)",
-      "description": "INV-OBS-IPC-ROUNDTRIP-COVERAGE-01 pins one counter increment + one histogram observation per frame — so the per-role rates MUST be equal. Sustained non-zero divergence on this panel = an emit site missed an arm or sample-rate kicked in unevenly across the two metrics. The RAII guard in `kernel/src/observability.rs::KernelSubstrateIpcRoundtrip::Drop` is the structural enforcement; this panel is the dashboard-side visual witness.",
+      "title": "Substrate IPC: counter ↔ histogram parity (per-role total diff)",
+      "description": "INV-OBS-IPC-ROUNDTRIP-COVERAGE-01 pins one counter increment + one histogram observation per frame — so the per-role totals MUST be equal. Sustained non-zero divergence on this panel = an emit site missed an arm or sample-rate kicked in unevenly across the two metrics. The RAII guard in `kernel/src/observability.rs::KernelSubstrateIpcRoundtrip::Drop` is the structural enforcement; this panel is the dashboard-side visual witness.",
       "gridPos": { "x": 0, "y": 33, "w": 24, "h": 7 },
       "targets": [
-        { "expr": "sum by (role) (rate(raxis_kernel_substrate_ipc_messages_total[5m])) - sum by (role) (rate(raxis_kernel_substrate_ipc_roundtrip_duration_milliseconds_count[5m]))", "legendFormat": "{{role}} (counter rate − histogram-count rate, expected ≈ 0)", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (role) (sum_over_time(raxis_kernel_substrate_ipc_messages_total[$__range])) - sum by (role) (sum_over_time(raxis_kernel_substrate_ipc_roundtrip_duration_milliseconds_count[$__range]))", "legendFormat": "{{role}} (counter total - histogram-count total, expected ≈ 0)", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
     }
   ]

@@ -420,6 +420,13 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
         failure_class,
         gateway_upstream_ms,
     );
+    crate::observability::record_gateway_stage(
+        &ctx.observability,
+        &provider_label,
+        crate::observability::GATEWAY_STAGE_UPSTREAM_ROUNDTRIP,
+        outcome_label,
+        gateway_upstream_ms,
+    );
 
     match result {
         Ok(fr) => PlannerFetchResponse {

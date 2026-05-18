@@ -15,19 +15,19 @@
       "title": "Active sessions by role",
       "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (role) (raxis_session_active)", "legendFormat": "{{role}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (role) (last_over_time(raxis_session_active[$__range]))", "legendFormat": "{{role}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Lifecycle transitions / sec",
+      "title": "Lifecycle transitions, selected range",
       "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (to_state) (rate(raxis_session_lifecycle_transition_total[1m]))", "legendFormat": "to {{to_state}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (to_state) (sum_over_time(raxis_session_lifecycle_transition_total[$__range]))", "legendFormat": "to {{to_state}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
     {
       "id": 10,
@@ -35,7 +35,7 @@
       "title": "Session duration p95 (ms) by agent_type",
       "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (agent_type, le) (rate(raxis_session_duration_milliseconds_bucket[5m])))", "legendFormat": "{{agent_type}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.95, sum by (agent_type, le) (sum_over_time(raxis_session_duration_milliseconds_bucket[$__range])))", "legendFormat": "{{agent_type}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
     },
@@ -45,7 +45,7 @@
       "title": "Initiative duration p95 (ms) by class",
       "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (initiative_class, le) (rate(raxis_initiative_duration_milliseconds_bucket[5m])))", "legendFormat": "{{initiative_class}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.95, sum by (initiative_class, le) (sum_over_time(raxis_initiative_duration_milliseconds_bucket[$__range])))", "legendFormat": "{{initiative_class}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
     },
@@ -55,7 +55,7 @@
       "title": "Tasks in flight (per initiative class)",
       "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 },
       "targets": [
-        { "expr": "sum by (initiative_class) (raxis_initiative_task_in_flight)", "legendFormat": "{{initiative_class}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (initiative_class) (last_over_time(raxis_initiative_task_in_flight[$__range]))", "legendFormat": "{{initiative_class}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     }

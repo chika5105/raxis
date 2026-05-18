@@ -16,7 +16,7 @@
       "title": "Active sessions",
       "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
       "targets": [
-        { "expr": "sum(raxis_session_active)", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum(last_over_time(raxis_session_active[$__range]))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 8 }, { "color": "red", "value": 16 } ] } }, "overrides": [] },
       "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"] }, "colorMode": "value" }
@@ -24,10 +24,10 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "VM cold-boot p50 (ms, 5m)",
+      "title": "VM cold-boot p50 (ms, selected range)",
       "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
       "targets": [
-        { "expr": "histogram_quantile(0.50, sum by (le) (rate(raxis_isolation_spawn_cold_boot_duration_milliseconds_bucket[5m])))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.50, sum by (le) (sum_over_time(raxis_isolation_spawn_cold_boot_duration_milliseconds_bucket[$__range])))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 350 }, { "color": "red", "value": 600 } ] } }, "overrides": [] },
       "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"] }, "colorMode": "value" }
@@ -35,10 +35,10 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "VM cold-boot p95 (ms, 5m)",
+      "title": "VM cold-boot p95 (ms, selected range)",
       "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
       "targets": [
-        { "expr": "histogram_quantile(0.95, sum by (le) (rate(raxis_isolation_spawn_cold_boot_duration_milliseconds_bucket[5m])))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.95, sum by (le) (sum_over_time(raxis_isolation_spawn_cold_boot_duration_milliseconds_bucket[$__range])))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 600 }, { "color": "red", "value": 1000 } ] } }, "overrides": [] },
       "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"] }, "colorMode": "value" }
@@ -49,7 +49,7 @@
       "title": "Audit chain length",
       "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
       "targets": [
-        { "expr": "max(raxis_audit_chain_length)", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "max(max_over_time(raxis_audit_chain_length[$__range]))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": { "reduceOptions": { "values": false, "calcs": ["lastNotNull"] }, "colorMode": "value" }
@@ -57,12 +57,12 @@
     {
       "id": 10,
       "type": "timeseries",
-      "title": "Spawn rate by outcome (req/s)",
+      "title": "Spawn events by outcome (selected range)",
       "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (outcome) (rate(raxis_isolation_spawn_total[1m]))", "legendFormat": "{{outcome}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (outcome) (sum_over_time(raxis_isolation_spawn_total[$__range]))", "legendFormat": "{{outcome}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
     },
     {
@@ -71,9 +71,9 @@
       "title": "Intent admission p50/p95/p99 (ms)",
       "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "histogram_quantile(0.50, sum by (le) (rate(raxis_intent_admission_duration_milliseconds_bucket[5m])))", "legendFormat": "p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "expr": "histogram_quantile(0.95, sum by (le) (rate(raxis_intent_admission_duration_milliseconds_bucket[5m])))", "legendFormat": "p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "expr": "histogram_quantile(0.99, sum by (le) (rate(raxis_intent_admission_duration_milliseconds_bucket[5m])))", "legendFormat": "p99", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.50, sum by (le) (sum_over_time(raxis_intent_admission_duration_milliseconds_bucket[$__range])))", "legendFormat": "p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (le) (sum_over_time(raxis_intent_admission_duration_milliseconds_bucket[$__range])))", "legendFormat": "p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.99, sum by (le) (sum_over_time(raxis_intent_admission_duration_milliseconds_bucket[$__range])))", "legendFormat": "p99", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
@@ -81,12 +81,12 @@
     {
       "id": 20,
       "type": "timeseries",
-      "title": "Audit append rate (events/s)",
+      "title": "Audit append events (selected range)",
       "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (event_kind) (rate(raxis_audit_event_append_total[1m]))", "legendFormat": "{{event_kind}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (event_kind) (sum_over_time(raxis_audit_event_append_total[$__range]))", "legendFormat": "{{event_kind}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
     },
     {
@@ -95,9 +95,9 @@
       "title": "Observability frames dropped (per reason)",
       "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
       "targets": [
-        { "expr": "sum by (drop_reason) (rate(raxis_observability_dropped_total[1m]))", "legendFormat": "{{drop_reason}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (drop_reason) (sum_over_time(raxis_observability_dropped_total[$__range]))", "legendFormat": "{{drop_reason}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
     },
     {
@@ -111,25 +111,25 @@
     {
       "id": 31,
       "type": "timeseries",
-      "title": "Kernel respawn rate by trigger (5m)",
+      "title": "Kernel respawn events by trigger (selected range)",
       "description": "raxis.kernel.respawn.total — one increment per supervisor-driven kernel respawn observed at boot. trigger ∈ { deadlock, sigsegv, sigabrt, exit_70, other }; closed lexicon per INV-OBS-KERNEL-RESPAWN-COVERAGE-01.",
       "gridPos": { "x": 0, "y": 21, "w": 8, "h": 8 },
       "targets": [
-        { "expr": "sum by (trigger) (rate(raxis_kernel_respawn_total[5m]))", "legendFormat": "{{trigger}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (trigger) (sum_over_time(raxis_kernel_respawn_total[$__range]))", "legendFormat": "{{trigger}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
     },
     {
       "id": 32,
       "type": "timeseries",
-      "title": "Kernel respawn duration p50/p95/p99 (ms, 5m)",
+      "title": "Kernel respawn duration p50/p95/p99 (ms, selected range)",
       "description": "raxis.kernel.respawn.duration — wall-clock from supervisor restart-decision to kernel-up-and-rehydrated. Wide histogram bucket spread (10ms → 5min) per the kernel-respawn slow-operation profile.",
       "gridPos": { "x": 8, "y": 21, "w": 8, "h": 8 },
       "targets": [
-        { "expr": "histogram_quantile(0.50, sum by (le) (rate(raxis_kernel_respawn_duration_milliseconds_bucket[5m])))", "legendFormat": "p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "expr": "histogram_quantile(0.95, sum by (le) (rate(raxis_kernel_respawn_duration_milliseconds_bucket[5m])))", "legendFormat": "p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "expr": "histogram_quantile(0.99, sum by (le) (rate(raxis_kernel_respawn_duration_milliseconds_bucket[5m])))", "legendFormat": "p99", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "histogram_quantile(0.50, sum by (le) (sum_over_time(raxis_kernel_respawn_duration_milliseconds_bucket[$__range])))", "legendFormat": "p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (le) (sum_over_time(raxis_kernel_respawn_duration_milliseconds_bucket[$__range])))", "legendFormat": "p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.99, sum by (le) (sum_over_time(raxis_kernel_respawn_duration_milliseconds_bucket[$__range])))", "legendFormat": "p99", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
@@ -137,13 +137,13 @@
     {
       "id": 33,
       "type": "timeseries",
-      "title": "Supervisor refused-restart rate by reason (5m)",
+      "title": "Supervisor refused-restart events by reason (selected range)",
       "description": "raxis.supervisor.refused_restart.total — kernel observed a Halted sentinel at boot (operator manually bypassed the supervisor). reason ∈ { circuit_open, operator_stop, operator_stop_forced, supervisor_gone, other }.",
       "gridPos": { "x": 16, "y": 21, "w": 8, "h": 8 },
       "targets": [
-        { "expr": "sum by (reason) (rate(raxis_supervisor_refused_restart_total[5m]))", "legendFormat": "{{reason}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum by (reason) (sum_over_time(raxis_supervisor_refused_restart_total[$__range]))", "legendFormat": "{{reason}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
-      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
     }
   ]

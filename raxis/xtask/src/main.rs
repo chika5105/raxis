@@ -20,6 +20,7 @@ mod linux_prereqs;
 mod macos_firewall;
 mod observability;
 mod perf;
+mod source_setup;
 mod spec_graph;
 mod trust_anchor;
 
@@ -55,6 +56,14 @@ fn main() -> anyhow::Result<()> {
             // inner parser sees flag args at args[0].
             let tail: Vec<String> = args.into_iter().skip(1).collect();
             dev_prereqs::run(&tail).context("dev-prereqs")
+        }
+        Some("source-setup") => {
+            // `cargo xtask source-setup` is the one-shot source
+            // bootstrap: host prereqs, release host tools, dashboard,
+            // guest image bake, matching trust-anchor kernel rebuild,
+            // verification, and macOS codesign.
+            let tail: Vec<String> = args.into_iter().skip(1).collect();
+            source_setup::run(&tail).context("source-setup")
         }
         Some("images") => {
             // `cargo xtask images <subcommand> [args...]`
@@ -212,7 +221,7 @@ fn main() -> anyhow::Result<()> {
         Some(other) => anyhow::bail!(
             "unknown xtask target: {other:?}\n\
              available: spec-graph [--strict], license-check [--strict], \
-             dev-keys, dev-codesign, dev-prereqs, dev-reset, hygiene, \
+             dev-keys, dev-codesign, dev-prereqs, source-setup, dev-reset, hygiene, \
              hygiene-check, hygiene-install-timer, \
              images {{bake|dev-kernel|verify-trust-anchor}}, \
              linux-microvm, linux-prereqs, macos-firewall-prereq, \
@@ -226,6 +235,7 @@ fn main() -> anyhow::Result<()> {
              dev-keys init  [--dir <PATH>] [--force]   — emit local-build signing keypair\n                                                 (release-and-distribution.md §8)\n  \
              dev-codesign   [--profile <P>]            — ad-hoc codesign target/<P>/raxis-kernel\n                 [--entitlements <PATH>]    against release/raxis.entitlements\n                 [--binary <NAME>]          (macOS only; no-op on Linux)\n                                                 (system-requirements.md §5.2)\n  \
              dev-prereqs    [--install]                 — verify / install AVF demo prerequisites\n                 [--scope user|workspace]   (Homebrew, musl-cross, openssl@3,\n                 [--arch aarch64|x86_64]    rustup musl target, codesign, cargo);\n                 [--skip-cargo-config]     idempotently patches\n                                                 ~/.cargo/config.toml linker pin.\n                                                 (demo-e2e-sample/AVF_DEMO.md §0)\n  \
+             source-setup                                — one-shot source bootstrap:\n                 [--install-dir <PATH>]                    host prereqs, release host tools,\n                 [--kernel-from-file <PATH>]               dashboard build, guest image bake,\n                 [--kernel-config <PATH>]                  trust-anchor kernel rebuild,\n                 [--builder <B>]                           trust-anchor verification, and\n                 [--force] [--no-cache]                    macOS AVF codesign. Prints timing\n                 [--skip-prereqs] [--skip-dashboard]       expectations before long phases.\n                 [--skip-codesign] [--with-observability]  Use --dry-run to inspect without\n                 [--dry-run]                               changing the host.\n                                                          (guides/SETUP.md)\n  \
              hygiene        [--dry-run]                — prune parent-side `git worktree`s whose\n                 [--max-age-days N]                       branch tip has landed to the resolved\n                 [--keep BRANCH ...]                      \"main\" ref AND whose files are not\n                 [--main-ref REF]                          actively held open. The main ref is\n                                                          auto-detected via `git symbolic-ref` so\n                                                          forks / non-`main` default branches Just\n                                                          Work; --main-ref overrides. Skips the\n                                                          main checkout, anything on --keep, and\n                                                          the worktree the xtask itself was invoked\n                                                          from. Prints disk-before / disk-after\n                                                          to stderr. (INV-HOST-HYGIENE-01)\n  \
              hygiene-check  [--threshold-pct N]         — read-only `df -P` probe across the repo\n                                                          volume, /private/tmp, and /var/folders/*.\n                                                          Exits non-zero when any volume exceeds\n                                                          --threshold-pct (default 85). Used as\n                                                          live-e2e preflight at 90%.\n                                                          (INV-HOST-HYGIENE-01)\n  \
              hygiene-install-timer                      — install the periodic hygiene-sweep timer\n                 [--system]                                  (every 6h via launchd on macOS or\n                 [--uninstall]                               systemd on Linux; user-scope by default,\n                 [--dry-run]                                 --system for shared hosts).\n                                                          (INV-HOST-HYGIENE-01,\n                                                           guides/operator/18-host-hygiene.md)\n  \
