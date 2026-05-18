@@ -61,7 +61,7 @@ use raxis_ipc::message::FetchKind;
 use raxis_types::{PlannerFetchKind, PlannerFetchRequest, PlannerFetchResponse, SessionAgentType};
 use uuid::Uuid;
 
-use crate::authority::session::get_session_by_token;
+use crate::authority::session::get_active_session_by_token;
 use crate::gateway::client::GatewayCallError;
 use crate::ipc::context::HandlerContext;
 
@@ -86,6 +86,7 @@ mod errors {
     pub const REVIEWER_DENIED: &str = "FAIL_PLANNER_FETCH_DENIED_REVIEWER";
     pub const GATEWAY_UNAVAILABLE: &str = "GatewayUnavailable";
     pub const NETWORK_ERROR: &str = "NetworkError";
+    pub const TIMEOUT_EXCEEDED: &str = "TimeoutExceeded";
 }
 
 /// Saturating conversion of `Instant::elapsed()` to the wire-level
@@ -370,6 +371,9 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
         Err(GatewayCallError::Dropped) => {
             failure_response(request_id, latency_ms, errors::NETWORK_ERROR)
         }
+        Err(GatewayCallError::Timeout { .. }) => {
+            failure_response(request_id, latency_ms, errors::TIMEOUT_EXCEEDED)
+        }
         Err(GatewayCallError::GatewayError(msg)) => {
             // V2 reviewer-egress-defaults-decision.md §7: feed
             // `DomainNotAllowed` denials into the kernel-wide
@@ -608,7 +612,7 @@ async fn resolve_session(
 ) -> Option<crate::authority::session::SessionRow> {
     let store = Arc::clone(&ctx.store);
     let token_owned = token.to_owned();
-    tokio::task::spawn_blocking(move || get_session_by_token(&token_owned, &store).ok())
+    tokio::task::spawn_blocking(move || get_active_session_by_token(&token_owned, &store).ok())
         .await
         .ok()
         .flatten()
@@ -729,6 +733,7 @@ mod tests {
         );
         assert_eq!(errors::GATEWAY_UNAVAILABLE, "GatewayUnavailable");
         assert_eq!(errors::NETWORK_ERROR, "NetworkError");
+        assert_eq!(errors::TIMEOUT_EXCEEDED, "TimeoutExceeded");
     }
 
     #[test]

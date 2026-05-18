@@ -49,14 +49,14 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use raxis_audit_tools::AuditEventKind;
 use raxis_types::{TproxyAdmissionRequest, TproxyAdmissionResponse, TproxyProtocol};
 use uuid::Uuid;
 
-use crate::authority::session::get_session_by_token;
+use crate::authority::session::get_active_session_by_token;
 use crate::ipc::context::HandlerContext;
 
 // ---------------------------------------------------------------------------
@@ -78,6 +78,8 @@ mod reasons {
     pub const SESSION_TOKEN_MISMATCH: &str = "FAIL_SESSION_TOKEN_MISMATCH";
     pub const AUDIT_EMIT_FAILED: &str = "FAIL_AUDIT_EMIT";
 }
+
+const TUNNEL_REGISTRY_TTL: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // TunnelRegistry — single-use tunnel handles minted by the admission
@@ -124,7 +126,13 @@ pub struct RegisteredTunnel {
 /// to the admission handler and the tunnel listener.
 #[derive(Default, Debug)]
 pub struct TunnelRegistry {
-    by_id: Mutex<HashMap<Uuid, RegisteredTunnel>>,
+    by_id: Mutex<HashMap<Uuid, StoredTunnel>>,
+}
+
+#[derive(Clone, Debug)]
+struct StoredTunnel {
+    registered_at: Instant,
+    tunnel: RegisteredTunnel,
 }
 
 impl TunnelRegistry {
@@ -142,7 +150,15 @@ impl TunnelRegistry {
     pub fn register(&self, tunnel: RegisteredTunnel) -> (Uuid, [u8; 32]) {
         let tunnel_id = Uuid::new_v4();
         let token = tunnel.tunnel_token;
-        self.by_id.lock().insert(tunnel_id, tunnel);
+        let mut by_id = self.by_id.lock();
+        prune_expired_tunnels(&mut by_id, Instant::now());
+        by_id.insert(
+            tunnel_id,
+            StoredTunnel {
+                registered_at: Instant::now(),
+                tunnel,
+            },
+        );
         (tunnel_id, token)
     }
 
@@ -155,9 +171,10 @@ impl TunnelRegistry {
     /// alive for a retry.
     pub fn consume(&self, tunnel_id: Uuid, token: &[u8; 32]) -> Option<RegisteredTunnel> {
         let mut by_id = self.by_id.lock();
+        prune_expired_tunnels(&mut by_id, Instant::now());
         let entry = by_id.remove(&tunnel_id)?;
-        if &entry.tunnel_token == token {
-            Some(entry)
+        if &entry.tunnel.tunnel_token == token {
+            Some(entry.tunnel)
         } else {
             None
         }
@@ -166,13 +183,19 @@ impl TunnelRegistry {
     /// Number of currently-registered tunnels. Test / metrics
     /// helper only.
     pub fn len(&self) -> usize {
-        self.by_id.lock().len()
+        let mut by_id = self.by_id.lock();
+        prune_expired_tunnels(&mut by_id, Instant::now());
+        by_id.len()
     }
 
     /// `true` when no tunnels are registered.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+fn prune_expired_tunnels(by_id: &mut HashMap<Uuid, StoredTunnel>, now: Instant) {
+    by_id.retain(|_, entry| now.duration_since(entry.registered_at) <= TUNNEL_REGISTRY_TTL);
 }
 
 // ---------------------------------------------------------------------------
@@ -485,7 +508,7 @@ async fn resolve_session(
 ) -> Option<crate::authority::session::SessionRow> {
     let store = Arc::clone(&ctx.store);
     let token_owned = token.to_owned();
-    tokio::task::spawn_blocking(move || get_session_by_token(&token_owned, &store).ok())
+    tokio::task::spawn_blocking(move || get_active_session_by_token(&token_owned, &store).ok())
         .await
         .ok()
         .flatten()

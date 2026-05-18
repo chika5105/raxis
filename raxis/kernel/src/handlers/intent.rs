@@ -223,10 +223,10 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     let seq = req.sequence_number;
 
     // ── Step 1: Session validation ────────────────────────────────────────
-    // Resolve session_token → SessionRow.
+    // Resolve session_token → active SessionRow.
     // session_token is 64-char hex; stored verbatim in sessions.session_token.
     //
-    // ASYNC-SAFETY: `get_session_by_token` calls `Store::lock_sync()` →
+    // ASYNC-SAFETY: `get_active_session_by_token` calls `Store::lock_sync()` →
     // `tokio::sync::Mutex::blocking_lock`, which panics if invoked from a
     // tokio worker thread. The planner dispatcher (`accept_planner_loop`)
     // calls us from exactly that context. We move this lookup onto the
@@ -237,7 +237,7 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
         let store_arc = Arc::clone(&ctx.store);
         let token = req.session_token.clone();
         tokio::task::spawn_blocking(move || {
-            authority::session::get_session_by_token(&token, &store_arc)
+            authority::session::get_active_session_by_token(&token, &store_arc)
         })
         .await
         .map_err(|_| (PlannerErrorCode::Unauthorized, TaskState::Admitted))?
@@ -246,17 +246,6 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
 
     let session_id = SessionId::parse(&session.session_id)
         .map_err(|_| (PlannerErrorCode::Unauthorized, TaskState::Admitted))?;
-
-    // Revocation and expiry checks (spec §2.3 step 1). These are pure
-    // in-memory checks against the SessionRow we just loaded — no
-    // additional `lock_sync` site, so they stay on the async path.
-    let now = unix_now_secs();
-    if session.revoked_at.is_some() {
-        return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted));
-    }
-    if session.expires_at < now {
-        return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted));
-    }
 
     // ── Step 1B: Static dispatch matrix (v2-deep-spec.md §Step 20) ────────
     //
@@ -4890,6 +4879,89 @@ async fn terminate_session_after_activation_failure(
     }
 }
 
+/// Revoke a session row that was minted during `ActivateSubTask` but
+/// never reached a live `SessionSpawnService` registration. Step 2
+/// inserts the session before image resolution / worktree provisioning
+/// so those later failures need an explicit rollback-like cleanup;
+/// otherwise the durable VM-cap query (`revoked = 0`) counts a session
+/// with no VM behind it and eventually wedges capacity admission.
+async fn cleanup_unactivated_session_after_activation_failure(
+    ctx: &Arc<HandlerContext>,
+    session_id: &str,
+    task_id: &str,
+    initiative_id: &str,
+    reason: &str,
+) {
+    let store = Arc::clone(&ctx.store);
+    let session_id_owned = session_id.to_owned();
+    let task_id_owned = task_id.to_owned();
+    let cleanup_result = tokio::task::spawn_blocking(move || -> Result<(), rusqlite::Error> {
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction()?;
+        let now = unix_now_secs();
+        tx.execute(
+            &format!(
+                "UPDATE {SESSIONS}
+                    SET revoked = 1,
+                        revoked_at = COALESCE(revoked_at, ?1)
+                  WHERE session_id = ?2
+                    AND revoked = 0"
+            ),
+            rusqlite::params![now, &session_id_owned],
+        )?;
+        tx.execute(
+            &format!(
+                "UPDATE {TASKS}
+                    SET session_id = NULL
+                  WHERE task_id = ?1
+                    AND session_id = ?2"
+            ),
+            rusqlite::params![&task_id_owned, &session_id_owned],
+        )?;
+        tx.commit()?;
+        Ok(())
+    })
+    .await;
+
+    match cleanup_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"ActivateSubTaskUnactivatedSessionCleanupFailed\",\
+                 \"session_id\":\"{session_id}\",\"task_id\":\"{task_id}\",\
+                 \"reason\":\"{reason}\",\"error\":\"{e}\"}}"
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"ActivateSubTaskUnactivatedSessionCleanupJoinFailed\",\
+                 \"session_id\":\"{session_id}\",\"task_id\":\"{task_id}\",\
+                 \"reason\":\"{reason}\",\"error\":\"{e}\"}}"
+            );
+            return;
+        }
+    }
+
+    let display = format!("ActivateSubTask pre-spawn cleanup: {reason}");
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::SessionRevoked {
+            session_id: session_id.to_owned(),
+            revoked_by: "kernel:activate_subtask_cleanup".to_owned(),
+            revoked_by_display_name: Some(display),
+        },
+        Some(session_id),
+        Some(task_id),
+        Some(initiative_id),
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"ActivateSubTaskCleanupAuditEmitFailed\",\
+             \"session_id\":\"{session_id}\",\"task_id\":\"{task_id}\",\
+             \"reason\":\"{reason}\",\"error\":\"{e}\"}}"
+        );
+    }
+}
+
 /// **V3 iter70 — `INV-IPC-BATCH-REUSE-SINGULAR-MACHINERY-01`.**
 /// Selector for which entry-point invoked the singular
 /// `handle_activate_sub_task`. `Singular` is the
@@ -5552,6 +5624,14 @@ async fn handle_activate_sub_task(
                         );
                     }
                 }
+                cleanup_unactivated_session_after_activation_failure(
+                    ctx,
+                    &lookup.new_session_id,
+                    &task_id_owned,
+                    &lookup.initiative_id,
+                    "vm_image_resolution_failed",
+                )
+                .await;
                 return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
             }
         }
@@ -5616,20 +5696,26 @@ async fn handle_activate_sub_task(
     //        * `pre_state.worktree_path` resolves correctly for
     //          domain-git diff/topology-check calls.
     let workspace_mounts: Vec<raxis_isolation::WorkspaceMount> = {
-        let data_dir = ctx
-            .executor_spawn
-            .data_dir
-            .as_ref()
-            .ok_or_else(|| {
+        let data_dir = match ctx.executor_spawn.data_dir.as_ref() {
+            Some(data_dir) => data_dir.clone(),
+            None => {
                 eprintln!(
                     "{{\"level\":\"error\",\"event\":\"ActivateSubTaskNoDataDir\",\
                      \"task_id\":\"{}\",\"diagnostic\":\"ExecutorSpawnContext is missing data_dir; \
                      worktree provisioning requires <data_dir>/worktrees/ — check kernel boot wiring\"}}",
                     task_id_owned,
                 );
-                (PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted)
-            })?
-            .clone();
+                cleanup_unactivated_session_after_activation_failure(
+                    ctx,
+                    &lookup.new_session_id,
+                    &task_id_owned,
+                    &lookup.initiative_id,
+                    "missing_executor_spawn_data_dir",
+                )
+                .await;
+                return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
+            }
+        };
 
         // Resolve the live orchestrator target_ref from the plan
         // registry (or fall back to the kernel default). The
@@ -5650,7 +5736,7 @@ async fn handle_activate_sub_task(
             crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer => {
                 let store_for_eval = Arc::clone(&ctx.store);
                 let task_id_for_eval = task_id_owned.clone();
-                let row: Result<Option<String>, _> = tokio::task::spawn_blocking(move || {
+                let row_join = tokio::task::spawn_blocking(move || {
                     let conn = store_for_eval.lock_sync();
                     // The Reviewer's `predecessors` list points
                     // at the Executor task; the Executor's
@@ -5675,8 +5761,21 @@ async fn handle_activate_sub_task(
                         |r| r.get::<_, Option<String>>(0),
                     )
                 })
-                .await
-                .map_err(|_| (PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted))?;
+                .await;
+                let row: Result<Option<String>, _> = match row_join {
+                    Ok(row) => row,
+                    Err(_) => {
+                        cleanup_unactivated_session_after_activation_failure(
+                            ctx,
+                            &lookup.new_session_id,
+                            &task_id_owned,
+                            &lookup.initiative_id,
+                            "reviewer_eval_sha_lookup_join_failed",
+                        )
+                        .await;
+                        return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
+                    }
+                };
                 let sha = match row {
                     Ok(Some(s)) => s,
                     _ => {
@@ -5687,6 +5786,14 @@ async fn handle_activate_sub_task(
                              commit_task_completion must run first\"}}",
                             task_id_owned,
                         );
+                        cleanup_unactivated_session_after_activation_failure(
+                            ctx,
+                            &lookup.new_session_id,
+                            &task_id_owned,
+                            &lookup.initiative_id,
+                            "reviewer_missing_predecessor_evaluation_sha",
+                        )
+                        .await;
                         return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
                     }
                 };
@@ -5700,46 +5807,57 @@ async fn handle_activate_sub_task(
         let target_ref_for_provision = target_ref.clone();
         let data_dir_for_provision = data_dir.clone();
         let provision_started = std::time::Instant::now();
-        let provisioned: Result<(raxis_isolation::WorkspaceMount, String, String), String> =
-            tokio::task::spawn_blocking(move || {
-                let anchor = crate::worktree_provisioning::provision_orchestrator_worktree(
+        let provision_join = tokio::task::spawn_blocking(move || {
+            let anchor = crate::worktree_provisioning::provision_orchestrator_worktree(
+                &data_dir_for_provision,
+                &initiative_for_provision,
+                &target_ref_for_provision,
+            )
+            .map_err(|e| format!("orchestrator anchor: {e}"))?;
+            let mount = match evaluation_sha_for_reviewer.as_deref() {
+                Some(eval_sha) => crate::worktree_provisioning::provision_reviewer_worktree(
                     &data_dir_for_provision,
-                    &initiative_for_provision,
-                    &target_ref_for_provision,
+                    &session_for_provision,
+                    &anchor,
+                    eval_sha,
                 )
-                .map_err(|e| format!("orchestrator anchor: {e}"))?;
-                let mount = match evaluation_sha_for_reviewer.as_deref() {
-                    Some(eval_sha) => crate::worktree_provisioning::provision_reviewer_worktree(
-                        &data_dir_for_provision,
-                        &session_for_provision,
-                        &anchor,
-                        eval_sha,
-                    )
-                    .map_err(|e| format!("reviewer provisioning: {e}"))?,
-                    None => crate::worktree_provisioning::provision_executor_worktree(
-                        &data_dir_for_provision,
-                        &session_for_provision,
-                        &anchor,
-                    )
-                    .map_err(|e| format!("executor provisioning: {e}"))?,
-                };
-                Ok((mount, anchor.base_sha, anchor.base_tracking_ref))
-            })
-            .await
-            .map_err(|e| {
-                eprintln!(
-                    "{{\"level\":\"error\",\"event\":\"ActivateSubTaskProvisionJoinFailed\",\
+                .map_err(|e| format!("reviewer provisioning: {e}"))?,
+                None => crate::worktree_provisioning::provision_executor_worktree(
+                    &data_dir_for_provision,
+                    &session_for_provision,
+                    &anchor,
+                )
+                .map_err(|e| format!("executor provisioning: {e}"))?,
+            };
+            Ok((mount, anchor.base_sha, anchor.base_tracking_ref))
+        })
+        .await;
+        let provisioned: Result<(raxis_isolation::WorkspaceMount, String, String), String> =
+            match provision_join {
+                Ok(result) => result,
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"ActivateSubTaskProvisionJoinFailed\",\
                      \"task_id\":\"{}\",\"kind\":\"{}\",\"error\":\"{}\"}}",
-                    task_id_owned, dispatch_kind, e,
-                );
-                crate::observability::record_git_worktree_provision(
-                    &ctx.observability,
-                    dispatch_kind,
-                    "join_failed",
-                    provision_started.elapsed().as_millis() as i64,
-                );
-                (PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted)
-            })?;
+                        task_id_owned, dispatch_kind, e,
+                    );
+                    crate::observability::record_git_worktree_provision(
+                        &ctx.observability,
+                        dispatch_kind,
+                        "join_failed",
+                        provision_started.elapsed().as_millis() as i64,
+                    );
+                    cleanup_unactivated_session_after_activation_failure(
+                        ctx,
+                        &lookup.new_session_id,
+                        &task_id_owned,
+                        &lookup.initiative_id,
+                        "worktree_provision_join_failed",
+                    )
+                    .await;
+                    return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
+                }
+            };
         // V3 §3 perf-telemetry — wall-clock + outcome for the
         // `provision_{orchestrator,executor,reviewer}` triple as a single
         // observation. `role` mirrors the `dispatch_kind` lexicon
@@ -5757,14 +5875,25 @@ async fn handle_activate_sub_task(
             provision_outcome,
             provision_started.elapsed().as_millis() as i64,
         );
-        let (mount, base_sha, base_tracking_ref) = provisioned.map_err(|e| {
-            eprintln!(
-                "{{\"level\":\"error\",\"event\":\"ActivateSubTaskProvisionFailed\",\
-                 \"task_id\":\"{}\",\"kind\":\"{}\",\"error\":\"{}\"}}",
-                task_id_owned, dispatch_kind, e,
-            );
-            (PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted)
-        })?;
+        let (mount, base_sha, base_tracking_ref) = match provisioned {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"ActivateSubTaskProvisionFailed\",\
+                     \"task_id\":\"{}\",\"kind\":\"{}\",\"error\":\"{}\"}}",
+                    task_id_owned, dispatch_kind, e,
+                );
+                cleanup_unactivated_session_after_activation_failure(
+                    ctx,
+                    &lookup.new_session_id,
+                    &task_id_owned,
+                    &lookup.initiative_id,
+                    "worktree_provision_failed",
+                )
+                .await;
+                return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
+            }
+        };
 
         // Update the new session row with worktree provenance so
         // intent admission (Phase A) and CompleteTask both
@@ -5777,7 +5906,7 @@ async fn handle_activate_sub_task(
         let worktree_root_str = mount.host_path.display().to_string();
         let base_sha_str = base_sha.clone();
         let tracking_ref_str = base_tracking_ref.clone();
-        let updated: Result<(), rusqlite::Error> = tokio::task::spawn_blocking(move || {
+        let update_join = tokio::task::spawn_blocking(move || {
             let conn = store_for_update.lock_sync();
             conn.execute(
                 &format!(
@@ -5796,14 +5925,35 @@ async fn handle_activate_sub_task(
             )?;
             Ok(())
         })
-        .await
-        .map_err(|_| (PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted))?;
+        .await;
+        let updated: Result<(), rusqlite::Error> = match update_join {
+            Ok(result) => result,
+            Err(_) => {
+                cleanup_unactivated_session_after_activation_failure(
+                    ctx,
+                    &lookup.new_session_id,
+                    &task_id_owned,
+                    &lookup.initiative_id,
+                    "worktree_session_row_update_join_failed",
+                )
+                .await;
+                return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
+            }
+        };
         if let Err(e) = updated {
             eprintln!(
                 "{{\"level\":\"error\",\"event\":\"ActivateSubTaskWorktreeRowUpdateFailed\",\
                  \"task_id\":\"{}\",\"session_id\":\"{}\",\"error\":\"{}\"}}",
                 task_id_owned, lookup.new_session_id, e,
             );
+            cleanup_unactivated_session_after_activation_failure(
+                ctx,
+                &lookup.new_session_id,
+                &task_id_owned,
+                &lookup.initiative_id,
+                "worktree_session_row_update_failed",
+            )
+            .await;
             return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
         }
 
@@ -5895,14 +6045,19 @@ async fn handle_activate_sub_task(
                         "UPDATE {SESSIONS} SET revoked = 1, revoked_at = ?1
                            WHERE session_id = ?2"
                     ),
-                    rusqlite::params![unix_now_secs(), revoke_session_id],
+                    rusqlite::params![unix_now_secs(), &revoke_session_id],
                 );
                 let _ = conn.execute(
                     &format!(
-                        "UPDATE {TASKS} SET block_reason = ?2
-                           WHERE task_id = ?1"
+                        "UPDATE {TASKS}
+                            SET block_reason = ?2,
+                                session_id = CASE
+                                    WHEN session_id = ?3 THEN NULL
+                                    ELSE session_id
+                                END
+                          WHERE task_id = ?1"
                     ),
-                    rusqlite::params![task_id_for_block, spawn_block_reason],
+                    rusqlite::params![&task_id_for_block, &spawn_block_reason, &revoke_session_id],
                 );
             })
             .await;

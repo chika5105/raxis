@@ -35,6 +35,7 @@
 
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use raxis_audit_tools::AuditEventKind;
 use raxis_types::{DnsQueryType, DnsResolveRequest, DnsResolveResponse};
@@ -51,6 +52,11 @@ const DNS_DEFAULT_TTL_SECS: u32 = 60;
 /// transient resolver flap doesn't cache the guest into permanent
 /// failure for a real upstream.
 const DNS_NEGATIVE_TTL_SECS: u32 = 5;
+/// Bound the host resolver call. DNS is on the guest's critical path
+/// for almost every raw tool process, so a wedged host resolver must
+/// degrade to a short-lived negative answer rather than parking the
+/// per-session vsock handler indefinitely.
+const DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Resolver-side maximum hostname length (matches the DNS wire
 /// limit of 255 octets). The guest stub MUST already enforce this
@@ -85,13 +91,14 @@ pub async fn handle(req: DnsResolveRequest, ctx: &Arc<HandlerContext>) -> DnsRes
     // can implement separate `getaddrinfo` calls for IPv4 / IPv6
     // (the in-guest stub mirrors the standard `nss_dns` behaviour).
     let probe = format!("{}:0", req.hostname);
-    let addrs: Vec<IpAddr> = match tokio::net::lookup_host(probe).await {
-        Ok(iter) => iter
-            .map(|sa| sa.ip())
-            .filter(|ip| query_type_matches(req.query_type, ip))
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+    let addrs: Vec<IpAddr> =
+        match tokio::time::timeout(DNS_LOOKUP_TIMEOUT, tokio::net::lookup_host(probe)).await {
+            Ok(Ok(iter)) => iter
+                .map(|sa| sa.ip())
+                .filter(|ip| query_type_matches(req.query_type, ip))
+                .collect(),
+            Ok(Err(_)) | Err(_) => Vec::new(),
+        };
 
     // ── Step 4: paired audit BEFORE response (single-class) ───────
     let ttl = if addrs.is_empty() {
@@ -153,7 +160,7 @@ async fn resolve_session_id(token: &str, ctx: &Arc<HandlerContext>) -> Option<St
     let store = Arc::clone(&ctx.store);
     let tok = token.to_owned();
     tokio::task::spawn_blocking(move || {
-        crate::authority::session::get_session_by_token(&tok, &store)
+        crate::authority::session::get_active_session_by_token(&tok, &store)
             .ok()
             .map(|row| row.session_id)
     })
@@ -187,6 +194,7 @@ mod tests {
         // the guest behind a transient resolver flap.
         assert_eq!(DNS_DEFAULT_TTL_SECS, 60);
         assert_eq!(DNS_NEGATIVE_TTL_SECS, 5);
+        assert_eq!(DNS_LOOKUP_TIMEOUT, Duration::from_secs(5));
     }
 
     #[test]

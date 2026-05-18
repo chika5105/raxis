@@ -1869,6 +1869,7 @@ pub fn abort_initiative(
     .map(|s| format!("'{}'", s.as_sql_str()))
     .collect::<Vec<_>>()
     .join(", ");
+    let actor_desc = format!("operator:{aborted_by}");
 
     let tx = conn.transaction()?;
 
@@ -1897,12 +1898,41 @@ pub fn abort_initiative(
         rows.filter_map(Result::ok).collect()
     };
 
+    // Close pending/active sub-task activation rows in the same
+    // transaction as the bulk task cancel. The single-task
+    // transition helper performs this close-out for terminal
+    // transitions; abort_initiative uses a bulk UPDATE for
+    // initiative-wide cancellation, so it must mirror that side
+    // effect explicitly. PendingActivation rows receive
+    // activated_at=now solely to satisfy the activation FSM CHECK
+    // constraint for terminal rows; there was no guest VM to revoke.
     tx.execute(
         &format!(
-            "UPDATE {TASKS} SET state='{cancel_state}', transitioned_at=?1
-             WHERE initiative_id=?2 AND state NOT IN ({terminal_not_in})"
+            "UPDATE {SUBTASK_ACTIVATIONS}
+                SET activation_state = 'Failed',
+                    activated_at      = COALESCE(activated_at, ?1),
+                    terminated_at     = ?1
+              WHERE initiative_id     = ?2
+                AND activation_state IN ('PendingActivation','Active')
+                AND task_id IN (
+                    SELECT task_id FROM {TASKS}
+                     WHERE initiative_id = ?2
+                       AND state NOT IN ({terminal_not_in})
+                )"
         ),
         rusqlite::params![now, initiative_id],
+    )?;
+
+    tx.execute(
+        &format!(
+            "UPDATE {TASKS}
+                SET state='{cancel_state}',
+                    transitioned_at=?1,
+                    actor=?2
+              WHERE initiative_id=?3
+                AND state NOT IN ({terminal_not_in})"
+        ),
+        rusqlite::params![now, &actor_desc, initiative_id],
     )?;
 
     // Release the lane reservation for every task we just cancelled —
@@ -9334,6 +9364,116 @@ max_concurrent_admissions   = 7
             init_state, "Aborted",
             "initiatives UPDATE must have committed in the SAME transaction"
         );
+    }
+
+    /// Initiative abort is an initiative-wide terminal transition, so
+    /// it must close every non-terminal subtask activation as well as
+    /// the parent task rows. This covers both PendingActivation (no VM
+    /// was ever spawned) and Active (a session was bound) rows.
+    #[test]
+    fn abort_initiative_closes_pending_and_active_subtask_activations() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+[plan.initiative]
+description = "fixture: abort closes activations"
+
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id     = "build-svc"
+description = "build the service"
+
+[[tasks]]
+task_id            = "review-it"
+description        = "review the diff"
+session_agent_type = "Reviewer"
+predecessors       = ["build-svc"]
+"#;
+        let (init_id, pk) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let live_registry = PlanRegistry::new();
+        approve_plan_for_test(&init_id, "op", None, &pk, 1, &store, &audit, &live_registry)
+            .unwrap();
+
+        {
+            let conn = store.lock_sync();
+            let now = unix_now_secs();
+            let sessions = Table::Sessions.as_str();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {sessions}
+                        (session_id, role_id, session_token, lineage_id,
+                         fetch_quota, created_at, expires_at, revoked,
+                         session_agent_type, initiative_id)
+                     VALUES ('sess-active', 'Planner', 'tok-active',
+                             '00000000-0000-4000-8000-000000000000',
+                             100, ?1, ?2, 0, ?3, ?4)"
+                ),
+                rusqlite::params![
+                    now,
+                    now + 3600,
+                    SessionAgentType::Executor.as_sql_str(),
+                    &init_id,
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                &format!(
+                    "UPDATE {SUBTASK_ACTIVATIONS}
+                        SET activation_state = 'Active',
+                            session_id        = 'sess-active',
+                            activated_at      = ?1
+                      WHERE task_id = 'build-svc'"
+                ),
+                rusqlite::params![now],
+            )
+            .unwrap();
+        }
+
+        abort_initiative(&init_id, "op", &store, None).unwrap();
+
+        let conn = store.lock_sync();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT task_id, activation_state, activated_at, terminated_at
+                   FROM {SUBTASK_ACTIVATIONS}
+                  WHERE initiative_id = ?1
+                  ORDER BY task_id"
+            ))
+            .unwrap();
+        let rows: Vec<(String, String, Option<i64>, Option<i64>)> = stmt
+            .query_map(rusqlite::params![&init_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(rows.len(), 2);
+        for (task_id, state, activated_at, terminated_at) in &rows {
+            assert_eq!(
+                state, "Failed",
+                "{task_id}: abort must terminally close the activation row"
+            );
+            assert!(
+                activated_at.is_some(),
+                "{task_id}: terminal activation rows must have activated_at"
+            );
+            assert!(
+                terminated_at.is_some(),
+                "{task_id}: terminal activation rows must have terminated_at"
+            );
+        }
+
+        let actor: String = conn
+            .query_row(
+                &format!("SELECT actor FROM {TASKS} WHERE task_id = 'build-svc'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(actor, "operator:op");
     }
 
     /// `INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01` /

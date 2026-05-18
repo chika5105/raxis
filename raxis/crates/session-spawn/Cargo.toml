@@ -67,14 +67,10 @@ thiserror   = { workspace = true }
 parking_lot = "0.12"
 getrandom   = { workspace = true }
 uuid        = { workspace = true }
+rusqlite    = { workspace = true }
 
 [dev-dependencies]
 raxis-test-support      = { path = "../test-support" }
 raxis-credentials-file  = { workspace = true }
-# iter65 stateless-cap regression suite (`INV-KERNEL-STATELESS-VM-
-# CONCURRENCY-CAP-01`). The `active_count_reads_db_*.rs` tests seed
-# `sessions` rows directly via raw SQL to drive the cap-admission
-# gate without booting a substrate VM.
-rusqlite                = { workspace = true }
 tempfile                = "3"
 tokio                   = { workspace = true, features = ["full"] }

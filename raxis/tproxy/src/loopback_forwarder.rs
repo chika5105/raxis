@@ -64,6 +64,9 @@ use thiserror::Error;
 #[cfg(target_os = "linux")]
 use tokio::net::TcpListener;
 
+#[cfg(target_os = "linux")]
+const LOOPBACK_VSOCK_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Errors surfaced by [`spawn_forwarder`] during startup. Per-
 /// connection errors are logged to stderr and dropped — they do
 /// not propagate up to `main()` because a single bad client
@@ -219,17 +222,29 @@ async fn run_forwarder_loop(entry: LoopbackEntry, listener: TcpListener) {
 async fn forward_one(entry: LoopbackEntry, mut agent: tokio::net::TcpStream) -> io::Result<()> {
     use tokio_vsock::{VsockAddr, VsockStream, VMADDR_CID_HOST};
 
-    let mut upstream = VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, entry.vsock_port))
-        .await
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "vsock connect (host_cid={VMADDR_CID_HOST}, port={}): {e}",
-                    entry.vsock_port
-                ),
-            )
-        })?;
+    let mut upstream = tokio::time::timeout(
+        LOOPBACK_VSOCK_CONNECT_TIMEOUT,
+        VsockStream::connect(VsockAddr::new(VMADDR_CID_HOST, entry.vsock_port)),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "vsock connect (host_cid={VMADDR_CID_HOST}, port={}) timed out after {:?}",
+                entry.vsock_port, LOOPBACK_VSOCK_CONNECT_TIMEOUT
+            ),
+        )
+    })?
+    .map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "vsock connect (host_cid={VMADDR_CID_HOST}, port={}): {e}",
+                entry.vsock_port
+            ),
+        )
+    })?;
 
     // Splice bidirectionally; ignore the byte counts. Per-direction
     // shutdown is handled by `copy_bidirectional` via the

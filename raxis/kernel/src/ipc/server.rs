@@ -28,6 +28,11 @@ use crate::ipc::auth;
 use crate::ipc::context::HandlerContext;
 use crate::ipc::operator;
 
+/// Bound response writes to planner/verifier streams. A guest that
+/// stops reading must not pin its per-connection dispatch task forever
+/// after the kernel has already completed the handler work.
+const PLANNER_IPC_RESPONSE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 // ---------------------------------------------------------------------------
 // ShutdownReason — why the dispatch loop exited.
 // Returned from `start()` so `main.rs` can decide whether to emit
@@ -453,7 +458,7 @@ pub(crate) async fn drive_planner_stream<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin,
 {
-    use raxis_ipc::{read_frame, write_frame, IpcMessage};
+    use raxis_ipc::{read_frame, IpcMessage};
 
     // `INV-FAILURE-REASON-CONCRETE-01` — capture the last-seen
     // planner exit notice across every frame the loop reads. The
@@ -581,7 +586,12 @@ where
                         },
                     );
                 }
-                write_frame(&mut stream, &IpcMessage::KernelIntentResponse(resp)).await?;
+                write_planner_frame(
+                    &mut stream,
+                    &IpcMessage::KernelIntentResponse(resp),
+                    "KernelIntentResponse",
+                )
+                .await?;
             }
 
             // ── WitnessSubmission ─────────────────────────────────────────
@@ -639,13 +649,14 @@ where
                                 (false, uuid::Uuid::nil(), Some(format!("{reason:?}")))
                             }
                         };
-                        write_frame(
+                        write_planner_frame(
                             &mut stream,
                             &IpcMessage::WitnessAck {
                                 verifier_run_id,
                                 accepted,
                                 reason,
                             },
+                            "WitnessAck",
                         )
                         .await?;
                     }
@@ -679,7 +690,12 @@ where
                 let resp = handlers::escalation::handle(req, &ctx).await;
                 let latency_ms = started.elapsed().as_millis() as u64;
                 planner_dispatch_log::escalation_response(&task_id_for_log, &resp, latency_ms);
-                write_frame(&mut stream, &IpcMessage::KernelEscalationResponse(resp)).await?;
+                write_planner_frame(
+                    &mut stream,
+                    &IpcMessage::KernelEscalationResponse(resp),
+                    "KernelEscalationResponse",
+                )
+                .await?;
             }
 
             // ── PlannerFetchRequest ──────────────────────────────────────
@@ -701,7 +717,12 @@ where
                 let resp = handlers::planner_fetch::handle(req, &ctx).await;
                 let latency_ms = started.elapsed().as_millis() as u64;
                 planner_dispatch_log::planner_fetch_response(request_id, &resp, latency_ms);
-                write_frame(&mut stream, &IpcMessage::KernelPlannerFetchResponse(resp)).await?;
+                write_planner_frame(
+                    &mut stream,
+                    &IpcMessage::KernelPlannerFetchResponse(resp),
+                    "KernelPlannerFetchResponse",
+                )
+                .await?;
             }
 
             // ── PlannerExitNotice ─────────────────────────────────
@@ -733,7 +754,12 @@ where
                 );
                 planner_dispatch_log::planner_exit_notice(&outcome);
                 last_exit_notice = Some(outcome);
-                write_frame(&mut stream, &IpcMessage::KernelPlannerExitNoticeAck).await?;
+                write_planner_frame(
+                    &mut stream,
+                    &IpcMessage::KernelPlannerExitNoticeAck,
+                    "KernelPlannerExitNoticeAck",
+                )
+                .await?;
             }
 
             other => {
@@ -752,6 +778,39 @@ where
         idle_watchdog_fired,
         idle_watchdog_threshold_secs: idle_threshold_secs,
     })
+}
+
+async fn write_planner_frame<S>(
+    stream: &mut S,
+    msg: &raxis_ipc::IpcMessage,
+    message_kind: &'static str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    match tokio::time::timeout(
+        PLANNER_IPC_RESPONSE_WRITE_TIMEOUT,
+        raxis_ipc::write_frame(stream, msg),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(Box::new(e)),
+        Err(_) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"planner_ipc_response_write_timeout\",\
+                 \"message_kind\":\"{message_kind}\",\"timeout_ms\":{}}}",
+                PLANNER_IPC_RESPONSE_WRITE_TIMEOUT.as_millis(),
+            );
+            Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "planner IPC response write timed out after {:?}",
+                    PLANNER_IPC_RESPONSE_WRITE_TIMEOUT
+                ),
+            )))
+        }
+    }
 }
 
 /// **`INV-FAILURE-REASON-CONCRETE-01`** — value returned by

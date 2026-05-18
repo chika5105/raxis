@@ -150,8 +150,20 @@ async fn handle_one_a3_connection(
     };
 
     // Open the admission vsock channel.
-    let mut admission_vsock =
-        VsockStream::connect(VsockAddr::new(host_cid, admission_port)).await?;
+    let mut admission_vsock = tokio::time::timeout(
+        crate::a3::VSOCK_CONNECT_TIMEOUT,
+        VsockStream::connect(VsockAddr::new(host_cid, admission_port)),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "A3 admission vsock connect timed out after {:?}",
+                crate::a3::VSOCK_CONNECT_TIMEOUT
+            ),
+        )
+    })??;
     let response = crate::a3::ask_admission(
         &mut admission_vsock,
         &session_token,
@@ -179,14 +191,53 @@ async fn handle_one_a3_connection(
     };
 
     // Open the byte-tunnel vsock, send the handshake, splice.
-    let mut tunnel = VsockStream::connect(VsockAddr::new(host_cid, tunnel_port)).await?;
+    let mut tunnel = tokio::time::timeout(
+        crate::a3::VSOCK_CONNECT_TIMEOUT,
+        VsockStream::connect(VsockAddr::new(host_cid, tunnel_port)),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "A3 tunnel vsock connect timed out after {:?}",
+                crate::a3::VSOCK_CONNECT_TIMEOUT
+            ),
+        )
+    })??;
     let handshake = crate::a3::encode_tunnel_handshake(tunnel_id, &tunnel_token);
-    tunnel.write_all(&handshake).await?;
+    tokio::time::timeout(
+        crate::a3::TUNNEL_HANDSHAKE_WRITE_TIMEOUT,
+        tunnel.write_all(&handshake),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "A3 tunnel handshake write timed out after {:?}",
+                crate::a3::TUNNEL_HANDSHAKE_WRITE_TIMEOUT
+            ),
+        )
+    })??;
     // Replay the peeked prelude bytes into the kernel-side tunnel
     // so the upstream sees the original TLS ClientHello / HTTP
     // request preamble unchanged.
     if !peeked.buffered.is_empty() {
-        tunnel.write_all(&peeked.buffered).await?;
+        tokio::time::timeout(
+            crate::a3::TUNNEL_HANDSHAKE_WRITE_TIMEOUT,
+            tunnel.write_all(&peeked.buffered),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "A3 tunnel prelude write timed out after {:?}",
+                    crate::a3::TUNNEL_HANDSHAKE_WRITE_TIMEOUT
+                ),
+            )
+        })??;
     }
     let _ = tokio::io::copy_bidirectional(&mut agent, &mut tunnel).await;
     Ok(())

@@ -180,7 +180,9 @@ pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, 
             &format!(
                 "SELECT session_id, role_id, session_token, sequence_number,
                     worktree_root, base_sha, base_tracking_ref,
-                    lineage_id, revoked_at, expires_at,
+                    lineage_id,
+                    CASE WHEN revoked = 1 AND revoked_at IS NULL THEN 0 ELSE revoked_at END,
+                    expires_at,
                     session_agent_type, can_delegate, initiative_id
              FROM {SESSIONS} WHERE session_id = ?1"
             ),
@@ -212,18 +214,7 @@ pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, 
             other => AuthorityError::Store(raxis_store::StoreError::Rusqlite(other)),
         })?;
 
-    // DDL Table 4: revoked INTEGER (0/1 flag) + revoked_at (nullable timestamp).
-    // Check both: revoked=1 is the gate; revoked_at carries the time.
-    if row.revoked_at.is_some() {
-        return Err(AuthorityError::SessionRevoked {
-            revoked_at: row.revoked_at.unwrap_or(0),
-        });
-    }
-    if row.expires_at < unix_now_secs() {
-        return Err(AuthorityError::SessionExpired);
-    }
-
-    Ok(row)
+    require_active_session_row(row)
 }
 
 /// Look up a session row by raw `session_token` hex string.
@@ -241,7 +232,9 @@ pub fn get_session_by_token(
         &format!(
             "SELECT session_id, role_id, session_token, sequence_number,
                     worktree_root, base_sha, base_tracking_ref,
-                    lineage_id, revoked_at, expires_at,
+                    lineage_id,
+                    CASE WHEN revoked = 1 AND revoked_at IS NULL THEN 0 ELSE revoked_at END,
+                    expires_at,
                     session_agent_type, can_delegate, initiative_id
              FROM {SESSIONS} WHERE session_token = ?1"
         ),
@@ -272,6 +265,36 @@ pub fn get_session_by_token(
         rusqlite::Error::QueryReturnedNoRows => AuthorityError::SessionNotFound,
         other => AuthorityError::Store(raxis_store::StoreError::Rusqlite(other)),
     })
+}
+
+/// Look up a session by token and apply the same active-session guards
+/// as [`get_session`]. Use this for any handler that authenticates an
+/// operation from a bearer token but does not need the raw revoked row
+/// for envelope sequencing.
+pub fn get_active_session_by_token(
+    session_token: &str,
+    store: &Store,
+) -> Result<SessionRow, AuthorityError> {
+    let row = get_session_by_token(session_token, store)?;
+    require_active_session_row(row)
+}
+
+fn require_active_session_row(row: SessionRow) -> Result<SessionRow, AuthorityError> {
+    // DDL Table 4: revoked INTEGER (0/1 flag) + revoked_at (nullable
+    // timestamp). The SELECT projects a defensive `revoked_at = 0`
+    // when it sees the inconsistent shape `revoked = 1 AND
+    // revoked_at IS NULL`, so this guard covers both columns while
+    // preserving the existing `SessionRow` surface.
+    if row.revoked_at.is_some() {
+        return Err(AuthorityError::SessionRevoked {
+            revoked_at: row.revoked_at.unwrap_or(0),
+        });
+    }
+    if row.expires_at <= unix_now_secs() {
+        return Err(AuthorityError::SessionExpired);
+    }
+
+    Ok(row)
 }
 
 /// Revoke a session by setting `revoked=1, revoked_at=now()`.
@@ -717,6 +740,66 @@ mod tests {
             Some(raxis_types::SessionAgentType::Reviewer)
         );
         assert!(!row.can_delegate);
+    }
+
+    #[test]
+    fn active_token_lookup_rejects_revoked_session_even_if_raw_lookup_reads_it() {
+        let sid = SessionId::new_v4();
+        let store = store_with_session(&sid);
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!(
+                    "UPDATE {SESSIONS} SET revoked = 1, revoked_at = 1234
+                     WHERE session_id = ?1"
+                ),
+                rusqlite::params![sid.as_str()],
+            )
+            .unwrap();
+        }
+
+        let raw =
+            get_session_by_token("tok", &store).expect("raw token lookup is intentionally raw");
+        assert_eq!(raw.revoked_at, Some(1234));
+        let err = get_active_session_by_token("tok", &store).unwrap_err();
+        assert!(matches!(
+            err,
+            AuthorityError::SessionRevoked { revoked_at: 1234 }
+        ));
+    }
+
+    #[test]
+    fn active_token_lookup_rejects_expired_session() {
+        let sid = SessionId::new_v4();
+        let store = store_with_session(&sid);
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!("UPDATE {SESSIONS} SET expires_at = 1 WHERE session_id = ?1"),
+                rusqlite::params![sid.as_str()],
+            )
+            .unwrap();
+        }
+
+        let err = get_active_session_by_token("tok", &store).unwrap_err();
+        assert!(matches!(err, AuthorityError::SessionExpired));
+    }
+
+    #[test]
+    fn active_token_lookup_rejects_session_expiring_at_current_second() {
+        let sid = SessionId::new_v4();
+        let store = store_with_session(&sid);
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!("UPDATE {SESSIONS} SET expires_at = ?1 WHERE session_id = ?2"),
+                rusqlite::params![unix_now_secs(), sid.as_str()],
+            )
+            .unwrap();
+        }
+
+        let err = get_active_session_by_token("tok", &store).unwrap_err();
+        assert!(matches!(err, AuthorityError::SessionExpired));
     }
 
     #[test]

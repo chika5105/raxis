@@ -60,6 +60,7 @@ const INITIATIVES: &str = Table::Initiatives.as_str();
 const INTEGRATION_MERGE_ATTEMPTS: &str = Table::IntegrationMergeAttempts.as_str();
 const WITNESS_RECORDS: &str = Table::WitnessRecords.as_str();
 const LANE_BUDGET_RESERVATIONS: &str = Table::LaneBudgetReservations.as_str();
+const SESSIONS: &str = Table::Sessions.as_str();
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -113,6 +114,11 @@ pub struct ReconciliationResult {
     /// the crash-between-commits window only — it must report 0
     /// in steady-state clean shutdowns.
     pub orphan_lane_reservations_freed: usize,
+    /// Number of unrevoked session rows marked revoked during boot
+    /// recovery because the new kernel process has no live
+    /// `SessionSpawnService` handle for sessions from the previous
+    /// process.
+    pub orphan_sessions_revoked: usize,
     /// Whether the audit chain verified cleanly.
     pub chain_ok: bool,
     /// V2.5 (`self-healing-supervisor.md §3.5`) per-task swept
@@ -165,6 +171,15 @@ pub struct OrphanLaneReservationReport {
     /// in-tx INV-STORE-02 paired write missed its DELETE before
     /// the previous kernel exited.
     pub freed: usize,
+    /// See [`ReconciliationReport::failures`].
+    pub failures: Vec<String>,
+}
+
+/// Report from [`reconcile_orphan_sessions`].
+#[derive(Debug, Default)]
+pub struct OrphanSessionReport {
+    /// Number of previously-unrevoked session rows revoked at boot.
+    pub revoked: usize,
     /// See [`ReconciliationReport::failures`].
     pub failures: Vec<String>,
 }
@@ -224,16 +239,19 @@ pub fn reconcile(store: &Store, audit_dir: &Path) -> Result<ReconciliationResult
     // admission loop. See INV-DEEP-SWEEP-D1-LANE-RESERVATION-
     // LEAK-01.
     let lane_res_report = reconcile_orphan_lane_reservations(store);
+    let orphan_session_report = reconcile_orphan_sessions(store);
 
     eprintln!(
         "{{\"level\":\"info\",\"step\":\"recovery\",\
          \"swept_tasks\":{},\"expired_tokens\":{},\
          \"folded_integration_merge_attempts\":{},\
-         \"orphan_lane_reservations_freed\":{},\"chain_ok\":{}}}",
+         \"orphan_lane_reservations_freed\":{},\
+         \"orphan_sessions_revoked\":{},\"chain_ok\":{}}}",
         task_report.swept_tasks,
         task_report.expired_tokens,
         imerge_report.folded_attempts,
         lane_res_report.freed,
+        orphan_session_report.revoked,
         chain_ok,
     );
 
@@ -241,6 +259,7 @@ pub fn reconcile(store: &Store, audit_dir: &Path) -> Result<ReconciliationResult
     all_failures.extend(task_report.failures.iter().cloned());
     all_failures.extend(imerge_report.failures.iter().cloned());
     all_failures.extend(lane_res_report.failures.iter().cloned());
+    all_failures.extend(orphan_session_report.failures.iter().cloned());
     if !all_failures.is_empty() {
         return Err(KernelError::RecoverySweepFailed {
             reason: all_failures.join("; "),
@@ -252,6 +271,7 @@ pub fn reconcile(store: &Store, audit_dir: &Path) -> Result<ReconciliationResult
         expired_tokens: task_report.expired_tokens,
         folded_integration_merge_attempts: imerge_report.folded_attempts,
         orphan_lane_reservations_freed: lane_res_report.freed,
+        orphan_sessions_revoked: orphan_session_report.revoked,
         chain_ok,
         swept_tasks_detail: task_report.swept_tasks_detail,
     })
@@ -1151,6 +1171,86 @@ fn reconcile_orphan_lane_reservations(store: &Store) -> OrphanLaneReservationRep
              \"action\":\"freed_orphan_lane_reservations\",\
              \"count\":{freed},\
              \"invariant\":\"INV-DEEP-SWEEP-D1-LANE-RESERVATION-LEAK-01\"}}",
+        );
+    }
+
+    report
+}
+
+// ---------------------------------------------------------------------------
+// Step 4c — Orphan session-row backstop.
+// ---------------------------------------------------------------------------
+
+/// Revoke every session row that survived from a previous kernel
+/// process. The new process starts with an empty
+/// `SessionSpawnService.sessions` live-handle map, so any `revoked = 0`
+/// row found during boot recovery is necessarily stale from the
+/// perspective of VM-capacity accounting and bearer-token authority.
+///
+/// This sweep is intentionally broad. If a planner VM somehow survived
+/// the old kernel process, the new kernel cannot safely trust the old
+/// stream or in-memory substrate handle; the task recovery sweep has
+/// already moved non-terminal work to `BlockedRecoveryPending` (or the
+/// supervisor auto-resume path will spawn fresh sessions after this
+/// step). Revoking the stale rows makes `count_unrevoked_sessions`
+/// converge to the new process's actual live-session set before IPC is
+/// bound.
+fn reconcile_orphan_sessions(store: &Store) -> OrphanSessionReport {
+    let mut report = OrphanSessionReport::default();
+
+    let mut conn = store.lock_sync();
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(e) => {
+            let msg = format!("reconcile_orphan_sessions: BEGIN transaction failed: {e}");
+            eprintln!(
+                "{{\"level\":\"error\",\"step\":\"recovery\",\
+                 \"action\":\"begin_orphan_session_tx_failed\",\"error\":\"{e}\"}}",
+            );
+            report.failures.push(msg);
+            return report;
+        }
+    };
+
+    let now = unix_now_secs();
+    let revoked = match tx.execute(
+        &format!(
+            "UPDATE {SESSIONS}
+                SET revoked = 1,
+                    revoked_at = COALESCE(revoked_at, ?1)
+              WHERE revoked = 0"
+        ),
+        rusqlite::params![now],
+    ) {
+        Ok(rows) => rows,
+        Err(e) => {
+            let msg = format!("reconcile_orphan_sessions: bulk UPDATE failed: {e}");
+            eprintln!(
+                "{{\"level\":\"error\",\"step\":\"recovery\",\
+                 \"action\":\"bulk_revoke_orphan_sessions_failed\",\"error\":\"{e}\"}}",
+            );
+            report.failures.push(msg);
+            return report;
+        }
+    };
+
+    if let Err(e) = tx.commit() {
+        let msg = format!("reconcile_orphan_sessions: COMMIT failed: {e}");
+        eprintln!(
+            "{{\"level\":\"error\",\"step\":\"recovery\",\
+             \"action\":\"commit_orphan_session_revoke_failed\",\"error\":\"{e}\"}}",
+        );
+        report.failures.push(msg);
+        return report;
+    }
+
+    report.revoked = revoked;
+    if revoked > 0 {
+        eprintln!(
+            "{{\"level\":\"warn\",\"step\":\"recovery\",\
+             \"action\":\"revoked_orphan_sessions\",\
+             \"count\":{revoked},\
+             \"invariant\":\"INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01\"}}",
         );
     }
 
@@ -3747,6 +3847,40 @@ mod supervisor_auto_resume_witness {
         .unwrap()
     }
 
+    fn seed_session_row(store: &Store, session_id: &str, revoked: bool, revoked_at: Option<i64>) {
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        conn.execute(
+            &format!(
+                "INSERT INTO {SESSIONS}
+                    (session_id, role_id, session_token, lineage_id,
+                     fetch_quota, created_at, expires_at, revoked, revoked_at)
+                 VALUES (?1, 'Planner', ?2,
+                         '00000000-0000-4000-8000-000000000000',
+                         100, ?3, ?4, ?5, ?6)"
+            ),
+            rusqlite::params![
+                session_id,
+                format!("tok-{session_id}"),
+                now,
+                now + 3600,
+                if revoked { 1 } else { 0 },
+                revoked_at,
+            ],
+        )
+        .unwrap();
+    }
+
+    fn session_revocation(store: &Store, session_id: &str) -> (i64, Option<i64>) {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!("SELECT revoked, revoked_at FROM {SESSIONS} WHERE session_id=?1"),
+            rusqlite::params![session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
     /// Reservations whose owning task is in any of the four terminal
     /// states (`Completed`/`Failed`/`Aborted`/`Cancelled`) MUST be
     /// deleted. Reservations whose owning task is still
@@ -3881,6 +4015,61 @@ mod supervisor_auto_resume_witness {
         let store = Store::open_in_memory().unwrap();
         let report = reconcile_orphan_lane_reservations(&store);
         assert_eq!(report.freed, 0);
+    }
+
+    /// Boot recovery must revoke any session row inherited from a
+    /// previous kernel process. The new `SessionSpawnService` has no
+    /// live handle for those rows, so leaving them active would leak VM
+    /// capacity and keep old bearer tokens authorized.
+    #[test]
+    fn orphan_session_sweep_revokes_unrevoked_rows_and_preserves_existing_revocations() {
+        let store = Store::open_in_memory().unwrap();
+        seed_session_row(&store, "s-active-before-boot", false, None);
+        seed_session_row(&store, "s-already-revoked", true, Some(1234));
+
+        let report = reconcile_orphan_sessions(&store);
+        assert!(report.failures.is_empty());
+        assert_eq!(report.revoked, 1);
+
+        let (revoked, revoked_at) = session_revocation(&store, "s-active-before-boot");
+        assert_eq!(revoked, 1);
+        assert!(
+            revoked_at.unwrap_or_default() > 0,
+            "freshly revoked orphan session must receive a revoked_at timestamp"
+        );
+
+        let (already_revoked, already_revoked_at) = session_revocation(&store, "s-already-revoked");
+        assert_eq!(already_revoked, 1);
+        assert_eq!(
+            already_revoked_at,
+            Some(1234),
+            "existing revoked_at timestamps must not be overwritten"
+        );
+    }
+
+    /// Re-running the sweep after it has revoked rows is a no-op. This
+    /// pins the mid-recovery re-crash case: the second boot observes a
+    /// consistent session table and reports zero new revocations.
+    #[test]
+    fn orphan_session_sweep_is_idempotent() {
+        let store = Store::open_in_memory().unwrap();
+        seed_session_row(&store, "s-stale", false, None);
+
+        let r1 = reconcile_orphan_sessions(&store);
+        assert_eq!(r1.revoked, 1);
+        let first_revoked_at = session_revocation(&store, "s-stale").1;
+
+        let r2 = reconcile_orphan_sessions(&store);
+        assert_eq!(r2.revoked, 0);
+        assert_eq!(session_revocation(&store, "s-stale").1, first_revoked_at);
+    }
+
+    #[test]
+    fn orphan_session_sweep_on_empty_store_is_zero() {
+        let store = Store::open_in_memory().unwrap();
+        let report = reconcile_orphan_sessions(&store);
+        assert!(report.failures.is_empty());
+        assert_eq!(report.revoked, 0);
     }
 
     /// Empty input → no-op (the supervisor restarted but the recovery

@@ -105,7 +105,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod perf_telemetry;
 
@@ -143,6 +143,8 @@ const A3_DEFAULT_ADMISSION_PORT: u32 = 5380;
 const A3_DEFAULT_TUNNEL_PORT: u32 = 5381;
 const A3_CONTROL_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const A3_TUNNEL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const A3_TUNNEL_UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const A3_TUNNEL_REGISTRY_TTL: Duration = Duration::from_secs(30);
 const A3_DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 const A3_DNS_DEFAULT_TTL_SECS: u32 = 60;
 const A3_DNS_NEGATIVE_TTL_SECS: u32 = 5;
@@ -429,7 +431,13 @@ struct A3RegisteredTunnel {
 
 #[derive(Default, Debug)]
 struct A3TunnelRegistry {
-    by_id: Mutex<HashMap<Uuid, A3RegisteredTunnel>>,
+    by_id: Mutex<HashMap<Uuid, StoredA3Tunnel>>,
+}
+
+#[derive(Clone, Debug)]
+struct StoredA3Tunnel {
+    registered_at: Instant,
+    tunnel: A3RegisteredTunnel,
 }
 
 impl A3TunnelRegistry {
@@ -442,19 +450,32 @@ impl A3TunnelRegistry {
     fn register(&self, tunnel: A3RegisteredTunnel) -> (Uuid, [u8; 32]) {
         let tunnel_id = Uuid::new_v4();
         let token = tunnel.tunnel_token;
-        self.by_id.lock().insert(tunnel_id, tunnel);
+        let mut by_id = self.by_id.lock();
+        prune_expired_a3_tunnels(&mut by_id, Instant::now());
+        by_id.insert(
+            tunnel_id,
+            StoredA3Tunnel {
+                registered_at: Instant::now(),
+                tunnel,
+            },
+        );
         (tunnel_id, token)
     }
 
     fn consume(&self, tunnel_id: Uuid, token: &[u8; 32]) -> Option<A3RegisteredTunnel> {
         let mut by_id = self.by_id.lock();
+        prune_expired_a3_tunnels(&mut by_id, Instant::now());
         let entry = by_id.remove(&tunnel_id)?;
-        if &entry.tunnel_token == token {
-            Some(entry)
+        if &entry.tunnel.tunnel_token == token {
+            Some(entry.tunnel)
         } else {
             None
         }
     }
+}
+
+fn prune_expired_a3_tunnels(by_id: &mut HashMap<Uuid, StoredA3Tunnel>, now: Instant) {
+    by_id.retain(|_, entry| now.duration_since(entry.registered_at) <= A3_TUNNEL_REGISTRY_TTL);
 }
 
 impl SessionSpawnService {
@@ -959,6 +980,7 @@ impl SessionSpawnService {
                 let svc = Arc::clone(&admission_service);
                 let audit = Arc::clone(&self.audit);
                 let registry = Arc::clone(&registry);
+                let store = self.store.clone();
                 let session_id = session_id.clone();
                 let session_token = session_token_for_a3.clone();
                 tokio::spawn(async move {
@@ -969,6 +991,7 @@ impl SessionSpawnService {
                         svc,
                         audit,
                         registry,
+                        store,
                     )
                     .await;
                 })
@@ -1316,6 +1339,7 @@ async fn run_a3_control_loop(
     admission_service: Arc<dyn AdmissionService>,
     audit: Arc<dyn AuditSink>,
     registry: Arc<A3TunnelRegistry>,
+    store: Option<Arc<raxis_store::Store>>,
 ) {
     loop {
         let (sock, peer) = match listener.accept().await {
@@ -1337,11 +1361,20 @@ async fn run_a3_control_loop(
         let svc = Arc::clone(&admission_service);
         let audit = Arc::clone(&audit);
         let registry = Arc::clone(&registry);
+        let store = store.clone();
         let session_id = session_id.clone();
         let session_token = session_token.clone();
         tokio::spawn(async move {
-            handle_a3_control_connection(sock, session_id, session_token, svc, audit, registry)
-                .await;
+            handle_a3_control_connection(
+                sock,
+                session_id,
+                session_token,
+                svc,
+                audit,
+                registry,
+                store,
+            )
+            .await;
         });
     }
 }
@@ -1353,6 +1386,7 @@ async fn handle_a3_control_connection(
     admission_service: Arc<dyn AdmissionService>,
     audit: Arc<dyn AuditSink>,
     registry: Arc<A3TunnelRegistry>,
+    store: Option<Arc<raxis_store::Store>>,
 ) {
     let envelope = match tokio::time::timeout(
         A3_CONTROL_FRAME_TIMEOUT,
@@ -1382,7 +1416,7 @@ async fn handle_a3_control_connection(
 
     let response = match envelope {
         IpcMessage::DnsResolveRequest(req) => IpcMessage::KernelDnsResolveResponse(
-            handle_a3_dns_request(req, &session_id, &session_token, &audit).await,
+            handle_a3_dns_request(req, &session_id, &session_token, &audit, store.as_ref()).await,
         ),
         IpcMessage::TproxyAdmissionRequest(req) => IpcMessage::KernelTproxyAdmissionResponse(
             handle_a3_tproxy_request(
@@ -1392,6 +1426,7 @@ async fn handle_a3_control_connection(
                 admission_service.as_ref(),
                 audit.as_ref(),
                 &registry,
+                store.as_ref(),
             )
             .await,
         ),
@@ -1429,8 +1464,10 @@ async fn handle_a3_dns_request(
     session_id: &str,
     session_token: &str,
     audit: &Arc<dyn AuditSink>,
+    store: Option<&Arc<raxis_store::Store>>,
 ) -> DnsResolveResponse {
-    let authenticated = req.session_token == session_token;
+    let authenticated = req.session_token == session_token
+        && a3_session_is_active(session_id, session_token, store).await;
     let audit_session = if authenticated { session_id } else { "" };
     if !authenticated || req.hostname.is_empty() || req.hostname.len() > A3_MAX_HOSTNAME_LEN {
         return a3_dns_audit_and_response(
@@ -1526,9 +1563,12 @@ async fn handle_a3_tproxy_request(
     admission_service: &dyn AdmissionService,
     audit: &dyn AuditSink,
     registry: &Arc<A3TunnelRegistry>,
+    store: Option<&Arc<raxis_store::Store>>,
 ) -> TproxyAdmissionResponse {
     let request_id = req.request_id;
-    if req.session_token != session_token {
+    if req.session_token != session_token
+        || !a3_session_is_active(session_id, session_token, store).await
+    {
         let _ = a3_emit_denied_audit(audit, "", &req, "FAIL_SESSION_TOKEN_MISMATCH");
         return a3_deny(request_id, "FAIL_SESSION_TOKEN_MISMATCH", None);
     }
@@ -1590,6 +1630,41 @@ async fn handle_a3_tproxy_request(
             }
         }
     }
+}
+
+async fn a3_session_is_active(
+    session_id: &str,
+    session_token: &str,
+    store: Option<&Arc<raxis_store::Store>>,
+) -> bool {
+    let Some(store) = store else {
+        // Legacy tests construct SessionSpawnService without a Store;
+        // production always wires one via `with_store`.
+        return true;
+    };
+    let store = Arc::clone(store);
+    let session_id = session_id.to_owned();
+    let session_token = session_token.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let conn = store.lock_sync();
+        let table = raxis_store::Table::Sessions.as_str();
+        let now = raxis_types::unix_now_secs();
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {table}
+                 WHERE session_id = ?1
+                   AND session_token = ?2
+                   AND revoked = 0
+                   AND expires_at > ?3"
+            ),
+            rusqlite::params![session_id, session_token, now],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count == 1)
+        .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 fn a3_connection_id(request_id: Uuid) -> u64 {
@@ -1760,9 +1835,14 @@ async fn handle_a3_tunnel_connection(
         }
     };
 
-    let mut upstream = match tokio::net::TcpStream::connect(tunnel.destination).await {
-        Ok(sock) => sock,
-        Err(e) => {
+    let mut upstream = match tokio::time::timeout(
+        A3_TUNNEL_UPSTREAM_CONNECT_TIMEOUT,
+        tokio::net::TcpStream::connect(tunnel.destination),
+    )
+    .await
+    {
+        Ok(Ok(sock)) => sock,
+        Ok(Err(e)) => {
             tracing::warn!(
                 session_id = %tunnel.session_id,
                 tunnel_id = %tunnel_id,
@@ -1770,6 +1850,17 @@ async fn handle_a3_tunnel_connection(
                 host_or_sni = ?tunnel.host_or_sni,
                 error = %e,
                 "A3 tunnel upstream connect failed",
+            );
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(
+                session_id = %tunnel.session_id,
+                tunnel_id = %tunnel_id,
+                destination = %tunnel.destination,
+                host_or_sni = ?tunnel.host_or_sni,
+                timeout_ms = A3_TUNNEL_UPSTREAM_CONNECT_TIMEOUT.as_millis() as u64,
+                "A3 tunnel upstream connect timed out",
             );
             return;
         }
@@ -1859,6 +1950,7 @@ mod a3_tests {
             &AlwaysAdmit,
             audit.as_ref(),
             &registry,
+            None,
         )
         .await;
 

@@ -2056,7 +2056,7 @@ pub enum AuditEventKind {
     /// `signal` is the `GatewayMessage` variant short-name (e.g.
     /// `"EpochAdvanced"`). `reason` is a stable short string from
     /// `GatewayCallError::category()`: `"unavailable"`, `"dropped"`,
-    /// `"gateway_error"`, `"unexpected_reply"`.
+    /// `"timeout"`, `"gateway_error"`, `"unexpected_reply"`.
     GatewaySignalFailed {
         signal: String,
         new_epoch_id: Option<u64>,

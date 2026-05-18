@@ -2253,14 +2253,14 @@ pub fn spawn_planner_dispatcher(
                 )
                 .ok();
             let (task_id, initiative_id) = row?;
-            let task_state_str: String = conn
+            let (task_state_str, lane_id): (String, String) = conn
                 .query_row(
                     &format!(
-                        "SELECT state FROM {tasks} WHERE task_id = ?1",
+                        "SELECT state, lane_id FROM {tasks} WHERE task_id = ?1",
                         tasks = Table::Tasks.as_str(),
                     ),
                     rusqlite::params![&task_id],
-                    |r| r.get::<_, String>(0),
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
                 )
                 .ok()?;
             let task_state = raxis_types::TaskState::from_sql_str(&task_state_str)?;
@@ -2395,6 +2395,20 @@ pub fn spawn_planner_dispatcher(
                          \"error\":\"{err}\"}}",
                     sid = &session_for_post_exit,
                     tid = &task_id,
+                    err = e,
+                );
+                return None;
+            }
+            if let Err(e) = crate::scheduler::budget::release_budget_in_tx(&tx, &lane_id, &task_id)
+            {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                         \"event\":\"worker_post_exit_synth_release_budget_failed\",\
+                         \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                         \"lane_id\":\"{lane}\",\"error\":\"{err}\"}}",
+                    sid = &session_for_post_exit,
+                    tid = &task_id,
+                    lane = &lane_id,
                     err = e,
                 );
                 return None;
@@ -2857,14 +2871,47 @@ pub async fn respawn_orchestrator_for_initiative(
                  (INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01)";
             tx.execute(
                 &format!(
+                    "DELETE FROM {reservations}
+                      WHERE task_id IN (
+                          SELECT task_id FROM {tasks}
+                           WHERE initiative_id = ?1
+                             AND state IN ('Admitted','Running','GatesPending','BlockedRecoveryPending')
+                      )",
+                    reservations = raxis_store::Table::LaneBudgetReservations.as_str(),
+                    tasks = raxis_store::Table::Tasks.as_str(),
+                ),
+                rusqlite::params![&init_for_ceiling],
+            )?;
+            tx.execute(
+                &format!(
+                    "UPDATE {activations}
+                        SET activation_state = 'Failed',
+                            activated_at      = COALESCE(activated_at, ?2),
+                            terminated_at     = ?2
+                      WHERE initiative_id     = ?1
+                        AND activation_state IN ('PendingActivation','Active')
+                        AND task_id IN (
+                            SELECT task_id FROM {tasks}
+                             WHERE initiative_id = ?1
+                               AND state IN ('Admitted','Running','GatesPending','BlockedRecoveryPending')
+                        )",
+                    activations = raxis_store::Table::SubtaskActivations.as_str(),
+                    tasks = raxis_store::Table::Tasks.as_str(),
+                ),
+                rusqlite::params![&init_for_ceiling, now_secs],
+            )?;
+            tx.execute(
+                &format!(
                     "UPDATE {tasks}
                         SET state        = 'Failed',
-                            block_reason = ?2
+                            block_reason = ?2,
+                            transitioned_at = ?3,
+                            actor = 'kernel'
                       WHERE initiative_id = ?1
                         AND state IN ('Admitted','Running','GatesPending','BlockedRecoveryPending')",
                     tasks = raxis_store::Table::Tasks.as_str(),
                 ),
-                rusqlite::params![&init_for_ceiling, cascade_reason],
+                rusqlite::params![&init_for_ceiling, cascade_reason, now_secs],
             )?;
         }
         tx.commit()?;

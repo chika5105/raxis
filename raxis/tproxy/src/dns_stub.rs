@@ -57,6 +57,8 @@ const QCLASS_IN: u16 = 1;
 const QTYPE_A: u16 = 1;
 /// DNS type AAAA.
 const QTYPE_AAAA: u16 = 28;
+/// Bound the post-connect kernel DNS request/response exchange.
+const DNS_VSOCK_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Errors raised by the DNS stub's per-packet path.
 #[derive(Debug, Error)]
@@ -350,8 +352,16 @@ async fn build_response_for_query(
             _ => return Ok(build_response(&parsed, &[], /*nxdomain*/ true, 0)),
         },
     };
-    write_frame(&mut vsock, &IpcMessage::DnsResolveRequest(req)).await?;
-    let envelope: IpcMessage = read_frame(&mut vsock).await?;
+    tokio::time::timeout(
+        DNS_VSOCK_FRAME_TIMEOUT,
+        write_frame(&mut vsock, &IpcMessage::DnsResolveRequest(req)),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "dns vsock write timeout"))??;
+    let envelope: IpcMessage =
+        tokio::time::timeout(DNS_VSOCK_FRAME_TIMEOUT, read_frame(&mut vsock))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "dns vsock read timeout"))??;
     let resp: DnsResolveResponse = match envelope {
         IpcMessage::KernelDnsResolveResponse(r) => r,
         _ => return Err(DnsStubError::UnexpectedResponse),

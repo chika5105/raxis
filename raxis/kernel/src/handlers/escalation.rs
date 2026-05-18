@@ -107,17 +107,11 @@ async fn handle_inner(
     let store_for_session = Arc::clone(&ctx.store);
     let token_owned = req.session_token.clone();
     let session = tokio::task::spawn_blocking(move || {
-        authority::session::get_session_by_token(&token_owned, &store_for_session)
+        authority::session::get_active_session_by_token(&token_owned, &store_for_session)
     })
     .await
     .map_err(|_| EscalationRejectionReason::RateLimitExceeded)?
     .map_err(|_| EscalationRejectionReason::RateLimitExceeded)?;
-
-    // Defence in depth: revoked or expired sessions cannot escalate.
-    let now_secs = unix_now_secs();
-    if session.revoked_at.is_some() || session.expires_at <= now_secs {
-        return Err(EscalationRejectionReason::RateLimitExceeded);
-    }
 
     // ── Step 2: validate wire payload ─────────────────────────────────
     if req.justification.trim().is_empty() || req.justification.len() > JUSTIFICATION_MAX_BYTES {

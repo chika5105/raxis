@@ -46,6 +46,7 @@
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 use raxis_ipc::{read_frame, write_frame, FrameError, IpcMessage};
 use raxis_types::{
@@ -60,6 +61,14 @@ use uuid::Uuid;
 /// (`16 + 32 = 48`). Pinned constant so a test failure makes
 /// drift impossible.
 pub const TUNNEL_HANDSHAKE_LEN: usize = 16 + 32;
+/// Bound guest→kernel A3 vsock dials. A half-open host-side listener
+/// must fail closed quickly so libc/tooling receives a deterministic
+/// error instead of parking a worker indefinitely.
+pub const VSOCK_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bound the bincode request/response exchange after the socket opens.
+pub const CONTROL_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound the fixed tunnel handshake write after an Admit verdict.
+pub const TUNNEL_HANDSHAKE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build the fixed-shape handshake frame the guest writes as the
 /// first 48 bytes of the kernel-tunnel vsock connection.
@@ -149,9 +158,14 @@ where
         protocol,
     };
     let envelope = IpcMessage::TproxyAdmissionRequest(req);
-    write_frame(stream, &envelope).await?;
+    tokio::time::timeout(CONTROL_FRAME_TIMEOUT, write_frame(stream, &envelope))
+        .await
+        .map_err(|_| timeout_io("A3 admission write"))??;
 
-    let response_envelope: IpcMessage = read_frame(stream).await?;
+    let response_envelope: IpcMessage =
+        tokio::time::timeout(CONTROL_FRAME_TIMEOUT, read_frame(stream))
+            .await
+            .map_err(|_| timeout_io("A3 admission read"))??;
     let response = match response_envelope {
         IpcMessage::KernelTproxyAdmissionResponse(r) => r,
         other => {
@@ -194,9 +208,16 @@ where
         hostname: hostname.to_owned(),
         query_type,
     };
-    write_frame(stream, &IpcMessage::DnsResolveRequest(req)).await?;
+    tokio::time::timeout(
+        CONTROL_FRAME_TIMEOUT,
+        write_frame(stream, &IpcMessage::DnsResolveRequest(req)),
+    )
+    .await
+    .map_err(|_| timeout_io("A3 DNS write"))??;
 
-    let envelope: IpcMessage = read_frame(stream).await?;
+    let envelope: IpcMessage = tokio::time::timeout(CONTROL_FRAME_TIMEOUT, read_frame(stream))
+        .await
+        .map_err(|_| timeout_io("A3 DNS read"))??;
     let response = match envelope {
         IpcMessage::KernelDnsResolveResponse(r) => r,
         other => {
@@ -212,6 +233,13 @@ where
         });
     }
     Ok(response)
+}
+
+fn timeout_io(what: &'static str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("{what} timed out after {CONTROL_FRAME_TIMEOUT:?}"),
+    )
 }
 
 /// Helper — extracts the destination as an `IpAddr` from a

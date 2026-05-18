@@ -12,18 +12,42 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use raxis_ipc::message::GatewayMessage;
 use raxis_ipc::{read_frame, write_frame, FrameError};
 use thiserror::Error;
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock, Semaphore};
 
 use crate::backend::Backend;
 use crate::dispatch::handle_fetch_request;
 use crate::env::GatewayEnv;
 use crate::http_backend::HttpBackend;
 use crate::policy_view::{load_policy_view, PolicyView, PolicyViewError};
+
+/// Bound response writes back to the kernel. If the kernel side stops
+/// reading, the gateway should tear down and let the supervisor respawn
+/// it rather than accumulating completed responses behind a stuck UDS.
+const KERNEL_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bound the startup handshake write too. A wedged kernel-side acceptor
+/// should fail this process loudly instead of parking before supervision
+/// can distinguish "not ready yet" from "stuck forever".
+const KERNEL_HANDSHAKE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Hard cap for concurrent upstream dispatch tasks inside the single
+/// gateway process. The architecture remains multiplexed and highly
+/// concurrent, but a runaway kernel/client cannot spawn unbounded
+/// provider futures and OOM the gateway before backpressure has a
+/// chance to reach the UDS.
+const MAX_CONCURRENT_FETCH_REQUESTS: usize = 512;
+
+/// Bound completed responses waiting to be written back to the kernel.
+/// This should be larger than the active fetch cap so normal bursts
+/// drain without friction, while still preserving a hard memory ceiling
+/// if the kernel reader slows down.
+const MAX_PENDING_KERNEL_RESPONSES: usize = MAX_CONCURRENT_FETCH_REQUESTS * 2;
 
 /// Fatal errors that abort the gateway process. Anything that should
 /// short-circuit a single FetchRequest stays as a `FetchResponse.error`
@@ -120,9 +144,21 @@ pub async fn run_gateway_with_backend(
     let ready = GatewayMessage::GatewayReady {
         gateway_token: env.gateway_token.clone(),
     };
-    write_frame(&mut stream, &ready)
-        .await
-        .map_err(|e| GatewayRunError::HandshakeWrite(format!("{e}")))?;
+    match tokio::time::timeout(
+        KERNEL_HANDSHAKE_WRITE_TIMEOUT,
+        write_frame(&mut stream, &ready),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(GatewayRunError::HandshakeWrite(format!("{e}"))),
+        Err(_) => {
+            return Err(GatewayRunError::HandshakeWrite(format!(
+                "timed out after {}ms",
+                KERNEL_HANDSHAKE_WRITE_TIMEOUT.as_millis()
+            )));
+        }
+    }
     // INV-GATEWAY-NO-TOKEN-IN-LOGS-01 — the raw `gateway_token` is
     // the shared secret guarding the kernel-gateway UDS. Logging
     // ANY substring of it (even an 8-char prefix) leaks credential
@@ -142,22 +178,57 @@ pub async fn run_gateway_with_backend(
     );
 
     let (mut reader, mut writer) = stream.into_split();
-    let (response_tx, mut response_rx) = mpsc::unbounded_channel::<GatewayMessage>();
+    let (response_tx, mut response_rx) =
+        mpsc::channel::<GatewayMessage>(MAX_PENDING_KERNEL_RESPONSES);
+    let (writer_exit_tx, mut writer_exit_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
+        let mut writer_exit_tx = Some(writer_exit_tx);
         while let Some(resp) = response_rx.recv().await {
-            if let Err(e) = write_frame(&mut writer, &resp).await {
-                eprintln!(
-                    "{{\"level\":\"warn\",\"event\":\"gateway_response_write_failed\",\
-                     \"error\":\"{e}\"}}"
-                );
-                return;
+            match tokio::time::timeout(
+                KERNEL_RESPONSE_WRITE_TIMEOUT,
+                write_frame(&mut writer, &resp),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"gateway_response_write_failed\",\
+                         \"error\":\"{e}\"}}"
+                    );
+                    if let Some(tx) = writer_exit_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    return;
+                }
+                Err(_) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"gateway_response_write_timeout\",\
+                         \"timeout_ms\":{}}}",
+                        KERNEL_RESPONSE_WRITE_TIMEOUT.as_millis(),
+                    );
+                    if let Some(tx) = writer_exit_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    return;
+                }
             }
         }
     });
+    let fetch_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCH_REQUESTS));
 
     // Step 4: dispatch loop.
     loop {
-        let msg: GatewayMessage = match read_frame(&mut reader).await {
+        let read_result = tokio::select! {
+            _ = &mut writer_exit_rx => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"gateway_response_writer_stopped\"}}"
+                );
+                return Ok(());
+            }
+            read_result = read_frame(&mut reader) => read_result,
+        };
+        let msg: GatewayMessage = match read_result {
             Ok(m) => m,
             Err(FrameError::Eof) => {
                 eprintln!("{{\"level\":\"info\",\"event\":\"kernel_disconnected_clean\"}}");
@@ -175,11 +246,35 @@ pub async fn run_gateway_with_backend(
         match msg {
             // ── FetchRequest → dispatch → FetchResponse ─────────────────
             req @ GatewayMessage::FetchRequest { .. } => {
+                let permit = match fetch_permits.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        if let GatewayMessage::FetchRequest { fetch_id, .. } = req {
+                            eprintln!(
+                                "{{\"level\":\"warn\",\"event\":\"gateway_overloaded\",\
+                                 \"fetch_id\":\"{fetch_id}\",\"max_concurrent\":{}}}",
+                                MAX_CONCURRENT_FETCH_REQUESTS,
+                            );
+                            let _ = response_tx
+                                .send(GatewayMessage::FetchResponse {
+                                    fetch_id,
+                                    status_code: None,
+                                    headers: Vec::new(),
+                                    body_bytes: None,
+                                    latency_ms: 0,
+                                    error: Some("NetworkError".to_owned()),
+                                })
+                                .await;
+                        }
+                        continue;
+                    }
+                };
                 let view_snapshot = view_slot.read().await.clone();
                 let gateway_token = env.gateway_token.clone();
                 let backend = Arc::clone(&backend);
                 let response_tx = response_tx.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let resp = handle_fetch_request(
                         req,
                         &gateway_token,
@@ -187,7 +282,7 @@ pub async fn run_gateway_with_backend(
                         backend.as_ref(),
                     )
                     .await;
-                    if response_tx.send(resp).is_err() {
+                    if response_tx.send(resp).await.is_err() {
                         eprintln!(
                             "{{\"level\":\"debug\",\"event\":\"gateway_response_dropped\",\
                              \"reason\":\"kernel_disconnected\"}}"

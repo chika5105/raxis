@@ -43,6 +43,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use raxis_ipc::message::{FetchKind, GatewayMessage};
 use raxis_ipc::{read_frame, write_frame, FrameError};
@@ -80,6 +81,11 @@ pub enum GatewayCallError {
     #[error("gateway connection dropped while request was in flight")]
     Dropped,
 
+    /// We sent the request but no matching response arrived within
+    /// the kernel-side gateway deadline.
+    #[error("gateway response timed out after {timeout_ms} ms")]
+    Timeout { timeout_ms: u32 },
+
     /// The gateway sent a frame but it was the wrong variant (not a
     /// `FetchResponse`). This indicates a wire-protocol bug.
     #[error("gateway sent unexpected message variant")]
@@ -93,11 +99,36 @@ impl GatewayCallError {
         match self {
             GatewayCallError::Unavailable => "unavailable",
             GatewayCallError::Dropped => "dropped",
+            GatewayCallError::Timeout { .. } => "timeout",
             GatewayCallError::GatewayError(_) => "gateway_error",
             GatewayCallError::UnexpectedReply => "unexpected_reply",
         }
     }
 }
+
+/// Additional grace beyond the upstream timeout requested by the
+/// planner. The gateway enforces `timeout_ms` against the provider; the
+/// kernel gives the gateway a short window to serialize the response,
+/// but does not let a wedged gateway pin the planner dispatch loop.
+#[cfg(not(test))]
+const GATEWAY_REPLY_TIMEOUT_GRACE_MS: u64 = 5_000;
+#[cfg(test)]
+const GATEWAY_REPLY_TIMEOUT_GRACE_MS: u64 = 50;
+
+/// Bound every kernel→gateway frame write. Caller-side fetch timeouts
+/// protect the planner task, but the pump itself must also fail closed
+/// if the gateway stops reading its UDS; otherwise the pump can wedge
+/// inside `write_frame` and accumulate queued jobs behind it.
+#[cfg(not(test))]
+const GATEWAY_FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const GATEWAY_FRAME_WRITE_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Bound queued kernel→gateway work waiting for the single stream-owning
+/// pump. The pump still serializes wire writes, but callers should see
+/// backpressure/timeout instead of growing an unbounded in-memory queue
+/// when the gateway or UDS stops draining.
+const GATEWAY_PUMP_QUEUE_CAP: usize = 1024;
 
 /// One outstanding fetch waiting on the pump task.
 struct Pending {
@@ -208,6 +239,7 @@ struct OneShot {
 /// by `fetch_id`) or a fire-and-forget `OneShot` (no `fetch_id`).
 enum PumpJob {
     Fetch(Pending),
+    Cancel(Uuid),
     Signal(OneShot),
 }
 
@@ -242,7 +274,7 @@ struct Inner {
     expected_token: Mutex<Option<String>>,
     /// Sender into the active pump task. `None` when no gateway is
     /// connected. Dropped to terminate the pump.
-    submit: Mutex<Option<mpsc::UnboundedSender<PumpJob>>>,
+    submit: Mutex<Option<mpsc::Sender<PumpJob>>>,
     /// Optional observer fanned every successful + failed
     /// `FetchResponse` so per-task capture (the dashboard's
     /// `TaskLlmCapture` file ring) can record raw LLM turns
@@ -294,7 +326,7 @@ impl GatewayClient {
     /// around `stream`; tears down any pre-existing pump (whose mpsc
     /// will be dropped).
     pub async fn install_connection(&self, stream: UnixStream) {
-        let (tx, rx) = mpsc::unbounded_channel::<PumpJob>();
+        let (tx, rx) = mpsc::channel::<PumpJob>(GATEWAY_PUMP_QUEUE_CAP);
         let mut slot = self.inner.submit.lock().await;
         // Drop the prior sender if any → old pump exits → blocked
         // callers see Unavailable via `RecvError`.
@@ -372,16 +404,19 @@ impl GatewayClient {
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
-
-        // Snapshot the current submit sender (clone Sender; cheap).
-        // Holding the mutex across `send` is fine — `send` on an
-        // unbounded channel never awaits.
-        {
+        let (submit_tx, submit_weak) = {
             let slot = self.inner.submit.lock().await;
             let Some(tx) = slot.as_ref() else {
                 return Err(GatewayCallError::Unavailable);
             };
-            tx.send(PumpJob::Fetch(Pending {
+            (tx.clone(), tx.downgrade())
+        };
+
+        // Snapshot the current submit sender (clone Sender; cheap).
+        // Do not hold the mutex across bounded-channel backpressure.
+        match tokio::time::timeout(
+            GATEWAY_FRAME_WRITE_TIMEOUT,
+            submit_tx.send(PumpJob::Fetch(Pending {
                 fetch_id,
                 payload,
                 reply_tx,
@@ -389,13 +424,42 @@ impl GatewayClient {
                 session_id: session_id_for_inflight,
                 request_body: request_body_for_inflight,
                 agent_role: agent_role_for_inflight,
-            }))
-            .map_err(|_| GatewayCallError::Unavailable)?;
+            })),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return Err(GatewayCallError::Unavailable),
+            Err(_) => {
+                return Err(GatewayCallError::Timeout {
+                    timeout_ms: GATEWAY_FRAME_WRITE_TIMEOUT
+                        .as_millis()
+                        .min(u128::from(u32::MAX)) as u32,
+                });
+            }
         }
+        drop(submit_tx);
 
-        match reply_rx.await {
-            Ok(res) => res,
-            Err(_) => Err(GatewayCallError::Dropped),
+        let timeout = Duration::from_millis(u64::from(timeout_ms))
+            .saturating_add(Duration::from_millis(GATEWAY_REPLY_TIMEOUT_GRACE_MS));
+        match tokio::time::timeout(timeout, reply_rx).await {
+            Ok(Ok(res)) => res,
+            Ok(Err(_)) => Err(GatewayCallError::Dropped),
+            Err(_) => {
+                // Best-effort pump cleanup. The caller timeout has
+                // already fired, so the user-visible contract is set;
+                // this prevents a silent gateway from retaining stale
+                // inflight slots until process replacement. Use a
+                // weak sender so this timeout hook does not keep an
+                // old pump alive after `install_connection` swaps the
+                // active gateway.
+                if let Some(tx) = submit_weak.upgrade() {
+                    let _ = tx.try_send(PumpJob::Cancel(fetch_id));
+                }
+                Err(GatewayCallError::Timeout {
+                    timeout_ms: timeout.as_millis().min(u128::from(u32::MAX)) as u32,
+                })
+            }
         }
     }
 
@@ -429,18 +493,39 @@ impl GatewayClient {
         let payload = GatewayMessage::EpochAdvanced { new_epoch_id };
         let (ack_tx, ack_rx) = oneshot::channel();
 
-        {
+        let submit_tx = {
             let slot = self.inner.submit.lock().await;
             let Some(tx) = slot.as_ref() else {
                 return Err(GatewayCallError::Unavailable);
             };
-            tx.send(PumpJob::Signal(OneShot { payload, ack_tx }))
-                .map_err(|_| GatewayCallError::Unavailable)?;
+            tx.clone()
+        };
+        match tokio::time::timeout(
+            GATEWAY_FRAME_WRITE_TIMEOUT,
+            submit_tx.send(PumpJob::Signal(OneShot { payload, ack_tx })),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return Err(GatewayCallError::Unavailable),
+            Err(_) => {
+                return Err(GatewayCallError::Timeout {
+                    timeout_ms: GATEWAY_FRAME_WRITE_TIMEOUT
+                        .as_millis()
+                        .min(u128::from(u32::MAX)) as u32,
+                });
+            }
         }
+        drop(submit_tx);
 
-        match ack_rx.await {
-            Ok(res) => res,
-            Err(_) => Err(GatewayCallError::Dropped),
+        match tokio::time::timeout(GATEWAY_FRAME_WRITE_TIMEOUT, ack_rx).await {
+            Ok(Ok(res)) => res,
+            Ok(Err(_)) => Err(GatewayCallError::Dropped),
+            Err(_) => Err(GatewayCallError::Timeout {
+                timeout_ms: GATEWAY_FRAME_WRITE_TIMEOUT
+                    .as_millis()
+                    .min(u128::from(u32::MAX)) as u32,
+            }),
         }
     }
 }
@@ -457,7 +542,7 @@ impl GatewayClient {
 /// pending caller via the broken oneshot.
 async fn pump(
     mut stream: UnixStream,
-    mut rx: mpsc::UnboundedReceiver<PumpJob>,
+    mut rx: mpsc::Receiver<PumpJob>,
     observer: Option<Arc<dyn LlmTurnObserver>>,
 ) {
     /// Per-fetch slot we keep across the request → response round trip.
@@ -506,17 +591,46 @@ async fn pump(
                             request_body: pending.request_body,
                             agent_role:   pending.agent_role,
                         });
-                        if let Err(e) = write_frame(&mut stream, &pending.payload).await {
-                            eprintln!(
-                                "{{\"level\":\"warn\",\"event\":\"gateway_write_failed\",\
-                                 \"kind\":\"FetchRequest\",\"reason\":\"{e}\"}}"
-                            );
-                            // Notify just this caller and exit; subsequent
-                            // sends would also fail.
-                            if let Some(slot) = inflight.remove(&pending.fetch_id) {
-                                let _ = slot.reply_tx.send(Err(GatewayCallError::Dropped));
+                        match tokio::time::timeout(
+                            GATEWAY_FRAME_WRITE_TIMEOUT,
+                            write_frame(&mut stream, &pending.payload),
+                        ).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                eprintln!(
+                                    "{{\"level\":\"warn\",\"event\":\"gateway_write_failed\",\
+                                     \"kind\":\"FetchRequest\",\"reason\":\"{e}\"}}"
+                                );
+                                // Notify just this caller and exit; subsequent
+                                // sends would also fail.
+                                if let Some(slot) = inflight.remove(&pending.fetch_id) {
+                                    let _ = slot.reply_tx.send(Err(GatewayCallError::Dropped));
+                                }
+                                break;
                             }
-                            break;
+                            Err(_) => {
+                                eprintln!(
+                                    "{{\"level\":\"warn\",\"event\":\"gateway_write_timeout\",\
+                                     \"kind\":\"FetchRequest\",\"timeout_ms\":{}}}",
+                                    GATEWAY_FRAME_WRITE_TIMEOUT.as_millis(),
+                                );
+                                if let Some(slot) = inflight.remove(&pending.fetch_id) {
+                                    let _ = slot.reply_tx.send(Err(GatewayCallError::Timeout {
+                                        timeout_ms: GATEWAY_FRAME_WRITE_TIMEOUT
+                                            .as_millis()
+                                            .min(u128::from(u32::MAX)) as u32,
+                                    }));
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    PumpJob::Cancel(fetch_id) => {
+                        if inflight.remove(&fetch_id).is_some() {
+                            eprintln!(
+                                "{{\"level\":\"debug\",\"event\":\"gateway_fetch_cancelled\",\
+                                 \"fetch_id\":\"{fetch_id}\"}}"
+                            );
                         }
                     }
                     PumpJob::Signal(one_shot) => {
@@ -524,11 +638,14 @@ async fn pump(
                         // caller. There is no response correlation slot
                         // — the gateway is expected to act on the signal
                         // (e.g. reload policy_view) without writing back.
-                        match write_frame(&mut stream, &one_shot.payload).await {
-                            Ok(()) => {
+                        match tokio::time::timeout(
+                            GATEWAY_FRAME_WRITE_TIMEOUT,
+                            write_frame(&mut stream, &one_shot.payload),
+                        ).await {
+                            Ok(Ok(())) => {
                                 let _ = one_shot.ack_tx.send(Ok(()));
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 eprintln!(
                                     "{{\"level\":\"warn\",\"event\":\"gateway_write_failed\",\
                                      \"kind\":\"Signal\",\"reason\":\"{e}\"}}"
@@ -536,6 +653,19 @@ async fn pump(
                                 let _ = one_shot.ack_tx.send(Err(GatewayCallError::Dropped));
                                 // Same exit policy as a failed FetchRequest
                                 // write — the stream is now suspect.
+                                break;
+                            }
+                            Err(_) => {
+                                eprintln!(
+                                    "{{\"level\":\"warn\",\"event\":\"gateway_write_timeout\",\
+                                     \"kind\":\"Signal\",\"timeout_ms\":{}}}",
+                                    GATEWAY_FRAME_WRITE_TIMEOUT.as_millis(),
+                                );
+                                let _ = one_shot.ack_tx.send(Err(GatewayCallError::Timeout {
+                                    timeout_ms: GATEWAY_FRAME_WRITE_TIMEOUT
+                                        .as_millis()
+                                        .min(u128::from(u32::MAX)) as u32,
+                                }));
                                 break;
                             }
                         }
@@ -1002,6 +1132,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_silence_times_out_pending_caller() {
+        let (kernel_side, mut gateway_side) = UnixStream::pair().unwrap();
+        let _gw = tokio::spawn(async move {
+            let _msg: GatewayMessage = read_frame(&mut gateway_side)
+                .await
+                .expect("gateway receives request");
+            std::future::pending::<()>().await;
+        });
+
+        let client = GatewayClient::new();
+        client.install_connection(kernel_side).await;
+
+        let result = client
+            .fetch(
+                "tok".into(),
+                FetchKind::Inference,
+                "https://api.anthropic.com/v1/messages".into(),
+                "POST".into(),
+                vec![],
+                b"{}".to_vec(),
+                1,
+                None,
+                None,
+                None,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(GatewayCallError::Timeout { .. })),
+            "silent gateway must return Timeout, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn install_connection_replaces_pump_and_drops_old_inflight() {
         // First connection — never responds. We hold one fetch on it.
         let (kernel_a, mut gateway_a) = UnixStream::pair().unwrap();
@@ -1078,6 +1242,10 @@ mod tests {
         // forensics) key off these short strings. Pin every variant.
         assert_eq!(GatewayCallError::Unavailable.category(), "unavailable");
         assert_eq!(GatewayCallError::Dropped.category(), "dropped");
+        assert_eq!(
+            GatewayCallError::Timeout { timeout_ms: 5 }.category(),
+            "timeout"
+        );
         assert_eq!(
             GatewayCallError::GatewayError("x".into()).category(),
             "gateway_error"
