@@ -9,6 +9,7 @@
 
 import type { LifecycleAnnotation as LA } from "@/types/api";
 
+import { GateLifecycleCard } from "./GateLifecycleCard";
 import { InitiativeBlockedCard } from "./InitiativeBlockedCard";
 import { OrchestratorGapWarningCard } from "./OrchestratorGapWarningCard";
 import { RetryCrashCard } from "./RetryCrashCard";
@@ -29,6 +30,13 @@ export function LifecycleAnnotation({ annotation }: Props) {
       return <RetryCrashCard a={annotation} />;
     case "retry_validation_reject":
       return <RetryValidationRejectCard a={annotation} />;
+    case "gate_rejection_accepted":
+    case "gate_fixup_spawned":
+    case "gate_rejection_terminal":
+    case "gate_fixup_completed":
+    case "witness_rejected":
+    case "verifier_process_failed":
+      return <GateLifecycleCard a={annotation} />;
     case "session_revoked_operator":
       return <SessionRevokedOperatorCard a={annotation} />;
     case "session_revoked_self_exit":
@@ -72,6 +80,18 @@ export function lifecycleSummary(a: LA | null | undefined): string {
       return `Retry ${a.retry_number} (crash ${a.crash_retry_count}/${a.max_crash_retries})`;
     case "retry_validation_reject":
       return `Retry ${a.retry_number} (validator: ${a.validator_reason})`;
+    case "gate_rejection_accepted":
+      return `Gate ${a.gate_type} rejected (${a.attempt_index}/${a.max_attempts})`;
+    case "gate_fixup_spawned":
+      return `Fixup ${a.attempt_index} spawned for ${a.gate_type}`;
+    case "gate_rejection_terminal":
+      return `Gate ${a.gate_type} terminal: ${a.terminal_reason}`;
+    case "gate_fixup_completed":
+      return `Fixup completed: ${a.outcome}`;
+    case "witness_rejected":
+      return `Witness rejected: ${a.reason}`;
+    case "verifier_process_failed":
+      return `Verifier failed: ${a.gate_type}`;
     case "session_revoked_operator":
       return `Revoked by ${a.revoked_by_display_name ?? a.revoked_by}`;
     case "session_revoked_self_exit":
@@ -93,9 +113,16 @@ export function lifecycleDotClass(a: LA | null | undefined): string {
   switch (a.kind) {
     case "retry_review_reject":
     case "retry_validation_reject":
+    case "gate_rejection_terminal":
+    case "witness_rejected":
+    case "verifier_process_failed":
       return "bg-bad";
     case "retry_crash":
+    case "gate_rejection_accepted":
       return "bg-warn";
+    case "gate_fixup_spawned":
+    case "gate_fixup_completed":
+      return "bg-info";
     case "session_revoked_operator":
       return "bg-info";
     case "session_revoked_self_exit":

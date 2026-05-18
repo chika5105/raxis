@@ -22,14 +22,13 @@
 //   4. The kernel emits a `GateFixupSpawned` audit event so the
 //      dashboard renders the lineage without joining tables.
 //   5. The orchestrator's next KSB fetch surfaces the new fixup task
-//      via the standard `ready_now` projection (it has no
-//      predecessors that aren't yet `Completed`-eligible — the
-//      `predecessor_satisfied` flag on the parent edge starts at
-//      `0` so the fixup task only becomes ready when the parent
-//      reaches a terminal state, the kernel handles transitions
-//      itself). The orchestrator dispatches it with a normal
-//      `ActivateSubTask` — the same machinery as any other plan
-//      task.
+//      via the standard `ready_now` projection. The parent→fixup DAG
+//      edge is lineage/accounting, not a wait-for-completion edge:
+//      the parent remains in `GatesPending` while the fixup runs,
+//      because the fixup is the mechanism that may produce the new
+//      evaluation sha and clear the gate. The orchestrator dispatches
+//      the fixup with a normal `ActivateSubTask` — the same machinery
+//      as any other executor task.
 //   6. If `[gate_fixup]` is absent OR the budget is exhausted, the
 //      witness handler transitions the parent task directly to
 //      `Failed` with a structured `terminal_reason`

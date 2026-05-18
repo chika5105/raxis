@@ -4822,6 +4822,13 @@ async fn resolve_vm_image_override(
 /// and returns `(PlannerErrorCode::DependencyNotMet,
 /// TaskState::Admitted)`).
 ///
+/// Gate-fixup tasks are the one intentional exception: their parent
+/// task is parked in `GatesPending` precisely because the fixup must
+/// repair it. The parent→fixup edge is lineage and accounting, not a
+/// wait-for-completion dependency, so that specific edge is ignored
+/// while all other predecessor edges keep the normal `Completed`
+/// requirement.
+///
 /// Pure-SQL: takes only the open `Transaction` and the target task
 /// id; no kernel-context dependency, no audit emit, no logging. The
 /// caller wires the rejection. Extracted as a free fn so the
@@ -4838,8 +4845,12 @@ fn missing_predecessors_for_activation(
            FROM {TASK_DAG_EDGES} AS e \
            JOIN {TASKS} AS pred \
              ON pred.task_id = e.predecessor_task_id \
+           JOIN {TASKS} AS succ \
+             ON succ.task_id = e.successor_task_id \
           WHERE e.successor_task_id = ?1 \
-            AND pred.state != ?2"
+            AND pred.state != ?2 \
+            AND NOT (COALESCE(succ.is_gate_fixup, 0) = 1 \
+                     AND succ.parent_gate_failure_task_id = e.predecessor_task_id)"
     ))?;
     let rows = stmt.query_map(
         rusqlite::params![task_id, TaskState::Completed.as_sql_str()],
@@ -14269,6 +14280,100 @@ mod tests {
                  got {missing:?}",
             );
         }
+    }
+
+    /// Gate-fixup tasks repair a parent that is intentionally parked
+    /// in `GatesPending`, so the parent→fixup edge is lineage rather
+    /// than a wait-for-completion dependency. Normal successor tasks
+    /// must still be blocked by the same non-Completed parent.
+    #[test]
+    fn inv_kernel_dag_authority_01_allows_gate_fixup_parent_lineage_edge() {
+        let initiatives = raxis_store::Table::Initiatives.as_str();
+        let tasks = raxis_store::Table::Tasks.as_str();
+        let edges = raxis_store::Table::TaskDagEdges.as_str();
+
+        let disk = DiskStore::new();
+        let initiative_id = "init-dag-authority-gate-fixup";
+
+        {
+            let g = disk.store().lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {initiatives} \
+                        (initiative_id, state, terminal_criteria_json, \
+                         plan_artifact_sha256, created_at, git_apply_pending) \
+                     VALUES (?1, 'Executing', '{{}}', 'deadbeef', 100, 0)"
+                ),
+                rusqlite::params![initiative_id],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {tasks} \
+                        (task_id, initiative_id, lane_id, state, actor, \
+                         policy_epoch, admitted_at, transitioned_at) \
+                     VALUES ('parent-gated', ?1, 'lane-0', 'GatesPending', \
+                             'kernel', 0, 100, 100)"
+                ),
+                rusqlite::params![initiative_id],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {tasks} \
+                        (task_id, initiative_id, lane_id, state, actor, \
+                         policy_epoch, admitted_at, transitioned_at, \
+                         is_gate_fixup, parent_gate_failure_task_id, \
+                         parent_gate_failure_type) \
+                     VALUES ('fixup-child', ?1, 'lane-0', 'Admitted', \
+                             'kernel', 0, 101, 101, 1, 'parent-gated', \
+                             'coverage')"
+                ),
+                rusqlite::params![initiative_id],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {tasks} \
+                        (task_id, initiative_id, lane_id, state, actor, \
+                         policy_epoch, admitted_at, transitioned_at) \
+                     VALUES ('ordinary-child', ?1, 'lane-0', 'Admitted', \
+                             'kernel', 0, 102, 102)"
+                ),
+                rusqlite::params![initiative_id],
+            )
+            .unwrap();
+            for succ in ["fixup-child", "ordinary-child"] {
+                g.execute(
+                    &format!(
+                        "INSERT INTO {edges} \
+                            (initiative_id, predecessor_task_id, successor_task_id, \
+                             predecessor_satisfied) \
+                         VALUES (?1, 'parent-gated', ?2, 0)"
+                    ),
+                    rusqlite::params![initiative_id, succ],
+                )
+                .unwrap();
+            }
+        }
+
+        let mut g = disk.store().lock_sync();
+        let tx = g.transaction().unwrap();
+        let fixup_missing = missing_predecessors_for_activation(&tx, "fixup-child")
+            .expect("fixup predecessor query");
+        assert!(
+            fixup_missing.is_empty(),
+            "gate-fixup child MUST be activatable while its parent is \
+             GatesPending; parent→fixup is a repair lineage edge"
+        );
+
+        let ordinary_missing = missing_predecessors_for_activation(&tx, "ordinary-child")
+            .expect("ordinary predecessor query");
+        assert_eq!(
+            ordinary_missing,
+            vec![("parent-gated".to_owned(), "GatesPending".to_owned())],
+            "normal successors MUST still be blocked by a non-Completed predecessor",
+        );
     }
 
     /// `INV-KERNEL-DAG-AUTHORITY-01` corollary: a task with multiple

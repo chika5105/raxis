@@ -19,19 +19,19 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use raxis_audit_tools::AuditEventKind;
+use rusqlite::OptionalExtension;
 use tokio::process::Command;
 
 use raxis_audit_tools::AuditSink;
 use raxis_policy::{PolicyBundle, VerifierRuntimeConfig};
-use raxis_store::Store;
-#[cfg(test)]
-use raxis_store::Table;
+use raxis_store::{Store, Table};
 
 use super::GateError;
 use crate::authority::verifier_token;
@@ -126,6 +126,25 @@ pub(crate) fn active_verifier_count() -> usize {
     ACTIVE_VERIFIERS.load(Ordering::Relaxed)
 }
 
+fn try_reserve_verifier_slot(max_concurrent: usize) -> bool {
+    loop {
+        let current = ACTIVE_VERIFIERS.load(Ordering::Acquire);
+        if current >= max_concurrent {
+            return false;
+        }
+        if ACTIVE_VERIFIERS
+            .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
+fn release_verifier_slot() {
+    ACTIVE_VERIFIERS.fetch_sub(1, Ordering::AcqRel);
+}
+
 /// Read accessor for the v1 default verifier-cap constant.
 ///
 /// Mirrors the spec's "in-memory counters that `kernel.db` cannot expose"
@@ -136,6 +155,39 @@ pub(crate) fn active_verifier_count() -> usize {
 /// change.
 pub(crate) fn max_concurrent_verifiers() -> usize {
     DEFAULT_MAX_CONCURRENT_VERIFIERS
+}
+
+fn verifier_exit_fields(status: &ExitStatus) -> (&'static str, Option<i32>) {
+    if let Some(code) = status.code() {
+        return (crate::gates::verifier_audit::SIGNAL_CLASS_EXIT, Some(code));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if status.signal().is_some() {
+            return (crate::gates::verifier_audit::SIGNAL_CLASS_SIGNAL, None);
+        }
+    }
+    (crate::gates::verifier_audit::SIGNAL_CLASS_KILLED, None)
+}
+
+async fn read_task_initiative_id(store: &Store, task_id: &str) -> Result<String, GateError> {
+    let store_clone = store.clone();
+    let task_id_owned = task_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let conn = store_clone.lock_sync();
+        let tasks = Table::Tasks.as_str();
+        conn.query_row(
+            &format!("SELECT initiative_id FROM {tasks} WHERE task_id = ?1"),
+            rusqlite::params![&task_id_owned],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| GateError::Store(e.to_string()))?
+        .ok_or_else(|| GateError::Store(format!("task row missing for {task_id_owned}")))
+    })
+    .await
+    .map_err(|e| GateError::Store(format!("read task initiative join failed: {e}")))?
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +302,16 @@ pub async fn spawn_verifier_with_audit(
     store: &Store,
     audit: Option<std::sync::Arc<dyn AuditSink>>,
 ) -> Result<String, GateError> {
-    // Step 0 (iter63-followups.md Item 2 #3): per-task cumulative-time
+    // Step 0: one active mechanical verifier per
+    // `(task_id, gate_type, evaluation_sha)`.
+    //
+    // A pass witness can trigger a gate recheck while another
+    // verifier for a different missing gate is still in flight. The
+    // spawn path therefore mints tokens with an atomic "unless active"
+    // guard below; this keeps retries bounded and prevents duplicate
+    // callbacks for the same missing gate under concurrent rechecks.
+    //
+    // Step 0.5 (iter63-followups.md Item 2 #3): per-task cumulative-time
     // ceiling check. If the task's accumulated verifier wall-time
     // already exceeds the budget, refuse to spawn another verifier
     // and emit `VerifierBudgetExhausted`. Pinned by
@@ -277,9 +338,11 @@ pub async fn spawn_verifier_with_audit(
         });
     }
 
-    // Step 1: Check global concurrent verifier count.
-    let current = ACTIVE_VERIFIERS.load(Ordering::Relaxed);
-    if current >= config.max_concurrent_verifiers {
+    // Step 1: reserve a global verifier slot. This must be a real
+    // compare-and-swap reservation, not load-then-increment after
+    // spawn, otherwise concurrent gate rechecks can overshoot the
+    // cap before any watcher task has a chance to observe them.
+    if !try_reserve_verifier_slot(config.max_concurrent_verifiers) {
         return Err(GateError::VerifierCapExceeded {
             task_id: task_id.to_owned(),
             gate_type: gate_type.to_owned(),
@@ -302,15 +365,15 @@ pub async fn spawn_verifier_with_audit(
     // `verifier_runner::integration::successful_spawn_persists_verifier_run_tokens_row_with_correct_fields`,
     // and pinned by every test in that module.)
     let verifier_run_id = uuid::Uuid::new_v4().to_string();
-    let raw_token = {
+    let token_outcome = {
         let store_clone = store.clone();
         let run_id_owned = verifier_run_id.clone();
         let task_id_owned = task_id.to_owned();
         let gate_type_owned = gate_type.to_owned();
         let evaluation_sha_owned = evaluation_sha.to_owned();
         let ttl = config.verifier_token_ttl_secs;
-        tokio::task::spawn_blocking(move || {
-            verifier_token::issue_verifier_token(
+        match tokio::task::spawn_blocking(move || {
+            verifier_token::issue_verifier_token_unless_active(
                 &run_id_owned,
                 &task_id_owned,
                 &gate_type_owned,
@@ -320,12 +383,48 @@ pub async fn spawn_verifier_with_audit(
             )
         })
         .await
-        .map_err(|e| {
-            GateError::AuthorityError(format!(
-                "issue_verifier_token spawn_blocking join failed: {e}"
-            ))
-        })?
-        .map_err(|e| GateError::AuthorityError(e.to_string()))?
+        {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(e)) => {
+                release_verifier_slot();
+                return Err(GateError::AuthorityError(e.to_string()));
+            }
+            Err(e) => {
+                release_verifier_slot();
+                return Err(GateError::AuthorityError(format!(
+                    "issue_verifier_token spawn_blocking join failed: {e}"
+                )));
+            }
+        }
+    };
+    let raw_token = match token_outcome {
+        verifier_token::IssueVerifierTokenOutcome::Issued { raw_token } => raw_token,
+        verifier_token::IssueVerifierTokenOutcome::AlreadyActive { verifier_run_id } => {
+            release_verifier_slot();
+            return Err(GateError::VerifierAlreadyActive {
+                task_id: task_id.to_owned(),
+                gate_type: gate_type.to_owned(),
+                evaluation_sha: evaluation_sha.to_owned(),
+                verifier_run_id,
+            });
+        }
+    };
+
+    let initiative_id = match read_task_initiative_id(store, task_id).await {
+        Ok(initiative_id) => initiative_id,
+        Err(e) => {
+            let store_for_cleanup = store.clone();
+            let run_id_for_cleanup = verifier_run_id.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                verifier_token::consume_verifier_token_by_run_id(
+                    &run_id_for_cleanup,
+                    &store_for_cleanup,
+                )
+            })
+            .await;
+            release_verifier_slot();
+            return Err(e);
+        }
     };
 
     // Step 3 (iter63-followups.md Item 1 (C)): serialise operator-
@@ -334,10 +433,25 @@ pub async fn spawn_verifier_with_audit(
     // `WitnessSubmission.body.operator_hints`. The `BTreeMap`
     // ordering on `config.hints` (validated at policy-load time) is
     // what gives us determinism without a separate canonicaliser.
-    let hints_json = serde_json::to_string(&config.hints).map_err(|e| GateError::SpawnFailed {
-        gate_type: gate_type.to_owned(),
-        reason: format!("serialise operator hints to JSON: {e}"),
-    })?;
+    let hints_json = match serde_json::to_string(&config.hints) {
+        Ok(json) => json,
+        Err(e) => {
+            let store_for_cleanup = store.clone();
+            let run_id_for_cleanup = verifier_run_id.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                verifier_token::consume_verifier_token_by_run_id(
+                    &run_id_for_cleanup,
+                    &store_for_cleanup,
+                )
+            })
+            .await;
+            release_verifier_slot();
+            return Err(GateError::SpawnFailed {
+                gate_type: gate_type.to_owned(),
+                reason: format!("serialise operator hints to JSON: {e}"),
+            });
+        }
+    };
 
     // Step 4: Build spawn envelope environment (scrubbed — env_clear() first).
     let mut cmd = Command::new(&config.verifier_binary_path);
@@ -354,8 +468,12 @@ pub async fn spawn_verifier_with_audit(
         // unconditionally reads the var sees a parseable value.
         .env("RAXIS_VERIFIER_OPERATOR_HINTS_JSON", &hints_json)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        // Mechanical verifiers report their verdict via the kernel
+        // IPC witness path. Do not create unconsumed pipes here: a
+        // noisy verifier can otherwise fill stdout/stderr and block
+        // before it submits its witness.
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .current_dir(worktree_root);
 
     // Apply documented RLIMIT_CPU + RLIMIT_AS via `pre_exec`
@@ -404,10 +522,50 @@ pub async fn spawn_verifier_with_audit(
 
     // Step 5: Spawn subprocess.
     // Note: FD_CLOEXEC is set by tokio::process::Command by default on Unix.
-    let mut child = cmd.spawn().map_err(|e| GateError::SpawnFailed {
-        gate_type: gate_type.to_owned(),
-        reason: e.to_string(),
-    })?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            let store_for_cleanup = store.clone();
+            let run_id_for_cleanup = verifier_run_id.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                verifier_token::consume_verifier_token_by_run_id(
+                    &run_id_for_cleanup,
+                    &store_for_cleanup,
+                )
+            })
+            .await;
+            release_verifier_slot();
+            if let Some(sink) = audit.as_ref() {
+                let _ = sink.emit(
+                    AuditEventKind::VerifierProcessFailed {
+                        task_id: task_id.to_owned(),
+                        exit_code: None,
+                        gate_type: gate_type.to_owned(),
+                    },
+                    None,
+                    Some(task_id),
+                    Some(&initiative_id),
+                );
+            }
+            return Err(GateError::SpawnFailed {
+                gate_type: gate_type.to_owned(),
+                reason: e.to_string(),
+            });
+        }
+    };
+
+    if let Some(sink) = audit.as_ref() {
+        let audit_ctx = crate::gates::verifier_audit::VerifierAuditContext {
+            verifier_run_id: verifier_run_id.clone(),
+            task_id: task_id.to_owned(),
+            initiative_id: initiative_id.clone(),
+            image_alias: "mechanical-verifier".to_owned(),
+            oci_digest: String::new(),
+            command: config.verifier_binary_path.display().to_string(),
+            on_failure: "record_witness".to_owned(),
+        };
+        crate::gates::verifier_audit::emit_vm_spawned(sink.as_ref(), &audit_ctx);
+    }
 
     let run_id_clone = verifier_run_id.clone();
     let task_id_clone = task_id.to_owned();
@@ -423,9 +581,12 @@ pub async fn spawn_verifier_with_audit(
         .verifier_runtime
         .verifier_force_shutdown_grace_seconds as u64;
     let audit_for_watcher = audit.clone();
+    let gate_type_clone = gate_type.to_owned();
+    let initiative_id_clone = initiative_id.clone();
 
-    // Step 6: Increment counter. Register completion watcher.
-    ACTIVE_VERIFIERS.fetch_add(1, Ordering::Relaxed);
+    // Step 6: Register completion watcher. The global slot was
+    // reserved before token issuance and is released exactly once
+    // when this watcher observes process completion / timeout.
 
     tokio::spawn(async move {
         let started = Instant::now();
@@ -441,13 +602,59 @@ pub async fn spawn_verifier_with_audit(
             .as_secs()
             .saturating_add(if elapsed.subsec_millis() > 0 { 1 } else { 0 });
         match outcome {
-            Ok(Ok(_status)) => {
+            Ok(Ok(status)) => {
                 // Normal exit — record the wall-time against the
-                // per-task accumulator and let the existing audit
-                // path (`emit_vm_exited`, wired at the iter62 audit
-                // helper layer) handle the exit row.
+                // per-task accumulator and emit the mechanical
+                // verifier lifecycle row. A non-zero exit means the
+                // subprocess failed before producing a usable witness
+                // and must be operator-visible in the audit stream.
+                let (signal_class, exit_code) = verifier_exit_fields(&status);
+                if let Some(sink) = audit_for_watcher.as_ref() {
+                    crate::gates::verifier_audit::emit_vm_exited(
+                        sink.as_ref(),
+                        &run_id_clone,
+                        signal_class,
+                        exit_code,
+                        elapsed_ms,
+                        Some(&task_id_clone),
+                        Some(&initiative_id_clone),
+                    );
+                    if !status.success() {
+                        let _ = sink.emit(
+                            AuditEventKind::VerifierProcessFailed {
+                                task_id: task_id_clone.clone(),
+                                exit_code,
+                                gate_type: gate_type_clone.clone(),
+                            },
+                            None,
+                            Some(&task_id_clone),
+                            Some(&initiative_id_clone),
+                        );
+                    }
+                }
             }
             Ok(Err(e)) => {
+                if let Some(sink) = audit_for_watcher.as_ref() {
+                    crate::gates::verifier_audit::emit_vm_exited(
+                        sink.as_ref(),
+                        &run_id_clone,
+                        crate::gates::verifier_audit::SIGNAL_CLASS_KILLED,
+                        None,
+                        elapsed_ms,
+                        Some(&task_id_clone),
+                        Some(&initiative_id_clone),
+                    );
+                    let _ = sink.emit(
+                        AuditEventKind::VerifierProcessFailed {
+                            task_id: task_id_clone.clone(),
+                            exit_code: None,
+                            gate_type: gate_type_clone.clone(),
+                        },
+                        None,
+                        Some(&task_id_clone),
+                        Some(&initiative_id_clone),
+                    );
+                }
                 eprintln!(
                     "{{\"level\":\"warn\",\"event\":\"VerifierWaitError\",\
                      \"verifier_run_id\":\"{run_id_clone}\",\"reason\":\"{e}\"}}"
@@ -466,6 +673,15 @@ pub async fn spawn_verifier_with_audit(
                 // not collect within the grace window.
                 let _ = child.kill().await;
                 if let Some(sink) = audit_for_watcher.as_ref() {
+                    crate::gates::verifier_audit::emit_vm_exited(
+                        sink.as_ref(),
+                        &run_id_clone,
+                        crate::gates::verifier_audit::SIGNAL_CLASS_TIMEOUT,
+                        None,
+                        elapsed_ms,
+                        Some(&task_id_clone),
+                        Some(&initiative_id_clone),
+                    );
                     let _ = sink.emit(
                         AuditEventKind::VerifierWallClockTimeout {
                             verifier_run_id: run_id_clone.clone(),
@@ -475,7 +691,17 @@ pub async fn spawn_verifier_with_audit(
                         },
                         None,
                         Some(&task_id_clone),
+                        Some(&initiative_id_clone),
+                    );
+                    let _ = sink.emit(
+                        AuditEventKind::VerifierProcessFailed {
+                            task_id: task_id_clone.clone(),
+                            exit_code: None,
+                            gate_type: gate_type_clone.clone(),
+                        },
                         None,
+                        Some(&task_id_clone),
+                        Some(&initiative_id_clone),
                     );
                 }
                 eprintln!(
@@ -489,7 +715,7 @@ pub async fn spawn_verifier_with_audit(
         // Always credit elapsed against the per-task accumulator,
         // whether the verifier exited normally or was reaped.
         record_task_verifier_seconds(&task_id_clone, elapsed_secs);
-        ACTIVE_VERIFIERS.fetch_sub(1, Ordering::Relaxed);
+        release_verifier_slot();
     });
 
     // Step 7: Return verifier_run_id.

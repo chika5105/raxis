@@ -43,7 +43,9 @@
 use std::sync::Arc;
 
 use raxis_policy::PlanSigningSection;
-use raxis_store::{Store, Table};
+use raxis_store::Store;
+#[cfg(test)]
+use raxis_store::Table;
 use rusqlite::TransactionBehavior;
 use tokio::sync::oneshot;
 

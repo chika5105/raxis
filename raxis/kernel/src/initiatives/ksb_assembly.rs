@@ -1195,15 +1195,22 @@ fn read_ready_now_task_ids(
         // Predecessor closure — mirrors
         // `missing_predecessors_for_activation` in
         // `kernel/src/handlers/intent.rs`. A non-Completed
-        // predecessor disqualifies the task.
+        // predecessor disqualifies the task, except for the
+        // parent→fixup lineage edge of a gate-fixup task. That edge
+        // records which `GatesPending` parent is being repaired; it
+        // is not a wait-for-parent-completion dependency.
         let any_unfinished_pred: bool = {
             let pred_sql = format!(
                 "SELECT 1 \
                    FROM {edges} AS e \
                    JOIN {tasks} AS pred \
                      ON pred.task_id = e.predecessor_task_id \
+                   JOIN {tasks} AS succ \
+                     ON succ.task_id = e.successor_task_id \
                   WHERE e.successor_task_id = ?1 \
                     AND pred.state != ?2 \
+                    AND NOT (COALESCE(succ.is_gate_fixup, 0) = 1 \
+                             AND succ.parent_gate_failure_task_id = e.predecessor_task_id) \
                   LIMIT 1",
                 edges = Table::TaskDagEdges.as_str(),
                 tasks = Table::Tasks.as_str(),
@@ -2325,6 +2332,8 @@ mod tests {
         let no_activation_row = "no-activation-row";
         let reviewer = "reviewer-of-ready-a";
         let pred_done = "predecessor-completed";
+        let gate_parent = "gate-parent";
+        let gate_fixup = "gate-fixup";
 
         registry.insert_orchestrator(
             init.to_owned(),
@@ -2343,6 +2352,8 @@ mod tests {
             (blocked_pred, SessionAgentType::Executor),
             (no_activation_row, SessionAgentType::Executor),
             (reviewer, SessionAgentType::Reviewer),
+            (gate_parent, SessionAgentType::Executor),
+            (gate_fixup, SessionAgentType::Executor),
         ] {
             registry.insert(
                 TaskKey::new(init.to_owned(), (*tid).to_owned()),
@@ -2405,16 +2416,40 @@ mod tests {
             )
             .expect("task");
         }
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS} (task_id, initiative_id, lane_id, state, actor, \
+                                policy_epoch, admitted_at, transitioned_at) \
+             VALUES (?1, ?2, 'default', 'GatesPending', 'kernel', 0, 24, 24)"
+            ),
+            rusqlite::params![gate_parent, init],
+        )
+        .expect("gate parent");
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS} (task_id, initiative_id, lane_id, state, actor, \
+                                policy_epoch, admitted_at, transitioned_at, \
+                                is_gate_fixup, parent_gate_failure_task_id, \
+                                parent_gate_failure_type) \
+             VALUES (?1, ?2, 'default', 'Admitted', 'kernel', 0, 25, 25, \
+                     1, ?3, 'coverage')"
+            ),
+            rusqlite::params![gate_fixup, init, gate_parent],
+        )
+        .expect("gate fixup task");
         // Edges:
         //   ready_a   ⟵ pred_done       (pred Completed → ready)
         //   blocked_pred ⟵ ready_a      (pred is Admitted not Completed → NOT ready)
         //   reviewer  ⟵ ready_a         (pred Admitted → reviewer NOT ready,
         //                                also reviewer rows are excluded
         //                                from ready_now by agent-type filter)
+        //   gate_fixup ⟵ gate_parent    (parent is GatesPending but this is a
+        //                                fixup-lineage edge → ready)
         for (pred, succ) in &[
             (pred_done, ready_a),
             (ready_a, blocked_pred),
             (ready_a, reviewer),
+            (gate_parent, gate_fixup),
         ] {
             conn.execute(
                 &format!(
@@ -2432,11 +2467,13 @@ mod tests {
         //   blocked_pred  latest = PendingActivation (would be admissible, but pred not Completed)
         //   no_activation_row  NO row (NOT admissible)
         //   reviewer      latest = PendingActivation (reviewers excluded by agent-type filter)
+        //   gate_fixup    latest = PendingActivation (ADMISSIBLE despite parent GatesPending)
         for (tid, state, created_at) in &[
             (ready_a, "PendingActivation", 21i64),
             (ready_b, "PendingActivation", 31i64),
             (blocked_pred, "PendingActivation", 41i64),
             (reviewer, "PendingActivation", 61i64),
+            (gate_fixup, "PendingActivation", 26i64),
         ] {
             conn.execute(
                 &format!(
@@ -2479,10 +2516,15 @@ mod tests {
 
         assert_eq!(
             o.ready_now,
-            vec![ready_a.to_owned(), ready_b.to_owned()],
+            vec![
+                ready_a.to_owned(),
+                gate_fixup.to_owned(),
+                ready_b.to_owned()
+            ],
             "ready_now MUST list only Executor tasks whose latest \
              activation is PendingActivation AND whose predecessors \
-             are all Completed; got: {:?}",
+             are all Completed except for the parent lineage edge of \
+             a gate-fixup task; got: {:?}",
             o.ready_now,
         );
 
@@ -2495,7 +2537,7 @@ mod tests {
         // Renderer must surface both lines in the orchestrator block.
         let rendered = raxis_ksb::render_ksb(&snap).expect("render");
         assert!(
-            rendered.contains(&format!("ready_now=[{ready_a}, {ready_b}]")),
+            rendered.contains(&format!("ready_now=[{ready_a}, {gate_fixup}, {ready_b}]")),
             "rendered KSB MUST surface `ready_now=[…]` in order; got:\n{rendered}",
         );
         assert!(

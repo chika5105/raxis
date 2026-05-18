@@ -126,6 +126,89 @@ pub enum LifecycleAnnotation {
         /// `IntentValidationRejected` audit row.
         ts_unix: i64,
     },
+    /// A mechanical verifier produced a non-pass witness and the
+    /// kernel accepted it into the gate-fixup pipeline.
+    GateRejectionAccepted {
+        /// Gate type that rejected the task.
+        gate_type: String,
+        /// Evaluation sha that the verifier checked.
+        evaluation_sha: String,
+        /// Verifier run id that produced the non-pass witness.
+        verifier_run_id: String,
+        /// Operator-facing repair instruction / critique excerpt.
+        critique: String,
+        /// Attempts already used at rejection time.
+        attempt_index: u32,
+        /// Maximum configured fixup attempts.
+        max_attempts: u32,
+        /// Unix-seconds timestamp of the audit row.
+        ts_unix: i64,
+    },
+    /// The kernel admitted a repair executor for a failed gate.
+    GateFixupSpawned {
+        /// Newly admitted fixup task id.
+        fixup_task_id: String,
+        /// Parent task whose gate failed.
+        parent_task_id: String,
+        /// Gate type being repaired.
+        gate_type: String,
+        /// Parent evaluation sha at fixup admission time.
+        parent_evaluation_sha: String,
+        /// One-based fixup attempt number.
+        attempt_index: u32,
+        /// Unix-seconds timestamp of the audit row.
+        ts_unix: i64,
+    },
+    /// A gate rejection reached a terminal branch and the parent
+    /// task is expected to move to `Failed`.
+    GateRejectionTerminal {
+        /// Gate type that could not be repaired.
+        gate_type: String,
+        /// Kernel terminal reason string.
+        terminal_reason: String,
+        /// Number of fixup attempts consumed.
+        attempts_used: u32,
+        /// Unix-seconds timestamp of the audit row.
+        ts_unix: i64,
+    },
+    /// A repair executor finished and the parent gate will be
+    /// re-evaluated against the resulting evaluation sha.
+    GateFixupCompleted {
+        /// Fixup task that completed.
+        fixup_task_id: String,
+        /// Parent task whose gate is being repaired.
+        parent_task_id: String,
+        /// Gate type being repaired.
+        gate_type: String,
+        /// Completion outcome string from the kernel.
+        outcome: String,
+        /// New parent evaluation sha when the fixup made a commit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_evaluation_sha: Option<String>,
+        /// Unix-seconds timestamp of the audit row.
+        ts_unix: i64,
+    },
+    /// A witness submission was rejected mechanically before it
+    /// could affect gate truth.
+    WitnessRejected {
+        /// Verifier run id whose callback was rejected.
+        verifier_run_id: String,
+        /// Stable rejection reason code.
+        reason: String,
+        /// Unix-seconds timestamp of the audit row.
+        ts_unix: i64,
+    },
+    /// A verifier subprocess failed before delivering a valid
+    /// witness.
+    VerifierProcessFailed {
+        /// Gate type the verifier was checking.
+        gate_type: String,
+        /// Process exit code when one was observed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        /// Unix-seconds timestamp of the audit row.
+        ts_unix: i64,
+    },
     /// Operator-initiated session revocation. Anything whose
     /// `revoked_by` does NOT start with the `kernel://` marker
     /// pattern lands here.
@@ -199,6 +282,12 @@ impl LifecycleAnnotation {
             Self::RetryReviewReject { ts_unix, .. }
             | Self::RetryCrash { ts_unix, .. }
             | Self::RetryValidationReject { ts_unix, .. }
+            | Self::GateRejectionAccepted { ts_unix, .. }
+            | Self::GateFixupSpawned { ts_unix, .. }
+            | Self::GateRejectionTerminal { ts_unix, .. }
+            | Self::GateFixupCompleted { ts_unix, .. }
+            | Self::WitnessRejected { ts_unix, .. }
+            | Self::VerifierProcessFailed { ts_unix, .. }
             | Self::SessionRevokedOperator { ts_unix, .. }
             | Self::SessionRevokedSelfExit { ts_unix, .. }
             | Self::InitiativeBlocked { ts_unix, .. } => *ts_unix,
@@ -214,6 +303,12 @@ impl LifecycleAnnotation {
             Self::RetryReviewReject { .. } => "retry_review_reject",
             Self::RetryCrash { .. } => "retry_crash",
             Self::RetryValidationReject { .. } => "retry_validation_reject",
+            Self::GateRejectionAccepted { .. } => "gate_rejection_accepted",
+            Self::GateFixupSpawned { .. } => "gate_fixup_spawned",
+            Self::GateRejectionTerminal { .. } => "gate_rejection_terminal",
+            Self::GateFixupCompleted { .. } => "gate_fixup_completed",
+            Self::WitnessRejected { .. } => "witness_rejected",
+            Self::VerifierProcessFailed { .. } => "verifier_process_failed",
             Self::SessionRevokedOperator { .. } => "session_revoked_operator",
             Self::SessionRevokedSelfExit { .. } => "session_revoked_self_exit",
             Self::InitiativeBlocked { .. } => "initiative_blocked",
@@ -3440,6 +3535,10 @@ pub mod recent_activity_filter {
         //   * Weak-verifier-author signal (tier-2 fallback fired,
         //     or wire-invalid agent_hint rejected).
         "VerifierWitnessReceived",
+        "WitnessRejected",
+        "VerifierProcessFailed",
+        "VerifierWallClockTimeout",
+        "VerifierBudgetExhausted",
         "GateRejectionAccepted",
         "GateRejectionTerminal",
         "GateFixupSpawned",

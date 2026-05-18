@@ -150,7 +150,7 @@ pub fn classify_for_task(
     // Sort audit by seq so the pairing scan is monotonic.
     let mut chain: Vec<&AuditRow> = audit_chain
         .iter()
-        .filter(|r| r.task_id.as_deref() == Some(task_id))
+        .filter(|r| audit_row_mentions_task(r, task_id))
         .collect();
     chain.sort_by_key(|r| r.seq);
 
@@ -343,6 +343,168 @@ pub fn classify_for_task(
                     validator_detail,
                     validation_reject_count: n,
                     max_validation_rejections: DEFAULT_MAX_VALIDATION_REJECTIONS,
+                    ts_unix: row.at,
+                });
+            }
+            "GateRejectionAccepted" => {
+                out.push(LifecycleAnnotation::GateRejectionAccepted {
+                    gate_type: row
+                        .payload
+                        .get("gate_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    evaluation_sha: row
+                        .payload
+                        .get("evaluation_sha")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    verifier_run_id: row
+                        .payload
+                        .get("verifier_run_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    critique: row
+                        .payload
+                        .get("critique")
+                        .and_then(|v| v.as_str())
+                        .map(|s| first_n_lines(s, 4))
+                        .unwrap_or_default(),
+                    attempt_index: row
+                        .payload
+                        .get("attempt_index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                    max_attempts: row
+                        .payload
+                        .get("max_attempts")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                    ts_unix: row.at,
+                });
+            }
+            "GateFixupSpawned" => {
+                out.push(LifecycleAnnotation::GateFixupSpawned {
+                    fixup_task_id: row
+                        .payload
+                        .get("fixup_task_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    parent_task_id: row
+                        .payload
+                        .get("parent_task_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    gate_type: row
+                        .payload
+                        .get("gate_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    parent_evaluation_sha: row
+                        .payload
+                        .get("parent_evaluation_sha")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    attempt_index: row
+                        .payload
+                        .get("attempt_index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                    ts_unix: row.at,
+                });
+            }
+            "GateRejectionTerminal" => {
+                out.push(LifecycleAnnotation::GateRejectionTerminal {
+                    gate_type: row
+                        .payload
+                        .get("gate_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    terminal_reason: row
+                        .payload
+                        .get("terminal_reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    attempts_used: row
+                        .payload
+                        .get("attempts_used")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                    ts_unix: row.at,
+                });
+            }
+            "GateFixupCompleted" => {
+                out.push(LifecycleAnnotation::GateFixupCompleted {
+                    fixup_task_id: row
+                        .payload
+                        .get("fixup_task_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    parent_task_id: row
+                        .payload
+                        .get("parent_task_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    gate_type: row
+                        .payload
+                        .get("gate_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    outcome: row
+                        .payload
+                        .get("outcome")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    new_evaluation_sha: row
+                        .payload
+                        .get("new_evaluation_sha")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                    ts_unix: row.at,
+                });
+            }
+            "WitnessRejected" => {
+                out.push(LifecycleAnnotation::WitnessRejected {
+                    verifier_run_id: row
+                        .payload
+                        .get("verifier_run_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    reason: row
+                        .payload
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    ts_unix: row.at,
+                });
+            }
+            "VerifierProcessFailed" => {
+                out.push(LifecycleAnnotation::VerifierProcessFailed {
+                    gate_type: row
+                        .payload
+                        .get("gate_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                    exit_code: row
+                        .payload
+                        .get("exit_code")
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as i32),
                     ts_unix: row.at,
                 });
             }
@@ -559,6 +721,21 @@ pub fn classify_orchestrator_gaps(
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn audit_row_mentions_task(row: &AuditRow, task_id: &str) -> bool {
+    row.task_id.as_deref() == Some(task_id)
+        || payload_str_eq(&row.payload, "task_id", task_id)
+        || payload_str_eq(&row.payload, "parent_task_id", task_id)
+        || payload_str_eq(&row.payload, "fixup_task_id", task_id)
+}
+
+fn payload_str_eq(payload: &serde_json::Value, key: &str, expected: &str) -> bool {
+    payload
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|v| v == expected)
+        .unwrap_or(false)
+}
+
 fn first_n_lines(s: &str, n: usize) -> String {
     let mut acc = String::new();
     for (i, line) in s.lines().enumerate() {
@@ -713,6 +890,90 @@ mod tests {
             }
             other => panic!("expected RetryReviewReject, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn classify_for_task_surfaces_gate_fixup_lifecycle_from_parent_and_fixup_rows() {
+        let parent = "materialize-records";
+        let fixup = "materialize-records--gatefixup-1";
+        let chain = vec![
+            audit(
+                10,
+                "GateRejectionAccepted",
+                Some(parent),
+                None,
+                json!({
+                    "task_id": parent,
+                    "gate_type": "coverage",
+                    "evaluation_sha": "abc123",
+                    "verifier_run_id": "run-1",
+                    "critique": "line 1\nline 2\nline 3\nline 4\nline 5",
+                    "attempt_index": 0,
+                    "max_attempts": 2,
+                }),
+            ),
+            audit(
+                11,
+                "GateFixupSpawned",
+                Some(fixup),
+                None,
+                json!({
+                    "fixup_task_id": fixup,
+                    "parent_task_id": parent,
+                    "gate_type": "coverage",
+                    "parent_evaluation_sha": "abc123",
+                    "attempt_index": 1,
+                }),
+            ),
+            audit(
+                12,
+                "GateFixupCompleted",
+                Some(fixup),
+                None,
+                json!({
+                    "fixup_task_id": fixup,
+                    "parent_task_id": parent,
+                    "gate_type": "coverage",
+                    "outcome": "completed_with_commit",
+                    "new_evaluation_sha": "def456",
+                }),
+            ),
+        ];
+
+        let out = classify_for_task(&chain, parent, &[], None);
+        assert_eq!(
+            out.len(),
+            3,
+            "parent timeline must include fixup child rows"
+        );
+        assert!(matches!(
+            &out[0],
+            LifecycleAnnotation::GateRejectionAccepted {
+                gate_type,
+                attempt_index: 0,
+                max_attempts: 2,
+                critique,
+                ..
+            } if gate_type == "coverage"
+                && critique == "line 1\nline 2\nline 3\nline 4"
+        ));
+        assert!(matches!(
+            &out[1],
+            LifecycleAnnotation::GateFixupSpawned {
+                fixup_task_id,
+                parent_task_id,
+                attempt_index: 1,
+                ..
+            } if fixup_task_id == fixup && parent_task_id == parent
+        ));
+        assert!(matches!(
+            &out[2],
+            LifecycleAnnotation::GateFixupCompleted {
+                outcome,
+                new_evaluation_sha: Some(sha),
+                ..
+            } if outcome == "completed_with_commit" && sha == "def456"
+        ));
     }
 
     /// **iter62 review-lint-defect-rust fixture.** A

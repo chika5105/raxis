@@ -218,6 +218,53 @@ export type LifecycleAnnotation =
       ts_unix: number;
     }
   | {
+      kind: "gate_rejection_accepted";
+      gate_type: string;
+      evaluation_sha: string;
+      verifier_run_id: string;
+      critique: string;
+      attempt_index: number;
+      max_attempts: number;
+      ts_unix: number;
+    }
+  | {
+      kind: "gate_fixup_spawned";
+      fixup_task_id: string;
+      parent_task_id: string;
+      gate_type: string;
+      parent_evaluation_sha: string;
+      attempt_index: number;
+      ts_unix: number;
+    }
+  | {
+      kind: "gate_rejection_terminal";
+      gate_type: string;
+      terminal_reason: string;
+      attempts_used: number;
+      ts_unix: number;
+    }
+  | {
+      kind: "gate_fixup_completed";
+      fixup_task_id: string;
+      parent_task_id: string;
+      gate_type: string;
+      outcome: string;
+      new_evaluation_sha?: string | null;
+      ts_unix: number;
+    }
+  | {
+      kind: "witness_rejected";
+      verifier_run_id: string;
+      reason: string;
+      ts_unix: number;
+    }
+  | {
+      kind: "verifier_process_failed";
+      gate_type: string;
+      exit_code?: number | null;
+      ts_unix: number;
+    }
+  | {
       kind: "session_revoked_operator";
       revoked_by: string;
       revoked_by_display_name?: string | null;

@@ -21,6 +21,7 @@
 use raxis_crypto::token::{generate_verifier_token, sha256_hex};
 use raxis_store::{Store, Table};
 use raxis_types::unix_now_secs;
+use rusqlite::OptionalExtension;
 
 use crate::authority::keys::AuthorityError;
 
@@ -36,6 +37,17 @@ pub struct ValidatedVerifierToken {
     pub task_id: String,
     pub gate_type: String,
     pub evaluation_sha: String,
+}
+
+/// Result of an atomic "issue unless already active" attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueVerifierTokenOutcome {
+    /// A fresh token row was inserted. `raw_token` is returned once
+    /// to the verifier subprocess and never persisted.
+    Issued { raw_token: String },
+    /// Another unconsumed, unexpired verifier token already covers
+    /// the same `(task_id, gate_type, evaluation_sha)` tuple.
+    AlreadyActive { verifier_run_id: String },
 }
 
 /// Issue a new verifier run token for `run_id`.
@@ -80,6 +92,71 @@ pub fn issue_verifier_token(
     .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 
     Ok(raw_token)
+}
+
+/// Issue a verifier run token unless an active run for the same
+/// `(task_id, gate_type, evaluation_sha)` already exists.
+///
+/// This is the production spawn-path API. The active-run check and
+/// INSERT are performed under the store mutex so two concurrent gate
+/// rechecks cannot both observe "no verifier" and mint duplicate
+/// callbacks for the same missing gate. Expired or consumed rows do
+/// not suppress a fresh run.
+pub fn issue_verifier_token_unless_active(
+    run_id: &str,
+    task_id: &str,
+    gate_type: &str,
+    evaluation_sha: &str,
+    ttl_secs: u64,
+    store: &Store,
+) -> Result<IssueVerifierTokenOutcome, AuthorityError> {
+    let now = unix_now_secs();
+    let expires_at = now + ttl_secs as i64;
+    let conn = store.lock_sync();
+
+    let active: Option<String> = conn
+        .query_row(
+            &format!(
+                "SELECT verifier_run_id
+                   FROM {VRT}
+                  WHERE task_id = ?1
+                    AND gate_type = ?2
+                    AND evaluation_sha = ?3
+                    AND consumed = 0
+                    AND expires_at > ?4
+                  ORDER BY issued_at DESC, verifier_run_id DESC
+                  LIMIT 1"
+            ),
+            rusqlite::params![task_id, gate_type, evaluation_sha, now],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
+    if let Some(verifier_run_id) = active {
+        return Ok(IssueVerifierTokenOutcome::AlreadyActive { verifier_run_id });
+    }
+
+    let (raw_token, token_hash) = generate_verifier_token()?;
+    conn.execute(
+        &format!(
+            "INSERT INTO {VRT}
+                (verifier_run_id, task_id, gate_type, evaluation_sha,
+                 token_hash, issued_at, expires_at, consumed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)"
+        ),
+        rusqlite::params![
+            run_id,
+            task_id,
+            gate_type,
+            evaluation_sha,
+            &token_hash,
+            now,
+            expires_at
+        ],
+    )
+    .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
+
+    Ok(IssueVerifierTokenOutcome::Issued { raw_token })
 }
 
 /// Validate a raw token presented by a verifier subprocess.
@@ -194,6 +271,31 @@ pub fn consume_verifier_token(raw_token: &str, store: &Store) -> Result<(), Auth
     consume_verifier_token_in_tx(&conn, raw_token)
 }
 
+/// Mark a verifier token consumed by run id.
+///
+/// Used by the subprocess spawn path when token issuance succeeded
+/// but `exec` failed before any verifier could receive or present the
+/// raw token. Without this cleanup, the active-run dedupe guard would
+/// suppress legitimate retry spawns until the token TTL expired.
+pub fn consume_verifier_token_by_run_id(
+    verifier_run_id: &str,
+    store: &Store,
+) -> Result<(), AuthorityError> {
+    let now = unix_now_secs();
+    let conn = store.lock_sync();
+    conn.execute(
+        &format!(
+            "UPDATE {VRT}
+                SET consumed = 1, consumed_at = ?1
+              WHERE verifier_run_id = ?2
+                AND consumed = 0"
+        ),
+        rusqlite::params![now, verifier_run_id],
+    )
+    .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
+    Ok(())
+}
+
 /// Consume a verifier token inside an existing transaction.
 ///
 /// **INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern C):** if this returns
@@ -274,6 +376,88 @@ mod tests {
                 gate_type: "coverage".to_owned(),
                 evaluation_sha: "abc123".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn issue_unless_active_suppresses_duplicate_open_run() {
+        let store = Store::open_in_memory().unwrap();
+        seed_token_task(&store, "task-dedupe");
+
+        let first = issue_verifier_token_unless_active(
+            "run-first",
+            "task-dedupe",
+            "coverage",
+            "sha-dedupe",
+            60,
+            &store,
+        )
+        .unwrap();
+        assert!(
+            matches!(first, IssueVerifierTokenOutcome::Issued { .. }),
+            "first verifier for a tuple must be issued"
+        );
+
+        let second = issue_verifier_token_unless_active(
+            "run-second",
+            "task-dedupe",
+            "coverage",
+            "sha-dedupe",
+            60,
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            second,
+            IssueVerifierTokenOutcome::AlreadyActive {
+                verifier_run_id: "run-first".to_owned()
+            },
+            "an unconsumed, unexpired token for the same tuple must suppress duplicate spawn"
+        );
+
+        let conn = store.lock_sync();
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {VRT} WHERE task_id = 'task-dedupe'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "duplicate suppression must not insert run-second");
+    }
+
+    #[test]
+    fn issue_unless_active_allows_new_run_after_consumed() {
+        let store = Store::open_in_memory().unwrap();
+        seed_token_task(&store, "task-consumed");
+
+        let first_raw = match issue_verifier_token_unless_active(
+            "run-old",
+            "task-consumed",
+            "lint",
+            "sha-consumed",
+            60,
+            &store,
+        )
+        .unwrap()
+        {
+            IssueVerifierTokenOutcome::Issued { raw_token } => raw_token,
+            other => panic!("expected first issue, got {other:?}"),
+        };
+        consume_verifier_token(&first_raw, &store).unwrap();
+
+        let second = issue_verifier_token_unless_active(
+            "run-new",
+            "task-consumed",
+            "lint",
+            "sha-consumed",
+            60,
+            &store,
+        )
+        .unwrap();
+        assert!(
+            matches!(second, IssueVerifierTokenOutcome::Issued { .. }),
+            "consumed verifier token must not suppress a new run"
         );
     }
 

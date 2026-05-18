@@ -56,6 +56,14 @@ pub enum GateError {
     #[error("verifier cap exceeded for task {task_id} gate {gate_type}")]
     VerifierCapExceeded { task_id: String, gate_type: String },
 
+    #[error("verifier already active for task {task_id} gate {gate_type} evaluation {evaluation_sha}: {verifier_run_id}")]
+    VerifierAlreadyActive {
+        task_id: String,
+        gate_type: String,
+        evaluation_sha: String,
+        verifier_run_id: String,
+    },
+
     /// iter63-followups.md Item 2 #3 — the task's cumulative
     /// verifier wall-time has already crossed
     /// `task_verifier_total_budget_seconds`; the kernel refuses to
@@ -260,6 +268,18 @@ pub async fn evaluate_claims(
                 eprintln!(
                     "{{\"level\":\"info\",\"event\":\"VerifierCapExceeded\",\
                      \"task_id\":\"{task_id}\",\"gate_type\":\"{gate_type}\"}}",
+                );
+            }
+            Err(GateError::VerifierAlreadyActive {
+                verifier_run_id,
+                evaluation_sha,
+                ..
+            }) => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"VerifierAlreadyActive\",\
+                     \"task_id\":\"{task_id}\",\"gate_type\":\"{gate_type}\",\
+                     \"evaluation_sha\":\"{evaluation_sha}\",\
+                     \"verifier_run_id\":\"{verifier_run_id}\"}}",
                 );
             }
             Err(GateError::VerifierBudgetExhausted {

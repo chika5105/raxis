@@ -429,9 +429,9 @@ async fn handle_inner(
     // insert witness index → consume token) inside ONE
     // `conn.transaction()`. If consume reports 0 rows (token concurrently
     // expired), the entire transaction rolls back, undoing the witness
-    // INSERT. The FS blob write happens outside the mutex (it's
-    // content-addressed and idempotent — orphan blobs are harmless and
-    // detected by `witness_index::startup_check`).
+    // INSERT. The FS blob write happens after token/task/binding
+    // validation and before the SQL witness insert, so rejected
+    // submissions do not leave orphan witness blobs on disk.
     let store = ctx.store.clone();
     let witness_dir = ctx.witness_dir.clone();
     let raw_token = sub.verifier_token.clone();
@@ -457,22 +457,7 @@ async fn handle_inner(
     let presented_sha_for_closure = presented_sha.clone();
     let outcome: CommitOutcome =
         tokio::task::spawn_blocking(move || -> Result<CommitOutcome, HandlerError> {
-            // (a) FS blob write outside the transaction — content-addressed,
-            // idempotent, no SQL state to roll back if a later step fails.
-            let provisional_record = WitnessRecord {
-                verifier_run_id: String::new(),
-                evaluation_sha: presented_sha_for_closure.clone(),
-                task_id: task_id_owned.clone(),
-                gate_type: gate_type_owned.clone(),
-                result_class: result_class_for_record.clone(),
-                blob_sha256: blob_sha256_owned.clone(),
-                blob_path: blob_sha256_owned.clone(),
-                recorded_at: 0,
-            };
-            witness_index::write_blob_to_disk(&provisional_record, &body_bytes_owned, &witness_dir)
-                .map_err(|e| HandlerError::WitnessWrite(e.to_string()))?;
-
-            // (b) SQL portion — single transaction.
+            // SQL + blob portion — single validation boundary.
             let mut conn = store.lock_sync();
             let tx = conn
                 .transaction()
@@ -533,7 +518,11 @@ async fn handle_inner(
                 });
             }
 
-            // Step 3 (in-tx): insert witness index row.
+            // Step 3: write the content-addressed blob only after
+            // token/task/evaluation binding have been validated. If
+            // the write fails, the transaction rolls back and the
+            // token remains unconsumed so the verifier receives a
+            // concrete rejection instead of a half-committed witness.
             let record = WitnessRecord {
                 verifier_run_id: run_id.clone(),
                 evaluation_sha: presented_sha_for_closure.clone(),
@@ -544,11 +533,15 @@ async fn handle_inner(
                 blob_path: blob_sha256_owned,
                 recorded_at: unix_now_secs(),
             };
+            witness_index::write_blob_to_disk(&record, &body_bytes_owned, &witness_dir)
+                .map_err(|e| HandlerError::WitnessWrite(e.to_string()))?;
+
+            // Step 4 (in-tx): insert witness index row.
             witness_index::insert_witness_index_in_tx(&tx, &record, record.recorded_at)
                 .map_err(|e| HandlerError::WitnessWrite(e.to_string()))?;
 
-            // Step 4 (in-tx): consume token. If a concurrent reconcile expired
-            // it between (a) and now, this returns TokenConsumed → we propagate
+            // Step 5 (in-tx): consume token. If a concurrent reconcile expired
+            // it before this transaction, this returns TokenConsumed → we propagate
             // an Unauthorized error and the transaction is rolled back, undoing
             // the witness INSERT we just wrote. INV-INIT-08 holds.
             verifier_token::consume_verifier_token_in_tx(&tx, &raw_token).map_err(|e| {
@@ -597,10 +590,9 @@ async fn handle_inner(
     // `VerifierWitnessReceived` audit row once the witness has been
     // accepted into the SQLite-side audit chain. Pairs with the
     // `VerifierVmSpawned` row that the verifier-runner emitted at spawn
-    // time (same `verifier_run_id`). Initiative-id is left `None` here
-    // because TaskRowData does not denormalise it today; iter63 can
-    // extend the SELECT in `load_task_row_in_tx` and pass it through
-    // without touching this call site.
+    // time (same `verifier_run_id`) and carries the task's
+    // denormalised initiative id so dashboard / notification filters
+    // can group the full mechanical-verifier lifecycle.
     crate::gates::verifier_audit::emit_witness_received(
         ctx.audit.as_ref(),
         &run_id,
@@ -608,7 +600,7 @@ async fn handle_inner(
         Some(&blob_sha256),
         Some(body_bytes.len() as u64),
         Some(sub.task_id.as_str()),
-        None,
+        Some(task_row.initiative_id.as_str()),
     );
 
     // Structured audit log (full audit integration is v2; structured stderr for now).
@@ -1267,15 +1259,56 @@ async fn process_non_pass_witness(
         crate::gate_fixup::AutoAdmitOutcome::NoFixupProfile => {
             // Defensive: we already short-circuited the no-profile
             // case a few branches up. Reaching here would mean the
-            // policy snapshot rotated mid-handler. Mirror the
-            // upstream terminal-transition path so the parent
-            // doesn't dangle in `GatesPending`.
+            // policy snapshot rotated mid-handler. Fail closed so
+            // the parent does not dangle indefinitely in
+            // `GatesPending`.
             eprintln!(
                 "{{\"level\":\"warn\",\
                  \"event\":\"GateFixupAutoSpawnPolicyRaceDetected\",\
                  \"task_id\":\"{}\"}}",
                 sub.task_id.as_str(),
             );
+            let _ = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::GateRejectionTerminal {
+                    task_id: sub.task_id.as_str().to_owned(),
+                    gate_type: sub.gate_type.as_str().to_owned(),
+                    terminal_reason: "no_fixup_profile".to_owned(),
+                    attempts_used: attempts_now,
+                },
+                None,
+                Some(sub.task_id.as_str()),
+                Some(initiative_id_str.as_str()),
+            );
+            let task_id_str = sub.task_id.as_str().to_owned();
+            let store_for_transition = ctx.store.clone();
+            let audit_for_transition = ctx.audit.clone();
+            let session_id_for_audit = task_row.session_id.clone();
+            let transition_res = tokio::task::spawn_blocking(move || {
+                use crate::initiatives::task_transitions::{
+                    transition_task_with_audit, TransitionActor,
+                };
+                transition_task_with_audit(
+                    &task_id_str,
+                    TaskState::Failed,
+                    Some("gate_rejected_no_fixup_profile"),
+                    TransitionActor::Kernel,
+                    store_for_transition.as_ref(),
+                    audit_for_transition.as_ref(),
+                    session_id_for_audit.as_deref(),
+                )
+            })
+            .await
+            .map_err(|e| {
+                HandlerError::Store(format!("gate-fixup policy-race transition join: {e}"))
+            })?;
+            if let Err(e) = transition_res {
+                eprintln!(
+                    "{{\"level\":\"error\",\
+                     \"event\":\"GateFixupPolicyRaceTransitionFailed\",\
+                     \"task_id\":\"{}\",\"error\":\"{e}\"}}",
+                    sub.task_id.as_str(),
+                );
+            }
             Ok(())
         }
         crate::gate_fixup::AutoAdmitOutcome::ParentMissing
@@ -1291,6 +1324,47 @@ async fn process_non_pass_witness(
                  \"task_id\":\"{}\",\"reason\":\"{reason}\"}}",
                 sub.task_id.as_str(),
             );
+            let _ = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::GateRejectionTerminal {
+                    task_id: sub.task_id.as_str().to_owned(),
+                    gate_type: sub.gate_type.as_str().to_owned(),
+                    terminal_reason: "gate_fixup_auto_spawn_failed".to_owned(),
+                    attempts_used: attempts_now,
+                },
+                None,
+                Some(sub.task_id.as_str()),
+                Some(initiative_id_str.as_str()),
+            );
+            let task_id_str = sub.task_id.as_str().to_owned();
+            let store_for_transition = ctx.store.clone();
+            let audit_for_transition = ctx.audit.clone();
+            let session_id_for_audit = task_row.session_id.clone();
+            let transition_res = tokio::task::spawn_blocking(move || {
+                use crate::initiatives::task_transitions::{
+                    transition_task_with_audit, TransitionActor,
+                };
+                transition_task_with_audit(
+                    &task_id_str,
+                    TaskState::Failed,
+                    Some("gate_fixup_auto_spawn_failed"),
+                    TransitionActor::Kernel,
+                    store_for_transition.as_ref(),
+                    audit_for_transition.as_ref(),
+                    session_id_for_audit.as_deref(),
+                )
+            })
+            .await
+            .map_err(|e| {
+                HandlerError::Store(format!("gate-fixup auto-spawn-failed transition join: {e}"))
+            })?;
+            if let Err(e) = transition_res {
+                eprintln!(
+                    "{{\"level\":\"error\",\
+                     \"event\":\"GateFixupAutoSpawnFailedTransitionFailed\",\
+                     \"task_id\":\"{}\",\"reason\":\"{reason}\",\"error\":\"{e}\"}}",
+                    sub.task_id.as_str(),
+                );
+            }
             Ok(())
         }
     }
