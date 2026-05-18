@@ -2719,7 +2719,7 @@ fn parse_plan_orchestrator(
             reason: "[plan.initiative] `description` is empty — operator \
                      must declare what the initiative is about \
                     "
-                .to_owned(),
+            .to_owned(),
         });
     }
     if description.len() > MAX_DESCRIPTION_BYTES {
@@ -7742,10 +7742,13 @@ max_concurrent_admissions   = 7
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
-        let r =
-            approve_plan_for_test(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry)
-                .unwrap();
-        let orch_sid = r.orchestrator_session_id.expect("orchestrator session minted");
+        let r = approve_plan_for_test(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        )
+        .unwrap();
+        let orch_sid = r
+            .orchestrator_session_id
+            .expect("orchestrator session minted");
 
         let conn = store.lock_sync();
         let coordinator_session_id: Option<String> = conn

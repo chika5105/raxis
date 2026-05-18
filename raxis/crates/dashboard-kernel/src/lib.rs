@@ -729,8 +729,7 @@ impl DashboardData for KernelDashboardData {
                     ),
                     "observability_pusher" => {
                         let obs = self.policy.load().observability().clone();
-                        let card =
-                            classify_observability_pusher(&self.data_dir, &obs, now_s);
+                        let card = classify_observability_pusher(&self.data_dir, &obs, now_s);
                         (
                             card.status,
                             card.summary,
@@ -1255,9 +1254,7 @@ impl DashboardData for KernelDashboardData {
                     raxis_dashboard::data::DagGateVerdictChip {
                         gate_type: row.get(1)?,
                         latest_verdict: row.get(2)?,
-                        recorded_at: row
-                            .get::<_, i64>(3)?
-                            .max(0),
+                        recorded_at: row.get::<_, i64>(3)?.max(0),
                     },
                 ))
             })
@@ -1480,10 +1477,9 @@ impl DashboardData for KernelDashboardData {
         let mut acc: std::collections::BTreeMap<String, GateStatRow> =
             std::collections::BTreeMap::new();
         for row in rows_iter.by_ref() {
-            let (gate_type, result_class, n, last_seen) =
-                row.map_err(|e| ApiError::Internal {
-                    log_only: format!("gate_stats: scan witness row: {e}"),
-                })?;
+            let (gate_type, result_class, n, last_seen) = row.map_err(|e| ApiError::Internal {
+                log_only: format!("gate_stats: scan witness row: {e}"),
+            })?;
             let entry = acc.entry(gate_type.clone()).or_insert_with(|| GateStatRow {
                 gate_type,
                 pass_count: 0,
@@ -1656,8 +1652,8 @@ impl DashboardData for KernelDashboardData {
             })
             .map(|s| {
                 let state = session_row_state(&s);
-                let owning = owning_task_for_session(&conn, s.session_id.as_str())
-                    .unwrap_or_default();
+                let owning =
+                    owning_task_for_session(&conn, s.session_id.as_str()).unwrap_or_default();
                 let view = SessionView {
                     session_id: s.session_id,
                     role: s.role_id,
@@ -1683,7 +1679,14 @@ impl DashboardData for KernelDashboardData {
                     annotations: Vec::new(),
                     latest_annotation: None,
                 };
-                let view = enrich_session_view_with_owning_task(view, owning, None);
+                // List view stays cheap on both fallback channels:
+                // the model fallback reads ONE turn per row and the
+                // token fallback reads ALL turns per row, both of
+                // which would multiply IO by the list cap. The list
+                // surfaces what the kernel has persisted; the detail
+                // page (`get_session`) pays for the per-task ring
+                // tail and renders the richer view.
+                let view = enrich_session_view_with_owning_task(view, owning, None, None);
                 enrich_session_view_with_lifecycle(&audit_chain, view)
             })
             .collect())
@@ -1728,12 +1731,29 @@ impl DashboardData for KernelDashboardData {
         // dashboard renders a real model id even on pre-iter69
         // sessions whose `sessions.model` column is still NULL.
         // The list view skips this fallback to stay cheap.
-        let owning = owning_task_for_session(&conn, s.session_id.as_str())
-            .unwrap_or_default();
+        let owning = owning_task_for_session(&conn, s.session_id.as_str()).unwrap_or_default();
         let fallback_model = owning
             .task_id
             .as_deref()
             .and_then(|tid| latest_model_for_task(self.task_llm_capture.as_ref(), tid));
+        // iter74 — orchestrator-session token visibility. Mirror
+        // the model-fallback pattern above and lift cumulative
+        // `(input, output)` token totals from the per-task LLM
+        // turn capture when the kernel-persisted columns
+        // (`tasks.cumulative_input_tokens` /
+        // `cumulative_output_tokens`) are still zero. The
+        // orchestrator's terminal intents
+        // (`ActivateSubTask` / `RetrySubTask` /
+        // `BatchActivateSubTasks`) early-dispatch in
+        // `handle_inner` before the shared `pre_gate` runs, so
+        // the pre-gate token UPDATE never fires for orchestrator
+        // coordinator tasks; this fallback closes that gap
+        // without changing kernel admission semantics. See
+        // `cumulative_tokens_for_task` for the full rationale.
+        let fallback_tokens = owning
+            .task_id
+            .as_deref()
+            .and_then(|tid| cumulative_tokens_for_task(self.task_llm_capture.as_ref(), tid));
         let view = SessionView {
             session_id: s.session_id,
             role: s.role_id,
@@ -1758,7 +1778,8 @@ impl DashboardData for KernelDashboardData {
             annotations: Vec::new(),
             latest_annotation: None,
         };
-        let view = enrich_session_view_with_owning_task(view, owning, fallback_model);
+        let view =
+            enrich_session_view_with_owning_task(view, owning, fallback_model, fallback_tokens);
         Ok(enrich_session_view_with_lifecycle(&audit_chain, view))
     }
 
@@ -3237,8 +3258,7 @@ fn classify_observability_pusher(
     if !obs.enabled {
         return PusherHealthCard {
             status: "ok",
-            summary: "Observability disabled in policy.toml; pusher not required."
-                .to_owned(),
+            summary: "Observability disabled in policy.toml; pusher not required.".to_owned(),
             details: vec![SubsystemDetailRow {
                 label: "Policy".into(),
                 value: "[observability].enabled = false".into(),
@@ -3287,9 +3307,7 @@ fn classify_observability_pusher(
     let (status, summary, last_observed_at) = if kernel_side_fresh && pusher_ever_ran {
         (
             "ok",
-            format!(
-                "Kernel ring written {age_kernel}s ago; pusher events file present."
-            ),
+            format!("Kernel ring written {age_kernel}s ago; pusher events file present."),
             kernel_side_mtime.max(pusher_mtime),
         )
     } else if kernel_side_fresh {
@@ -3313,8 +3331,7 @@ fn classify_observability_pusher(
     } else {
         (
             "unknown",
-            "No observability segments on disk yet; kernel ring not initialised."
-                .to_owned(),
+            "No observability segments on disk yet; kernel ring not initialised.".to_owned(),
             0,
         )
     };
@@ -3826,6 +3843,87 @@ pub(crate) fn latest_model_for_task(
         .filter(|s| !s.is_empty())
 }
 
+/// iter74 — sum `usage.input_tokens` / `usage.output_tokens`
+/// across every captured LLM turn for the given task and return
+/// the totals. Mirrors the per-turn extraction in `record_to_view`:
+/// Anthropic emits `usage.input_tokens` / `usage.output_tokens`;
+/// OpenAI's `chat.completion` envelope uses
+/// `usage.prompt_tokens` / `usage.completion_tokens`; both are
+/// folded into the canonical input/output totals here.
+///
+/// Why a read-side helper rather than a kernel-side UPDATE:
+/// Orchestrator-role sessions emit terminal intents
+/// (`ActivateSubTask`, `RetrySubTask`, `BatchActivateSubTasks`)
+/// that early-dispatch in `handle_inner` BEFORE the shared
+/// `pre_gate` runs (see `kernel/src/handlers/intent.rs`, the
+/// `match req.intent_kind { ... ActivateSubTask ... }` block
+/// that returns directly into `handle_activate_sub_task` etc).
+/// Pre-gate is the ONLY place that persists
+/// `tokens_used` into `tasks.cumulative_input_tokens` /
+/// `cumulative_output_tokens`, so an orchestrator coordinator
+/// task's token columns stay at zero for the entire initiative
+/// lifecycle. Executor / Reviewer sessions are unaffected — their
+/// terminal intents (`SingleCommit`, `CompleteTask`,
+/// `ReportFailure`, `SubmitReview`) all flow through pre-gate.
+///
+/// This fallback closes the visibility gap without changing any
+/// kernel admission semantics. It also gives the dashboard
+/// "streaming" token semantics — totals refresh on every
+/// LLM-turn capture rather than only at terminal-intent time —
+/// which is what the model fallback already provides for the
+/// model id.
+///
+/// Returns `None` when the capture is unwired (read-only data
+/// dir / EROFS bind mount) or when no captured turn carries
+/// a parseable `usage.*` object — both totals being zero would
+/// be indistinguishable from "no turns yet" and would suppress
+/// the kernel-persisted values that ARE the truth for executor /
+/// reviewer sessions, so we return `None` rather than `Some((0,0))`.
+pub(crate) fn cumulative_tokens_for_task(
+    capture: Option<&Arc<TaskLlmCapture>>,
+    task_id: &str,
+) -> Option<(u64, u64)> {
+    let cap = capture?;
+    // `tail(.., usize::MAX)` is the existing all-records read path;
+    // it parses every line of the per-task JSONL ring. Cost is
+    // bounded by `TaskCaptureConfig::max_records_per_task` (today
+    // a few hundred), so even an O(N) sum here is cheap on a
+    // detail-page render and does not materially extend the
+    // session-detail handler's tail latency.
+    let recs = cap.tail(task_id, usize::MAX);
+    if recs.is_empty() {
+        return None;
+    }
+    let mut total_in: u64 = 0;
+    let mut total_out: u64 = 0;
+    let mut any_usage = false;
+    for r in &recs {
+        let Ok(body) = serde_json::from_str::<serde_json::Value>(&r.body) else {
+            continue;
+        };
+        let Some(usage) = body.get("usage").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        any_usage = true;
+        let in_tok = usage
+            .get("input_tokens")
+            .or_else(|| usage.get("prompt_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let out_tok = usage
+            .get("output_tokens")
+            .or_else(|| usage.get("completion_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        total_in = total_in.saturating_add(in_tok);
+        total_out = total_out.saturating_add(out_tok);
+    }
+    if !any_usage {
+        return None;
+    }
+    Some((total_in, total_out))
+}
+
 /// iter69 — fold the `owning_task_for_session` projection plus
 /// (optionally) a fallback model from the LLM turn capture into
 /// a partially-built `SessionView`. The fields touched are the
@@ -3846,6 +3944,7 @@ pub(crate) fn enrich_session_view_with_owning_task(
     mut view: raxis_dashboard::data::SessionView,
     owning_task: SessionOwningTask,
     fallback_model: Option<String>,
+    fallback_tokens: Option<(u64, u64)>,
 ) -> raxis_dashboard::data::SessionView {
     if view.initiative_id.is_none() {
         view.initiative_id = owning_task.initiative_id;
@@ -3858,6 +3957,25 @@ pub(crate) fn enrich_session_view_with_owning_task(
     }
     if view.output_tokens == 0 {
         view.output_tokens = owning_task.output_tokens;
+    }
+    // iter74 — orchestrator-session token visibility fallback.
+    //
+    // Apply ONLY when BOTH `input_tokens` and `output_tokens` are
+    // still zero. Either pre-populated (kernel-persisted via the
+    // pre-gate UPDATE) value sticks: the LLM-turn-capture sum has
+    // a different semantic than the kernel's per-intent stamp
+    // (the latter is the planner's running-total snapshot at
+    // terminal-submit time, the former is a per-turn aggregate),
+    // and Mixing the two would silently inflate the dashboard's
+    // reported totals on hybrid paths. Pairs with
+    // `cumulative_tokens_for_task` above — see the rationale
+    // doc-comment there for the orchestrator early-dispatch gap
+    // this closes.
+    if view.input_tokens == 0 && view.output_tokens == 0 {
+        if let Some((in_tok, out_tok)) = fallback_tokens {
+            view.input_tokens = in_tok;
+            view.output_tokens = out_tok;
+        }
     }
     if view.model.is_none() {
         view.model = fallback_model;
@@ -4963,11 +5081,7 @@ mod tests {
     #[test]
     fn pusher_card_is_ok_when_observability_is_disabled_in_policy() {
         let tmp = tempfile::tempdir().unwrap();
-        let card = classify_observability_pusher(
-            tmp.path(),
-            &disabled_obs_config(),
-            1_700_000_000,
-        );
+        let card = classify_observability_pusher(tmp.path(), &disabled_obs_config(), 1_700_000_000);
         assert_eq!(card.status, "ok");
         assert!(card.summary.contains("disabled in policy"));
         assert_eq!(card.last_observed_at, 1_700_000_000);
@@ -5207,7 +5321,7 @@ mod tests {
             output_tokens: 567,
         };
         let fallback_model = Some("claude-3-5-sonnet".into());
-        let out = enrich_session_view_with_owning_task(view, owning, fallback_model);
+        let out = enrich_session_view_with_owning_task(view, owning, fallback_model, None);
         assert_eq!(out.initiative_id.as_deref(), Some("init-a"));
         assert_eq!(out.task_id.as_deref(), Some("task-a"));
         assert_eq!(out.input_tokens, 1234);
@@ -5247,7 +5361,7 @@ mod tests {
             output_tokens: 567,
         };
         let fallback_model = Some("claude-3-5-sonnet".into());
-        let out = enrich_session_view_with_owning_task(view, owning, fallback_model);
+        let out = enrich_session_view_with_owning_task(view, owning, fallback_model, None);
         // All five pre-populated fields must stick.
         assert_eq!(out.initiative_id.as_deref(), Some("init-existing"));
         assert_eq!(out.task_id.as_deref(), Some("task-existing"));
@@ -5273,8 +5387,8 @@ mod tests {
     #[test]
     fn latest_model_for_task_lifts_body_model_from_latest_turn() {
         let tmp = tempfile::tempdir().unwrap();
-        let cap = crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default())
-            .unwrap();
+        let cap =
+            crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default()).unwrap();
         let body = serde_json::json!({
             "model": "claude-3-5-sonnet-20241022",
             "role": "assistant",
@@ -5303,8 +5417,8 @@ mod tests {
     #[test]
     fn latest_model_for_task_returns_none_when_body_is_non_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let cap = crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default())
-            .unwrap();
+        let cap =
+            crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default()).unwrap();
         let rec = crate::LlmTurnRecord {
             at_ms: 100,
             task_id: "task-a".into(),
@@ -5321,5 +5435,227 @@ mod tests {
         };
         cap.append("task-a", rec).unwrap();
         assert!(latest_model_for_task(Some(&cap), "task-a").is_none());
+    }
+
+    // ── iter74 — `cumulative_tokens_for_task` read-side fallback ────────
+
+    /// Helper for the iter74 token-fallback tests below: build an
+    /// Anthropic-shaped response body carrying `usage.input_tokens`
+    /// / `usage.output_tokens`.
+    fn anthropic_turn_body(in_tok: u64, out_tok: u64) -> String {
+        serde_json::json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "role": "assistant",
+            "usage": {"input_tokens": in_tok, "output_tokens": out_tok},
+        })
+        .to_string()
+    }
+
+    /// Same as `anthropic_turn_body` but with the OpenAI
+    /// `chat.completion`-style field names. The helper folds both
+    /// shapes onto the canonical `(input, output)` totals.
+    fn openai_turn_body(prompt: u64, completion: u64) -> String {
+        serde_json::json!({
+            "model": "gpt-4o",
+            "role": "assistant",
+            "usage": {"prompt_tokens": prompt, "completion_tokens": completion},
+        })
+        .to_string()
+    }
+
+    fn mk_rec(body: String, at_ms: u64) -> crate::LlmTurnRecord {
+        crate::LlmTurnRecord {
+            at_ms,
+            task_id: "task-a".into(),
+            session_id: Some("sess-a".into()),
+            fetch_id: format!("f{at_ms}"),
+            status_code: Some(200),
+            latency_ms: 10,
+            request_body: String::new(),
+            body,
+            body_truncated: false,
+            original_body_bytes: 0,
+            error: None,
+            agent_role: None,
+        }
+    }
+
+    /// `cumulative_tokens_for_task` returns `None` (not `Some((0,0))`)
+    /// when the capture is unwired so callers can distinguish
+    /// "no fallback available" from "fallback was zero" — the
+    /// enrichment treats `None` as "preserve kernel-persisted
+    /// value" and `Some((0,0))` would have the same effect but
+    /// would also paper over a future bug that drops kernel
+    /// writes silently.
+    #[test]
+    fn cumulative_tokens_for_task_returns_none_when_capture_is_unwired() {
+        assert!(cumulative_tokens_for_task(None, "task-a").is_none());
+    }
+
+    /// No turns captured yet → `None`. Distinct from "captured
+    /// turn that lacked a usage object" so the helper does not
+    /// pretend visibility it does not have.
+    #[test]
+    fn cumulative_tokens_for_task_returns_none_when_no_turns_captured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap =
+            crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default()).unwrap();
+        assert!(cumulative_tokens_for_task(Some(&cap), "task-never-seen").is_none());
+    }
+
+    /// Two Anthropic-shape turns: the helper sums both
+    /// `input_tokens` and `output_tokens`. This is the dominant
+    /// real-world path — every orchestrator session today
+    /// terminates through the Anthropic-backed planner.
+    #[test]
+    fn cumulative_tokens_for_task_sums_anthropic_usage_across_all_turns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap =
+            crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default()).unwrap();
+        cap.append("task-a", mk_rec(anthropic_turn_body(100, 50), 1))
+            .unwrap();
+        cap.append("task-a", mk_rec(anthropic_turn_body(200, 75), 2))
+            .unwrap();
+        let (in_tok, out_tok) = cumulative_tokens_for_task(Some(&cap), "task-a").unwrap();
+        assert_eq!(in_tok, 300);
+        assert_eq!(out_tok, 125);
+    }
+
+    /// The dispatch-loop fold sums both Anthropic
+    /// (`input_tokens` / `output_tokens`) and OpenAI
+    /// (`prompt_tokens` / `completion_tokens`) shapes onto the
+    /// canonical channels. Both must contribute to the
+    /// dashboard's `(input, output)` totals.
+    #[test]
+    fn cumulative_tokens_for_task_handles_mixed_provider_shapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap =
+            crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default()).unwrap();
+        cap.append("task-a", mk_rec(anthropic_turn_body(10, 5), 1))
+            .unwrap();
+        cap.append("task-a", mk_rec(openai_turn_body(20, 15), 2))
+            .unwrap();
+        let (in_tok, out_tok) = cumulative_tokens_for_task(Some(&cap), "task-a").unwrap();
+        assert_eq!(in_tok, 30);
+        assert_eq!(out_tok, 20);
+    }
+
+    /// Non-JSON or `usage`-less turns are skipped without
+    /// poisoning the running total. The helper still surfaces
+    /// the parseable turns' contributions.
+    #[test]
+    fn cumulative_tokens_for_task_skips_malformed_turns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap =
+            crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default()).unwrap();
+        cap.append("task-a", mk_rec("not json at all".into(), 1))
+            .unwrap();
+        cap.append(
+            "task-a",
+            mk_rec(serde_json::json!({"model": "x"}).to_string(), 2),
+        )
+        .unwrap();
+        cap.append("task-a", mk_rec(anthropic_turn_body(7, 3), 3))
+            .unwrap();
+        let (in_tok, out_tok) = cumulative_tokens_for_task(Some(&cap), "task-a").unwrap();
+        assert_eq!(in_tok, 7);
+        assert_eq!(out_tok, 3);
+    }
+
+    /// Captured turns that ALL lack a `usage` object → `None`
+    /// rather than `Some((0,0))`. Pre-iter74 callers that
+    /// pre-populated `view.input_tokens` from the kernel-persisted
+    /// `tasks` row MUST not see the fallback overwrite a real
+    /// zero (which can be legitimate for a session that
+    /// short-circuited before any LLM turn fired); pairing
+    /// `Some((0,0))` with the `view.input_tokens == 0 &&
+    /// view.output_tokens == 0` enrichment guard would be a
+    /// no-op, but returning `None` is semantically clearer.
+    #[test]
+    fn cumulative_tokens_for_task_returns_none_when_no_turn_carries_usage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap =
+            crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default()).unwrap();
+        cap.append(
+            "task-a",
+            mk_rec(
+                serde_json::json!({"model": "x", "role": "assistant"}).to_string(),
+                1,
+            ),
+        )
+        .unwrap();
+        assert!(cumulative_tokens_for_task(Some(&cap), "task-a").is_none());
+    }
+
+    /// End-to-end of the orchestrator-session token-visibility
+    /// fix: `view.input_tokens == 0` AND `owning_task.input_tokens
+    /// == 0` (the orchestrator coordinator's kernel-persisted
+    /// columns are stuck at zero because the orchestrator's
+    /// terminal intents early-dispatch past `pre_gate`) — the
+    /// fold must lift the LLM-turn-capture sum into the view so
+    /// the dashboard renders real numbers.
+    #[test]
+    fn enrich_session_view_with_owning_task_uses_token_fallback_when_kernel_zero() {
+        let view = raxis_dashboard::data::SessionView {
+            session_id: "sess-a".into(),
+            role: "Orchestrator".into(),
+            initiative_id: None,
+            task_id: None,
+            state: "Active".into(),
+            provider: None,
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            created_at: 100,
+            updated_at: 200,
+            failure: None,
+            annotations: Vec::new(),
+            latest_annotation: None,
+        };
+        let owning = SessionOwningTask {
+            initiative_id: Some("init-a".into()),
+            task_id: Some("task-coordinator".into()),
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+        let out = enrich_session_view_with_owning_task(view, owning, None, Some((9_999, 4_321)));
+        assert_eq!(out.input_tokens, 9_999);
+        assert_eq!(out.output_tokens, 4_321);
+    }
+
+    /// Executor/Reviewer sessions DO get kernel-persisted token
+    /// columns. The fallback must NOT overwrite them, even when
+    /// the capture sum disagrees — the kernel-side value carries
+    /// the planner's running-total snapshot at terminal-submit
+    /// time and is the authoritative billing surface.
+    #[test]
+    fn enrich_session_view_with_owning_task_preserves_kernel_persisted_tokens() {
+        let view = raxis_dashboard::data::SessionView {
+            session_id: "sess-a".into(),
+            role: "Executor".into(),
+            initiative_id: None,
+            task_id: None,
+            state: "Active".into(),
+            provider: None,
+            model: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            created_at: 100,
+            updated_at: 200,
+            failure: None,
+            annotations: Vec::new(),
+            latest_annotation: None,
+        };
+        let owning = SessionOwningTask {
+            initiative_id: Some("init-a".into()),
+            task_id: Some("task-a".into()),
+            input_tokens: 1_111,
+            output_tokens: 222,
+        };
+        // Owning-task contribution should land first; the
+        // fallback then sees a non-zero view and stays out.
+        let out = enrich_session_view_with_owning_task(view, owning, None, Some((9_999, 4_321)));
+        assert_eq!(out.input_tokens, 1_111);
+        assert_eq!(out.output_tokens, 222);
     }
 }

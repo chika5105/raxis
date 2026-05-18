@@ -180,6 +180,21 @@ pub fn require_disk_hygiene() {
 /// via `RAXIS_BOOT_REAP_AVF_ORPHANS=1` (TODO — not yet wired into
 /// the kernel binary; tracked alongside this helper for symmetry).
 ///
+/// **Co-tenant VMM exclusion.** The Virtualization.framework XPC
+/// binary (`com.apple.Virtualization.VirtualMachine.xpc`) is shared
+/// by every framework consumer on the host — including Docker
+/// Desktop (`com.docker.virtualization`), Xcode simulators, and any
+/// other developer-tool VMM. Killing those XPCs out from under their
+/// parent VMM crashes that VMM ("Internal Virtualization error.
+/// The virtual machine stopped unexpectedly."), which on a dev host
+/// running iter73 manifests as the live-e2e Docker compose stack
+/// becoming unreachable within ~30 s of the reaper firing. We
+/// therefore walk each candidate XPC's ancestry and skip any whose
+/// parent chain leads back to a known co-tenant VMM, only reaping
+/// XPCs that are either parented to launchd directly (true orphans
+/// from a SIGKILL'd raxis-kernel) or descended from a `raxis-*`
+/// process. iter73 regression — see `specs/v3/avf-orphan-reaper-cotenant-skip.md`.
+///
 /// On non-macOS hosts this is a no-op.
 pub fn reap_avf_orphan_vms() {
     #[cfg(target_os = "macos")]
@@ -193,9 +208,7 @@ pub fn reap_avf_orphan_vms() {
         let pgrep = match Command::new("/usr/bin/pgrep").args(["-f", NEEDLE]).output() {
             Ok(o) => o,
             Err(e) => {
-                eprintln!(
-                    "[realism-e2e] AVF-orphan reaper: pgrep unavailable ({e}); skipping",
-                );
+                eprintln!("[realism-e2e] AVF-orphan reaper: pgrep unavailable ({e}); skipping",);
                 return;
             }
         };
@@ -205,13 +218,42 @@ pub fn reap_avf_orphan_vms() {
             eprintln!("[realism-e2e] AVF-orphan reaper: no orphan VMs found");
             return;
         }
-        let mut pids: Vec<u32> = Vec::new();
+        let mut candidate_pids: Vec<u32> = Vec::new();
         for line in String::from_utf8_lossy(&pgrep.stdout).lines() {
             if let Ok(pid) = line.trim().parse::<u32>() {
-                pids.push(pid);
+                candidate_pids.push(pid);
             }
         }
+        if candidate_pids.is_empty() {
+            return;
+        }
+
+        // Partition into (orphan, cotenant) by walking each XPC's
+        // ancestry. An XPC is a true orphan iff its parent chain
+        // does NOT pass through any of the known cotenant VMMs
+        // before terminating at launchd (pid 1).
+        let mut pids: Vec<u32> = Vec::new();
+        let mut skipped: Vec<(u32, String)> = Vec::new();
+        for &pid in &candidate_pids {
+            match ancestor_cotenant_vmm_macos(pid) {
+                Some(owner) => skipped.push((pid, owner)),
+                None => pids.push(pid),
+            }
+        }
+        if !skipped.is_empty() {
+            eprintln!(
+                "[realism-e2e] AVF-orphan reaper: skipped {} co-tenant VM XPC \
+                 process(es) owned by other VMMs (skipped={skipped:?})",
+                skipped.len(),
+            );
+        }
         if pids.is_empty() {
+            eprintln!(
+                "[realism-e2e] AVF-orphan reaper: no raxis-attributable \
+                 orphan VMs found ({} candidate(s) all belonged to co-tenant \
+                 VMMs)",
+                candidate_pids.len(),
+            );
             return;
         }
         eprintln!(
@@ -235,10 +277,14 @@ pub fn reap_avf_orphan_vms() {
             .ok();
         if let Some(v) = verify {
             if v.status.success() {
-                let surviving: Vec<String> = String::from_utf8_lossy(&v.stdout)
+                // Re-apply the co-tenant filter so we only WARN
+                // about XPCs that we actually tried to kill but
+                // failed — co-tenant VMMs (Docker, etc.) are
+                // expected to still be running.
+                let surviving: Vec<u32> = String::from_utf8_lossy(&v.stdout)
                     .lines()
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| s.trim().parse::<u32>().ok())
+                    .filter(|pid| ancestor_cotenant_vmm_macos(*pid).is_none())
                     .collect();
                 if !surviving.is_empty() {
                     eprintln!(
@@ -261,6 +307,86 @@ pub fn reap_avf_orphan_vms() {
         // through the normal kernel-side `wait4` path. No orphan
         // class equivalent to AVF XPC has been observed on Linux.
     }
+}
+
+/// Identifies the co-tenant VMM (if any) that "owns" an
+/// AVF `com.apple.Virtualization.VirtualMachine.xpc` process by
+/// inspecting the files it has open.
+///
+/// Returns `Some(owner_label)` if `pid`'s open-file set contains a
+/// path fragment that uniquely identifies a known co-tenant VMM's
+/// disk image, kernel image, or boot image; or `None` when no
+/// match — which is the signature of a raxis-attributable AVF
+/// orphan.
+///
+/// **Why open files, not the parent chain.** macOS XPC services
+/// are launched via `xpcproxy`/launchd, so the AVF VM XPC is
+/// **always** parented to launchd (pid 1) regardless of who
+/// requested it. Walking ppid is therefore useless: Docker's XPC
+/// and a SIGKILL'd-raxis-kernel's leftover XPC are both
+/// indistinguishable parent-chain-wise. The actual disk and boot
+/// images opened by the XPC, however, live under VMM-private
+/// directories (e.g. `Library/Containers/com.docker.docker/` for
+/// Docker Desktop) and are visible to `lsof -p`.
+///
+/// The needle list is intentionally narrow: we only suppress
+/// reaping for VMMs we have actually observed colliding with
+/// iter73 on developer hosts. Adding a new cotenant should require
+/// a fresh regression report — see
+/// `specs/v3/avf-orphan-reaper-cotenant-skip.md`.
+#[cfg(target_os = "macos")]
+fn ancestor_cotenant_vmm_macos(pid: u32) -> Option<String> {
+    use std::process::Command;
+    // Substrings that uniquely identify a co-tenant VMM's
+    // private disk/boot artefacts. Matching on file paths instead
+    // of process metadata is robust against XPC re-parenting.
+    const COTENANT_PATH_NEEDLES: &[(&str, &str)] = &[
+        ("/Library/Containers/com.docker.docker/", "docker-desktop"),
+        ("/Applications/Docker.app/", "docker-desktop"),
+        ("/Library/Developer/CoreSimulator/", "xcode-simulator"),
+        (
+            "/Applications/Xcode.app/Contents/Developer/Platforms/",
+            "xcode-simulator",
+        ),
+        ("/Applications/Tart.app/", "tart"),
+        ("/Library/Application Support/com.utmapp.UTM/", "utm"),
+        ("/Applications/OrbStack.app/", "orbstack"),
+        // ColIma/Lima/podman-machine use AVF too; their VM images
+        // live under ~/.lima or ~/.colima.
+        ("/.lima/", "lima"),
+        ("/.colima/", "colima"),
+    ];
+    let lsof = match Command::new("/usr/sbin/lsof")
+        // -p PID, -F n = field-mode names only (one per line),
+        // -a = AND the filters, -d ^cwd,^rtd,^txt = skip the
+        // working-dir / root-dir / text segment so we don't
+        // false-positive on a Docker VM that opened
+        // /Applications/Docker.app as its CWD.
+        .args(["-p", &pid.to_string(), "-Fn"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return None,
+    };
+    // lsof exits non-zero when the pid has no matching fds or has
+    // died between pgrep and lsof — both cases we treat as "no
+    // discriminating info" and fall through to None so the caller
+    // applies its normal reap policy.
+    let stdout = String::from_utf8_lossy(&lsof.stdout);
+    for line in stdout.lines() {
+        // -Fn produces lines like "n/path/to/file"; skip header
+        // lines starting with 'p' (pid) or 'c' (command).
+        let path = match line.strip_prefix('n') {
+            Some(p) => p,
+            None => continue,
+        };
+        for (needle, owner) in COTENANT_PATH_NEEDLES {
+            if path.contains(needle) {
+                return Some((*owner).to_owned());
+            }
+        }
+    }
+    None
 }
 
 /// Underlying probe — split out so unit tests can drive it with a
@@ -1007,9 +1133,30 @@ pub fn spawn_kernel_normal(
     use std::process::{Command as ProcCommand, Stdio};
     use std::sync::{Arc, Mutex};
 
-    let mut child = ProcCommand::new(kernel_bin)
-        .env("RAXIS_DATA_DIR", &data_dir)
-        .env("RAXIS_INSTALL_DIR", install_dir)
+    // iter73 follow-up — shrink the planner-IPC idle watchdog
+    // from the 900 s production default to 300 s (5 min) for the
+    // extended-e2e harness. iter73's executor wedge (BUG-B in
+    // `specs/v3/iter73-networking-dry-run-trace.md`) sat in the
+    // 15-minute "dead-zone" of the production watchdog, which is
+    // an entire iteration loop for an interactive operator.
+    // The 5-minute threshold is still well above the legitimate
+    // worst-case orchestrator turn (LLM responses regularly take
+    // 30-60 s; a worst-case 4-minute reasoning pass still fits)
+    // so it cannot false-positive on slow-but-honest sessions.
+    // Production callers (real kernels, not the harness) inherit
+    // the 900 s default unchanged via
+    // `PLANNER_IPC_IDLE_TIMEOUT_DEFAULT_SECS` so the safety
+    // contract on customer deployments is unchanged.
+    // Operator override (`RAXIS_PLANNER_IPC_IDLE_TIMEOUT_SECS=N`
+    // in the harness's parent env) still wins — the harness only
+    // sets the var if it is not already set.
+    let mut cmd = ProcCommand::new(kernel_bin);
+    cmd.env("RAXIS_DATA_DIR", &data_dir)
+        .env("RAXIS_INSTALL_DIR", install_dir);
+    if std::env::var_os("RAXIS_PLANNER_IPC_IDLE_TIMEOUT_SECS").is_none() {
+        cmd.env("RAXIS_PLANNER_IPC_IDLE_TIMEOUT_SECS", "300");
+    }
+    let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -2404,8 +2551,7 @@ pub fn poll_for_dual_lifecycle_completion(
         // `RootfsErofs`) leaves the test waiting the full
         // [`realistic_lifecycle_deadline`] for an event that will
         // never arrive.
-        if let Some(failure) = tail.scan_for_terminal_spawn_failure(&stderr_path, &initiative_ids)
-        {
+        if let Some(failure) = tail.scan_for_terminal_spawn_failure(&stderr_path, &initiative_ids) {
             let stderr_tail = std::fs::read_to_string(&stderr_path)
                 .ok()
                 .map(|s| {
@@ -3261,7 +3407,10 @@ mod tests {
             "already-scanned failure must not re-fire on the next poll iteration; \
              got {hit:?}",
         );
-        assert_eq!(tail.offset, stable, "cursor must not advance with no new bytes");
+        assert_eq!(
+            tail.offset, stable,
+            "cursor must not advance with no new bytes"
+        );
     }
 
     /// Log rotation / truncation: the file shrinks below the cursor.
@@ -3579,12 +3728,8 @@ mod tests {
     #[test]
     fn examples_policy_carries_no_secret_strings_gate() {
         let path = realism_workspace_root().join("live-e2e/examples/policy.toml");
-        let body = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            panic!(
-                "read examples policy.toml at {}: {e}",
-                path.display(),
-            )
-        });
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read examples policy.toml at {}: {e}", path.display(),));
         let v: toml::Value = toml::from_str(&body).unwrap_or_else(|e| {
             panic!(
                 "parse examples policy.toml at {} as TOML: {e}",
@@ -3746,8 +3891,8 @@ mod tests {
             );
         }
         // The block MUST parse as a valid TOML fragment.
-        let parsed: toml::Value = toml::from_str(&gate_block)
-            .expect("runtime gate block must parse as TOML");
+        let parsed: toml::Value =
+            toml::from_str(&gate_block).expect("runtime gate block must parse as TOML");
         let gates = parsed
             .get("gates")
             .and_then(|g| g.as_array())

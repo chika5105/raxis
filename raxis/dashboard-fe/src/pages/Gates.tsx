@@ -87,14 +87,12 @@ export function GatesPage() {
   // Hooks MUST run on every render — keep these above the
   // early-return guards below, otherwise React's Rules of Hooks
   // bites on the first error/loading repaint.
-  const witnessRows = witnesses.data ?? [];
-  const filteredWitnesses = useMemo(
-    () =>
-      gateParam.length > 0
-        ? witnessRows.filter((w) => w.gate_type === gateParam)
-        : witnessRows,
-    [gateParam, witnessRows],
-  );
+  const filteredWitnesses = useMemo(() => {
+    const witnessRows = witnesses.data ?? [];
+    return gateParam.length > 0
+      ? witnessRows.filter((w) => w.gate_type === gateParam)
+      : witnessRows;
+  }, [gateParam, witnesses.data]);
   const witnessCounts = useMemo(
     () => summariseWitnesses(filteredWitnesses),
     [filteredWitnesses],
@@ -136,7 +134,7 @@ export function GatesPage() {
         <p className="text-[11px] text-ink-subtle max-w-md">
           A gate is flagged when every failure spawned a fixup loop
           (<code className="font-mono">fixup_loop_count ≥ fail_count</code>).
-          That's the cue to revisit the verifier author or raise the budget.
+          That&apos;s the cue to revisit the verifier author or raise the budget.
         </p>
       </header>
 
@@ -523,6 +521,7 @@ function summariseWitnesses(rows: WitnessView[]) {
 /// not carry a synthetic id, so we composite the verifier run +
 /// gate + recorded_at (the underlying tuple uniqueness in
 /// `witness_records`). Kept exported for the Vitest suite.
+// eslint-disable-next-line react-refresh/only-export-components
 export function witnessKey(w: WitnessView): string {
   return `${w.verifier_run_id}-${w.gate_type}-${w.recorded_at}`;
 }

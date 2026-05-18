@@ -302,10 +302,7 @@ mod tests {
             Some("Operator-supplied repair instructions go here."),
             "NoSecretStrings",
         );
-        assert_eq!(
-            r.critique,
-            "Operator-supplied repair instructions go here."
-        );
+        assert_eq!(r.critique, "Operator-supplied repair instructions go here.");
         assert_eq!(r.tier, ResolvedTier::OperatorDefault);
         assert_eq!(r.fallback_reason, Some("absent"));
     }

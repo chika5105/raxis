@@ -1,6 +1,6 @@
 // `<TaskLlmTurns>` — the per-task LLM-turn panel.
 //
-// Consumes `GET /api/tasks/:task_id/llm-turns?n=N` and
+// Consumes `GET /api/tasks/:task_id/llm-turns?limit=N` and
 // renders one collapsible card per turn with:
 //
 //   * Turn number + timestamp + model + role

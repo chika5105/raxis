@@ -164,7 +164,9 @@ async fn run() -> Result<(), PlannerError> {
     // `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` — scrub the
     // session token and sister sensitive env vars from the
     // process environment now that `BootContext::from_process`
-    // has consumed them into `ctx.env`. The orchestrator
+    // has captured the session token into `ctx.env`. The scrubber
+    // also keeps an in-process snapshot for the driver; `run_role_session`
+    // reduces that snapshot to a fixed runtime allowlist. The orchestrator
     // dispatches HTTP fetches via `PlannerFetchRequest` over the
     // kernel-IPC vsock (not the in-VM tproxy), so the only
     // legitimate post-boot reader of `RAXIS_SESSION_TOKEN` is the

@@ -202,12 +202,10 @@ impl DepFetchEvidenceWitness {
     /// without re-running the load.
     fn parse_evidence(&self) -> Result<EvidenceFile, String> {
         let path = self.absolute_evidence_path();
-        let bytes = std::fs::read(&path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
         let v: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| format!("parse {} as JSON: {e}", path.display()))?;
-        EvidenceFile::from_json(&v)
-            .map_err(|e| format!("evidence {} shape: {e}", path.display()))
+        EvidenceFile::from_json(&v).map_err(|e| format!("evidence {} shape: {e}", path.display()))
     }
 
     /// Count `TproxyAdmissionGranted` events that match this
@@ -251,10 +249,7 @@ impl DepFetchEvidenceWitness {
                         .as_deref()
                         .is_some_and(|h| ALLOWED_HOSTS.contains(&h)) =>
                 {
-                    Some((
-                        ev.seq,
-                        host_or_sni.unwrap_or_else(|| "<no-sni>".to_owned()),
-                    ))
+                    Some((ev.seq, host_or_sni.unwrap_or_else(|| "<no-sni>".to_owned())))
                 }
                 _ => None,
             })
@@ -389,9 +384,7 @@ impl EvidenceFile {
 
 impl PipInstallEvidence {
     fn from_json(v: &serde_json::Value) -> Result<Self, String> {
-        let obj = v
-            .as_object()
-            .ok_or("`pip_install` is not a JSON object")?;
+        let obj = v.as_object().ok_or("`pip_install` is not a JSON object")?;
         let success = obj
             .get("success")
             .and_then(|x| x.as_bool())
@@ -402,9 +395,10 @@ impl PipInstallEvidence {
             .ok_or("missing or non-array `pip_install.installed`")?;
         let mut installed = Vec::with_capacity(installed_raw.len());
         for (idx, row) in installed_raw.iter().enumerate() {
-            installed.push(PipInstallEntry::from_json(row).map_err(|e| {
-                format!("`pip_install.installed[{idx}]`: {e}")
-            })?);
+            installed.push(
+                PipInstallEntry::from_json(row)
+                    .map_err(|e| format!("`pip_install.installed[{idx}]`: {e}"))?,
+            );
         }
         Ok(Self { success, installed })
     }
@@ -494,9 +488,7 @@ impl EnforcementWitness for DepFetchEvidenceWitness {
                 if !pip.success || pip.installed.is_empty() {
                     return false;
                 }
-                pip.installed
-                    .iter()
-                    .any(|e| e.name == PIP_PACKAGE_NAME)
+                pip.installed.iter().any(|e| e.name == PIP_PACKAGE_NAME)
             }
             Err(_) => false,
         }
@@ -783,7 +775,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_synthetic_evidence(tmp.path()).expect("smoke evidence");
         let w = witness_for(tmp.path(), "sess-exec-1");
-        let chain = vec![grant(10, "sess-someone-else", Some(TARGET_HOST), TARGET_PORT)];
+        let chain = vec![grant(
+            10,
+            "sess-someone-else",
+            Some(TARGET_HOST),
+            TARGET_PORT,
+        )];
         assert!(!w.satisfied_by(&chain));
     }
 

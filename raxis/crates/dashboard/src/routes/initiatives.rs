@@ -138,10 +138,7 @@ where
             title: t.title.clone(),
             state: t.state.clone(),
             is_active: t.is_active,
-            gate_verdict_summary: chip_map
-                .get(&t.task_id)
-                .cloned()
-                .unwrap_or_default(),
+            gate_verdict_summary: chip_map.get(&t.task_id).cloned().unwrap_or_default(),
         })
         .collect();
     Ok(Json(DagView {

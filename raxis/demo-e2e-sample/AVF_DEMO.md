@@ -176,7 +176,18 @@ atomically writes the binary to the canonical layout.
 If you already have a compatible `vmlinux` for `aarch64`:
 
 ```bash
-cargo xtask images dev-kernel --from-file /path/to/vmlinux-aarch64-virt
+cargo xtask images dev-kernel \
+  --from-file /path/to/vmlinux-aarch64-virt \
+  --config /path/to/linux/.config
+```
+
+`dev-kernel` validates the supplied `.config` (or an embedded
+`CONFIG_IKCONFIG` blob / sidecar `vmlinux.config`) before staging the
+kernel. The staged layout is:
+
+```text
+$RAXIS_INSTALL_DIR/kernel/vmlinux
+$RAXIS_INSTALL_DIR/kernel/vmlinux.config
 ```
 
 ### §5.1 — Required kernel `CONFIG_*` flags (READ BEFORE choosing a kernel)
@@ -212,6 +223,30 @@ least the following config flags `=y`:
 | `CONFIG_FUSE_FS` + `CONFIG_VIRTIO_FS` | Workspace + meta-sidecar shares (`/workspace`, `/raxis-meta`). |
 | `CONFIG_BLK_DEV_INITRD`               | Initramfs `RootfsInitramfsCpio` path (the dev pipeline). |
 | `CONFIG_TMPFS`                        | The unpacker mounts the cpio.gz contents into a tmpfs rootfs. |
+
+Path A3 executor egress also requires built-in nftables NAT support
+for the in-guest `iptables-nft` REDIRECT chain. These flags are
+validated by `cargo xtask images dev-kernel` and `cargo xtask images
+bake` under `INV-GUEST-KERNEL-A3-NFTABLES-01`:
+
+| Flag                                  | Why                                                  |
+|---------------------------------------|------------------------------------------------------|
+| `CONFIG_NETFILTER`                    | Netfilter core.                                      |
+| `CONFIG_NETFILTER_NETLINK`            | nfnetlink control plane used by nftables generation-id queries. |
+| `CONFIG_NF_TABLES`                    | nftables core.                                       |
+| `CONFIG_NF_TABLES_INET` or `CONFIG_NF_TABLES_IPV4` | Family support used by `iptables-nft`.              |
+| `CONFIG_NF_CONNTRACK`                 | Connection tracking required by NAT.                 |
+| `CONFIG_NF_NAT`                       | NAT core.                                            |
+| `CONFIG_NFT_NAT`                      | nftables NAT expression.                             |
+| `CONFIG_NFT_REDIR`                    | nftables REDIRECT expression for the tproxy chain.   |
+| `CONFIG_NFT_CHAIN_NAT`                | Base NAT chain support for the `nat OUTPUT` hook.    |
+
+The canonical fragment lives at
+`images/kernel/raxis-guest-a3-netfilter.config`; merge it into your
+kernel `.config` with Linux's `scripts/kconfig/merge_config.sh` or an
+equivalent defconfig flow before building. These options must be `=y`,
+not `=m`, because the canonical initramfs does not stage kernel
+modules.
 
 **Firecracker reference kernels (the docs/getting-started kernels)
 DO NOT satisfy this list.** They ship with `CONFIG_VIRTIO_MMIO=y` and
@@ -267,7 +302,8 @@ takes:
 # mandatory and the subcommand refuses to install on mismatch.
 cargo xtask images dev-kernel \
     --url    "https://mirrors.kernel.org/fedora/releases/<rel>/Everything/aarch64/os/images/pxeboot/vmlinuz" \
-    --sha256 "<hex sha256 of the file>"
+    --sha256 "<hex sha256 of the file>" \
+    --config "<matching Fedora kernel .config>"
 ```
 
 Verify:

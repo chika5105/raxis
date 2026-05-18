@@ -3994,18 +3994,21 @@ dependencies = [
 name = "raxis-session-spawn"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.2.17",
  "parking_lot",
  "raxis-audit-tools",
  "raxis-credential-proxy-manager",
  "raxis-credentials",
  "raxis-credentials-file",
  "raxis-egress-admission",
+ "raxis-ipc",
  "raxis-isolation",
  "raxis-observability",
  "raxis-plan-credentials",
  "raxis-store",
  "raxis-test-support",
  "raxis-tproxy-protocol",
+ "raxis-types",
  "raxis-vsock-loopback",
  "rusqlite",
  "serde",
@@ -4014,6 +4017,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -6384,10 +6384,7 @@ mod tests {
         assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
 
         let mut stmt = conn
-            .prepare(&format!(
-                "PRAGMA table_info({})",
-                Table::Sessions.as_str()
-            ))
+            .prepare(&format!("PRAGMA table_info({})", Table::Sessions.as_str()))
             .unwrap();
         // PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
         let cols: Vec<(String, String, i64, Option<String>)> = stmt
@@ -6444,10 +6441,7 @@ mod tests {
         assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
 
         let mut stmt = conn
-            .prepare(&format!(
-                "PRAGMA table_info({})",
-                Table::Sessions.as_str()
-            ))
+            .prepare(&format!("PRAGMA table_info({})", Table::Sessions.as_str()))
             .unwrap();
         let names: Vec<String> = stmt
             .query_map([], |r| r.get::<_, String>(1))

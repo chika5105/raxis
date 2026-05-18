@@ -41,9 +41,9 @@ fn fixture_kernel_data() -> (Arc<KernelDashboardData>, Arc<Store>, TempDir) {
     let data_dir: PathBuf = dir.path().join("kernel-data");
     std::fs::create_dir_all(data_dir.join("audit")).unwrap();
     let store = Arc::new(Store::open(&data_dir.join("kernel.db")).expect("open kernel.db"));
-    let policy = Arc::new(ArcSwap::new(Arc::new(PolicyBundle::for_tests_with_operators(
-        Vec::new(),
-    ))));
+    let policy = Arc::new(ArcSwap::new(Arc::new(
+        PolicyBundle::for_tests_with_operators(Vec::new()),
+    )));
     let policy_path = data_dir.join("policy.toml");
     let data = Arc::new(
         KernelDashboardData::new(
@@ -163,12 +163,44 @@ fn gate_stats_empty_kernel_returns_empty_array_with_generated_at() {
 fn gate_stats_aggregates_across_classes_and_orders_alphabetically() {
     let (data, store, _td) = fixture_kernel_data();
     // NoSecretStrings: 2 Pass + 1 Fail across two tasks.
-    seed_witness(&store, "task-a", "init-1", "NoSecretStrings", "Pass", 100, "r-1");
-    seed_witness(&store, "task-b", "init-1", "NoSecretStrings", "Pass", 150, "r-2");
-    seed_witness(&store, "task-c", "init-1", "NoSecretStrings", "Fail", 200, "r-3");
+    seed_witness(
+        &store,
+        "task-a",
+        "init-1",
+        "NoSecretStrings",
+        "Pass",
+        100,
+        "r-1",
+    );
+    seed_witness(
+        &store,
+        "task-b",
+        "init-1",
+        "NoSecretStrings",
+        "Pass",
+        150,
+        "r-2",
+    );
+    seed_witness(
+        &store,
+        "task-c",
+        "init-1",
+        "NoSecretStrings",
+        "Fail",
+        200,
+        "r-3",
+    );
     // SchemaValid: 1 Pass + 1 Inconclusive.
     seed_witness(&store, "task-d", "init-1", "SchemaValid", "Pass", 50, "r-4");
-    seed_witness(&store, "task-e", "init-1", "SchemaValid", "Inconclusive", 75, "r-5");
+    seed_witness(
+        &store,
+        "task-e",
+        "init-1",
+        "SchemaValid",
+        "Inconclusive",
+        75,
+        "r-5",
+    );
 
     let resp = data.gate_stats().expect("gate_stats");
     assert_eq!(
@@ -206,7 +238,15 @@ fn gate_stats_surfaces_fixup_loop_counter_even_without_witness_rows() {
     // A witness row to anchor the gate on the rollup AND a
     // separate task that bumped `gate_fixup_attempts` after a
     // verifier-crash path (no witness landed).
-    seed_witness(&store, "task-w", "init-2", "NoSecretStrings", "Fail", 300, "r-w");
+    seed_witness(
+        &store,
+        "task-w",
+        "init-2",
+        "NoSecretStrings",
+        "Fail",
+        300,
+        "r-w",
+    );
     mark_fixup_attempts(&store, "task-w", "NoSecretStrings", 2);
 
     // A second task whose verifier ran but never recorded a
@@ -229,7 +269,12 @@ fn gate_stats_surfaces_fixup_loop_counter_even_without_witness_rows() {
     }
 
     let resp = data.gate_stats().expect("gate_stats");
-    assert_eq!(resp.gates.len(), 1, "one distinct gate, got {:?}", resp.gates);
+    assert_eq!(
+        resp.gates.len(),
+        1,
+        "one distinct gate, got {:?}",
+        resp.gates
+    );
     let row = &resp.gates[0];
     assert_eq!(row.gate_type, "NoSecretStrings");
     assert_eq!(row.fail_count, 1, "the single Fail witness counts once");

@@ -407,8 +407,7 @@ mod tests {
     #[test]
     fn no_worktree_when_session_unknown() {
         let disk = DiskStore::new();
-        let decision =
-            gc_session_worktree(disk.store(), disk.data_dir(), "ghost-session").unwrap();
+        let decision = gc_session_worktree(disk.store(), disk.data_dir(), "ghost-session").unwrap();
         assert_eq!(decision, WorktreeGcDecision::NoWorktree);
     }
 
@@ -416,8 +415,7 @@ mod tests {
     fn no_worktree_when_column_null() {
         let disk = DiskStore::new();
         seed_session(disk.store(), "sess-orphan", None);
-        let decision =
-            gc_session_worktree(disk.store(), disk.data_dir(), "sess-orphan").unwrap();
+        let decision = gc_session_worktree(disk.store(), disk.data_dir(), "sess-orphan").unwrap();
         assert_eq!(decision, WorktreeGcDecision::NoWorktree);
     }
 
@@ -536,13 +534,7 @@ mod tests {
         let head_sha = init_git_repo_with_one_commit(&wt);
         seed_initiative(disk.store(), "init-pregc", 0);
         seed_session(disk.store(), session_id, Some(&wt));
-        seed_task_with_base_sha(
-            disk.store(),
-            "t-pregc",
-            "init-pregc",
-            session_id,
-            &head_sha,
-        );
+        seed_task_with_base_sha(disk.store(), "t-pregc", "init-pregc", session_id, &head_sha);
 
         let decision = gc_session_worktree(disk.store(), disk.data_dir(), session_id).unwrap();
         assert!(matches!(decision, WorktreeGcDecision::Removed { .. }));

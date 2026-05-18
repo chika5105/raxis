@@ -649,14 +649,7 @@ async fn handle_inner(
     // planner does not mistake "non-Pass recorded" for "all gates
     // cleared, you may advance".
     if result_class != ResultClass::Pass {
-        process_non_pass_witness(
-            &sub,
-            &run_id,
-            &presented_sha,
-            &task_row,
-            ctx,
-        )
-        .await?;
+        process_non_pass_witness(&sub, &run_id, &presented_sha, &task_row, ctx).await?;
         eprintln!(
             "{{\"level\":\"info\",\"event\":\"WitnessNonPass\",\
              \"task_id\":\"{}\",\"result_class\":\"{}\"}}",
@@ -1199,9 +1192,7 @@ async fn process_non_pass_witness(
             })
             .await
             .map_err(|e| {
-                HandlerError::Store(format!(
-                    "gate-fixup budget-exhausted transition join: {e}"
-                ))
+                HandlerError::Store(format!("gate-fixup budget-exhausted transition join: {e}"))
             })?;
             if let Err(e) = transition_res {
                 eprintln!(
@@ -1231,9 +1222,7 @@ async fn process_non_pass_witness(
         | crate::gate_fixup::AutoAdmitOutcome::SqlError(_) => {
             let reason = match &outcome {
                 crate::gate_fixup::AutoAdmitOutcome::SqlError(s) => s.clone(),
-                crate::gate_fixup::AutoAdmitOutcome::ParentMissing => {
-                    "parent_missing".to_owned()
-                }
+                crate::gate_fixup::AutoAdmitOutcome::ParentMissing => "parent_missing".to_owned(),
                 _ => unreachable!(),
             };
             eprintln!(
@@ -1287,19 +1276,24 @@ fn load_task_row_in_tx(
     task_id: &str,
 ) -> Result<TaskRowData, HandlerError> {
     conn.query_row(
-        &format!("SELECT state, evaluation_sha, base_sha, session_id, lane_id, initiative_id \
-                    FROM {TASKS} WHERE task_id = ?1"),
+        &format!(
+            "SELECT state, evaluation_sha, base_sha, session_id, lane_id, initiative_id \
+                    FROM {TASKS} WHERE task_id = ?1"
+        ),
         rusqlite::params![task_id],
-        |row| Ok(TaskRowData {
-            state:          row.get(0)?,
-            evaluation_sha: row.get(1)?,
-            base_sha:       row.get(2)?,
-            session_id:     row.get(3)?,
-            worktree_root:  None, // resolved via session join below
-            lane_id:        row.get(4)?,
-            initiative_id:  row.get(5)?,
-        }),
-    ).map_err(|e| match e {
+        |row| {
+            Ok(TaskRowData {
+                state: row.get(0)?,
+                evaluation_sha: row.get(1)?,
+                base_sha: row.get(2)?,
+                session_id: row.get(3)?,
+                worktree_root: None, // resolved via session join below
+                lane_id: row.get(4)?,
+                initiative_id: row.get(5)?,
+            })
+        },
+    )
+    .map_err(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => HandlerError::InvalidTask {
             task_id: task_id.to_owned(),
         },

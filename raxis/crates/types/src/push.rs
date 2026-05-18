@@ -150,7 +150,6 @@ pub enum KernelPush {
     /// consistent. The parameter set (`task_id` only) matches the
     /// wire shape stipulated by §14 line 588 verbatim.
     SubTaskSecurityViolation { task_id: TaskId },
-
 }
 
 // ---------------------------------------------------------------------------

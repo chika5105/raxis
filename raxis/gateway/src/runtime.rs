@@ -17,7 +17,7 @@ use raxis_ipc::message::GatewayMessage;
 use raxis_ipc::{read_frame, write_frame, FrameError};
 use thiserror::Error;
 use tokio::net::UnixStream;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 
 use crate::backend::Backend;
 use crate::dispatch::handle_fetch_request;
@@ -94,7 +94,8 @@ pub async fn run_gateway_with_backend(
     // BOOT_ERR equivalent in the kernel log.
     let policy_view =
         load_policy_view(&env.data_dir).map_err(GatewayRunError::InitialPolicyLoad)?;
-    let view_slot: Arc<RwLock<Option<PolicyView>>> = Arc::new(RwLock::new(Some(policy_view)));
+    let view_slot: Arc<RwLock<Option<Arc<PolicyView>>>> =
+        Arc::new(RwLock::new(Some(Arc::new(policy_view))));
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"policy_view_loaded\",\
@@ -140,9 +141,23 @@ pub async fn run_gateway_with_backend(
          \"token_fingerprint\":\"{token_fp}\"}}",
     );
 
+    let (mut reader, mut writer) = stream.into_split();
+    let (response_tx, mut response_rx) = mpsc::unbounded_channel::<GatewayMessage>();
+    tokio::spawn(async move {
+        while let Some(resp) = response_rx.recv().await {
+            if let Err(e) = write_frame(&mut writer, &resp).await {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"gateway_response_write_failed\",\
+                     \"error\":\"{e}\"}}"
+                );
+                return;
+            }
+        }
+    });
+
     // Step 4: dispatch loop.
     loop {
-        let msg: GatewayMessage = match read_frame(&mut stream).await {
+        let msg: GatewayMessage = match read_frame(&mut reader).await {
             Ok(m) => m,
             Err(FrameError::Eof) => {
                 eprintln!("{{\"level\":\"info\",\"event\":\"kernel_disconnected_clean\"}}");
@@ -160,14 +175,25 @@ pub async fn run_gateway_with_backend(
         match msg {
             // ── FetchRequest → dispatch → FetchResponse ─────────────────
             req @ GatewayMessage::FetchRequest { .. } => {
-                let view_guard = view_slot.read().await;
-                let view_ref: Option<&PolicyView> = view_guard.as_ref();
-                let resp =
-                    handle_fetch_request(req, &env.gateway_token, view_ref, backend.as_ref()).await;
-                drop(view_guard);
-                if let Err(e) = write_frame(&mut stream, &resp).await {
-                    return Err(GatewayRunError::FrameWrite(format!("{e}")));
-                }
+                let view_snapshot = view_slot.read().await.clone();
+                let gateway_token = env.gateway_token.clone();
+                let backend = Arc::clone(&backend);
+                let response_tx = response_tx.clone();
+                tokio::spawn(async move {
+                    let resp = handle_fetch_request(
+                        req,
+                        &gateway_token,
+                        view_snapshot.as_deref(),
+                        backend.as_ref(),
+                    )
+                    .await;
+                    if response_tx.send(resp).is_err() {
+                        eprintln!(
+                            "{{\"level\":\"debug\",\"event\":\"gateway_response_dropped\",\
+                             \"reason\":\"kernel_disconnected\"}}"
+                        );
+                    }
+                });
             }
 
             // ── EpochAdvanced → reload policy_view ──────────────────────
@@ -181,7 +207,7 @@ pub async fn run_gateway_with_backend(
                         let mut slot = view_slot.write().await;
                         let old_epoch = slot.as_ref().map(|v| v.epoch).unwrap_or(0);
                         let new_epoch = new_view.epoch;
-                        *slot = Some(new_view);
+                        *slot = Some(Arc::new(new_view));
                         eprintln!(
                             "{{\"level\":\"info\",\"event\":\"policy_view_reloaded\",\
                              \"old_epoch\":{old_epoch},\"new_epoch\":{new_epoch}}}"

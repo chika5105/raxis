@@ -44,6 +44,14 @@ a network call. Output lands at
 hash, and the Ed25519 signature binding the bundle hash to the kernel
 signing key.
 
+The guest kernel is validated before bake output is produced. Path A3
+requires built-in nftables NAT/REDIRECT support for `iptables-nft`;
+`cargo xtask images bake` therefore verifies the staged vmlinux's
+embedded `IKCONFIG`, sidecar `vmlinux.config`, or explicit
+`--kernel-config <.config>` against
+`images/kernel/raxis-guest-a3-netfilter.config` and stages the
+validated config at `$RAXIS_INSTALL_DIR/kernel/vmlinux.config`.
+
 > **The host kernel must be rebuilt against the SAME signing key.**
 > `cargo xtask images bake` signs the manifests with the secret half
 > living at `<workspace>/.git/info/raxis-signing-key/sk.hex` (or the

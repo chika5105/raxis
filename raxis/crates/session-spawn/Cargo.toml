@@ -21,6 +21,13 @@ raxis-credential-proxy-manager = { path = "../credential-proxy-manager" }
 # loopback (dev) or vsock (V2 GA).
 raxis-egress-admission  = { path = "../egress-admission" }
 
+# Path A3 executor egress: the guest DNS stub / tproxy speak
+# IpcMessage frames over per-VM vsock-loopback listeners registered
+# by this composer.
+raxis-ipc               = { workspace = true }
+raxis-types             = { workspace = true }
+raxis-tproxy-protocol   = { path = "../tproxy-protocol" }
+
 # Plan-level credential declarations (the input the spawn service
 # consumes when building a SpawnRequest).
 raxis-plan-credentials  = { path = "../plan-credentials" }
@@ -58,11 +65,12 @@ tokio       = { workspace = true }
 tracing     = "0.1"
 thiserror   = { workspace = true }
 parking_lot = "0.12"
+getrandom   = { workspace = true }
+uuid        = { workspace = true }
 
 [dev-dependencies]
 raxis-test-support      = { path = "../test-support" }
 raxis-credentials-file  = { workspace = true }
-raxis-tproxy-protocol   = { path = "../tproxy-protocol" }
 # iter65 stateless-cap regression suite (`INV-KERNEL-STATELESS-VM-
 # CONCURRENCY-CAP-01`). The `active_count_reads_db_*.rs` tests seed
 # `sessions` rows directly via raw SQL to drive the cap-admission

@@ -349,8 +349,14 @@ fn read_gate_fixup_context(
     // Pull the fixup row.
     // (is_gate_fixup, parent_gate_failure_task_id, parent_gate_failure_type,
     //  last_gate_critique, last_gate_type, gate_fixup_attempts)
-    type FixupChildRow =
-        (i64, Option<String>, Option<String>, Option<String>, Option<String>, i64);
+    type FixupChildRow = (
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+    );
     let row: Result<FixupChildRow, rusqlite::Error> = conn.query_row(
         &format!(
             "SELECT is_gate_fixup, \
@@ -362,14 +368,29 @@ fn read_gate_fixup_context(
                FROM {tasks} WHERE task_id = ?1"
         ),
         rusqlite::params![task_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        },
     );
-    let (is_gate_fixup, parent_id_opt, parent_gate_type_opt, _last_critique, last_gate_type, _attempts) =
-        match row {
-            Ok(t) => t,
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-            Err(e) => return Err(e),
-        };
+    let (
+        is_gate_fixup,
+        parent_id_opt,
+        parent_gate_type_opt,
+        _last_critique,
+        last_gate_type,
+        _attempts,
+    ) = match row {
+        Ok(t) => t,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e),
+    };
     if is_gate_fixup == 0 {
         return Ok(None);
     }
@@ -458,9 +479,7 @@ fn read_gate_fixup_context(
     // `INV-GATE-FIXUP-BUDGET-KERNEL-ENFORCED-01`.
     let parent_attempts: i64 = conn
         .query_row(
-            &format!(
-                "SELECT COALESCE(gate_fixup_attempts, 0) FROM {tasks} WHERE task_id = ?1"
-            ),
+            &format!("SELECT COALESCE(gate_fixup_attempts, 0) FROM {tasks} WHERE task_id = ?1"),
             rusqlite::params![&parent_id],
             |r| r.get(0),
         )
@@ -971,8 +990,7 @@ fn assemble_capabilities(
                 // the KSB renderable while the bigger problem
                 // (missing plan registry entry) surfaces elsewhere.
                 .unwrap_or(3);
-            let active_count =
-                read_active_subtask_activations_count(conn, inputs.initiative_id)?;
+            let active_count = read_active_subtask_activations_count(conn, inputs.initiative_id)?;
             let headroom = cap.saturating_sub(active_count);
             let concurrency = ConcurrencyCapabilityView {
                 cap,
@@ -2242,7 +2260,8 @@ mod tests {
         let rendered = raxis_ksb::render_ksb(&snap).expect("render");
         for line in rendered.lines() {
             assert!(
-                !(line.trim_start().starts_with(&format!("- {init} ")) && line.contains(" preds_ready=")),
+                !(line.trim_start().starts_with(&format!("- {init} "))
+                    && line.contains(" preds_ready=")),
                 "rendered DAG block MUST NOT contain a row for the \
                  synthetic coordinator (`task_id == initiative_id`); \
                  offending line: {line:?}; full render:\n{rendered}",
@@ -2404,10 +2423,8 @@ mod tests {
         .expect("snapshot");
         drop(conn);
 
-        let raxis_ksb::Capabilities::Orchestrator(o) = snap
-            .capabilities
-            .as_ref()
-            .expect("capabilities present")
+        let raxis_ksb::Capabilities::Orchestrator(o) =
+            snap.capabilities.as_ref().expect("capabilities present")
         else {
             panic!("expected orchestrator capabilities");
         };
@@ -2790,10 +2807,7 @@ mod tests {
         )
         .unwrap();
         let ctx = read_gate_fixup_context(&conn, "task-plain").unwrap();
-        assert!(
-            ctx.is_none(),
-            "non-fixup task MUST surface gate_fixup=None"
-        );
+        assert!(ctx.is_none(), "non-fixup task MUST surface gate_fixup=None");
     }
 
     /// Happy path: a fixup task whose parent carries the witness

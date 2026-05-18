@@ -225,26 +225,23 @@ async fn handle_udp_query(
     // into a wire SERVFAIL (RCODE=2) response so libc returns
     // EAI_FAIL (-4) deterministically and the agent's tool gets
     // a fast, structured error to react to.
-    let response = match build_response_for_query(pkt, host_cid, admission_port, session_token)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!(
-                "raxis-tproxy(A3 dns): udp query failed, emitting SERVFAIL: {e}"
-            );
-            match build_servfail_from_query(pkt) {
-                Some(r) => r,
-                // Question section was unparseable — even
-                // SERVFAIL needs the qname echoed, so fall back
-                // to dropping the packet. libc will time out
-                // but this branch only fires on truly malformed
-                // wire input, which a libc resolver should never
-                // produce.
-                None => return Err(e),
+    let response =
+        match build_response_for_query(pkt, host_cid, admission_port, session_token).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("raxis-tproxy(A3 dns): udp query failed, emitting SERVFAIL: {e}");
+                match build_servfail_from_query(pkt) {
+                    Some(r) => r,
+                    // Question section was unparseable — even
+                    // SERVFAIL needs the qname echoed, so fall back
+                    // to dropping the packet. libc will time out
+                    // but this branch only fires on truly malformed
+                    // wire input, which a libc resolver should never
+                    // produce.
+                    None => return Err(e),
+                }
             }
-        }
-    };
+        };
     // Truncate per RFC1035 if the response exceeds the UDP cap.
     let to_send = if response.len() > MAX_UDP_PAYLOAD {
         truncate_response(&response)
@@ -274,20 +271,17 @@ async fn handle_tcp_connection(
     sock.read_exact(&mut pkt).await?;
     // Same SERVFAIL fallback as the UDP path — never silently
     // drop a query that the libc resolver is waiting on.
-    let response = match build_response_for_query(&pkt, host_cid, admission_port, session_token)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!(
-                "raxis-tproxy(A3 dns): tcp query failed, emitting SERVFAIL: {e}"
-            );
-            match build_servfail_from_query(&pkt) {
-                Some(r) => r,
-                None => return Err(e),
+    let response =
+        match build_response_for_query(&pkt, host_cid, admission_port, session_token).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("raxis-tproxy(A3 dns): tcp query failed, emitting SERVFAIL: {e}");
+                match build_servfail_from_query(&pkt) {
+                    Some(r) => r,
+                    None => return Err(e),
+                }
             }
-        }
-    };
+        };
     let resp_len = (response.len() as u16).to_be_bytes();
     sock.write_all(&resp_len).await?;
     sock.write_all(&response).await?;
@@ -318,7 +312,7 @@ fn build_servfail_response(q: &ParsedQuery) -> Vec<u8> {
         | (opcode << 11)
         | (rd << 8)
         | 0x0080                              // RA
-        | 0x0002;                             // SERVFAIL
+        | 0x0002; // SERVFAIL
     out.extend_from_slice(&flags_out.to_be_bytes());
     out.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
     out.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT

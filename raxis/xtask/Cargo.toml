@@ -27,6 +27,12 @@ rand          = "0.8"
 # operator pinned for the staged guest-kernel binary. Workspace-pinned
 # so all crates in the tree resolve to one transitive sha2 version.
 sha2          = { workspace = true }
+# Used by `cargo xtask images dev-kernel` / `images bake` to extract
+# an embedded Linux `IKCONFIG` blob from vmlinux when validating the
+# guest kernel's required A3 nftables/netfilter support. Workspace-
+# pinned so xtask uses the same rust-backed codec as the initramfs
+# builder.
+flate2        = { workspace = true }
 # `cargo xtask images dev-stage` + `build-all` consume the typed
 # manifest builder + initramfs writer to produce the macOS-hermetic
 # dev pipeline output (signed initramfs cpio.gz blobs under
@@ -71,14 +77,6 @@ rusqlite     = { workspace = true }
 tempfile     = "3"
 
 [dev-dependencies]
-# `flate2` is used in the `images.rs` cpio multi-archive witnesses
-# (`inv_image_cpio_multi_archive_preserved_01_*`) to gunzip the
-# `pack_initramfs` output back to raw cpio so the test can count
-# `TRAILER!!!` occurrences. `raxis-initramfs-builder` already pulls
-# `flate2` as a workspace transitive dep, so this declaration just
-# exposes it to the xtask test crate (no new transitive dep).
-flate2       = "1"
-
 # `filetime` is used in the `images.rs` stale-cache-guard witnesses
 # (`inv_image_bake_no_stale_cache_01_*`) to set deterministic mtimes
 # on test scaffold files. The witnesses need to inject ordering

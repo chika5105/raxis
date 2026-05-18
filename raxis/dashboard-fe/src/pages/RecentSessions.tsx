@@ -49,7 +49,7 @@ export function RecentSessionsPage() {
           <p className="text-sm text-ink-muted">
             Bounded ring of the most-recent {PAGE_LIMIT} sessions, including
             revoked + expired rows. The active Sessions list drops these — see
-            the "Lifecycle" column for why each session ended.
+            the &quot;Lifecycle&quot; column for why each session ended.
           </p>
         </div>
       </header>

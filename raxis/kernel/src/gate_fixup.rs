@@ -396,9 +396,7 @@ mod tests {
 
         let attempts: i64 = conn
             .query_row(
-                &format!(
-                    "SELECT gate_fixup_attempts FROM {tasks_t} WHERE task_id = ?1"
-                ),
+                &format!("SELECT gate_fixup_attempts FROM {tasks_t} WHERE task_id = ?1"),
                 rusqlite::params!["parent-1"],
                 |r| r.get(0),
             )
@@ -444,9 +442,7 @@ mod tests {
         let tasks_t = Table::Tasks.as_str();
         let attempts: i64 = conn
             .query_row(
-                &format!(
-                    "SELECT gate_fixup_attempts FROM {tasks_t} WHERE task_id = ?1"
-                ),
+                &format!("SELECT gate_fixup_attempts FROM {tasks_t} WHERE task_id = ?1"),
                 rusqlite::params!["parent-1"],
                 |r| r.get(0),
             )

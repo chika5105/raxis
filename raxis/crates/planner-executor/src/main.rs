@@ -391,15 +391,13 @@ async fn run() -> Result<(), PlannerError> {
 
     // `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` — scrub the
     // session token and sister sensitive env vars from the
-    // process environment now that `BootContext::from_process`
-    // has consumed them into `ctx.env`. The dispatch loop below
-    // passes `ctx.env.clone()` into `run_role_session`, so the
-    // legitimate consumer (kernel-IPC handshake, vsock listener
-    // tasks already kicked off pre-runtime) keeps its values
-    // by-value. The first `BashTool` / `SubprocessTool` child
-    // process the agent spawns now inherits a scrubbed env via
-    // `Command::spawn`, defanging the most common token-recovery
-    // vector (`bash -lc env | grep RAXIS_`).
+    // process environment now that the listener tasks have cloned
+    // their A3 credentials and `BootContext::from_process` has
+    // captured the session token into `ctx.env`. The scrubber also
+    // keeps an in-process snapshot for the driver; `run_role_session`
+    // reduces that snapshot to a fixed runtime allowlist, while the
+    // first `BashTool` / `SubprocessTool` child process inherits the
+    // scrubbed env via `Command::spawn`.
     scrub_sensitive_env_for_agent();
 
     let outcome = run_role_session(ctx.role, ctx.args.clone(), ctx.env.clone())

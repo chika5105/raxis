@@ -28,16 +28,21 @@
 //!   bring-up is covered separately by the kernel supervisor's
 //!   spawn-on-boot smoke (`kernel/tests/...`).
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use raxis_gateway::backend::{BackendRequest, BackendResponse};
 use raxis_gateway::{parse_gateway_env, run_gateway_with_backend, Backend};
 use raxis_ipc::message::{FetchKind, GatewayMessage};
 use raxis_ipc::{read_frame, write_frame};
 use raxis_test_support::MockBackend;
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use uuid::Uuid;
 
 const GATEWAY_TOKEN: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
@@ -185,6 +190,57 @@ impl Drop for FakeKernel {
     }
 }
 
+#[derive(Debug)]
+struct BlockingFirstBackend {
+    calls: AtomicUsize,
+    first_seen_tx: Mutex<Option<oneshot::Sender<()>>>,
+    release_first_rx: Arc<AsyncMutex<Option<oneshot::Receiver<()>>>>,
+}
+
+impl BlockingFirstBackend {
+    fn new(first_seen_tx: oneshot::Sender<()>, release_first_rx: oneshot::Receiver<()>) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            first_seen_tx: Mutex::new(Some(first_seen_tx)),
+            release_first_rx: Arc::new(AsyncMutex::new(Some(release_first_rx))),
+        }
+    }
+}
+
+impl Backend for BlockingFirstBackend {
+    fn call<'a>(
+        &'a self,
+        _req: BackendRequest<'a>,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<BackendResponse, raxis_gateway::BackendError>> + Send + 'a>,
+    > {
+        let call_idx = self.calls.fetch_add(1, Ordering::SeqCst);
+        let first_seen_tx = if call_idx == 0 {
+            self.first_seen_tx.lock().unwrap().take()
+        } else {
+            None
+        };
+        let release_first_rx = Arc::clone(&self.release_first_rx);
+        Box::pin(async move {
+            if let Some(tx) = first_seen_tx {
+                let _ = tx.send(());
+                let rx = release_first_rx
+                    .lock()
+                    .await
+                    .take()
+                    .expect("first call owns release receiver");
+                let _ = rx.await;
+            }
+            Ok(BackendResponse {
+                status_code: 200,
+                headers: vec![("content-type".to_owned(), "application/json".to_owned())],
+                body: b"{\"mock\":true}".to_vec(),
+                latency_ms: 1,
+            })
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Test utilities
 // ---------------------------------------------------------------------------
@@ -288,6 +344,81 @@ async fn gateway_handshakes_then_returns_mock_response_for_allowed_url() {
 
     // Drop the kernel side to signal EOF; gateway run-future should
     // resolve `Ok(())` cleanly.
+    drop(stream);
+    drop(kernel);
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("gateway exited within 5s")
+        .expect("gateway task did not panic");
+    result.expect("run_gateway returned Ok on clean disconnect");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gateway_dispatches_later_fetch_while_first_backend_call_is_blocked() {
+    let data_dir = build_data_dir();
+    let kernel = FakeKernel::bind();
+
+    let (first_seen_tx, first_seen_rx) = oneshot::channel();
+    let (release_first_tx, release_first_rx) = oneshot::channel();
+    let backend: Arc<dyn Backend> =
+        Arc::new(BlockingFirstBackend::new(first_seen_tx, release_first_rx));
+    let task = spawn_gateway(
+        kernel.socket_path.clone(),
+        data_dir.path().to_owned(),
+        backend,
+    );
+
+    let (mut stream, _addr) = kernel.listener.accept().await.expect("accept");
+    drain_handshake(&mut stream).await;
+
+    let slow_req = ok_request("https://api.anthropic.com/v1/messages");
+    let slow_id = match &slow_req {
+        GatewayMessage::FetchRequest { fetch_id, .. } => *fetch_id,
+        _ => unreachable!(),
+    };
+    write_frame(&mut stream, &slow_req).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), first_seen_rx)
+        .await
+        .expect("first backend call started")
+        .expect("first_seen sender dropped");
+
+    let fast_req = ok_request("https://api.anthropic.com/v1/messages");
+    let fast_id = match &fast_req {
+        GatewayMessage::FetchRequest { fetch_id, .. } => *fetch_id,
+        _ => unreachable!(),
+    };
+    write_frame(&mut stream, &fast_req).await.unwrap();
+
+    let resp: GatewayMessage =
+        tokio::time::timeout(Duration::from_secs(2), read_frame(&mut stream))
+            .await
+            .expect("second fetch response should not wait behind the first")
+            .expect("read fast response");
+    match resp {
+        GatewayMessage::FetchResponse {
+            fetch_id,
+            status_code,
+            error,
+            ..
+        } => {
+            assert_eq!(fetch_id, fast_id);
+            assert_eq!(status_code, Some(200));
+            assert!(error.is_none(), "expected success, got error={error:?}");
+        }
+        other => panic!("expected FetchResponse for fast request, got {other:?}"),
+    }
+
+    let _ = release_first_tx.send(());
+    let resp: GatewayMessage =
+        tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream))
+            .await
+            .expect("released first fetch response")
+            .expect("read slow response");
+    match resp {
+        GatewayMessage::FetchResponse { fetch_id, .. } => assert_eq!(fetch_id, slow_id),
+        other => panic!("expected FetchResponse for slow request, got {other:?}"),
+    }
+
     drop(stream);
     drop(kernel);
     let result = tokio::time::timeout(Duration::from_secs(5), task)

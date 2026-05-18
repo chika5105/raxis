@@ -566,7 +566,34 @@ loop. The function iterates over `SENSITIVE_ENV_VARS_TO_SCRUB`
 (`RAXIS_AIRGAP_A3_*`, `RAXIS_KERNEL_VSOCK_LISTEN_PORT`,
 `RAXIS_PLANNER_TASK_PROMPT[_PATH]`, `RAXIS_SESSION_TOKEN`) and
 removes each from the process environment via
-`std::env::remove_var`.
+`std::env::remove_var`. **Critically**, it ALSO snapshots each
+removed value into a process-local `OnceLock`
+(`SCRUBBED_ENV_SNAPSHOT`) so subsequent in-process readers — most
+notably `driver::run_role_session_with_env_fn`, which reads
+`RAXIS_KERNEL_VSOCK_LISTEN_PORT` to configure the kernel
+transport and `RAXIS_PLANNER_TASK_PROMPT[_PATH]` to source the
+seed prompt — can still resolve the value via
+`read_scrubbed_env_snapshot`. The snapshot is in-process Rust
+memory unreachable from a spawned child (a `bash` subprocess
+cannot invoke a Rust function), so the security boundary is
+identical: `Command::spawn` still inherits a scrubbed `std::env`,
+while planner-driver code that needs the values gets them
+through the snapshot-first env-reader closure installed in
+`run_role_session`.
+
+**iter73 regression note:** an earlier version of this defense
+removed values from `std::env` only, without the snapshot. The
+`run_role_session_with_env_fn` env-reader closure
+(`|k| std::env::var(k).ok()`) then resolved every scrubbed key to
+`None`, so `read_task_prompt` returned `None`,
+`run_role_session` returned `DriverOutcome::Scaffold`, and the
+planner entered `park_on_signal().await` indefinitely. The
+substrate-visible symptom was a 30 s vsock CONNECT timeout
+because no listener ever bound. The snapshot-fallback closure
+fixes this without weakening V6 — see
+`crates/planner-core/src/driver.rs::run_role_session` and the
+`read_scrubbed_env_snapshot` docstring in
+`crates/planner-core/src/guest_init.rs`.
 
 Critical ordering invariant: the in-guest tproxy +
 DNS-stub-spawning tasks (`activate_airgap_a3_chokepoint` in

@@ -10,6 +10,7 @@ mod dev_kernel;
 mod dev_keys;
 mod dev_prereqs;
 mod dev_reset;
+mod guest_kernel_config;
 mod hygiene;
 mod hygiene_install;
 mod images;

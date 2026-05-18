@@ -643,7 +643,16 @@ workaround. The driver:
    resulting SHA-256 in every per-role integrity manifest so a
    kernel rotation forces a full rebake.
    (`INV-IMAGE-BAKE-VMLINUX-STAGED-01`.)
-3. **Bakes every selected role.** Per role:
+3. **Validates the guest kernel config** and stages it at
+   `<install_dir>/kernel/vmlinux.config`. The validator accepts an
+   explicit `--kernel-config <.config>`, a sidecar
+   `vmlinux.config`, or an embedded `CONFIG_IKCONFIG` blob, then
+   requires built-in nftables NAT/REDIRECT support for Path A3's
+   `iptables-nft` REDIRECT chain. The canonical fragment is
+   `images/kernel/raxis-guest-a3-netfilter.config`, and all required
+   options must be built in (`=y`) because the initramfs does not
+   stage kernel modules. (`INV-GUEST-KERNEL-A3-NFTABLES-01`.)
+4. **Bakes every selected role.** Per role:
    `bake-rootfs` (only for roles whose `Containerfile` carries
    an OS-tooling stack — today, `executor-starter`) →
    `dev-stage` → `build-all`. Roles whose prior integrity
@@ -652,7 +661,7 @@ workaround. The driver:
    SHAs are short-circuited with a `bake_role_no_op` log line.
    Re-running bake on an unchanged tree is a fast no-op.
    (`INV-IMAGE-BAKE-MANIFEST-INTEGRITY-01`.)
-4. **Writes the per-role integrity manifest** at
+5. **Writes the per-role integrity manifest** at
    `<install_dir>/images/<artefact_stem>-<kver>.bake.json`. The
    manifest records every input SHA (Containerfile,
    `manifest.toml`, staged planner binary, signing-key

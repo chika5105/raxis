@@ -2090,9 +2090,9 @@ mod tests {
                          classify as `gate_fixup`, not `{field}`"
                     );
                 }
-                other => panic!(
-                    "expected DelimiterInjection on gate_fixup.{field_name}, got {other:?}"
-                ),
+                other => {
+                    panic!("expected DelimiterInjection on gate_fixup.{field_name}, got {other:?}")
+                }
             }
         }
     }

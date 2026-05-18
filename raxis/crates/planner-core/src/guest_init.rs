@@ -589,6 +589,41 @@ pub fn init_pid1_filesystem() {
     {
         if std::process::id() == 1 {
             linux::mount_pid1_essentials();
+            // iter73 regression: the Linux kernel hands /init only
+            // `HOME=/ TERM=linux` from the AVF substrate boot-args
+            // and the cmdline-env token does not carry PATH either.
+            // Musl libc's `execvp` then falls back to a default
+            // search path of `/usr/local/bin:/bin:/usr/bin` — which
+            // does NOT include `/usr/sbin`, where Debian ships
+            // iptables, ip, sysctl, etc. Bare-name `Command::new("X")`
+            // calls would silently miss those binaries (the
+            // forensic case was `iptables` in `install_iptables_redirect`,
+            // which produced a 15-minute executor wedge before the
+            // planner-IPC idle watchdog reaped the VM).
+            // Synthesising a defensive PATH here is cheap (one
+            // `set_var`), idempotent, and short-circuits any future
+            // bare-name spawn that lands inside the agent VM. The
+            // operator-supplied env still wins via `set_var`'s
+            // last-writer semantics — `hydrate_from_proc_cmdline`
+            // runs AFTER this and will overwrite PATH if the
+            // kernel-stamped cmdline carries one.
+            // SAFETY: PID 1 is single-threaded at this point
+            // (tokio runtime has not been built yet). Setting an
+            // env var here is therefore unsynchronised but
+            // race-free.
+            if std::env::var_os("PATH").is_none() {
+                unsafe {
+                    std::env::set_var(
+                        "PATH",
+                        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    );
+                }
+                eprintln!(
+                    "{{\"level\":\"info\",\"step\":\"guest-init\",\
+                     \"event\":\"pid1_default_path_set\",\
+                     \"value\":\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\"}}"
+                );
+            }
         }
     }
     // Non-Linux + non-PID-1 path: deliberate no-op.
@@ -852,9 +887,25 @@ pub fn harden_guest_for_agent() {
 pub fn scrub_sensitive_env_for_agent() {
     let mut scrubbed = 0u32;
     let mut already_unset = 0u32;
+    let mut snapshot: std::collections::BTreeMap<&'static str, String> =
+        std::collections::BTreeMap::new();
     for &key in SENSITIVE_ENV_VARS_TO_SCRUB {
-        match std::env::var_os(key) {
-            Some(_) => {
+        match std::env::var(key) {
+            Ok(v) => {
+                // Snapshot BEFORE removal so in-process readers
+                // (specifically `driver::run_role_session`, which
+                // reads `RAXIS_KERNEL_VSOCK_LISTEN_PORT`,
+                // `RAXIS_PLANNER_TASK_PROMPT[_PATH]`, and
+                // `RAXIS_SESSION_TOKEN` after this scrub fires)
+                // can still resolve the value via
+                // `read_scrubbed_env_snapshot`. The snapshot is
+                // process-local memory — an agent's `bash`
+                // subprocess cannot reach it because it inherits
+                // via `Command::spawn` from `std::env`, which is
+                // the surface this function strips. See iter73
+                // regression note in
+                // `specs/v3/guest-agent-jailbreak-defense.md`.
+                snapshot.insert(key, v);
                 // SAFETY: documented contract — the caller invokes
                 // this on the main task before the agent's tool
                 // dispatch spawns any child. The tokio runtime
@@ -870,17 +921,73 @@ pub fn scrub_sensitive_env_for_agent() {
                 }
                 scrubbed += 1;
             }
-            None => {
+            Err(_) => {
                 already_unset += 1;
             }
         }
     }
+    // Idempotency: a second call is a no-op against std::env (vars
+    // already removed) and MUST NOT overwrite an earlier snapshot
+    // with an empty one. `get_or_init` preserves the first writer.
+    let _ = SCRUBBED_ENV_SNAPSHOT.get_or_init(|| snapshot);
     eprintln!(
         "{{\"level\":\"info\",\"step\":\"guest-harden\",\
          \"event\":\"sensitive_env_scrubbed\",\
          \"scrubbed\":{scrubbed},\"already_unset\":{already_unset},\
          \"invariant\":\"INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01\"}}"
     );
+}
+
+/// In-process snapshot of the values
+/// [`scrub_sensitive_env_for_agent`] removed from `std::env`.
+///
+/// Populated exactly once, on the first scrub call. Subsequent
+/// scrub calls are no-ops against this snapshot
+/// (`OnceLock::get_or_init`).
+static SCRUBBED_ENV_SNAPSHOT: std::sync::OnceLock<
+    std::collections::BTreeMap<&'static str, String>,
+> = std::sync::OnceLock::new();
+
+/// Read-side accessor for the scrubbed-env snapshot. Returns
+/// `Some(value)` if `key` was in [`SENSITIVE_ENV_VARS_TO_SCRUB`]
+/// and was present in `std::env` at the moment
+/// [`scrub_sensitive_env_for_agent`] ran. Returns `None` otherwise
+/// (variable absent at scrub time, scrub not yet called, or key
+/// not in the scrub list).
+///
+/// This intentionally does NOT fall back to `std::env::var` — the
+/// caller is responsible for that fallback so the scrub-vs-read
+/// ordering is auditable at the call site.
+///
+/// ## Why this exists
+///
+/// iter73 regression: `scrub_sensitive_env_for_agent` was placed
+/// before `run_role_session` in the planner-role `main`s under the
+/// belief that `BootContext::from_process` had already consumed
+/// every env var the planner needed. That belief was wrong —
+/// `BootContext::env` only captures `RAXIS_SESSION_TOKEN`, while
+/// `run_role_session_with_env_fn` reads
+/// `RAXIS_KERNEL_VSOCK_LISTEN_PORT`,
+/// `RAXIS_PLANNER_TASK_PROMPT[_PATH]`, and several other vars from
+/// `std::env::var` via its env-reader closure. The scrub therefore
+/// blanked the very vars `run_role_session` needed, the prompt
+/// resolved to `None`, the driver returned `DriverOutcome::Scaffold`,
+/// the planner entered `park_on_signal().await`, and the kernel's
+/// vsock CONNECT timed out because no listener ever bound.
+///
+/// The fix preserves the security property — `std::env` is still
+/// scrubbed, so the agent's `bash` subprocess (spawned via
+/// `tokio::process::Command::spawn`, which inherits from
+/// `std::env`) STILL cannot see `RAXIS_SESSION_TOKEN` or its
+/// sister vars — while restoring in-process readability for
+/// post-scrub planner-driver code that legitimately needs the
+/// values. The snapshot lives in Rust-process memory and is not
+/// reachable from a spawned child.
+pub fn read_scrubbed_env_snapshot(key: &str) -> Option<String> {
+    SCRUBBED_ENV_SNAPSHOT
+        .get()
+        .and_then(|m| m.get(key))
+        .cloned()
 }
 
 #[cfg(target_os = "linux")]
@@ -936,15 +1043,7 @@ mod linux_harden {
         // SAFETY: `prctl` is a thin wrapper around the
         // `prctl(2)` syscall; `PR_SET_DUMPABLE` is stable in
         // `libc::PR_SET_DUMPABLE`.
-        let rc = unsafe {
-            libc::prctl(
-                libc::PR_SET_DUMPABLE,
-                SUID_DUMP_DISABLE,
-                0,
-                0,
-                0,
-            )
-        };
+        let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, SUID_DUMP_DISABLE, 0, 0, 0) };
         if rc == 0 {
             eprintln!(
                 "{{\"level\":\"info\",\"step\":\"guest-harden\",\
@@ -1026,15 +1125,7 @@ mod linux_harden {
         // SAFETY: `prctl` with `PR_CAPBSET_DROP` is a thin
         // wrapper around the prctl(2) syscall; the constant
         // `PR_CAPBSET_DROP` is stable in `libc::PR_CAPBSET_DROP`.
-        let rc = unsafe {
-            libc::prctl(
-                libc::PR_CAPBSET_DROP,
-                CAP_SYS_BOOT,
-                0,
-                0,
-                0,
-            )
-        };
+        let rc = unsafe { libc::prctl(libc::PR_CAPBSET_DROP, CAP_SYS_BOOT, 0, 0, 0) };
         if rc == 0 {
             eprintln!(
                 "{{\"level\":\"info\",\"step\":\"guest-harden\",\
@@ -1221,7 +1312,7 @@ mod linux_a3 {
                 "127.0.0.1/32",
                 "-j",
                 "REDIRECT",
-                "--to-port",
+                "--to-ports",
                 &tproxy_port_s,
             ],
             vec![
@@ -1238,12 +1329,37 @@ mod linux_a3 {
                 "127.0.0.1/32",
                 "-j",
                 "REDIRECT",
-                "--to-port",
+                "--to-ports",
                 "53",
             ],
         ];
 
-        let binaries: &[&str] = &["iptables-nft", "iptables"];
+        // iter73 regression note: the executor VM's PID 1 starts
+        // with `HOME=/ TERM=linux` only — no PATH. Musl libc's
+        // `execvp` default search path is
+        // `"/usr/local/bin:/bin:/usr/bin"` which does NOT include
+        // `/usr/sbin`, where Debian's iptables package installs
+        // its binaries. A bare-name `Command::new("iptables")`
+        // therefore fails with ENOENT and the REDIRECT chain
+        // never installs, leaving the agent's network egress
+        // hanging in TCP-connect retransmission until the kernel
+        // watchdog reaps the VM ~15 min later. We mitigate by
+        // trying canonical absolute paths first; the bare-name
+        // entries remain as a last-resort fallback for substrates
+        // whose iptables ships under a different prefix. See
+        // `specs/v3/iter73-networking-dry-run-trace.md` for the
+        // full forensic walkthrough.
+        let binaries: &[&str] = &[
+            "/usr/sbin/iptables-nft",
+            "/sbin/iptables-nft",
+            "/usr/sbin/iptables-legacy",
+            "/sbin/iptables-legacy",
+            "/usr/sbin/iptables",
+            "/sbin/iptables",
+            "iptables-nft",
+            "iptables-legacy",
+            "iptables",
+        ];
         let mut installed_any = false;
         for binary in binaries {
             let mut ok = true;
@@ -2001,8 +2117,8 @@ mod guest_harden_tests {
         }
         scrub_sensitive_env_for_agent();
         scrub_sensitive_env_for_agent(); // idempotent second pass
-        // Restore.
-        // SAFETY: serialised via the static mutex.
+                                         // Restore.
+                                         // SAFETY: serialised via the static mutex.
         for (k, v) in snapshot {
             unsafe {
                 match v {

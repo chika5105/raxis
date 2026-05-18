@@ -87,7 +87,7 @@ fn build_bogus_intent(seq: u64) -> IntentRequest {
         resolved_via_escalation: None,
         tokens_used: None,
         structured_output: None,
-            batch_task_ids: None,
+        batch_task_ids: None,
     }
 }
 

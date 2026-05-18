@@ -238,8 +238,7 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
     // the fetch still succeeds — capture is best-effort by
     // contract, never a load-bearing gate on the planner's
     // egress.
-    let active_task_id =
-        lookup_active_task_id_for_session(ctx, &session.session_id).await;
+    let active_task_id = lookup_active_task_id_for_session(ctx, &session.session_id).await;
     let task_id_for_observer = resolve_observer_task_id(
         active_task_id,
         session.session_agent_type,
@@ -858,11 +857,7 @@ mod tests {
     /// been bound) returns None rather than panicking.
     #[test]
     fn resolve_observer_task_id_orchestrator_without_initiative_id_is_none() {
-        let out = resolve_observer_task_id(
-            None,
-            Some(SessionAgentType::Orchestrator),
-            None,
-        );
+        let out = resolve_observer_task_id(None, Some(SessionAgentType::Orchestrator), None);
         assert!(out.is_none());
     }
 
@@ -874,18 +869,12 @@ mod tests {
     /// dashboard role attribution.
     #[test]
     fn resolve_observer_task_id_executor_without_active_row_is_none() {
-        let out = resolve_observer_task_id(
-            None,
-            Some(SessionAgentType::Executor),
-            Some("init-ignored"),
-        );
+        let out =
+            resolve_observer_task_id(None, Some(SessionAgentType::Executor), Some("init-ignored"));
         assert!(out.is_none());
 
-        let out_reviewer = resolve_observer_task_id(
-            None,
-            Some(SessionAgentType::Reviewer),
-            Some("init-ignored"),
-        );
+        let out_reviewer =
+            resolve_observer_task_id(None, Some(SessionAgentType::Reviewer), Some("init-ignored"));
         assert!(out_reviewer.is_none());
     }
 

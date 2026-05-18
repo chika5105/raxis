@@ -1,6 +1,5 @@
 //! Auth endpoints: challenge, verify, logout.
 
-
 use std::sync::Arc;
 
 use axum::extract::{Json as AxumJson, State};

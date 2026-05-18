@@ -62,6 +62,7 @@ export function LifecycleAnnotation({ annotation }: Props) {
 /// Render a one-line summary suitable for the global Tasks
 /// "Lifecycle" column. Skips inline cards entirely; this is
 /// the compact path.
+// eslint-disable-next-line react-refresh/only-export-components
 export function lifecycleSummary(a: LA | null | undefined): string {
   if (!a) return "—";
   switch (a.kind) {
@@ -86,6 +87,7 @@ export function lifecycleSummary(a: LA | null | undefined): string {
 
 /// Map a `kind` to a short colour-coded dot class so the
 /// global Tasks index renders a one-glance cue per row.
+// eslint-disable-next-line react-refresh/only-export-components
 export function lifecycleDotClass(a: LA | null | undefined): string {
   if (!a) return "bg-edge";
   switch (a.kind) {

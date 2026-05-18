@@ -149,12 +149,7 @@ pub async fn handle(req: IntentRequest, ctx: &Arc<HandlerContext>) -> IntentResp
         IntentOutcome::AcceptedBatch { results, .. } => {
             let accepted = results
                 .iter()
-                .filter(|r| {
-                    matches!(
-                        r.outcome,
-                        raxis_types::BatchTaskOutcome::Accepted { .. }
-                    )
-                })
+                .filter(|r| matches!(r.outcome, raxis_types::BatchTaskOutcome::Accepted { .. }))
                 .count();
             (
                 "AcceptedBatch",
@@ -1565,9 +1560,7 @@ fn run_phase_c(
     // exclusive transition mutex — extending the branch here closes
     // the drift at its only source. Pinned by
     // `phase_c_running_with_pending_gates_transitions_to_gates_pending`.
-    if !pending_gates.is_empty()
-        && matches!(task_state, TaskState::Admitted | TaskState::Running)
-    {
+    if !pending_gates.is_empty() && matches!(task_state, TaskState::Admitted | TaskState::Running) {
         let rec = transition_task_in_tx(
             &tx,
             task_id_owned.as_str(),
@@ -3034,8 +3027,7 @@ fn handle_complete_task(
                         task_id: req.task_id.as_str().to_owned(),
                         session_id: task.session_id.clone(),
                         initiative_id: Some(task.initiative_id.clone()),
-                        trigger:
-                            crate::worktree_snapshot::SnapshotTrigger::ExecutorCommitCopy,
+                        trigger: crate::worktree_snapshot::SnapshotTrigger::ExecutorCommitCopy,
                         worktree_root: exec_worktree.clone(),
                         base_sha,
                     },
@@ -4892,8 +4884,8 @@ async fn terminate_session_after_activation_failure(
              \"error\":\"{e}\"}}",
             session_json = serde_json::to_string(session_id)
                 .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
-            reason_json = serde_json::to_string(reason)
-                .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+            reason_json =
+                serde_json::to_string(reason).unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
         );
     }
 }
@@ -6176,7 +6168,9 @@ enum BatchClassify {
     NotAdmissible(raxis_types::NotAdmissibleReason),
     /// Admissible — carries `(admitted_at, task_id)` for the
     /// kernel-side sort.
-    Admissible { admitted_at: i64 },
+    Admissible {
+        admitted_at: i64,
+    },
 }
 
 async fn handle_batch_activate_sub_tasks(
@@ -6261,8 +6255,11 @@ async fn handle_batch_activate_sub_tasks(
     admissible.sort_by(|a, b| {
         let (idx_a, at_a) = *a;
         let (idx_b, at_b) = *b;
-        at_a.cmp(&at_b)
-            .then_with(|| candidate_ids[idx_a].as_str().cmp(candidate_ids[idx_b].as_str()))
+        at_a.cmp(&at_b).then_with(|| {
+            candidate_ids[idx_a]
+                .as_str()
+                .cmp(candidate_ids[idx_b].as_str())
+        })
     });
 
     // ── Step 5: headroom truncate ─────────────────────────────────
@@ -6328,18 +6325,20 @@ async fn handle_batch_activate_sub_tasks(
     // ── Step 7: assemble per-id results in input order ────────────
     let mut results: Vec<BatchTaskResult> = Vec::with_capacity(candidate_ids.len());
     for (idx, id) in candidate_ids.iter().enumerate() {
-        let outcome = per_idx_outcome[idx].take().unwrap_or_else(|| match &classification[idx] {
-            BatchClassify::Duplicate => BatchTaskOutcome::DuplicateInBatch,
-            BatchClassify::Unknown => BatchTaskOutcome::UnknownTask,
-            BatchClassify::NotAdmissible(reason) => BatchTaskOutcome::NotAdmissible {
-                reason: reason.clone(),
-            },
-            // Should not happen — `Admissible` candidates went
-            // through Step 6 / drop-at-cap. Treat defensively as
-            // DroppedAtCap so a future refactor surfaces it as a
-            // benign no-op rather than a panic.
-            BatchClassify::Admissible { .. } => BatchTaskOutcome::DroppedAtCap,
-        });
+        let outcome = per_idx_outcome[idx]
+            .take()
+            .unwrap_or_else(|| match &classification[idx] {
+                BatchClassify::Duplicate => BatchTaskOutcome::DuplicateInBatch,
+                BatchClassify::Unknown => BatchTaskOutcome::UnknownTask,
+                BatchClassify::NotAdmissible(reason) => BatchTaskOutcome::NotAdmissible {
+                    reason: reason.clone(),
+                },
+                // Should not happen — `Admissible` candidates went
+                // through Step 6 / drop-at-cap. Treat defensively as
+                // DroppedAtCap so a future refactor surfaces it as a
+                // benign no-op rather than a panic.
+                BatchClassify::Admissible { .. } => BatchTaskOutcome::DroppedAtCap,
+            });
         results.push(BatchTaskResult {
             task_id: id.clone(),
             outcome,
@@ -6366,9 +6365,7 @@ async fn handle_batch_activate_sub_tasks(
                     policy_for_budget.as_ref(),
                     store_for_budget.as_ref(),
                 ),
-                Err(_) => BudgetSnapshot {
-                    admission_units: 0,
-                },
+                Err(_) => BudgetSnapshot { admission_units: 0 },
             }
         })
         .await
@@ -6449,8 +6446,7 @@ fn classify_batch_candidates(
         // are inserted by `approve_plan` which also populates
         // `plan_registry`, so a miss here means a corrupt
         // initialisation that should NOT silently admit.
-        let key =
-            crate::initiatives::plan_registry::TaskKey::new(&initiative_id, id_str);
+        let key = crate::initiatives::plan_registry::TaskKey::new(&initiative_id, id_str);
         if plan_registry.get(&key).is_none() {
             out.push(BatchClassify::NotAdmissible(
                 raxis_types::NotAdmissibleReason::PlanRegistryMissing,
@@ -7584,9 +7580,14 @@ fn commit_task_completion(
     //    as `LifecycleError::TaskNotAbortable`, which we collapse to the
     //    historical `Err(())` so the caller's PlannerErrorCode mapping
     //    (`FailTaskNotRunning`) stays unchanged.
-    let record =
-        transition_task_in_tx(&tx, task_id, TaskState::Completed, None, TransitionActor::Kernel)
-            .map_err(|_| ())?;
+    let record = transition_task_in_tx(
+        &tx,
+        task_id,
+        TaskState::Completed,
+        None,
+        TransitionActor::Kernel,
+    )
+    .map_err(|_| ())?;
 
     // 2. Stamp `tasks.evaluation_sha` with the head SHA submitted by the
     //    planner. Done as a follow-up UPDATE in the same tx because
@@ -8236,13 +8237,7 @@ fn finalize_integration_merge_completion(
     let mut normalization_records: Vec<TaskTransitionRecord> =
         Vec::with_capacity(normalization_path.len());
     for next in normalization_path {
-        match transition_task_in_tx(
-            &tx,
-            task_id,
-            *next,
-            None,
-            TransitionActor::Kernel,
-        ) {
+        match transition_task_in_tx(&tx, task_id, *next, None, TransitionActor::Kernel) {
             Ok(rec) => normalization_records.push(rec),
             Err(e) => {
                 eprintln!(
@@ -9757,11 +9752,13 @@ mod tests {
         drop(conn);
 
         assert_eq!(
-            rec.from_state, TaskState::Running,
+            rec.from_state,
+            TaskState::Running,
             "record must carry the pre-transition state"
         );
         assert_eq!(
-            rec.to_state, TaskState::GatesPending,
+            rec.to_state,
+            TaskState::GatesPending,
             "record must carry the post-transition state"
         );
         assert_eq!(

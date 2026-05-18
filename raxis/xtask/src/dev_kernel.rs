@@ -23,7 +23,8 @@
 //! Two source modes:
 //!
 //! * `--from-file PATH` — copy a local kernel binary into place.
-//!   Hermetic, recommended for CI and air-gapped environments.
+//!   Hermetic, recommended for CI and air-gapped environments. Pair
+//!   with `--config PATH` unless the vmlinux embeds `CONFIG_IKCONFIG`.
 //! * `--url URL --sha256 HEX` — `curl -fL` the URL, verify SHA-256,
 //!   install on success. We shell out to `curl(1)` (universally
 //!   available on macOS + Linux dev boxes) rather than introducing a
@@ -55,7 +56,8 @@
 //! ## Exit-code contract
 //!
 //! * `0` — kernel binary is in place at `<install_dir>/kernel/vmlinux`,
-//!   bytes match the SHA-256 (when supplied).
+//!   bytes match the SHA-256 (when supplied), and the validated
+//!   `.config` is staged at `<install_dir>/kernel/vmlinux.config`.
 //! * `non-zero` (anyhow::bail) — bad arg, missing source, SHA-256
 //!   mismatch, filesystem error, `curl` failure.
 
@@ -66,6 +68,10 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
+
+use crate::guest_kernel_config::{
+    resolve_and_validate_kernel_config, stage_kernel_config, KernelConfigSource,
+};
 
 /// Default install directory when neither `--install-dir` nor
 /// `RAXIS_INSTALL_DIR` is set. Matches the documented dev-host layout
@@ -130,6 +136,9 @@ struct Args {
     install_dir: PathBuf,
     arch: Arch,
     source: Source,
+    /// Optional Linux `.config` used to validate the staged vmlinux
+    /// and copied to `<install_dir>/kernel/vmlinux.config`.
+    config: Option<PathBuf>,
     /// Optional SHA-256 to verify the local-file source (always
     /// verified when `Source::Url`). Lowercase hex.
     sha256: Option<String>,
@@ -143,6 +152,7 @@ impl Args {
         let mut install_dir: Option<PathBuf> = None;
         let mut arch: Option<Arch> = None;
         let mut from_file: Option<PathBuf> = None;
+        let mut config: Option<PathBuf> = None;
         let mut url: Option<String> = None;
         let mut sha256: Option<String> = None;
         let mut force = false;
@@ -171,6 +181,12 @@ impl Args {
                 "--url" => {
                     i += 1;
                     url = Some(argv.get(i).context("--url requires a value")?.clone());
+                }
+                "--config" => {
+                    i += 1;
+                    config = Some(PathBuf::from(
+                        argv.get(i).context("--config requires a path")?,
+                    ));
                 }
                 "--sha256" => {
                     i += 1;
@@ -222,6 +238,7 @@ impl Args {
             install_dir,
             arch,
             source,
+            config,
             sha256: local_sha256,
             force,
         })
@@ -232,12 +249,14 @@ fn print_help() {
     eprintln!(
         "usage: cargo xtask images dev-kernel \n           \
            (--from-file <PATH> [--sha256 <HEX>] | --url <URL> --sha256 <HEX>)\n           \
-           [--install-dir <PATH>] [--arch aarch64|x86_64] [--force]\n\
+           [--install-dir <PATH>] [--arch aarch64|x86_64] [--config <.config>] [--force]\n\
          \n\
          Stages a Linux guest-kernel binary at \n           \
          <install_dir>/kernel/vmlinux\n\
          which is the path the kernel hands to AVF / Firecracker as \n         \
-         `VmSpec.linux_kernel_path`. Verifies SHA-256 when supplied.\n\
+         `VmSpec.linux_kernel_path`. Verifies SHA-256 when supplied\n\
+         and rejects kernels whose .config lacks built-in Path A3\n\
+         nftables/netfilter support.\n\
          Refuses to overwrite an existing kernel without --force.\n\
          \n\
          Defaults:\n  \
@@ -285,6 +304,22 @@ fn install(args: &Args) -> Result<()> {
         }
     }
 
+    let source_kernel_path = match &args.source {
+        Source::File(path) => Some(path.as_path()),
+        Source::Url { .. } => None,
+    };
+    let config = match source_kernel_path {
+        Some(path) => resolve_and_validate_kernel_config(path, args.config.as_deref())?,
+        None => {
+            let tmp_kernel = dest_dir.join(format!(".{}.config-check.tmp", KERNEL_FILENAME));
+            fs::write(&tmp_kernel, &bytes)
+                .with_context(|| format!("write temp kernel {}", tmp_kernel.display()))?;
+            let resolved = resolve_and_validate_kernel_config(&tmp_kernel, args.config.as_deref());
+            let _ = fs::remove_file(&tmp_kernel);
+            resolved?
+        }
+    };
+
     {
         let mut f = fs::File::create(&tmp_path)
             .with_context(|| format!("create temp file {}", tmp_path.display()))?;
@@ -301,15 +336,25 @@ fn install(args: &Args) -> Result<()> {
             dest_path.display(),
         )
     })?;
+    let config_path = stage_kernel_config(&args.install_dir, &config)?;
+    let config_source = match &config.source {
+        KernelConfigSource::Explicit(path) => format!("explicit:{}", path.display()),
+        KernelConfigSource::Sidecar(path) => format!("sidecar:{}", path.display()),
+        KernelConfigSource::EmbeddedIkconfig => "embedded:IKCONFIG".to_owned(),
+    };
+    let config_source_json = serde_json::Value::String(config_source).to_string();
 
     let staged_sha = sha256_hex(&bytes);
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"dev_kernel_installed\",\
-         \"path\":\"{}\",\"arch\":\"{}\",\"size\":{},\"sha256\":\"{}\"}}",
+         \"path\":\"{}\",\"arch\":\"{}\",\"size\":{},\"sha256\":\"{}\",\
+         \"config_path\":\"{}\",\"config_source\":{}}}",
         dest_path.display(),
         args.arch.as_str(),
         bytes.len(),
         staged_sha,
+        config_path.display(),
+        config_source_json,
     );
 
     Ok(())
@@ -418,6 +463,23 @@ mod tests {
         p
     }
 
+    fn valid_kernel_config() -> &'static str {
+        "CONFIG_NETFILTER=y\n\
+         CONFIG_NETFILTER_NETLINK=y\n\
+         CONFIG_NF_TABLES=y\n\
+         CONFIG_NF_TABLES_INET=y\n\
+         CONFIG_NF_CONNTRACK=y\n\
+         CONFIG_NF_NAT=y\n\
+         CONFIG_NFT_NAT=y\n\
+         CONFIG_NFT_REDIR=y\n\
+         CONFIG_NFT_CHAIN_NAT=y\n"
+    }
+
+    fn write_kernel_with_config(path: &Path, bytes: &[u8]) {
+        fs::write(path, bytes).unwrap();
+        fs::write(path.with_extension("config"), valid_kernel_config()).unwrap();
+    }
+
     #[test]
     fn args_parser_defaults_install_dir_to_env_then_documented_layout() {
         // SAFETY: env mutation is fine in single-threaded test that
@@ -490,12 +552,13 @@ mod tests {
     fn install_from_local_file_writes_canonical_layout_with_correct_bytes() {
         let install_dir = temp_dir("install");
         let src = temp_dir("src").join("vmlinux.bin");
-        fs::write(&src, b"DUMMY KERNEL BYTES").unwrap();
+        write_kernel_with_config(&src, b"DUMMY KERNEL BYTES");
 
         let args = Args {
             install_dir: install_dir.clone(),
             arch: Arch::Aarch64,
             source: Source::File(src.clone()),
+            config: None,
             sha256: None,
             force: false,
         };
@@ -518,12 +581,13 @@ mod tests {
         fs::write(kdir.join("vmlinux"), b"OLD").unwrap();
 
         let src = temp_dir("src2").join("k");
-        fs::write(&src, b"NEW").unwrap();
+        write_kernel_with_config(&src, b"NEW");
 
         let args = Args {
             install_dir: install_dir.clone(),
             arch: Arch::Aarch64,
             source: Source::File(src.clone()),
+            config: None,
             sha256: None,
             force: false,
         };
@@ -549,13 +613,14 @@ mod tests {
     fn install_verifies_sha256_when_supplied_and_rejects_mismatch() {
         let install_dir = temp_dir("sha256");
         let src = temp_dir("sha256-src").join("k");
-        fs::write(&src, b"hello").unwrap();
+        write_kernel_with_config(&src, b"hello");
         let actual_sha = sha256_hex(b"hello");
 
         let bad_args = Args {
             install_dir: install_dir.clone(),
             arch: Arch::X86_64,
             source: Source::File(src.clone()),
+            config: None,
             sha256: Some("0".repeat(64)),
             force: false,
         };
@@ -569,6 +634,7 @@ mod tests {
             install_dir: install_dir.clone(),
             arch: Arch::X86_64,
             source: Source::File(src),
+            config: None,
             sha256: Some(actual_sha.clone()),
             force: false,
         };

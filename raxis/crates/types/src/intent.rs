@@ -703,9 +703,7 @@ pub enum NotAdmissibleReason {
     /// list carries `(predecessor_task_id, observed_state)` for
     /// each blocker so the orchestrator can decide which
     /// predecessor to drive next.
-    PredecessorsNotComplete {
-        predecessors: Vec<(String, String)>,
-    },
+    PredecessorsNotComplete { predecessors: Vec<(String, String)> },
     /// The task row is missing the in-memory plan registry entry
     /// the activation path needs (typed agent kind, vm_image
     /// alias, task prompt). Should be impossible in practice
@@ -792,7 +790,10 @@ mod tests {
         assert_eq!(IntentKind::RetrySubTask.as_str(), "RetrySubTask");
         assert_eq!(IntentKind::SubmitReview.as_str(), "SubmitReview");
         assert_eq!(IntentKind::StructuredOutput.as_str(), "StructuredOutput");
-        assert_eq!(IntentKind::BatchActivateSubTasks.as_str(), "BatchActivateSubTasks");
+        assert_eq!(
+            IntentKind::BatchActivateSubTasks.as_str(),
+            "BatchActivateSubTasks"
+        );
     }
 
     /// V2 sub-task kinds do NOT carry a SHA range. The kernel
@@ -1131,7 +1132,10 @@ mod tests {
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
                 .expect("bincode decode");
         assert_eq!(back.intent_kind, IntentKind::BatchActivateSubTasks);
-        let back_ids = back.batch_task_ids.as_ref().expect("batch_task_ids preserved");
+        let back_ids = back
+            .batch_task_ids
+            .as_ref()
+            .expect("batch_task_ids preserved");
         assert_eq!(back_ids.len(), 3);
         assert_eq!(back_ids[0], id_a);
         assert_eq!(back_ids[1], id_b);
@@ -1160,9 +1164,7 @@ mod tests {
             results: vec![
                 BatchTaskResult {
                     task_id: TaskId::parse("good-task").unwrap(),
-                    outcome: BatchTaskOutcome::Accepted {
-                        admission_order: 0,
-                    },
+                    outcome: BatchTaskOutcome::Accepted { admission_order: 0 },
                 },
                 BatchTaskResult {
                     task_id: TaskId::parse("typo-task").unwrap(),
@@ -1180,17 +1182,13 @@ mod tests {
                     task_id: TaskId::parse("pred-pending-task").unwrap(),
                     outcome: BatchTaskOutcome::NotAdmissible {
                         reason: NotAdmissibleReason::PredecessorsNotComplete {
-                            predecessors: vec![(
-                                "upstream".to_owned(),
-                                "Admitted".to_owned(),
-                            )],
+                            predecessors: vec![("upstream".to_owned(), "Admitted".to_owned())],
                         },
                     },
                 },
             ],
         };
-        let bytes =
-            bincode::serde::encode_to_vec(&outcome, bincode::config::standard()).unwrap();
+        let bytes = bincode::serde::encode_to_vec(&outcome, bincode::config::standard()).unwrap();
         let (back, _): (IntentOutcome, _) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
         let results = match back {

@@ -61,6 +61,7 @@ import type { TaskView } from "@/types/api";
 /// pins. New visual signals (gate dots, error pills, …) are
 /// added here field-by-field as the DAG renderer learns to
 /// consume them.
+// eslint-disable-next-line react-refresh/only-export-components
 export function mapTasksToDagNodes(tasks: TaskView[]): DagGraphNode[] {
   return tasks.map((t) => ({
     task_id: t.task_id,
@@ -421,9 +422,29 @@ export function InitiativeDetailPage() {
                 <CopyButton value={focusedTask.task_id} />
               </div>
               <div className="mt-3 flex items-center gap-2">
+                {/* INV-DASHBOARD-RUNNING-STATE-VISIBLE-01 — same
+                    `Admitted + is_active → Running` lift the DAG
+                    (`DagGraph::effectiveState`), the sibling task
+                    table on this page (~line 348), the standalone
+                    DAG focus panel (`InitiativeDag.tsx` ~line 272),
+                    and `TaskDetail.tsx` (~line 67) already apply.
+                    Pre-iter74 this panel rendered the raw FSM
+                    state, so a live executor (FSM still `Admitted`
+                    because no terminal intent has landed yet)
+                    showed "Admitted" in the focused-task card
+                    while the sibling list / DAG on the same page
+                    showed "Running" — the user-reported
+                    source-of-truth split. The pulse predicate is
+                    widened to match `TaskDetail.tsx`'s shape so
+                    every actively-executing task pulses in this
+                    surface too. */}
                 <StateBadge
-                  state={focusedTask.state}
-                  pulse={focusedTask.state === "Running"}
+                  state={
+                    focusedTask.is_active && focusedTask.state === "Admitted"
+                      ? "Running"
+                      : focusedTask.state
+                  }
+                  pulse={focusedTask.is_active || focusedTask.state === "Running"}
                 />
               </div>
               {(isTerminalFailureState(focusedTask.state) ||

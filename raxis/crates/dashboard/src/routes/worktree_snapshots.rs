@@ -91,9 +91,7 @@ where
             })
         }
     };
-    let bytes = state
-        .data
-        .read_worktree_snapshot_blob(&snapshot_id, kind)?;
+    let bytes = state.data.read_worktree_snapshot_blob(&snapshot_id, kind)?;
     // INV-WORKTREE-SNAPSHOT-CONTENT-ADDR-01: the body is
     // identified by its sha256 → `immutable` is safe.
     let resp = Response::builder()

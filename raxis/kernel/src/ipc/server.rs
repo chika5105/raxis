@@ -1253,12 +1253,7 @@ pub(crate) mod planner_dispatch_log {
                 let total = results.len();
                 let accepted = results
                     .iter()
-                    .filter(|r| {
-                        matches!(
-                            r.outcome,
-                            raxis_types::BatchTaskOutcome::Accepted { .. }
-                        )
-                    })
+                    .filter(|r| matches!(r.outcome, raxis_types::BatchTaskOutcome::Accepted { .. }))
                     .count();
                 let dropped_cap = results
                     .iter()
@@ -1266,7 +1261,12 @@ pub(crate) mod planner_dispatch_log {
                     .count();
                 let not_admissible = results
                     .iter()
-                    .filter(|r| matches!(r.outcome, raxis_types::BatchTaskOutcome::NotAdmissible { .. }))
+                    .filter(|r| {
+                        matches!(
+                            r.outcome,
+                            raxis_types::BatchTaskOutcome::NotAdmissible { .. }
+                        )
+                    })
                     .count();
                 let unknown = results
                     .iter()
@@ -1274,7 +1274,9 @@ pub(crate) mod planner_dispatch_log {
                     .count();
                 let duplicate = results
                     .iter()
-                    .filter(|r| matches!(r.outcome, raxis_types::BatchTaskOutcome::DuplicateInBatch))
+                    .filter(|r| {
+                        matches!(r.outcome, raxis_types::BatchTaskOutcome::DuplicateInBatch)
+                    })
                     .count();
                 body.insert("status".into(), json!("accepted_batch"));
                 body.insert(

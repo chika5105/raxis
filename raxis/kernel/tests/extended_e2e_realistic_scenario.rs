@@ -85,8 +85,7 @@ use extended_e2e_support::{
         locate_executor_worktree_via_chain, locate_session_id_for_task, maybe_refresh_examples,
         poll_for_dual_lifecycle_completion, realism_workspace_root, realistic_lifecycle_deadline,
         reap_avf_orphan_vms, require_anthropic_dev_key, require_canonical_images,
-        require_disk_hygiene,
-        require_gateway_binary, require_gcp_adc, require_tcp_reachable,
+        require_disk_hygiene, require_gateway_binary, require_gcp_adc, require_tcp_reachable,
         seed_realistic_main_repository, spawn_kernel_normal, walk_chain_or_panic,
         write_credentials, write_provider_credentials, ExampleRefreshInputs, OperatorIpc,
         LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED, SHUTDOWN_DEADLINE,
@@ -805,10 +804,8 @@ fn wiring_smoke_test() {
     dep_fetch_evidence::write_synthetic_evidence(dep_fetch_tmp.path())
         .expect("smoke: write_synthetic_evidence");
     let dep_fetch_chain = dep_fetch_evidence::synthetic_satisfying_chain("sess-dep-fetch-smoke");
-    let dep_fetch_witness = DepFetchEvidenceWitness::for_realistic_plan(
-        "sess-dep-fetch-smoke",
-        dep_fetch_tmp.path(),
-    );
+    let dep_fetch_witness =
+        DepFetchEvidenceWitness::for_realistic_plan("sess-dep-fetch-smoke", dep_fetch_tmp.path());
     assert!(
         dep_fetch_witness.satisfied_by(&dep_fetch_chain),
         "smoke: dep-fetch-evidence witness on synthetic chain: {}",

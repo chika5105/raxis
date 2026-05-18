@@ -984,10 +984,8 @@ async fn main() {
         // saturating to keep the audit row defensive against a
         // pathologically long-running boot (one where the system
         // clock advanced 500+ years).
-        let recovery_sweep_ms: u64 = u64::try_from(
-            boot_recovery_started_at.elapsed().as_millis(),
-        )
-        .unwrap_or(u64::MAX);
+        let recovery_sweep_ms: u64 =
+            u64::try_from(boot_recovery_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let sentinel_path = data_dir.join("kernel_lifecycle_status.json");
         let sentinel = restart_lifecycle::read_sentinel_for_restart(&sentinel_path);
         let supervisor_restart_id = sentinel.as_ref().map(|s| {

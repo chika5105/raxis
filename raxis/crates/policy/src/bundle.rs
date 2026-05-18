@@ -5166,7 +5166,7 @@ impl PolicyBundle {
                     "[budget.sleep_caps] max_seconds_per_call = 0 is never useful; \
                      omit the entire section to disable the Sleep tool \
                     "
-                        .to_owned(),
+                    .to_owned(),
                 ));
             }
             if caps.max_cumulative_seconds == 0 {
@@ -5174,7 +5174,7 @@ impl PolicyBundle {
                     "[budget.sleep_caps] max_cumulative_seconds = 0 is never useful; \
                      omit the entire section to disable the Sleep tool \
                     "
-                        .to_owned(),
+                    .to_owned(),
                 ));
             }
             if caps.max_seconds_per_call > 600 {
@@ -5210,11 +5210,8 @@ impl PolicyBundle {
         // section is `enabled = true`, every gate row MUST carry a
         // non-empty `agent_hint_default` so the tier-2 fallback is
         // always available at runtime.
-        let gate_fixup_profile = validate_gate_fixup_section(
-            raw.gate_fixup.as_ref(),
-            &raw.gates,
-            &vm_images_validated,
-        )?;
+        let gate_fixup_profile =
+            validate_gate_fixup_section(raw.gate_fixup.as_ref(), &raw.gates, &vm_images_validated)?;
 
         // V2 — validate `[egress] deny_provider` against the
         // `[[providers]]` array. Every entry MUST resolve to a
@@ -10469,12 +10466,8 @@ mod gate_fixup_tests {
 
     #[test]
     fn absent_section_returns_none_profile() {
-        let resolved = validate_gate_fixup_section(
-            None,
-            &[sample_gate("TestCoverage", None)],
-            &[],
-        )
-        .expect("validate returns ok");
+        let resolved = validate_gate_fixup_section(None, &[sample_gate("TestCoverage", None)], &[])
+            .expect("validate returns ok");
         assert!(
             resolved.is_none(),
             "absent [gate_fixup] keeps gates hard (no profile)"
@@ -10485,12 +10478,9 @@ mod gate_fixup_tests {
     fn disabled_section_returns_none_profile() {
         let mut s = enabled_section();
         s.enabled = false;
-        let resolved = validate_gate_fixup_section(
-            Some(&s),
-            &[sample_gate("TestCoverage", None)],
-            &[],
-        )
-        .expect("validate returns ok");
+        let resolved =
+            validate_gate_fixup_section(Some(&s), &[sample_gate("TestCoverage", None)], &[])
+                .expect("validate returns ok");
         assert!(
             resolved.is_none(),
             "[gate_fixup].enabled = false is equivalent to absent"

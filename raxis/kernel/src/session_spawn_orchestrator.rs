@@ -2127,8 +2127,8 @@ pub fn spawn_planner_dispatcher(
                     .and_then(|n| u32::try_from(n).ok())
                     .unwrap_or(0);
                 let active_exists: bool = active_count > 0;
-                let concurrency_cap = plan_registry_for_post_exit
-                    .orchestrator_concurrency_cap(&initiative_id);
+                let concurrency_cap =
+                    plan_registry_for_post_exit.orchestrator_concurrency_cap(&initiative_id);
                 if pending_exists && active_count < concurrency_cap {
                     eprintln!(
                         "{{\"level\":\"info\",\
@@ -6336,7 +6336,8 @@ mod concrete_reason_tests {
             last_intent_outcome: LastIntentOutcome::Accepted,
             recorded_at_unix: 1_715_694_342_i64,
         };
-        let s = build_worker_post_exit_failure_reason("executor", None, None, Some(&activity), None);
+        let s =
+            build_worker_post_exit_failure_reason("executor", None, None, Some(&activity), None);
         assert_no_forbidden(&s);
         assert!(
             s.contains("StructuredOutput"),
@@ -6401,10 +6402,7 @@ mod concrete_reason_tests {
             s.contains("idle watchdog"),
             "must name the watchdog; got {s:?}"
         );
-        assert!(
-            s.contains("900s"),
-            "must inline the threshold; got {s:?}"
-        );
+        assert!(s.contains("900s"), "must inline the threshold; got {s:?}");
         assert!(
             s.contains("wedged-VM"),
             "must classify as wedged-VM signature; got {s:?}"

@@ -163,8 +163,7 @@ pub const TASK_CREDENTIAL_SUBSTITUTION_CANARY: &str =
 /// `TproxyAdmissionDenied` for that host on the same session,
 /// (c) the on-disk evidence carries `http_status=200` +
 /// `body_contains_example_domain=true`.
-pub const TASK_DEP_FETCH_EVIDENCE: &str =
-    super::dep_fetch_evidence::TASK_DEP_FETCH_EVIDENCE;
+pub const TASK_DEP_FETCH_EVIDENCE: &str = super::dep_fetch_evidence::TASK_DEP_FETCH_EVIDENCE;
 
 /// Transparent-proxy real-scripts executor task id (P3-10).
 ///

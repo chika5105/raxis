@@ -4629,7 +4629,6 @@ pub enum AuditEventKind {
         /// can prefer Deny on non-recoverable causes.
         recoverable_via_approve: bool,
     },
-
 }
 
 impl AuditEventKind {

@@ -1887,10 +1887,7 @@ pub trait DashboardData: Send + Sync + 'static {
     /// turns endpoint's contract) to keep the wire response
     /// bounded; the route handler enforces the cap server-side
     /// rather than trusting the FE.
-    fn list_recent_witnesses(
-        &self,
-        _limit: u32,
-    ) -> Result<Vec<WitnessView>, ApiError> {
+    fn list_recent_witnesses(&self, _limit: u32) -> Result<Vec<WitnessView>, ApiError> {
         Ok(Vec::new())
     }
 
@@ -1908,10 +1905,7 @@ pub trait DashboardData: Send + Sync + 'static {
     /// carry the gate-rejection critique implicitly through the
     /// `blob_sha256` body file (operator opens the body via a
     /// separate route).
-    fn list_witnesses_for_task(
-        &self,
-        _task_id: &str,
-    ) -> Result<Vec<WitnessView>, ApiError> {
+    fn list_witnesses_for_task(&self, _task_id: &str) -> Result<Vec<WitnessView>, ApiError> {
         Ok(Vec::new())
     }
 
@@ -1958,10 +1952,7 @@ pub trait DashboardData: Send + Sync + 'static {
     /// /api/worktree-snapshots/:snapshot_id`. Returns
     /// `Err(NotFound { kind: "worktree_snapshot" })` for an
     /// unknown id so the route returns 404 with a stable shape.
-    fn get_worktree_snapshot(
-        &self,
-        _snapshot_id: &str,
-    ) -> Result<WorktreeSnapshotView, ApiError> {
+    fn get_worktree_snapshot(&self, _snapshot_id: &str) -> Result<WorktreeSnapshotView, ApiError> {
         Err(ApiError::NotFound {
             kind: "worktree_snapshot".into(),
         })

@@ -1390,10 +1390,7 @@ mod tests {
         let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
         match out {
             DispatchOutcome::TokensExceeded { which, .. } => {
-                assert_eq!(
-                    which, "total",
-                    "total ceiling fires before input ceiling"
-                );
+                assert_eq!(which, "total", "total ceiling fires before input ceiling");
             }
             other => panic!("expected TokensExceeded(total), got {other:?}"),
         }

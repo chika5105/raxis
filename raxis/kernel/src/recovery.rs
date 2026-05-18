@@ -828,9 +828,7 @@ pub fn reconcile_after_supervisor_restart(
             Some(transition_rec.task_id.as_str()),
             Some(transition_rec.initiative_id.as_str()),
         ) {
-            let reason = format!(
-                "TaskStateChanged audit emit failed after FSM advance: {e}"
-            );
+            let reason = format!("TaskStateChanged audit emit failed after FSM advance: {e}");
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"supervisor_auto_resume\",\
                  \"event\":\"TaskStateChanged\",\"audit_emit_failed\":\"{e}\",\
@@ -994,9 +992,8 @@ fn reconcile_integration_merge_attempts(store: &Store) -> IntegrationMergeReconc
     let tx = match conn.transaction() {
         Ok(t) => t,
         Err(e) => {
-            let msg = format!(
-                "reconcile_integration_merge_attempts: BEGIN transaction failed: {e}"
-            );
+            let msg =
+                format!("reconcile_integration_merge_attempts: BEGIN transaction failed: {e}");
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"recovery\",\
                  \"action\":\"begin_imerge_tx_failed\",\"error\":\"{e}\"}}",
@@ -1023,9 +1020,7 @@ fn reconcile_integration_merge_attempts(store: &Store) -> IntegrationMergeReconc
     ) {
         Ok(rows) => rows,
         Err(e) => {
-            let msg = format!(
-                "reconcile_integration_merge_attempts: bulk fold UPDATE failed: {e}"
-            );
+            let msg = format!("reconcile_integration_merge_attempts: bulk fold UPDATE failed: {e}");
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"recovery\",\
                  \"action\":\"bulk_fold_imerge_failed\",\"error\":\"{e}\"}}",
@@ -1107,9 +1102,7 @@ fn reconcile_orphan_lane_reservations(store: &Store) -> OrphanLaneReservationRep
     let tx = match conn.transaction() {
         Ok(t) => t,
         Err(e) => {
-            let msg = format!(
-                "reconcile_orphan_lane_reservations: BEGIN transaction failed: {e}"
-            );
+            let msg = format!("reconcile_orphan_lane_reservations: BEGIN transaction failed: {e}");
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"recovery\",\
                  \"action\":\"begin_lane_reservation_tx_failed\",\"error\":\"{e}\"}}",
@@ -1130,9 +1123,7 @@ fn reconcile_orphan_lane_reservations(store: &Store) -> OrphanLaneReservationRep
     ) {
         Ok(rows) => rows,
         Err(e) => {
-            let msg = format!(
-                "reconcile_orphan_lane_reservations: bulk DELETE failed: {e}"
-            );
+            let msg = format!("reconcile_orphan_lane_reservations: bulk DELETE failed: {e}");
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"recovery\",\
                  \"action\":\"bulk_free_orphan_lane_reservations_failed\",\"error\":\"{e}\"}}",

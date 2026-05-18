@@ -76,6 +76,7 @@
 //! that lets us re-use the same dispatch path under both isolation
 //! backends.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -181,6 +182,69 @@ pub use raxis_types::planner_env::PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV;
 /// Env var carrying the per-session
 /// cumulative *combined* (input + output) token cap.
 pub use raxis_types::planner_env::PLANNER_MAX_TOKENS_TOTAL_ENV;
+
+/// Env vars the planner driver is allowed to read after guest
+/// hardening has scrubbed `std::env`.
+///
+/// This is deliberately explicit. PID-1 boot may ingest a larger
+/// `raxis.envb64=...` payload from `/proc/cmdline`, but the
+/// dispatch driver only needs this allowlist. Capturing it once
+/// into [`PlannerRuntimeEnv`] gives the legitimate in-process path
+/// a stable, typed read surface while keeping agent tool children
+/// on the scrubbed process environment.
+const PLANNER_RUNTIME_ENV_KEYS: &[&str] = &[
+    "RAXIS_KERNEL_PLANNER_SOCKET",
+    "RAXIS_KERNEL_VSOCK_CID",
+    "RAXIS_KERNEL_VSOCK_LISTEN_PORT",
+    "RAXIS_KERNEL_VSOCK_PORT",
+    "RAXIS_MODEL_ID",
+    "RAXIS_PLANNER_BASE_URL",
+    "RAXIS_PLANNER_KSB",
+    "RAXIS_PLANNER_KSB_PATH",
+    "RAXIS_PLANNER_MAX_TOKENS",
+    PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV,
+    PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV,
+    PLANNER_MAX_TOKENS_TOTAL_ENV,
+    "RAXIS_PLANNER_MAX_TURNS",
+    raxis_types::planner_env::PLANNER_MAX_SLEEP_CUMULATIVE_ENV,
+    raxis_types::planner_env::PLANNER_MAX_SLEEP_PER_CALL_ENV,
+    PLANNER_SIDECAR_ENDPOINT_ENV,
+    PLANNER_SIDECAR_HMAC_SECRET_ENV,
+    PLANNER_SIDECAR_PROVIDER_ID_ENV,
+    raxis_types::planner_env::PLANNER_TASK_PROMPT_ENV,
+    raxis_types::planner_env::PLANNER_TASK_PROMPT_PATH_ENV,
+    "RAXIS_WORKSPACE_PATH",
+];
+
+#[derive(Debug, Clone, Default)]
+struct PlannerRuntimeEnv {
+    values: Arc<BTreeMap<&'static str, String>>,
+}
+
+impl PlannerRuntimeEnv {
+    fn capture_from_process() -> Self {
+        Self::capture_from_reader(|key| {
+            crate::guest_init::read_scrubbed_env_snapshot(key).or_else(|| std::env::var(key).ok())
+        })
+    }
+
+    fn capture_from_reader<F>(reader: F) -> Self
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let values = PLANNER_RUNTIME_ENV_KEYS
+            .iter()
+            .filter_map(|&key| reader(key).map(|value| (key, value)))
+            .collect();
+        Self {
+            values: Arc::new(values),
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<String> {
+        self.values.get(key).cloned()
+    }
+}
 
 /// What the binary's `main` does next after [`run_role_session`].
 #[derive(Debug)]
@@ -337,7 +401,22 @@ pub async fn run_role_session(
     args: BootArgs,
     env: BootEnv,
 ) -> Result<DriverOutcome, DriverError> {
-    run_role_session_with_env_fn(role, args, env, |k| std::env::var(k).ok()).await
+    // Capture the driver's post-scrub runtime config once, then
+    // run from that stable allowlisted view. This preserves the
+    // iter73 hardening property (agent child processes inherit a
+    // scrubbed `std::env`) without letting the driver fall back to
+    // arbitrary raw process env lookups after boot.
+    let runtime_env = PlannerRuntimeEnv::capture_from_process();
+    run_role_session_with_runtime_env(role, args, env, runtime_env).await
+}
+
+async fn run_role_session_with_runtime_env(
+    role: Role,
+    args: BootArgs,
+    env: BootEnv,
+    runtime_env: PlannerRuntimeEnv,
+) -> Result<DriverOutcome, DriverError> {
+    run_role_session_with_env_fn(role, args, env, |k| runtime_env.get(k)).await
 }
 
 /// Test-friendly variant — accepts the env reader as a closure so
@@ -495,6 +574,7 @@ where
         output_total: max_tokens_output_total,
         total: max_tokens_total,
     };
+    let sleep_caps = parse_sleep_caps_env(&f);
     run_role_session_with_connected_transport(
         role,
         args,
@@ -506,6 +586,7 @@ where
         max_turns,
         max_tokens,
         token_caps,
+        sleep_caps,
         model,
         ksb_snapshot,
     )
@@ -741,6 +822,23 @@ fn parse_u64_env<F: Fn(&str) -> Option<String>>(f: &F, name: &str) -> Option<u64
     }
 }
 
+fn parse_sleep_caps_env<F: Fn(&str) -> Option<String>>(f: &F) -> Option<(u32, u32)> {
+    use raxis_types::planner_env::{
+        PLANNER_MAX_SLEEP_CUMULATIVE_ENV, PLANNER_MAX_SLEEP_PER_CALL_ENV,
+    };
+    let per = f(PLANNER_MAX_SLEEP_PER_CALL_ENV)
+        .filter(|v| !v.is_empty())
+        .and_then(|s| s.parse::<u32>().ok())?;
+    let cumulative = f(PLANNER_MAX_SLEEP_CUMULATIVE_ENV)
+        .filter(|v| !v.is_empty())
+        .and_then(|s| s.parse::<u32>().ok())?;
+    if per > 0 && cumulative >= per {
+        Some((per, cumulative))
+    } else {
+        None
+    }
+}
+
 /// Test-friendly variant — accepts the model client as an
 /// `Arc<dyn ModelClient>` so unit / integration tests can pin a
 /// [`crate::model::MockModelClient`] without touching the live
@@ -766,6 +864,7 @@ pub async fn run_role_session_with_model(
     max_turns: u32,
     max_tokens: u32,
     token_caps: TokenCaps,
+    sleep_caps: Option<(u32, u32)>,
     model: Arc<dyn ModelClient>,
     ksb_snapshot: Option<raxis_ksb::KsbSnapshot>,
 ) -> Result<DriverOutcome, DriverError> {
@@ -781,6 +880,7 @@ pub async fn run_role_session_with_model(
         max_turns,
         max_tokens,
         token_caps,
+        sleep_caps,
         model,
         ksb_snapshot,
     )
@@ -810,6 +910,7 @@ pub async fn run_role_session_with_connected_transport(
     max_turns: u32,
     max_tokens: u32,
     token_caps: TokenCaps,
+    sleep_caps: Option<(u32, u32)>,
     model: Arc<dyn ModelClient>,
     ksb_snapshot: Option<raxis_ksb::KsbSnapshot>,
 ) -> Result<DriverOutcome, DriverError> {
@@ -835,7 +936,7 @@ pub async fn run_role_session_with_connected_transport(
     ));
 
     // ── Step 2: build per-role registry + terminal tool list. ───────
-    let (registry, terminal_tools) = build_role(role, Arc::clone(&submitter));
+    let (registry, terminal_tools) = build_role(role, Arc::clone(&submitter), sleep_caps);
     let registry = Arc::new(registry);
 
     // ── Step 3: configure dispatch loop. ────────────────────────────
@@ -1062,21 +1163,8 @@ pub fn driver_outcome_to_exit_outcome(
 fn build_role(
     role: Role,
     submitter: Arc<crate::intent::IntentSubmitter>,
+    sleep_caps: Option<(u32, u32)>,
 ) -> (ToolRegistry, Vec<&'static str>) {
-    use raxis_types::planner_env::{
-        PLANNER_MAX_SLEEP_CUMULATIVE_ENV, PLANNER_MAX_SLEEP_PER_CALL_ENV,
-    };
-    let sleep_caps = match (
-        std::env::var(PLANNER_MAX_SLEEP_PER_CALL_ENV)
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok()),
-        std::env::var(PLANNER_MAX_SLEEP_CUMULATIVE_ENV)
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok()),
-    ) {
-        (Some(per), Some(cum)) if per > 0 && cum >= per => Some((per, cum)),
-        _ => None,
-    };
     match role {
         Role::Executor => (
             match sleep_caps {
@@ -2024,7 +2112,7 @@ mod tests {
 
     #[test]
     fn build_role_executor_includes_write_tools() {
-        let (reg, terminals) = build_role(Role::Executor, stub_submitter());
+        let (reg, terminals) = build_role(Role::Executor, stub_submitter(), None);
         assert!(reg.get("git_commit").is_some());
         assert!(reg.get("edit_file").is_some());
         assert!(reg.get("bash").is_some());
@@ -2041,7 +2129,7 @@ mod tests {
 
     #[test]
     fn build_role_reviewer_excludes_write_tools_and_pins_terminal() {
-        let (reg, terminals) = build_role(Role::Reviewer, stub_submitter());
+        let (reg, terminals) = build_role(Role::Reviewer, stub_submitter(), None);
         // INV-PLANNER-HARNESS-04: reviewer must not have write
         // tools.
         assert!(reg.get("edit_file").is_none());
@@ -2061,7 +2149,7 @@ mod tests {
 
     #[test]
     fn build_role_orchestrator_pins_dag_terminals() {
-        let (reg, terminals) = build_role(Role::Orchestrator, stub_submitter());
+        let (reg, terminals) = build_role(Role::Orchestrator, stub_submitter(), None);
         assert!(reg.get("read_file").is_some());
         // V2 §3.2 — orchestrator also gets structured_output.
         assert!(
@@ -2258,18 +2346,11 @@ mod tests {
         );
     }
 
-    /// Iter50 regression — the orchestrator NNSP rule 2 MUST gate
-    /// `activate_subtask` on the wire-stable `preds_ready=` boolean
-    /// from the `dag=` block. Without this gate the planner LLM
-    /// activates Reviewer rows whose immediate Executor predecessor
-    /// has not stamped `evaluation_sha` yet (the realistic-plan
-    /// `lint-defect → lint-runner → review-lint-defect-A` chain in
-    /// iter49 reproduced this), the kernel rejects every attempt
-    /// with `ActivateSubTaskReviewerNoEvalSha`, and the per-
-    /// initiative no-progress respawn ceiling
-    /// (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`) fires.
-    /// Closes `INV-PLANNER-ORCH-PREDS-READY-GATE-01` (added with
-    /// the iter50 fix).
+    /// Iter50 regression — the orchestrator NNSP must not let the
+    /// LLM activate work by re-deriving readiness from forensic DAG
+    /// rows. The current prompt makes `capabilities.ready_now` the
+    /// authoritative admission menu and explains that `preds_ready=`
+    /// is diagnostic context only.
     #[test]
     fn render_system_prompt_for_orchestrator_gates_activate_on_preds_ready() {
         let args = BootArgs {
@@ -2284,23 +2365,20 @@ mod tests {
              got prompt: {prompt}",
         );
         assert!(
-            prompt.contains("preds_ready=true"),
-            "orchestrator NNSP MUST teach the LLM the `true` admission \
-             form; got prompt: {prompt}",
+            prompt.contains("preds_ready=<true|false>"),
+            "orchestrator NNSP MUST teach the LLM the boolean field \
+             shape; got prompt: {prompt}",
         );
         assert!(
-            prompt.contains("preds_ready=false"),
-            "orchestrator NNSP MUST teach the LLM the `false` deny \
-             form (and what it implies); got prompt: {prompt}",
+            prompt.contains("capabilities.ready_now=["),
+            "orchestrator NNSP MUST name the authoritative ready_now \
+             menu; got prompt: {prompt}",
         );
         assert!(
-            prompt.contains(
-                "NEVER activate a row whose \
-                            `preds_ready=false`"
-            ),
-            "orchestrator NNSP MUST contain a categorical \
-             prohibition against activating rows with \
-             `preds_ready=false` per iter50 regression; \
+            prompt.contains("forensic context only")
+                && prompt.contains("NEVER activate a task id that is NOT in `ready_now"),
+            "orchestrator NNSP MUST prohibit activation outside the \
+             kernel-projected ready_now menu; \
              got prompt: {prompt}",
         );
         assert!(
@@ -2310,12 +2388,10 @@ mod tests {
              reviewer with `preds_ready=false`; got prompt: {prompt}",
         );
         assert!(
-            prompt.contains("lint-defect")
-                && prompt.contains("lint-runner")
-                && prompt.contains("review-lint-defect-A"),
-            "orchestrator NNSP SHOULD include the realistic-plan \
-             chain as a worked example so the LLM grounds the rule \
-             on a concrete shape; got prompt: {prompt}",
+            prompt.contains("Reviewer activation is handled transparently by `ready_now`")
+                && prompt.contains("evaluation_sha"),
+            "orchestrator NNSP SHOULD connect reviewer readiness to \
+             the kernel-projected ready_now menu; got prompt: {prompt}",
         );
     }
 
@@ -2471,6 +2547,7 @@ mod tests {
             5,
             512,
             TokenCaps::default(),
+            None,
             model as Arc<dyn ModelClient>,
             Some(snap),
         )
@@ -2576,6 +2653,7 @@ mod tests {
             5,
             512,
             TokenCaps::default(),
+            None,
             model as Arc<dyn ModelClient>,
             None,
         )
@@ -2743,6 +2821,7 @@ mod tests {
             5,
             512,
             TokenCaps::default(),
+            None,
             model,
             None,
         )
@@ -2867,6 +2946,7 @@ mod tests {
                 output_total: None,
                 total: None,
             },
+            None,
             model as Arc<dyn ModelClient>,
             None,
         )

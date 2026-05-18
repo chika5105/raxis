@@ -316,17 +316,23 @@ export const dashboardApi = {
       apiFetch<TaskView>(`/api/tasks/${encodeURIComponent(id)}`, signal ? { signal } : {}),
     outputs: (id: string, signal?: AbortSignal): Promise<TaskView["structured_outputs"]> =>
       apiFetch(`/api/tasks/${encodeURIComponent(id)}/outputs`, signal ? { signal } : {}),
-    /// `GET /api/tasks/:task_id/llm-turns?n=…` — tail of LLM
+    /// `GET /api/tasks/:task_id/llm-turns?limit=…` — tail of LLM
     /// turns the kernel-side tap recorded for this task.
     /// Powers `<TaskLlmTurns>` on TaskDetail. The endpoint is
-    /// always ndjson-tail style; current default `n=100`.
+    /// always ndjson-tail style; default `limit=100` here. The
+    /// BE deserialises the query as `{ limit: u32 }` (see
+    /// `LlmTurnsQuery` in `crates/dashboard/src/routes/tasks.rs`),
+    /// so an unknown param like `?n=…` is silently dropped and the
+    /// BE falls back to its own default of 50 — that mismatch was
+    /// the iter72 regression where operators noticed truncated turn
+    /// counts on long-running coordinator tasks.
     llmTurns: (
       id: string,
-      n: number = 100,
+      limit: number = 100,
       signal?: AbortSignal,
     ): Promise<TaskLlmTurnView[]> => {
       const qs = new URLSearchParams();
-      qs.set("n", String(n));
+      qs.set("limit", String(limit));
       return apiFetch<TaskLlmTurnView[]>(
         `/api/tasks/${encodeURIComponent(id)}/llm-turns?${qs}`,
         signal ? { signal } : {},

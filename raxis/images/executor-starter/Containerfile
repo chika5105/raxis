@@ -62,12 +62,13 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
 # requires `iptables` inside the guest to install the `nat OUTPUT`
 # REDIRECT chain at PID-1 setup time. Debian bookworm ships
 # `iptables-nft` as the default backend (xtables-nft variant);
-# both binaries are installed by the `iptables` package above and
-# `raxis_planner_core::guest_init::linux_a3::install_iptables_redirect`
-# tries them in order (`iptables-nft` first, falling back to plain
-# `iptables`). `iproute2` is pulled in for the cred-proxy
-# loopback-forwarder + the A3 stub if a future operator wants to
-# debug the chain interactively.
+# `cargo xtask images dev-kernel` / `images bake` now validate that
+# the staged guest kernel has built-in nftables NAT/REDIRECT support
+# before the image can boot with this rootfs. The legacy backend
+# remains installed by the same Debian package as a last-ditch
+# operator diagnostic, but the canonical path is nftables. `iproute2`
+# is pulled in for the cred-proxy loopback-forwarder + the A3 stub if
+# a future operator wants to debug the chain interactively.
 #
 # These packages add ~5 MB to the canonical executor rootfs and
 # are unconditionally enabled because the kernel-side `EgressTier`

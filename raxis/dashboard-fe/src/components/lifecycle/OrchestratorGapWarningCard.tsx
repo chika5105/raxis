@@ -64,7 +64,7 @@ export function OrchestratorGapWarningCard({ a }: Props) {
 
       {a.predecessors_completed_at.length > 0 && (
         <ul className="mt-2 space-y-1 text-[11px] text-ink-subtle">
-          {a.predecessors_completed_at.map(([pred, _ts]) => (
+          {a.predecessors_completed_at.map(([pred]) => (
             <li key={pred}>
               <Mono>{pred}</Mono> completed
             </li>

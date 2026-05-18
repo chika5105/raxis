@@ -2727,7 +2727,7 @@ mod substrate_ipc_tests {
                 resolved_via_escalation: None,
                 tokens_used: None,
                 structured_output: None,
-            batch_task_ids: None,
+                batch_task_ids: None,
             }),
             // ── Dispatched: verifier / WitnessSubmission ──
             M::WitnessSubmission(WitnessSubmission {

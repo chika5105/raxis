@@ -335,11 +335,7 @@ fn capture_bodies(worktree_root: &Path, base_sha: &str) -> Result<WorktreeBodies
 
     let log = run_git(
         worktree_root,
-        &[
-            "log",
-            &base_dotdot_head,
-            "--format=%H%x09%an%x09%at%x09%s",
-        ],
+        &["log", &base_dotdot_head, "--format=%H%x09%an%x09%at%x09%s"],
     )?;
     // Each non-empty line is one commit.
     let commit_count = log.iter().filter(|&&b| b == b'\n').count() as u32;
@@ -423,7 +419,12 @@ pub fn snapshot_worktree(
         "wts-{}-{}-{:x}",
         sanitize_id_segment(&input.task_id),
         nanos,
-        input.trigger.as_sql_str().as_bytes().iter().fold(0u32, |a, b| a.wrapping_add(*b as u32)),
+        input
+            .trigger
+            .as_sql_str()
+            .as_bytes()
+            .iter()
+            .fold(0u32, |a, b| a.wrapping_add(*b as u32)),
     );
 
     let record = WorktreeSnapshotRecord {
@@ -655,8 +656,14 @@ pub fn startup_check(
     };
     let index_set: std::collections::HashSet<String> = index_shas.iter().cloned().collect();
 
-    let orphaned_blobs = blob_files.iter().filter(|f| !index_set.contains(*f)).count();
-    let orphaned_index_rows = index_shas.iter().filter(|s| !blob_files.contains(*s)).count();
+    let orphaned_blobs = blob_files
+        .iter()
+        .filter(|f| !index_set.contains(*f))
+        .count();
+    let orphaned_index_rows = index_shas
+        .iter()
+        .filter(|s| !blob_files.contains(*s))
+        .count();
 
     Ok(SnapshotStartupReport {
         orphaned_blobs,
@@ -713,10 +720,7 @@ mod tests {
         // diff renderer to surface a clear "this is incomplete"
         // banner. Pin the literal so a rephrase doesn't break the
         // UI contract.
-        assert_eq!(
-            DIFF_TRUNCATION_MARKER,
-            "\n<<< RAXIS-DIFF-TRUNCATED >>>\n"
-        );
+        assert_eq!(DIFF_TRUNCATION_MARKER, "\n<<< RAXIS-DIFF-TRUNCATED >>>\n");
         assert_eq!(MAX_DIFF_BYTES, 1_048_576);
     }
 

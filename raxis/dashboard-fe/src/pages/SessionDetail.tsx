@@ -11,6 +11,7 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { SessionStream } from "@/components/SessionStream";
 import { StateBadge } from "@/components/StateBadge";
+import { TaskLlmTurns } from "@/components/TaskLlmTurns";
 import { fmtAbsolute, fmtRelative, fmtTokens } from "@/lib/format";
 import { isTerminalFailureState } from "@/lib/state-color";
 import type { SessionCaptureView } from "@/types/api";
@@ -155,19 +156,34 @@ export function SessionDetailPage() {
           `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`. */}
       <LifecycleTimeline annotations={s.annotations ?? []} />
 
-      <SessionDetailTabs sessionId={s.session_id} />
+      <SessionDetailTabs
+        sessionId={s.session_id}
+        owningTaskId={s.task_id ?? null}
+      />
     </div>
   );
 }
 
-type DetailTab = "stream" | "postmortem";
+type DetailTab = "stream" | "llm-turns" | "postmortem";
 
-/// Tab strip for the bottom of the SessionDetail page. Two
+/// Tab strip for the bottom of the SessionDetail page. Three
 /// tabs:
 ///   * **Live stream** — the existing `<SessionStream>`
 ///     subscribes to `/api/sessions/:id/stream` SSE for
 ///     active sessions. Replays the on-disk ring's tail then
 ///     attaches live frames.
+///   * **LLM turns** — `<TaskLlmTurns>` keyed by the session's
+///     owning `task_id` (bound at session-mint time per
+///     `INV-DASHBOARD-SESSION-OWNS-TASK-AT-MINT-01`). Shows the
+///     raw upstream provider request/response envelopes the
+///     kernel-side gateway tap captured for whichever task this
+///     session is bound to (for Orchestrator sessions the
+///     synthetic coordinator task whose `task_id == initiative_id`;
+///     for Executor / Reviewer sessions their respective subtask).
+///     `INV-DASHBOARD-LLM-TURN-CAPTURED-01` /
+///     `INV-DASHBOARD-TASK-LLM-CAPTURE-01`. When the session has
+///     no owning task (pre-iter72 fixture, or a synthetic test
+///     row), the tab is disabled with a hint.
 ///   * **Post-mortem** — `<SessionPostmortemPanel>` calls
 ///     `/api/sessions/:id/capture` to surface FSM transitions
 ///     + audit-event mirrors + KSB snapshots from the
@@ -179,8 +195,15 @@ type DetailTab = "stream" | "postmortem";
 /// We default to the live stream — operators land here while
 /// the session is running 95 % of the time. Only on a fail /
 /// post-mortem dive do they want the capture ring.
-function SessionDetailTabs({ sessionId }: { sessionId: string }) {
+function SessionDetailTabs({
+  sessionId,
+  owningTaskId,
+}: {
+  sessionId: string;
+  owningTaskId: string | null;
+}) {
   const [tab, setTab] = useState<DetailTab>("stream");
+  const llmTurnsEnabled = !!owningTaskId;
   return (
     <section data-testid="session-detail-tabs" className="space-y-3">
       <div
@@ -196,6 +219,19 @@ function SessionDetailTabs({ sessionId }: { sessionId: string }) {
           Live stream
         </TabButton>
         <TabButton
+          active={tab === "llm-turns"}
+          onClick={() => llmTurnsEnabled && setTab("llm-turns")}
+          testId="tab-llm-turns"
+          disabled={!llmTurnsEnabled}
+          title={
+            llmTurnsEnabled
+              ? "Raw LLM request/response envelopes for the session's owning task"
+              : "No owning task is bound to this session (pre-iter72 fixture)."
+          }
+        >
+          LLM turns
+        </TabButton>
+        <TabButton
           active={tab === "postmortem"}
           onClick={() => setTab("postmortem")}
           testId="tab-postmortem"
@@ -203,11 +239,11 @@ function SessionDetailTabs({ sessionId }: { sessionId: string }) {
           Post-mortem
         </TabButton>
       </div>
-      {tab === "stream" ? (
-        <SessionStream sessionId={sessionId} />
-      ) : (
-        <SessionPostmortemPanel sessionId={sessionId} />
+      {tab === "stream" && <SessionStream sessionId={sessionId} />}
+      {tab === "llm-turns" && owningTaskId && (
+        <TaskLlmTurns taskId={owningTaskId} />
       )}
+      {tab === "postmortem" && <SessionPostmortemPanel sessionId={sessionId} />}
     </section>
   );
 }
@@ -217,25 +253,32 @@ function TabButton({
   onClick,
   children,
   testId,
+  disabled,
+  title,
 }: {
   active: boolean;
   onClick: () => void;
   children: React.ReactNode;
   testId?: string;
+  disabled?: boolean;
+  title?: string;
 }) {
+  const stateCls = disabled
+    ? "text-ink-faint cursor-not-allowed opacity-60"
+    : active
+      ? "bg-accent/15 text-accent border border-accent/30"
+      : "text-ink-muted hover:text-ink hover:bg-panel";
   return (
     <button
       type="button"
       role="tab"
       aria-selected={active}
+      aria-disabled={disabled || undefined}
       data-testid={testId}
-      onClick={onClick}
-      className={
-        "px-3 py-1.5 text-xs rounded-sm transition-colors " +
-        (active
-          ? "bg-accent/15 text-accent border border-accent/30"
-          : "text-ink-muted hover:text-ink hover:bg-panel")
-      }
+      title={title}
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
+      className={"px-3 py-1.5 text-xs rounded-sm transition-colors " + stateCls}
     >
       {children}
     </button>

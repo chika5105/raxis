@@ -639,7 +639,11 @@ pub fn locate_dashboard_dist() -> Option<PathBuf> {
                     dist_mtime_unix,
                     newest_source_path,
                     newest_source_mtime_unix,
-                } => (*dist_mtime_unix, newest_source_path.clone(), *newest_source_mtime_unix),
+                } => (
+                    *dist_mtime_unix,
+                    newest_source_path.clone(),
+                    *newest_source_mtime_unix,
+                ),
                 // `classify_bundle_state` only routes here when
                 // `dist_is_fresh == false && skip == false &&
                 // dist_present == true`, which only fires from
@@ -950,12 +954,7 @@ fn listening_pids_on_port(port: u16) -> Vec<u32> {
     // line; `-n` and `-P` skip DNS / service-name resolution so
     // the call is fast on a saturated DNS host.
     let output = std::process::Command::new("lsof")
-        .args([
-            "-nP",
-            &format!("-iTCP:{port}"),
-            "-sTCP:LISTEN",
-            "-t",
-        ])
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output();
@@ -1486,19 +1485,20 @@ mod tests {
         // unambiguously newer regardless of FS mtime resolution.
         let week_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 86400);
         set_mtime(&fe.join("dist").join("index.html"), week_ago);
-        assert_eq!(probe_dashboard_fe_freshness(fe), DashboardFeFreshness::Fresh);
+        assert_eq!(
+            probe_dashboard_fe_freshness(fe),
+            DashboardFeFreshness::Fresh
+        );
 
         // 3. Add a src/ file with mtime newer than dist → Stale.
         std::fs::create_dir_all(fe.join("src")).expect("mkdir src");
         let src_file = fe.join("src").join("App.tsx");
-        std::fs::write(&src_file, b"export const App = () => null;")
-            .expect("write src/App.tsx");
+        std::fs::write(&src_file, b"export const App = () => null;").expect("write src/App.tsx");
         let now = std::time::SystemTime::now();
         set_mtime(&src_file, now);
         match probe_dashboard_fe_freshness(fe) {
             DashboardFeFreshness::Stale {
-                newest_source_path,
-                ..
+                newest_source_path, ..
             } => {
                 assert_eq!(newest_source_path, src_file);
             }
@@ -1508,7 +1508,10 @@ mod tests {
         // 4. Backdate the src file so dist is again newer →
         //    Fresh (the reverse-order case).
         set_mtime(&src_file, week_ago - std::time::Duration::from_secs(86400));
-        assert_eq!(probe_dashboard_fe_freshness(fe), DashboardFeFreshness::Fresh);
+        assert_eq!(
+            probe_dashboard_fe_freshness(fe),
+            DashboardFeFreshness::Fresh
+        );
 
         // 5. A root config file (e.g., package.json) newer than
         //    dist also votes Stale — exercising the
@@ -1518,8 +1521,7 @@ mod tests {
         set_mtime(&pkg, now);
         match probe_dashboard_fe_freshness(fe) {
             DashboardFeFreshness::Stale {
-                newest_source_path,
-                ..
+                newest_source_path, ..
             } => {
                 assert_eq!(newest_source_path, pkg);
             }
@@ -1661,10 +1663,7 @@ mod tests {
         // The probe must return Vec::new() in <100ms.
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral test port");
-        let port = listener
-            .local_addr()
-            .expect("ephemeral local_addr")
-            .port();
+        let port = listener.local_addr().expect("ephemeral local_addr").port();
         drop(listener);
         let started = Instant::now();
         let pids = listening_pids_on_port(port);

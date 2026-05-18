@@ -103,7 +103,7 @@
 #![warn(missing_docs)]
 
 use std::collections::{BTreeMap, HashMap};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -115,16 +115,38 @@ use raxis_credential_proxy_manager::{
     CredentialProxyManager, ManagerError, SessionProxyHandles, ShutdownReport,
 };
 use raxis_egress_admission::{
-    run_admission_loop_with_stall_tracker, AdmissionService, EgressStallTracker,
+    run_admission_loop_with_stall_tracker, AdmissionService, AdmissionVerdict, EgressStallTracker,
 };
+use raxis_ipc::message::IpcMessage;
+use raxis_ipc::{read_frame, write_frame, FrameError};
 use raxis_isolation::{
-    Backend as IsolationBackend, ExitStatus, IsolationError, Session as IsolationSession,
-    VerifiedImage, VmSpec, WorkspaceMount,
+    Backend as IsolationBackend, EgressTier, ExitStatus, IsolationError,
+    Session as IsolationSession, VerifiedImage, VmSpec, WorkspaceMount,
 };
 use raxis_plan_credentials::TaskCredentialDecl;
+use raxis_tproxy_protocol::{AdmissionProtocol, ProxyAdmissionRequest};
+use raxis_types::{
+    DnsQueryType, DnsResolveRequest, DnsResolveResponse, TproxyAdmissionRequest,
+    TproxyAdmissionResponse, TproxyProtocol,
+};
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+use uuid::Uuid;
+
+const A3_HOST_CID_ENV: &str = "RAXIS_AIRGAP_A3_HOST_CID";
+const A3_ADMISSION_PORT_ENV: &str = "RAXIS_AIRGAP_A3_ADMISSION_PORT";
+const A3_TUNNEL_PORT_ENV: &str = "RAXIS_AIRGAP_A3_TUNNEL_PORT";
+const A3_DEFAULT_HOST_CID: u32 = 2;
+const A3_DEFAULT_ADMISSION_PORT: u32 = 5380;
+const A3_DEFAULT_TUNNEL_PORT: u32 = 5381;
+const A3_CONTROL_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+const A3_TUNNEL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const A3_DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+const A3_DNS_DEFAULT_TTL_SECS: u32 = 60;
+const A3_DNS_NEGATIVE_TTL_SECS: u32 = 5;
+const A3_MAX_HOSTNAME_LEN: usize = 255;
 
 // ---------------------------------------------------------------------------
 // V3 perf-telemetry helpers
@@ -385,7 +407,54 @@ struct ActiveSession {
     session: Box<dyn IsolationSession>,
     credential_proxy_handles: SessionProxyHandles,
     admission_loop_task: JoinHandle<()>,
+    a3_control_task: Option<JoinHandle<()>>,
+    a3_tunnel_task: Option<JoinHandle<()>>,
     admission_loopback: SocketAddr,
+}
+
+struct A3BoundListeners {
+    control_listener: TcpListener,
+    tunnel_listener: TcpListener,
+    control_addr: SocketAddr,
+    tunnel_addr: SocketAddr,
+}
+
+#[derive(Clone, Debug)]
+struct A3RegisteredTunnel {
+    destination: SocketAddr,
+    tunnel_token: [u8; 32],
+    session_id: String,
+    host_or_sni: Option<String>,
+}
+
+#[derive(Default, Debug)]
+struct A3TunnelRegistry {
+    by_id: Mutex<HashMap<Uuid, A3RegisteredTunnel>>,
+}
+
+impl A3TunnelRegistry {
+    fn new() -> Self {
+        Self {
+            by_id: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn register(&self, tunnel: A3RegisteredTunnel) -> (Uuid, [u8; 32]) {
+        let tunnel_id = Uuid::new_v4();
+        let token = tunnel.tunnel_token;
+        self.by_id.lock().insert(tunnel_id, tunnel);
+        (tunnel_id, token)
+    }
+
+    fn consume(&self, tunnel_id: Uuid, token: &[u8; 32]) -> Option<A3RegisteredTunnel> {
+        let mut by_id = self.by_id.lock();
+        let entry = by_id.remove(&tunnel_id)?;
+        if &entry.tunnel_token == token {
+            Some(entry)
+        } else {
+            None
+        }
+    }
 }
 
 impl SessionSpawnService {
@@ -565,6 +634,28 @@ impl SessionSpawnService {
             "session-spawn: admission listener bound",
         );
 
+        let a3_required = req.vm_spec.egress_tier == EgressTier::Mediated;
+        let a3_listeners = if a3_required {
+            match bind_a3_listeners().await {
+                Ok(listeners) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        control_addr = %listeners.control_addr,
+                        tunnel_addr = %listeners.tunnel_addr,
+                        "session-spawn: A3 vsock-loopback listeners bound",
+                    );
+                    Some(listeners)
+                }
+                Err(e) => {
+                    drop(admission_listener);
+                    let _ = cred_handles.shutdown();
+                    return Err(SpawnError::AdmissionBind(e));
+                }
+            }
+        } else {
+            None
+        };
+
         // ── Step 3: stamp env entries the substrate forwards to the
         //           guest. The credential-proxy URLs land first
         //           (one per `mount_as`), the kernel-injected vars
@@ -580,6 +671,20 @@ impl SessionSpawnService {
             "RAXIS_TPROXY_KERNEL_TCP".to_owned(),
             admission_addr.to_string(),
         );
+        if a3_required {
+            req.vm_spec
+                .env
+                .insert(A3_HOST_CID_ENV.to_owned(), A3_DEFAULT_HOST_CID.to_string());
+            req.vm_spec.env.insert(
+                A3_ADMISSION_PORT_ENV.to_owned(),
+                A3_DEFAULT_ADMISSION_PORT.to_string(),
+            );
+            req.vm_spec.env.insert(
+                A3_TUNNEL_PORT_ENV.to_owned(),
+                A3_DEFAULT_TUNNEL_PORT.to_string(),
+            );
+        }
+        let session_token_for_a3 = req.vm_spec.session_token.0.clone();
 
         // ── Step 3a: build the credential-proxy vsock-loopback plan.
         //           For each bound credential proxy at host
@@ -752,6 +857,35 @@ impl SessionSpawnService {
             );
         }
 
+        if let Some(a3) = a3_listeners.as_ref() {
+            let registrations = [
+                (A3_DEFAULT_ADMISSION_PORT, a3.control_addr.port(), "control"),
+                (A3_DEFAULT_TUNNEL_PORT, a3.tunnel_addr.port(), "tunnel"),
+            ];
+            for (vsock_port, host_port, channel) in registrations {
+                if let Err(e) = session.register_loopback_listener(vsock_port, host_port) {
+                    tracing::error!(
+                        session_id = %session_id,
+                        channel,
+                        vsock_port,
+                        host_port,
+                        error = %e,
+                        "session-spawn: A3 register_loopback_listener failed",
+                    );
+                    let _ = session.terminate();
+                    drop(admission_listener);
+                    let _ = cred_handles.shutdown();
+                    return Err(SpawnError::IsolationSpawn(e));
+                }
+            }
+            tracing::info!(
+                session_id = %session_id,
+                admission_vsock_port = A3_DEFAULT_ADMISSION_PORT,
+                tunnel_vsock_port = A3_DEFAULT_TUNNEL_PORT,
+                "session-spawn: A3 vsock-loopback listeners registered on substrate",
+            );
+        }
+
         // ── Step 4.5: surrender the kernel-side IPC stream. ─────────
         //
         // microVM substrates (Apple-VZ today, Firecracker once it
@@ -813,6 +947,43 @@ impl SessionSpawnService {
         // which drops the futures cleanly (no half-written frames per
         // the trait contract).
         let admission_service: Arc<dyn AdmissionService> = Arc::from(req.admission_service);
+        let a3_tasks = if let Some(a3) = a3_listeners {
+            let A3BoundListeners {
+                control_listener,
+                tunnel_listener,
+                control_addr: _,
+                tunnel_addr: _,
+            } = a3;
+            let registry = Arc::new(A3TunnelRegistry::new());
+            let control_task = {
+                let svc = Arc::clone(&admission_service);
+                let audit = Arc::clone(&self.audit);
+                let registry = Arc::clone(&registry);
+                let session_id = session_id.clone();
+                let session_token = session_token_for_a3.clone();
+                tokio::spawn(async move {
+                    run_a3_control_loop(
+                        control_listener,
+                        session_id,
+                        session_token,
+                        svc,
+                        audit,
+                        registry,
+                    )
+                    .await;
+                })
+            };
+            let tunnel_task = {
+                let registry = Arc::clone(&registry);
+                let session_id = session_id.clone();
+                tokio::spawn(async move {
+                    run_a3_tunnel_loop(tunnel_listener, session_id, registry).await;
+                })
+            };
+            Some((control_task, tunnel_task))
+        } else {
+            None
+        };
         let audit_for_loop = Arc::clone(&self.audit);
         let session_id_for_loop = session_id.clone();
         // V2 reviewer-egress-defaults-decision.md §7. Clone the
@@ -890,6 +1061,10 @@ impl SessionSpawnService {
             // admission loop, and the credential proxies before
             // surfacing the error.
             admission_task.abort();
+            if let Some((control_task, tunnel_task)) = &a3_tasks {
+                control_task.abort();
+                tunnel_task.abort();
+            }
             let mut sess = session;
             let _ = sess.terminate();
             let _ = cred_handles.shutdown();
@@ -897,6 +1072,10 @@ impl SessionSpawnService {
         }
 
         // ── Step 7: register the active session. ────────────────────
+        let (a3_control_task, a3_tunnel_task) = match a3_tasks {
+            Some((control_task, tunnel_task)) => (Some(control_task), Some(tunnel_task)),
+            None => (None, None),
+        };
         let mut table = self.sessions.lock();
         table.insert(
             session_id.clone(),
@@ -904,6 +1083,8 @@ impl SessionSpawnService {
                 session,
                 credential_proxy_handles: cred_handles,
                 admission_loop_task: admission_task,
+                a3_control_task,
+                a3_tunnel_task,
                 admission_loopback: admission_addr,
             },
         );
@@ -984,6 +1165,12 @@ impl SessionSpawnService {
             // tasks don't leak. We surface the audit error AFTER
             // best-effort cleanup.
             entry.admission_loop_task.abort();
+            if let Some(task) = entry.a3_control_task.take() {
+                task.abort();
+            }
+            if let Some(task) = entry.a3_tunnel_task.take() {
+                task.abort();
+            }
             let _ = entry.credential_proxy_handles.shutdown();
             return Err(SpawnError::Audit(e.to_string()));
         }
@@ -995,10 +1182,16 @@ impl SessionSpawnService {
         // run_admission_loop calls drop cleanly (cancel-safe per
         // the crate's trait contract).
         entry.admission_loop_task.abort();
+        if let Some(task) = entry.a3_control_task.take() {
+            task.abort();
+        }
+        if let Some(task) = entry.a3_tunnel_task.take() {
+            task.abort();
+        }
         let _ = entry.admission_loopback;
         tracing::info!(
             session_id = %session_id,
-            "session-terminate: admission loop aborted",
+            "session-terminate: admission loops aborted",
         );
 
         // ── Step 4: shut down credential proxies (emits
@@ -1100,6 +1293,596 @@ impl SessionSpawnService {
         // path — production main / `HandlerContext::new` always
         // call `with_store`.
         self.sessions.lock().len()
+    }
+}
+
+async fn bind_a3_listeners() -> Result<A3BoundListeners, std::io::Error> {
+    let control_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let control_addr = control_listener.local_addr()?;
+    let tunnel_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let tunnel_addr = tunnel_listener.local_addr()?;
+    Ok(A3BoundListeners {
+        control_listener,
+        tunnel_listener,
+        control_addr,
+        tunnel_addr,
+    })
+}
+
+async fn run_a3_control_loop(
+    listener: TcpListener,
+    session_id: String,
+    session_token: String,
+    admission_service: Arc<dyn AdmissionService>,
+    audit: Arc<dyn AuditSink>,
+    registry: Arc<A3TunnelRegistry>,
+) {
+    loop {
+        let (sock, peer) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "A3 control accept failed; closing listener",
+                );
+                return;
+            }
+        };
+        tracing::debug!(
+            session_id = %session_id,
+            peer = %peer,
+            "A3 control: accepted guest connection",
+        );
+        let svc = Arc::clone(&admission_service);
+        let audit = Arc::clone(&audit);
+        let registry = Arc::clone(&registry);
+        let session_id = session_id.clone();
+        let session_token = session_token.clone();
+        tokio::spawn(async move {
+            handle_a3_control_connection(sock, session_id, session_token, svc, audit, registry)
+                .await;
+        });
+    }
+}
+
+async fn handle_a3_control_connection(
+    mut sock: tokio::net::TcpStream,
+    session_id: String,
+    session_token: String,
+    admission_service: Arc<dyn AdmissionService>,
+    audit: Arc<dyn AuditSink>,
+    registry: Arc<A3TunnelRegistry>,
+) {
+    let envelope = match tokio::time::timeout(
+        A3_CONTROL_FRAME_TIMEOUT,
+        read_frame::<_, IpcMessage>(&mut sock),
+    )
+    .await
+    {
+        Ok(Ok(msg)) => msg,
+        Ok(Err(FrameError::Eof)) => return,
+        Ok(Err(e)) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "A3 control frame read failed",
+            );
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(
+                session_id = %session_id,
+                timeout_ms = A3_CONTROL_FRAME_TIMEOUT.as_millis() as u64,
+                "A3 control frame read timed out",
+            );
+            return;
+        }
+    };
+
+    let response = match envelope {
+        IpcMessage::DnsResolveRequest(req) => IpcMessage::KernelDnsResolveResponse(
+            handle_a3_dns_request(req, &session_id, &session_token, &audit).await,
+        ),
+        IpcMessage::TproxyAdmissionRequest(req) => IpcMessage::KernelTproxyAdmissionResponse(
+            handle_a3_tproxy_request(
+                req,
+                &session_id,
+                &session_token,
+                admission_service.as_ref(),
+                audit.as_ref(),
+                &registry,
+            )
+            .await,
+        ),
+        other => {
+            tracing::warn!(
+                session_id = %session_id,
+                variant = %a3_ipc_variant_name(&other),
+                "A3 control received unexpected IPC message",
+            );
+            return;
+        }
+    };
+
+    match tokio::time::timeout(A3_CONTROL_FRAME_TIMEOUT, write_frame(&mut sock, &response)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "A3 control frame write failed",
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                session_id = %session_id,
+                timeout_ms = A3_CONTROL_FRAME_TIMEOUT.as_millis() as u64,
+                "A3 control frame write timed out",
+            );
+        }
+    }
+}
+
+async fn handle_a3_dns_request(
+    req: DnsResolveRequest,
+    session_id: &str,
+    session_token: &str,
+    audit: &Arc<dyn AuditSink>,
+) -> DnsResolveResponse {
+    let authenticated = req.session_token == session_token;
+    let audit_session = if authenticated { session_id } else { "" };
+    if !authenticated || req.hostname.is_empty() || req.hostname.len() > A3_MAX_HOSTNAME_LEN {
+        return a3_dns_audit_and_response(
+            audit,
+            audit_session,
+            &req,
+            Vec::new(),
+            A3_DNS_NEGATIVE_TTL_SECS,
+        );
+    }
+
+    let probe = format!("{}:0", req.hostname);
+    let addresses: Vec<IpAddr> =
+        match tokio::time::timeout(A3_DNS_LOOKUP_TIMEOUT, tokio::net::lookup_host(probe)).await {
+            Ok(Ok(iter)) => iter
+                .map(|addr| addr.ip())
+                .filter(|ip| a3_dns_query_type_matches(req.query_type, ip))
+                .collect(),
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    session_id,
+                    hostname = %req.hostname,
+                    error = %e,
+                    "A3 DNS lookup failed",
+                );
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::warn!(
+                    session_id,
+                    hostname = %req.hostname,
+                    timeout_ms = A3_DNS_LOOKUP_TIMEOUT.as_millis() as u64,
+                    "A3 DNS lookup timed out",
+                );
+                Vec::new()
+            }
+        };
+    let ttl = if addresses.is_empty() {
+        A3_DNS_NEGATIVE_TTL_SECS
+    } else {
+        A3_DNS_DEFAULT_TTL_SECS
+    };
+    a3_dns_audit_and_response(audit, audit_session, &req, addresses, ttl)
+}
+
+fn a3_dns_audit_and_response(
+    audit: &Arc<dyn AuditSink>,
+    session_id: &str,
+    req: &DnsResolveRequest,
+    addresses: Vec<IpAddr>,
+    ttl_secs: u32,
+) -> DnsResolveResponse {
+    let kind = AuditEventKind::DnsResolveRequested {
+        session_id: session_id.to_owned(),
+        hostname: req.hostname.clone(),
+        query_type: match req.query_type {
+            DnsQueryType::A => "A".to_owned(),
+            DnsQueryType::Aaaa => "AAAA".to_owned(),
+        },
+        resolved_count: addresses.len() as u32,
+        ttl_secs,
+    };
+    let session_anchor = if session_id.is_empty() {
+        None
+    } else {
+        Some(session_id)
+    };
+    if let Err(e) = audit.emit(kind, session_anchor, None, None) {
+        tracing::error!(
+            session_id,
+            error = %e,
+            "A3 DNS audit emit failed",
+        );
+    }
+    DnsResolveResponse {
+        request_id: req.request_id,
+        addresses,
+        ttl_secs,
+    }
+}
+
+fn a3_dns_query_type_matches(query_type: DnsQueryType, ip: &IpAddr) -> bool {
+    matches!(
+        (query_type, ip),
+        (DnsQueryType::A, IpAddr::V4(_)) | (DnsQueryType::Aaaa, IpAddr::V6(_))
+    )
+}
+
+async fn handle_a3_tproxy_request(
+    req: TproxyAdmissionRequest,
+    session_id: &str,
+    session_token: &str,
+    admission_service: &dyn AdmissionService,
+    audit: &dyn AuditSink,
+    registry: &Arc<A3TunnelRegistry>,
+) -> TproxyAdmissionResponse {
+    let request_id = req.request_id;
+    if req.session_token != session_token {
+        let _ = a3_emit_denied_audit(audit, "", &req, "FAIL_SESSION_TOKEN_MISMATCH");
+        return a3_deny(request_id, "FAIL_SESSION_TOKEN_MISMATCH", None);
+    }
+
+    let proxy_req = ProxyAdmissionRequest {
+        connection_id: a3_connection_id(request_id),
+        original_dst_ip: req.destination.ip().to_string(),
+        original_dst_port: req.destination.port(),
+        host_or_sni: a3_host_or_sni_for_audit(&req),
+        protocol: a3_protocol(req.protocol),
+    };
+    let decision = admission_service.admit(session_id, &proxy_req);
+    match decision.verdict {
+        AdmissionVerdict::Deny(reason) => {
+            let reason = reason.as_str();
+            if !a3_emit_denied_audit(audit, session_id, &req, reason) {
+                return a3_deny(request_id, "FAIL_AUDIT_EMIT", None);
+            }
+            a3_deny(
+                request_id,
+                reason,
+                a3_hint_for_denied_host(proxy_req.host_or_sni.as_deref()),
+            )
+        }
+        AdmissionVerdict::Admit => {
+            let mut tunnel_token = [0u8; 32];
+            if let Err(e) = getrandom::getrandom(&mut tunnel_token) {
+                tracing::error!(
+                    session_id,
+                    error = %e,
+                    "A3 tproxy tunnel token generation failed",
+                );
+                let _ = a3_emit_denied_audit(audit, session_id, &req, "protocol_not_permitted");
+                return a3_deny(request_id, "protocol_not_permitted", None);
+            }
+
+            let host_for_audit = a3_host_or_sni_for_audit(&req);
+            let (tunnel_id, _token_echo) = registry.register(A3RegisteredTunnel {
+                destination: req.destination,
+                tunnel_token,
+                session_id: session_id.to_owned(),
+                host_or_sni: host_for_audit.clone(),
+            });
+            if !a3_emit_granted_audit(
+                audit,
+                session_id,
+                &req,
+                host_for_audit.as_deref(),
+                tunnel_id,
+            ) {
+                let _ = registry.consume(tunnel_id, &tunnel_token);
+                return a3_deny(request_id, "FAIL_AUDIT_EMIT", None);
+            }
+
+            TproxyAdmissionResponse::Admit {
+                request_id,
+                tunnel_id,
+                tunnel_token,
+            }
+        }
+    }
+}
+
+fn a3_connection_id(request_id: Uuid) -> u64 {
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&request_id.as_bytes()[..8]);
+    u64::from_be_bytes(bytes)
+}
+
+fn a3_protocol(protocol: TproxyProtocol) -> AdmissionProtocol {
+    match protocol {
+        TproxyProtocol::Tcp => AdmissionProtocol::Tcp,
+        TproxyProtocol::Tls => AdmissionProtocol::Https,
+        TproxyProtocol::Http => AdmissionProtocol::Http,
+    }
+}
+
+fn a3_host_or_sni_for_audit(req: &TproxyAdmissionRequest) -> Option<String> {
+    req.sni.clone().or_else(|| req.host_header.clone())
+}
+
+fn a3_emit_denied_audit(
+    audit: &dyn AuditSink,
+    session_id: &str,
+    req: &TproxyAdmissionRequest,
+    reason: &str,
+) -> bool {
+    let kind = AuditEventKind::TproxyAdmissionDenied {
+        session_id: session_id.to_owned(),
+        host_or_sni: a3_host_or_sni_for_audit(req),
+        original_dst_ip: req.destination.ip().to_string(),
+        original_dst_port: req.destination.port(),
+        protocol: req.protocol.as_str().to_owned(),
+        reason: reason.to_owned(),
+    };
+    let session_anchor = if session_id.is_empty() {
+        None
+    } else {
+        Some(session_id)
+    };
+    match audit.emit(kind, session_anchor, None, None) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::error!(
+                session_id,
+                error = %e,
+                "A3 tproxy denied audit emit failed",
+            );
+            false
+        }
+    }
+}
+
+fn a3_emit_granted_audit(
+    audit: &dyn AuditSink,
+    session_id: &str,
+    req: &TproxyAdmissionRequest,
+    host_for_match: Option<&str>,
+    tunnel_id: Uuid,
+) -> bool {
+    let kind = AuditEventKind::TproxyAdmissionGranted {
+        session_id: session_id.to_owned(),
+        host_or_sni: host_for_match.map(str::to_owned),
+        original_dst_ip: req.destination.ip().to_string(),
+        original_dst_port: req.destination.port(),
+        protocol: req.protocol.as_str().to_owned(),
+        tunnel_id: tunnel_id.to_string(),
+    };
+    match audit.emit(kind, Some(session_id), None, None) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::error!(
+                session_id,
+                error = %e,
+                "A3 tproxy granted audit emit failed",
+            );
+            false
+        }
+    }
+}
+
+fn a3_deny(request_id: Uuid, reason: &str, hint: Option<String>) -> TproxyAdmissionResponse {
+    TproxyAdmissionResponse::Deny {
+        request_id,
+        reason: reason.to_owned(),
+        hint,
+    }
+}
+
+fn a3_hint_for_denied_host(host: Option<&str>) -> Option<String> {
+    host.filter(|h| !h.is_empty()).map(|h| {
+        format!(
+            "add `{h}` (or a matching `*.<suffix>` pattern) to \
+             policy `[egress] domains` / `[egress] patterns`"
+        )
+    })
+}
+
+async fn run_a3_tunnel_loop(
+    listener: TcpListener,
+    session_id: String,
+    registry: Arc<A3TunnelRegistry>,
+) {
+    loop {
+        let (sock, peer) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "A3 tunnel accept failed; closing listener",
+                );
+                return;
+            }
+        };
+        tracing::debug!(
+            session_id = %session_id,
+            peer = %peer,
+            "A3 tunnel: accepted guest connection",
+        );
+        let registry = Arc::clone(&registry);
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            handle_a3_tunnel_connection(sock, session_id, registry).await;
+        });
+    }
+}
+
+async fn handle_a3_tunnel_connection(
+    mut sock: tokio::net::TcpStream,
+    session_id_for_log: String,
+    registry: Arc<A3TunnelRegistry>,
+) {
+    let mut handshake = [0u8; 48];
+    match tokio::time::timeout(A3_TUNNEL_HANDSHAKE_TIMEOUT, sock.read_exact(&mut handshake)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(
+                session_id = %session_id_for_log,
+                error = %e,
+                "A3 tunnel handshake read failed",
+            );
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(
+                session_id = %session_id_for_log,
+                timeout_ms = A3_TUNNEL_HANDSHAKE_TIMEOUT.as_millis() as u64,
+                "A3 tunnel handshake timed out",
+            );
+            return;
+        }
+    }
+
+    let mut id_bytes = [0u8; 16];
+    id_bytes.copy_from_slice(&handshake[..16]);
+    let tunnel_id = Uuid::from_bytes(id_bytes);
+    let mut token = [0u8; 32];
+    token.copy_from_slice(&handshake[16..48]);
+    let tunnel = match registry.consume(tunnel_id, &token) {
+        Some(tunnel) => tunnel,
+        None => {
+            tracing::warn!(
+                session_id = %session_id_for_log,
+                tunnel_id = %tunnel_id,
+                "A3 tunnel handshake rejected",
+            );
+            return;
+        }
+    };
+
+    let mut upstream = match tokio::net::TcpStream::connect(tunnel.destination).await {
+        Ok(sock) => sock,
+        Err(e) => {
+            tracing::warn!(
+                session_id = %tunnel.session_id,
+                tunnel_id = %tunnel_id,
+                destination = %tunnel.destination,
+                host_or_sni = ?tunnel.host_or_sni,
+                error = %e,
+                "A3 tunnel upstream connect failed",
+            );
+            return;
+        }
+    };
+
+    match tokio::io::copy_bidirectional(&mut sock, &mut upstream).await {
+        Ok((guest_to_upstream, upstream_to_guest)) => {
+            tracing::debug!(
+                session_id = %tunnel.session_id,
+                tunnel_id = %tunnel_id,
+                destination = %tunnel.destination,
+                host_or_sni = ?tunnel.host_or_sni,
+                guest_to_upstream,
+                upstream_to_guest,
+                "A3 tunnel closed",
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                session_id = %tunnel.session_id,
+                tunnel_id = %tunnel_id,
+                destination = %tunnel.destination,
+                host_or_sni = ?tunnel.host_or_sni,
+                error = %e,
+                "A3 tunnel copy failed",
+            );
+        }
+    }
+}
+
+fn a3_ipc_variant_name(msg: &IpcMessage) -> &'static str {
+    match msg {
+        IpcMessage::IntentRequest(_) => "IntentRequest",
+        IpcMessage::EscalationRequest(_) => "EscalationRequest",
+        IpcMessage::PlannerFetchRequest(_) => "PlannerFetchRequest",
+        IpcMessage::KernelIntentResponse(_) => "KernelIntentResponse",
+        IpcMessage::KernelEscalationResponse(_) => "KernelEscalationResponse",
+        IpcMessage::KernelPlannerFetchResponse(_) => "KernelPlannerFetchResponse",
+        IpcMessage::PlannerExitNotice { .. } => "PlannerExitNotice",
+        IpcMessage::KernelPlannerExitNoticeAck => "KernelPlannerExitNoticeAck",
+        IpcMessage::TproxyAdmissionRequest(_) => "TproxyAdmissionRequest",
+        IpcMessage::KernelTproxyAdmissionResponse(_) => "KernelTproxyAdmissionResponse",
+        IpcMessage::DnsResolveRequest(_) => "DnsResolveRequest",
+        IpcMessage::KernelDnsResolveResponse(_) => "KernelDnsResolveResponse",
+        IpcMessage::WitnessSubmission(_) => "WitnessSubmission",
+        IpcMessage::WitnessAck { .. } => "WitnessAck",
+        IpcMessage::OperatorRequest(_) => "OperatorRequest",
+        IpcMessage::OperatorResponse(_) => "OperatorResponse",
+    }
+}
+
+#[cfg(test)]
+mod a3_tests {
+    use super::*;
+    use raxis_egress_admission::{AdmissionDecision, AdmissionVerdict};
+    use raxis_test_support::audit_sink::FakeAuditSink;
+
+    struct AlwaysAdmit;
+
+    impl AdmissionService for AlwaysAdmit {
+        fn admit(&self, _session_id: &str, request: &ProxyAdmissionRequest) -> AdmissionDecision {
+            AdmissionDecision {
+                connection_id: request.connection_id,
+                verdict: AdmissionVerdict::Admit,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a3_tproxy_admit_registers_single_use_tunnel_and_audits() {
+        let audit = Arc::new(FakeAuditSink::new());
+        let registry = Arc::new(A3TunnelRegistry::new());
+        let destination = "127.0.0.1:443".parse().unwrap();
+        let req = TproxyAdmissionRequest {
+            request_id: Uuid::new_v4(),
+            session_token: "session-token".to_owned(),
+            sni: Some("api.anthropic.com".to_owned()),
+            host_header: None,
+            destination,
+            protocol: TproxyProtocol::Tls,
+        };
+
+        let resp = handle_a3_tproxy_request(
+            req,
+            "sess-a3",
+            "session-token",
+            &AlwaysAdmit,
+            audit.as_ref(),
+            &registry,
+        )
+        .await;
+
+        let (tunnel_id, tunnel_token) = match resp {
+            TproxyAdmissionResponse::Admit {
+                tunnel_id,
+                tunnel_token,
+                ..
+            } => (tunnel_id, tunnel_token),
+            other => panic!("expected A3 admit, got {other:?}"),
+        };
+        let tunnel = registry
+            .consume(tunnel_id, &tunnel_token)
+            .expect("admit registers tunnel");
+        assert_eq!(tunnel.destination, destination);
+        assert_eq!(tunnel.session_id, "sess-a3");
+        assert!(registry.consume(tunnel_id, &tunnel_token).is_none());
+
+        let events = audit.events();
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            AuditEventKind::TproxyAdmissionGranted { ref session_id, .. }
+            if session_id == "sess-a3"
+        )));
     }
 }
 
