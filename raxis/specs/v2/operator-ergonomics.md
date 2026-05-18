@@ -1465,10 +1465,11 @@ raxis-cli setup wizard [--non-interactive --config <path>]
        --no-executor-starter for slim deployments).
      - Default protected paths ([default_protected_paths]).
    - Sign the policy bundle with the operator key.
-   - Push the policy via raxis-cli policy push.
+   - Advance the policy epoch with
+     `raxis epoch advance --policy <policy.toml> --sig <policy.sig>`.
 
 8. Canonical image verification:
-   - Run `raxis-cli doctor canonical-images` (§17.4) to verify that all
+   - Run `raxis doctor canonical-images` (§17.4) to verify that all
      bundled canonical images (Reviewer, Orchestrator, Executor starter,
      symbol-index verifier, and any selected language starters) are
      present and digest-verified per system-requirements.md §11.1.

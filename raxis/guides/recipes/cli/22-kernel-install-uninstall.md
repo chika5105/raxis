@@ -86,9 +86,9 @@ sudo raxis kernel uninstall --purge
 
 Purging is destructive and removes:
 
-- The audit chain (`audit.jsonl`).
+- The audit chain (`audit/segment-NNN.jsonl`).
 - The kernel database (`kernel.db`).
-- All worktrees and verifier images.
+- All worktrees and cached images.
 - Embedded operator certs and signed policy.
 
 For a forensic backup before purge:

@@ -106,11 +106,12 @@ The session specifies how the agent is isolated. The kernel supports multiple is
 
 ### What the agent can see:
 
-```text
-/ (read-only root filesystem)
-├── /work/            ← VirtioFS mount of the git worktree (read-write)
-├── /raxis/session.env ← Session metadata (session_id, task_id, ports)
-└── localhost:PORT    ← Credential proxy endpoints
+```mermaid
+flowchart TD
+    root["/<br/>read-only root filesystem"]
+    root --> work["/work/<br/>VirtioFS git worktree mount, read-write"]
+    root --> env["/raxis/session.env<br/>session_id, task_id, ports"]
+    root --> proxy["localhost:PORT<br/>credential proxy endpoints"]
 ```
 
 The agent cannot:

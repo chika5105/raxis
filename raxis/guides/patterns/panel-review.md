@@ -90,7 +90,7 @@ context            = """
   - Are the test cases complete? Check edge cases: zero amount, duplicate requests,
     network timeout during charge.
   Approve only if all three functions are correctly implemented and tested.
-```
+"""
 
 [[tasks]]
 task_id            = "style_reviewer"
@@ -105,7 +105,7 @@ context            = """
   - Are there any unwrap() calls on payment-critical paths?
   Approve if the code is maintainable and follows project conventions.
 """
-```text
+```
 
 ---
 
@@ -117,21 +117,27 @@ When the Executor submits `CompleteTask { head_sha: "abc123" }`, the Kernel:
 2. Each Reviewer evaluates the same `evaluation_sha = "abc123"` independently
 3. As each Reviewer submits, the Kernel checks: "are there any Reviewers still Active?"
 
+```mermaid
+sequenceDiagram
+    participant S as security_reviewer
+    participant Q as correctness_reviewer
+    participant C as style_reviewer
+    participant K as Kernel
+    participant O as Orchestrator
+
+    S->>K: SubmitReview(approved=true)
+    C->>K: SubmitReview(approved=true)
+    Q->>K: SubmitReview(approved=false, critique)
+    K->>K: Last reviewer submitted; ANY rejected
+    K->>K: Append rejecting critiques to tasks.last_critique
+    K-->>O: KernelPush::ReviewFailed(executor_task_id)
 ```
-security_reviewer   → SubmitReview { approved: true  }   (first to finish)
-style_reviewer      → SubmitReview { approved: true  }   (second)
-correctness_reviewer → SubmitReview { approved: false,
-                         critique: "refund() doesn't handle partial refunds" }
 
-Kernel: last Reviewer has submitted.
-Verdict: ANY rejected → ReviewFailed
+`tasks.last_critique` stores the rejecting reviewer's critique:
 
-KernelPush::ReviewFailed { executor_task_id: "payments_implementer" }
-
-tasks.last_critique aggregates all critiques:
-  "[correctness_reviewer]: refund() doesn't handle partial refunds"
-  (security and style had no critique — not included)
 ```text
+[correctness_reviewer]: refund() doesn't handle partial refunds
+```
 
 The Orchestrator retries the Executor. The retry VM's system prompt is prepended with
 the aggregated critique. On the next round, all three Reviewers activate again.
@@ -140,22 +146,26 @@ the aggregated critique. On the next round, all three Reviewers activate again.
 
 ## Execution Timeline
 
+```mermaid
+flowchart LR
+    A["t=0<br/>Orchestrator activates executor"]
+    B["t=12m<br/>Executor completes and kernel stages bundle"]
+    C1["t=14m<br/>Security reviewer approves"]
+    C2["t=16m<br/>Style reviewer approves"]
+    C3["t=20m<br/>Correctness reviewer approves"]
+    D["Kernel computes all-approved verdict"]
+    E["Orchestrator submits IntegrationMerge"]
+    F["Kernel fast-forwards main"]
+
+    A --> B
+    B --> C1 --> D
+    B --> C2 --> D
+    B --> C3 --> D
+    D --> E --> F
 ```
-t=0    Orchestrator activates payments_implementer
-t=12m  Executor completes. Kernel creates bundle for Orchestrator.
-       Kernel activates: security_reviewer, correctness_reviewer, style_reviewer (simultaneously)
 
-t=14m  security_reviewer → approved
-t=16m  style_reviewer → approved
-t=20m  correctness_reviewer → approved  ← last one; verdict computed
-
-Kernel: all approved → KernelPush::AllReviewersPassed
-Orchestrator → IntegrationMerge { commit_sha: "abc123" }
-Kernel fast-forwards main. Done.
-
-Total wall-clock: ~20 minutes.
-Sequential equivalent: 12 + 8 + 8 + 10 = 38 minutes.
-```text
+Total wall-clock is about 20 minutes. The sequential equivalent would
+be roughly 38 minutes.
 
 ---
 

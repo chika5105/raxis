@@ -102,7 +102,7 @@ git -C "$DEMO_ROOT" show main:data/ping.json | jq .
 
 # 3. The egress event was admitted.
 raxis log "$INIT_ID" --kind EgressAdmitted --limit 5 --json \
-  | jq '.[] | {host: .payload.target_host, port: .payload.target_port}'
+  | jq -c '{host: .payload.target_host, port: .payload.target_port}'
 # { "host": "internal.example.com", "port": 443 }
 
 # 4. No EgressDenied events — the agent stuck to the allowlist.

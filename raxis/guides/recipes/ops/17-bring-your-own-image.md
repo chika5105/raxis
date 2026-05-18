@@ -200,7 +200,7 @@ Default-image semantics:
 ### 6. Re-sign policy
 
 ```bash
-raxis policy sign /etc/raxis/policy.toml --operator-key "$OPERATOR_KEY"
+raxis policy sign /etc/raxis/policy.toml --key "$OPERATOR_KEY"
 # Loads the bundle, validates [[vm_images]] (digest shape, role
 # admit-list, kernel-version floor), and emits the signed
 # bundle under $RAXIS_DATA_DIR/policy/.
@@ -232,7 +232,7 @@ description        = """
 """
 EOF
 
-raxis submit plan /tmp/byo-smoke.toml
+raxis submit plan /tmp/byo-smoke.toml --no-dry-run
 INIT=$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')
 raxis plan approve "$INIT"
 ```
@@ -302,7 +302,7 @@ printf '\x00' | dd of="$DEST" bs=1 count=1 \
 # diverge from the policy-declared sha256: digest.)
 
 # Submit the same plan again.
-raxis submit plan /tmp/byo-smoke.toml
+raxis submit plan /tmp/byo-smoke.toml --no-dry-run
 INIT2=$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')
 raxis plan approve "$INIT2"
 

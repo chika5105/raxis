@@ -1,6 +1,6 @@
 # RAXIS V3 — Live-E2E Keep-Alive Flag
 
-> **Status:** V3 Specified (operator post-mortem ergonomics; dev-only)
+> **Status:** Implemented (operator post-mortem ergonomics; dev-only)
 >
 > **Cross-references:**
 > - `specs/invariants.md` — `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01` (the keep-running flag MUST default to off; absent any signal, all teardown paths execute as before).

@@ -154,33 +154,30 @@ The verifier image is operator-published (signed) — see
 
 ## What the kernel does on `IntegrationMerge`
 
-```text
-Orchestrator → IntegrationMerge { commit_sha, merged_task_ids, ... }
+```mermaid
+flowchart TD
+    A["Orchestrator submits IntegrationMerge"]
+    B["Check 1<br/>session_agent_type is Orchestrator"]
+    C["Check 2<br/>commit_sha reachable in Orchestrator worktree"]
+    D["Check 3<br/>commit descends from base_sha"]
+    E["Check 4<br/>merged_task_ids Completed and approved"]
+    F["Check 5<br/>hybrid path allowlist covers touched paths"]
+    G["Check 5b/5c<br/>operator approval gates"]
+    H["Check 5d<br/>compute candidate merge tree"]
+    I["Check 6<br/>run integration_merge_verifiers"]
+    J{"Verifier outcome"}
+    K["block_merge non-pass<br/>FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED"]
+    L["warn non-pass<br/>record witness and proceed"]
+    M["escalate non-pass<br/>raise operator escalation"]
+    N["pass"]
+    O["Check 7<br/>fast-forward target_ref"]
+    P["Audit IntegrationMergeCompleted"]
 
-Kernel admission (specs/v2/integration-merge.md):
-  Check 1  Dispatch matrix: session_agent_type == Orchestrator
-  Check 2  commit_sha is reachable in the orchestrator's worktree
-  Check 3  ancestry: commit_sha descends from base_sha
-  Check 4  merged_task_ids each Completed and approved
-  Check 5  hybrid path-allowlist: union(sub-task path_allowlists)
-           ∪ orchestrator.cross_cutting_artifacts contains every
-           touched path
-  Check 5b protected paths require operator-approval escalation
-  Check 5c [orchestrator].all_merges_require_approval gate
-  Check 5d compute candidate merge tree as orphan commit in
-           verifier-staging
-  Check 6  run each [[integration_merge_verifiers]] against the
-           candidate tree:
-             - on_failure = "block_merge" + non-pass →
-               FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED
-             - on_failure = "warn" + non-pass → record witness,
-               proceed
-             - on_failure = "escalate" + non-pass → raise
-               operator escalation, block until resolved
-  Check 7  apply the merge (Phase 2 git fast-forward of target_ref)
-
-Audit: IntegrationMergeCompleted { initiative_id, commit_sha,
-       verifier_witnesses: [...] }
+    A --> B --> C --> D --> E --> F --> G --> H --> I --> J
+    J -->|"block_merge failure"| K
+    J -->|"warn failure"| L --> O
+    J -->|"escalate failure"| M
+    J -->|pass| N --> O --> P
 ```
 
 If any block-merge verifier rejects, the candidate tree is

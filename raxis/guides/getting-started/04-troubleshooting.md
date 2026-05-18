@@ -386,8 +386,8 @@ something) edited a segment file by hand.
 
 1. Stop the kernel immediately.
 2. Copy the `<data_dir>/audit/` tree aside.
-3. Run `raxis verify-chain --full` against the copy to identify the
-   exact seq.
+3. Run `raxis verify-chain --audit-dir <copy>/audit` against the copy
+   to identify the exact seq.
 4. If the disk is healthy and the gap pre-dates a known restore,
    restore from a known-good backup (see
    [`recipes/ops/03-backup-and-restore.md`](../recipes/ops/03-backup-and-restore.md)).
@@ -417,10 +417,12 @@ raxis log --since 5m --kind SessionReconciled
 ls "$RAXIS_DATA_DIR/worktrees/"
 ```
 
-When you are ready to clean up orphan worktrees:
+When you are ready to clean up orphan worktrees, first confirm no
+active session references them:
 
 ```bash
-raxis doctor --fix-orphans
+raxis sessions --json
+ls "$RAXIS_DATA_DIR/worktrees/"
 ```
 
 Reference: [`recipes/ops/13-handle-reconciliation-gap.md`](../recipes/ops/13-handle-reconciliation-gap.md),

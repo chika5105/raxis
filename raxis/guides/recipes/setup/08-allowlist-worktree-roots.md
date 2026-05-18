@@ -65,30 +65,32 @@ There is no glob support; `*` and `?` are literal characters.
 raxis policy sign \
   "$RAXIS_DATA_DIR/policy/policy.toml" \
   --key "$RAXIS_OPERATOR_KEY"
+raxis epoch advance \
+  --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --sig    "$RAXIS_DATA_DIR/policy/policy.sig"
 ```
 
-The kernel hot-reloads policy on file change; no restart needed. The
-signature is rejected if any part of the file changed since the
+The signature is rejected if any part of the file changed since the
 prior signing — including comments and whitespace — so always
-re-sign after edits.
+advance the exact signed artifact.
 
 ---
 
 ## Step 4 — Confirm the kernel observed the new policy
 
 ```bash
-# The kernel logs PolicyReloaded with the new epoch on hot-reload.
-raxis log --kind PolicyReloaded --limit 5
+raxis log --kind PolicyEpochAdvanced --limit 5
 ```
 
 Sample event:
 
 ```text
-{"event":"PolicyReloaded","epoch_id":7,"new_epoch_id":8,"changed_sections":["sessions"]}
+{"event":"PolicyEpochAdvanced","old_epoch":7,"new_epoch":8,"n_sessions_invalidated":0}
 ```
 
-The `changed_sections` list confirms the kernel sees the diff and
-only the `[sessions]` block changed.
+The event confirms the kernel committed the epoch advance. Use
+`raxis policy diff` before advancing when you want a section-level
+review of what changed.
 
 ---
 
@@ -125,7 +127,7 @@ hint: /tmp/scratch-demo is not under any [sessions] allowed_worktree_roots prefi
 |---|---|
 | `FAIL_WORKTREE_OUTSIDE_ALLOWED_ROOTS` | Add the prefix and re-sign; the canonical fix is to *broaden* the policy, not to *bypass* it. |
 | `policy: signature mismatch` after edit | The file changed but wasn't re-signed. `raxis policy sign …`. |
-| Hot reload didn't fire | The kernel watches policy.toml but only when its mtime changes. Some editors write to a temp + rename, breaking the watch — try `touch` after edit. |
+| The edit did not take effect | Re-run `raxis epoch advance --policy ... --sig ...`; the kernel only swaps policy through the signed epoch-advance path. |
 | Allowlist worked yesterday, fails today | The host `TMPDIR` may have rotated (macOS `/var/folders/abc/T/` paths are user-specific). Allowlist the parent prefix `/var/folders` instead of the leaf. |
 
 ---

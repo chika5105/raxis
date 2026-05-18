@@ -30,7 +30,7 @@ You do NOT need the supervisor for:
   `RAXIS_SUPERVISOR_AUTO_RESTART=1`; it relies on the kernel's
   exit code as the test verdict.
 - One-shot CLI ceremonies — `raxis cert mint-emergency`,
-  `raxis log verify-chain`, etc. all run inside `raxis-supervisor`
+  `raxis verify-chain`, etc. all run inside `raxis-supervisor`
   pass-through mode (no auto-restart, no sentinel writes) when
   the env var is unset.
 
@@ -279,11 +279,11 @@ three before re-launching:
 
 | Source | Path | What's there |
 |---|---|---|
-| Audit chain | `<data_dir>/audit.jsonl` | Hash-chained `KernelDeadlockDetected`, `KernelRestartInitiated`, `KernelRestartCompleted`, `KernelRestartHaltedCircuitOpen` rows. Cross-checks against the supervisor's view. |
+| Audit chain | `<data_dir>/audit/segment-NNN.jsonl` | Hash-chained `KernelDeadlockDetected`, `KernelRestartInitiated`, `KernelRestartCompleted`, `KernelRestartHaltedCircuitOpen` rows. Cross-checks against the supervisor's view. |
 | Deadlock dump | `<data_dir>/deadlock_dump_<unix_ts>.json` | Lock-graph + per-thread backtrace. Pending dumps move to `<data_dir>/deadlock_dump_consumed/` after the next kernel boot synthesises the audit row. |
 | Supervisor log | `<data_dir>/supervisor.stderr.log` | One JSON-line per supervisor decision (signal received, classification, restart, breaker open). Forensic-only; not consulted by the auth path. |
 
-`raxis log verify-chain` keeps working across restarts — the
+`raxis verify-chain` keeps working across restarts — the
 chain remains hash-continuous because the new kernel's
 `restart_lifecycle::rehydrate_restart_context` synthesises the
 restart events from the dump + sentinel under the next monotonic
@@ -348,7 +348,7 @@ of the following:
   use the supervisor").
 
 - **One-shot CLI ceremonies.** `raxis cert mint-emergency`,
-  `raxis log verify-chain`, etc. all benefit from passthrough
+  `raxis verify-chain`, etc. all benefit from passthrough
   mode where the kernel exits exactly once.
 
 ### Re-enabling later

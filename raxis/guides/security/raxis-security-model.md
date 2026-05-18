@@ -1109,12 +1109,19 @@ RAXIS_INITIATIVE_ID=<initiative_uuid>
 
 The inference workflow from the planner's perspective:
 
-```text
-planner → InferenceRequest { messages, tools } → Kernel (via VSock)
-Kernel  → InferenceRequest → raxis-gateway (via UDS)
-gateway → provider API call (with credential from $RAXIS_DATA_DIR/credentials/)
-gateway → InferenceResponse → Kernel
-Kernel  → InferenceResponse → planner (via VSock)
+```mermaid
+sequenceDiagram
+    participant Planner as Planner VM
+    participant Kernel as Kernel via VSOCK
+    participant Gateway as raxis-gateway via UDS
+    participant Provider as Provider API
+
+    Planner->>Kernel: InferenceRequest(messages, tools)
+    Kernel->>Gateway: InferenceRequest
+    Gateway->>Provider: API call with credential from data dir
+    Provider-->>Gateway: InferenceResponse
+    Gateway-->>Kernel: InferenceResponse
+    Kernel-->>Planner: InferenceResponse
 ```
 
 The planner sends a conversation history. It receives a model response. It never touches
@@ -1577,8 +1584,8 @@ The policy store and the audit store are the most sensitive data in RAXIS. Both 
 
 | Store | Path | Who reads | Who writes |
 |---|---|---|---|
-| Policy bundle | `$RAXIS_DATA_DIR/policy/policy.toml` | `raxis-kernel` (at startup + epoch advance) | Operator (`raxis policy push`) |
-| Policy signature | `$RAXIS_DATA_DIR/policy/policy.toml.sig` | `raxis-kernel` | Operator |
+| Policy bundle | `$RAXIS_DATA_DIR/policy/policy.toml` | `raxis-kernel` (at startup + epoch advance) | Operator (`raxis policy sign` + `raxis epoch advance`) |
+| Policy signature | `$RAXIS_DATA_DIR/policy/policy.sig` | `raxis-kernel` | Operator |
 | Audit log | `$RAXIS_DATA_DIR/audit/<date>.jsonl` | Auditor (read-only) | `raxis-kernel` (append only) |
 | Kernel secret | `$RAXIS_DATA_DIR/kernel.secret` | `raxis-kernel` | Generated at first boot |
 | Credentials | `$RAXIS_DATA_DIR/credentials/` | `raxis-gateway` | Operator (`raxis creds set`) |
@@ -1662,30 +1669,34 @@ require_approval_for = ["IntegrationMerge"]
 
 **Why policy bundle, not plan:** A plan-level configuration allows an operator to write a
 plan that omits `src/payments/` from protection, defeating the compliance guarantee.
-Policy bundle changes require `raxis policy push` with the operator's Ed25519 key and
-result in a `PolicyEpochAdvanced` audit event — they cannot be made silently.
+Policy bundle changes require a signed epoch-advance ceremony and result in a
+`PolicyEpochAdvanced` audit event — they cannot be made silently.
 
 ### The Approval Flow
 
-```text
-Orchestrator submits IntegrationMerge { commit_sha: "abc", operator_approval_id: None }
-  ↓
-Kernel Check 5b: diff touches src/payments/ → protected hit
-  → Auto-creates escalation { id: esc-99, class: ProtectedPathMerge, commit_sha: "abc" }
-  → Emits MergeApprovalRequired audit event
-  → Returns FAIL_PROTECTED_PATH_APPROVAL_REQUIRED { escalation_id: esc-99 }
-  → KernelPush::MergeApprovalRequired to Orchestrator
+```mermaid
+sequenceDiagram
+    participant Orch as Orchestrator
+    participant Kernel
+    participant Operator
+    participant Main as Main branch
 
-Operator: raxis merge diff esc-99    ← full diff of commit "abc"
-Operator: raxis merge approve esc-99 ← or reject
-  → Emits EscalationConsumed { class: ProtectedPathMerge, resolved_by: operator_alice }
-  → KernelPush::EscalationResolved to Orchestrator
+    Orch->>Kernel: IntegrationMerge(commit_sha=abc, approval=None)
+    Kernel->>Kernel: Check diff against protected paths
+    Kernel->>Kernel: Create escalation esc-99 for commit abc
+    Kernel-->>Orch: FAIL_PROTECTED_PATH_APPROVAL_REQUIRED
+    Kernel-->>Orch: KernelPush::MergeApprovalRequired
 
-Orchestrator re-submits IntegrationMerge { commit_sha: "abc", operator_approval_id: Some(esc-99) }
-  ↓
-Kernel Check 6a: verifies esc-99 is Consumed, class matches, SHA matches → admitted
-  → main fast-forwards to "abc"
-  → Emits IntegrationMergeCompleted { operator_approval_id: Some(esc-99), ... }
+    Operator->>Kernel: raxis merge diff esc-99
+    Kernel-->>Operator: Full diff for commit abc
+    Operator->>Kernel: raxis merge approve esc-99
+    Kernel->>Kernel: Emit EscalationConsumed
+    Kernel-->>Orch: KernelPush::EscalationResolved
+
+    Orch->>Kernel: IntegrationMerge(commit_sha=abc, approval=esc-99)
+    Kernel->>Kernel: Verify consumed class and SHA match
+    Kernel->>Main: Fast-forward to abc
+    Kernel->>Kernel: Emit IntegrationMergeCompleted
 ```
 
 ### Why Approval Is SHA-Specific (Critical Security Property)
@@ -1750,4 +1761,3 @@ the others can fail:
 
 No single layer is sufficient. Every layer that fails has another layer behind it.
 The audit chain ensures that even a breach is fully reconstructable.
-

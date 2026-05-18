@@ -72,14 +72,15 @@ Always keep them in sync to avoid post-load surprises.
 raxis cert mint \
   --key bob_private.pem \
   --display-name bob \
-  --permitted-ops CreateInitiative,ApprovePlan \
+  --ops "CreateInitiative,ApprovePlan" \
   --validity-days 365 \
   --out bob.cert.toml
 
 # On the kernel host:
-raxis cert install bob.cert.toml --operator-key "$RAXIS_OPERATOR_KEY"
-# (Atomic: appends [[operators.entries]] + [operators.entries.cert]
-#  block, then re-signs policy.)
+raxis cert install bob.cert.toml \
+  --policy "$RAXIS_DATA_DIR/policy/policy.toml"
+raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --key "$RAXIS_OPERATOR_KEY"
 ```
 
 See *Add a second operator to an existing install* recipe for the
@@ -90,15 +91,14 @@ end-to-end ceremony, including the offline-cert exchange.
 ## Revoking an operator
 
 ```bash
-raxis cert revoke \
-  --fingerprint 8a4f2c1e9b6d0f3a \
-  --reason "key rotation 2026-05" \
-  --operator-key "$RAXIS_OPERATOR_KEY"
+raxis --operator-key "$RAXIS_OPERATOR_KEY" cert revoke ./bob.cert.toml \
+  --reason rotation \
+  --reference change-2026-05
 ```
 
-Revocation writes a row in `cert_revocations` and re-signs policy.
-The next `policy_manager::advance_epoch` rolls into a new epoch and
-the kernel rejects every subsequent signature from the revoked
+Revocation writes a signed record under `<data-dir>/revocations/`.
+Restart the kernel for the revocation record to take effect; from
+then on, the kernel rejects subsequent signatures from the revoked
 fingerprint with `CERT_REVOKED`.
 
 ---
@@ -120,18 +120,18 @@ fingerprint with `CERT_REVOKED`.
 | Command | Purpose |
 |---|---|
 | `raxis cert list` | Enumerate operator entries + their expiry windows. |
-| `raxis cert mint --key <pem> --display-name <name> [--permitted-ops <csv>] [--validity-days N] --out <path>` | Mint a self-signed cert. |
-| `raxis cert install <cert.toml> --operator-key <pem>` | Atomic add-and-sign ceremony. |
-| `raxis cert revoke --fingerprint <fp> [--reason <text>] --operator-key <pem>` | Revoke an operator. |
+| `raxis cert mint --key <pem> --display-name <name> --ops <csv> [--validity-days N] --out <path>` | Mint a self-signed cert. |
+| `raxis cert install <cert.toml> --policy <policy.toml>` | Insert a cert-backed operator entry. |
+| `raxis [--operator-key <pem>] cert revoke <cert.toml> --reason <rotation\|compromise> --reference <id>` | Revoke an operator cert. |
 | `raxis cert verify <cert.toml>` | Cryptographic self-signature check, offline. |
 
 ---
 
 ## Variations
 
-- **Read-only auditor.** Mint a cert with empty `--permitted-ops`.
-  The fingerprint shows up in `cert list` (so peers see who has
-  auditing power), but no signing operation succeeds.
+- **Read-only auditor.** No cert is needed for read-only local
+  inspection commands; access is controlled by filesystem and socket
+  permissions.
 - **Time-boxed co-signer.** Short `--validity-days 7`. Pair with a
   rotation reminder.
 - **Multiple roles for one human.** A single human can have multiple

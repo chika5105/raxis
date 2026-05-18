@@ -13,12 +13,11 @@ calls `genesis`, mints the genesis cert, and writes a starter
 ## auth sign — ad-hoc signature
 
 ```bash
-raxis auth sign \
-  --operator-key /tmp/genesis.key \
-  --payload "deploy:abc123:2026-05-10T17:30:00Z"
+raxis --operator-key /tmp/genesis.key auth sign \
+  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 # Output:
 # signature: <hex>
-# signer_kid: 8a4f...
+# public_key: <hex>
 ```
 
 What it's for:
@@ -27,25 +26,17 @@ What it's for:
   before the kernel ingests it.
 - A custom tool needs to attach an operator signature to a payload
   that's not directly a Raxis intent.
-- Pre-flight verification: sign a known message, run `auth verify`
-  on the other side, confirm the operator key chain is intact.
+- Dashboard login: sign the challenge from `/api/auth/challenge`, then
+  let the dashboard verify through `/api/auth/verify`.
 
 Important: `auth sign` does NOT mint a kernel-recognized intent.
 If you want the kernel to act, use the appropriate command
 (`submit plan`, `plan approve`, etc.); those internally sign their
 canonical payloads.
 
-To verify a signature out-of-band:
-
-```bash
-raxis auth verify \
-  --signer-kid 8a4f... \
-  --pubkey /tmp/genesis.pub \
-  --payload "deploy:abc123:2026-05-10T17:30:00Z" \
-  --signature <hex>
-# Output:
-# verdict: VALID
-```
+The dashboard verifies the returned public key and signature through
+`POST /api/auth/verify`; there is no separate `raxis auth verify`
+subcommand.
 
 ---
 
@@ -102,7 +93,7 @@ it reports the current state and exits cleanly.
 | Symptom | Fix |
 |---|---|
 | `auth sign: --operator-key unreadable` | Path / perms; chmod 600 the key file. |
-| `auth verify: VERDICT INVALID` | Either the signature is wrong or the pubkey doesn't match the signer kid. |
+| Dashboard rejects signature | Re-run `raxis auth sign` with the fresh challenge; challenges are single-use and time-bounded. |
 | `setup: data_dir already initialized` | Either nuke and rerun, or use `--force` (destructive). |
 | `setup: missing required env in --non-interactive` | The non-interactive mode wants `RAXIS_DATA_DIR`, `RAXIS_OPERATOR_KEY`, `RAXIS_OPERATOR_NAME` at minimum. |
 

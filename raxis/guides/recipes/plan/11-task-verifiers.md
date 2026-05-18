@@ -97,26 +97,18 @@ what threshold counts as Pass.
 
 ## How a witness flows
 
-```text
-Executor completes (CompleteTask):
-  └─ Kernel snapshots the worktree (per task verifier_evaluation_sha).
-       └─ For each [[tasks.verifiers]]:
-            ├─ Spawn a verifier VM from <image>.
-            ├─ Stamp env: RAXIS_VERIFIER_TOKEN, RAXIS_TASK_ID,
-            │    RAXIS_GATE_TYPE, RAXIS_EVALUATION_SHA, RAXIS_KERNEL_SOCKET.
-            ├─ Run <command>. Verifier emits WitnessSubmission over
-            │    RAXIS_KERNEL_SOCKET.
-            └─ Witness recorded in witness/<sha>; result_class indexed.
-
-merge_gate:
-  └─ For each declared verifier:
-       └─ Find the latest witness for (task_id, gate_type).
-       └─ Apply gate_on:
-            ├─ "Pass": require result_class = Pass.
-            ├─ "PassOrInconclusive": Pass or Inconclusive both OK.
-            └─ "Always": require any witness regardless of class.
-       └─ All gates pass → merge proceeds.
-       └─ Any gate fails → FAIL_VERIFIER_GATE.
+```mermaid
+flowchart TD
+    complete["Executor submits CompleteTask"] --> snapshot["Kernel snapshots worktree<br/>verifier_evaluation_sha"]
+    snapshot --> spawn["For each [[tasks.verifiers]]<br/>spawn verifier VM from image"]
+    spawn --> env["Stamp verifier env<br/>RAXIS_VERIFIER_TOKEN<br/>RAXIS_TASK_ID<br/>RAXIS_GATE_TYPE<br/>RAXIS_EVALUATION_SHA<br/>RAXIS_KERNEL_SOCKET"]
+    env --> run["Run verifier command"]
+    run --> submit["Verifier submits WitnessSubmission"]
+    submit --> record["Kernel writes witness/<sha><br/>and indexes witness_records.result_class"]
+    record --> gate["merge_gate checks latest witness<br/>for task_id + gate_type"]
+    gate --> pass{"gate_on satisfied?"}
+    pass -->|yes| merge["Merge may proceed"]
+    pass -->|no| fail["FAIL_VERIFIER_GATE"]
 ```
 
 ---

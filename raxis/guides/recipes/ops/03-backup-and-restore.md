@@ -11,24 +11,32 @@ new host with the same state". Restore is rehearsed periodically.
 
 ## What's in the data directory
 
-```text
-$RAXIS_DATA_DIR/
-├── audit.jsonl                  # tamper-evident audit chain
-├── kernel.db                    # SQLite: initiatives, tasks, sessions, etc.
-├── kernel.db-wal                # SQLite WAL (transient if kernel running)
-├── kernel.db-shm                # SQLite shared-memory (transient)
-├── policy.toml                  # signed policy
-├── audit-verify-cursor.txt      # incremental verify cursor
-├── heartbeat.json               # kernel liveness file
-├── credentials/                 # encrypted credential blobs
-├── verifier-images/             # signed verifier images
-├── witnesses/                   # content-addressed witness blobs
-└── worktrees/                   # per-session worktrees (large; large blast radius)
+```mermaid
+flowchart TD
+    root["$RAXIS_DATA_DIR/"]
+    root --> db["kernel.db<br/>SQLite metadata store"]
+    root --> wal["kernel.db-wal / kernel.db-shm<br/>transient SQLite sidecars"]
+    root --> audit["audit/<br/>segment-NNN.jsonl tamper-evident chain"]
+    root --> policy["policy/<br/>policy.toml + policy.sig"]
+    root --> keys["keys/<br/>authority, quality, verifier-token keys"]
+    root --> providers["providers/<br/>provider credential files"]
+    root --> credentials["credentials/<br/>credential proxy backend files"]
+    root --> auth["auth/<br/>dashboard JWT secret, when enabled"]
+    root --> revocations["revocations/<br/>operator-cert revocations, when present"]
+    root --> artifacts["artifacts/<br/>immutable policy/plan/cert byte store"]
+    root --> witness["witness/<br/>content-addressed witness blobs"]
+    root --> worktrees["worktrees/<br/>per-session checkouts, optional and large"]
+    root --> runtime["runtime/<br/>heartbeat and runtime sidecars"]
+    root --> streams["streams/ + session-capture/<br/>dashboard timeline/postmortem capture"]
+    root --> cache["oci-cache/ + worktree-snapshots/<br/>rebuildable caches and snapshots"]
 ```
 
-The **critical** files are `audit.jsonl`, `kernel.db`, `policy.toml`,
-and `credentials/`. Worktrees and witnesses can be regenerated or
-re-fetched.
+The **critical** state is `audit/`, `kernel.db`, `policy/`, `keys/`,
+`providers/`, `credentials/`, `auth/` if the dashboard is enabled,
+and `revocations/` if any certs have been revoked. Worktrees,
+streams, session captures, image cache, and worktree snapshots are
+useful for forensics and fast resume, but a production recovery can
+usually proceed without them.
 
 ---
 
@@ -39,14 +47,18 @@ re-fetched.
 Two options:
 
 ```bash
+DATE=$(date -u +%Y%m%dT%H%M%SZ)
+BACKUP_DIR=/tmp/raxis-backup-$DATE
+mkdir -p "$BACKUP_DIR"
+
 # Option A: Stop the kernel (a few seconds of downtime).
 sudo systemctl stop raxis-kernel
 
 # Option B: Use SQLite's online backup (no downtime).
 sqlite3 "$RAXIS_DATA_DIR/kernel.db" \
-  ".backup '/tmp/raxis-backup/kernel.db'"
-# Then copy the rest with the kernel running; audit.jsonl is
-# append-only so a hot copy is consistent.
+  ".backup '$BACKUP_DIR/kernel.db'"
+# Then copy the rest with the kernel running; audit segments are
+# append-only, so a hot copy is consistent for forensic replay.
 ```
 
 Option B is preferred for production; Option A is simpler for
@@ -55,16 +67,22 @@ sandbox.
 ### 2. Snapshot the data dir
 
 ```bash
-DATE=$(date -u +%Y%m%dT%H%M%SZ)
-mkdir -p /tmp/raxis-backup-$DATE
-sudo cp -a "$RAXIS_DATA_DIR/audit.jsonl"  /tmp/raxis-backup-$DATE/
-sudo cp -a "$RAXIS_DATA_DIR/kernel.db"    /tmp/raxis-backup-$DATE/    # if Option A
-sudo cp -a "$RAXIS_DATA_DIR/policy.toml"  /tmp/raxis-backup-$DATE/
-sudo cp -a "$RAXIS_DATA_DIR/credentials"  /tmp/raxis-backup-$DATE/
-sudo cp -a "$RAXIS_DATA_DIR/verifier-images" /tmp/raxis-backup-$DATE/
-sudo cp -a "$RAXIS_DATA_DIR/witnesses"    /tmp/raxis-backup-$DATE/
-# Optional, large:
-sudo cp -a "$RAXIS_DATA_DIR/worktrees"    /tmp/raxis-backup-$DATE/
+sudo cp -a "$RAXIS_DATA_DIR/audit"       "$BACKUP_DIR/"
+sudo cp -a "$RAXIS_DATA_DIR/kernel.db"   "$BACKUP_DIR/"    # if Option A
+sudo cp -a "$RAXIS_DATA_DIR/policy"      "$BACKUP_DIR/"
+sudo cp -a "$RAXIS_DATA_DIR/keys"        "$BACKUP_DIR/"
+sudo cp -a "$RAXIS_DATA_DIR/providers"   "$BACKUP_DIR/"
+sudo cp -a "$RAXIS_DATA_DIR/credentials" "$BACKUP_DIR/" 2>/dev/null || true
+sudo cp -a "$RAXIS_DATA_DIR/auth"        "$BACKUP_DIR/" 2>/dev/null || true
+sudo cp -a "$RAXIS_DATA_DIR/revocations" "$BACKUP_DIR/" 2>/dev/null || true
+sudo cp -a "$RAXIS_DATA_DIR/artifacts"   "$BACKUP_DIR/" 2>/dev/null || true
+sudo cp -a "$RAXIS_DATA_DIR/witness"     "$BACKUP_DIR/" 2>/dev/null || true
+
+# Optional and often large:
+sudo cp -a "$RAXIS_DATA_DIR/worktrees" "$BACKUP_DIR/" 2>/dev/null || true
+sudo cp -a "$RAXIS_DATA_DIR/streams" "$BACKUP_DIR/" 2>/dev/null || true
+sudo cp -a "$RAXIS_DATA_DIR/session-capture" "$BACKUP_DIR/" 2>/dev/null || true
+sudo cp -a "$RAXIS_DATA_DIR/worktree-snapshots" "$BACKUP_DIR/" 2>/dev/null || true
 ```
 
 ### 3. Verify the backup
@@ -73,11 +91,11 @@ Before relying on it:
 
 ```bash
 # Verify the audit chain in the backup.
-RAXIS_DATA_DIR=/tmp/raxis-backup-$DATE raxis verify-chain --full
-# Expected: verdict OK
+raxis verify-chain --audit-dir "$BACKUP_DIR/audit"
+# Expected: Chain integrity: OK
 
 # Verify the SQLite db is consistent.
-sqlite3 /tmp/raxis-backup-$DATE/kernel.db "PRAGMA integrity_check;"
+sqlite3 "$BACKUP_DIR/kernel.db" "PRAGMA integrity_check;"
 # Expected: ok
 ```
 
@@ -92,11 +110,11 @@ raxis status
 ### 5. Archive immutably
 
 ```bash
-tar czf /tmp/raxis-backup-$DATE.tar.gz -C /tmp raxis-backup-$DATE
-sha256sum /tmp/raxis-backup-$DATE.tar.gz > /tmp/raxis-backup-$DATE.tar.gz.sha256
+tar czf "$BACKUP_DIR.tar.gz" -C /tmp "raxis-backup-$DATE"
+sha256sum "$BACKUP_DIR.tar.gz" > "$BACKUP_DIR.tar.gz.sha256"
 
 # Upload to your immutable store; e.g.:
-aws s3 cp /tmp/raxis-backup-$DATE.tar.gz \
+aws s3 cp "$BACKUP_DIR.tar.gz" \
   s3://my-raxis-backups/$DATE/ \
   --object-lock-mode COMPLIANCE \
   --object-lock-retain-until-date $(date -u -d '+1 year' --iso-8601=seconds)
@@ -126,7 +144,7 @@ sudo chown -R "$(id -un):$(id -gn)" "$RAXIS_DATA_DIR"
 ### 3. Verify before starting
 
 ```bash
-RAXIS_DATA_DIR="$RAXIS_DATA_DIR" raxis verify-chain --full
+raxis verify-chain
 sqlite3 "$RAXIS_DATA_DIR/kernel.db" "PRAGMA integrity_check;"
 ```
 
@@ -150,7 +168,7 @@ that were in `Active` at backup time may need a manual decision:
 raxis initiative list --state Active
 # For each: decide whether to abort and resubmit, or resume.
 # If resume: raxis task resume <task_id> (only works for paused).
-# If abort:  raxis initiative abort <id> --reason "post-restore: rerun"
+# If abort:  raxis initiative abort <id>
 ```
 
 ---
@@ -171,7 +189,7 @@ raxis initiative list --state Active
 | Command | Purpose |
 |---|---|
 | `sqlite3 ... .backup` | Online SQLite backup (no kernel downtime). |
-| `raxis verify-chain --full` | Audit-chain integrity check. |
+| `raxis verify-chain [--audit-dir <path>]` | Audit-chain integrity check. |
 | `raxis doctor` | Diagnostic suite. |
 | `raxis initiative show --bundle --to` | Per-initiative forensic export (alternative for selective restore). |
 
@@ -179,8 +197,8 @@ raxis initiative list --state Active
 
 ## Variations
 
-- **Hourly snapshots.** Use SQLite `.backup` mode + `cp -a audit.jsonl`
-  + `cp -a policy.toml`; cheap and frequent.
+- **Hourly snapshots.** Use SQLite `.backup` mode plus `cp -a audit`
+  and `cp -a policy`; cheap and frequent.
 - **Off-host backup.** Pipe the tarball directly to S3 / `rsync`
   to a remote host without writing locally.
 - **Selective restore.** Use `raxis initiative show --bundle --to`

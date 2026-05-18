@@ -114,31 +114,37 @@ needs but won't write to.
 
 ## How the kernel provisions
 
-```text
-admit:
-  └─ clone_strategy = sparse
-       └─ git clone --filter=blob:none --no-checkout
-            └─ git sparse-checkout init --cone
-                 └─ git sparse-checkout set <path_allowlist + path_export_globs>
-                      └─ git checkout <base_tracking_ref>
+```mermaid
+flowchart TD
+    admit["Admit sparse task"]
+    clone["git clone --filter=blob:none --no-checkout"]
+    init["git sparse-checkout init --cone"]
+    set["git sparse-checkout set path_allowlist + path_export_globs"]
+    checkout["git checkout base_tracking_ref"]
+
+    admit --> clone --> init --> set --> checkout
 ```
 
 For `blobless`:
 
-```text
-admit:
-  └─ clone_strategy = blobless
-       └─ git clone --filter=blob:none
-            └─ git checkout <base_tracking_ref>
+```mermaid
+flowchart TD
+    admit["Admit blobless task"]
+    clone["git clone --filter=blob:none"]
+    checkout["git checkout base_tracking_ref"]
+
+    admit --> clone --> checkout
 ```
 
 For `full`:
 
-```text
-admit:
-  └─ clone_strategy = full
-       └─ git clone <upstream>
-            └─ git checkout <base_tracking_ref>
+```mermaid
+flowchart TD
+    admit["Admit full-clone task"]
+    clone["git clone upstream"]
+    checkout["git checkout base_tracking_ref"]
+
+    admit --> clone --> checkout
 ```
 
 The `<upstream>` and `<base_tracking_ref>` come from the kernel's

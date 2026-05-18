@@ -41,8 +41,8 @@ the migration variation below before proceeding.
 ```bash
 DATE=$(date -u +%Y%m%dT%H%M%SZ)
 mkdir -p /tmp/pre-upgrade-$DATE
-sudo cp -a "$RAXIS_DATA_DIR"/{audit.jsonl,kernel.db,policy.toml} \
-     /tmp/pre-upgrade-$DATE/
+sudo cp -a "$RAXIS_DATA_DIR"/audit "$RAXIS_DATA_DIR"/policy \
+     "$RAXIS_DATA_DIR"/kernel.db /tmp/pre-upgrade-$DATE/
 ```
 
 (See [`03-backup-and-restore.md`](./03-backup-and-restore.md) for
@@ -70,7 +70,7 @@ For true draining, an operator-friendly approach is:
 raxis policy show > /tmp/policy-pre.toml
 # Manually edit /tmp/policy-pre.toml to set every lane's
 # max_concurrent_tasks = 0, then:
-raxis policy sign /tmp/policy-pre.toml --operator-key /tmp/op.key
+raxis policy sign /tmp/policy-pre.toml --key /tmp/op.key
 ```
 
 Restore the original policy after the upgrade.
@@ -141,7 +141,7 @@ where they left off — the kernel rebuilds in-memory state from
 
 ```bash
 raxis policy sign /tmp/policy-pre-upgrade-original.toml \
-  --operator-key /tmp/op.key
+  --key /tmp/op.key
 # Or revert via your usual policy-management process.
 ```
 

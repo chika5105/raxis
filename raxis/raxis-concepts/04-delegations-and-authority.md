@@ -107,13 +107,12 @@ clause.
 The CLI call (verified against `cli/src/commands/delegation.rs`):
 
 ```bash
-raxis delegation grant \
+raxis --operator-key /path/to/operator.priv delegation grant \
   --session "sess-abc" \
   --capability "WriteCode" \
   --role "operator-prod" \
   --ttl 3600 \
-  --scope-json '{"paths": ["src/**"]}' \
-  --operator-key /path/to/operator.priv
+  --scope-json '{"paths": ["src/**"]}'
 ```
 
 | Flag | Required | Notes |
@@ -123,7 +122,7 @@ raxis delegation grant \
 | `--role`        | yes | The operator role id that authorises this grant; signed into the canonical signing domain |
 | `--ttl`         | yes | TTL in seconds. The kernel re-derives `expires_at = now() + ttl_secs`; the CLI does NOT send `expires_at` directly |
 | `--scope-json`  | no  | Free-form JSON included in the signing input. Currently NOT persisted in the table — it survives only in the operator audit row |
-| `--operator-key`| yes | Path to the operator Ed25519 private key (PEM or raw seed); used locally, never sent |
+| `--operator-key`| yes | Global CLI flag before `delegation`; path to the operator Ed25519 private key (PEM or raw seed), used locally and never sent |
 
 **Flags that do NOT exist:**
 

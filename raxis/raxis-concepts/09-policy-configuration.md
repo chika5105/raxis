@@ -18,8 +18,8 @@
 > **R-7 — Operator-bound authority** at the policy layer:
 > every privilege the kernel hands out is rooted in an
 > Ed25519-signed TOML file controlled by the operator, and
-> `arc_swap` makes hot reloads atomic so an in-flight intent
-> cannot straddle epochs.
+> `arc_swap` makes signed epoch advances atomic so an in-flight
+> intent cannot straddle policy snapshots.
 
 ---
 
@@ -217,11 +217,11 @@ surface (verified against `cli/src/main.rs:319-360` and
 `cli/src/commands/policy.rs`):
 
 ```bash
-raxis policy sign --policy policy.toml --operator-key operator.key
+raxis policy sign policy.toml --key operator.key
 ```
 
-This produces `policy.toml.sig` (raw 64-byte Ed25519 signature
-in hex) alongside the policy file. The kernel verifies the
+This produces `policy.sig`, a TOML sidecar with `signed_by`,
+`plan_sha256`, `signature_hex`, and `signed_at` fields. The kernel verifies the
 signature against the operator pubkey embedded in the *previous*
 epoch's policy bundle — meaning a fresh deployment must seed the
 chain via `raxis genesis` (which writes the bootstrap operator

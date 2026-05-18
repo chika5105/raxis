@@ -73,14 +73,15 @@ and a short cap surfaces stuck Reviewers fast.
 
 ## How the cap is enforced
 
-```text
-On every Intent the agent sends:
-  └─ kernel reads task.activated_at + sum_of_prior_activations
-       └─ wall_clock = now() - activated_at + sum_of_prior_activations
-       └─ if wall_clock > cumulative_max_seconds:
-              fail with FAIL_WALL_CLOCK_LIMIT_EXCEEDED
-              transition task to Failed
-              emit WallClockLimitExceeded audit event
+```mermaid
+flowchart TD
+    intent["Agent sends an Intent"] --> read["Kernel reads task.activated_at<br/>+ sum_of_prior_activations"]
+    read --> calc["wall_clock = now - activated_at<br/>+ prior activation time"]
+    calc --> over{"wall_clock > cumulative_max_seconds?"}
+    over -->|no| continue["Continue intent handling"]
+    over -->|yes| fail["Return FAIL_WALL_CLOCK_LIMIT_EXCEEDED"]
+    fail --> state["Transition task to Failed"]
+    state --> audit["Emit WallClockLimitExceeded audit event"]
 ```
 
 Notes:

@@ -110,9 +110,16 @@ cross_cutting_artifacts = []
 
 The DAG it produces:
 
-```text
-pricing-stub  →  review-stub  →  pricing-impl  →  review-impl  →  pricing-flip  →  review-flip
-              (predecessors)   (predecessors)   (predecessors)   (predecessors)   (predecessors)
+```mermaid
+flowchart LR
+    A["pricing-stub"]
+    B["review-stub"]
+    C["pricing-impl"]
+    D["review-impl"]
+    E["pricing-flip"]
+    F["review-flip"]
+
+    A --> B --> C --> D --> E --> F
 ```
 
 `pricing-impl` is held in `Pending` by the kernel until
@@ -131,17 +138,19 @@ edge stored in `task_dag_edges`. On every `Completed` transition,
 the FSM walks downstream edges and admits any task whose
 predecessors are now all-Completed.
 
-```text
-Initial: pricing-stub Admitted; everything downstream Pending.
+```mermaid
+flowchart TD
+    A["Initial state<br/>pricing-stub Admitted<br/>downstream tasks Pending"]
+    B["Activate pricing-stub"]
+    C["Reviewer approves"]
+    D["Orchestrator merges"]
+    E["pricing-stub Completed"]
+    F["FSM admits review-stub<br/>Pending -> Admitted"]
+    G["review-stub submits approved review"]
+    H["review-stub Completed"]
+    I["FSM admits pricing-impl<br/>Pending -> Admitted"]
 
-Activate pricing-stub → ... → Reviewer approves → Orchestrator merges
-         pricing-stub: Completed
-   ⇒ FSM admits review-stub: Pending → Admitted
-
-Activate review-stub → SubmitReview approved → Reviewer Completes
-         review-stub: Completed
-   ⇒ FSM admits pricing-impl: Pending → Admitted
-   (... loop continues ...)
+    A --> B --> C --> D --> E --> F --> G --> H --> I
 ```
 
 Two safety properties fall out:

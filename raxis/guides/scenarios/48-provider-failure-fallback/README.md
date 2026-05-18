@@ -80,7 +80,7 @@ raxis plan approve "$INIT_BASE"
 raxis initiative show "$INIT_BASE" --with-tasks
 
 # Expect zero ProviderFailover events.
-raxis log "$INIT_BASE" --kind ProviderFailover --json | jq length
+raxis log "$INIT_BASE" --kind ProviderFailover --json | wc -l
 # 0
 
 # 3. Break the primary.

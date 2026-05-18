@@ -16,7 +16,7 @@ A complete guide to every core concept in the RAXIS kernel. Each document explai
 | [06](06-audit-chain.md) | **Audit Chain** | Hash-linked tamper-evident logging, chain verification |
 | [07](07-escalations.md) | **Escalations** | Human-in-the-loop: request → park → approve/reject → resume |
 | [08](08-sessions-and-isolation.md) | **Sessions & Isolation** | Session lifecycle, microVM isolation, system prompt assembly |
-| [09](09-policy-configuration.md) | **Policy Configuration** | Every section of policy.toml, signing, hot reload, epochs |
+| [09](09-policy-configuration.md) | **Policy Configuration** | Every section of policy.toml, signing, epoch advance |
 | [10](10-v2-orchestration.md) | **V2 Orchestration** | Multi-agent DAG, Orchestrator/Executor/Reviewer, review loops, retry counters |
 | [11](11-glossary.md) | **Glossary** | Every Raxis term in one place — sessions, intents, claims, lanes, audit-chain vocabulary, plus the common `PlannerErrorCode` cheatsheet |
 

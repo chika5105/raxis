@@ -31,7 +31,7 @@ install:
 ```bash
 RAXIS_DATA_DIR=$RAXIS_DATA_DIR_STAGING \
 RAXIS_OPERATOR_KEY=/etc/raxis/staging.key \
-raxis submit plan ./plans/feature-x.toml
+raxis submit plan ./plans/feature-x.toml --no-dry-run
 ```
 
 Capture the canonical bundle:
@@ -100,7 +100,7 @@ Address any failure by either:
 ```bash
 RAXIS_DATA_DIR=/var/raxis-prod \
 RAXIS_OPERATOR_KEY=/etc/raxis/prod.key \
-raxis submit plan /tmp/staging-bundle/plan.toml
+raxis submit plan /tmp/staging-bundle/plan.toml --no-dry-run
 ```
 
 Note: use the canonical plan from staging (`/tmp/staging-bundle/plan.toml`),

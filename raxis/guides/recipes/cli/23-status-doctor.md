@@ -22,8 +22,8 @@ raxis status
 ```
 
 `raxis status --json` is the machine-readable form for monitoring
-(scrape it from a cron, alert on `kernel != running` or
-`audit_chain != ok`).
+(scrape it from a cron, alert on `liveness != "Running"` or
+`audit_chain.status != "Ok"`).
 
 What `status` checks:
 
@@ -80,14 +80,14 @@ db inconsistency, missing operator key, etc.
 
 ```text
 raxis status   [--json]
-raxis doctor   [--json] [--fix-orphans] [--full-audit-verify]
+raxis doctor   [--json]
+raxis doctor   signing-key-fp [--json]
+raxis doctor   canonical-images [--install-dir P] [--json]
 ```
 
 | Flag | Effect |
 |---|---|
 | `--json` | Machine-readable output. |
-| `doctor --fix-orphans` | Remove orphan worktrees the diagnostic finds. Idempotent and audited. |
-| `doctor --full-audit-verify` | Verify every audit-chain hash from genesis (slow on large chains). Default is incremental. |
 
 ---
 
@@ -96,10 +96,10 @@ raxis doctor   [--json] [--fix-orphans] [--full-audit-verify]
 | Symptom | Fix |
 |---|---|
 | `status: kernel not running` | Start it: `systemctl start raxis-kernel` or run the binary. Check `journalctl -u raxis-kernel`. |
-| `status: audit chain hash mismatch` | Tampering or disk corruption. Stop the kernel, run `raxis verify-chain --full`, restore from backup if needed. |
+| `status: audit chain hash mismatch` | Tampering or disk corruption. Stop the kernel, run `raxis verify-chain`, restore from backup if needed. |
 | `doctor [error] kernel.db integrity check failed` | The SQLite file is corrupted. Stop kernel, copy `kernel.db` aside, run `sqlite3 kernel.db "PRAGMA integrity_check;"`, restore from snapshot. |
 | `doctor [warn] cert ttl_remaining < 30d` | Rotate the cert: `cert mint`, `cert install`, `cert revoke <old>`. |
-| `doctor [warn] orphan worktree` | `doctor --fix-orphans` to clean up. |
+| `doctor [warn] orphan worktree` | Inspect the matching session with `raxis sessions` and clean up after aborting or recovering the work. |
 
 ---
 
@@ -107,8 +107,8 @@ raxis doctor   [--json] [--fix-orphans] [--full-audit-verify]
 
 | Command | Purpose |
 |---|---|
-| `raxis verify-chain` | Cheap incremental audit-chain verify. |
-| `raxis verify-chain --full` | Full verification from genesis. |
+| `raxis verify-chain` | Full audit-chain verification. |
+| `raxis verify-chain --quick` | Cheap first/last-record check, same class as `status`. |
 | `raxis policy show` | Inspect policy state. |
 | `raxis cert list` | Check cert expiry windows. |
 | `raxis sessions` | Active sessions. |
@@ -117,12 +117,9 @@ raxis doctor   [--json] [--fix-orphans] [--full-audit-verify]
 
 ## Variations
 
-- **Liveness probe.** `raxis status --json | jq -e '.kernel == "running"'`
+- **Liveness probe.** `raxis status --json | jq -e '.liveness == "Running" and .audit_chain.status == "Ok"'`
   in your monitoring loop.
 - **Pre-deploy gate.** A CI deploy step that runs
   `raxis doctor` and fails the deploy on any warn or error.
-- **Periodic deep verify.** Cron `raxis doctor --full-audit-verify`
-  weekly; `verify-chain` is the cheap/frequent counterpart.
-- **Self-heal.** `doctor --fix-orphans` cleans worktrees the
-  scheduler couldn't reach (e.g., crashed mid-provision); safe to
-  schedule daily.
+- **Periodic deep verify.** Cron `raxis verify-chain` weekly and
+  `raxis status --json` frequently.

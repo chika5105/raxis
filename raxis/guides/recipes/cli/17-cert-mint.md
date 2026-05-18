@@ -4,26 +4,26 @@
 
 Mint operator certificates from your operator key. `cert mint` is
 the standard path used at install time and for routine rotation.
-`cert mint-emergency` produces a short-TTL one-shot cert intended
-for break-glass situations where the standard cert is compromised
-or unavailable.
+`cert mint-emergency` produces a narrowly-scoped recovery cert
+intended for break-glass situations where the standard cert is
+compromised or unavailable.
 
 ---
 
 ## Syntax
 
 ```text
-raxis cert mint --signer <signer_kid>
-                --subject <operator_id>
-                --pubkey <hex_or_path>
-                --permitted-ops <csv>
-                --ttl-seconds <seconds>
+raxis cert mint --key <operator_private.pem>
+                --display-name <name>
+                --ops <csv>
+                [--validity-days <days>]
+                [--warn-days <days>]
+                [--grace-days <days>]
+                [--contact <text>]
                 [--out <path>]
 
-raxis cert mint-emergency --signer <signer_kid>
-                          --subject <operator_id>
-                          --pubkey <hex_or_path>
-                          --reason <text>
+raxis cert mint-emergency --key <operator_private.pem>
+                          --display-name <name>
                           [--out <path>]
 ```
 
@@ -33,18 +33,16 @@ raxis cert mint-emergency --signer <signer_kid>
 
 A Raxis operator cert is an Ed25519-signed document with:
 
-- `subject` — operator id this cert grants authority to.
-- `pubkey` — operator's public key (32-byte Ed25519).
-- `signer_kid` — the key id of the signer (typically the genesis
-  signer or a higher-privilege operator).
+- `display_name` — human-readable operator name.
+- `pubkey_hex` — derived from the private key passed via `--key`.
 - `permitted_ops` — the list of operations this cert authorizes
   (e.g., `CreateInitiative`, `ApprovePlan`, `RevokeSession`).
 - `not_before` / `not_after` — TTL bounds.
-- `signature` — Ed25519 signature over the canonical bytes.
+- `self_sig_hex` — Ed25519 self-signature over the canonical bytes.
 
-Every operator-signed action checks: signer's cert is valid (not
-expired, not revoked, embedded in current `policy.toml`), and the
-op is in `permitted_ops`. Fail-closed.
+Every operator-signed action checks: the operator cert is valid
+(not expired, not revoked, embedded in current `policy.toml`), and
+the op is in `permitted_ops`. Fail-closed.
 
 ---
 
@@ -54,19 +52,16 @@ Common use: rotating an operator's cert before TTL expires.
 
 ```bash
 raxis cert mint \
-  --signer 8a4f...                      \
-  --subject ops-alice                    \
-  --pubkey  /tmp/alice.pub               \
-  --permitted-ops CreateInitiative,ApprovePlan,SubmitPlan,GrantDelegation \
-  --ttl-seconds 7776000                  \
-  --out /tmp/alice.cert
+  --key /tmp/alice.key \
+  --display-name ops-alice \
+  --ops "CreateInitiative,ApprovePlan,GrantDelegation" \
+  --validity-days 90 \
+  --out /tmp/alice.cert.toml
 # Output:
-# cert_path:     /tmp/alice.cert
-# signer_kid:    8a4f...
-# subject:       ops-alice
-# not_before:    2026-05-10T17:30:00Z
-# not_after:     2026-08-08T17:30:00Z
-# permitted_ops: CreateInitiative,ApprovePlan,SubmitPlan,GrantDelegation
+# ✓ Wrote operator cert ...
+# display_name:  ops-alice
+# kind:          Standard
+# permitted_ops: CreateInitiative,ApprovePlan,GrantDelegation
 ```
 
 The output cert must then be embedded into `policy.toml` under
@@ -76,35 +71,26 @@ The output cert must then be embedded into `policy.toml` under
 
 ## mint-emergency — break-glass cert
 
-Use when standard cert chain is broken: signer's key is lost, all
-operator certs expired in CI, etc. Emergency certs:
+Use when the normal operator path is broken and you need the narrow
+recovery operation. Emergency certs:
 
-- Always TTL ≤ 24 hours (server-side ceiling, can't be raised).
-- Carry a mandatory `--reason` string in the cert payload.
-- Fire an audit-chain event of kind `EmergencyCertMinted` so the
-  break-glass action is auditable forever.
+- Are structurally pinned to `permitted_ops = ["RotateEpoch"]`.
+- Have no normal validity window (`not_after = 0` sentinel).
+- Still require policy install + policy signing before use.
 
 ```bash
 raxis cert mint-emergency \
-  --signer 8a4f...                       \
-  --subject ops-bob                       \
-  --pubkey  /tmp/bob.pub                  \
-  --reason  "rotate alice cert: CI auth lost" \
-  --out /tmp/bob-emergency.cert
+  --key /tmp/bob.key \
+  --display-name ops-bob \
+  --out /tmp/bob-emergency.cert.toml
 # Output:
-# cert_path:     /tmp/bob-emergency.cert
-# signer_kid:    8a4f...
-# subject:       ops-bob
-# not_before:    2026-05-10T17:30:00Z
-# not_after:     2026-05-11T17:30:00Z   (24h max)
-# permitted_ops: <full set>
-# emergency:     true
-# reason:        "rotate alice cert: CI auth lost"
+# kind:          EmergencyRecovery
+# permitted_ops: RotateEpoch
 ```
 
 After the emergency, the operator should mint a regular cert
-(`cert mint`) and let the emergency cert expire naturally. The
-audit event is permanent.
+(`cert mint`) and rotate policy away from the emergency cert. The
+emergency cert is deliberately limited to `RotateEpoch`.
 
 ---
 
@@ -112,11 +98,10 @@ audit event is permanent.
 
 | Symptom | Fix |
 |---|---|
-| `mint: --signer cert not found in policy` | Embed the signer's cert in `policy.toml` and re-sign. |
-| `mint: --pubkey not 32 bytes` | Verify the public key is raw 32-byte Ed25519, not PEM. Use `raxis auth show-pubkey <key.priv>` to extract. |
-| `mint: --permitted-ops contains unknown op` | The op name doesn't match the kernel's enum. Run `raxis cert show --help-permitted-ops` for the supported list. |
-| `mint: --ttl-seconds exceeds [operators].max_cert_ttl_seconds` | Lower TTL or raise the policy cap. |
-| `mint-emergency: missing --reason` | Required for emergency certs (audit). |
+| `cert mint requires --ops <op,op,...>` | Standard certs require an explicit operation list. |
+| `unknown cert mint flag` | Run `raxis cert mint --help`; the current flag is `--ops`, not `--permitted-ops`. |
+| `cert mint requires --key <path>` | Pass `--key` or the global `--operator-key` before `cert`. |
+| `cert mint-emergency rejects --ops other than 'RotateEpoch'` | Emergency certs are structurally pinned to `RotateEpoch`. |
 
 ---
 
@@ -125,9 +110,9 @@ audit event is permanent.
 | Command | Purpose |
 |---|---|
 | `raxis cert show <path>` | Decode a cert file. |
-| `raxis cert verify <path> --against-policy <policy.toml>` | Confirm chain validity. |
-| `raxis cert install <path>` | Embed in `policy.toml` and re-sign. |
-| `raxis cert revoke <kid> --reason ...` | Add to revocation list. |
+| `raxis cert verify <path>` | Confirm structure, time status, and self-signature. |
+| `raxis cert install <path> --policy <policy.toml>` | Embed in `policy.toml`; re-sign afterwards. |
+| `raxis [--operator-key <key>] cert revoke <cert> --reason <rotation\|compromise> --reference <id>` | Add a signed revocation record. |
 | `raxis cert list` | Active certs in the current policy. |
 | `raxis cert list-revocations` | Revoked certs. |
 
@@ -135,11 +120,12 @@ audit event is permanent.
 
 ## Variations
 
-- **CI bot cert with narrow permitted_ops.** `--permitted-ops CreateInitiative,SubmitPlan`
+- **CI bot cert with narrow permitted_ops.** `--ops CreateInitiative,CreateSession`
   for a CI bot that should only submit plans, not approve them.
-- **Reviewer-only cert.** `--permitted-ops ApprovePlan,ApproveEscalation,DenyEscalation`
+- **Reviewer-only cert.** `--ops ApprovePlan,ApproveEscalation,DenyEscalation`
   for an operator who reviews but doesn't initiate.
-- **Short-lived TTLs.** Set `--ttl-seconds 86400` for daily rotation
+- **Short-lived TTLs.** Set `--validity-days 1` for daily rotation
   of automated bots; pair with a refresh script.
-- **Multi-region.** Mint per-region certs with distinct `subject`
-  values to track which region performed which action in audit.
+- **Multi-region.** Mint per-region certs with distinct
+  `--display-name` values to track which region performed which action
+  in audit.

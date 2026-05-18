@@ -5,6 +5,16 @@ bootable local install.
 
 ## 1. Host Prereqs
 
+Source builds require:
+
+| Surface | Requirement |
+|---|---|
+| Rust workspace | Current stable Rust, Cargo, Git 2.30+, C/C++ toolchain, `make`, `pkg-config` |
+| Operator keys | OpenSSL 3 CLI for Ed25519 PEM generation |
+| Guest images | Docker, Podman, or Buildah when baking rootfs-producing image roles |
+| Dashboard UI | Node.js 20+ and npm |
+| Local observability stack | Docker Compose for OTel Collector, Prometheus, and Grafana |
+
 macOS:
 
 ```bash
@@ -23,13 +33,44 @@ checks KVM, vhost-vsock, cgroup v2, and Firecracker tooling.
 
 ## 2. Build Host Tools
 
+First prove the workspace builds with the checked-in lockfile:
+
+```bash
+cargo build --workspace --locked
+```
+
+Build the host binaries:
+
+```bash
+cargo build --release --locked \
+  -p raxis-cli \
+  -p raxis-kernel \
+  -p raxis-gateway \
+  -p raxis-otel-pusher \
+  -p raxis-supervisor
+```
+
+Install the operator-facing tools if you want them on `$PATH`:
+
 ```bash
 cargo install --path cli --locked --force
 cargo install --path gateway --locked --force
+cargo install --path pusher --locked --force
+cargo install --path crates/supervisor --bin raxis-supervisor --locked --force
 ```
 
-Build the host `raxis-kernel` daemon after the image bake, so it can
-embed the same manifest-signing trust anchor.
+Build or install the host `raxis-kernel` daemon after the image bake,
+so it can embed the same manifest-signing trust anchor as the images
+you staged.
+
+Build the dashboard frontend when you plan to serve the dashboard UI:
+
+```bash
+cd dashboard-fe
+npm install
+npm run build
+cd ..
+```
 
 ## 3. Bake Guest Images
 
@@ -48,7 +89,7 @@ bytes you will run:
 
 ```bash
 RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat .git/info/raxis-signing-key/pk.hex)" \
-  cargo build --release -p raxis-kernel
+  cargo build --release --locked -p raxis-kernel
 cargo xtask images verify-trust-anchor --kernel target/release/raxis-kernel
 ```
 
@@ -143,7 +184,7 @@ RAXIS_DATA_DIR="$RAXIS_DATA_DIR" target/release/raxis-kernel
 Submit the starter plan from another shell:
 
 ```bash
-raxis submit plan "$RAXIS_DATA_DIR/plan/plan.toml"
+raxis submit plan "$RAXIS_DATA_DIR/plan/plan.toml" --no-dry-run
 ```
 
 ## Troubleshooting

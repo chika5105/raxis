@@ -35,14 +35,16 @@ writing.
 
 Outputs land under:
 
-```text
-$RAXIS_INSTALL_DIR/
-├── kernel/vmlinux
-├── kernel/vmlinux.config
-└── images/
-    ├── raxis-<role>-<kver>.img
-    ├── raxis-<role>-<kver>.manifest.toml
-    └── raxis-<role>-<kver>.bake.json
+```mermaid
+flowchart TD
+    install["$RAXIS_INSTALL_DIR/"]
+    install --> kernel["kernel/"]
+    kernel --> vmlinux["vmlinux"]
+    kernel --> config["vmlinux.config"]
+    install --> images["images/"]
+    images --> img["raxis-<role>-<kver>.img"]
+    images --> manifest["raxis-<role>-<kver>.manifest.toml"]
+    images --> bake["raxis-<role>-<kver>.bake.json"]
 ```
 
 ## Cache Safety

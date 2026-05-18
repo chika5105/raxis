@@ -1,14 +1,15 @@
 # Canonical Image Trust Anchor (V3)
 
-Status: V3. Supersedes V2's "warn-only on unpopulated anchor"
-boot posture (`specs/v2/planner-harness.md §14.4`,
+Status: Active V3 hardening. Supersedes V2's "warn-only on
+unpopulated anchor" boot posture
+(`specs/v2/planner-harness.md §14.4`,
 `specs/v2/release-and-distribution.md §8`). Cross-refs:
 
 - `kernel/src/canonical_images_preflight.rs` — boot-time fail-loud
   assertion + canonical-image manifest preflight.
 - `crates/canonical-images/build.rs` — compile-time anchor
   embedding.
-- `xtask/src/images.rs` — `cargo xtask images bake-all` operator
+- `xtask/src/images.rs` — `cargo xtask images bake` operator
   recipe.
 - `specs/invariants.md::INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01` —
   pinned contract.
@@ -84,7 +85,7 @@ The panic message **MUST** name:
 
 1. The env var (`RAXIS_KERNEL_SIGNING_KEY_HEX`) so an operator can
    recover by export-and-rebuild.
-2. The xtask recipe (`cargo xtask images bake-all`) so an operator
+2. The xtask recipe (`cargo xtask images bake`) so an operator
    with no env-var habit can recover by running the umbrella
    one-command pipeline.
 3. This spec path (`specs/v3/canonical-image-trust-anchor.md`) so
@@ -142,12 +143,12 @@ unreachable from `main()` once the boot-time enforcement has fired.
 The dev round-trip is:
 
 ```text
-cargo xtask images bake-all
+cargo xtask images bake
   → kernel boots with valid trust anchor
   → no panic
 ```
 
-`bake-all` does the following on FIRST invocation:
+`images bake` does the following on FIRST invocation:
 
 1. Resolves a dev-host signing keypair.
    * If `RAXIS_KERNEL_SIGNING_KEY_HEX` is already set in the env
@@ -180,10 +181,10 @@ The dev key never leaves the operator's workstation, never enters a
 commit, and never crosses the trust boundary between the dev host
 and any other host.
 
-Subsequent `bake-all` invocations are idempotent: the keypair on
+Subsequent `images bake` invocations are idempotent: the keypair on
 disk is reused, the kernel rebuild is a fast no-op when nothing
 has changed, and the operator's iteration loop is
-`make change → cargo xtask images bake-all → cargo run -p raxis-kernel`.
+`make change → cargo xtask images bake → cargo run -p raxis-kernel`.
 
 ### §4.1 — Why `.git/info/` and not `~/.config/raxis/keys/`?
 
@@ -222,7 +223,7 @@ two structural facts:
    release env vars set never trusts a dev key, even if the dev
    key is leaked to the public.
 2. **Dev kernels never run untrusted images.** The dev workflow's
-   only canonical-image source is `cargo xtask images bake-all`,
+   only canonical-image source is `cargo xtask images bake`,
    which signs with the same dev key it generated. An attacker
    with the leaked dev key could forge a manifest for an
    adversarial `.img`, but to get a dev kernel to load that image
@@ -234,7 +235,7 @@ two structural facts:
    designed to defend against.
 
 Operators rotating a dev key after a suspected leak run
-`rm -rf <repo>/.git/info/raxis-signing-key/ && cargo xtask images bake-all`
+`rm -rf <repo>/.git/info/raxis-signing-key/ && cargo xtask images bake`
 to generate fresh halves and rebuild the kernel against them.
 
 ## §5 — Production workflow
@@ -272,7 +273,7 @@ The kernel binary was compiled without
 recipes:
 
 1. **Dev / local-build host.** Run
-   `cargo xtask images bake-all`. It auto-generates a dev
+   `cargo xtask images bake`. It auto-generates a dev
    keypair on first run, bakes the canonical images, re-invokes
    `cargo build -p raxis-kernel` with the env var set, and the
    next `cargo run` succeeds.
@@ -287,19 +288,19 @@ recipes:
    environment; the most common cause is a credential-mounting
    misconfiguration that didn't surface the secret.
 
-### §6.2 — "I rotated the dev key and now `bake-all` keeps regenerating it"
+### §6.2 — "I rotated the dev key and now `images bake` keeps regenerating it"
 
-`bake-all` regenerates only when both
+`images bake` regenerates only when both
 `<repo>/.git/info/raxis-signing-key/raxis-dev-signing.key.hex` AND
 the `.pub.hex` are missing. If you want to force regeneration
 without `rm`, delete both files. To keep a specific keypair across
 rotations, copy the two files into `.git/info/raxis-signing-key/`
-before running `bake-all` and they will be reused.
+before running `images bake` and they will be reused.
 
 ### §6.3 — "I want the panic message to mention my company's runbook URL"
 
 The fail-loud message is intentionally minimal —
-`RAXIS_KERNEL_SIGNING_KEY_HEX` + `cargo xtask images bake-all` +
+`RAXIS_KERNEL_SIGNING_KEY_HEX` + `cargo xtask images bake` +
 this spec path. Operators with internal runbooks chain the spec
 path into their own documentation; the kernel does not embed
 deployment-specific URLs. The exact message is exposed as
@@ -320,7 +321,7 @@ triggers this case is **key-rotation drift**.
 
 ```text
 Day 1:
-  $ cargo xtask images bake-all
+  $ cargo xtask images bake
     → generates dev keypair K_a (priv + pub) under
       <repo>/.git/info/raxis-signing-key/
     → signs every canonical image with K_a's private half
@@ -333,9 +334,9 @@ Day 1:
 
 Day 2 (operator rotates the dev key without re-baking):
   $ rm -rf <repo>/.git/info/raxis-signing-key/
-  $ cargo xtask images bake-all
+  $ cargo xtask images bake
     → generates fresh keypair K_b
-    → would re-sign images, BUT (e.g. on a partial bake-all run
+    → would re-sign images, BUT (e.g. on a partial images bake run
       that fails between key-gen and per-role bake) the on-disk
       manifests are still K_a-signed
     → exports RAXIS_KERNEL_SIGNING_KEY_HEX=<K_b pub hex>
@@ -350,7 +351,7 @@ Day 2 (operator rotates the dev key without re-baking):
 A more common variant of the same scenario:
 
 * An operator clones the repo to a second worktree, runs
-  `bake-all` there (generating keypair K_c), then comes back to
+  `images bake` there (generating keypair K_c), then comes back to
   the first worktree and `cargo run`s the K_a kernel against
   manifests that worktree 2 re-baked under K_c.
 * CI runs `cargo build -p raxis-kernel` with the
@@ -406,18 +407,18 @@ counter that does NOT page on-call.
 
 ### §7.4 — Operator recovery
 
-Run `cargo xtask images bake-all` once. It regenerates the
+Run `cargo xtask images bake` once. It regenerates the
 keypair if `.git/info/raxis-signing-key/` is missing, OR reuses
 the existing keypair if it's present; either way it re-signs the
 canonical images with the current key's private half and
 rebuilds the kernel against the matching public half. After one
-bake-all the preflight succeeds and session admission resumes.
+images bake the preflight succeeds and session admission resumes.
 
 If the operator wants to keep the existing kernel anchor and
 re-sign the images against it (the inverse direction), they
 export the kernel's embedded public-hex half as the
 `RAXIS_IMAGE_SIGNING_KEY` for the image-builder pipeline before
-re-running `bake-all`. The kernel exposes its embedded anchor in
+re-running `images bake`. The kernel exposes its embedded anchor in
 hex form via `raxis doctor canonical-images --print-anchor` (V3
 addition).
 

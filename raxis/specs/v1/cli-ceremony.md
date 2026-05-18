@@ -531,13 +531,12 @@ the four-zone expiry model (Active / Expiring / Grace / Expired);
 `EmergencyRecovery` certs are structurally pinned and never expire.
 
 **Usage:**
-- `raxis cert mint --display-name <text> --pubkey <pubkey.pem> --key <signing_key.pem> [--ops "RotateEpoch,ApprovePlan,..."] [--validity-days N] [--warn-days N] [--grace-days N] [--not-before <unix_ts>] --out <cert.toml>`
-- `raxis cert mint-emergency --display-name <text> --pubkey <pubkey.pem> --key <signing_key.pem> --out <cert.toml>`
+- `raxis cert mint --display-name <text> --key <signing_key.pem> --ops "RotateEpoch,ApprovePlan,..." [--validity-days N] [--warn-days N] [--grace-days N] [--not-before <unix_ts>] --out <cert.toml>`
+- `raxis cert mint-emergency --display-name <text> --key <signing_key.pem> --out <cert.toml>`
 
 **Behaviour:**
-1. Reads the public key (PEM) and the signing key (PEM); asserts the
-   signing key matches the public key (an emergency cert MUST be
-   self-signed by the operator key it certifies).
+1. Reads the signing key (PEM) and derives the public key. An
+   emergency cert MUST be self-signed by the operator key it certifies.
 2. Builds the canonical signing input
    `display_name|pubkey_hex|kind|not_before|not_after|warn|grace|permitted_ops_json`
    (hashed before signing per `raxis_crypto::cert::sign_cert`).

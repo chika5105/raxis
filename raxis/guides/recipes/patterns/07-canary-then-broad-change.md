@@ -116,9 +116,14 @@ cross_cutting_artifacts = []
 
 The DAG:
 
-```text
-canary-auth  →  review-canary  →  broad-replace  →  review-broad
-            (verifier: bench-auth)              (no verifier)
+```mermaid
+flowchart LR
+    A["canary-auth<br/>verifier: bench-auth"]
+    B["review-canary"]
+    C["broad-replace"]
+    D["review-broad"]
+
+    A --> B --> C --> D
 ```
 
 ---

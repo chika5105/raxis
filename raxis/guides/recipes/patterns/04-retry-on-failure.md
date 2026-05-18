@@ -126,9 +126,16 @@ this in a single SQLite transaction:
 **It does NOT spawn a new VM.** The Orchestrator's normal retry
 workflow is the two-intent dance:
 
-```text
-Orchestrator → RetrySubTask    { task_id }              # this handler
-Orchestrator → ActivateSubTask { task_id }              # spawns the new VM
+```mermaid
+sequenceDiagram
+    participant O as Orchestrator
+    participant K as Kernel
+    participant VM as Fresh VM
+
+    O->>K: RetrySubTask(task_id)
+    K-->>O: Retry state prepared
+    O->>K: ActivateSubTask(task_id)
+    K->>VM: Spawn fresh Executor or Reviewer VM
 ```
 
 Having `ActivateSubTask` remain the single spawn point makes the
@@ -140,21 +147,24 @@ can produce a Reviewer / Executor session.
 
 ## Reviewer-rejection retry: the typical loop
 
-```text
-Reviewer  → SubmitReview { approved = false, critique = "..." }
-Kernel    → bumps review_reject_count on the activation row
-            transitions activation → Failed, task → Failed
-Kernel    → KernelPush::ReviewRejected { task_id, critique } → Orchestrator
-Orchestrator (decides):
-  if review_reject_count + 1 < max_review_rejections:
-    → RetrySubTask    { task_id }      # cleanup + state prep
-    → ActivateSubTask { task_id }      # spawn fresh Executor with the
-                                       # critique injected into the
-                                       # next system-prompt assembly
-  else:
-    → ReportFailure { task_id, reason: "Reviewer rejection budget exhausted" }
-    OR
-    → escalate via SubmitReview { approved = ?, escalate = true }
+```mermaid
+sequenceDiagram
+    participant R as Reviewer
+    participant K as Kernel
+    participant O as Orchestrator
+    participant E as Fresh Executor
+
+    R->>K: SubmitReview(approved=false, critique)
+    K->>K: Increment review_reject_count
+    K->>K: Mark activation Failed and task Failed
+    K-->>O: KernelPush::ReviewRejected(task_id, critique)
+    alt retry budget remains
+        O->>K: RetrySubTask(task_id)
+        O->>K: ActivateSubTask(task_id)
+        K->>E: Spawn with critique in prompt context
+    else retry budget exhausted
+        O->>K: ReportFailure or escalation path
+    end
 ```
 
 The new Executor's system prompt is re-assembled by the kernel
@@ -173,13 +183,16 @@ For VM-crash failures, the kernel detects via SIGCHLD or the
 emits `KernelPush::ExecutorCrashed { task_id, exit_kind }` to the
 Orchestrator. Same two-intent recovery loop, different counter.
 
-```text
-Kernel detects VM crash
-  → activation_state: Active → Failed
-  → crash_retry_count += 1
-  → KernelPush::ExecutorCrashed { task_id, exit_kind } → Orchestrator
-Orchestrator → RetrySubTask    { task_id }
-Orchestrator → ActivateSubTask { task_id }
+```mermaid
+sequenceDiagram
+    participant K as Kernel
+    participant O as Orchestrator
+
+    K->>K: Detect VM crash
+    K->>K: Active -> Failed; crash_retry_count += 1
+    K-->>O: KernelPush::ExecutorCrashed(task_id, exit_kind)
+    O->>K: RetrySubTask(task_id)
+    O->>K: ActivateSubTask(task_id)
 ```
 
 If `crash_retry_count >= max_crash_retries`, the kernel rejects

@@ -1557,7 +1557,7 @@ approval_escalation_class = "ProtectedPathMerge"
 **Why policy bundle, not plan:** If protected paths were declared in `plan.toml`, an
 operator could write a plan that omits `src/payments/` from the protection list. The
 protection is a compliance guarantee, not a per-initiative preference. Policy bundle
-changes require a new signed bundle (`raxis policy push`), which goes through
+changes require a new signed bundle (`raxis epoch advance --policy <policy.toml> --sig <policy.sig>`), which goes through
 `advance_epoch` and is audited as a policy change.
 
 ### The Operator Approval Flow

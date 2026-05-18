@@ -3,23 +3,17 @@
 This directory holds the static assets the V2 release pipeline
 consumes. **Normative reference:** [`raxis/specs/v2/release-and-distribution.md`](../specs/v2/release-and-distribution.md).
 
-```text
-release/
-├── README.md                       — this file
-├── raxis.entitlements              — macOS Virtualization.framework
-│                                     entitlements consumed by `codesign`
-│                                     (release-and-distribution.md §6.3)
-├── templates/
-│   ├── raxis-kernel.rb.tmpl        — Homebrew formula template for the
-│   │                                 main kernel + planner-binaries +
-│   │                                 canonical-images bundle
-│   └── raxis-cli.rb.tmpl           — Homebrew formula template for the
-│                                     standalone CLI (raxis-kernel-dependent)
-└── scripts/
-    ├── render-formula.sh           — populate templates with version +
-    │                                 per-(os, arch) sha256 sums
-    └── notarize.sh                 — codesign + notarytool + staple
-                                      wrapper for the macOS bottle build
+```mermaid
+flowchart TD
+    release["release/"]
+    release --> readme["README.md<br/>this file"]
+    release --> entitlements["raxis.entitlements<br/>macOS AVF entitlements for codesign"]
+    release --> templates["templates/"]
+    templates --> kernel_formula["raxis-kernel.rb.tmpl<br/>kernel, planner binaries, canonical image bundle"]
+    templates --> cli_formula["raxis-cli.rb.tmpl<br/>standalone CLI formula"]
+    release --> scripts["scripts/"]
+    scripts --> render["render-formula.sh<br/>fill templates with version, URLs, and SHA-256 sums"]
+    scripts --> notarize["notarize.sh<br/>codesign, notarytool, staple"]
 ```
 
 ## Workflow

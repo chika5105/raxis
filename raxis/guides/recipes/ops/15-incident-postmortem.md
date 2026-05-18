@@ -32,13 +32,13 @@ INCIDENT_DIR=/tmp/incident-$DATE
 mkdir -p $INCIDENT_DIR
 
 # 1. Audit chain snapshot.
-sudo cp -a "$RAXIS_DATA_DIR/audit.jsonl" $INCIDENT_DIR/
+sudo cp -a "$RAXIS_DATA_DIR/audit" $INCIDENT_DIR/
 
 # 2. Kernel db snapshot.
 sqlite3 "$RAXIS_DATA_DIR/kernel.db" ".backup '$INCIDENT_DIR/kernel.db'"
 
 # 3. Active policy.
-sudo cp -a "$RAXIS_DATA_DIR/policy.toml" $INCIDENT_DIR/
+sudo cp -a "$RAXIS_DATA_DIR/policy" $INCIDENT_DIR/
 
 # 4. Recent gateway and kernel logs.
 sudo journalctl -u raxis-kernel  --since "2 hours ago" > $INCIDENT_DIR/kernel.log
@@ -66,23 +66,25 @@ This is non-destructive; the kernel keeps running.
 
 ```bash
 # When did the SecurityViolation / first symptom appear?
-jq 'select(.kind == "SecurityViolation") | {ts, payload}' \
-   $INCIDENT_DIR/audit.jsonl | head -5
+raxis --data-dir "$INCIDENT_DIR" log --json --limit 0 \
+  | jq -c 'select(.event_kind == "SecurityViolation") | {seq, emitted_at, payload}' \
+  | head -5
 
 # What was happening just before?
-jq -c '.' $INCIDENT_DIR/audit.jsonl | tail -200 > $INCIDENT_DIR/audit-tail.jsonl
+raxis --data-dir "$INCIDENT_DIR" log --json --limit 0 \
+  | tail -200 > $INCIDENT_DIR/audit-tail.jsonl
 ```
 
-Pin a `T_START` (first symptom) and `T_END` (incident over).
+Pin `SEQ_START` and `SEQ_END` from the event `seq` values.
 
 ### 2. Filter to the incident window
 
 ```bash
-jq -c "select(.ts >= \"$T_START\" and .ts <= \"$T_END\")" \
-   $INCIDENT_DIR/audit.jsonl > $INCIDENT_DIR/window.jsonl
+jq -c "select(.seq >= $SEQ_START and .seq <= $SEQ_END)" \
+   $INCIDENT_DIR/audit-tail.jsonl > $INCIDENT_DIR/window.jsonl
 
 # Audit-event histogram:
-jq -r '.kind' $INCIDENT_DIR/window.jsonl | sort | uniq -c | sort -rn
+jq -r '.event_kind' $INCIDENT_DIR/window.jsonl | sort | uniq -c | sort -rn
 ```
 
 A typical incident window has:
@@ -101,14 +103,14 @@ A typical incident window has:
 ### 3. Identify affected initiatives
 
 ```bash
-jq -r 'select(.kind == "SecurityViolation") | .initiative_id' \
+jq -r 'select(.event_kind == "SecurityViolation") | .initiative_id' \
    $INCIDENT_DIR/window.jsonl | sort -u
 ```
 
 For each, pull a per-initiative narrative:
 
 ```bash
-for INIT in $(jq -r 'select(.kind == "SecurityViolation") | .initiative_id' $INCIDENT_DIR/window.jsonl | sort -u); do
+for INIT in $(jq -r 'select(.event_kind == "SecurityViolation") | .initiative_id' $INCIDENT_DIR/window.jsonl | sort -u); do
   echo "=== $INIT ==="
   jq -c "select(.initiative_id == \"$INIT\")" $INCIDENT_DIR/window.jsonl > $INCIDENT_DIR/init-$INIT.jsonl
   raxis explain $(jq -r '.task_id' $INCIDENT_DIR/init-$INIT.jsonl | head -1) > $INCIDENT_DIR/explain-$INIT.txt
@@ -126,13 +128,13 @@ Most incidents fall into one of:
 | `ReconciliationGap` cluster around a kernel restart | Kernel crash; partial-write recovery left orphans. |
 | `EscalationRaised` rate spike | Lineage looping; rate limit kicked in. |
 | `LaneAdmissionRejected` cluster | Lane budget overspend or capacity floor. |
-| `PolicyReloaded` followed by `SECURITY_QUARANTINED` | A policy edit revoked an in-flight delegation. |
+| `PolicyEpochAdvanced` followed by `SECURITY_QUARANTINED` | A policy edit revoked an in-flight delegation. |
 
 ### 5. Verify chain integrity
 
 ```bash
-RAXIS_DATA_DIR=$INCIDENT_DIR raxis verify-chain --full
-# Expected: verdict OK
+raxis verify-chain --audit-dir "$INCIDENT_DIR/audit"
+# Expected: Chain integrity: OK
 ```
 
 If `FAIL`, the audit chain itself was tampered or corrupted; that
@@ -213,8 +215,8 @@ Common follow-ups:
 |---|---|
 | `raxis log <id> --json` | Audit slice. |
 | `raxis explain <task_id>` | Per-task narrative. |
-| `raxis verify-chain --full` | Audit-chain integrity. |
-| `raxis doctor --full-audit-verify` | Aggregate health check. |
+| `raxis verify-chain [--audit-dir <path>]` | Audit-chain integrity. |
+| `raxis doctor` | Aggregate health check. |
 | `jq` | Audit-chain analysis. |
 
 ---

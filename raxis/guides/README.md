@@ -3,14 +3,16 @@
 > **Audience.** Operators, developers, and demo-runners — anyone exercising
 > RAXIS against a real repo, real provider, and real local kernel.
 
-This is the **practical cookbook**. Each guide under `scenarios/` is a
-self-contained folder with a [`README.md`](README.md), a runnable `plan.toml`, a
-local-policy `policy.toml`, and a `credential.toml` template. Every guide
+This is the **practical cookbook**. Each guide under
+[`scenarios/`](scenarios/) is a self-contained folder with its own
+`README.md`, a runnable `plan.toml`, a local-policy `policy.toml`, and a
+`credential.toml` template. Every guide
 is built to be plug-and-play: clone the folder, fill in the credential
 placeholders, run the setup commands, and watch RAXIS drive the work.
 
 > **Architecture rationale** (why RAXIS is shaped the way it is) lives in
-> [`specs/design-decisions.md`](../specs/design-decisions.md) and
+> [`specs/README.md`](../specs/README.md),
+> [`specs/design-decisions.md`](../specs/design-decisions.md), and
 > [`specs/v2/v2-deep-spec.md`](../specs/v2/v2-deep-spec.md). The guides
 > here are operationally-focused — they assume the architecture and show
 > you how to drive it.
@@ -27,13 +29,27 @@ placeholders, run the setup commands, and watch RAXIS drive the work.
    [`SETUP.md`](SETUP.md), then jump straight into a scenario below.
 3. Pick a scenario. Each guide is rated by complexity (⭐ – ⭐⭐⭐⭐⭐) and
    estimated wall-clock time.
-4. `cd` into the scenario folder and follow its [`README.md`](README.md). The `plan.toml`
+4. `cd` into the scenario folder and follow that folder's `README.md`. The `plan.toml`
    in each folder has already passed `raxis plan validate`; you can re-run
    the validator at any time to confirm.
 5. Iterate. Most scenarios end with a "Variations" section — knobs you can
    change to explore further.
 
 ---
+
+## Docs Map
+
+```mermaid
+flowchart TD
+    First["First run"] --> GettingStarted["getting-started/<br/>short runnable path"]
+    First --> Setup["SETUP.md<br/>long-form inspectable setup"]
+    Daily["Daily operator question"] --> Recipes["recipes/<br/>focused commands, env vars, policy, ops"]
+    Shape["Which plan topology?"] --> Scenarios["scenarios/<br/>runnable examples"]
+    Shape --> Patterns["patterns/<br/>abstract coordination shapes"]
+    Why["Why is RAXIS shaped this way?"] --> Concepts["CONCEPTS.md + raxis-concepts/<br/>conceptual model"]
+    Why --> Security["security/<br/>threat model and hardening"]
+    Contract["Need normative contract"] --> Specs["../specs/<br/>invariants and versioned specs"]
+```
 
 ## Catalogue
 
@@ -162,8 +178,8 @@ read-order.
 ## Adding a new scenario
 
 Use [`scenarios/_template/`](scenarios/_template/) as the starting
-point. Copy the folder, rename, edit the four files ([`README.md`](README.md),
-`plan.toml`, `policy.toml`, `credential.toml`), then run:
+point. Copy the folder, rename it, edit its `README.md`, `plan.toml`,
+`policy.toml`, and `credential.toml`, then run:
 
 ```bash
 raxis plan validate scenarios/<your-scenario>/plan.toml

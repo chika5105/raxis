@@ -65,20 +65,16 @@ were not bound to the revoked session.
 ```bash
 # 1. Pick a running initiative + session. The list is JSON; filter
 #    for state Running.
-raxis session list --json | jq '[.[] | select(.state == "Running")]'
+raxis sessions --json | jq '.active_sessions[] | select(.state == "Running")'
 
 # 2. Pick one session_id. Substitute below.
 TARGET_SESSION="<session_id>"
 
-# 3. Revoke. The CLI prompts for confirmation unless you pass --yes.
-raxis session revoke "$TARGET_SESSION" \
-  --reason "manual operator stop — suspicious behaviour" \
-  --yes
+# 3. Revoke.
+raxis session revoke "$TARGET_SESSION"
 
 # 4. Observe.
-raxis log --initiative-id "$(raxis session show "$TARGET_SESSION" \
-    --json | jq -r '.initiative_id')" \
-  --kind SessionRevoked --limit 1 --json
+raxis log --session "$TARGET_SESSION" --kind SessionRevoked --limit 1 --json
 ```
 
 ---
@@ -87,20 +83,20 @@ raxis log --initiative-id "$(raxis session show "$TARGET_SESSION" \
 
 ```bash
 # 1. The session row is Revoked.
-raxis session show "$TARGET_SESSION" --json | jq '.state'
-# "Revoked"
+raxis log --session "$TARGET_SESSION" --kind SessionRevoked --limit 1 --json | wc -l
+# 1
 
-# 2. The worktree was moved (not deleted).
-ls "$RAXIS_DATA_DIR/sessions/" | grep "$TARGET_SESSION"
-# <id>-revoked
+# 2. Session capture / worktree evidence remains available for forensics.
+ls "$RAXIS_DATA_DIR/session-capture/" | grep "$TARGET_SESSION" || true
+find "$RAXIS_DATA_DIR/worktrees" -maxdepth 2 -name "*$TARGET_SESSION*" -print
 
 # 3. The revoked session's verifier tokens are consumed.
 raxis log --kind VerifierTokenExpired \
   --limit 20 --json \
-  | jq '[.[] | select(.payload.session_id == "'"$TARGET_SESSION"'")]'
+  | jq -c 'select(.payload.session_id == "'"$TARGET_SESSION"'")'
 
 # 4. The initiative did *not* abort; pending tasks were re-admitted.
-INIT_ID="$(raxis session show "$TARGET_SESSION" --json | jq -r '.initiative_id')"
+INIT_ID="$(raxis log --session "$TARGET_SESSION" --limit 1 --json | jq -r '.initiative_id')"
 raxis initiative show "$INIT_ID" --with-tasks
 # State: Active (or Completed if the remaining task graph finished)
 
@@ -108,20 +104,15 @@ raxis initiative show "$INIT_ID" --with-tasks
 raxis verify-chain
 ```
 
-The forensic manifest at
-`<data_dir>/sessions/<id>-revoked/manifest.json` records the reason
-the operator supplied, the revocation timestamp, and the SHA of the
-last commit the session made on its worktree branch (so you can
-`git checkout` the branch in a fresh repo and inspect the
-diff later).
+The audit chain and session-capture files preserve the revocation
+timeline for post-mortem work.
 
 ---
 
 ## Variations
 
-- **Revoke without reason.** Drop `--reason`. The kernel still
-  records `SessionRevoked` but the audit row's `reason` field is
-  `null`.
+- **Revoke a single Executor.** The kernel records `SessionRevoked`
+  and downstream recovery decides whether the task can be retried.
 - **Revoke an Orchestrator.** Orchestrator revocation cascades:
   every Executor/Reviewer spawned by it transitions to
   `BlockedRecoveryPending` and the operator must either retry or

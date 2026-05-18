@@ -2,9 +2,9 @@
 
 > **Complexity:** ⭐⭐⭐ Advanced | **Wall clock:** ~10 min | **Provider:** Anthropic
 
-Publish a tighter policy bundle while an initiative is mid-flight.
-Demonstrates how live sessions migrate to the new epoch on next
-heartbeat without disturbance.
+Sign and advance a tighter policy bundle while an initiative is
+mid-flight. Demonstrates how live sessions migrate to the new epoch on
+next policy check without disturbance.
 
 ---
 
@@ -17,7 +17,8 @@ launch one).
 
 ## What this scenario demonstrates
 
-- `raxis policy publish` issues `AUDIT_POLICY_EPOCH_ADVANCED`.
+- `raxis policy sign` writes a fresh `policy.sig`.
+- `raxis epoch advance` issues the policy-epoch audit event.
 - In-flight tasks fail-closed if the new policy denies them.
 
 ---
@@ -29,5 +30,10 @@ launch one).
 INIT_ID=$(... see scenario 26 ...)
 
 # Tighten the policy:
-raxis policy publish ./tighter-policy.toml.signed
+cp ./tighter-policy.toml "$RAXIS_DATA_DIR/policy/policy.toml"
+raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --key "$RAXIS_OPERATOR_KEY"
+raxis epoch advance \
+  --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --sig "$RAXIS_DATA_DIR/policy/policy.sig"
 ```

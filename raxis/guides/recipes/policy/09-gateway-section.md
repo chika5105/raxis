@@ -70,9 +70,9 @@ raxis policy sign \
   "$RAXIS_DATA_DIR/policy/policy.toml" \
   --key "$RAXIS_OPERATOR_KEY"
 
-# 4. Restart the kernel — the gateway supervisor wires up at boot, NOT
-#    at hot-reload (this is one of the few sections that requires a
-#    restart). Ctrl-C the running kernel, then:
+# 4. Restart the kernel — the gateway supervisor wiring is boot-time
+#    state, not an epoch-advance-only change. Ctrl-C the running
+#    kernel, then:
 raxis-kernel
 # Watch for:
 #   {"event":"GatewaySpawned","pid":N}
@@ -83,14 +83,22 @@ raxis-kernel
 
 ## What the supervisor does
 
-```text
-boot → spawn(gateway) → wait(spawn_timeout_secs) for GatewayReady
-                            ├── ready: gateway is live
-                            └── timeout / crash: respawn after backoff_ms
+```mermaid
+flowchart TD
+    A["Kernel boot"]
+    B["Spawn gateway"]
+    C["Wait spawn_timeout_secs for GatewayReady"]
+    D["Gateway live"]
+    E["Timeout or crash"]
+    F["Backoff: min(initial_backoff * 2^N, 60_000 ms)"]
+    G{"N >= max_consecutive_respawns?"}
+    H["Quarantine gateway"]
 
-crash recovery:
-  attempt N → backoff = min(initial_backoff * 2^N, 60_000) ms
-  if N >= max_consecutive_respawns: quarantine, no further auto-respawn
+    A --> B --> C
+    C -->|ready| D
+    C -->|timeout/crash| E --> G
+    G -->|no| F --> B
+    G -->|yes| H
 ```
 
 While the gateway is quarantined, every `FetchRequest` from

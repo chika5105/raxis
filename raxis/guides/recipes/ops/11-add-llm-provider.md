@@ -83,8 +83,10 @@ model = "claude-3-haiku-20240307"
 ### 3. Re-sign and apply
 
 ```bash
-raxis policy sign /tmp/policy.toml --operator-key /tmp/op.key
-# Expected: kernel hot-reloads; gateway picks up the new entry.
+raxis policy sign /tmp/policy.toml --key /tmp/op.key
+raxis --operator-key /tmp/op.key epoch advance \
+  --policy /tmp/policy.toml \
+  --sig /tmp/policy.sig
 raxis providers status | grep anthropic-prod
 # Output: status ok (or unknown until first traffic).
 ```
@@ -122,7 +124,7 @@ predecessors       = []
 description        = """Print the provider id you're using and exit."""
 EOF
 
-raxis submit plan /tmp/probe-plan.toml
+raxis submit plan /tmp/probe-plan.toml --no-dry-run
 INIT=$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')
 raxis plan approve "$INIT"
 # Wait...

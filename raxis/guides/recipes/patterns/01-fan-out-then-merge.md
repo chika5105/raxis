@@ -152,33 +152,30 @@ Key points:
 
 ## What happens when the plan runs
 
-```text
-1. Operator: raxis submit plan ... (signed bundle).
-2. Kernel: admit, store, mint Orchestrator session.
-3. Orchestrator: ActivateSubTask { trace-auth },
-                 ActivateSubTask { trace-api },
-                 ActivateSubTask { trace-db }.
-4. Kernel: spawn three Executor sessions in parallel.
-5. Each Executor: edits files in its slice → SingleCommit (per
-   commit) → CompleteTask when done.
-6. Orchestrator (on each KernelPush::SubTaskCompleted):
-   ActivateSubTask { review-<slice> }.
-7. Kernel: spawn Reviewer session pinned to the Executor's
-   evaluation_sha.
-8. Reviewer: reads files (no writes, no network) → SubmitReview
-   { approved | rejected, critique }.
-9. Kernel: review_aggregation logical-AND across the panel for
-   that sub-task (here panel size = 1).
-10. On all-approved: KernelPush::AllReviewersPassed { task_id }
-    is dispatched to the Orchestrator session.
-11. Orchestrator: fetches the Executor's bundle, runs git merge
-    locally in its workspace, regenerates Cargo.lock,
-    submits IntegrationMerge { commit_sha, merged_task_ids }.
-12. Kernel: admits the IntegrationMerge (Checks 1-7 in
-    integration-merge.md), runs integration_merge_verifiers
-    against a candidate merge tree, fast-forwards the target ref.
-13. Repeat 11-12 for the next approved sub-task (or batch them).
-14. After all sub-tasks merged: Initiative Completed.
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant K as Kernel
+    participant O as Orchestrator
+    participant E as Executors
+    participant R as Reviewers
+    participant Main as Target ref
+
+    Op->>K: submit plan signed bundle
+    K->>K: Admit plan and mint Orchestrator session
+    O->>K: Activate trace-auth, trace-api, trace-db
+    K->>E: Spawn three Executor sessions in parallel
+    E->>K: SingleCommit ranges, then CompleteTask
+    K-->>O: KernelPush::SubTaskCompleted per slice
+    O->>K: Activate review-auth, review-api, review-db
+    K->>R: Spawn Reviewers pinned to evaluation_sha
+    R->>K: SubmitReview approved or rejected
+    K->>K: Aggregate reviewer verdicts per sub-task
+    K-->>O: KernelPush::AllReviewersPassed
+    O->>O: Fetch bundles, merge locally, regenerate Cargo.lock
+    O->>K: IntegrationMerge(commit_sha, merged_task_ids)
+    K->>K: Run merge admission checks and integration verifiers
+    K->>Main: Fast-forward target ref
 ```
 
 The Orchestrator is the **single merge serialization point**.

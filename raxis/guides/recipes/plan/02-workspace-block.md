@@ -23,19 +23,18 @@ admission.
 
 ## How `target_ref` resolves
 
-```text
-plan.toml [workspace] target_ref         (operator declares per-plan)
-          ├── absent: fall through
-          │           policy [git] default_target_ref       (operator declares per-install)
-          │             ├── absent: fall through
-          │             │            "refs/heads/main"      (kernel hardcoded fallback)
-          │             └── present + locked: plan override rejected
-          │                  with FAIL_POLICY_LOCKED_FIELD
-          └── present:
-                ├── policy [git] target_ref_locked = false: plan wins
-                └── policy [git] target_ref_locked = true:
-                     └── plan must equal default_target_ref
-                          else FAIL_POLICY_LOCKED_FIELD
+```mermaid
+flowchart TD
+    start["Resolve [workspace].target_ref"] --> plan{"Plan declares target_ref?"}
+    plan -->|no| policy{"Policy has [git].default_target_ref?"}
+    policy -->|no| main["Use refs/heads/main"]
+    policy -->|yes| policy_default["Use policy default_target_ref"]
+
+    plan -->|yes| locked{"Policy target_ref_locked?"}
+    locked -->|false| plan_wins["Use plan target_ref"]
+    locked -->|true| matches{"Plan target_ref equals policy default?"}
+    matches -->|yes| plan_locked_ok["Use policy/plan target_ref"]
+    matches -->|no| reject["Reject with FAIL_POLICY_LOCKED_FIELD"]
 ```
 
 So:

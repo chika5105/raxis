@@ -24,11 +24,12 @@ Filters:
 ```bash
 raxis sessions --initiative 1f3c8a4b
 raxis sessions --agent-type Reviewer
-raxis sessions --json | jq '.[] | select(.ttl_remaining_seconds < 300)'
+raxis sessions --json | jq '.active_sessions[] | select(.ttl_remaining_seconds < 300)'
 ```
 
-`raxis sessions show <id>` (or `inspect session:<id>`) drills
-into one session's metadata, delegations, and recent intents.
+For one session, filter `raxis sessions --json` by `session_id` and
+then use `raxis log --session <id>` for the recent intent/audit
+trail.
 
 ---
 
@@ -105,7 +106,7 @@ prints `Inbox empty (all clear).`
 
 | Command | Purpose |
 |---|---|
-| `raxis session show <id>` / `inspect session:<id>` | Per-session deep dive. |
+| `raxis sessions --json` + `raxis log --session <id>` | Per-session deep dive. |
 | `raxis escalation show <id>` | Per-escalation deep dive. |
 | `raxis explain <task_id>` | Why a task is in its state. |
 | `raxis budget [--lane <id>]` | Lane-level budget view. |
@@ -125,5 +126,5 @@ prints `Inbox empty (all clear).`
   `raxis cert list --json | jq '.[] | select(.ttl_remaining_seconds < 86400)'`
   is faster.
 - **Per-lane operator.** A lane owner runs
-  `raxis sessions --json | jq '.[] | select(.lane_id == "auth-work")'`
+  `raxis sessions --json | jq '.active_sessions[] | select(.lane_id == "auth-work")'`
   to see their lane's sessions.

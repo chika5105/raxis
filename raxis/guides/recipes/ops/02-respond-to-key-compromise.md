@@ -17,7 +17,7 @@ new damage and preserve forensic evidence without destroying it.
    use `cert mint-emergency` from the genesis key (or the most
    privileged key you still trust).
 3. **Has the suspected-compromised key been used in the last hour?**
-   `raxis log --kind OperatorAction --since "1 hour ago" --json | jq '.[] | select(.signer_kid == "<suspect_kid>")'`.
+   `raxis log --kind OperatorAction --since 1h --json | jq -c 'select(.payload.signer_kid == "<suspect_kid>")'`.
    The output drives the urgency.
 
 ---
@@ -29,8 +29,8 @@ new damage and preserve forensic evidence without destroying it.
 ```bash
 DATE=$(date -u +%Y%m%dT%H%M%SZ)
 mkdir -p /tmp/incident-$DATE
-cp -a "$RAXIS_DATA_DIR"/audit.jsonl /tmp/incident-$DATE/audit.jsonl
-cp -a "$RAXIS_DATA_DIR"/policy.toml /tmp/incident-$DATE/policy.toml
+cp -a "$RAXIS_DATA_DIR"/audit /tmp/incident-$DATE/audit
+cp -a "$RAXIS_DATA_DIR"/policy /tmp/incident-$DATE/policy
 cp -a "$RAXIS_DATA_DIR"/kernel.db   /tmp/incident-$DATE/kernel.db
 ```
 
@@ -42,10 +42,10 @@ Pick a trusted operator key (NOT the suspected one). Use
 `cert mint-emergency` if you don't have a normal trusted key.
 
 ```bash
-raxis cert revoke <suspect_kid> \
-  --reason "key compromise: <details, e.g. laptop stolen>" \
-  --operator-key /tmp/safe-genesis.key
-# Expected: revoked_kid, new_epoch advanced.
+raxis --operator-key /tmp/safe-genesis.key cert revoke /path/to/suspect.cert.toml \
+  --reason compromise \
+  --reference incident-2026-05
+# Expected: signed revocation written under <data-dir>/revocations/.
 ```
 
 Effect:
@@ -57,7 +57,7 @@ Effect:
 ### 3. Bulk-quarantine in-flight initiatives
 
 ```bash
-raxis operator quarantine-plans-by <suspect_kid> \
+raxis --operator-key /tmp/safe-genesis.key operator quarantine-plans-by <suspect_kid> \
   --reason "key compromise: investigation pending"
 # Expected: N initiatives quarantined.
 ```
@@ -72,9 +72,9 @@ Effect:
 
 ```bash
 raxis sessions --json \
-  | jq -r '.[] | select(.signer_kid == "<suspect_kid>") | .session_id' \
+  | jq -r '.active_sessions[] | select(.signer_kid == "<suspect_kid>") | .session_id' \
   | while read SID; do
-      raxis session revoke "$SID" --reason "key compromise: terminate active sessions"
+      raxis session revoke "$SID"
     done
 ```
 
@@ -84,8 +84,8 @@ controlling.
 ### 5. Verify the audit chain is intact
 
 ```bash
-raxis verify-chain --full
-# Expected: verdict OK
+raxis verify-chain
+# Expected: Chain integrity: OK
 ```
 
 If `FAIL`, the audit chain itself was tampered with. Stop, treat
@@ -123,9 +123,9 @@ raxis credential list --json | jq -r '.[].id' \
 With the audit snapshot, walk:
 
 ```bash
-raxis log --kind SessionMinted --since "24 hours ago" --json | jq '.[] | select(.signer_kid == "<suspect_kid>")'
-raxis log --kind CredentialUsed --since "24 hours ago" --json | jq '.[] | select(.session_id as $s | <suspect_session_ids> | index($s))'
-raxis log --kind SecurityViolation --since "24 hours ago"
+raxis log --kind SessionMinted --since 24h --json | jq -c 'select(.payload.signer_kid == "<suspect_kid>")'
+raxis log --kind CredentialUsed --since 24h --json | jq -c 'select(.session_id as $s | <suspect_session_ids> | index($s))'
+raxis log --kind SecurityViolation --since 24h
 ```
 
 Build a timeline. Identify:
@@ -142,8 +142,8 @@ For each quarantined initiative:
 
 - If the investigation shows the work is unaffected, lift
   quarantine: `raxis initiative quarantine <id> --lift`.
-- If contaminated, abort: `raxis initiative abort <id> --reason
-  "key compromise: aborted"`. This frees lane budgets.
+- If contaminated, abort: `raxis initiative abort <id>`. This frees
+  lane budgets.
 
 ### 10. Post-mortem
 
@@ -157,7 +157,7 @@ For each quarantined initiative:
 
 ## What NOT to do
 
-- **Do not** delete `audit.jsonl`. It's append-only forensic
+- **Do not** delete `audit/` segments. They are append-only forensic
   evidence; rotation is fine, deletion is not.
 - **Do not** stop the kernel before revoking the cert. A running
   kernel rejects revoked-cert intents immediately; a stopped
@@ -173,11 +173,11 @@ For each quarantined initiative:
 
 | Command | Purpose |
 |---|---|
-| `raxis cert revoke <kid>` | Revoke the compromised cert. |
+| `raxis cert revoke <cert.toml> --reason compromise --reference <id>` | Revoke the compromised cert. |
 | `raxis cert mint-emergency` | Break-glass cert if no trusted key. |
-| `raxis operator quarantine-plans-by <kid>` | Bulk quarantine. |
+| `raxis --operator-key <pem> operator quarantine-plans-by <kid>` | Bulk quarantine. |
 | `raxis session revoke <id>` | Kill a live session. |
-| `raxis verify-chain --full` | Audit-chain integrity. |
+| `raxis verify-chain` | Audit-chain integrity. |
 | `raxis initiative show --bundle --to <dir>` | Forensic export. |
 
 ---
@@ -188,8 +188,8 @@ For each quarantined initiative:
   new genesis cert from a backup of the genesis key (you should
   have one offline). If no backup, the install is effectively
   burned and you must rebuild from scratch.
-- **Tampered audit chain.** Stop the kernel, restore `audit.jsonl`
-  from snapshot, rerun `verify-chain --full` to confirm. Treat
+- **Tampered audit chain.** Stop the kernel, restore `audit/`
+  from snapshot, rerun `verify-chain` to confirm. Treat
   any audit data after the tampering point as untrusted.
 - **Key compromise in CI.** Disable the CI bot's runner, revoke
   its cert, mint a new one, redeploy with the new key. Don't

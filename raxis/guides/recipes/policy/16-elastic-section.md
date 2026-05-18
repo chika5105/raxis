@@ -92,13 +92,10 @@ transient_retry_max_backoff_ms         = 1000
 The `[elastic]` ceilings MUST be `≥` the largest `[isolation]`
 role baseline:
 
-```text
-max_vcpus_per_session    >= max(orchestrator_vcpu_count,
-                                 executor_vcpu_count,
-                                 reviewer_vcpu_count)
-max_memory_mb_per_session>= max(orchestrator_mem_mib,
-                                 executor_mem_mib,
-                                 reviewer_mem_mib)
+```toml
+# Required invariant:
+max_vcpus_per_session     >= max(orchestrator_vcpu_count, executor_vcpu_count, reviewer_vcpu_count)
+max_memory_mb_per_session >= max(orchestrator_mem_mib, executor_mem_mib, reviewer_mem_mib)
 ```
 
 If a baseline is above the elastic ceiling, the policy load

@@ -92,60 +92,33 @@ context             = """
 
 ## How It Executes
 
-```text
-approve_plan
-  └── Kernel validates: DAG acyclicity, path subset, single Orchestrator ✓
+```mermaid
+flowchart TD
+    A["approve_plan"]
+    B["Kernel validates DAG, path subset, single orchestrator"]
+    C["Kernel activates Orchestrator VM"]
+    D["Orchestrator activates rate_limit_implementer"]
+    E["Kernel boots Executor VM with sparse src/auth clone"]
+    F["Executor edits, tests, commits, and submits CompleteTask(head_sha=abc123)"]
+    G["Kernel records completed_sha and stages executor bundle"]
+    H["Kernel pushes SubTaskCompleted with security_reviewer newly activatable"]
+    I["Orchestrator fetches bundle and merges into staging"]
+    J["Orchestrator activates security_reviewer"]
+    K["Kernel boots Reviewer at evaluation_sha=abc123"]
+    L{"Reviewer verdict"}
+    M["SubmitReview approved=true"]
+    N["Kernel pushes AllReviewersPassed"]
+    O["Orchestrator submits IntegrationMerge(commit_sha=abc123)"]
+    P["Kernel fast-forwards main"]
+    Q["SubmitReview approved=false with critique"]
+    R["Kernel stores critique and increments review_reject_count"]
+    S["Kernel pushes ReviewFailed"]
+    T["Orchestrator retries executor"]
+    U["New Executor prompt prepends reviewer critique"]
 
-Kernel activates Orchestrator VM
-Orchestrator receives: [rate_limit_implementer] in activatable list
-
-Orchestrator → ActivateSubTask { task_id: "rate_limit_implementer" }
-  └── Kernel boots Executor VM with sparse clone of src/auth/
-
-Executor runs (N turns):
-  - reads src/auth/redis.rs for context
-  - implements src/auth/rate_limit.rs
-  - adds tests in src/auth/rate_limit_test.rs
-  - git commit → CompleteTask { head_sha: "abc123" }
-
-Kernel:
-  1. Writes abc123 to tasks.completed_sha
-  2. Creates bundle: executor worktree → orchestrator staging
-  3. Sends KernelPush::SubTaskCompleted {
-       task_id: "rate_limit_implementer",
-       newly_activatable: ["security_reviewer"]
-     }
-  4. Tears down Executor VM
-
-Orchestrator receives push → git fetch bundle → git merge (no conflict expected)
-Orchestrator → ActivateSubTask { task_id: "security_reviewer" }
-
-Kernel boots Reviewer VM:
-  - evaluation_sha = "abc123" injected into system_prompt.txt
-  - Reviewer checks out exactly abc123
-
-Reviewer runs (N turns):
-  - reads src/auth/rate_limit.rs
-  - reads src/auth/rate_limit_test.rs
-  - approves or rejects
-
-Case A — Reviewer approves:
-  Reviewer → SubmitReview { approved: true }
-  Kernel → KernelPush::AllReviewersPassed
-  Orchestrator → IntegrationMerge { commit_sha: "abc123" }
-  Kernel fast-forwards main branch ✓
-
-Case B — Reviewer rejects:
-  Reviewer → SubmitReview { approved: false, critique: "X-Forwarded-For not sanitised" }
-  Kernel:
-    - writes critique to tasks.last_critique on the Executor's row
-    - increments review_reject_count (1 of 2 allowed)
-    - sends KernelPush::ReviewFailed { executor_task_id: "rate_limit_implementer" }
-  Orchestrator → RetrySubTask { task_id: "rate_limit_implementer" }
-  Kernel boots new Executor VM:
-    - system_prompt.txt now PREPENDS the critique from the previous attempt
-    - Executor sees: "[Reviewer security_reviewer]: X-Forwarded-For not sanitised\n\n"
-  Cycle repeats...
+    A --> B --> C --> D --> E --> F --> G --> H --> I --> J --> K --> L
+    L -->|approve| M --> N --> O --> P
+    L -->|reject| Q --> R --> S --> T --> U --> E
 ```
 
 ---

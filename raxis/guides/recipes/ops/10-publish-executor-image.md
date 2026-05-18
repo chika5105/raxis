@@ -127,7 +127,7 @@ The kernel rejects `role_restriction` containing `"Reviewer"` or
 `"Orchestrator"` at policy load:
 
 ```bash
-raxis policy sign /tmp/policy.toml --operator-key /tmp/op.key
+raxis policy sign /tmp/policy.toml --key /tmp/op.key
 # If you set role_restriction = ["Reviewer"]:
 #   FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED: [[vm_images]] name = "..."
 #   declares role_restriction = "Reviewer"; the Reviewer image is
@@ -164,7 +164,7 @@ admission.
 ### 6. Test
 
 ```bash
-raxis submit plan ./test-plan.toml
+raxis submit plan ./test-plan.toml --no-dry-run
 INIT=$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')
 raxis plan approve "$INIT"
 raxis sessions show <executor_session_id>

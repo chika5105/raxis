@@ -34,6 +34,15 @@ for tests only — never set it on a host that runs untrusted agents.
 | `uuidgen`     | Lineage IDs in some scripts       | `uuidgen`                                                  |
 | `jq`          | Parse `--json` output in examples | `jq --version`                                             |
 
+Source builds have a few additional surfaces:
+
+| Tool | Required For | Notes |
+|---|---|---|
+| C/C++ toolchain, `make`, `pkg-config` | Rust crates with native build steps | Xcode CLT on macOS; distro build tools on Linux. |
+| Docker, Podman, or Buildah | Guest image bake roles that assemble a rootfs | `cargo xtask images bake` auto-detects the builder. |
+| Node.js 20+ and npm | `dashboard-fe/` | Only needed when building the dashboard UI. |
+| Docker Compose | Local observability/live-e2e/perf stacks | Used by `cargo xtask observability up`. |
+
 On macOS the default `/usr/bin/openssl` is LibreSSL, which cannot
 generate Ed25519 keys. Install Homebrew `openssl@3` and put its `bin/`
 on `$PATH`:
@@ -103,7 +112,12 @@ and [`demo-e2e-sample/AVF_DEMO.md §0`](../../demo-e2e-sample/AVF_DEMO.md).
 The workspace provides:
 
 ```bash
-cargo build --release -p raxis-kernel -p raxis-cli -p raxis-gateway
+cargo build --release --locked \
+  -p raxis-kernel \
+  -p raxis-cli \
+  -p raxis-gateway \
+  -p raxis-otel-pusher \
+  -p raxis-supervisor
 cargo xtask dev-codesign --profile release
 ```
 
@@ -162,22 +176,55 @@ Reference:
 
 ---
 
-## Verify the install
+## Build from source
 
 Once `cargo xtask dev-prereqs` (macOS) or `cargo xtask linux-prereqs`
-(Linux) is green, install the three binaries:
+(Linux) is green, the workspace should build with the checked-in lock:
 
 ```bash
 cd /path/to/raxis        # workspace root
-cargo install --path cli      --locked --force
-cargo install --path kernel   --locked --force
-cargo install --path gateway  --locked --force
+cargo build --workspace --locked
 ```
+
+Build the host binaries operators normally run:
+
+```bash
+cargo build --release --locked \
+  -p raxis-cli \
+  -p raxis-kernel \
+  -p raxis-gateway \
+  -p raxis-otel-pusher \
+  -p raxis-supervisor
+```
+
+If you want them installed into `~/.cargo/bin`, install the non-kernel
+tools first and build the kernel after the guest-image bake so its
+canonical-image trust anchor matches the images you staged:
+
+```bash
+cargo install --path cli --locked --force
+cargo install --path gateway --locked --force
+cargo install --path pusher --locked --force
+cargo install --path crates/supervisor --bin raxis-supervisor --locked --force
+```
+
+Dashboard frontend build:
+
+```bash
+cd dashboard-fe
+npm install
+npm run build
+```
+
+Guest-image bake and the final trust-anchored kernel build are in
+[`SETUP.md §3`](../SETUP.md#3-bake-guest-images). That step is
+intentionally later because the kernel binary embeds the public half
+of the image manifest-signing key.
 
 Confirm:
 
 ```bash
-which raxis raxis-kernel raxis-gateway
+which raxis raxis-gateway raxis-otel-pusher raxis-supervisor
 raxis --help | head -20
 ```
 

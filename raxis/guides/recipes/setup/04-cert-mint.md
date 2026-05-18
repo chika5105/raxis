@@ -29,14 +29,14 @@ host.
 raxis cert mint \
   --key "$HOME/raxis-keys/operator_private.pem" \
   --display-name "$USER" \
+  --ops "CreateInitiative,ApprovePlan,RejectPlan,CreateSession,RevokeSession,GrantDelegation,RetryTask,ResumeTask,AbortTask,AbortInitiative,ApproveEscalation,DenyEscalation,RotateEpoch,QuarantineInitiative,QuarantinePlansBy" \
   --out "$HOME/raxis-keys/operator.cert.toml"
 ```
 
-Defaults applied:
+Important defaults:
 
-- `--permitted-ops` defaults to **all** operator operations
-  (`CreateInitiative,ApprovePlan,RejectPlan,AbortInitiative,...`).
-  Restrict it explicitly for CI / break-glass keys (see *Variations*).
+- Standard certs must pass `--ops <csv>` explicitly. Use the full
+  operation set for a genesis operator; restrict CI / break-glass keys.
 - `--validity-days` defaults to `365`. The cert's `not_after` is
   the host's clock at mint time + this many days.
 - The signing algorithm is fixed at Ed25519. There is no toggle.
@@ -119,12 +119,12 @@ To rotate the *key* itself (not just the cert), see the
 
 | Command | Purpose |
 |---|---|
-| `raxis cert mint --key <pem> --display-name <name> [--permitted-ops <csv>] [--validity-days N] --out <path>` | Mint a self-signed cert from a private PEM. |
+| `raxis cert mint --key <pem> --display-name <name> --ops <csv> [--validity-days N] --out <path>` | Mint a self-signed cert from a private PEM. |
 | `raxis cert mint-emergency` | Same as `mint` but stamps a `kind = "Emergency"` claim on the cert; used for break-glass operators with auto-revoke after first use. |
 | `raxis cert show <path>` | Decode and pretty-print a cert. |
 | `raxis cert verify <path>` | Cryptographically verify the cert's self-signature. |
-| `raxis cert install <path>` | Inject a cert into the running kernel's policy under a fresh epoch (requires `--operator-key` for the policy re-signing step). |
-| `raxis cert revoke --fingerprint <fp> [--reason <text>]` | Add a revocation row; the kernel rejects all subsequent signatures from that fingerprint. |
+| `raxis cert install <path> --policy <policy.toml>` | Inject a cert into a policy file, then re-sign with `raxis policy sign`. |
+| `raxis [--operator-key <key>] cert revoke <cert> --reason <rotation\|compromise> --reference <id>` | Add a signed revocation record; restart the kernel for it to take effect. |
 | `raxis cert list` | Show all operator certs currently in policy + their expiry dates. |
 | `raxis cert list-revocations` | Show every revoked cert + the epoch they were revoked at. |
 
@@ -138,7 +138,7 @@ To rotate the *key* itself (not just the cert), see the
   raxis cert mint \
     --key ci-private.pem \
     --display-name ci-bot \
-    --permitted-ops CreateInitiative \
+    --ops CreateInitiative \
     --validity-days 90 \
     --out ci.cert.toml
   ```

@@ -14,7 +14,7 @@ natural end.
 ```text
 raxis session create --initiative <id> --agent-type <Executor|Reviewer|Orchestrator>
                      [--ttl <seconds>] [--lane <lane_id>]
-raxis session revoke <session_id> [--reason <text>]
+raxis session revoke <session_id>
 ```
 
 ---
@@ -57,12 +57,9 @@ the session are dropped before any side effects fire (the kernel
 checks the session is alive on every IPC step).
 
 ```bash
-raxis session revoke 91a7c83f \
-  --reason "operator: session leaked credential proxy URL"
+raxis session revoke 91a7c83f
 # Output:
-# session_id:  91a7c83f...
-# state:       Revoked
-# pid_killed:  yes
+# Session 91a7c83f revoked at 1779068884
 ```
 
 Use revoke when:
@@ -92,7 +89,7 @@ Use revoke when:
 | Command | Purpose |
 |---|---|
 | `raxis sessions [--initiative <id>] [--agent-type ...]` | List active sessions. |
-| `raxis session show <id>` | Detailed view of one session. |
+| `raxis sessions --json` + `raxis log --session <id>` | Detailed view of one session. |
 | `raxis log <initiative_id>` | Audit events including SessionMinted / SessionRevoked. |
 | `raxis initiative show <id>` | Initiative-level overview. |
 
@@ -107,7 +104,7 @@ Use revoke when:
 - **Short-lived diagnostic session.** `--ttl 600` for a 10-minute
   scratch session; the kernel auto-revokes at expiry.
 - **Bulk revoke.** A leaked operator key — iterate
-  `raxis sessions --json | jq -r '.[].session_id'` and revoke each.
+  `raxis sessions --json | jq -r '.active_sessions[].session_id'` and revoke each.
 - **Pre-flight a token.** Before handing a token to a tool, do
-  `raxis sessions --json | jq -e '.[] | select(.session_id == "$SID")'`
+  `raxis sessions --json | jq -e '.active_sessions[] | select(.session_id == "$SID")'`
   to confirm the session is still alive.

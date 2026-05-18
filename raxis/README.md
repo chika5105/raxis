@@ -86,23 +86,90 @@ What you have checked out is the **RAXIS** codebase: a **Rust workspace** meant 
 
 Do not confuse the workspace root with **where the kernel keeps live state**. Databases, sockets, audit log segments, witness blobs, and the policy cache live under **`$RAXIS_DATA_DIR`**, which defaults to **`~/.raxis/`**. That location is fixed by environment variable, not by where the Git tree sits on disk.
 
-For operator actions (genesis, plan approval, escalations, audit-chain verification, and the rest), the spec names one binary: **`raxis`**. Details are in Part 4 ([`specs/v1/cli-ceremony.md`](specs/v1/cli-ceremony.md)). The Cargo crate that produces this binary is `raxis-cli` (the crate name remains stable because it's referenced from every workspace dependency); the produced binary is plain `raxis` so operator commands read naturally (`raxis genesis init`, `raxis policy sign`, etc.).
+For operator actions (genesis, plan approval, escalations,
+audit-chain verification, and the rest), the spec names one binary:
+**`raxis`**. Details are in Part 4
+([`specs/v1/cli-ceremony.md`](specs/v1/cli-ceremony.md)). The Cargo
+crate that produces this binary is `raxis-cli` (the crate name remains
+stable because it is referenced from workspace dependencies); the
+produced binary is plain `raxis` so operator commands read naturally
+(`raxis genesis`, `raxis policy sign policy.toml --key operator.key`,
+etc.).
 
 ---
 
 ## Quick Start
 
+The maintained operator runbook is [`guides/SETUP.md`](guides/SETUP.md).
+Use it for a clean machine. This section is the orientation-level
+version so the top-level README does not become a second stale setup
+manual.
+
 ### 1. Build and Install from Source
 
-RAXIS is written in Rust. You need to build the `raxis` CLI, the `raxis-kernel`, and the `raxis-gateway` binaries and put them on your system `$PATH`. The easiest way is using `cargo install`:
+RAXIS is written in Rust. The full requirements are in
+[`guides/getting-started/01-prereqs.md`](guides/getting-started/01-prereqs.md)
+and [`specs/v2/system-requirements.md §9`](specs/v2/system-requirements.md#9-building-from-source).
+Run the platform prerequisite command first:
 
 ```bash
 # From the raxis/ workspace root
-cargo install --path cli
-cargo install --path kernel
-cargo install --path gateway
+# macOS:
+cargo xtask dev-prereqs --install
+
+# Linux:
+cargo xtask linux-prereqs
 ```
-*(Ensure `~/.cargo/bin` is in your `$PATH`)*
+
+Then prove the workspace builds with the checked-in lockfile and
+build the host binaries:
+
+```bash
+cargo build --workspace --locked
+cargo build --release --locked \
+  -p raxis-cli \
+  -p raxis-kernel \
+  -p raxis-gateway \
+  -p raxis-otel-pusher \
+  -p raxis-supervisor
+```
+
+Bake images:
+
+```bash
+# Guest image bundle; pass your staged guest kernel + config.
+cargo xtask images bake \
+  --kernel-from-file /path/to/vmlinux \
+  --kernel-config /path/to/vmlinux.config
+```
+
+Finally build and verify the kernel trust anchor:
+
+```bash
+RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat .git/info/raxis-signing-key/pk.hex)" \
+  cargo build --release --locked -p raxis-kernel
+cargo xtask images verify-trust-anchor --kernel target/release/raxis-kernel
+```
+
+Dashboard frontend:
+
+```bash
+cd dashboard-fe
+npm install
+npm run build
+cd ..
+```
+
+Install the operator-facing tools if you want them on `$PATH`:
+
+```bash
+cargo install --path cli --locked --force
+cargo install --path gateway --locked --force
+cargo install --path pusher --locked --force
+cargo install --path crates/supervisor --bin raxis-supervisor --locked --force
+```
+
+Ensure `~/.cargo/bin` is in your `$PATH`.
 
 ### 2. Set Up Your Operator Identity
 
@@ -154,7 +221,7 @@ RAXIS expects **Ed25519 PEM** keys compatible with **OpenSSL 3**’s `genpkey` /
 
 2. **Start the Kernel**:
    ```bash
-   raxis-kernel
+   target/release/raxis-kernel
    ```
    *(Note: You do not need to run `raxis-gateway` manually. The kernel will automatically spawn and supervise the gateway subprocess for you.)*
 
@@ -201,7 +268,6 @@ expects you to pre-mint it offline:
 # operator private key).
 raxis cert mint \
   --display-name "Chika"  \
-  --pubkey       operator_public.pem \
   --key          operator_private.pem \
   --ops          "CreateInitiative,ApprovePlan,RotateEpoch,QuarantineInitiative,QuarantinePlansBy" \
   --out          chika.cert.toml
@@ -502,7 +568,14 @@ v2 extends the proven v1 foundation without weakening any of its guarantees.
 
 ### v3 — Coordination, Flexibility, and Scale
 
-> **Status:** Design intent only. No item in this section is an implementable contract. Each area requires a dedicated gap spec — with typed message definitions, invariant statements, DDL amendments, and adversarial assertion coverage — before work may begin. v3 builds on top of proven v2 primitives (kernel-mediated agent channels, hierarchical delegation, push notifications) and must not be started until v2 is stable.
+> **Status:** Mixed. This table is the forward-looking coordination
+> roadmap, not the full V3 implementation ledger. Several V3 slices
+> already ship as implemented or active hardening work — dashboard
+> session capture, task LLM capture, worktree snapshots, prompt
+> caching, canonical-image trust anchors, OTel pusher plumbing, and
+> live-e2e keep-alive. Use each spec header and
+> [`specs/README.md`](specs/README.md) as the source of truth before
+> treating any V3 item as future-only.
 
 > **Rule:** An item moves from this section to a versioned additions table only when its gap spec is complete and reviewed.
 
@@ -559,6 +632,7 @@ Full invariant specifications (rationale, adversarial assertions, test cross-ref
 
 | Document | Scope |
 |---|---|
+| [`specs/README.md`](specs/README.md) | Map of the specs tree — start here when deciding whether a contract lives in `invariants.md`, `v2/`, historical `v1/`, or forward-looking `v3/` |
 | [`specs/paradigm.md`](specs/paradigm.md) | **The RAXIS paradigm** — formal definition, twelve R-invariants, RAXIS-Verified conformance contract, mapping from paradigm invariants to this implementation's INV-* invariants, acknowledged paradigm limitations. The authoritative source for what RAXIS *is* |
 | [`POSITIONING.md`](POSITIONING.md) | **External positioning** — the one-line positioning, working taglines, why "Docker for agents" was rejected, where RAXIS sits in the stack, side-by-side comparison against alignment / agent frameworks / sandbox runtimes / policy engines / AIOS / MCP / coding-agent products / confidential computing, talking points and FAQ |
 
@@ -588,12 +662,10 @@ Full invariant specifications (rationale, adversarial assertions, test cross-ref
 The recommended approach for environment isolation (staging, production,
 etc.) is **one kernel per environment**:
 
-```text
-staging-kernel (policy: permissive, staging creds)
-    └── staging sessions
-
-prod-kernel (policy: strict, prod creds)
-    └── prod sessions
+```mermaid
+flowchart TD
+    staging["staging kernel<br/>permissive policy, staging creds"] --> staging_sessions["staging sessions"]
+    prod["prod kernel<br/>strict policy, prod creds"] --> prod_sessions["prod sessions"]
 ```
 
 Each kernel instance is fully self-contained via `--data-dir`: separate

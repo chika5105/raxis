@@ -14,7 +14,7 @@ all egress goes through the kernel-mediated proxy, gated by
 ### 1. Confirm an egress denial happened
 
 ```bash
-raxis log <initiative_id> --kind EgressDenied --since "1 hour ago"
+raxis log <initiative_id> --kind EgressDenied --since 1h
 # AT                     SESSION    HOST                   PORT   REASON
 # 2026-05-10T17:30:00Z   91a7c83f   api.example.com        443    not_in_allowed_egress
 ```
@@ -76,8 +76,10 @@ The planner is hallucinating a host or trying to exfiltrate data.
 Don't add to allowlist; abort the task and investigate:
 
 ```bash
-raxis task abort <task_id> --reason "egress denial: planner attempted unexpected host"
-raxis log --kind EgressDenied --since "24 hours ago" --json | jq '.[] | .host' | sort | uniq -c
+raxis task abort <task_id>
+raxis log --kind EgressDenied --since 24h --json \
+  | jq -r '.payload.target_host // .payload.host // empty' \
+  | sort | uniq -c
 ```
 
 ### 4. Common host families
@@ -104,7 +106,7 @@ unanticipated hosts.
 After a plan resubmit or delegation:
 
 ```bash
-raxis log --kind EgressAllowed --since "1 minute ago"
+raxis log --kind EgressAllowed --since 1m
 # AT                     SESSION    HOST                   PORT
 # 2026-05-10T17:31:00Z   91a7c83f   api.example.com        443
 

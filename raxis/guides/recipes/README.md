@@ -41,15 +41,16 @@ normative spec (`specs/v1/`, `specs/v2/`) and the source of truth
 
 ## Layout
 
-```text
-guides/recipes/
-├── setup/        — One-time bootstrapping, key/cert ceremony, daemon install
-├── env/          — Every RAXIS_* and per-binary env var the runtime honours
-├── policy/       — Each top-level section of policy.toml, signed and explained
-├── plan/         — Each top-level field/section of plan.toml
-├── patterns/     — Common multi-task plan patterns (fan-out, panel, retry, …)
-├── cli/          — Every `raxis <verb>` subcommand, with examples and exit codes
-└── ops/          — Day-2 operational tasks (rotate, restore, upgrade, debug)
+```mermaid
+flowchart TD
+    recipes["guides/recipes/"]
+    recipes --> setup["setup/<br/>bootstrap, keys, certs, daemon install"]
+    recipes --> env["env/<br/>RAXIS_* and per-binary env vars"]
+    recipes --> policy["policy/<br/>policy.toml sections"]
+    recipes --> plan["plan/<br/>plan.toml fields and sections"]
+    recipes --> patterns["patterns/<br/>fan-out, panel, retry, staged rollout"]
+    recipes --> cli["cli/<br/>raxis subcommands, examples, exit codes"]
+    recipes --> ops["ops/<br/>rotation, restore, upgrade, debug"]
 ```
 
 | Category | Count | Best for |

@@ -137,13 +137,18 @@ cross_cutting_artifacts = ["Cargo.lock"]
 Per `specs/v2/integration-merge.md`, when the Orchestrator
 submits `IntegrationMerge { commit_sha, merged_task_ids }`:
 
-```text
-Kernel admission:
-  Check 5  hybrid path-allowlist:
-    candidate_paths = git diff --name-only base..commit_sha
-    permitted_set   = union(merged_task_ids[*].path_allowlist)
-                    ∪ orchestrator.cross_cutting_artifacts
-    require: candidate_paths ⊆ permitted_set
+```mermaid
+flowchart TD
+    A["Orchestrator submits IntegrationMerge"]
+    B["Kernel computes candidate_paths<br/>git diff --name-only base..commit_sha"]
+    C["Kernel computes permitted_set<br/>union merged_task_ids path_allowlist<br/>plus orchestrator.cross_cutting_artifacts"]
+    D{"candidate_paths subset of permitted_set?"}
+    E["Admit merge"]
+    F["Reject merge"]
+
+    A --> B --> C --> D
+    D -->|yes| E
+    D -->|no| F
 ```
 
 In our example, `candidate_paths` for the merged tokio-bump tree

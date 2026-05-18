@@ -49,7 +49,7 @@ $RAXIS_DATA_DIR/policy/
   current_epoch            ← plain text file: "10"
 ```
 
-**Write path:** `raxis policy push new_policy.toml`
+**Write path:** `raxis epoch advance --policy new_policy.toml --sig new_policy.sig`
 1. Kernel computes `sha256 = SHA-256(new_policy.toml bytes)`
 2. Kernel verifies it does not already exist (idempotent push of same bytes is a no-op)
 3. Kernel writes `$RAXIS_DATA_DIR/artifacts/policy/<sha256>.toml` with `O_CREAT | O_EXCL`
@@ -252,7 +252,7 @@ keys           = "forever"   # keys should never be deleted — see safety const
 The TOML value is parsed into a Rust enum that makes invalid states unrepresentable.
 The value `0` is not a valid `RetentionDays` — it is rejected at the serde deserialization
 layer before it reaches any Kernel logic. An operator who types `plans = 0` gets a parse
-error at `raxis policy push` time, not a silent "retain zero days" behavior.
+error at policy epoch-advance time, not a silent "retain zero days" behavior.
 
 ```rust
 /// Retention window for a class of artifacts.
@@ -328,7 +328,7 @@ pub struct ArtifactRetention {
 plan and policy artifacts signed by it are also deleted breaks the audit chain — historical
 signatures become unverifiable.
 
-The Kernel enforces this at `raxis policy push` time: if `keys` is set to `Days(N)`,
+The Kernel enforces this at policy epoch-advance time: if `keys` is set to `Days(N)`,
 the Kernel checks that `policy_bundles` and `plans` are also set to `Days(M)` where
 `M ≤ N`. If any plan or policy artifact would outlive the key used to sign it, the push
 is rejected:
@@ -573,7 +573,7 @@ With content-addressed immutable storage, the following queries become fully ans
 
 - [ ] Create `artifacts/policy/`, `artifacts/plans/`, `artifacts/keys/` directories
       at Kernel first boot with correct ownership and permissions
-- [ ] Implement content-addressed write in `raxis policy push`:
+- [ ] Implement content-addressed write in `raxis epoch advance`:
       SHA-256 computation → `O_CREAT | O_EXCL` write → symlink update (atomic `rename()`)
 - [ ] Implement content-addressed write in `raxis plan approve`:
       SHA-256 computation → `O_CREAT | O_EXCL` for `.toml` and `.sig` files
@@ -581,7 +581,7 @@ With content-addressed immutable storage, the following queries become fully ans
 - [ ] Update `PolicyEpochAdvanced` audit event struct:
       add `new_policy_sha256`, `previous_policy_sha256`, `operator_key_fingerprint`,
       `sections_changed`, `sections_added`, `sections_removed`
-- [ ] Implement semantic diff computation between policy bundles at `raxis policy push`
+- [ ] Implement semantic diff computation between policy bundles at `raxis epoch advance`
 - [ ] Add `[artifact_retention]` section to `PolicyBundle` struct
 - [ ] Implement retention GC with key-retention safety check
 - [ ] Implement CLI read commands:

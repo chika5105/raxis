@@ -51,8 +51,8 @@ The session is alive but not making intents.
 ```bash
 raxis sessions show <session_id>
 # Look at: ttl_remaining, last_intent_at, current_intent_in_flight.
-raxis log <initiative_id> --kind ProviderError --since "1 hour ago"
-raxis log <initiative_id> --kind CredentialUsed --since "1 hour ago"
+raxis log <initiative_id> --kind ProviderError --since 1h
+raxis log <initiative_id> --kind CredentialUsed --since 1h
 raxis providers status
 ```
 
@@ -71,9 +71,9 @@ The Reviewer rejected; the Orchestrator must decide whether to
 `RetrySubTask` or escalate.
 
 ```bash
-raxis log <initiative_id> --kind ReviewSubmitted --since "1 hour ago"
-raxis log <initiative_id> --kind RetrySubTaskRequested --since "1 hour ago"
-raxis log <initiative_id> --kind EscalationRaised --since "1 hour ago"
+raxis log <initiative_id> --kind ReviewSubmitted --since 1h
+raxis log <initiative_id> --kind RetrySubTaskRequested --since 1h
+raxis log <initiative_id> --kind EscalationRaised --since 1h
 ```
 
 Possible states:
@@ -135,7 +135,7 @@ Common causes:
 If the session is truly hung:
 
 ```bash
-raxis session revoke <session_id> --reason "investigation: hang"
+raxis session revoke <session_id>
 # If the task should be retried:
 raxis task retry <task_id>
 ```
@@ -150,8 +150,9 @@ raxis queue --state blocked
 
 Causes:
 
-- `budget_exhausted` → wait for epoch advance, or
-  `raxis epoch advance --reason "manual: unblock test"`.
+- `budget_exhausted` → wait for the next epoch boundary, or stage
+  a freshly signed policy artifact and run
+  `raxis epoch advance --policy <policy.toml> --sig <policy.sig>`.
 - `host_capacity_floor` → free capacity (kill rogue processes,
   raise `[host_capacity]` floor).
 - `no_image_available` → the verifier or VM image isn't installed
@@ -196,7 +197,7 @@ remediation action.
 |---|---|
 | `raxis explain <task_id>` | Decision-tree narrative. |
 | `raxis log <initiative_id>` | Raw audit chain. |
-| `raxis sessions show <id>` / `inspect session:<id>` | Session detail. |
+| `raxis sessions --json` + `raxis log --session <id>` | Session detail. |
 | `raxis escalations` | Pending human-in-loop. |
 | `raxis queue` | Scheduler view. |
 | `raxis providers status` | LLM gateway health. |

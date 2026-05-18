@@ -27,7 +27,7 @@ The second operator runs on their own machine:
 raxis cert mint \
   --key "$HOME/raxis-keys/bob_private.pem" \
   --display-name "bob" \
-  --permitted-ops CreateInitiative,ApprovePlan \
+  --ops CreateInitiative,ApprovePlan \
   --validity-days 365 \
   --out "$HOME/raxis-keys/bob.cert.toml"
 
@@ -70,12 +70,14 @@ The cleanest approach is `raxis cert install`, which atomically:
 
 1. Adds the `[[operators.entries]]` block to `policy.toml`.
 2. Embeds the cert under `[operators.entries.cert]`.
-3. Re-signs the bundle with `--operator-key` (the existing operator).
+3. Prints the exact re-sign reminder. The file edit invalidates
+   `policy.sig`; you still run `raxis policy sign` as the existing
+   operator.
 
 ```bash
 raxis cert install \
   "$RAXIS_DATA_DIR/operator-certs/bob.cert.toml" \
-  --operator-key "$RAXIS_OPERATOR_KEY"
+  --policy "$RAXIS_DATA_DIR/policy/policy.toml"
 ```
 
 Or do it manually:
@@ -104,6 +106,9 @@ Then re-sign:
 raxis policy sign \
   "$RAXIS_DATA_DIR/policy/policy.toml" \
   --key "$RAXIS_OPERATOR_KEY"
+raxis epoch advance \
+  --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --sig    "$RAXIS_DATA_DIR/policy/policy.sig"
 ```
 
 ---
@@ -111,17 +116,17 @@ raxis policy sign \
 ## Step 4 — Confirm the kernel admitted the new operator
 
 ```bash
-raxis log --kind PolicyReloaded --limit 1
-# {"event":"PolicyReloaded","new_epoch_id":N,"changed_sections":["operators"]}
+raxis log --kind PolicyEpochAdvanced --limit 1
+# {"event":"PolicyEpochAdvanced","new_epoch":N,"n_delegations_marked_stale":...}
 
 raxis cert list
 # alice (existing): expires 2027-05-10  permitted_ops=...
 # bob   (new):      expires 2027-05-10  permitted_ops=CreateInitiative,ApprovePlan
 ```
 
-The audit chain has a `PolicyReloaded` event with
-`changed_sections: ["operators"]`; `cert list` enumerates both
-operators with their expiry windows and scopes.
+The audit chain has a `PolicyEpochAdvanced` event for the new
+bundle; `cert list` enumerates both operators with their expiry
+windows and scopes.
 
 ---
 
@@ -163,8 +168,9 @@ fingerprint:
 |---|---|
 | `raxis cert show <path>` | Inspect a cert before trusting it. |
 | `raxis cert verify <path>` | Cryptographic self-signature check. |
-| `raxis cert install <path> --operator-key <key>` | Atomic add-operator-then-sign ceremony. |
-| `raxis cert revoke --fingerprint <fp> [--reason …]` | Revoke an operator immediately; subsequent signatures from that fingerprint are rejected. |
+| `raxis cert install <path> --policy <policy.toml>` | Insert the cert-backed operator entry. |
+| `raxis policy sign <policy.toml> --key <key>` | Re-sign the edited policy and write `policy.sig`. |
+| `raxis cert revoke <cert.toml> --reason <rotation\|compromise> --reference <id>` | Revoke an operator cert; subsequent signatures from that fingerprint are rejected after restart. |
 | `raxis cert list` | Enumerate every operator entry currently in policy. |
 | `raxis cert list-revocations` | Enumerate every revoked operator + the epoch the revocation took effect. |
 
@@ -184,12 +190,10 @@ fingerprint:
 
 ## Variations
 
-- **Read-only auditor.** Mint a cert with `--permitted-ops ""`
-  (empty); no signing operation is permitted. The fingerprint still
-  appears in `raxis cert list` so other operators see who has
-  observation authority. Read-only operations (`raxis log`,
-  `raxis status`, etc.) don't require a signed envelope at all and
-  work for any user with shell access to `RAXIS_DATA_DIR`.
+- **Read-only auditor.** Do not mint an operator cert just for
+  observation. Read-only operations (`raxis log`, `raxis status`,
+  `raxis doctor`, etc.) do not require a signed envelope and work for
+  any user with shell access to `RAXIS_DATA_DIR`.
 - **Time-bounded co-signer.** Mint Bob's cert with
   `--validity-days 30` for a 30-day on-call rotation. After expiry
   the kernel auto-rejects his signatures with `CERT_EXPIRED`; just

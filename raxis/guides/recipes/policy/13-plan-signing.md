@@ -67,26 +67,29 @@ nonce_sweep_interval_secs   = 14400      # sweep every 4 h
 
 ## What the lifecycle looks like
 
-```text
-sign(plan.toml)
-    └─ stamps {signed_at, nonce} into the bundle envelope.
+```mermaid
+flowchart TD
+    A["Sign plan.toml"]
+    B["Bundle envelope gets signed_at and nonce"]
+    C["Submit plan bundle"]
+    D["Kernel computes age = now - signed_at"]
+    E{"Age valid?"}
+    F["Reject: FAIL_PLAN_BUNDLE_EXPIRED"]
+    G["Reject: FAIL_PLAN_BUNDLE_FROM_FUTURE"]
+    H["Insert nonce into plan_bundle_nonces_seen"]
+    I{"Nonce duplicate?"}
+    J["Reject: FAIL_PLAN_BUNDLE_REPLAY"]
+    K["Continue admission"]
+    L["Sweep every nonce_sweep_interval_secs"]
+    M["Delete nonce rows older than age + skew + grace"]
 
-submit:
-    └─ kernel checks now() vs signed_at:
-         age = now - signed_at
-         if age > max_plan_bundle_age_secs:    FAIL_PLAN_BUNDLE_EXPIRED
-         if age < -max_clock_skew_secs:        FAIL_PLAN_BUNDLE_FROM_FUTURE
-    └─ kernel checks nonce:
-         INSERT into plan_bundle_nonces_seen (nonce, signed_at, first_seen_at).
-         If duplicate row: FAIL_PLAN_BUNDLE_REPLAY.
-
-sweep loop:
-    every nonce_sweep_interval_secs:
-        DELETE FROM plan_bundle_nonces_seen
-         WHERE now() - first_seen_at_unix_secs >
-               max_plan_bundle_age_secs
-             + max_clock_skew_secs
-             + nonce_retention_grace_secs;
+    A --> B --> C --> D --> E
+    E -->|"age too large"| F
+    E -->|"age too far in future"| G
+    E -->|"valid"| H --> I
+    I -->|yes| J
+    I -->|no| K
+    L --> M
 ```
 
 The sweep cutoff is the sum of the three knobs. Lowering any of

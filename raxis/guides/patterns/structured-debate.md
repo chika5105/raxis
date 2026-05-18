@@ -33,23 +33,20 @@
 
 Agents communicate exclusively through the git worktree. There is no message passing.
 
-```
-Round 1:
-  Proposer A boots  → reads nothing (first mover) → writes proposal-a-r1.md → CompleteTask
-  Orchestrator merges A's commit
-  Proposer B boots  → reads proposal-a-r1.md → writes proposal-b-r1.md → CompleteTask
-  Orchestrator merges B's commit
+```mermaid
+flowchart TD
+    A1["Proposer A round 1<br/>writes proposal-a-r1.md"]
+    MergeA1["Orchestrator merges A round 1"]
+    B1["Proposer B round 1<br/>reads A round 1 and writes proposal-b-r1.md"]
+    MergeB1["Orchestrator merges B round 1"]
+    A2["Proposer A round 2<br/>reads both round-1 proposals and writes proposal-a-r2.md"]
+    MergeA2["Orchestrator merges A round 2"]
+    B2["Proposer B round 2<br/>reads all prior proposals and writes proposal-b-r2.md"]
+    MergeB2["Orchestrator merges B round 2"]
+    S["Synthesizer reads all four proposals<br/>writes final-design.md"]
+    I["Implementer reads final-design.md<br/>implements"]
 
-Round 2:
-  Proposer A boots  → reads proposal-a-r1.md AND proposal-b-r1.md → writes proposal-a-r2.md
-  Orchestrator merges A's commit
-  Proposer B boots  → reads all three prior proposals → writes proposal-b-r2.md
-
-Synthesis:
-  Synthesizer boots → reads all 4 proposals → writes final-design.md
-
-Implementation:
-  Implementer boots → reads final-design.md → implements
+    A1 --> MergeA1 --> B1 --> MergeB1 --> A2 --> MergeA2 --> B2 --> MergeB2 --> S --> I
 ```
 
 Each agent's clone is provisioned AFTER the Orchestrator merges the previous round. So

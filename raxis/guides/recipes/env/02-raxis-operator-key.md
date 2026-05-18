@@ -73,16 +73,17 @@ the path the operator just typed.
 | Operation | CLI |
 |---|---|
 | Sign / re-sign policy | `raxis policy sign <path> --key <pem>` |
-| Submit a plan bundle | `raxis submit plan <plan.toml> --no-dry-run` |
-| Approve an escalation | `raxis escalation approve <id> --scope ...` |
-| Grant a delegation | `raxis delegation grant --session ... --capability ... --ttl ...` |
-| Install a new operator cert | `raxis cert install <cert.toml>` |
-| Revoke a cert | `raxis cert revoke --fingerprint <fp>` |
-| Advance the policy epoch | `raxis epoch advance --policy <new.toml> --sig <new.sig>` |
-| Quarantine plans by signer | `raxis operator quarantine-plans-by <fp>` |
+| Submit a plan bundle | `raxis --operator-key <pem> submit plan <plan.toml> --no-dry-run` |
+| Approve an escalation | `raxis --operator-key <pem> escalation approve <id> --scope ...` |
+| Grant a delegation | `raxis --operator-key <pem> delegation grant --session ... --capability ... --ttl ...` |
+| Install a new operator cert | `raxis cert install <cert.toml> --policy <policy.toml>` then `raxis policy sign ... --key <pem>` |
+| Revoke a cert | `raxis --operator-key <pem> cert revoke <cert.toml> --reason <rotation\|compromise> --reference <id>` |
+| Advance the policy epoch | `raxis --operator-key <pem> epoch advance --policy <new.toml> --sig <new.sig>` |
+| Quarantine plans by signer | `raxis --operator-key <pem> operator quarantine-plans-by <fp>` |
 
-Each of these accepts `--operator-key <path>` explicitly **or** falls
-back to `RAXIS_OPERATOR_KEY`.
+For commands shown with `raxis --operator-key <pem> ...`, the key flag
+is global and must appear before the subcommand. Those commands also
+fall back to `RAXIS_OPERATOR_KEY` when the global flag is absent.
 
 ---
 
@@ -124,7 +125,7 @@ The env var holds the **path**, not the bytes. This means:
 | `RAXIS_OPERATOR_CERT` | Path to a pre-minted operator cert; used at `raxis genesis --operator-cert <path>`. Independent of the private key. |
 | `--operator-key <path>` | Explicit flag; always wins over the env var. |
 | `raxis cert mint` | Use this to convert a private PEM into a self-signed cert. The cert can then be shipped offline; the private key stays where it was. |
-| `raxis cert revoke --fingerprint <fp>` | Revoke a key at the policy level after it's compromised. |
+| `raxis cert revoke <cert.toml> --reason <rotation\|compromise> --reference <id>` | Revoke a key after it is compromised; pass `--operator-key` globally or use `RAXIS_OPERATOR_KEY`. |
 
 ---
 

@@ -102,26 +102,28 @@ with `1142 access denied`.
 
 ## How the kernel lifecycle looks
 
-```text
-admission:
-  └─ For each [[tasks.credentials]]:
-       ├── Verify <name> is registered (raxis credential add ran).
-       ├── Verify <kind> matches the credential file's declared kind.
-       ├── Validate the restriction body (per-kind parser).
-       └── Reserve a bind_port on the VM (kernel-allocated unless explicit).
+```mermaid
+flowchart TD
+    admission["Admission: each [[tasks.credentials]]"]
+    registered["Verify credential name is registered"]
+    kind["Verify kind matches the credential declaration"]
+    restrictions["Validate per-kind restriction body"]
+    reserve["Reserve a VM bind_port"]
+    spawn["Session spawn"]
+    listeners["Boot proxy listeners on reserved ports"]
+    env["Stamp RAXIS_CREDENTIAL_* env vars"]
+    connect["Agent connects to 127.0.0.1:port"]
+    audit["Audit stream"]
+    request["CredentialProxyRequest for each intercept"]
+    denied["CredentialProxyDenied for restriction violations"]
+    closed["CredentialProxyClosed at teardown"]
 
-session_spawn:
-  └─ Boot the proxy listeners on the reserved ports.
-  └─ Stamp env vars into the agent's process:
-       RAXIS_CREDENTIAL_<NAME>_PORT = <bind_port>
-       RAXIS_CREDENTIAL_<NAME>_HOST = "127.0.0.1"
-       RAXIS_CREDENTIAL_<NAME>_USER = "<proxy-user>"   # for SQL kinds
-  └─ Agent connects to localhost:port; proxy upstreams.
-
-audit:
-  └─ Every proxy intercept produces a CredentialProxyRequest event.
-  └─ Every restriction violation is CredentialProxyDenied.
-  └─ Session teardown emits CredentialProxyClosed with traffic stats.
+    admission --> registered --> kind --> restrictions --> reserve
+    reserve --> spawn --> listeners --> env --> connect
+    connect --> audit
+    audit --> request
+    audit --> denied
+    audit --> closed
 ```
 
 ---

@@ -1,6 +1,7 @@
 # observability-prometheus.md
 
-V3 perf-data spec. Companion to `specs/v3/otel-observability.md`.
+Active V3 perf-data spec. Companion to
+`specs/v3/otel-observability.md`.
 
 This document describes how the kernel's OTel-shaped emit surface
 flows into Prometheus + Grafana for operator-facing time-series
@@ -11,24 +12,22 @@ documents the live-e2e + perf-harness wiring.
 
 ## 1. Pipeline
 
-```text
-raxis-kernel              (in-process)
-  |
-  |  ObservabilityHub.record_*   (ring file JSONL frames)
-  v
-<data_dir>/observability/  (per-segment JSONL, drop-oldest GC)
-  |
-  |  raxis-otel-pusher           (host process; OTLP/HTTP)
-  v
-otel-collector:4318       (OTLP HTTP receiver)
-  |
-  |  prometheus exporter         (/metrics on :8889)
-  v
-prometheus:9090           (5s scrape, 14d retention)
-  |
-  |  Grafana datasource          (uid `prometheus`)
-  v
-grafana:3000              (anonymous Viewer; 10 raxis dashboards)
+```mermaid
+flowchart TD
+    Kernel["raxis-kernel<br/>in-process"]
+    Ring["&lt;data_dir&gt;/observability/<br/>JSONL segments, drop-oldest GC"]
+    Pusher["raxis-otel-pusher<br/>host process, OTLP/HTTP"]
+    Collector["otel-collector:4318<br/>OTLP HTTP receiver"]
+    Exporter["collector Prometheus exporter<br/>/metrics on :8889"]
+    Prom["prometheus:9090<br/>5s scrape, 14d retention"]
+    Grafana["grafana:3000<br/>anonymous Viewer dashboards"]
+
+    Kernel -->|"ObservabilityHub.record_*"| Ring
+    Ring -->|"tail JSONL frames"| Pusher
+    Pusher -->|"OTLP/HTTP"| Collector
+    Collector --> Exporter
+    Exporter --> Prom
+    Prom -->|"datasource uid: prometheus"| Grafana
 ```
 
 The collector is **Option A** from the V3 audit: kernel stays

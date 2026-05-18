@@ -132,19 +132,30 @@ would be `cumulative_max_seconds`, a different per-task field).
 The cap is checked on every "consider admitting a task" event,
 including the transitions that admission walking touches:
 
-```text
-Plan approved → kernel walks DAG → for each Pending task with all-Completed predecessors:
-                                     check lane.max_concurrent_tasks
-                                     check budget.max_cost_per_epoch
-                                     if both pass: state = Admitted
-                                     else: stay Pending; reschedule on next event
+```mermaid
+flowchart TD
+    A["Plan approved"]
+    B["Kernel walks DAG"]
+    C["Pending task with all predecessors Completed"]
+    D{"lane.max_concurrent_tasks allows it?"}
+    E{"budget.max_cost_per_epoch allows it?"}
+    F["state = Admitted"]
+    G["Stay Pending"]
+    H["Reschedule on next trigger"]
+
+    A --> B --> C --> D
+    D -->|no| G --> H
+    D -->|yes| E
+    E -->|yes| F
+    E -->|no| G
 ```
 
 Reschedule events that re-trigger the walk:
 
 - A task transitions to `Completed` / `Failed` (frees a slot).
 - A new epoch begins (refreshes the cost window).
-- The operator hot-reloads `policy.toml` (may raise the ceilings).
+- The operator advances to a newly signed `policy.toml` (may raise
+  the ceilings).
 - The operator submits a new plan to the lane.
 
 ---
@@ -211,10 +222,10 @@ queued tasks waiting for slots.
 - **Strict no-overrun lane.** `on_exhaustion = "fail-closed"`
   rejects every over-cap admission. Use for cost-sensitive
   environments. The opposite (`warn`) is useful only for staging.
-- **Dynamic ceilings.** Operator hot-reloads `policy.toml` with
-  a higher `max_concurrent_tasks` during off-peak hours.
-  Hot-reload re-evaluates Pending tasks and admits any newly-
-  fitting ones immediately.
+- **Dynamic ceilings.** Operator advances to a signed `policy.toml`
+  with a higher `max_concurrent_tasks` during off-peak hours. The
+  next admission walk re-evaluates Pending tasks and admits any
+  newly fitting ones immediately.
 
 ---
 

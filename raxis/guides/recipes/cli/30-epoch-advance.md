@@ -2,34 +2,32 @@
 
 > **Topic:** CLI | **Time to read:** ~2 min | **Complexity:** ⭐⭐ Intermediate
 
-Roll the policy epoch. Resets per-epoch lane budgets, advances
-delegations into `StaleOnNextUse` if they reference an old epoch,
-and is recorded as `EpochAdvanced` in the audit chain.
+Load a new signed policy artifact and roll the policy epoch. The
+kernel verifies the policy bytes plus detached signature, rejects
+epoch replay, swaps the active bundle atomically, advances stale
+delegations, invalidates affected prompts, and records
+`PolicyEpochAdvanced` in the audit chain.
 
 ---
 
 ## Syntax
 
 ```text
-raxis epoch advance [--reason <text>]
+raxis epoch advance --policy <policy.toml> --sig <policy.sig>
 ```
 
 ---
 
 ## When to advance
 
-The policy epoch is a monotonic counter. The default scheduler
-runs `epoch advance` automatically based on `[budget].epoch_seconds`
-in policy. You manually advance when:
+The policy epoch is a monotonic counter. Advance it when:
 
-- You want to reset lane budgets immediately (e.g., after a CI run
-  exhausted them and you want to admit more work without waiting).
-- You changed `policy.toml` and `raxis policy sign` produced a new
-  bundle; the kernel hot-reloads on file change, but a manual
-  advance documents the operator-driven boundary.
+- You changed `policy.toml` and produced a matching signature.
 - A break-glass response: you've just rotated cert sets and want
   delegations on the old epoch to transition to `StaleOnNextUse`
   for safety.
+- You want the new policy's per-epoch lane budgets to become the
+  active budget boundaries immediately.
 
 ---
 
@@ -37,31 +35,31 @@ in policy. You manually advance when:
 
 ```bash
 raxis epoch advance \
-  --reason "manual: budget reset after incident"
+  --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --sig    "$RAXIS_DATA_DIR/policy/policy.sig"
 # Output:
-# from_epoch:   7
-# to_epoch:     8
-# reset_lanes:  3
-# stale_delegations: 5
-# audit_event:  EpochAdvanced (line 7322)
+# Epoch advanced:
+#   new_epoch_id:               8
+#   policy_sha256:              9ab3...
+#   signed_by_authority:        8f0c...
+#   n_delegations_marked_stale: 5
+#   n_sessions_invalidated:     2
+#   advanced_at:                1779068884
 ```
 
 What happens during advance:
 
-1. `from_epoch → to_epoch` is recorded in `policy_epochs` and
-   audited (`EpochAdvanced`).
-2. Each lane's `[budget].max_cost_per_epoch` accumulator resets
-   to zero for the new epoch.
+1. The kernel verifies the detached signature and checks that
+   `[meta].epoch` is greater than the current epoch.
+2. The epoch row and audit pointer land in one store transaction
+   with the delegation sweep and prompt invalidation.
 3. Active delegations whose policy epoch is `< to_epoch`
    transition to `StaleOnNextUse` — the next intent that uses them
    re-validates against the new policy or fails-closed.
-4. The kernel emits `KernelPush::EpochAdvanced` to active
-   Orchestrator sessions so they can re-issue intents that were
-   blocked on budget.
-
-The kernel rejects a manual advance if no `policy.toml` change has
-occurred AND no `epoch_seconds` boundary has been crossed; pass
-`--force` to override (rare; document the reason).
+4. The in-memory policy and allowlist snapshots swap after the
+   transaction commits.
+5. The kernel sends a best-effort `EpochAdvanced` signal to the
+   gateway so provider egress and credential views reload.
 
 ---
 
@@ -69,10 +67,11 @@ occurred AND no `epoch_seconds` boundary has been crossed; pass
 
 | Symptom | Fix |
 |---|---|
-| `epoch advance: not enough time since last advance` | The kernel rate-limits manual advances; pass `--force --reason ...` if you intentionally want to override. |
-| `OPERATOR_NOT_AUTHORIZED` | Cert lacks `AdvanceEpoch` in `permitted_ops`. |
-| `epoch advance: reason required` | The kernel always wants a reason in the audit chain. |
-| `epoch advance: in-flight admission detected; retry` | Another admission was mid-flight; retry. Idempotent. |
+| `epoch advance requires --policy <path>` | Pass the policy artifact path explicitly. |
+| `epoch advance requires --sig <path>` | Pass the detached signature path explicitly. |
+| `FAIL_POLICY_SIGNATURE_INVALID` | The signature does not verify against the authority key or is not the expected detached signature bytes. Re-sign the exact policy bytes. |
+| `FAIL_POLICY_EPOCH_REPLAY` | `[meta].epoch` is not greater than the current kernel epoch. Start from `raxis policy show`, bump/sign a fresh artifact, and retry. |
+| `FAIL_POLICY_PATH_OUTSIDE_DATA_DIR` | Stage the policy and signature under `<data-dir>/policy/`; the kernel refuses paths outside its controlled policy directory. |
 
 ---
 
@@ -82,18 +81,16 @@ occurred AND no `epoch_seconds` boundary has been crossed; pass
 |---|---|
 | `raxis policy show` | Active epoch + history. |
 | `raxis budget` | Lane budgets (resets on advance). |
-| `raxis log --kind EpochAdvanced` | Past advance events. |
+| `raxis log --kind PolicyEpochAdvanced` | Past advance events. |
 | `raxis policy sign` | Re-sign policy.toml (often paired with advance). |
 
 ---
 
 ## Variations
 
-- **Daily reset.** Cron `raxis epoch advance --reason "scheduled daily reset"`
-  every 24 hours, even if `[budget].epoch_seconds` is longer.
 - **Post-incident reset.** After investigating a budget-blowup
-  incident, advance the epoch with a detailed `--reason` so the
-  audit chain captures the operator decision.
+  incident, stage a fresh policy artifact and advance the epoch so
+  the audit chain captures the new boundary.
 - **Cert-rotation pairing.** After installing new operator certs
   and revoking old ones, advance the epoch immediately so any
   delegations issued under the old certs land on `StaleOnNextUse`.

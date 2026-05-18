@@ -31,9 +31,10 @@ the watchdog is for surge protection.
 
 ```bash
 raxis policy show | grep -A 20 "\[host_capacity\]"
-raxis status --json | jq '{cpu_load_1m, free_ram_bytes, free_disk_bytes}'
-raxis log --kind HostCapacityFloorTripped --since "24 hours ago" --json | jq length
-raxis log --kind WatchdogSessionTerminated --since "24 hours ago" --json | jq length
+raxis status --json | jq '{liveness, workload, audit_chain}'
+df -h "$RAXIS_DATA_DIR"
+raxis log --kind HostCapacityFloorTripped --since 24h --json | wc -l
+raxis log --kind WatchdogSessionTerminated --since 24h --json | wc -l
 ```
 
 If you see frequent `HostCapacityFloorTripped` events, the kernel
@@ -86,23 +87,26 @@ watchdog_grace_seconds   = 300
 Re-sign:
 
 ```bash
-raxis policy sign /tmp/policy.toml --operator-key /tmp/op.key
+raxis policy sign /tmp/policy.toml --key /tmp/op.key
+raxis --operator-key /tmp/op.key epoch advance \
+  --policy /tmp/policy.toml \
+  --sig /tmp/policy.sig
 ```
 
-The kernel hot-reloads. Check with `raxis policy show` and the
-audit chain:
+Check the committed epoch with `raxis policy show` and the audit
+chain:
 
 ```bash
-raxis log --kind PolicyReloaded --since "1 minute ago"
+raxis log --kind PolicyEpochAdvanced --since 1m
 ```
 
 ### 5. Monitor
 
 ```bash
 # Daily check.
-raxis log --kind HostCapacityFloorTripped --since "24 hours ago" --json | jq length
-raxis log --kind WatchdogSessionTerminated --since "24 hours ago" --json | jq length
-raxis status --json | jq '{cpu_load_1m, free_ram_bytes}'
+raxis log --kind HostCapacityFloorTripped --since 24h --json | wc -l
+raxis log --kind WatchdogSessionTerminated --since 24h --json | wc -l
+raxis status --json | jq '{liveness, workload, audit_chain}'
 ```
 
 If the trip count is non-zero, the host is undersized for the
@@ -127,7 +131,7 @@ room).
 
 | Command | Purpose |
 |---|---|
-| `raxis status --json` | Live host metrics. |
+| `raxis status --json` | Kernel liveness, workload counts, and audit-chain quick check. |
 | `raxis log --kind HostCapacityFloorTripped` | Recent floor trips. |
 | `raxis log --kind WatchdogSessionTerminated` | Recent watchdog reaps. |
 | [policy/12-host-capacity](../policy/12-host-capacity.md) | Full schema. |
@@ -141,7 +145,8 @@ room).
   the load balancer to skip a kernel reporting capacity-tripped.
 - **Dev box.** Lower floors aggressively (e.g., `min_free_disk_bytes
   = 1 GiB`) so a small machine can run scenarios. Pair with
-  `raxis doctor --fix-orphans` to recover space from dead worktrees.
+  `raxis sessions --json` and a worktree audit to recover space from
+  dead worktrees.
 - **Multi-tenant host.** Set floors high enough that Raxis won't
   starve other tenants — typically `min_free_disk_bytes = 50 GiB`
   and tighter CPU water marks.

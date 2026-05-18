@@ -1,6 +1,6 @@
 # RAXIS V2 — System Requirements
 
-> **Status:** V2 Specified
+> **Status:** V2 baseline plus implemented V3 operational addenda
 > **Audience:** Operators evaluating, installing, or deploying RAXIS V2 on a host.
 > **Cross-references:**
 > - `specs/v2/host-capacity.md` — runtime resource caps; this spec specifies the host's prerequisite capabilities for those caps to be enforceable
@@ -16,6 +16,12 @@
 ## 1. Overview
 
 RAXIS V2 is a single-host control plane consisting of `raxis-kernel` (the trusted authority), `raxis-gateway` workers (provider proxies), `raxis-egress` (web egress proxy), and zero-or-more agent microVMs (each running `raxis-planner` plus `raxis-tproxy`). All components run on one physical or virtual host. There are no cluster, multi-host, or distributed-state requirements in V2.
+
+This requirements document also calls out implemented V3 surfaces that
+affect installation or operations today: dashboard capture, worktree
+snapshots, prompt caching, canonical-image trust anchors, the
+OpenTelemetry pusher, and the local Prometheus/Grafana stack. Deferred
+V3 specs remain labeled as deferred where they appear.
 
 ### 1.1 Quick reference matrix
 
@@ -36,6 +42,10 @@ RAXIS V2 is a single-host control plane consisting of `raxis-kernel` (the truste
 | **Inbound network** | None | The kernel listens only on local UDS sockets |
 | **Daemon mode** | systemd (Linux) or launchd (macOS) | Required only if using `--daemon`; foreground mode has no supervisor requirement |
 | **External tooling** | `git` ≥ 2.30, SQLite ≥ 3.35 | `gix` for native operations; `git` shells out for fallback |
+| **Source build tooling** | Current stable Rust, Cargo, C toolchain, `make`, `pkg-config` | The repo does not currently pin a local `rust-toolchain.toml`; CI/release should pin externally if exact compiler reproducibility is required. See §9. |
+| **Guest image bake tooling** | Docker, Podman, or Buildah for rootfs-producing image roles | `cargo xtask images bake` auto-detects the builder; binary-only roles do not need a container builder. |
+| **Dashboard frontend build** | Node.js 20+ and npm | Required only for `dashboard-fe/`; not needed for kernel-only builds. |
+| **Observability dev stack** | Docker Compose | Required for `cargo xtask observability up` and the live-e2e/perf Prometheus + Grafana stack. |
 | **Bundled with kernel release** | `raxis-reviewer-core-<kernel_version>.img`, `raxis-orchestrator-core-<kernel_version>.img`, and (opt-in) `raxis-executor-starter-<kernel_version>.img`, all at `$RAXIS_INSTALL_DIR/images/` | Kernel-built canonical Reviewer image (`INV-PLANNER-HARNESS-02`) and canonical Orchestrator image (`INV-PLANNER-HARNESS-05`); both digests hardcoded in the kernel binary; neither operator-customizable. The Executor starter image is opt-in ([`planner-harness.md §10.6`](planner-harness.md)): used only when `policy.toml [default_executor_image]` selects it; its digest is published in release notes and pinned in policy via `[[vm_images]] oci_digest`. See §8.1, §11. |
 
 ### 1.2 Validation: `raxis doctor`
@@ -477,18 +487,22 @@ The kernel binary is statically-linked for SQLite, rustls, and most other depend
 | `loginctl` | Linux user daemon mode | Bundled with systemd |
 | launchd | macOS user/system daemon mode | Built into macOS |
 
-### 8.3 Required for V3 (audit retention; out of V2 scope)
+### 8.3 Implemented V3 operational dependencies
 
 | Dependency | Required for | Notes |
 |---|---|---|
-| Archive backend SDK | V3 archiver sidecar | Operator-chosen; the reference archiver supports S3, Azure, local mirror |
-| External anchor service (optional) | V3 witness publication | Sigstore Rekor (default), CT log, custom HTTP |
+| `raxis-otel-pusher` | OpenTelemetry export | Separate host process; reads `<data_dir>/observability/{spans,metrics}` and pushes OTLP over HTTP/protobuf. |
+| OTLP collector endpoint | Production telemetry export | Required only when `[observability].enabled = true` and a pusher endpoint is configured. |
+| Docker Compose | Local observability stack | Used by `cargo xtask observability up` and live-e2e/perf compose files to run OTel Collector, Prometheus, and Grafana. |
+| Node.js 20+ and npm | Dashboard frontend build | Required for `dashboard-fe/`; backend/dashboard-kernel crates are normal Cargo workspace members. |
+| Archive backend SDK | Deferred V3 audit-retention archiver | Operator-chosen; not required for the implemented OTel/dashboard capture surfaces. |
+| External anchor service (optional) | Deferred V3 witness publication | Sigstore Rekor, CT log, or custom HTTP; not required for the current kernel. |
 
 ### 8.4 Recommended for operations
 
 | Dependency | Why recommended | Notes |
 |---|---|---|
-| A monitoring agent (Prometheus node-exporter, Datadog agent, etc.) | Host capacity visibility | RAXIS exposes metrics via `raxis kernel status` and audit events; agent integration is operator-DIY in V2 |
+| A monitoring agent (Prometheus node-exporter, Datadog agent, etc.) | Host capacity visibility | RAXIS emits authority-side metrics/traces through the implemented observability ring and `raxis-otel-pusher`; host-level CPU/disk/network metrics still come from the operator's normal monitoring stack. |
 | Log shipper (vector, fluentd, etc.) | Centralized operational logs | journald or `kernel.{out,err}` files are the source |
 | Backup tool (restic, borg, snapshots) | Disaster recovery for `disk_root` | Audit log + state.db + main_repos are the critical state |
 
@@ -502,37 +516,81 @@ For operators wanting to build RAXIS from source rather than use pre-built binar
 
 | Component | Minimum version | Notes |
 |---|---|---|
-| Rust toolchain | 1.78 | Pin via `rust-toolchain.toml` in the repo |
-| `cargo` | bundled with Rust | |
+| Rust toolchain | Current stable | Workspace edition is Rust 2021. The repo does not currently carry a `rust-toolchain.toml`; release/CI automation should pin one externally when exact compiler reproducibility is required. |
+| `cargo` | Bundled with Rust | Use `--locked` for operator/release builds so `Cargo.lock` is honored. |
 | `git` | 2.30 | For fetching dependencies |
 | `pkg-config` | any | For native library discovery |
-| C/C++ compiler | gcc 9+ or clang 12+ | For building bundled SQLite, etc. |
+| C/C++ compiler | gcc 9+ or clang 12+ | For crates with native build steps, bundled SQLite, and platform glue. |
 | `make` | any POSIX-compatible | |
+| OpenSSL 3 CLI | 3.x | Required for operator Ed25519 key generation; Rust HTTPS uses rustls. |
+| Docker, Podman, or Buildah | Current stable | Required for guest-image bake roles that assemble a rootfs. |
+| Node.js + npm | Node 20+ | Required only for `dashboard-fe/`. |
+| Docker Compose | Current v2 plugin or compatible binary | Required only for local observability/live-e2e/perf service stacks. |
 
 ### 9.2 Platform-specific build dependencies
 
 **Linux:**
 
-- `libssl-dev` or `libssl3` development headers (alternative: build with `--features rustls-only` to avoid OpenSSL)
 - Linux kernel headers matching the running kernel (`linux-headers-$(uname -r)`)
-- For Firecracker integration: the bundled Firecracker source tree builds as part of the kernel build
+- KVM/vsock/cgroup prerequisites from `cargo xtask linux-prereqs`
+- `firecracker(1)` on `$PATH` before the first kernel boot on Linux
 
 **macOS:**
 
 - Xcode Command Line Tools (`xcode-select --install`)
-- Swift toolchain (bundled with Xcode CLI Tools)
 - macOS SDK matching deployment target (13.0)
+- Homebrew `openssl@3` for Ed25519 operator keys
+- `codesign` for ad-hoc signing the AVF-enabled `raxis-kernel`
 
 ### 9.3 Build invocation
 
 ```bash
-$ git clone https://github.com/chika5105/raxis
-$ cd raxis
-$ cargo build --release
-$ sudo ./target/release/raxis kernel install --system  # production install
+git clone https://github.com/chika5105/raxis
+cd raxis/raxis
+
+# Verify host prerequisites.
+cargo xtask dev-prereqs --install       # macOS
+cargo xtask linux-prereqs               # Linux
+
+# Build the Rust workspace using the checked-in lockfile.
+cargo build --workspace --locked
+
+# Build the host binaries operators normally run.
+cargo build --release --locked \
+  -p raxis-cli \
+  -p raxis-kernel \
+  -p raxis-gateway \
+  -p raxis-otel-pusher \
+  -p raxis-supervisor
+
+# Build the dashboard frontend when serving the dashboard UI.
+cd dashboard-fe
+npm install
+npm run build
 ```
 
-The build process is documented in detail in `docs/building.md` (separate from this requirements document).
+Canonical guest images and the kernel trust anchor are a separate
+build step because the `raxis-kernel` binary embeds the image
+manifest-signing public key:
+
+```bash
+cd /path/to/raxis/raxis
+export RAXIS_INSTALL_DIR="$HOME/.raxis-install"
+cargo xtask images bake \
+  --kernel-from-file /path/to/vmlinux \
+  --kernel-config /path/to/vmlinux.config
+
+RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat .git/info/raxis-signing-key/pk.hex)" \
+  cargo build --release --locked -p raxis-kernel
+
+cargo xtask images verify-trust-anchor --kernel target/release/raxis-kernel
+cargo xtask dev-codesign --profile release     # macOS only; no-op on Linux
+```
+
+The short operator runbook is
+[`guides/SETUP.md`](../../guides/SETUP.md); the prerequisite-focused
+version is
+[`guides/getting-started/01-prereqs.md`](../../guides/getting-started/01-prereqs.md).
 
 ---
 
@@ -981,7 +1039,7 @@ CI pipelines and infrastructure-as-code tools can parse JSON output to gate depl
 ### 12.7 Distribution
 
 - **Pre-built binary signing:** binaries are signed with the RAXIS team's developer ID for macOS and GPG-signed for Linux distributions. Operators with strict supply-chain policies should verify signatures before installation.
-- **From-source builds on macOS:** require Xcode Command Line Tools and ad-hoc code signing for the Virtualization.framework entitlement. Documented in `docs/building.md`.
+- **From-source builds on macOS:** require Xcode Command Line Tools and ad-hoc code signing for the Virtualization.framework entitlement. The maintained source-build path is in §9 and [`guides/SETUP.md`](../../guides/SETUP.md).
 
 ---
 

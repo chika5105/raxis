@@ -165,7 +165,7 @@ incident-response from a shell.
 | -------------- | ------------------------------------------------------------------ | ----- |
 | Overview       | `raxis status`, `raxis doctor`                                     |
 | Initiatives    | `raxis initiative list`, `raxis initiative show <id> --with-tasks` |
-| Sessions       | `raxis sessions`, `raxis session show <id>`                        |
+| Sessions       | `raxis sessions`, `raxis log --session <id>`                       |
 | Audit          | `raxis log <id> [-f]`, `raxis verify-chain`                        |
 | Escalations    | `raxis escalations inbox`, `raxis escalation approve               | deny` |
 | Policy         | `raxis policy show`, `raxis policy diff`, `raxis policy sign`      |

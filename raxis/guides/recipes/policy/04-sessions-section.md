@@ -62,9 +62,12 @@ $EDITOR "$RAXIS_DATA_DIR/policy/policy.toml"
 raxis policy sign \
   "$RAXIS_DATA_DIR/policy/policy.toml" \
   --key "$RAXIS_OPERATOR_KEY"
+raxis epoch advance \
+  --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --sig    "$RAXIS_DATA_DIR/policy/policy.sig"
 
-# Confirm the kernel hot-reloaded:
-raxis log --kind PolicyReloaded --limit 1
+# Confirm the kernel advanced:
+raxis log --kind PolicyEpochAdvanced --limit 1
 ```
 
 ---

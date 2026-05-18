@@ -82,7 +82,7 @@ Use this for sandbox / single-developer installs.
 raxis cert mint \
   --key "$HOME/raxis-keys/operator_private.pem" \
   --display-name "$USER" \
-  --permitted-ops CreateInitiative,GrantDelegation,ApproveEscalation \
+  --ops CreateInitiative,GrantDelegation,ApproveEscalation \
   --validity-days 365 \
   --out "$HOME/raxis-keys/operator.cert.toml"
 ```
@@ -130,7 +130,7 @@ any field is empty or malformed the cert is unusable — re-mint.
 |---|---|
 | `Algorithm ed25519 not found` | LibreSSL detected. Install `brew install openssl@3` and prepend its `bin/` to `$PATH`. |
 | `error reading private key: bad password read` | Your shell has `OPENSSL_CONF` pointing at an FIPS profile that disables Ed25519. `unset OPENSSL_CONF` and retry. |
-| `cert mint: --permitted-ops contains unknown op` | The op string drifted between releases. Run `raxis cert mint --help` to see the current valid set. |
+| `cert mint: --ops contains unknown op` | The op string drifted between releases. Run `raxis cert mint --help` to see the current valid set. |
 | Kernel rejects the cert at genesis with `CERT_EXPIRED` | The cert's validity window started before the host's clock. Either re-mint with `--validity-days 365` (default), or fix the host clock. |
 
 ---
@@ -148,7 +148,7 @@ any field is empty or malformed the cert is unusable — re-mint.
 
 ## Variations
 
-- **Permitted-ops scoping.** `--permitted-ops` accepts a comma-list.
+- **Permitted-ops scoping.** `--ops` accepts a comma-list.
   Restrict it: a "CI signing operator" might get only
   `CreateInitiative`; a "key-rotation operator" gets only
   `GrantDelegation,ApproveEscalation`. The kernel enforces these

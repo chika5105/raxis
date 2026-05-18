@@ -59,32 +59,19 @@ To trigger an automatic redeploy whenever raxis is updated, add a deploy hook to
 
 ## Project structure
 
-```
-raxis-site/
-├── public/
-│   └── search-index.json     # generated at build
-├── scripts/
-│   ├── sync-docs.mjs         # mirrors RAXIS_REPO_PATH or RAXIS_REPO_URL into vendor/
-│   └── build-search-index.mjs# builds the MiniSearch index
-├── src/
-│   ├── app/                  # Next.js App Router pages
-│   │   ├── page.tsx          # home
-│   │   ├── paradigm/         # the 12 invariants + Lampson lineage
-│   │   ├── threat-model/     # the threat triad + layered enforcement
-│   │   ├── reference/        # the autonomous-software-engineering implementation
-│   │   ├── conformance/      # the three conformance tiers
-│   │   ├── about/            # origin story + Aegis link
-│   │   └── docs/             # docs index + dynamic [...slug] + search
-│   ├── components/           # presentational React components
-│   └── lib/
-│       ├── docs.ts           # filesystem reader → DocMeta / DocFull
-│       ├── markdown.ts       # unified pipeline (gfm + slug + autolink + pretty-code)
-│       └── paradigm.ts       # canonical 12-invariant copy used across the site
-├── vendor/
-│   └── raxis-docs/           # generated at build (gitignored)
-├── tailwind.config.ts
-├── next.config.mjs
-└── vercel.json
+```mermaid
+flowchart TD
+    site["raxis-site/"]
+    site --> public["public/<br/>generated search-index.json"]
+    site --> scripts["scripts/"]
+    scripts --> sync["sync-docs.mjs<br/>mirror RAXIS_REPO_PATH or RAXIS_REPO_URL into vendor/"]
+    scripts --> index["build-search-index.mjs<br/>build MiniSearch index"]
+    site --> src["src/"]
+    src --> app["app/<br/>Next.js routes: home, paradigm, threat-model, reference, conformance, about, docs"]
+    src --> components["components/<br/>presentational React components"]
+    src --> lib["lib/<br/>docs reader, Markdown pipeline, canonical paradigm copy"]
+    site --> vendor["vendor/raxis-docs/<br/>generated docs mirror, gitignored"]
+    site --> config["tailwind.config.ts + next.config.mjs + vercel.json"]
 ```
 
 ## Editorial source-of-truth rules

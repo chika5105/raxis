@@ -12,7 +12,7 @@ rejects future intents until lifted. Both record an
 ## Syntax
 
 ```text
-raxis initiative abort      <initiative_id> [--reason <text>]
+raxis initiative abort      <initiative_id>
 raxis initiative quarantine <initiative_id> [--reason <text>] [--lift]
 ```
 
@@ -24,12 +24,9 @@ raxis initiative quarantine <initiative_id> [--reason <text>] [--lift]
 marks the initiative `Aborted`, and refuses any further intents.
 
 ```bash
-raxis initiative abort 1f3c8a4b \
-  --reason "operator: changing approach"
+raxis initiative abort 1f3c8a4b
 # Output:
-# initiative_id:        1f3c8a4b...
-# state:                Aborted
-# sessions_terminated:  3
+# Initiative 1f3c8a4b aborted. All non-terminal tasks cancelled.
 ```
 
 What aborts mean:
@@ -101,7 +98,7 @@ raxis initiative quarantine "$INIT_ID" --reason "incident: review pending"
 # investigate, dump bundle, etc.
 raxis initiative show "$INIT_ID" --bundle --to /tmp/incident-${INIT_ID}
 # decision: cannot resume safely
-raxis initiative abort "$INIT_ID" --reason "incident: data exposure confirmed"
+raxis initiative abort "$INIT_ID"
 ```
 
 ---
@@ -133,7 +130,7 @@ raxis initiative abort "$INIT_ID" --reason "incident: data exposure confirmed"
 
 - **Bulk quarantine by signer.** A leaked operator key is detected;
   freeze every initiative they signed:
-  `raxis operator quarantine-plans-by <signer_kid> --reason "key compromise"`.
+  `raxis --operator-key <pem> operator quarantine-plans-by <signer_kid> --reason "key compromise"`.
 - **Auto-quarantine on egress drift.** Cron parses the audit log for
   `EgressViolation` events and quarantines the offending initiative.
 - **Lift after fix.** Once the suspicious change is addressed,

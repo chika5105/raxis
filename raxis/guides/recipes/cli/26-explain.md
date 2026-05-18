@@ -107,7 +107,7 @@ raxis explain code_reviewer-2025-05-10 --json | jq '.events[] | .kind'
 | Command | Purpose |
 |---|---|
 | `raxis log <initiative_id>` | Full audit chain (raw). |
-| `raxis inspect task:<id>` | Subject deep-dive (FSM + sessions + witnesses). |
+| `raxis inspect <task_id>` | Task deep-dive (FSM + sessions + witnesses). |
 | `raxis task outputs <id>` | Witness blobs the task produced. |
 | `raxis escalations` | Pending escalations across all initiatives. |
 

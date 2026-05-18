@@ -57,21 +57,22 @@ raxis genesis --operator-cert operator.cert.toml
 
 ## Outputs
 
-```text
-$RAXIS_DATA_DIR/
-├── audit/segment-000.jsonl
-├── kernel.db
-├── keys/
-│   ├── authority_keypair.pem
-│   ├── quality_keypair.pem
-│   ├── verifier_token_key.bin
-│   ├── operator_<fp>.pub
-│   └── operator_<fp>.cert.toml
-├── policy/policy.toml
-├── providers/
-├── runtime/
-├── sockets/
-└── notifications/
+```mermaid
+flowchart TD
+    root["$RAXIS_DATA_DIR/"]
+    root --> audit["audit/segment-000.jsonl"]
+    root --> db["kernel.db"]
+    root --> keys["keys/"]
+    keys --> authority["authority_keypair.pem"]
+    keys --> quality["quality_keypair.pem"]
+    keys --> verifier["verifier_token_key.bin"]
+    keys --> op_pub["operator_<fp>.pub"]
+    keys --> op_cert["operator_<fp>.cert.toml"]
+    root --> policy["policy/policy.toml"]
+    root --> providers["providers/"]
+    root --> runtime["runtime/"]
+    root --> sockets["sockets/"]
+    root --> notifications["notifications/"]
 ```
 
 After genesis, sign the policy before first boot:

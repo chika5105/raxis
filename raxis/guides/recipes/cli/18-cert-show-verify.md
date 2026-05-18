@@ -2,9 +2,9 @@
 
 > **Topic:** CLI | **Time to read:** ~2 min | **Complexity:** ⭐⭐ Intermediate
 
-Read-only inspection of operator certificates. `cert show` decodes
-a cert file and prints its claims. `cert verify` checks chain
-validity against a policy bundle.
+Read-only inspection of operator certificates. `cert show` decodes a
+cert file and prints its claims. `cert verify` checks the cert's
+structure, self-signature, and time status.
 
 ---
 
@@ -12,7 +12,7 @@ validity against a policy bundle.
 
 ```text
 raxis cert show   <cert_path> [--json]
-raxis cert verify <cert_path> --against-policy <policy.toml>
+raxis cert verify <cert_path> [--at-time <unix-seconds>]
 ```
 
 ---
@@ -20,64 +20,47 @@ raxis cert verify <cert_path> --against-policy <policy.toml>
 ## show — decode a cert
 
 ```bash
-raxis cert show /tmp/alice.cert
+raxis cert show /tmp/alice.cert.toml
 # Output:
-# subject:        ops-alice
-# pubkey:         3b1d... (32 bytes)
-# signer_kid:     8a4f...
+# display_name:   ops-alice
+# pubkey_hex:     3b1d...
+# kind:           Standard
 # not_before:     2026-05-10T17:30:00Z
 # not_after:      2026-08-08T17:30:00Z
-# permitted_ops:  CreateInitiative,ApprovePlan,SubmitPlan,GrantDelegation
-# emergency:      false
-# signature:      <hex>
-# signature_ok:   yes (over canonical bytes)
+# permitted_ops:  CreateInitiative,ApprovePlan,GrantDelegation
+# self_sig_ok:    yes
 ```
 
 JSON form for tooling:
 
 ```bash
-raxis cert show /tmp/alice.cert --json | jq '.permitted_ops'
+raxis cert show /tmp/alice.cert.toml --json | jq '.permitted_ops'
 ```
 
-`signature_ok: yes` confirms the cert's bytes haven't been
-tampered with — the kernel re-runs Ed25519 verification using the
-signer's public key embedded in the cert. It does **not** confirm
-the signer's cert is valid against the current policy; for that,
-use `cert verify`.
+`self_sig_ok: yes` confirms the cert's bytes have not been
+tampered with. It does **not** confirm the cert is installed in the
+current policy; for that, use `raxis cert list` or `raxis doctor`.
 
 ---
 
-## verify — full chain check
+## verify — structural check
 
-`cert verify` is what the kernel does at admission time. It checks:
+`cert verify` checks:
 
 1. The cert's signature is valid (Ed25519 over canonical bytes).
-2. The signer is embedded in the supplied policy's
-   `[[operators.entries]]`.
-3. The signer's cert is itself within its `not_before` /
-   `not_after` window.
-4. Neither the signer nor the subject is on the revocation list
-   (`[[operators.revocations]]`).
-5. `now()` is within the cert's TTL.
+2. The cert has no structural violations.
+3. `now()` (or `--at-time`) is within the cert's validity window.
 
 ```bash
-raxis cert verify /tmp/alice.cert \
-  --against-policy /var/raxis/policy.toml
+raxis cert verify /tmp/alice.cert.toml
 # Output:
-# subject:                   ops-alice
-# signer_kid:                8a4f...
-# signature_ok:              yes
-# signer_in_policy:          yes
-# signer_within_ttl:         yes
-# subject_revoked:           no
-# signer_revoked:            no
-# subject_within_ttl:        yes
-# verdict:                   VALID
+# display_name:             ops-alice
+# status:                   Active
+# self-signature            OK
 ```
 
-If any check fails, `verdict` is `INVALID` and the line that failed
-is marked `no`. Useful for diagnosing
-`OPERATOR_NOT_AUTHORIZED` errors.
+If structure or self-signature fails, the command exits non-zero and
+prints the failing checks.
 
 ---
 
@@ -86,11 +69,9 @@ is marked `no`. Useful for diagnosing
 | Symptom | Fix |
 |---|---|
 | `show: file not found` | Wrong path. |
-| `show: not a Raxis cert` | Wrong file format. Raxis certs are CBOR-encoded; check you're not pointing at a TOML or PEM file. |
-| `verify: --against-policy not found` | Provide the path to the active policy bundle (`/var/raxis/policy.toml` typically). |
-| `verify: signer not in policy` | The signer cert was rotated out of the policy; this cert is no longer chainable. Re-sign by a current signer. |
-| `verify: subject revoked` | The cert is in `[[operators.revocations]]`. Mint a new cert. |
-| `verify: subject TTL expired` | Re-mint with `cert mint`. |
+| `show: not a Raxis cert` | Wrong file format. RAXIS certs are TOML; check you are not pointing at a PEM key. |
+| `unknown cert verify flag: "--against-policy"` | Current `cert verify` is local-only; use `raxis cert list` or `raxis doctor` to inspect installed policy state. |
+| `cert verification failed` | Re-mint the cert; the file is structurally invalid or its self-signature does not match. |
 
 ---
 
@@ -99,8 +80,8 @@ is marked `no`. Useful for diagnosing
 | Command | Purpose |
 |---|---|
 | `raxis cert mint` / `cert mint-emergency` | Issue a new cert. |
-| `raxis cert install <path>` | Embed cert in policy and re-sign. |
-| `raxis cert revoke <kid>` | Add to revocation list. |
+| `raxis cert install <path> --policy <policy.toml>` | Embed cert in policy; re-sign afterwards. |
+| `raxis [--operator-key <key>] cert revoke <cert> --reason <rotation\|compromise> --reference <id>` | Add a signed revocation record. |
 | `raxis cert list` | Active certs in policy. |
 | `raxis cert list-revocations` | Revoked certs. |
 | `raxis policy show` | Display the active policy bundle. |
@@ -109,13 +90,12 @@ is marked `no`. Useful for diagnosing
 
 ## Variations
 
-- **Pre-flight cert install.** `cert verify` against the policy
-  before running `cert install` to ensure the install will succeed.
+- **Pre-flight cert install.** Run `cert verify` before
+  `cert install --policy` to catch structural mistakes early.
 - **CI sanity check.** A periodic cron that runs
   `cert verify` for every operator cert and pages on `INVALID`
   verdicts.
 - **Cert audit.** Track the output of `cert show --json` over time;
   feed it into a compliance dashboard that flags certs nearing TTL.
 - **Revocation drill.** `cert revoke` a test cert, then
-  `cert verify` confirms the `subject_revoked: yes` line — useful
-  to validate the revocation pipeline end-to-end.
+  `cert list-revocations` confirms the signed revocation record.

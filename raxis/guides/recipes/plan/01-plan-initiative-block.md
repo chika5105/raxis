@@ -78,12 +78,15 @@ Constraints:
 
 ## How the description reaches the agent
 
-```text
-Operator writes plan.toml.description
-    └─ Plan-bundle sealing canonicalises the bytes.
-         └─ Kernel admits + stores in plan_bundle_artifacts[0].
-              └─ Each session_spawn_orchestrator call reads it.
-                   └─ Stamped into the system prompt at boot.
+```mermaid
+flowchart TD
+    author["Operator writes plan.toml description"]
+    seal["Plan-bundle sealing canonicalises the bytes"]
+    store["Kernel admits and stores plan_bundle_artifacts[0]"]
+    spawn["session_spawn_orchestrator reads the sealed artifact"]
+    prompt["Kernel stamps the description into the boot prompt"]
+
+    author --> seal --> store --> spawn --> prompt
 ```
 
 The agent never sees `plan.toml` raw; the kernel composes a

@@ -787,7 +787,7 @@ The classification of `TerminationReason` variants into Immediate vs Graceful is
 
 ### CLI
 
-- [ ] `raxis policy push <bundle.toml>` — invokes `approve_policy`; surfaces revocation effects in pre-commit summary ("This push will terminate 3 active sessions due to key compromise. Continue? [y/N]")
+- [ ] `raxis epoch advance --policy <policy.toml> --sig <policy.sig>` — invokes `approve_policy`; surfaces revocation effects in pre-commit summary ("This advance will terminate 3 active sessions due to key compromise. Continue? [y/N]")
 - [ ] `raxis emergency-revoke --key-id <id> --reference <ref>` — implements §6.4 flow; computes fingerprint, lists affected sessions, atomically rewrites the file, sends SIGHUP, tails audit log for confirmation
 - [ ] `raxis emergency-revoke --fingerprint <sha256> --reference <ref>` — variant for revoking by fingerprint (e.g., orphan revocation)
 - [ ] `raxis audit replay [--until <ts>]` — implements §8 historical validation; renders `RevokedKeyAtEventTime` and `RetroactivelyCompromisedKey` warning categories distinctly; surfaces `EmergencyKeyCompromised` provenance with `authorized_by` field

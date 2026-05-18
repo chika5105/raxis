@@ -80,26 +80,27 @@ cost flat.
 
 ## Wire path
 
-```text
-planner VM ──HTTPS POST──▶ tproxy ──intra-VM redirect──▶ raxis-gateway
-                                                              │
-                                                              │  upstream completes
-                                                              ▼
-                                                      gateway → kernel
-                                                  (GatewayMessage::FetchResponse)
-                                                              │
-                                                              ▼
-                                              kernel/src/gateway/client.rs::pump
-                                                              │
-                                                              ├──▶ LlmTurnObserver.observe(...)
-                                                              │       │
-                                                              │       ▼
-                                                              │   TaskLlmCapture.append(task_id, record)
-                                                              │       │
-                                                              │       ├──▶ broadcast::Sender (live SSE)
-                                                              │       └──▶ <data_dir>/llm-turns/<task_id>.jsonl
-                                                              │
-                                                              └──▶ oneshot::Sender (dispatch caller unblocks)
+```mermaid
+flowchart TD
+    A["Planner VM"]
+    B["tproxy"]
+    C["raxis-gateway"]
+    D["GatewayMessage::FetchResponse"]
+    E["kernel/src/gateway/client.rs::pump"]
+    F["LlmTurnObserver.observe(...)"]
+    G["TaskLlmCapture.append(task_id, record)"]
+    H["broadcast::Sender<br/>live SSE"]
+    I["&lt;data_dir&gt;/llm-turns/&lt;task_id&gt;.jsonl"]
+    J["oneshot::Sender<br/>dispatch caller unblocks"]
+
+    A -->|"HTTPS POST"| B
+    B -->|"intra-VM redirect"| C
+    C -->|"upstream completes"| D
+    D --> E
+    E --> F --> G
+    G --> H
+    G --> I
+    E --> J
 ```
 
 The observer fires **before** the dispatch caller unblocks, so

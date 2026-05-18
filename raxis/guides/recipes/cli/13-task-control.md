@@ -10,7 +10,7 @@ inside a running initiative without disturbing the rest.
 ## Syntax
 
 ```text
-raxis task abort   <task_id> [--reason <text>]
+raxis task abort   <task_id>
 raxis task resume  <task_id>
 raxis task retry   <task_id>
 raxis task outputs <task_id> [--json]
@@ -25,12 +25,9 @@ Stops the session running this task. The task FSM transitions to
 aborted predecessor never satisfies the predecessor list).
 
 ```bash
-raxis task abort code_reviewer-2025-05-10 \
-  --reason "operator: reviewer in compute loop"
+raxis task abort code_reviewer-2025-05-10
 # Output:
-# task_id:        code_reviewer-2025-05-10
-# state:          Aborted
-# session_terminated: yes
+# Task code_reviewer-2025-05-10 aborted. New state: Aborted
 ```
 
 Differences vs `initiative abort`:

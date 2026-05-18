@@ -59,38 +59,25 @@ What the columns mean:
 
 ---
 
-## inspect — subject deep-dive
+## Related deep-dives
 
-`inspect` accepts `<kind>:<id>` form. Supported kinds:
+The current `inspect` command is task-focused:
 
-| Kind | Example |
+| Need | Command |
 |---|---|
-| `initiative` | `inspect initiative:1f3c8a4b` |
-| `task` | `inspect task:implementer-2025-05-10` |
-| `session` | `inspect session:91a7c8…` |
-| `lane` | `inspect lane:auth-work` |
-| `verifier` | `inspect verifier:cargo-test` |
-| `credential` | `inspect credential:github-deploy` |
-| `delegation` | `inspect delegation:d8a93c1f…` |
+| Task FSM, gates, witnesses, recent events | `raxis inspect <task_id>` |
+| Why a task is blocked | `raxis explain <task_id>` |
+| Initiative metadata and bundle | `raxis initiative show <initiative_id> [--bundle]` |
+| Session inventory | `raxis sessions [--json]` |
+| Per-session audit trail | `raxis log --session <session_id>` |
+| Lane budget pressure | `raxis budget [<lane_id>]` |
 
-Each kind unfolds the relevant pieces:
+Example:
 
 ```bash
-raxis inspect initiative:1f3c8a4b
-# Output: initiative metadata + task list + lane budget snapshot +
-#         pending escalations + recent audit lines.
-
-raxis inspect task:implementer-2025-05-10
+raxis inspect implementer-2025-05-10
 # Output: task FSM state + predecessors + assigned session +
 #         witnesses + recent intents + retry counters.
-
-raxis inspect lane:auth-work
-# Output: lane config (max_concurrent_tasks, budget) + active
-#         tasks + recent admissions + budget burn-down.
-
-raxis inspect session:91a7c83f
-# Output: session metadata (agent_type, ttl, initiative) +
-#         delegations + recent intents + worktree path.
 ```
 
 Many of these mirror the per-subject `show` commands; `inspect` is
@@ -103,8 +90,7 @@ the unified surface.
 | Symptom | Fix |
 |---|---|
 | `queue: kernel not running` | `raxis status` — start the kernel. |
-| `inspect: unknown subject kind` | Check the supported kinds above. |
-| `inspect: subject not found` | Wrong id; use `raxis initiative list` / `raxis sessions` / etc. to find it. |
+| `inspect: task not found` | Wrong id; use `raxis initiative show <id>` or `raxis queue` to find it. |
 | Empty `RUNNABLE` despite expectations | Either no Draft initiative is approved yet, or every task is blocked. Check the BLOCKED section for budget / capacity stalls. |
 
 ---
@@ -127,9 +113,9 @@ the unified surface.
   until `RUNNABLE` is empty for the initiative.
 - **Capacity alerting.** `queue --json | jq '.lanes[] | select(.budget_used / .budget_cap > 0.9)'`
   to alert on near-cap lanes.
-- **Task triage.** `inspect task:<id>` is the shortest path from
+- **Task triage.** `raxis inspect <task_id>` is the shortest path from
   "this task seems stuck" to "here's what's wrong".
-- **Replay scratch session.** `inspect session:<id>` shows the
+- **Replay scratch session.** Use `raxis sessions --json` to find the
   worktree path; you can `cd` into it for manual inspection (the
   kernel is the source of truth for intents, but the worktree is
   visible read-only).

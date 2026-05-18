@@ -114,7 +114,7 @@ raxis log "$COMPLETED_INIT" --json \
 
 # 4. Each TaskCompleted has a corresponding IntegrationMergeCompleted
 #    (or InitiativeAborted / InitiativeFailed).
-raxis log "$COMPLETED_INIT" --kind TaskCompleted --json | jq length
+raxis log "$COMPLETED_INIT" --kind TaskCompleted --json | wc -l
 raxis log "$COMPLETED_INIT" --kind IntegrationMergeCompleted \
   --json | jq length
 

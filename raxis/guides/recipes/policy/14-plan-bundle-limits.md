@@ -60,9 +60,12 @@ auxiliary artifacts.
 
 A V2.1 plan bundle has a structured shape:
 
-```text
-artifact[0] = canonical plan.toml bytes  ← always
-artifact[1..] = optional auxiliary blobs (e.g. seed data, fixture YAML)
+```mermaid
+flowchart LR
+    A["artifact[0]<br/>canonical plan.toml bytes"]
+    B["artifact[1..]<br/>optional auxiliary blobs"]
+
+    A --> B
 ```
 
 The 200-artifact cap is generous because realistic V2 plans use 1–3

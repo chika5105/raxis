@@ -56,16 +56,16 @@ On **`Accepted`**, **`warn_delegation_stale: bool`** may be true when the kernel
 
 ### Egress restriction — step by step
 
-```text
-Agent sends:   FetchRequest { fetch_request_id: X, url: "https://docs.example.com/api" }
-
-Kernel:
-  1. Validates URL format
-  2. Checks domain against signed allowlist ([egress.domain_allowlist] in policy.toml)
-  3. "docs.example.com" not found → DomainNotAllowed
-
-Kernel sends:  FetchDenied { fetch_request_id: X, deny_reason: DomainNotAllowed }
-               AuditEventKind::FetchDenied { ... }  ← audit only
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Kernel
+    participant Audit
+    Agent->>Kernel: FetchRequest { fetch_request_id: X, url: "https://docs.example.com/api" }
+    Kernel->>Kernel: Validate URL format
+    Kernel->>Kernel: Check domain against signed egress allowlist
+    Kernel-->>Agent: FetchDenied { fetch_request_id: X, deny_reason: DomainNotAllowed }
+    Kernel->>Audit: AuditEventKind::FetchDenied { ... }
 ```
 
 **v1 does not define a planner escalation class that widens egress.** [`philosophy.md`](specs/v1/philosophy.md) lists `EscalationClass`: `CapabilityUpgrade` | `DelegationRenewal` | `BudgetException` | `QualityGateException` — none of these replaces a domain allowlist edit.
@@ -125,13 +125,14 @@ EscalationRequest {
 
 ### Budget ceiling — step by step
 
-```text
-Agent sends:   IntentRequest (would exceed lane / session admission budget)
-
-Kernel:
-  1. Computes admission cost from VCS-derived touched_paths + intent_kind + policy (INV-02A)
-  2. Budget check fails
-  3. Returns Rejected { FAIL_BUDGET_EXCEEDED } or FAIL_POLICY_VIOLATION per dispatcher mapping
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Kernel
+    Agent->>Kernel: IntentRequest
+    Kernel->>Kernel: Compute cost from VCS-derived touched_paths, intent_kind, and policy
+    Kernel->>Kernel: Compare admission cost with lane and session budget
+    Kernel-->>Agent: Rejected { FAIL_BUDGET_EXCEEDED } or FAIL_POLICY_VIOLATION
 ```
 
 Options: complete with **`CompleteTask`** if done, **`ReportFailure`**, operator **`BudgetException`** escalation ([`philosophy.md`](specs/v1/philosophy.md)), or wait for reservations to clear.
@@ -174,22 +175,20 @@ Optional **`idempotency_key`** on **`IntentRequest`** duplicates the same **`Int
 
 ### Timeline sketch — multi-gate task (conceptual)
 
-```text
-Planner                Kernel                         Verifiers
-  |                       |                                |
-  |-- SingleCommit -----> |                                |
-  |                       |-- spawn gate A --------------> |
-  |                       |-- spawn gate B --------------> |
-  |<-- Accepted           |                                |
-  |    task_state:        |                   [A: runs...] |
-  |    GatesPending       |                   [B: runs...] |
-  |                       |<-- WitnessSubmission Pass --- |
-  |                       |<-- WitnessSubmission Pass --- |
-  |                       |   (gate recheck → ready)      |
-  |-- CompleteTask -----> |                                |
-  |<-- Accepted           |                                |
-  |    task_state:        |                                |
-  |    Completed          |                                |
+```mermaid
+sequenceDiagram
+    participant Planner
+    participant Kernel
+    participant Verifiers
+    Planner->>Kernel: SingleCommit
+    Kernel->>Verifiers: Spawn gate A
+    Kernel->>Verifiers: Spawn gate B
+    Kernel-->>Planner: Accepted { task_state: GatesPending }
+    Verifiers-->>Kernel: WitnessSubmission { result_class: Pass } for gate A
+    Verifiers-->>Kernel: WitnessSubmission { result_class: Pass } for gate B
+    Kernel->>Kernel: Gate recheck clears required witnesses
+    Planner->>Kernel: CompleteTask
+    Kernel-->>Planner: Accepted { task_state: Completed }
 ```
 
 Exact states and ordering are defined in **`handlers/intent.rs`**, **`handlers/witness.rs`**, and Part 2.4 FSM tables in [`kernel-core.md`](specs/v1/kernel-core.md); this diagram is illustrative only.

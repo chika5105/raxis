@@ -125,5 +125,5 @@ gives you the original bytes.
   re-sign, push to operators; old verifier images stay registered
   but new ones get used. Track via `verifiers show <id>` and
   compare `image_signed_at`.
-- **Mismatch alert.** `raxis log --kind VerifierMismatchDetected --since 24h --json | jq length`
+- **Mismatch alert.** `raxis log --kind VerifierMismatchDetected --since 24h --json | wc -l`
   for a daily incident-detection cron.

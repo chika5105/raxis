@@ -120,14 +120,24 @@ registries.
 
 ## How egress is mediated
 
-```text
-Agent inside VM:
-  curl https://api.stripe.com/v1/charges  ← agent makes outbound call
-       └─ DNS resolves via the kernel's DNS proxy
-            └─ kernel checks allowed_egress: api.stripe.com matches?
-                 ├─ yes: TCP forwarded; agent sees normal HTTPS response
-                 └─ no:  TransparentProxyDenied; agent sees connection refused
-                          + audit event in raxis log
+```mermaid
+sequenceDiagram
+    participant Agent as Agent inside VM
+    participant DNS as Kernel DNS proxy
+    participant Egress as Kernel egress proxy
+    participant Remote as api.stripe.com
+
+    Agent->>DNS: Resolve api.stripe.com
+    DNS-->>Agent: Address if host can be evaluated
+    Agent->>Egress: CONNECT api.stripe.com:443
+    Egress->>Egress: Check task allowed_egress<br/>against policy/image allowlists
+    alt Host allowed
+        Egress->>Remote: Forward encrypted TCP stream
+        Remote-->>Agent: Normal HTTPS response
+    else Host denied
+        Egress-->>Agent: Connection refused
+        Egress->>Egress: Emit TransparentProxyDenied audit event
+    end
 ```
 
 The kernel does NOT do TLS interception by default — it forwards
@@ -143,7 +153,7 @@ the egress proxy and rewrites the request body / headers.
 | Symptom | Fix |
 |---|---|
 | `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED` | Remove `vm_image` from Reviewer tasks. |
-| `FAIL_VM_IMAGE_NOT_DECLARED` | The alias doesn't match any `[[vm_images]]` entry. Spelling check; ensure the policy is signed and the kernel has hot-reloaded. |
+| `FAIL_VM_IMAGE_NOT_DECLARED` | The alias doesn't match any `[[vm_images]]` entry. Spelling check; ensure the policy is signed and the kernel has advanced to that signed bundle. |
 | `FAIL_VM_IMAGE_ROLE_NOT_PERMITTED` | The alias's `role_restriction` doesn't include `Executor` (or whatever role this task is). |
 | `TransparentProxyDenied` audit events | Agent tried an egress not in the allowlist. Either add it (and bump the policy / image allowlists if needed) or fix the agent prompt. |
 | `image_cache: digest mismatch` at spawn | The OCI registry served bytes whose SHA-256 doesn't match the pinned digest. Investigate — don't auto-update. |

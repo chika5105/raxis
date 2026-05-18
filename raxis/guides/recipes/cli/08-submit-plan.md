@@ -29,7 +29,7 @@ raxis submit plan <plan.toml> [--initiative-id <id>]
 | `--dry-run` (default) | Build and validate the bundle locally. Does NOT submit. Prints the would-be `initiative_id` and bundle stats. |
 | `--no-dry-run` | Submit for real. Returns the live `initiative_id` and the bundle's resolved (epoch, signed_at, nonce). |
 | `--initiative-id <id>` | Reuse a pre-allocated `initiative_id`. Most operators don't need this; the kernel mints one automatically. |
-| `--operator-key <pem>` | Override `RAXIS_OPERATOR_KEY` for this invocation. |
+| `--operator-key <pem>` | Global CLI flag before `submit`; overrides `RAXIS_OPERATOR_KEY` for this invocation. |
 
 ---
 
@@ -65,8 +65,8 @@ raxis submit plan ./plan.toml
 ### Explicit key
 
 ```bash
-raxis submit plan ./plan.toml --no-dry-run \
-  --operator-key /etc/raxis/keys/ci-bot.pem
+raxis --operator-key /etc/raxis/keys/ci-bot.pem \
+  submit plan ./plan.toml --no-dry-run
 ```
 
 ---

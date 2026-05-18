@@ -23,7 +23,7 @@ raxis operator quarantine-plans-by <signer_kid>
 
 If an operator key is compromised, the attacker may have signed
 plans submitted before you noticed. Revoking the cert
-(`cert revoke <kid>`) prevents NEW plans, but the old ones are
+(`cert revoke <cert.toml>`) prevents NEW plans, but the old ones are
 already running. `quarantine-plans-by` freezes them in bulk so you
 can investigate without manually iterating.
 
@@ -81,9 +81,10 @@ correlation). Initiatives quarantined by a separate
 The bulk quarantine should be paired with revoking the cert:
 
 ```bash
-raxis cert revoke 8a4f... --reason "key compromise: alice laptop stolen" \
-  --operator-key /tmp/safe-genesis.key
-raxis operator quarantine-plans-by 8a4f... \
+raxis --operator-key /tmp/safe-genesis.key cert revoke /tmp/alice.cert.toml \
+  --reason compromise \
+  --reference incident-2026-05
+raxis --operator-key /tmp/safe-genesis.key operator quarantine-plans-by 8a4f... \
   --reason "key compromise: alice laptop stolen"
 ```
 
@@ -108,7 +109,7 @@ work.
 
 | Command | Purpose |
 |---|---|
-| `raxis cert revoke <kid>` | Revoke the cert itself. |
+| `raxis cert revoke <cert.toml> --reason compromise --reference <id>` | Revoke the cert itself. |
 | `raxis initiative quarantine <id>` | Single-initiative quarantine. |
 | `raxis log --kind InitiativeQuarantined --since <when>` | Audit the bulk action. |
 | `raxis initiative list --state quarantined` | List frozen initiatives. |

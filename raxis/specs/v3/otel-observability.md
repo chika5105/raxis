@@ -1,6 +1,11 @@
 # RAXIS V3 — OpenTelemetry Observability
 
-> **Status:** V3 Specified.
+> **Status:** Active / partially implemented. The current workspace
+> includes the authority-side observability ring, kernel instrumentation,
+> `raxis-otel-pusher`, policy validation, and dev/perf OTel Collector +
+> Prometheus + Grafana wiring. Treat unimplemented doctor/dashboard
+> conveniences in this spec as remaining V3 work, not as prerequisites
+> for the shipped pusher pipeline.
 > **Audience:** Operators integrating RAXIS telemetry into their observability stack (Grafana / Datadog / Honeycomb / Jaeger / Tempo / Mimir / VictoriaMetrics, or any OTLP-compatible collector). Implementers extending the kernel with new spans/metrics. Reviewers verifying that observability extraction does not weaken any `R-*` invariant.
 >
 > **Cross-references:**
@@ -1137,7 +1142,10 @@ For an operator with an existing OTLP/HTTP collector at `https://otlp.example.co
    environment  = "production"
    ```
 
-2. Re-sign and load the policy: `raxis policy sign && raxis policy push`.
+2. Re-sign and load the policy with the current epoch-advance flow:
+   `raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" --key "$RAXIS_OPERATOR_KEY"`
+   followed by
+   `raxis epoch advance --policy "$RAXIS_DATA_DIR/policy/policy.toml" --sig "$RAXIS_DATA_DIR/policy/policy.sig"`.
 3. Start the pusher: `systemctl start raxis-otel-pusher`.
 4. Verify: `raxis doctor observability` → all checks pass.
 5. Open the dashboard preset: `raxis dashboard preset import grafana-default.json` (V3 ships a baseline Grafana JSON dashboard at `release/dashboards/grafana-raxis-default.json`).

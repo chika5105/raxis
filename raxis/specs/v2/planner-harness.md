@@ -3113,8 +3113,8 @@ source tree, auto-rebaking by default or failing closed under
 per-role required-binary list is present in the resulting image.
 The three layers catch different regressions:
 
-* dev-stage catches "the operator skipped `bake-rootfs`" (missing
-  OS tooling in the staging tree).
+* dev-stage catches "the role rootfs phase did not produce the
+  expected OS tooling" (missing OS tooling in the staging tree).
 * build-all freshness catches "the operator skipped `dev-stage`
   after a `planner-core` edit".
 * cpio-walk catches "the operator ran `build-all` with a stale

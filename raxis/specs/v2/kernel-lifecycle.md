@@ -125,7 +125,7 @@ raxis kernel status
 # Tail logs (works for both modes; pulls from terminal or service log destination)
 raxis kernel logs
 raxis kernel logs --follow         # -f equivalent
-raxis kernel logs --since "1 hour ago"
+raxis kernel logs --since 1h
 
 # Service management without starting/stopping the kernel
 raxis kernel install               # writes service file; enables boot-at-login; does NOT start
@@ -334,7 +334,7 @@ $ sudo journalctl -u raxis-kernel               # system mode
 
 # Or via the raxis CLI (which delegates to journalctl):
 $ raxis kernel logs --follow
-$ raxis kernel logs --since "10 minutes ago"
+$ raxis kernel logs --since 10m
 $ raxis kernel logs --grep "IntegrationMerge"
 ```
 
@@ -603,7 +603,7 @@ cgroup.kill and synthesized as a `crashed` witness for its task.
 
 1. Kernel re-reads `policy.toml` (and emergency revocations file per [`key-revocation.md §6`](key-revocation.md)).
 2. Validates new policy against current state; if invalid, emits `PolicyReloadFailed` audit event and continues with old policy.
-3. If valid: advances policy epoch per [`policy-epoch-diffing.md`](policy-epoch-diffing.md); emits `PolicyReloaded` audit event.
+3. If valid: advances policy epoch per [`policy-epoch-diffing.md`](policy-epoch-diffing.md); emits `PolicyEpochAdvanced` audit event.
 4. In-flight intents continue with the policy active at their admission; new intents use the reloaded policy.
 
 This is a non-disruptive reload — no IPC connections drop, no in-flight work is interrupted.

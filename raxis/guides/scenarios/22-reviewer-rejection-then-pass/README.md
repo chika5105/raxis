@@ -110,7 +110,7 @@ raxis initiative show "$INIT_ID" --with-tasks
 
 # 2. Two ReviewSubmitted events — first Reject, then Accept.
 raxis log "$INIT_ID" --kind ReviewSubmitted --json \
-  | jq '.[] | {round: .payload.revision_round, verdict: .payload.verdict, reason: .payload.reason}'
+  | jq -c '{round: .payload.revision_round, verdict: .payload.verdict, reason: .payload.reason}'
 # { round: 0, verdict: "Reject", reason: "use bytes-safe concatenation" }
 # { round: 1, verdict: "Accept" }
 

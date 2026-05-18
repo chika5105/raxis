@@ -124,7 +124,7 @@ description  = "Ripgrep TODO check"
 Re-sign and apply:
 
 ```bash
-raxis policy sign /tmp/policy.toml --operator-key /tmp/op.key
+raxis policy sign /tmp/policy.toml --key /tmp/op.key
 ```
 
 ### 4. Reference from a plan
@@ -150,7 +150,7 @@ records the witness but doesn't gate.
 Submit a plan that references the new verifier:
 
 ```bash
-raxis submit plan ./test-plan.toml
+raxis submit plan ./test-plan.toml --no-dry-run
 raxis plan approve <init_id>
 # Wait for the task to run.
 raxis task outputs <task_id>

@@ -129,9 +129,8 @@ denied, fix the policy IMMEDIATELY:
   * Remove the host from `[egress] domains` if it was added by
     mistake.
   * Tighten an overly permissive `*` pattern to a narrower glob.
-  * Re-issue the policy via the operator-cert sign path; the
-    kernel's hot-reload picks up the new bundle without a
-    restart.
+  * Re-issue the policy through `raxis policy sign` and
+    `raxis epoch advance --policy <path> --sig <sig>`.
 
 ## Step 4 — Operating the gate
 

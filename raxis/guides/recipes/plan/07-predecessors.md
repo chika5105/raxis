@@ -111,17 +111,22 @@ verdict (logical-AND across `verdict`).
 
 ## How activation propagates
 
-```text
-admission:
-  └─ Find tasks with predecessors = [].
-       └─ Mint an Activate intent for each.
+```mermaid
+flowchart TD
+    admit["Admission walk"]
+    roots["Find tasks with predecessors = []"]
+    activate_roots["Mint Activate intent for each root task"]
+    complete["Executor submits CompleteTask"]
+    completed["Kernel transitions task to Completed"]
+    dependents["Find tasks that list this task as predecessor"]
+    all_done{"All predecessors Completed?"}
+    activate_next["Mint Activate intent"]
+    stay["Task stays Admitted"]
 
-executor completes (writes files, submits CompleteTask):
-  └─ Kernel transitions task to Completed.
-       └─ Find tasks where this task is a predecessor.
-            └─ For each, check if ALL predecessors are Completed.
-                 └─ If yes: mint an Activate intent for that task.
-                 └─ If no:  task stays Admitted.
+    admit --> roots --> activate_roots
+    complete --> completed --> dependents --> all_done
+    all_done -->|yes| activate_next
+    all_done -->|no| stay
 ```
 
 The same logic applies for Reviewer dependencies, except a Reviewer

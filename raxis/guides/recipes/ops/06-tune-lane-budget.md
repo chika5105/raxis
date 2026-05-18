@@ -60,7 +60,9 @@ happens at every epoch advance (`raxis epoch advance` or scheduled).
 ```bash
 raxis budget                # snapshot per-lane
 raxis budget --json --lane auth-work | jq '.utilization'
-raxis log --kind LaneAdmissionRejected --since "24 hours ago" --json | jq '.[] | .reason' | sort | uniq -c
+raxis log --kind LaneAdmissionRejected --since 24h --json \
+  | jq -r '.payload.reason // .reason // empty' \
+  | sort | uniq -c
 ```
 
 Build a picture of how often each lane is hitting its caps.
@@ -88,15 +90,12 @@ description          = "auth team feature work"
 
 ```bash
 raxis policy sign /tmp/policy.toml \
-  --operator-key /tmp/op.key
-# Output: signed_at, new_epoch.
-```
-
-The kernel hot-reloads. Check:
-
-```bash
+  --key /tmp/op.key
+raxis --operator-key /tmp/op.key epoch advance \
+  --policy /tmp/policy.toml \
+  --sig /tmp/policy.sig
 raxis policy show | grep -A 5 "id = \"auth-work\""
-raxis log --kind PolicyReloaded --since "1 minute ago"
+raxis log --kind PolicyEpochAdvanced --since 1m
 ```
 
 ### 4. Verify the change took effect
@@ -110,14 +109,16 @@ If you raised the budget mid-epoch, the existing `budget_used`
 counter is preserved; you'll only see effective change if it was
 above the old cap.
 
-### 5. Optional: advance the epoch
+### 5. Optional: reset budget pressure
 
 ```bash
-raxis epoch advance --reason "lane tuning: reset budget for new caps"
+raxis --operator-key /tmp/op.key epoch advance \
+  --policy /tmp/policy.toml \
+  --sig /tmp/policy.sig
 ```
 
-This zeros the lane's `budget_used` and lets fresh admissions
-take advantage of the new cap immediately.
+An epoch advance makes the newly signed policy active and starts
+new admissions against the new epoch's budget boundary.
 
 ---
 
@@ -149,7 +150,7 @@ If you're **raising** caps:
 |---|---|
 | `policy sign: lane id duplicated` | Check the policy for two `[[lanes]]` with the same `id`. |
 | `policy sign: priority out of range` | `priority` must be 0–100. |
-| `policy reloaded` but new admissions still hit old caps | The kernel cached the policy; check `raxis policy show` matches your new bundle. |
+| New admissions still hit old caps | Confirm `raxis policy show` reports the policy SHA and epoch you advanced to. |
 | Lane budget overspends after raise | The new admissions are honoring the new cap; the overspend is from in-flight tasks that started under the old cap. Wait or abort. |
 
 ---

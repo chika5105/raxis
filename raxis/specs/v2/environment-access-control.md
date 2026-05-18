@@ -318,7 +318,7 @@ With `--strict` (default): plan is rejected. The operator must either:
 a) Remove the write methods from the prod URL in `allowed_egress`
 b) Accept the escalation flow and run with `--no-strict`
 c) If they genuinely need unrestricted prod writes: request a policy bundle update to
-   change or remove the environment gate (requires `raxis policy push` with new epoch)
+   change or remove the environment gate (requires a signed `raxis epoch advance`)
 
 ---
 
@@ -835,7 +835,7 @@ default for.
 categorical policy floor — it cannot be overridden by plan configuration or `--no-strict`.
 
 **Fix:** Remove the blocked URL from `allowed_egress`, or update the policy bundle to
-change or remove the `block_all` gate (requires `raxis policy push`, new epoch).
+change or remove the `block_all` gate (requires a signed `raxis epoch advance`).
 
 ---
 
@@ -848,7 +848,8 @@ does not appear in policy `[[permitted_credentials]]`.
 declared in the policy bundle before any plan can reference them. This prevents plans
 from referencing arbitrary files in `credentials/`.
 
-**Fix:** Add the credential to policy `[[permitted_credentials]]` via `raxis policy push`.
+**Fix:** Add the credential to policy `[[permitted_credentials]]` via a signed
+`raxis epoch advance`.
 
 ---
 
@@ -952,8 +953,8 @@ namespace.
   same_cluster_acknowledged = true   # ack: shares hostname with beta
   ```
 
-- Operator re-signs and pushes the policy bundle (`raxis policy push`,
-  new epoch).
+- Operator re-signs the policy bundle and advances the epoch with
+  `raxis epoch advance --policy <policy.toml> --sig <policy.sig>`.
 - On the next `approve_plan` for this task, the same-cluster handler
   (§11.4) returns `TaskEnvBinding::SameClusterAcknowledged`; the URL
   contributes ZERO labels to the task's environment set.

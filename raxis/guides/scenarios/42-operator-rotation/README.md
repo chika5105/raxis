@@ -2,9 +2,9 @@
 
 > **Complexity:** ⭐⭐⭐ Advanced | **Wall clock:** ~10 min | **Provider:** Anthropic
 
-Add a second operator with `raxis operator add`, sign a policy
-update with the new key, then revoke the old one. Demonstrates the
-multi-operator policy quorum and key-rotation flow.
+Add a second cert-backed operator, sign the updated policy, then rotate
+or revoke the old cert. Demonstrates the operator-cert flow without the
+removed pre-cert `raxis operator add` surface.
 
 ---
 
@@ -16,25 +16,37 @@ Genesis must be complete. See SETUP.md.
 
 ## What this scenario demonstrates
 
-- `raxis operator add` issues an OperatorActivated audit.
-- Policy bundles signed with multiple operator fingerprints.
-- `raxis operator deactivate` for offboarding.
+- `raxis cert mint` creates the new self-signed operator cert.
+- `raxis cert install --policy ...` embeds it in policy.
+- `raxis policy sign ... --key ...` writes the new `policy.sig`.
+- Old certs are rotated with `raxis cert install --replace-for ...`.
 
 ---
 
 ## Run it
 
 ```bash
-# Generate a new operator key:
-raxis operator add --label alice
+# Mint alice's cert on the machine that holds alice's private key.
+raxis cert mint \
+  --key /tmp/alice.key \
+  --display-name alice \
+  --ops "CreateInitiative,ApprovePlan,RejectPlan" \
+  --out /tmp/alice.cert.toml
 
-# List operators (should show two now):
-raxis operator list
+# Install alice into the live policy.
+raxis cert install /tmp/alice.cert.toml \
+  --policy "$RAXIS_DATA_DIR/policy/policy.toml"
 
-# Sign a policy with both keys:
-raxis policy sign ./policy.toml --operator alice
-raxis policy publish ./policy.toml.signed
+# Re-sign the policy with the existing operator key.
+raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --key "$RAXIS_OPERATOR_KEY"
 
-# Deactivate the old key (after the new one signs first):
-raxis operator deactivate --operator-id <old_fp>
+# Later, rotate an existing cert without changing its public key:
+raxis cert install --replace-for <old-fingerprint> \
+  --new-cert /tmp/alice-renewed.cert.toml \
+  --policy "$RAXIS_DATA_DIR/policy/policy.toml"
 ```
+
+For the full runbook, use
+[`../../recipes/setup/10-add-second-operator.md`](../../recipes/setup/10-add-second-operator.md)
+and [`../../recipes/ops/01-rotate-operator-cert.md`](../../recipes/ops/01-rotate-operator-cert.md).

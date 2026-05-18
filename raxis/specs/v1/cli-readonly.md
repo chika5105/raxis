@@ -712,7 +712,7 @@ CONFIG:
 `<data_dir>/policy/policy.toml` (current) or
 `<data_dir>/policy/archive/epoch-<N>.toml` (historical), parsed via
 `raxis_policy::load_policy` then re-rendered. Validates the signature
-against `<data_dir>/policy/policy.toml.sig` and prints
+against `<data_dir>/policy/policy.sig` and prints
 `signature: VALID | INVALID` at the top — fail-closed: if the signature
 is invalid, the command exits `4` and prints nothing else.
 

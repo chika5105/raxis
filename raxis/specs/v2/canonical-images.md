@@ -619,12 +619,11 @@ NOT reintroduce the reverted narrow per-DB tools
 
 `cargo xtask images bake [--role <ROLE>]... [--install-dir <P>]
 [--signing-key <P>] [--builder <B>] [--kernel-from-file <P>]
-[--force] [--no-cache]` is the one command operators run to
+[--kernel-config <P>] [--force] [--no-cache]` is the one command operators run to
 produce a complete, bootable set of canonical images from a
-fresh checkout. It wraps the three-step `bake-rootfs →
-dev-stage → build-all` pipeline plus the guest-kernel staging
-step that used to live in the live-e2e harness's auto-bake
-workaround. The driver:
+fresh checkout. It owns the role rootfs bake, binary staging,
+image packing/signing, trust-anchor injection, and guest-kernel
+staging in one idempotent pipeline. The driver:
 
 1. **Preflights every required input** (read-only). Container
    builder + daemon, signing key, musl linker (macOS),
@@ -652,10 +651,10 @@ workaround. The driver:
    `images/kernel/raxis-guest-a3-netfilter.config`, and all required
    options must be built in (`=y`) because the initramfs does not
    stage kernel modules. (`INV-GUEST-KERNEL-A3-NFTABLES-01`.)
-4. **Bakes every selected role.** Per role:
-   `bake-rootfs` (only for roles whose `Containerfile` carries
-   an OS-tooling stack — today, `executor-starter`) →
-   `dev-stage` → `build-all`. Roles whose prior integrity
+4. **Bakes every selected role.** Per role, the driver runs the
+   required internal phases: rootfs bake only for roles whose
+   `Containerfile` carries an OS-tooling stack, binary staging,
+   pack, manifest signing, and integrity recording. Roles whose prior integrity
    manifest agrees with the current input SHAs AND whose on-disk
    `.img` + `.manifest.toml` still match the recorded output
    SHAs are short-circuited with a `bake_role_no_op` log line.
@@ -673,10 +672,10 @@ workaround. The driver:
    "unknown" so a stale xtask never trusts a newer manifest's
    no-op decision.
 
-The four legacy subcommands (`dev-kernel`, `bake-rootfs`,
-`dev-stage`, `build-all`) remain available unchanged for
-operators who want fine-grained control or are scripting CI.
-`bake` is a strict superset.
+The operator-facing `images` surface is intentionally small:
+`bake`, `dev-kernel`, and `verify-trust-anchor`. The old
+multi-command image phases are implementation details of `bake`,
+not separate operator runbook steps.
 
 ### §7.2 — Outputs per role
 

@@ -71,7 +71,7 @@ path  = "/var/lib/raxis/audit-mirror/notifications.jsonl"
 [notifications.routes]
 EscalationRaised      = ["ops-pager", "slack-prod", "shell"]
 LineageQuarantined    = ["ops-pager", "shell"]
-PolicyReloaded        = ["audit-archive"]
+PolicyEpochAdvanced   = ["audit-archive"]
 HostDiskLow           = ["ops-pager", "slack-prod"]
 PlanBundleReplay      = []                           # silenced — auditable, not paging
 
@@ -154,12 +154,17 @@ PagerDuty integration. Fields:
 
 ## How routing works
 
-```text
-Event "EscalationRaised" emitted by kernel
-    └─ Lookup [notifications.routes]["EscalationRaised"]
-        ├── if present: dispatch to listed channels
-        └── if absent:  dispatch to [notifications.default].channels
-            └─ default falls back to ["shell"] when omitted
+```mermaid
+flowchart TD
+    event["Kernel emits EscalationRaised"] --> lookup["Look up [notifications.routes].EscalationRaised"]
+    lookup --> present{"Route present?"}
+    present -->|yes| dispatch["Dispatch to listed channels"]
+    present -->|no| default["Use [notifications.default].channels"]
+    default --> configured{"Default configured?"}
+    configured -->|yes| dispatch
+    configured -->|no| shell["Dispatch to implicit shell channel"]
+    dispatch --> audit["Audit NotificationDispatched<br/>or NotificationDispatchFailed"]
+    shell --> audit
 ```
 
 A single event fans out to multiple channels. The dispatch is

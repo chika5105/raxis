@@ -36,8 +36,11 @@ raxis policy sign \
   "$RAXIS_DATA_DIR/policy/policy.toml" \
   --key "$RAXIS_OPERATOR_KEY"
 
-# Confirm the kernel hot-reloaded:
-raxis log --kind PolicyReloaded --limit 1
+# Apply the signed artifact through the policy-epoch ceremony:
+raxis epoch advance \
+  --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --sig    "$RAXIS_DATA_DIR/policy/policy.sig"
+raxis log --kind PolicyEpochAdvanced --limit 1
 ```
 
 ---
@@ -54,16 +57,16 @@ raxis log --kind PolicyReloaded --limit 1
 6. Computes Ed25519 over the canonical bytes.
 7. Writes `<artifact>.sig` (sidecar) with the signature in hex.
 
-The kernel watches `policy/policy.toml` for mtime changes and
-hot-reloads on every change — no kernel restart needed for most
-sections.
+`policy sign` is local file work. The kernel does not adopt the new
+bundle until `raxis epoch advance --policy <path> --sig <path>`
+commits the signed artifact.
 
-### Sections that DO require a kernel restart
+### Sections that also require a kernel restart
 
 - `[gateway]` — the gateway supervisor is wired at boot.
 - `[host_capacity] required_min_fd_limit` — RLIMIT is set at boot.
 
-For everything else, hot-reload is sufficient.
+For everything else, signed epoch advance is sufficient.
 
 ---
 
@@ -72,7 +75,7 @@ For everything else, hot-reload is sufficient.
 ```bash
 raxis policy sign /path/to/plan.toml ...
 # → policy sign: refusing to sign a plan.toml artifact
-#   hint: use `raxis submit plan <plan.toml>` to sign + submit atomically.
+#   hint: use `raxis submit plan <plan.toml> --no-dry-run` to sign + submit atomically.
 ```
 
 Plans use a different signing surface (`submit plan`) because the
@@ -90,7 +93,7 @@ envelope.
 | `policy sign: cannot read key file: Permission denied` | `chmod 600 "$RAXIS_OPERATOR_KEY"`. |
 | `policy sign: refusing to sign plan.toml` | Use `raxis submit plan` for plans. |
 | `policy sign: epoch <N> already exists` | Two `policy sign` invocations in flight. The kernel is the source of truth on epoch numbering; re-read with `raxis policy show --history` and retry. |
-| Kernel doesn't hot-reload | Sometimes editors write via temp+rename and break the inotify watch. `touch "$RAXIS_DATA_DIR/policy/policy.toml"` after the edit + sign. |
+| Kernel still shows the old policy | Run `raxis epoch advance --policy <path> --sig <sig>` against the exact signed artifact. |
 
 ---
 

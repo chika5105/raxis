@@ -53,24 +53,24 @@ same machine.
 
 ### Architecture
 
-```text
-src/
-├── styles/global.css        # :root (light) + :root.dark palettes
-├── lib/theme.tsx            # <ThemeProvider> + useTheme() hook
-├── components/ThemeToggle.tsx
-└── main.tsx                 # wraps <App /> in <ThemeProvider>
+```mermaid
+flowchart TD
+    src["src/"]
+    src --> global["styles/global.css<br/>light + dark palettes"]
+    src --> theme["lib/theme.tsx<br/>ThemeProvider + useTheme"]
+    src --> toggle["components/ThemeToggle.tsx"]
+    src --> main["main.tsx<br/>wraps App in ThemeProvider"]
 ```
 
 Colors flow from CSS custom properties → Tailwind utility classes
 → components:
 
-```text
-:root[.dark] in global.css
-    ↓ (--c-panel: 13 17 23)
-tailwind.config.js
-    ↓ panel: { DEFAULT: "rgb(var(--c-panel) / <alpha-value>)" }
-component
-    ↓ <div className="bg-panel" />
+```mermaid
+flowchart TD
+    css[":root / :root.dark in global.css<br/>--c-panel: 13 17 23"]
+    tailwind["tailwind.config.js<br/>panel = rgb(var(--c-panel) / alpha)"]
+    component["component<br/>className = 'bg-panel'"]
+    css --> tailwind --> component
 ```
 
 The `rgb(R G B) / <alpha-value>` triplet pattern means opacity

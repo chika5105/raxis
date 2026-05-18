@@ -31,9 +31,9 @@ dir.
 ```
 
 When `RAXIS_DATA_DIR` is unset, the CLI and kernel both fall back
-to `<home>/.raxis`. The kernel's resolution rule is: read the env
-var first, then `--data-dir <path>` flag (where supported),
-otherwise default to `$HOME/.raxis`.
+to `<home>/.raxis`. The CLI resolves the env var first and then lets
+the global `--data-dir <path>` flag override it for one invocation.
+The kernel reads only the env var and otherwise uses `$HOME/.raxis`.
 
 ---
 
@@ -79,32 +79,29 @@ Environment=RAXIS_DATA_DIR=/var/lib/raxis
 
 ## What lives under `RAXIS_DATA_DIR`
 
-```text
-$RAXIS_DATA_DIR/
-├── kernel.db                  # SQLite store: tasks, sessions, plan_bundle_*
-├── policy/
-│   ├── policy.toml            # The signed bundle.
-│   └── policy.toml.sig        # Sidecar Ed25519 signature.
-├── audit/
-│   ├── segment-000.jsonl      # Genesis chain anchor.
-│   └── segment-NNN.jsonl      # Subsequent segments, hash-linked.
-├── keys/
-│   ├── authority.key          # Ed25519 private; mode 0600.
-│   ├── quality.key            # Ed25519 private; mode 0600.
-│   └── verifier_token.key     # HMAC seed; mode 0600.
-├── providers/                 # Per-provider credentials (mode 0600).
-├── credentials/               # Per-credential bytes (mode 0600).
-├── worktrees/                 # Per-session worktrees (kernel-managed).
-├── witness/                   # Content-addressed witness blobs.
-├── runtime/
-│   ├── heartbeat.json         # Live kernel state for `raxis status`.
-│   ├── gateway.log            # Gateway subprocess stdout/stderr.
-│   └── credential-proxy-*.log # Per-proxy logs.
-├── notifications/
-│   └── inbox.jsonl            # `shell` notification channel.
-└── sockets/
-    ├── operator.sock          # Operator IPC; CLI connects here.
-    └── kernel.sock             # Verifier IPC; verifiers connect here.
+```mermaid
+flowchart TD
+    root["$RAXIS_DATA_DIR/"]
+    root --> db["kernel.db<br/>SQLite store: tasks, sessions, plan bundles"]
+    root --> auth["auth/<br/>dashboard_jwt.secret when the dashboard is enabled"]
+    root --> artifacts["artifacts/<br/>immutable content-addressed policy/plan/cert bytes"]
+    root --> policy["policy/<br/>policy.toml + policy.sig"]
+    root --> audit["audit/<br/>segment-000.jsonl and hash-linked later segments"]
+    root --> keys["keys/<br/>authority, quality, verifier-token, and operator cert artifacts"]
+    root --> oci["oci-cache/<br/>pre-populated canonical image cache"]
+    root --> providers["providers/<br/>per-provider credentials, mode 0600"]
+    root --> credentials["credentials/<br/>per-credential bytes, mode 0600"]
+    root --> repositories["repositories/<br/>host-side main clone root"]
+    root --> revocations["revocations/<br/>operator-cert revocation records, when present"]
+    root --> runtime["runtime/<br/>heartbeat.json, gateway.log, credential-proxy logs"]
+    root --> notifications["notifications/<br/>inbox.jsonl for shell notifications"]
+    root --> sessions["session-capture/<br/>post-mortem session records"]
+    root --> sockets["sockets/<br/>operator.sock and kernel.sock"]
+    root --> streams["streams/<br/>per-session activity stream capture"]
+    root --> transfer["transfer/<br/>worktree staging root"]
+    root --> witness["witness/<br/>content-addressed witness blobs"]
+    root --> snapshots["worktree-snapshots/<br/>content-addressed worktree snapshots"]
+    root --> worktrees["worktrees/<br/>kernel-managed per-session checkouts"]
 ```
 
 `kernel.db` is the **only** SQLite file. The kernel uses WAL mode

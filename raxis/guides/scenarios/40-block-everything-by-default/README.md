@@ -85,11 +85,11 @@ raxis initiative show "$INIT_ID" --with-tasks
 
 # 2. The audit chain has one or more EgressDenied rows.
 raxis log "$INIT_ID" --kind EgressDenied --json \
-  | jq '.[] | {host: .payload.target_host, port: .payload.target_port, reason: .payload.reason}'
+  | jq -c '{host: .payload.target_host, port: .payload.target_port, reason: .payload.reason}'
 # { "host": "1.1.1.1", "port": 443, "reason": "no allowlist entry" }
 
 # 3. *Zero* EgressAdmitted rows.
-raxis log "$INIT_ID" --kind EgressAdmitted --json | jq length
+raxis log "$INIT_ID" --kind EgressAdmitted --json | wc -l
 # 0
 
 # 4. The inference traffic to Anthropic *did* succeed — it goes
