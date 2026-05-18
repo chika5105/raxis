@@ -153,6 +153,13 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         return run_rotate(flags, &family);
     }
 
+    if operator_cert_path.is_none() {
+        operator_cert_path = std::env::var_os("RAXIS_OPERATOR_CERT").map(PathBuf::from);
+    }
+    if operator_key_path.is_none() {
+        operator_key_path = flags.operator_key_path.clone();
+    }
+
     // Mutually-exclusive: --operator-cert and --operator-key never
     // appear together. Each represents a distinct operator-identity
     // origin (one says "I minted this off-machine"; the other says
@@ -1643,6 +1650,30 @@ mod run_genesis_e2e {
                 }
             }
         }
+    }
+
+    #[test]
+    fn run_uses_global_operator_key_path_when_local_flag_is_absent() {
+        let (tmp, mut flags) = fresh_flags();
+        let (sk, _pk_hex) = fixed_operator();
+        let key_path = tmp.path().join("operator.key");
+        std::fs::write(&key_path, hex::encode(sk.to_bytes())).unwrap();
+        flags.operator_key_path = Some(key_path);
+
+        run(&flags, &["--operator-name".to_owned(), "Chika".to_owned()])
+            .expect("global --operator-key / RAXIS_OPERATOR_KEY fallback must work");
+
+        let keys_dir = tmp.path().join("keys");
+        assert!(
+            keys_dir.read_dir().unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".cert.toml")
+            }),
+            "genesis should persist the operator cert when the key came from GlobalFlags",
+        );
     }
 
     #[test]

@@ -49,7 +49,7 @@ if [ ! -e "$ROOTFS/usr/local/bin/ruff" ]; then
     echo "verify: missing /usr/local/bin/ruff (Python lint toolchain) — \
 INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01 VIOLATED. Remediation: \
 re-bake the executor-starter rootfs via \`cargo xtask images \
-bake-rootfs --role executor-starter\` against the current \
+bake --role executor-starter\` against the current \
 Containerfile, which pins ruff==$RUFF_PINNED_VERSION." >&2
     exit 1
 fi
@@ -101,7 +101,7 @@ if [ -z "$RUFF_DIST_GLOB" ]; then
 any python3 site-packages root in $ROOTFS — \
 INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01 VIOLATED. Remediation: \
 re-bake the executor-starter rootfs via \`cargo xtask images \
-bake-rootfs --role executor-starter\`; the Containerfile pins \
+bake --role executor-starter\`; the Containerfile pins \
 ruff==$RUFF_PINNED_VERSION via pip3 --break-system-packages." >&2
     exit 1
 fi

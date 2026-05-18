@@ -33,7 +33,7 @@ sha2          = { workspace = true }
 # pinned so xtask uses the same rust-backed codec as the initramfs
 # builder.
 flate2        = { workspace = true }
-# `cargo xtask images dev-stage` + `build-all` consume the typed
+# `cargo xtask images bake` consumes the typed
 # manifest builder + initramfs writer to produce the macOS-hermetic
 # dev pipeline output (signed initramfs cpio.gz blobs under
 # `$RAXIS_INSTALL_DIR/images/`). Workspace-paths so xtask never falls

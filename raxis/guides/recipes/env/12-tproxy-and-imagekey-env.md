@@ -98,22 +98,28 @@ signature; the kernel verifies the signature at pull time.
 ### Effect
 
 These are **build-time** variables that the canonical-images crate
-uses to seal a fixed signing key into the binary. They are not
-runtime-configurable. The kernel verifies operator-published
-images against this key (when matching the operator-side
-signature scheme).
+uses to seal the image-manifest verifying key into the host
+`raxis-kernel` binary. They are not runtime-configurable. The
+kernel verifies canonical image manifests against this key.
 
 | Variable | Format | Effect |
 |---|---|---|
-| `RAXIS_KERNEL_SIGNING_KEY_HEX` | 64 lowercase hex chars | The full 32-byte Ed25519 seed inline. Used by canonical-image builds. |
-| `RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH` | path | Absolute path to a 32-byte raw key file. Alternative to inline hex. |
+| `RAXIS_KERNEL_SIGNING_KEY_HEX` | 64 lowercase hex chars | The 32-byte Ed25519 public/verifying key inline. Preferred for CI and release builds. |
+| `RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH` | path | Absolute path to a 32-byte raw public-key file. Alternative to inline hex. |
 
-If neither is set at build time, the canonical-images crate falls
-back to an embedded developer key — usable for `cargo build` but
-NOT for production images.
+If neither is set at build time, release builds embed the all-zero
+fail-loud placeholder and dev/test builds auto-mint the per-clone
+key at `.git/info/raxis-signing-key/{sk.hex,pk.hex}`.
 
-These are kernel-build-team workflow vars; you don't set them as
-an operator.
+Normal local development usually does not set these directly:
+`cargo xtask images bake` creates the per-clone key and the host
+daemon rebuild can pin it explicitly:
+
+```bash
+RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat .git/info/raxis-signing-key/pk.hex)" \
+  cargo build --release -p raxis-kernel
+cargo xtask images verify-trust-anchor --kernel target/release/raxis-kernel
+```
 
 ---
 

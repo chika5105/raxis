@@ -224,8 +224,8 @@ fn inv_executor_image_lint_toolchain_python_01_missing_cli_shim_fails_closed() {
         "remediation must name the missing path: {out}",
     );
     assert!(
-        out.contains("bake-rootfs --role executor-starter"),
-        "remediation must name the bake-rootfs command: {out}",
+        out.contains("images bake --role executor-starter"),
+        "remediation must name the images bake command: {out}",
     );
 }
 

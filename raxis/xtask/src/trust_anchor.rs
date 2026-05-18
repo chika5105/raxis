@@ -463,9 +463,11 @@ pub fn verify_kernel_binary_at_path(kernel_path: &Path, expected_pk_hex: &str) -
                  fingerprint (32 bytes derived from pk_hex={}). The kernel was \
                  built against a different RAXIS_KERNEL_SIGNING_KEY_HEX, or the \
                  env var was unset and the build script fell through to the \
-                 placeholder arm. Remediation: re-run `cargo xtask images bake` \
-                 to rebuild the kernel with the correct trust anchor injected \
-                 into every cargo subprocess.",
+                 placeholder arm. Remediation: run `cargo xtask images bake` \
+                 to mint/resolve the per-clone signing key, rebuild the host \
+                 binary with the same key (`cargo build --release -p \
+                 raxis-kernel`), then re-run `cargo xtask images \
+                 verify-trust-anchor --kernel <path-to-raxis-kernel>`.",
                 kernel_path.display(),
                 expected_pk_hex,
             )
@@ -477,9 +479,12 @@ pub fn verify_kernel_binary_at_path(kernel_path: &Path, expected_pk_hex: &str) -
                  (EXPECTED_KERNEL_SIGNING_KEY_BYTES = [0; 32]) and does NOT \
                  contain the expected fingerprint for pk_hex={}. The kernel \
                  would abort at boot with FATAL trust_anchor_unpopulated \
-                 (INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01). Remediation: re-run \
-                 `cargo xtask images bake` so the bake's signing-key injection \
-                 propagates RAXIS_KERNEL_SIGNING_KEY_HEX into the kernel build.",
+                 (INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01). Remediation: run \
+                 `cargo xtask images bake` to mint/resolve the per-clone \
+                 signing key, rebuild the host binary with the same key \
+                 (`cargo build --release -p raxis-kernel`), then re-run \
+                 `cargo xtask images verify-trust-anchor --kernel \
+                 <path-to-raxis-kernel>`.",
                 kernel_path.display(),
                 expected_pk_hex,
             )

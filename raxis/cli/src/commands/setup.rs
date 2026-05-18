@@ -10,7 +10,8 @@
 //
 // V2.3 MVP scope
 // ──────────────
-// V2 ships a **non-interactive scaffolding** flow that:
+// V2 ships a scriptable scaffolding flow that can also prompt for
+// the handful of first-run values when invoked from a real terminal:
 //   1. Creates the `<data_dir>` skeleton (`runtime/`, `audit/`,
 //      `keys/`, `providers/`, `policy/`, `sockets/`,
 //      `revocations/`).
@@ -33,10 +34,9 @@
 //
 // What is intentionally **deferred to V3**:
 //   * Phase 1 (key ceremony) — V2 stops short of running
-//     `raxis genesis` automatically because that command needs
-//     either an air-gapped operator cert (`--operator-cert`) or
-//     an interactive paste flow (`--operator-key`) that requires
-//     a TTY abstraction the wizard does not yet have.
+//     `raxis genesis` automatically because it consumes private
+//     operator key material or an air-gapped cert. The wizard prints
+//     the exact command instead.
 //   * Phase 4 (VM image OCI-digest picking) — depends on a
 //     registry-list fetch path that V2 does not ship.
 //   * Phase 5 (credential proxy setup) — declarative-only in V2
@@ -45,14 +45,14 @@
 //     empty `[[tproxy_allowlist]]` and the operator pastes the
 //     hosts they need.
 //   * Phase 9 (`raxis submit plan --dry-run`) — handler is V3
-//     (no `DryRunAdmit` IPC type yet, see ).
+//     (no `DryRunAdmit` IPC type yet).
 //   * Phase 10 (first launch) — operator runs
 //     `raxis submit plan` manually after the cert ceremony.
 // Design constraints honoured by the V2 MVP
 // ──────────────────────────────────────────
-//   * **Non-interactive only.** Every input is a flag — no TTY
-//     dependency, no `dialoguer`/`inquire` deps, fully scriptable
-//     for CI smoke tests.
+//   * **Scriptable by default.** Every prompt has an equivalent flag,
+//     and non-TTY invocations still fail with usage text rather than
+//     blocking on stdin.
 //   * **Idempotent re-entry.** `<data_dir>/.setup_state.json`
 //     records which phases completed; a re-run skips them
 //     unless `--force` is passed. Crash mid-Phase-2? Re-run
@@ -68,7 +68,7 @@
 //     re-run later when verifying config drift.
 
 use std::fs;
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -206,12 +206,14 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let mut initiative_name: Option<String> = None;
     let mut skip_phases: Vec<String> = Vec::new();
     let mut only_phase: Option<String> = None;
+    let mut interactive = false;
 
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
         match a {
             "--force" => force = true,
+            "--interactive" => interactive = true,
             "--operator-name" => {
                 operator_name = Some(req(args, &mut i, a)?);
             }
@@ -259,10 +261,37 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         i += 1;
     }
 
+    let can_prompt = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if interactive && !can_prompt {
+        return Err(CliError::Usage(
+            "raxis setup --interactive requires a terminal; pass flags instead".into(),
+        ));
+    }
+    let auto_prompt = operator_name.is_none() && can_prompt;
+    let prompt_mode = interactive || auto_prompt;
+    if prompt_mode {
+        if operator_name.is_none() {
+            operator_name = Some(prompt_required("Operator display name")?);
+        }
+        if provider.is_none() {
+            provider = Some(prompt_default("Provider", "anthropic")?);
+        }
+        if provider_id.is_none() {
+            let default_id = format!("{}-default", provider.as_deref().unwrap_or("anthropic"));
+            provider_id = Some(prompt_default("Provider id", &default_id)?);
+        }
+        budget_usd = prompt_u32_default("Default initiative budget USD", budget_usd)?;
+        max_concurrency = prompt_u32_default("Max concurrent VMs", max_concurrency)?;
+        if max_concurrency == 0 {
+            return Err(CliError::Usage("--max-concurrency must be > 0".into()));
+        }
+    }
+
     let operator_name = operator_name.ok_or_else(|| {
         CliError::Usage(
             "--operator-name <text> is required (the human-readable label that \
-             identifies the operator in policy.toml + audit events)"
+             identifies the operator in policy.toml + audit events). Run \
+             `raxis setup --interactive` to be prompted."
                 .into(),
         )
     })?;
@@ -300,7 +329,14 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     }
     state.params_fingerprint = Some(new_fp);
 
-    println!("raxis setup — non-interactive scaffolding");
+    println!(
+        "raxis setup — {} scaffolding",
+        if prompt_mode {
+            "interactive"
+        } else {
+            "scripted"
+        }
+    );
     println!("  data-dir:        {}", data_dir.display());
     println!("  operator-name:   {operator_name}");
     println!("  provider:        {provider}  (id: {provider_id})");
@@ -316,15 +352,18 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         !skip_phases.iter().any(|s| s == ph.label())
     };
 
-    // Phase 1: Key ceremony — DEFERRED. Print the recipe.
+    // Phase 1: Key ceremony — explicit operator action. Print the recipe.
     if want_phase(Phase::KeyCeremony) {
         if state.is_done(Phase::KeyCeremony) && !force {
             println!("[1/8] key_ceremony      — already completed, skipping (--force to re-run)");
         } else {
-            println!("[1/8] key_ceremony      — DEFERRED (V3): run manually:");
-            println!("       1) raxis cert mint --operator-name {operator_name:?} --output operator.cert.toml");
-            println!("       2) raxis genesis --operator-cert ./operator.cert.toml");
-            println!("      The wizard will resume at Phase 2 once those two commands return Ok.");
+            println!("[1/8] key_ceremony      — run manually:");
+            println!("       export RAXIS_OPERATOR_KEY=/path/to/operator_private.pem");
+            println!(
+                "       raxis genesis --operator-key \"$RAXIS_OPERATOR_KEY\" --operator-name {operator_name:?} --data-dir {}",
+                data_dir.display()
+            );
+            println!("       Air-gapped: mint a cert offline with `raxis cert mint --key ... --display-name ... --ops ... --out operator.cert.toml`, then run `raxis genesis --operator-cert operator.cert.toml`.");
         }
     }
 
@@ -362,9 +401,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // Phases 3, 4, 5, 7 are explicitly deferred — print the recipe.
     if want_phase(Phase::ProviderCreds) {
         println!("[3/8] provider_creds    — DEFERRED (V3): run manually:");
-        println!(
-            "       raxis credential add --name {provider}-api-key --file ./{provider}-key.txt"
-        );
+        println!("       raxis credential add {provider}-api-key --file ./{provider}-key.txt");
     }
     if want_phase(Phase::VmImages) {
         println!("[4/8] vm_images         — DEFERRED (V3): edit policy.toml [[vm_images]] with OCI digests");
@@ -421,17 +458,17 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // Phases 9, 10 — V3 deferrals.
     println!();
     println!("Next steps to bring the kernel online:");
-    println!("  1. raxis cert mint --operator-name {operator_name:?} --output operator.cert.toml");
+    println!("  1. export RAXIS_OPERATOR_KEY=/path/to/operator_private.pem");
     println!(
-        "  2. raxis genesis --operator-cert ./operator.cert.toml --data-dir {}",
+        "  2. raxis genesis --operator-key \"$RAXIS_OPERATOR_KEY\" --operator-name {operator_name:?} --data-dir {}",
         data_dir.display()
     );
     println!("  3. Edit {}/policy/policy.toml — fill in [[vm_images]] OCI digests + [[tproxy_allowlist]]", data_dir.display());
     println!(
-        "  4. raxis policy sign --policy {}/policy/policy.toml",
+        "  4. raxis policy sign {}/policy/policy.toml --key \"$RAXIS_OPERATOR_KEY\"",
         data_dir.display()
     );
-    println!("  5. raxis credential add --name {provider}-api-key --file ./{provider}-key.txt");
+    println!("  5. raxis credential add {provider}-api-key --file ./{provider}-key.txt");
     println!("  6. raxis doctor --data-dir {}", data_dir.display());
     println!(
         "  7. Start the kernel binary, then `raxis submit plan {}/plan/plan.toml`",
@@ -448,6 +485,53 @@ fn req(args: &[String], i: &mut usize, flag: &str) -> Result<String, CliError> {
         .clone();
     *i += 1;
     Ok(v)
+}
+
+fn prompt_required(label: &str) -> Result<String, CliError> {
+    loop {
+        let v = prompt_line(&format!("{label}: "))?;
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_owned());
+        }
+        eprintln!("{label} is required.");
+    }
+}
+
+fn prompt_default(label: &str, default: &str) -> Result<String, CliError> {
+    let v = prompt_line(&format!("{label} [{default}]: "))?;
+    let trimmed = v.trim();
+    if trimmed.is_empty() {
+        Ok(default.to_owned())
+    } else {
+        Ok(trimmed.to_owned())
+    }
+}
+
+fn prompt_u32_default(label: &str, default: u32) -> Result<u32, CliError> {
+    loop {
+        let raw = prompt_default(label, &default.to_string())?;
+        match raw.parse::<u32>() {
+            Ok(v) => return Ok(v),
+            Err(_) => eprintln!("{label} must be an integer."),
+        }
+    }
+}
+
+fn prompt_line(prompt: &str) -> Result<String, CliError> {
+    print!("{prompt}");
+    std::io::stdout().flush().map_err(|e| CliError::Io {
+        path: "stdout".to_owned(),
+        source: e,
+    })?;
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| CliError::Io {
+            path: "stdin".to_owned(),
+            source: e,
+        })?;
+    Ok(line)
 }
 
 fn params_fingerprint(
@@ -472,20 +556,20 @@ fn params_fingerprint(
 }
 
 fn print_usage() {
-    println!("Usage: raxis setup --operator-name <text>");
+    println!("Usage: raxis setup [--interactive]");
+    println!("       raxis setup --operator-name <text>");
     println!("                   [--provider <name>] [--provider-id <id>]");
     println!("                   [--budget-usd <int>] [--max-concurrency <int>]");
     println!("                   [--plan-template <name>] [--initiative-name <text>]");
     println!("                   [--skip-phase <label>] [--only-phase <label>]");
     println!("                   [--force]");
     println!();
-    println!("Non-interactive first-run scaffolding. Creates the data-dir");
-    println!("skeleton, a starter policy.toml, and a starter plan.toml.");
-    println!("Phases the wizard runs in V2: 2 (policy_authoring), 6");
-    println!("(plan_template). Phases 1, 3, 4, 5, 7, 8, 9, 10 are printed");
-    println!("as recipes the operator runs by hand. See");
-    println!("`specs/v2/operator-ergonomics.md §16` and");
-    println!(" for the full phase catalogue.");
+    println!("First-run scaffolding. Creates the data-dir skeleton, a starter");
+    println!("policy.toml, and a starter plan.toml. In a terminal, missing");
+    println!("operator details are prompted; in scripts, pass flags explicitly.");
+    println!("Phase 1 prints the exact genesis command instead of touching your");
+    println!("operator private key automatically.");
+    println!("See specs/v2/operator-ergonomics.md §16.");
 }
 
 // ---------------------------------------------------------------------------
@@ -532,7 +616,7 @@ kind        = {provider_kind:?}
 # "gpt-4o-2024-08-06") before signing the policy.
 model       = "TODO-pin-a-released-model-id"
 # `credential_name` is the key the kernel will pull from the
-# credential store (`raxis credential add --name <this>`).
+# credential store (`raxis credential add <this>`).
 credential_name = "{provider_kind}-api-key"
 
 # ──────────────────────────────────────────────────────────────────────

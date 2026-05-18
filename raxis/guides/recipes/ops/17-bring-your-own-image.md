@@ -122,14 +122,12 @@ docker export "$container" \
 docker rm "$container"
 
 # Convert to the on-disk shape the substrate boots from.
-# (Production: use `raxis xtask images bake-rootfs` per
-#  release-and-distribution.md §4.2; for one-off development you
-#  can skip the EROFS conversion and stage the tar directly.)
+# (Production canonical images now use `cargo xtask images bake`;
+#  for one-off BYOI development you can stage the tar directly.)
 ```
 
-For the actual production build pipeline, see
-`xtask/src/images.rs::bake_rootfs` and
-`specs/v2/release-and-distribution.md §4.2`. The end-to-end test
+For the actual production build pipeline, see `cargo xtask images
+bake` and `specs/v2/release-and-distribution.md §4.2`. The end-to-end test
 harness at
 `kernel/tests/extended_e2e_support/byo_image.rs::bake_byo_executor_image_full`
 demonstrates the same flow programmatically.

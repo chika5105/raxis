@@ -201,7 +201,7 @@ guides/recipes/
 | 02 | [`raxis-operator-key`](env/02-raxis-operator-key.md) | `RAXIS_OPERATOR_KEY` |
 | 03 | [`raxis-operator-cert`](env/03-raxis-operator-cert.md) | `RAXIS_OPERATOR_CERT` |
 | 04 | [`raxis-log-format`](env/04-raxis-log-format.md) | `RAXIS_LOG_FORMAT` |
-| 05 | [`raxis-force-and-bootstrap`](env/05-raxis-force-and-bootstrap.md) | `RAXIS_FORCE`, `RAXIS_BOOTSTRAP` |
+| 05 | [`genesis-force-and-bootstrap`](env/05-raxis-force-and-bootstrap.md) | `--force`, `RAXIS_BOOTSTRAP` |
 | 06 | [`raxis-install-dir`](env/06-raxis-install-dir.md) | `RAXIS_INSTALL_DIR` |
 | 07 | [`raxis-vcs-timeout`](env/07-raxis-vcs-timeout.md) | `RAXIS_VCS_TIMEOUT_SECS` |
 | 08 | [`raxis-kernel-binary`](env/08-raxis-kernel-binary.md) | `RAXIS_KERNEL_BINARY` |

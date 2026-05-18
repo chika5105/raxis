@@ -21,7 +21,7 @@ zstd_version      = "1.5.5"
 
 # `image_format` selects the on-disk shape of the rootfs blob this
 # build emits. Defaults to `RootfsErofs` (production canonical) when
-# absent; `cargo xtask images build-all` overrides this to
+# absent; `cargo xtask images bake` overrides this to
 # `RootfsInitramfsCpio` for the macOS-hermetic dev pipeline regardless
 # of what's written here. Operators running the production EROFS path
 # leave this at `RootfsErofs` (or omit it entirely).

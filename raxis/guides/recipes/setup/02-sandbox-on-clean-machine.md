@@ -210,7 +210,7 @@ rm -rf "$HOME/raxis-keys"   # only if you also want the keypair gone
 | `RAXIS_DATA_DIR` | Step 2 | Root of every kernel state file. Default `~/.raxis`. |
 | `RAXIS_OPERATOR_KEY` | Step 3 | Path to the operator's Ed25519 PEM. Read by every signing CLI when `--operator-key` isn't passed. **Holds a path, never key bytes.** |
 | `RAXIS_LOG_FORMAT` | (unset) | Set to `json` to switch the kernel's stderr to single-line JSON; otherwise human-readable. |
-| `RAXIS_FORCE` | (unset) | If set, `raxis genesis` will overwrite an existing data dir (DANGEROUS — irreversible). |
+| `--force` | command flag | Explicit destructive re-genesis for throwaway dev installs. Do not use on production state without archiving first. |
 
 ---
 

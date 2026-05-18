@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # `vsock-transport` is enabled here so a binary built for the canonical
 # orchestrator-core image (cross-compiled to Linux musl by
-# `cargo xtask images dev-stage --role orchestrator`) speaks AF_VSOCK
+# `cargo xtask images bake --role orchestrator`) speaks AF_VSOCK
 # to the kernel host as required by `planner-harness.md §14.5`.
 # Builds on macOS / Windows still link successfully because the inner
 # `tokio-vsock` dep is itself feature-gated to Linux at the upstream

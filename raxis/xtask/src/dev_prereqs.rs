@@ -32,7 +32,7 @@
 //!          tested-against version.
 //!   3. **Rustup target** — verifies (and, when `--install` is
 //!      passed, adds) the `<host-arch>-unknown-linux-musl` target
-//!      so `cargo xtask images dev-stage` can cross-compile.
+//!      so `cargo xtask images bake` can cross-compile.
 //!   4. **Cargo linker config** — reads the operator's
 //!      `~/.cargo/config.toml` (or workspace `.cargo/config.toml`,
 //!      per `--scope`) and patches in the

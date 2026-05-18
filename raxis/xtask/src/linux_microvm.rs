@@ -7,32 +7,26 @@
 //! who has just provisioned a Linux dev box can go from
 //! "freshly cloned repo" → "every artefact `raxis-isolation-firecracker`
 //! needs at boot is in place" with a single invocation, instead of
-//! discovering the four-step `images dev-kernel` / `images dev-stage`
-//! / `images build-all` recipe and the per-arch reference-kernel URL
-//! / SHA-256 pin themselves.
+//! discovering the old multi-step image staging recipe and the
+//! per-arch reference-kernel URL / SHA-256 pin themselves.
 //!
 //! ## What this command does
 //!
 //! 1. Fetch the Firecracker-published reference vmlinux for the host
 //!    arch (or accept `--from-file` for air-gapped operators) and
 //!    install it to `<install_dir>/kernel/vmlinux` via the existing
-//!    `cargo xtask images dev-kernel` machinery (no logic dup —
-//!    we re-call its public entry point).
+//!    `cargo xtask images dev-kernel` machinery.
 //! 2. For each canonical role (orchestrator, reviewer,
-//!    executor-starter), invoke `cargo xtask images dev-stage --role
-//!    <role>` to cross-compile the planner agent into the staging
-//!    layout that `build-all` expects.
-//! 3. Invoke `cargo xtask images build-all` to pack each staged
-//!    rootfs into a signed cpio.gz initramfs at
+//!    executor-starter), run the same internal staging path used by
+//!    `cargo xtask images bake` to cross-compile the planner agent.
+//! 3. Pack each staged rootfs into a signed cpio.gz initramfs at
 //!    `<install_dir>/images/raxis-<role>-core-<kver>.{img,manifest.toml}`.
 //! 4. Emit a one-line JSON summary listing every artefact installed
 //!    and the SHA-256 of the kernel binary so an operator can grep
 //!    the audit chain for the bundle they just produced.
 //!
-//! Each step is **delegated** to the existing xtask subcommands —
-//! this module owns no image-building logic of its own. That keeps
-//! `xtask/src/images.rs` (Worker B's surface) the single source of
-//! truth for the staging recipe.
+//! Each step is delegated to `xtask/src/images.rs`; this module owns
+//! no image-building logic of its own.
 //!
 //! ## Reference kernel pin
 //!
@@ -363,8 +357,8 @@ fn print_help() {
          One-shot orchestrator: stages the Firecracker reference kernel,\n\
          cross-compiles each canonical planner role, and packs each staged\n\
          rootfs into a signed cpio.gz initramfs under <install_dir>/.\n\
-         Delegates to existing `images dev-kernel`, `images dev-stage`,\n\
-         and `images build-all` subcommands — no recipe dup.\n\
+         Delegates to the same internal image stages that power\n\
+         `cargo xtask images bake` — no recipe dup.\n\
          \n\
          Defaults:\n  \
          --install-dir   $RAXIS_INSTALL_DIR (or /usr/local/lib/raxis)\n  \
@@ -513,8 +507,9 @@ fn install_kernel(args: &BundleArgs) -> Result<()> {
 }
 
 /// Step 2 (per role) — cross-compile the planner agent and stage it
-/// at `images/<role>-core/rootfs/init`. Delegates to `images
-/// dev-stage` so the recipe is single-source.
+/// at `images/<role>-core/rootfs/init`. Delegates to the internal
+/// staging function used by `images bake` so the recipe is
+/// single-source.
 fn stage_role(args: &BundleArgs, role: Role) -> Result<()> {
     let mut argv: Vec<String> = vec!["--role".to_owned(), role.cli_name().to_owned()];
     if let Some(triple) = &args.cargo_target {
@@ -529,11 +524,8 @@ fn stage_role(args: &BundleArgs, role: Role) -> Result<()> {
 }
 
 /// Step 3 — pack each staged rootfs into a signed cpio.gz initramfs
-/// under `<install_dir>/images/`. We always run `build-all` without
-/// the `--role` filter so the operator gets a complete bundle; if
-/// they restricted via `--role`, only those rootfs subdirs are
-/// populated and `build-all` skips the rest by dint of empty
-/// staging dirs (per `images.rs` semantics).
+/// under `<install_dir>/images/`. We forward the role filter so the
+/// packer only signs the roles requested by the operator.
 fn pack_initramfs(args: &BundleArgs) -> Result<()> {
     let mut argv: Vec<String> = vec![
         "--install-dir".to_owned(),

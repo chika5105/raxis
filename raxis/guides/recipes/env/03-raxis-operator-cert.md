@@ -64,6 +64,7 @@ without ever seeing the private bytes.
 raxis cert mint \
   --key operator_private.pem \
   --display-name alice \
+  --ops "CreateInitiative,ApprovePlan,RejectPlan,CreateSession,RevokeSession,GrantDelegation,RetryTask,ResumeTask,AbortTask,AbortInitiative,ApproveEscalation,DenyEscalation,RotateEpoch,QuarantineInitiative,QuarantinePlansBy" \
   --validity-days 365 \
   --out operator.cert.toml
 
@@ -107,7 +108,7 @@ The same private PEM continues to live at the path under
 | Variable / command | Relationship |
 |---|---|
 | `RAXIS_OPERATOR_KEY` | Used by every signing CLI **after** genesis. The cert path env var is genesis-only. |
-| `raxis cert mint --key <pem> --display-name <name> --out <cert>` | Produces the file `RAXIS_OPERATOR_CERT` references. |
+| `raxis cert mint --key <pem> --display-name <name> --ops <csv> --out <cert>` | Produces the file `RAXIS_OPERATOR_CERT` references. |
 | `raxis cert show <path>` | Inspect a cert before trusting it. |
 | `raxis cert verify <path>` | Cryptographic self-signature check. |
 | `--operator-cert <path>` (genesis flag) | Always wins over the env var. |

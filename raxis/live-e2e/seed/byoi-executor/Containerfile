@@ -4,8 +4,8 @@
 # canonical RAXIS Executor image. The canonical image
 # (`raxis/images/executor-starter/Containerfile`) ships Python 3.11
 # + Node 20 + Rust + Go + GitHub CLI + ripgrep/fd; it is built by
-# the `cargo xtask images bake-rootfs --role executor-starter`
-# pipeline and signed by the kernel release.
+# `cargo xtask images bake --role executor-starter` and signed by
+# the kernel release.
 #
 # This file demonstrates the OPERATOR-FACING workflow for declaring
 # a custom Executor image via `policy.toml [[vm_images]]`:

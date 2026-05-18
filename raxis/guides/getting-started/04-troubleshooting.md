@@ -92,7 +92,11 @@ rm -rf "$RAXIS_DATA_DIR"
 raxis genesis --operator-key "$RAXIS_OPERATOR_KEY" --operator-name "$USER"
 ```
 
-Or set `RAXIS_FORCE=1` to skip the rm step.
+Or pass `--force` to make the destructive reset explicit:
+
+```bash
+raxis genesis --force --operator-key "$RAXIS_OPERATOR_KEY" --operator-name "$USER"
+```
 
 If you are coming back to an existing install, do **not** re-run
 genesis. Confirm it instead:

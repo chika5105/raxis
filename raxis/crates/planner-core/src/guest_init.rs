@@ -5,7 +5,7 @@
 //!
 //! Under the AVF and Firecracker substrates the canonical image is
 //! a `cpio.gz` initramfs whose `/init` entry **is** the planner
-//! binary (per `cargo xtask images dev-stage`). The Linux kernel
+//! binary (per `cargo xtask images bake`). The Linux kernel
 //! `execve(/init)` after unpacking the initramfs into rootfs and
 //! does **not** mount `/proc`, `/sys`, or `/dev` — that is the
 //! responsibility of `/init` itself, which on a typical
@@ -102,7 +102,7 @@ mod linux {
 
     /// Mount the canonical filesystems and ensure the target
     /// directories exist (initramfs may not include them by
-    /// default; `cargo xtask images dev-stage` creates them but a
+    /// default; `cargo xtask images bake` creates them but a
     /// hand-rolled rootfs may not).
     pub(super) fn mount_pid1_essentials() {
         for plan in PLAN {
@@ -703,7 +703,7 @@ pub fn init_pid1_a3_egress() {
 /// in-VM agent's `bash -lc "cat <path>"` returns an empty file
 /// instead of the planner executable. The list is comprehensive
 /// rather than minimal because the canonical image builder
-/// (`cargo xtask images dev-stage`) emits a copy at `/init` AND a
+/// (`cargo xtask images bake`) emits a copy at `/init` AND a
 /// PATH-resolvable copy under `/usr/local/bin/` — masking only one
 /// would leave the other readable.
 pub const PLANNER_BINARY_PATHS_TO_MASK: &[&str] = &[

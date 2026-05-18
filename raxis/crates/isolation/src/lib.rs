@@ -84,7 +84,7 @@ pub enum ImageKind {
     ///      using only `std::io`, `flate2`, and `sha2`. No
     ///      Linux-only filesystem tooling is required, so a
     ///      macOS developer can build the canonical images via
-    ///      `cargo xtask images build-all` without Docker or a
+    ///      `cargo xtask images bake` without Docker or a
     ///      Linux VM.
     ///   2. **Same trust anchor.** The image-builder hashes the
     ///      cpio.gz bytes through SHA-256 and signs the manifest

@@ -11,7 +11,7 @@
 //!       `raxis.isolation.spawn.*` histogram family. Default backend
 //!       is `subprocess` because it is hermetic across CI hosts;
 //!       set `--backend apple-vz` on macOS where the AVF prerequisites
-//!       (`cargo xtask dev-prereqs`, `cargo xtask images dev-stage`)
+//!       (`cargo xtask dev-prereqs`, `cargo xtask images bake`)
 //!       have been satisfied.
 //!
 //! * `audit-throughput [--iterations N]`
@@ -207,7 +207,7 @@ fn run_vm_cold_boot(tail: &[String]) -> Result<()> {
             anyhow::bail!(
                 "apple-vz backend not yet wired into perf harness; \
                  stage the AVF prerequisites (`cargo xtask dev-prereqs`, \
-                 `cargo xtask images dev-stage`) and the V3.1 patch will \
+                 `cargo xtask images bake`) and the V3.1 patch will \
                  expose the substrate here. For now use --backend subprocess."
             );
         }
