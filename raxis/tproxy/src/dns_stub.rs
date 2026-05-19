@@ -321,7 +321,6 @@ fn build_servfail_response(q: &ParsedQuery) -> Vec<u8> {
     out.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
     out.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
     out.extend_from_slice(&q.qname_wire);
-    out.push(0);
     out.extend_from_slice(&q.qtype.to_be_bytes());
     out.extend_from_slice(&q.qclass.to_be_bytes());
     out
@@ -488,7 +487,6 @@ fn build_response(q: &ParsedQuery, addrs: &[IpAddr], nxdomain: bool, ttl_secs: u
     out.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
                                                 // Echo the question section verbatim.
     out.extend_from_slice(&q.qname_wire);
-    out.push(0); // null terminator we stripped during parsing
     out.extend_from_slice(&q.qtype.to_be_bytes());
     out.extend_from_slice(&q.qclass.to_be_bytes());
     // Append one RR per address.
@@ -571,6 +569,22 @@ mod tests {
         buf
     }
 
+    fn assert_question_echoed_without_extra_zero(query: &[u8], response: &[u8]) -> usize {
+        let expected_question = &query[12..];
+        let end = 12 + expected_question.len();
+        assert!(
+            response.len() >= end,
+            "response shorter than echoed question: response_len={} expected_question_end={end}",
+            response.len(),
+        );
+        assert_eq!(
+            &response[12..end],
+            expected_question,
+            "question section must be echoed exactly once"
+        );
+        end
+    }
+
     #[test]
     fn parse_query_round_trips_qname() {
         let q = encode_query_for("api.example.com", QTYPE_A);
@@ -614,6 +628,8 @@ mod tests {
         assert_eq!(flags & 0x8000, 0x8000, "QR bit set");
         assert_eq!(flags & 0x000F, 0, "NOERROR rcode");
         assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 1, "ANCOUNT=1");
+        let answer_start = assert_question_echoed_without_extra_zero(&q, &resp);
+        assert_eq!(&resp[answer_start..answer_start + 2], &[0xC0, 0x0C]);
         // Last 4 bytes = the IPv4 address.
         assert_eq!(&resp[resp.len() - 4..], &[1, 2, 3, 4]);
     }
@@ -626,6 +642,12 @@ mod tests {
         let flags = u16::from_be_bytes([resp[2], resp[3]]);
         assert_eq!(flags & 0x000F, 0, "NOERROR rcode");
         assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 0, "ANCOUNT=0");
+        let end = assert_question_echoed_without_extra_zero(&q, &resp);
+        assert_eq!(
+            resp.len(),
+            end,
+            "NODATA response has no extra question bytes"
+        );
     }
 
     #[test]
@@ -636,6 +658,12 @@ mod tests {
         let flags = u16::from_be_bytes([resp[2], resp[3]]);
         assert_eq!(flags & 0x000F, 0, "empty AAAA must not be NXDOMAIN");
         assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 0, "ANCOUNT=0");
+        let end = assert_question_echoed_without_extra_zero(&q, &resp);
+        assert_eq!(
+            resp.len(),
+            end,
+            "NODATA response has no extra question bytes"
+        );
     }
 
     #[test]
@@ -683,8 +711,12 @@ mod tests {
         assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 0, "ANCOUNT=0");
         // Question section must be echoed back so libc can match
         // the response to its outstanding outbound query.
-        let body = &resp[12..];
-        assert!(body.starts_with(b"\x07example\x03com\x00"));
+        let end = assert_question_echoed_without_extra_zero(&q, &resp);
+        assert_eq!(
+            resp.len(),
+            end,
+            "SERVFAIL response has no extra question bytes"
+        );
     }
 
     #[test]

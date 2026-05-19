@@ -92,12 +92,11 @@ restricted to that directory.
 
    Notes:
    - The request **must** succeed (`http_status == 200`). If the
-     kernel's egress policy denies `example.com:443` the
-     `HTTPSConnection.request` call will raise — that is a
-     **policy failure**, not a task failure, and you should NOT
-     swallow the exception. If it happens, run `task_complete`
-     anyway with a one-line summary stating which exception fired
-     so the witness diagnostic can render it.
+     kernel's egress policy denies `example.com:443`, DNS fails, or
+     the `HTTPSConnection.request` call raises for any reason, that
+     is a hard evidence failure. Do **not** catch the exception, do
+     not write `install-evidence.json`, and do not synthesize
+     placeholder values such as `http_status: null`.
    - `body_contains_example_domain` MUST be `true`. If the body
      came back empty or did not contain the pinned substring, you
      are looking at a captive-portal-style intercept; treat that
@@ -194,6 +193,9 @@ restricted to that directory.
      `name == "certifi"`.
    - Every `pip_install.installed[*].sha256` is a 64-char
      lowercase hex string.
+   If any of these assertions would fail, stop before committing.
+   A missing evidence file is easier for the operator to debug than
+   a committed diagnostic JSON that looks like a completed contract.
 
 6. **Commit the evidence file.**
    ```bash
