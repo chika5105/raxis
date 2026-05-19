@@ -189,10 +189,10 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV RUSTUP_TOOLCHAIN=stable
+ENV PATH=/root/.cargo/bin:$PATH
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
     && rustup default stable \
     && rustup component add rustfmt clippy
-ENV PATH=/root/.cargo/bin:$PATH
 
 # Go 1.22 — fetch the upstream tarball matching the build platform.
 # `dpkg --print-architecture` returns the Debian arch identifier
