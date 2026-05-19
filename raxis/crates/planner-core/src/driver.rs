@@ -87,6 +87,7 @@ use crate::openai_client::OpenAiClient;
 use crate::provider_model::{
     resolve_model_from_env_fn, KnownModel, ProviderId, ProviderModelError,
 };
+use crate::retry::{RetryConfig, RetryingModelClient};
 use crate::sidecar_client::{SidecarConstructError, SidecarModelClient};
 use crate::tools::{
     build_executor_registry, build_executor_registry_full, build_orchestrator_registry,
@@ -642,8 +643,27 @@ fn build_model_client<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
+    build_model_client_with_retry_config(
+        known_model,
+        base_url,
+        http_fetch,
+        f,
+        RetryConfig::anthropic_default(),
+    )
+}
+
+fn build_model_client_with_retry_config<F>(
+    known_model: &KnownModel,
+    base_url: &str,
+    http_fetch: &Arc<dyn crate::http_fetch::HttpFetch>,
+    f: &F,
+    retry_config: RetryConfig,
+) -> Result<Arc<dyn ModelClient>, DriverError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let var = |k: &str| f(k).filter(|v| !v.is_empty());
-    Ok(match known_model.provider {
+    let raw_client: Arc<dyn ModelClient> = match known_model.provider {
         ProviderId::Anthropic => Arc::new(AnthropicClient::with_http_fetch(
             base_url.to_owned(),
             Arc::clone(http_fetch),
@@ -680,7 +700,9 @@ where
                 Arc::clone(http_fetch),
             )?)
         }
-    })
+    };
+
+    Ok(Arc::new(RetryingModelClient::new(raw_client, retry_config)))
 }
 
 /// Helper for `run_role_session_with_env_fn` — read the
@@ -1459,6 +1481,8 @@ mod tests {
     use super::*;
     use crate::model::{ContentBlock, MessageResponse, MockModelClient, Usage};
     use crate::transport::StreamTransport;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     use tokio::io::duplex;
 
     // ---------------------------------------------------------------
@@ -1604,6 +1628,65 @@ mod tests {
         }
     }
 
+    /// Like [`RecordingFetch`] but fails the first N requests with a
+    /// transient transport error. This pins that `build_model_client`
+    /// returns the production retry wrapper, not a raw provider
+    /// client that would let one gateway `NetworkError` kill a VM.
+    #[derive(Debug)]
+    struct FlakyRecordingFetch {
+        last_url: tokio::sync::Mutex<Option<String>>,
+        body: Vec<u8>,
+        failures_remaining: AtomicU32,
+        calls: AtomicU32,
+    }
+
+    impl FlakyRecordingFetch {
+        fn new(failures: u32, body: Vec<u8>) -> Self {
+            Self {
+                last_url: tokio::sync::Mutex::new(None),
+                body,
+                failures_remaining: AtomicU32::new(failures),
+                calls: AtomicU32::new(0),
+            }
+        }
+
+        fn calls(&self) -> u32 {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::http_fetch::HttpFetch for FlakyRecordingFetch {
+        async fn fetch<'a>(
+            &self,
+            req: crate::http_fetch::HttpFetchRequest<'a>,
+        ) -> Result<crate::http_fetch::HttpFetchResponse, crate::http_fetch::HttpFetchError>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.last_url.lock().await = Some(req.url.to_owned());
+            if self
+                .failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    if n > 0 {
+                        Some(n - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
+                return Err(crate::http_fetch::HttpFetchError::Transport(
+                    "NetworkError".to_owned(),
+                ));
+            }
+            Ok(crate::http_fetch::HttpFetchResponse {
+                status: 200,
+                headers: vec![],
+                body: self.body.clone(),
+            })
+        }
+    }
+
     fn known(name: &str) -> &'static crate::provider_model::KnownModel {
         crate::provider_model::find_known_model(name)
             .expect("test fixture: model id must be registered")
@@ -1632,7 +1715,7 @@ mod tests {
     async fn build_model_client_routes_anthropic_to_anthropic_url() {
         // `MessageResponse`-shaped body so the parse succeeds.
         let body = br#"{
-            "id":"m_test","model":"fixture-model","role":"assistant",
+            "id":"m_test","type":"message","model":"fixture-model","role":"assistant",
             "content":[],"stop_reason":"end_turn",
             "usage":{"input_tokens":1,"output_tokens":1}
         }"#
@@ -1643,6 +1726,47 @@ mod tests {
         let client = build_model_client(m, "https://api.anthropic.com", &fetch, &|_| None).unwrap();
         let url = url_dialled_by(client, rec).await;
         assert_eq!(url, "https://api.anthropic.com/v1/messages");
+    }
+
+    #[tokio::test]
+    async fn build_model_client_retries_transient_transport_errors() {
+        let body = br#"{
+            "id":"m_test","type":"message","model":"fixture-model","role":"assistant",
+            "content":[],"stop_reason":"end_turn",
+            "usage":{"input_tokens":1,"output_tokens":1}
+        }"#
+        .to_vec();
+        let rec = Arc::new(FlakyRecordingFetch::new(1, body));
+        let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
+        let m = known("claude-sonnet-4-5-20250929");
+        let client = build_model_client_with_retry_config(
+            m,
+            "https://api.anthropic.com",
+            &fetch,
+            &|_| None,
+            RetryConfig::deterministic_for_tests(1),
+        )
+        .unwrap();
+        let req = crate::model::MessageRequest {
+            model: "fixture-model".to_owned(),
+            ..crate::model::MessageRequest::default()
+        };
+
+        client
+            .create_message(&req)
+            .await
+            .expect("transient transport failure should be retried in-session");
+
+        assert_eq!(
+            rec.calls(),
+            2,
+            "raw provider clients would make one call and fail the VM; \
+             retry-wrapped clients should retry once and recover"
+        );
+        assert_eq!(
+            rec.last_url.lock().await.as_deref(),
+            Some("https://api.anthropic.com/v1/messages")
+        );
     }
 
     #[tokio::test]
