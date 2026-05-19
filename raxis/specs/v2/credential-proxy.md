@@ -1796,6 +1796,7 @@ host.
 
 ```toml
 [workspace]
+name = "User API credentials"
 lane_id = "feature-work"
 
 [[tasks]]

@@ -13,6 +13,7 @@ import type { WorktreeListEntry } from "@/types/api";
 
 type WorktreeScope = "all" | "reviewable" | "session" | "main";
 type LifecycleScope = "all" | "live" | "past";
+type GroupScope = "name" | "id";
 const EMPTY_WORKTREES: WorktreeListEntry[] = [];
 
 export function GitPage() {
@@ -21,6 +22,8 @@ export function GitPage() {
   const [scope, setScope] = useState<WorktreeScope>("all");
   const [lifecycleScope, setLifecycleScope] =
     useState<LifecycleScope>("all");
+  const [groupBy, setGroupBy] = useState<GroupScope>("name");
+  const [workspaceName, setWorkspaceName] = useState("All");
   const [collapsedGroups, setCollapsedGroups] = useState<
     Record<string, boolean>
   >({});
@@ -29,12 +32,6 @@ export function GitPage() {
     queryFn: ({ signal }) => dashboardApi.git.list(signal),
     refetchInterval: 10_000,
   });
-  const initiatives = useQuery({
-    queryKey: ["initiatives", "git-worktree-labels"],
-    queryFn: ({ signal }) => dashboardApi.initiatives.list({ limit: 500 }, signal),
-    staleTime: 30_000,
-  });
-
   const items = q.data ?? EMPTY_WORKTREES;
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -43,6 +40,12 @@ export function GitPage() {
       if (scope === "session" && w.kind === "Main") return false;
       if (scope === "main" && w.kind !== "Main") return false;
       if (!matchesLifecycleScope(w, lifecycleScope)) return false;
+      if (
+        workspaceName !== "All" &&
+        (w.initiative_display_name ?? "") !== workspaceName
+      ) {
+        return false;
+      }
       if (!needle) return true;
       return [
         w.name,
@@ -52,6 +55,8 @@ export function GitPage() {
         w.session_id ?? "",
         w.task_id ?? "",
         w.initiative_id ?? "",
+        w.initiative_display_name ?? "",
+        w.agent_type ?? "",
         w.session_state ?? "",
         w.base_sha ?? "",
       ]
@@ -59,17 +64,18 @@ export function GitPage() {
         .toLowerCase()
         .includes(needle);
     });
-  }, [items, scope, lifecycleScope, search]);
-  const initiativeNames = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const i of initiatives.data ?? []) {
-      map.set(i.initiative_id, i.display_name || i.initiative_id);
+  }, [items, scope, lifecycleScope, search, workspaceName]);
+  const workspaceOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const w of items) {
+      const name = w.initiative_display_name?.trim();
+      if (name) names.add(name);
     }
-    return map;
-  }, [initiatives.data]);
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [items]);
   const grouped = useMemo(
-    () => groupWorktrees(filtered, initiativeNames),
-    [filtered, initiativeNames],
+    () => groupWorktrees(filtered, groupBy),
+    [filtered, groupBy],
   );
   const sessionCount = items.filter((w) => w.kind !== "Main").length;
   const liveSessionCount = items.filter(
@@ -166,9 +172,40 @@ export function GitPage() {
               </ScopeButton>
             </div>
           </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] uppercase tracking-wider text-ink-subtle">
+              Group
+            </span>
+            <div className="inline-flex rounded-md border border-edge bg-panel p-0.5 text-xs">
+              <ScopeButton
+                active={groupBy === "name"}
+                onClick={() => setGroupBy("name")}
+              >
+                Workspace
+              </ScopeButton>
+              <ScopeButton
+                active={groupBy === "id"}
+                onClick={() => setGroupBy("id")}
+              >
+                ID
+              </ScopeButton>
+            </div>
+          </div>
+          <select
+            className="input max-w-[220px]"
+            value={workspaceName}
+            onChange={(e) => setWorkspaceName(e.target.value)}
+          >
+            <option value="All">All workspaces</option>
+            {workspaceOptions.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
           <input
             className="input w-72"
-            placeholder="Search path / session / task..."
+            placeholder="Search workspace / path / session..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -192,6 +229,7 @@ export function GitPage() {
                 <th className="text-left px-4 py-2 font-medium">Lifecycle</th>
                 <th className="text-left px-4 py-2 font-medium">Repo state</th>
                 <th className="text-left px-4 py-2 font-medium">Path</th>
+                <th className="text-left px-4 py-2 font-medium">Workspace</th>
                 <th className="text-left px-4 py-2 font-medium">Session / Task</th>
                 <th className="text-left px-4 py-2 font-medium">Review range</th>
                 <th className="text-right px-4 py-2 font-medium">Review</th>
@@ -201,7 +239,7 @@ export function GitPage() {
               {grouped.map((group) => (
                 <Fragment key={group.key}>
                   <tr className="border-t border-edge/60 bg-panel-high/70">
-                    <td colSpan={8} className="px-4 py-2">
+                    <td colSpan={9} className="px-4 py-2">
                       <button
                         type="button"
                         onClick={() =>
@@ -222,10 +260,15 @@ export function GitPage() {
                           <span className="font-medium text-ink truncate">
                             {group.label}
                           </span>
-                          {group.initiativeId && (
+                          {group.initiativeId && groupBy === "name" && (
                             <Mono className="text-[11px] text-ink-subtle truncate">
                               {group.initiativeId}
                             </Mono>
+                          )}
+                          {group.initiativeName && groupBy === "id" && (
+                            <span className="text-[11px] text-ink-subtle truncate">
+                              {group.initiativeName}
+                            </span>
                           )}
                         </span>
                         <span className="badge bg-panel border-edge text-ink-muted">
@@ -264,15 +307,22 @@ export function GitPage() {
                       </div>
                     </td>
                     <td className="px-4 py-2.5">
-                      <span
-                        className={`badge ${
-                          w.kind === "Main"
-                            ? "bg-info-muted/30 border-info text-info"
-                            : "bg-edge/40 border-edge-strong text-ink-muted"
-                        }`}
-                      >
-                        {w.kind}
-                      </span>
+                      <div className="flex flex-col items-start gap-1">
+                        <span
+                          className={`badge ${
+                            w.kind === "Main"
+                              ? "bg-info-muted/30 border-info text-info"
+                              : "bg-edge/40 border-edge-strong text-ink-muted"
+                          }`}
+                        >
+                          {w.kind}
+                        </span>
+                        {w.agent_type && (
+                          <span className="text-[11px] text-ink-subtle">
+                            {w.agent_type}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-2.5">
                       <WorktreeLifecyclePill worktree={w} />
@@ -285,6 +335,25 @@ export function GitPage() {
                       title={w.path}
                     >
                       {w.path}
+                    </td>
+                    <td className="px-4 py-2.5 text-xs">
+                      {w.initiative_id && w.initiative_display_name ? (
+                        <Link
+                          to={`/initiatives/${w.initiative_id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-accent hover:underline"
+                          title={w.initiative_id}
+                        >
+                          {w.initiative_display_name}
+                        </Link>
+                      ) : (
+                        <span className="text-ink-subtle">-</span>
+                      )}
+                      {w.initiative_id && (
+                        <div className="font-mono text-[11px] text-ink-subtle break-all">
+                          {w.initiative_id}
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-2.5 text-xs">
                       {w.session_id ? (
@@ -353,26 +422,27 @@ interface WorktreeGroup {
   key: string;
   label: string;
   initiativeId?: string;
+  initiativeName?: string;
   items: WorktreeListEntry[];
 }
 
 function groupWorktrees(
   worktrees: WorktreeListEntry[],
-  initiativeNames: Map<string, string>,
+  groupBy: GroupScope,
 ): WorktreeGroup[] {
   const groups = new Map<string, WorktreeGroup>();
   for (const w of worktrees) {
+    const initiativeName = w.initiative_display_name?.trim() || undefined;
     const key =
       w.kind === "Main"
         ? "__main"
         : w.initiative_id
-          ? `initiative:${w.initiative_id}`
+          ? groupBy === "id"
+            ? `initiative-id:${w.initiative_id}`
+            : `initiative-name:${initiativeName ?? "__missing-workspace"}`
           : "__unscoped";
     let group = groups.get(key);
     if (!group) {
-      const initiativeName = w.initiative_id
-        ? initiativeNames.get(w.initiative_id)
-        : undefined;
       group = {
         key,
         label:
@@ -380,8 +450,11 @@ function groupWorktrees(
             ? "Main repository"
             : key === "__unscoped"
               ? "Unscoped sessions"
-              : initiativeName || "Initiative",
+              : groupBy === "id"
+                ? (w.initiative_id ?? "Initiative")
+                : (initiativeName ?? "Workspace unavailable"),
         initiativeId: w.initiative_id ?? undefined,
+        initiativeName,
         items: [],
       };
       groups.set(key, group);

@@ -7,7 +7,7 @@ The fixer Executor restores `pub fn add(...)` in src/lib.rs; the
   is allowed to advance main.
 """
 [workspace]
-name        = "Fix typo with witness"
+name = "Fix Typo With Witness"
 lane_id     = "fix-typo-lane"
 
 [[tasks]]

@@ -114,6 +114,8 @@ export interface StructuredOutputView {
 export interface TaskView {
   task_id: string;
   initiative_id: string;
+  initiative_display_name: string;
+  agent_type: string;
   title: string;
   state: string;
   session_id: string | null;
@@ -334,6 +336,7 @@ export interface RecentSessionEntry {
   agent_type: string;
   task_id?: string | null;
   initiative_id?: string | null;
+  initiative_display_name?: string | null;
   created_at: number;
   terminated_at?: number | null;
   terminated_reason?: string | null;
@@ -594,6 +597,7 @@ export interface CredentialReveal {
 export interface DagNode {
   task_id: string;
   title: string;
+  agent_type: string;
   state: string;
   /// Mirror of `TaskView.is_active`: backend sets this when an
   /// executor/reviewer subtask activation is live for the task.
@@ -619,6 +623,7 @@ export interface DagGateVerdictChip {
 
 export interface DagView {
   initiative_id: string;
+  display_name: string;
   nodes: DagNode[];
   edges: DagEdge[];
 }
@@ -627,6 +632,7 @@ export interface SessionView {
   session_id: string;
   role: string;
   initiative_id: string | null;
+  initiative_display_name?: string | null;
   task_id: string | null;
   state: string;
   provider: string | null;
@@ -949,6 +955,8 @@ export interface WorktreeListEntry {
   session_id: string | null;
   task_id: string | null;
   initiative_id?: string | null;
+  initiative_display_name?: string | null;
+  agent_type?: string | null;
   session_state?: string | null;
   observed_head_sha?: string | null;
   observed_branch?: string | null;

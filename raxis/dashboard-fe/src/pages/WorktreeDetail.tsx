@@ -104,6 +104,20 @@ export function WorktreeDetailPage() {
             <span className="badge bg-info-muted/30 border-info text-info">
               {w.kind}
             </span>
+            {w.agent_type && (
+              <span className="badge bg-panel border-edge text-ink-muted">
+                {w.agent_type}
+              </span>
+            )}
+            {w.initiative_id && (
+              <Link
+                to={`/initiatives/${w.initiative_id}`}
+                className="text-accent hover:underline"
+                title={w.initiative_id}
+              >
+                {w.initiative_display_name}
+              </Link>
+            )}
             <WorktreeLifecyclePill
               kind={w.kind}
               sessionState={w.session_state ?? null}

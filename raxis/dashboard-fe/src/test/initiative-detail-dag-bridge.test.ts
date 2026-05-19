@@ -29,6 +29,8 @@ function task(over: Partial<TaskView> & { task_id: string }): TaskView {
   return {
     task_id: over.task_id,
     initiative_id: over.initiative_id ?? "init-x",
+    initiative_display_name: over.initiative_display_name ?? "Initiative X",
+    agent_type: over.agent_type ?? "Executor",
     title: over.title ?? over.task_id,
     state: over.state ?? "Admitted",
     session_id: over.session_id ?? null,
@@ -58,18 +60,21 @@ describe("mapTasksToDagNodes", () => {
     expect(nodes[0]).toEqual({
       task_id: "T1",
       title: "execute-a",
+      agent_type: "Executor",
       state: "Admitted",
       is_active: undefined,
     });
     expect(nodes[1]).toEqual({
       task_id: "T2",
       title: "execute-b",
+      agent_type: "Executor",
       state: "Admitted",
       is_active: true,
     });
     expect(nodes[2]).toEqual({
       task_id: "T3",
       title: "execute-c",
+      agent_type: "Executor",
       state: "Running",
       is_active: undefined,
     });

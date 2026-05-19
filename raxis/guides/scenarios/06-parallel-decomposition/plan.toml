@@ -8,7 +8,7 @@ Two Executors run in parallel against disjoint sub-trees: auth_module
   their path_allowlists do not overlap.
 """
 [workspace]
-name        = "Parallel decomposition"
+name = "Parallel Decomposition"
 lane_id     = "parallel-decomp-lane"
 
 [[tasks]]

@@ -5,7 +5,7 @@ description = """
 Reviewer rejects round 1, accepts round 2.
 """
 [workspace]
-name        = "Reject then pass"
+name = "Reviewer Rejection Then Pass"
 lane_id     = "reject-pass-lane"
 
 [[tasks]]

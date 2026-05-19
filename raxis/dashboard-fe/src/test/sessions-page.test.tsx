@@ -31,6 +31,7 @@ function session(over: Partial<SessionView>): SessionView {
     session_id: "sess-anthropic-1234567890",
     role: "Executor",
     initiative_id: "init-a",
+    initiative_display_name: "Alpha pipeline",
     task_id: "task-a",
     state: "Active",
     provider: "anthropic-prod",
@@ -69,13 +70,39 @@ describe("<SessionsPage>", () => {
     expect(screen.getByText("openai-prod")).toBeInTheDocument();
 
     fireEvent.change(
-      screen.getByPlaceholderText("Search id / provider / model..."),
+      screen.getByPlaceholderText("Search workspace / id / provider..."),
       { target: { value: "openai" } },
     );
 
     await waitFor(() => {
       expect(screen.getByText("openai-prod")).toBeInTheDocument();
       expect(screen.queryByText("anthropic-prod")).toBeNull();
+    });
+  });
+
+  it("filters sessions by workspace name", async () => {
+    vi.spyOn(dashboardApi.sessions, "list").mockResolvedValue([
+      session({}),
+      session({
+        session_id: "sess-beta-1234567890",
+        initiative_id: "init-b",
+        initiative_display_name: "Beta import",
+        task_id: "task-beta",
+      }),
+    ]);
+
+    renderWithProviders(<SessionsPage />);
+
+    expect(await screen.findByText("sess-anthropic-1...")).toBeInTheDocument();
+    expect(screen.getByText("sess-beta-123456...")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByDisplayValue("All workspaces"), {
+      target: { value: "Beta import" },
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("sess-anthropic-1...")).toBeNull();
+      expect(screen.getByText("sess-beta-123456...")).toBeInTheDocument();
     });
   });
 

@@ -5,7 +5,7 @@ description = """
 Golangci lint verifier (scenario 30)
 """
 [workspace]
-name        = "golangci-lint"
+name = "Golangci Lint Verifier"
 lane_id     = "golangci-lane"
 
 [[tasks]]

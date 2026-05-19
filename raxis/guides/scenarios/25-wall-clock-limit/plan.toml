@@ -5,7 +5,7 @@ description = """
 Wall clock limit (scenario 25)
 """
 [workspace]
-name        = "Wall-clock limit"
+name = "Wall Clock Limit"
 lane_id     = "wallclock-lane"
 
 [[tasks]]

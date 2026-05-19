@@ -5,7 +5,7 @@ description = """
 Internal grpc call (scenario 39)
 """
 [workspace]
-name        = "Internal gRPC"
+name = "Internal Grpc Call"
 lane_id     = "grpc-lane"
 
 [[tasks]]

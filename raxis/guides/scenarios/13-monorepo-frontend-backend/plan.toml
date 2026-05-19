@@ -5,7 +5,7 @@ description = """
 Add a /health endpoint on the backend and a status badge on the frontend.
 """
 [workspace]
-name        = "Monorepo split"
+name = "Monorepo Frontend Backend"
 lane_id     = "monorepo-lane"
 
 [[tasks]]

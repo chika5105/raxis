@@ -110,15 +110,15 @@ export function InitiativesPage() {
     <div className="space-y-4">
       <header className="flex items-end justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-xl font-semibold text-ink">Initiatives</h1>
+          <h1 className="text-xl font-semibold text-ink">Workspaces</h1>
           <p className="text-sm text-ink-muted">
-            All operator-approved initiatives, newest first.
+            Operator-named initiatives, newest first.
           </p>
         </div>
         <div className="flex items-center gap-2">
           <input
             className="input w-56"
-            placeholder="Search by id or name…"
+            placeholder="Search workspace or id…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -188,7 +188,7 @@ export function InitiativesPage() {
             <thead className="text-xs text-ink-subtle bg-panel-high">
               <tr>
                 <th className="text-left px-4 py-2.5 font-medium">
-                  Initiative
+                  Workspace
                 </th>
                 <th className="text-left px-4 py-2.5 font-medium">State</th>
                 <th className="text-left px-4 py-2.5 font-medium">Tasks</th>
@@ -224,7 +224,7 @@ export function InitiativesPage() {
                         onClick={(e) => e.stopPropagation()}
                         className="text-ink hover:text-accent font-medium"
                       >
-                        {i.display_name || i.initiative_id}
+                        {i.display_name}
                       </Link>
                       <div className="text-[11px] text-ink-subtle">
                         <Mono>{i.initiative_id}</Mono>

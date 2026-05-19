@@ -5,7 +5,7 @@ description = """
 Stripe api call (scenario 38)
 """
 [workspace]
-name        = "Stripe API call"
+name = "Stripe Api Call"
 lane_id     = "stripe-api-lane"
 
 [[tasks]]

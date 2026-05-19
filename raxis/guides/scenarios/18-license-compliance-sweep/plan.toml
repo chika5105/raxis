@@ -5,7 +5,7 @@ description = """
 License compliance sweep (scenario 18)
 """
 [workspace]
-name        = "License compliance"
+name = "License Compliance Sweep"
 lane_id     = "licsweep-lane"
 
 [[tasks]]

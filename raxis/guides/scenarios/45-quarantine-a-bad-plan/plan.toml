@@ -6,7 +6,7 @@ description = """
 Quarantine a bad plan (scenario 45)
 """
 [workspace]
-name        = "Bad plan"
+name = "Quarantine A Bad Plan"
 lane_id     = "bad-plan-lane"
 
 [[tasks]]

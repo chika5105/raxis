@@ -855,6 +855,10 @@ pub fn approve_plan(
     // V2 §Step 28 — read `[workspace] lane_id` (or surface the
     // missing/empty/override error below).
     let workspace_lane_raw = parse_plan_workspace_lane(&plan_toml_str)?;
+    // Operator-facing display identity. `initiative_id` remains the
+    // kernel-owned uniqueness boundary; `[workspace].name` is the
+    // stable dashboard label.
+    let _workspace_name = parse_plan_workspace_name(&plan_toml_str)?;
     // Read `[workspace] target_ref` (or `None`
     // for plans that don't override the operator default).
     let plan_target_ref_raw = parse_plan_workspace_target_ref(&plan_toml_str)?;
@@ -2710,6 +2714,12 @@ fn parse_plan_orchestrator(
         })
         .unwrap_or_default();
 
+    let initiative_table = doc
+        .get("plan")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("initiative"))
+        .and_then(|v| v.as_table());
+
     // Initiative-level seed prompt
     // for the orchestrator. Sourced from `[plan.initiative]
     // description`, the canonical operator-authored "what is this
@@ -2722,11 +2732,6 @@ fn parse_plan_orchestrator(
     // 64 KiB cap as task descriptions to bound the env-var
     // footprint passed to the substrate.
     const MAX_DESCRIPTION_BYTES: usize = 64 * 1024;
-    let initiative_table = doc
-        .get("plan")
-        .and_then(|v| v.as_table())
-        .and_then(|t| t.get("initiative"))
-        .and_then(|v| v.as_table());
     let description = match initiative_table.and_then(|t| t.get("description")) {
         Some(toml::Value::String(s)) => s.trim_end().to_owned(),
         Some(_) => {
@@ -2905,6 +2910,7 @@ fn validate_elastic_against_policy(
 /// **TOML shape:**
 /// ```toml
 /// [workspace]
+/// name = "feature work"
 /// lane_id = "feature-work"
 /// ```
 /// Returns `Ok(Some(lane_id))` when the table+key is present and the
@@ -2933,6 +2939,54 @@ fn parse_plan_workspace_lane(plan_toml: &str) -> Result<Option<String>, Lifecycl
         .map(str::to_owned);
 
     Ok(raw)
+}
+
+/// Parse and validate `[workspace] name`, the operator-facing
+/// initiative label rendered in dashboards and audit pivots.
+fn parse_plan_workspace_name(plan_toml: &str) -> Result<String, LifecycleError> {
+    const MAX_WORKSPACE_NAME_CHARS: usize = 64;
+    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| LifecycleError::PlanInvalid {
+        reason: format!("TOML parse error: {e}"),
+    })?;
+
+    let workspace = doc
+        .get("workspace")
+        .and_then(|v| v.as_table())
+        .ok_or_else(|| LifecycleError::PlanInvalid {
+            reason: "[workspace] is missing required `name` field".to_owned(),
+        })?;
+
+    let raw = workspace
+        .get("name")
+        .ok_or_else(|| LifecycleError::PlanInvalid {
+            reason: "[workspace] is missing required `name` field".to_owned(),
+        })?;
+    let name = raw.as_str().ok_or_else(|| LifecycleError::PlanInvalid {
+        reason: format!(
+            "[workspace] name must be a TOML string (got {ty})",
+            ty = raw.type_str(),
+        ),
+    })?;
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(LifecycleError::PlanInvalid {
+            reason: "[workspace] name is empty".to_owned(),
+        });
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err(LifecycleError::PlanInvalid {
+            reason: "[workspace] name must be a single line with no control characters".to_owned(),
+        });
+    }
+    let count = trimmed.chars().count();
+    if count > MAX_WORKSPACE_NAME_CHARS {
+        return Err(LifecycleError::PlanInvalid {
+            reason: format!(
+                "[workspace] name is {count} characters, exceeds cap {MAX_WORKSPACE_NAME_CHARS}"
+            ),
+        });
+    }
+    Ok(trimmed.to_owned())
 }
 
 /// ** ** Parse the plan-side
@@ -5783,6 +5837,7 @@ session_agent_type = "Coordinator"
 description = "fixture: rogue orchestrator"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -5822,6 +5877,7 @@ session_agent_type = "Orchestrator"
 description = "fixture: unknown clone strategy"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -5857,6 +5913,7 @@ clone_strategy = "treeless"
 description = "fixture: clone strategy persistence"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -5923,6 +5980,7 @@ predecessors       = ["run-tests"]
 description = "fixture: subtask activations"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -6050,6 +6108,7 @@ predecessors       = ["run-tests"]
 description = "fixture: known proxy types"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -6140,6 +6199,7 @@ predecessors = ["test-it"]
 description = "fixture: credential proxies persistence"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -6320,6 +6380,7 @@ predecessors = ["build-svc"]
 description = "fixture: unknown proxy type"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -6383,6 +6444,7 @@ description = "send the email"
 description = "fixture: malformed credential block"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -6698,6 +6760,7 @@ description = "do thing"
         // V1 plans have no `[[plan.integration_merge_verifiers]]`
         // section; the parser MUST return an empty Vec without error.
         let toml = r#"[workspace]
+name = "fixture"
 lane_id = "x"
 
 [[tasks]]
@@ -6711,6 +6774,7 @@ task_id = "t1"
     fn parse_plan_pre_merge_verifiers_round_trips_full_entry() {
         let toml = r#"
 [workspace]
+name = "fixture"
 lane_id = "x"
 
 [[tasks]]
@@ -6752,6 +6816,7 @@ CI = "true"
     fn parse_plan_pre_merge_verifiers_rejects_invalid_on_failure_at_parse_time() {
         let toml = r#"
 [workspace]
+name = "fixture"
 lane_id = "x"
 
 [[tasks]]
@@ -6782,6 +6847,7 @@ on_failure  = "block_review"
 description = "fixture: pre-merge verifier unknown task"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -6832,6 +6898,7 @@ task_set    = ["implement_auth", "implement_session"]
 description = "fixture: pre-merge verifier valid"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -6859,6 +6926,7 @@ applies_to  = "all"
     fn parse_plan_workspace_lane_reads_value() {
         let toml = r#"
 [workspace]
+name = "fixture"
 lane_id = "feature-work"
 
 [[tasks]]
@@ -6875,6 +6943,46 @@ task_id = "t1"
         assert_eq!(lane, None);
     }
 
+    #[test]
+    fn parse_plan_workspace_name_reads_value() {
+        let toml = r#"
+[workspace]
+name = "Feature work"
+lane_id = "default"
+"#;
+        let name = parse_plan_workspace_name(toml).unwrap();
+        assert_eq!(name, "Feature work");
+    }
+
+    #[test]
+    fn parse_plan_workspace_name_rejects_missing_name() {
+        let toml = r#"
+[workspace]
+lane_id = "default"
+"#;
+        let err = parse_plan_workspace_name(toml).unwrap_err();
+        match err {
+            LifecycleError::PlanInvalid { reason } => {
+                assert!(reason.contains("[workspace]"), "reason = {reason}");
+                assert!(reason.contains("name"), "reason = {reason}");
+            }
+            other => panic!("expected PlanInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_plan_workspace_name_rejects_oversized_name() {
+        let name = "x".repeat(65);
+        let toml = format!("[workspace]\nname = \"{name}\"\nlane_id = \"default\"\n",);
+        let err = parse_plan_workspace_name(&toml).unwrap_err();
+        match err {
+            LifecycleError::PlanInvalid { reason } => {
+                assert!(reason.contains("64"), "reason = {reason}");
+            }
+            other => panic!("expected PlanInvalid, got {other:?}"),
+        }
+    }
+
     // ── ─────────────────────────────────────────
     // INV-PLAN-POLICY-PRECEDENCE-01 unit-tests for the
     // `target_ref` resolution chain.
@@ -6883,6 +6991,7 @@ task_id = "t1"
     fn parse_plan_workspace_target_ref_reads_value() {
         let toml = r#"
 [workspace]
+name = "fixture"
 lane_id    = "default"
 target_ref = "refs/heads/raxis/feature"
 "#;
@@ -6920,6 +7029,7 @@ target_ref = "refs/heads/raxis/feature"
     fn parse_plan_workspace_max_concurrent_admissions_reads_value() {
         let toml = r#"
 [workspace]
+name = "fixture"
 lane_id                     = "default"
 max_concurrent_admissions   = 5
 "#;
@@ -6981,6 +7091,7 @@ max_concurrent_admissions   = 5
     fn parse_plan_workspace_max_concurrent_admissions_rejects_string() {
         let toml = r#"
 [workspace]
+name = "fixture"
 lane_id                     = "d"
 max_concurrent_admissions   = "5"
 "#;
@@ -7021,6 +7132,7 @@ max_concurrent_admissions   = "5"
 description = "anything non-empty"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 "#;
         let fields = parse_plan_orchestrator(toml).unwrap();
@@ -7038,6 +7150,7 @@ lane_id = "default"
 description = "anything non-empty"
 
 [workspace]
+name = "fixture"
 lane_id                     = "default"
 max_concurrent_admissions   = 7
 "#;
@@ -7198,8 +7311,11 @@ max_concurrent_admissions   = 7
             if plan_toml.contains("[workspace]") || plan_toml.contains("[ workspace ]") {
                 plan_toml.to_owned()
             } else {
-                format!("[workspace]\nlane_id = \"default\"\n\n{plan_toml}")
+                format!(
+                "[workspace]\nname = \"Kernel fixture plan\"\nlane_id = \"default\"\n\n{plan_toml}"
+            )
             };
+        let with_workspace = ensure_workspace_name(&with_workspace);
         // `[plan.initiative]
         // description` is REQUIRED. If the test author didn't add
         // one, splice in a deterministic placeholder (and the
@@ -7211,6 +7327,26 @@ max_concurrent_admissions   = 7
         // legacy unit-test fixtures continue to validate without
         // being individually rewritten.
         ensure_task_descriptions(&with_initiative_description)
+    }
+
+    /// Splice `[workspace] name = "<placeholder>"` into older unit
+    /// fixtures that only cared about lane propagation.
+    fn ensure_workspace_name(plan_toml: &str) -> String {
+        if has_field_in_dotted_table(plan_toml, "workspace", "name") {
+            return plan_toml.to_owned();
+        }
+        let header = "[workspace]";
+        if let Some(idx) = plan_toml.find(header) {
+            let mut s = plan_toml.to_owned();
+            s.insert_str(idx + header.len(), "\nname = \"Kernel fixture plan\"");
+            s
+        } else {
+            format!(
+                "[workspace]\n\
+                 name = \"Kernel fixture plan\"\n\n\
+                 {plan_toml}",
+            )
+        }
     }
 
     /// splice
@@ -7921,6 +8057,9 @@ max_concurrent_admissions   = 7
             [plan.initiative]
             description = "fixture: missing lane"
 
+            [workspace]
+            name = "fixture"
+
             [[tasks]]
             task_id     = "t1"
             description = "fixture task"
@@ -7963,6 +8102,7 @@ max_concurrent_admissions   = 7
             description = "fixture: empty lane"
 
             [workspace]
+            name = "fixture"
             lane_id = ""
 
             [[tasks]]
@@ -7995,6 +8135,7 @@ max_concurrent_admissions   = 7
             description = "fixture: lane override"
 
             [workspace]
+            name = "fixture"
             lane_id = "feature-work"
 
             [[tasks]]
@@ -8043,6 +8184,7 @@ max_concurrent_admissions   = 7
             description = "fixture: lane propagation"
 
             [workspace]
+name = "fixture"
             lane_id = "feature-work"
 
             [[tasks]]
@@ -8249,6 +8391,7 @@ max_concurrent_admissions   = 7
             description = "smoke initiative — fixture for lane-validation rejection"
 
             [workspace]
+name = "fixture"
             lane_id = "ghost-lane"
 
             [[tasks]]
@@ -8334,6 +8477,7 @@ max_concurrent_admissions   = 7
             description = "smoke initiative — fixture for lane-validation happy path"
 
             [workspace]
+name = "fixture"
             lane_id = "feature-work"
 
             [[tasks]]
@@ -8790,6 +8934,7 @@ max_concurrent_admissions   = 7
             description = "Migrate the cron service from systemd-timer to k8s CronJobs"
 
             [workspace]
+name = "fixture"
             lane_id = "default"
 
             [[tasks]]
@@ -8825,6 +8970,7 @@ max_concurrent_admissions   = 7
         // we exercise the real validator path.
         let plan = r#"
             [workspace]
+name = "fixture"
             lane_id = "default"
 
             [[tasks]]
@@ -9379,6 +9525,7 @@ max_concurrent_admissions   = 7
 description = "fixture: abort closes activations"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]

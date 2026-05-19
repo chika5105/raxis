@@ -67,6 +67,7 @@ export function mapTasksToDagNodes(tasks: TaskView[]): DagGraphNode[] {
   return tasks.map((t) => ({
     task_id: t.task_id,
     title: t.title,
+    agent_type: t.agent_type,
     state: t.state,
     is_active: t.is_active,
   }));
@@ -166,7 +167,7 @@ export function InitiativeDetailPage() {
             <CopyButton value={init.initiative_id} />
           </div>
           <h1 className="mt-1 text-xl font-semibold text-ink text-balance">
-            {init.display_name || init.initiative_id}
+            {init.display_name}
           </h1>
           <div className="mt-2 flex flex-wrap gap-2 items-center">
             <StateBadge state={init.state} pulse={init.state === "Active"} />

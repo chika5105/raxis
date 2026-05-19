@@ -6,7 +6,7 @@ draft writes a rough docs/spec.md; refine adds structure and
   examples; polish proofreads and fixes prose.
 """
 [workspace]
-name        = "Sequential refinement"
+name = "Sequential Refinement"
 lane_id     = "seq-refine-lane"
 
 [[tasks]]

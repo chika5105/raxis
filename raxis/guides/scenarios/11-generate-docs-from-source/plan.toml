@@ -5,7 +5,7 @@ description = """
 Read src/lib.rs and produce docs/api.md.
 """
 [workspace]
-name        = "Generate docs from source"
+name = "Generate Docs From Source"
 lane_id     = "doc-gen-lane"
 
 [[tasks]]

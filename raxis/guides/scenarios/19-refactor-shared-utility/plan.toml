@@ -5,7 +5,7 @@ description = """
 Refactor shared utility (scenario 19)
 """
 [workspace]
-name        = "Refactor shared utility"
+name = "Refactor Shared Utility"
 lane_id     = "refactor-util-lane"
 
 [[tasks]]

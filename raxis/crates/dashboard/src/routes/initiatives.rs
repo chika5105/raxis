@@ -77,6 +77,8 @@ where
 pub struct DagView {
     /// Initiative id this DAG belongs to.
     pub initiative_id: String,
+    /// Operator-authored `[workspace].name`.
+    pub display_name: String,
     /// Nodes (one per task).
     pub nodes: Vec<DagNode>,
     /// Edges (predecessor → successor).
@@ -90,6 +92,8 @@ pub struct DagNode {
     pub task_id: String,
     /// Task title.
     pub title: String,
+    /// Semantic agent type (`Orchestrator`, `Executor`, `Reviewer`).
+    pub agent_type: String,
     /// Task FSM state.
     pub state: String,
     /// `true` when an executor/reviewer subtask activation is live
@@ -137,6 +141,7 @@ where
         .map(|t| DagNode {
             task_id: t.task_id.clone(),
             title: t.title.clone(),
+            agent_type: t.agent_type.clone(),
             state: t.state.clone(),
             is_active: t.is_active,
             gate_verdict_summary: chip_map.get(&t.task_id).cloned().unwrap_or_default(),
@@ -144,6 +149,7 @@ where
         .collect();
     Ok(Json(DagView {
         initiative_id: init.summary.initiative_id,
+        display_name: init.summary.display_name,
         nodes,
         edges: init.edges,
     }))

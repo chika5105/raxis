@@ -8,7 +8,7 @@ designer_a proposes one approach in docs/proposal.md, designer_b
   docs/decision.md.
 """
 [workspace]
-name        = "Structured debate"
+name = "Structured Debate"
 lane_id     = "structured-debate-lane"
 
 [[tasks]]

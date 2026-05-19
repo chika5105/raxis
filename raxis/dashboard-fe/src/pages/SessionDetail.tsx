@@ -109,15 +109,21 @@ export function SessionDetailPage() {
             }
           />
           <Row
-            label="Initiative"
+            label="Workspace"
             value={
               s.initiative_id ? (
-                <Link
-                  to={`/initiatives/${s.initiative_id}`}
-                  className="text-accent hover:underline font-mono"
-                >
-                  {s.initiative_id}
-                </Link>
+                <span className="inline-flex flex-col">
+                  <Link
+                    to={`/initiatives/${s.initiative_id}`}
+                    className="text-accent hover:underline"
+                    title={s.initiative_id}
+                  >
+                    {s.initiative_display_name}
+                  </Link>
+                  <span className="font-mono text-[11px] text-ink-subtle">
+                    {s.initiative_id}
+                  </span>
+                </span>
               ) : (
                 "—"
               )

@@ -5,7 +5,7 @@ description = """
 Load test witness (scenario 32)
 """
 [workspace]
-name        = "Load test witness"
+name = "Load Test Witness"
 lane_id     = "loadtest-lane"
 
 [[tasks]]

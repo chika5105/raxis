@@ -7,7 +7,7 @@ A realistic feature: add a /version endpoint that returns crate
   test, and matching docs. Coordinated across multiple agents.
 """
 [workspace]
-name        = "End-to-end feature shipment"
+name = "End To End Feature Shipment"
 lane_id     = "e2e-feature-lane"
 
 [budget]

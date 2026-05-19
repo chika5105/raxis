@@ -13,7 +13,7 @@ The adder Executor implements pub fn add(a: i32, b: i32) -> i32
   function.
 """
 [workspace]
-name        = "Single Executor + Reviewer"
+name = "Single Executor Reviewer"
 lane_id     = "single-er-lane"
 
 # ── Executor ────────────────────────────────────────────────────────────────

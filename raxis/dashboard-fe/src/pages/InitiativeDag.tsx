@@ -118,9 +118,7 @@ export function InitiativeDagPage() {
             <span className="text-ink">DAG</span>
           </div>
           <h1 className="mt-1 text-xl font-semibold text-ink">
-            {summary.data?.display_name ||
-              summary.data?.initiative_id ||
-              "Task DAG"}
+            {dag.data.display_name || summary.data?.display_name || "Task DAG"}
           </h1>
           <p className="text-sm text-ink-muted mt-0.5">
             {nodes.length} task{nodes.length === 1 ? "" : "s"} · {edges.length}{" "}
@@ -263,6 +261,9 @@ export function InitiativeDagPage() {
                 <CopyButton value={focusedNode.task_id} />
               </div>
               <div className="mt-3 flex items-center gap-2">
+                <span className="badge bg-panel border-edge text-ink-muted">
+                  {focusedNode.agent_type}
+                </span>
                 <StateBadge
                   // Lift `Admitted + is_active` to `Running` so the
                   // focus panel matches the chip on the node body

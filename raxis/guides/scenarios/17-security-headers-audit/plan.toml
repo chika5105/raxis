@@ -5,7 +5,7 @@ description = """
 Security headers audit (scenario 17)
 """
 [workspace]
-name        = "Security headers audit"
+name = "Security Headers Audit"
 lane_id     = "secaudit-lane"
 
 [[tasks]]

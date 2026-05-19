@@ -5,7 +5,7 @@ description = """
 Postgres credential proxy (scenario 36)
 """
 [workspace]
-name        = "Postgres credential proxy"
+name = "Postgres Credential Proxy"
 lane_id     = "pg-cred-lane"
 
 [[tasks]]

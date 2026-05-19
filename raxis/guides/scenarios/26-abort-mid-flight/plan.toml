@@ -5,7 +5,7 @@ description = """
 Abort mid flight (scenario 26)
 """
 [workspace]
-name        = "Abort mid-flight"
+name = "Abort Mid Flight"
 lane_id     = "abort-lane"
 
 [[tasks]]

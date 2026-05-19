@@ -817,14 +817,14 @@ Scaffold a new `plan.toml` from a built-in template. Templates ship with the CLI
 ### 6.2 Invocation
 
 ```bash
-raxis-cli plan init [--template <name>] [--output <path>] [--initiative-name <text>]
+raxis-cli plan init [--template <name>] [--output <path>] [--name <text>]
 ```
 
 | Flag | Default | Effect |
 |---|---|---|
 | `--template`, `-t` | `feature` | Template name. List available templates with `raxis-cli plan init --list-templates`. |
 | `--output`, `-o` | `./plan.toml` | Where to write the scaffolded file. Refuses to overwrite an existing file unless `--force` is passed. |
-| `--initiative-name` | (prompted interactively) | Free-form initiative description, embedded into `[plan.initiative].description`. |
+| `--name` | (prompted interactively) | Human-readable initiative label, embedded into `[workspace].name` and used as the initial `[plan.initiative].description` placeholder. |
 
 ### 6.3 Templates (V2)
 

@@ -5,7 +5,7 @@ description = """
 Circular revision detection (scenario 24)
 """
 [workspace]
-name        = "Circular revision"
+name = "Circular Revision Detection"
 lane_id     = "circular-revision-lane"
 
 [[tasks]]

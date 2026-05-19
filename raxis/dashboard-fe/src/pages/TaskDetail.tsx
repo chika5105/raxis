@@ -41,14 +41,16 @@ export function TaskDetailPage() {
   if (q.error) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
   const t = q.data;
   const initiativeName =
-    initiativeQ.data?.display_name?.trim() || t.initiative_id;
+    t.initiative_display_name.trim() ||
+    initiativeQ.data?.display_name?.trim() ||
+    "Initiative";
 
   return (
     <div className="space-y-5">
       <header className="flex items-start justify-between gap-4 flex-wrap">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm text-ink-subtle">
-            <Link to="/initiatives" className="hover:text-accent">Initiatives</Link>
+            <Link to="/initiatives" className="hover:text-accent">Workspaces</Link>
             <span>/</span>
             <Link
               to={`/initiatives/${t.initiative_id}`}
@@ -69,7 +71,7 @@ export function TaskDetailPage() {
             <CopyButton value={t.task_id} />
           </div>
           <div className="mt-1 flex items-center gap-2 text-[11px] text-ink-subtle">
-            <span>Initiative</span>
+            <span>Workspace</span>
             <Mono>{t.initiative_id}</Mono>
             <CopyButton value={t.initiative_id} />
           </div>
@@ -77,6 +79,9 @@ export function TaskDetailPage() {
             {t.title}
           </h1>
           <div className="mt-2 flex items-center gap-2">
+            <span className="badge bg-panel border-edge text-ink-muted">
+              {t.agent_type}
+            </span>
             <StateBadge
               state={
                 t.is_active && t.state === "Admitted" ? "Running" : t.state

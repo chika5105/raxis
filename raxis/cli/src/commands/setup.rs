@@ -239,7 +239,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
             "--plan-template" => {
                 plan_template = req(args, &mut i, a)?;
             }
-            "--initiative-name" => {
+            "--name" | "--initiative-name" => {
                 initiative_name = Some(req(args, &mut i, a)?);
             }
             "--skip-phase" => {
@@ -429,7 +429,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
                 plan_path.display().to_string(),
             ];
             if let Some(name) = &initiative_name {
-                sub_args.push("--initiative-name".into());
+                sub_args.push("--name".into());
                 sub_args.push(name.clone());
             }
             if force {
@@ -560,7 +560,7 @@ fn print_usage() {
     println!("       raxis setup --operator-name <text>");
     println!("                   [--provider <name>] [--provider-id <id>]");
     println!("                   [--budget-usd <int>] [--max-concurrency <int>]");
-    println!("                   [--plan-template <name>] [--initiative-name <text>]");
+    println!("                   [--plan-template <name>] [--name <text>]");
     println!("                   [--skip-phase <label>] [--only-phase <label>]");
     println!("                   [--force]");
     println!();

@@ -94,7 +94,7 @@ chain or an on-disk worktree witness — no LLM-side judgement.
 """
 
 [workspace]
-name    = "E2E extended scenario"
+name = "E2E extended scenario"
 lane_id = "e2e-extended-lane""#;
 
 const EXTENDED_PLAN_MATERIALIZER_HEAD: &str = r#"# ── Materializer Executor ───────────────────────────────

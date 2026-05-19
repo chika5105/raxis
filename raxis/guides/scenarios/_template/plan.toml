@@ -14,7 +14,7 @@ One-paragraph natural-language description of the work this plan
   as part of their boot prompt.
 """
 [workspace]
-name        = "Scenario template"
+name = "Scenario template"
 lane_id     = "scenario-template-lane"
 
 # ── Executor ──────────────────────────────────────────────────────────────────

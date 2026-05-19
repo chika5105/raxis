@@ -11,6 +11,7 @@ import {
 export interface DagGraphNode {
   task_id: string;
   title: string;
+  agent_type?: string;
   state: string;
   node_kind?: "task" | "gate";
   parent_task_id?: string;
@@ -353,7 +354,9 @@ export function DagGraph({
               <title>
                 {isGate ? `Witness gate: ${n.gate_type ?? n.title}` : n.title}
                 {"\n"}
-                {isGate ? `task: ${n.parent_task_id}` : n.task_id}
+                {isGate
+                  ? `task: ${n.parent_task_id}`
+                  : `${n.agent_type ?? "Task"}: ${n.task_id}`}
                 {"\n"}
                 {isGate ? `verdict: ${n.latest_verdict ?? "Pending"}` : `state: ${eff}`}
                 {n.is_active && n.state !== eff
@@ -419,6 +422,18 @@ export function DagGraph({
               >
                 {displayNodeId(n, isGate)}
               </text>
+              {!isGate && (
+                <text
+                  x={10}
+                  y={62}
+                  fill="rgb(var(--c-ink-subtle))"
+                  fontSize={9}
+                  fontWeight={600}
+                  fontFamily="Inter, system-ui, sans-serif"
+                >
+                  {n.agent_type ?? "Task"}
+                </text>
+              )}
             </g>
           );
         })}
@@ -481,6 +496,7 @@ function expandGateNodes(
       outNodes.push({
         task_id: gateId,
         title: chip.gate_type,
+        agent_type: "Witness",
         state: gateState(chip.latest_verdict),
         node_kind: "gate",
         parent_task_id: n.task_id,

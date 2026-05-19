@@ -5,7 +5,7 @@ description = """
 Benchmark witness (scenario 34)
 """
 [workspace]
-name        = "Benchmark witness"
+name = "Benchmark Witness"
 lane_id     = "bench-lane"
 
 [[tasks]]

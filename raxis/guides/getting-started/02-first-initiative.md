@@ -174,10 +174,10 @@ Save this as `$DEMO_ROOT/plan.toml`:
 
 ```toml
 [plan.initiative]
-title       = "Hello world"
 description = "Create a HELLO.md file with a one-line greeting and commit it."
 
 [workspace]
+name     = "Hello world"
 base_ref = "refs/heads/main"
 lane_id  = "default"
 

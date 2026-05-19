@@ -20,7 +20,7 @@ The greeter task writes a small markdown file (HELLO.md) at the
   accepted.
 """
 [workspace]
-name        = "Hello World"
+name = "Hello World"
 lane_id     = "hello-world-lane"
 
 # ── Greeter ───────────────────────────────────────────────────────────────────

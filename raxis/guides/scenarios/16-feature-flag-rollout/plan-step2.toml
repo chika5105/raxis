@@ -5,7 +5,7 @@ description = """
 Feature flag rollout (scenario 16)
 """
 [workspace]
-name        = "Flip flag on"
+name = "Feature Flag Rollout"
 lane_id     = "ff-flip-lane"
 
 [[tasks]]

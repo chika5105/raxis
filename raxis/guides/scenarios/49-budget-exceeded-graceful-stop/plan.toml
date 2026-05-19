@@ -5,7 +5,7 @@ description = """
 Budget exceeded graceful stop (scenario 49)
 """
 [workspace]
-name        = "Tiny budget"
+name = "Budget Exceeded Graceful Stop"
 lane_id     = "tiny-budget-lane"
 
 [budget]

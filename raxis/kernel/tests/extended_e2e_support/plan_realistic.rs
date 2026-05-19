@@ -364,7 +364,7 @@ Cloud connections (S3 / GCP / Azure) are explicitly out of scope.
 """
 
 [workspace]
-name    = "E2E realistic scenario"
+name = "E2E realistic scenario"
 lane_id = "e2e-realistic-lane""#;
 
 const REALISTIC_PLAN_MATERIALIZER_HEAD: &str = r#"# ── Materializer Executor (re-used from extended scenario) ──

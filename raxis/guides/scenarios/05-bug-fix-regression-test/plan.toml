@@ -8,7 +8,7 @@ regression_test writes a #[test] that calls safe_div(1, 0) and
   regression test passes.
 """
 [workspace]
-name        = "Bug fix: regression-then-fix"
+name = "Bug Fix Regression Test"
 lane_id     = "regression-fix-lane"
 
 [[tasks]]

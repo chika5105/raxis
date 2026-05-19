@@ -226,7 +226,7 @@ export function OverviewPage() {
               <thead className="text-xs text-ink-subtle">
                 <tr className="border-b border-edge">
                   <th className="text-left px-4 py-2 font-medium">
-                    Initiative
+                    Workspace
                   </th>
                   <th className="text-left px-4 py-2 font-medium">State</th>
                   <th className="text-right px-4 py-2 font-medium">Progress</th>
@@ -255,7 +255,7 @@ export function OverviewPage() {
                           onClick={(e) => e.stopPropagation()}
                           className="text-ink hover:text-accent"
                         >
-                          {i.display_name || i.initiative_id}
+                          {i.display_name}
                         </Link>
                         <div className="text-[11px] text-ink-subtle">
                           <Mono>{i.initiative_id}</Mono>
@@ -364,8 +364,18 @@ export function OverviewPage() {
                                 : "Provider not observed yet"
                             }
                           >
-                            {s.provider ?? "provider pending"}
-                          </span>
+                          {s.provider ?? "provider pending"}
+                        </span>
+                          {s.initiative_id && s.initiative_display_name && (
+                            <Link
+                              to={`/initiatives/${s.initiative_id}`}
+                              onClick={(e) => e.stopPropagation()}
+                              className="badge bg-panel border-edge text-ink-muted hover:text-accent"
+                              title={s.initiative_id ?? undefined}
+                            >
+                              {s.initiative_display_name}
+                            </Link>
+                          )}
                           <span className="text-[11px] text-ink-subtle font-mono break-all">
                             {s.model ?? "model pending"}
                           </span>

@@ -5,7 +5,7 @@ description = """
 Cargo clippy verifier (scenario 28)
 """
 [workspace]
-name        = "clippy verifier"
+name = "Cargo Clippy Verifier"
 lane_id     = "clippy-lane"
 
 [[tasks]]

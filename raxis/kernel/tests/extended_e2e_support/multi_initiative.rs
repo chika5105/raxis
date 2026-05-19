@@ -109,7 +109,7 @@ materially testable.
 """
 
 [workspace]
-name    = "E2E realistic sibling"
+name = "E2E realistic sibling"
 lane_id = "e2e-realistic-sibling-lane""#;
 
 // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` parity guard. Iter52

@@ -7,7 +7,7 @@ The documenter Executor adds a new top-level section "## Quickstart"
   (just README.md) so any wander-off triggers FAIL_PATH_POLICY_VIOLATION.
 """
 [workspace]
-name        = "Add README section"
+name = "Add Readme Section"
 lane_id     = "readme-edit-lane"
 
 [[tasks]]

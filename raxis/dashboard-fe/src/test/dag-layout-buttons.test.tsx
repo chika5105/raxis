@@ -77,10 +77,11 @@ function renderPage(id: string) {
   });
   vi.spyOn(dashboardApi.initiatives, "dag").mockResolvedValue({
     initiative_id: id,
+    display_name: "dag-button-fixture",
     nodes: [
-      { task_id: "t1", title: "first",  state: "Completed" },
-      { task_id: "t2", title: "second", state: "Running" },
-      { task_id: "t3", title: "third",  state: "Admitted" },
+      { task_id: "t1", title: "first",  state: "Completed", agent_type: "Executor" },
+      { task_id: "t2", title: "second", state: "Running", agent_type: "Executor" },
+      { task_id: "t3", title: "third",  state: "Admitted", agent_type: "Executor" },
     ],
     edges: [
       { from: "t1", to: "t2" },

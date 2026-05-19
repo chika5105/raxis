@@ -233,6 +233,23 @@
     @apply bg-panel-high cursor-pointer;
   }
 
+  /*
+   * Wide forensic tables (Git worktrees, sessions, gates, audit)
+   * must stay inspectable at operator zoom levels. Many of those
+   * surfaces intentionally wrap the table in `card p-0
+   * overflow-hidden` to preserve rounded corners; without this
+   * override the table is clipped instead of gaining a horizontal
+   * scroll range.
+   */
+  .card.overflow-hidden:has(> table) {
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .card.overflow-hidden:has(> table) > table {
+    min-width: max-content;
+  }
+
   .pulse-dot {
     @apply inline-block w-2 h-2 rounded-full bg-info animate-pulseDot;
   }

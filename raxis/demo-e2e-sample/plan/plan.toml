@@ -19,6 +19,7 @@ integration test that exercises the new route end-to-end.
 """
 
 [workspace]
+name = "Demo health endpoint"
 lane_id    = "main"
 target_ref = "refs/heads/main"
 

@@ -5,7 +5,7 @@ description = """
 Cargo test verifier (scenario 27)
 """
 [workspace]
-name        = "cargo test verifier"
+name = "Cargo Test Verifier"
 lane_id     = "cargo-test-lane"
 
 [[tasks]]

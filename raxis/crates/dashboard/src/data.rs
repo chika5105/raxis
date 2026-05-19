@@ -592,6 +592,10 @@ pub struct RecentSessionEntry {
     /// Owning initiative id, when the kernel recorded one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative_id: Option<String>,
+    /// Operator-authored `[workspace].name`, when the
+    /// session can be tied back to an initiative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiative_display_name: Option<String>,
     /// Unix-seconds timestamp the session was created.
     pub created_at: u64,
     /// Unix-seconds timestamp the session terminated.
@@ -903,6 +907,11 @@ pub struct TaskView {
     pub task_id: String,
     /// Owning initiative id.
     pub initiative_id: String,
+    /// Operator-authored `[workspace].name`.
+    pub initiative_display_name: String,
+    /// Semantic agent type for this task:
+    /// `Orchestrator`, `Executor`, or `Reviewer`.
+    pub agent_type: String,
     /// Display title.
     pub title: String,
     /// Task FSM state.
@@ -1172,6 +1181,9 @@ pub struct SessionView {
     pub role: String,
     /// Owning initiative id.
     pub initiative_id: Option<String>,
+    /// Operator-authored `[workspace].name`, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiative_display_name: Option<String>,
     /// Owning task id (None for orchestrator).
     pub task_id: Option<String>,
     /// FSM state.
@@ -1434,6 +1446,13 @@ pub struct WorktreeListEntry {
     /// from the bound task / session row; main roots leave it empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative_id: Option<String>,
+    /// Operator-authored `[workspace].name`, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiative_display_name: Option<String>,
+    /// Semantic agent type for session worktrees
+    /// (`Orchestrator` / `Executor` / `Reviewer`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
     /// Derived session lifecycle state (`Active`, `Revoked`,
     /// `Expired`) when `kind == "Session"`, else `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3741,6 +3760,8 @@ mod tests {
                 TaskView {
                     task_id: format!("{id}-t1"),
                     initiative_id: id.into(),
+                    initiative_display_name: format!("Initiative {id}"),
+                    agent_type: "Executor".into(),
                     title: "first".into(),
                     state: "Completed".into(),
                     session_id: Some("s-1".into()),
@@ -3761,6 +3782,8 @@ mod tests {
                 TaskView {
                     task_id: format!("{id}-t2"),
                     initiative_id: id.into(),
+                    initiative_display_name: format!("Initiative {id}"),
+                    agent_type: "Executor".into(),
                     title: "second".into(),
                     state: "Running".into(),
                     session_id: Some("s-2".into()),
@@ -3855,6 +3878,8 @@ mod tests {
         let t = TaskView {
             task_id: "t-1".into(),
             initiative_id: "i-1".into(),
+            initiative_display_name: "Initiative i-1".into(),
+            agent_type: "Executor".into(),
             title: "t".into(),
             state: "Completed".into(),
             session_id: None,
@@ -3890,6 +3915,8 @@ mod tests {
         let t = TaskView {
             task_id: "t-1".into(),
             initiative_id: "i-1".into(),
+            initiative_display_name: "Initiative i-1".into(),
+            agent_type: "Executor".into(),
             title: "t".into(),
             state: "Failed".into(),
             session_id: None,
@@ -3937,7 +3964,7 @@ mod tests {
         assert!(matches!(err, ApiError::NotFound { ref kind } if kind == "initiative"));
 
         // Seed → byte-for-byte round-trip.
-        let plan_toml = "# original\n[plan.initiative]\ntitle = \"x\"\n";
+        let plan_toml = "# original\n[workspace]\nname = \"x\"\n";
         d.push_initiative_plan(InitiativePlanView {
             initiative_id: "init1".into(),
             plan_sha256: Some("deadbeef".into()),
@@ -4051,6 +4078,8 @@ mod tests {
             session_id: None,
             task_id: None,
             initiative_id: None,
+            initiative_display_name: None,
+            agent_type: None,
             session_state: None,
             observed_head_sha: None,
             observed_branch: None,

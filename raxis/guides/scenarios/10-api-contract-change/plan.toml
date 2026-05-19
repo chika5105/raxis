@@ -7,7 +7,7 @@ Add a function `parse_version(s: &str) -> Result<(u32, u32, u32),
   and docs.
 """
 [workspace]
-name        = "API contract change"
+name = "Api Contract Change"
 lane_id     = "api-contract-lane"
 
 [[tasks]]

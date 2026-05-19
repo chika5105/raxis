@@ -12,6 +12,7 @@ version = 1
 description = "@@INITIATIVE_NAME@@"
 
 [workspace]
+name = "@@INITIATIVE_NAME@@"
 lane_id    = "main"
 target_ref = "refs/heads/main"
 

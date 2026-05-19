@@ -840,21 +840,11 @@ impl DashboardData for KernelDashboardData {
                 .map(|t| t.transitioned_at)
                 .max()
                 .unwrap_or(r.created_at);
-            // `initiatives` table has no `display_name` column —
-            // the operator-visible title lives in
-            // `[plan.initiative].title` inside the plan TOML
-            // (`02-first-initiative.md §"Define the plan"`). Fall
-            // back to `initiative_id` so the list view never
-            // renders an invisible <Link> row.
-            let title =
-                raxis_store::views::plan_fields::reveal_initiative_meta(&conn, &r.initiative_id)
-                    .map(|m| m.title)
-                    .unwrap_or_default();
-            let display_name = if title.is_empty() {
-                r.initiative_id.clone()
-            } else {
-                title
-            };
+            // The operator-visible name is exactly `[workspace].name`.
+            // There is intentionally no read-side UUID fallback:
+            // missing or invalid names are plan-quality errors the
+            // operator should see.
+            let display_name = initiative_name_for_id(&conn, &r.initiative_id)?;
             out.push(InitiativeListEntry {
                 initiative_id: r.initiative_id,
                 display_name,
@@ -919,17 +909,9 @@ impl DashboardData for KernelDashboardData {
                 &conn,
                 &audit_index,
                 t,
-            ));
+            )?);
         }
-        let title =
-            raxis_store::views::plan_fields::reveal_initiative_meta(&conn, &row.initiative_id)
-                .map(|m| m.title)
-                .unwrap_or_default();
-        let display_name = if title.is_empty() {
-            row.initiative_id.clone()
-        } else {
-            title
-        };
+        let display_name = initiative_name_for_id(&conn, &row.initiative_id)?;
         // INV-DASHBOARD-FAILURE-VISIBILITY-01: when the initiative
         // is in a terminal-failure state, surface the most recent
         // failure-bearing audit row as `failure`. V2.5 ships the
@@ -976,10 +958,9 @@ impl DashboardData for KernelDashboardData {
         .map_err(|e| ApiError::Internal {
             log_only: format!("tasks::list_by_initiative: {e}"),
         })?;
-        Ok(rows
-            .iter()
+        rows.iter()
             .map(|t| task_row_to_view_with_lifecycle_indexed(&conn, &audit_index, t))
-            .collect())
+            .collect()
     }
 
     /// `GET /api/initiatives/:id/plan` —
@@ -1124,7 +1105,7 @@ impl DashboardData for KernelDashboardData {
         .ok_or(ApiError::NotFound {
             kind: "task".into(),
         })?;
-        Ok(task_row_to_view_with_lifecycle(&conn, &audit_chain, &row))
+        task_row_to_view_with_lifecycle(&conn, &audit_chain, &row)
     }
 
     /// `INV-DASHBOARD-TASK-LLM-CAPTURE-01`,
@@ -1583,7 +1564,7 @@ impl DashboardData for KernelDashboardData {
         // overview panel can surface revoked + expired alongside
         // active. `active_list` filters to `revoked = 0`; we
         // need the wider set here.
-        let mut rows = read_sessions_all_for_recent(&conn, cap);
+        let mut rows = read_sessions_all_for_recent(&conn, cap)?;
         // Sort newest by either `revoked_at` (when set) or
         // `created_at` so the most recently terminated rows
         // appear at the top.
@@ -1680,23 +1661,26 @@ impl DashboardData for KernelDashboardData {
             .collect();
         let session_ids: Vec<String> = rows.iter().map(|s| s.session_id.clone()).collect();
         let owning_by_session = owning_tasks_for_sessions(&conn, &session_ids);
-        let role_by_session = session_agent_types_for_sessions(&conn, &session_ids);
-        Ok(rows
-            .into_iter()
-            .map(|s| {
+        rows.into_iter()
+            .map(|s| -> Result<SessionView, ApiError> {
                 let state = session_row_state(&s);
-                let role = role_by_session
-                    .get(&s.session_id)
-                    .cloned()
-                    .unwrap_or_else(|| s.role_id.clone());
                 let owning = owning_by_session
                     .get(&s.session_id)
                     .cloned()
                     .unwrap_or_default();
+                let role = semantic_agent_type_for_session(
+                    &conn,
+                    &s.session_id,
+                    &s.role_id,
+                    Some(&owning),
+                );
+                let initiative_display_name =
+                    initiative_name_for_id_opt(&conn, owning.initiative_id.as_deref())?;
                 let view = SessionView {
                     session_id: s.session_id,
                     role,
                     initiative_id: None,
+                    initiative_display_name,
                     task_id: None,
                     state,
                     provider: s.provider,
@@ -1726,9 +1710,12 @@ impl DashboardData for KernelDashboardData {
                 // page (`get_session`) pays for the per-task ring
                 // tail and renders the richer view.
                 let view = enrich_session_view_with_owning_task(view, owning, None, None, None);
-                enrich_session_view_with_lifecycle_indexed(&audit_index, view)
+                Ok(enrich_session_view_with_lifecycle_indexed(
+                    &audit_index,
+                    view,
+                ))
             })
-            .collect())
+            .collect()
     }
 
     fn get_session(&self, session_id: &str) -> Result<SessionView, ApiError> {
@@ -1797,12 +1784,19 @@ impl DashboardData for KernelDashboardData {
             .task_id
             .as_deref()
             .and_then(|tid| cumulative_tokens_for_task(self.task_llm_capture.as_ref(), tid));
-        let role = session_agent_type_for_session(&conn, s.session_id.as_str())
-            .unwrap_or_else(|| s.role_id.clone());
+        let role = semantic_agent_type_for_session(
+            &conn,
+            s.session_id.as_str(),
+            &s.role_id,
+            Some(&owning),
+        );
+        let initiative_display_name =
+            initiative_name_for_id_opt(&conn, owning.initiative_id.as_deref())?;
         let view = SessionView {
             session_id: s.session_id,
             role,
             initiative_id: None,
+            initiative_display_name,
             task_id: None,
             state,
             provider: s.provider,
@@ -3619,7 +3613,7 @@ impl KernelDashboardData {
         // needed for a PR-style diff.
         if let Ok(conn) = self.open_ro() {
             if let Ok(mut stmt) = conn.prepare(&format!(
-                "SELECT s.session_id, COALESCE(s.session_agent_type, s.role_id), \
+                "SELECT s.session_id, COALESCE(s.session_agent_type, ''), s.role_id, \
                         s.worktree_root, s.base_sha, \
                         s.created_at, s.expires_at, s.revoked, s.revoked_at, \
                         (SELECT t.task_id FROM {TBL_TASKS} t \
@@ -3643,20 +3637,22 @@ impl KernelDashboardData {
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                        r.get::<_, i64>(4)?.max(0) as u64,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(4)?,
                         r.get::<_, i64>(5)?.max(0) as u64,
-                        r.get::<_, i64>(6)? != 0,
-                        r.get::<_, Option<i64>>(7)?.map(|v| v.max(0) as u64),
-                        r.get::<_, Option<String>>(8)?,
+                        r.get::<_, i64>(6)?.max(0) as u64,
+                        r.get::<_, i64>(7)? != 0,
+                        r.get::<_, Option<i64>>(8)?.map(|v| v.max(0) as u64),
                         r.get::<_, Option<String>>(9)?,
+                        r.get::<_, Option<String>>(10)?,
                     ))
                 });
                 if let Ok(rows) = rows {
                     for row in rows.flatten() {
                         let (
                             session_id,
-                            agent_type,
+                            raw_agent_type,
+                            role_id,
                             wt,
                             base_sha,
                             created_at,
@@ -3674,6 +3670,24 @@ impl KernelDashboardData {
                         } else {
                             session_id.clone()
                         };
+                        let owning = SessionOwningTask {
+                            initiative_id: initiative_id.clone(),
+                            task_id: task_id.clone(),
+                            input_tokens: 0,
+                            output_tokens: 0,
+                        };
+                        let agent_type = if raw_agent_type.trim().is_empty() {
+                            semantic_agent_type_for_session(
+                                &conn,
+                                &session_id,
+                                &role_id,
+                                Some(&owning),
+                            )
+                        } else {
+                            raw_agent_type
+                        };
+                        let initiative_display_name =
+                            initiative_name_for_id_opt(&conn, initiative_id.as_deref())?;
                         out.push(ResolvedWorktree {
                             summary: WorktreeListEntry {
                                 name: format!("session-{short}"),
@@ -3683,6 +3697,8 @@ impl KernelDashboardData {
                                 session_id: Some(session_id),
                                 task_id,
                                 initiative_id,
+                                initiative_display_name,
+                                agent_type: Some(agent_type),
                                 session_state: Some(session_state_from_columns(
                                     revoked, revoked_at, created_at, expires_at,
                                 )),
@@ -3746,6 +3762,8 @@ fn main_worktree_entry(name: String, label: String, path: String) -> ResolvedWor
             session_id: None,
             task_id: None,
             initiative_id: None,
+            initiative_display_name: None,
+            agent_type: None,
             session_state: None,
             observed_head_sha: observed.as_ref().and_then(|s| s.head_sha.clone()),
             observed_branch: observed.as_ref().and_then(|s| s.branch.clone()),
@@ -4057,45 +4075,6 @@ fn owning_tasks_for_sessions(
     out
 }
 
-/// Read the semantic planner-agent role for session rows. The
-/// historical `role_id` column is the IPC/wire role (`Planner` for all
-/// planner VMs); the operator dashboard needs the V2 dispatch role
-/// (`Orchestrator` / `Executor` / `Reviewer`).
-fn session_agent_types_for_sessions(
-    conn: &rusqlite::Connection,
-    session_ids: &[String],
-) -> std::collections::HashMap<String, String> {
-    let mut out = std::collections::HashMap::new();
-    if session_ids.is_empty() {
-        return out;
-    }
-    let placeholders = std::iter::repeat("?")
-        .take(session_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT session_id, session_agent_type \
-         FROM {sessions} \
-         WHERE session_id IN ({placeholders}) \
-           AND session_agent_type IS NOT NULL",
-        sessions = raxis_store::Table::Sessions.as_str(),
-    );
-    let Ok(mut stmt) = conn.prepare(&sql) else {
-        return out;
-    };
-    let rows = stmt.query_map(
-        rusqlite::params_from_iter(session_ids.iter().map(String::as_str)),
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-    );
-    if let Ok(rows) = rows {
-        for row in rows.flatten() {
-            let (session_id, role) = row;
-            out.insert(session_id, role);
-        }
-    }
-    out
-}
-
 fn session_agent_type_for_session(conn: &rusqlite::Connection, session_id: &str) -> Option<String> {
     conn.query_row(
         &format!(
@@ -4108,6 +4087,68 @@ fn session_agent_type_for_session(conn: &rusqlite::Connection, session_id: &str)
         |r| r.get::<_, String>(0),
     )
     .ok()
+}
+
+fn initiative_name_for_id(
+    conn: &raxis_store::ro::RoConn,
+    initiative_id: &str,
+) -> Result<String, ApiError> {
+    raxis_store::views::plan_fields::reveal_initiative_meta(conn, initiative_id)
+        .map(|m| m.name)
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("plan_fields::reveal_initiative_meta({initiative_id}): {e}"),
+        })
+}
+
+fn initiative_name_for_id_opt(
+    conn: &raxis_store::ro::RoConn,
+    initiative_id: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    initiative_id
+        .map(|id| initiative_name_for_id(conn, id).map(Some))
+        .unwrap_or(Ok(None))
+}
+
+fn semantic_agent_type_for_task(
+    conn: &raxis_store::ro::RoConn,
+    task_id: &str,
+    initiative_id: &str,
+) -> Result<String, ApiError> {
+    if task_id == initiative_id {
+        return Ok("Orchestrator".to_owned());
+    }
+    raxis_store::views::plan_fields::reveal_for_task(conn, task_id)
+        .map(|f| f.session_agent_type)
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("plan_fields::reveal_for_task({task_id}) agent type: {e}"),
+        })
+}
+
+fn semantic_agent_type_for_session(
+    conn: &raxis_store::ro::RoConn,
+    session_id: &str,
+    role_id: &str,
+    owning_task: Option<&SessionOwningTask>,
+) -> String {
+    if let Some(role) = session_agent_type_for_session(conn, session_id) {
+        if !role.trim().is_empty() {
+            return role;
+        }
+    }
+    if let Some(owning) = owning_task {
+        if let (Some(task_id), Some(initiative_id)) =
+            (owning.task_id.as_deref(), owning.initiative_id.as_deref())
+        {
+            if let Ok(role) = semantic_agent_type_for_task(conn, task_id, initiative_id) {
+                return role;
+            }
+        }
+    }
+    if role_id == "Planner" {
+        "Orchestrator".to_owned()
+    } else {
+        role_id.to_owned()
+    }
 }
 
 /// iter69 — extract a model id from the most-recent LLM turn
@@ -4551,7 +4592,7 @@ fn parse_worktree_snapshot_row(
 fn task_row_to_view(
     conn: &raxis_store::ro::RoConn,
     t: &raxis_store::views::tasks::TaskRow,
-) -> TaskView {
+) -> Result<TaskView, ApiError> {
     let outputs = raxis_store::views::structured_outputs::list_for_task(conn, &t.task_id)
         .unwrap_or_default()
         .into_iter()
@@ -4561,9 +4602,30 @@ fn task_row_to_view(
             at: o.emitted_at.max(0) as u64,
         })
         .collect();
-    let path_allowlist = raxis_store::views::plan_fields::reveal_for_task(conn, &t.task_id)
-        .map(|f| f.path_allowlist)
+    let plan_fields = if t.task_id == t.initiative_id {
+        None
+    } else {
+        Some(
+            raxis_store::views::plan_fields::reveal_for_task(conn, &t.task_id).map_err(|e| {
+                ApiError::Internal {
+                    log_only: format!("plan_fields::reveal_for_task({}): {e}", t.task_id),
+                }
+            })?,
+        )
+    };
+    let path_allowlist = plan_fields
+        .as_ref()
+        .map(|f| f.path_allowlist.clone())
         .unwrap_or_default();
+    let agent_type = if t.task_id == t.initiative_id {
+        "Orchestrator".to_owned()
+    } else {
+        plan_fields
+            .as_ref()
+            .map(|f| f.session_agent_type.clone())
+            .unwrap_or_else(|| "Executor".to_owned())
+    };
+    let initiative_display_name = initiative_name_for_id(conn, &t.initiative_id)?;
     // `is_active` mirrors whether there's any `Active`
     // `subtask_activations` row bound to this task. The FE renders
     // this as the dashboard's "really running" signal even when
@@ -4589,9 +4651,11 @@ fn task_row_to_view(
     // (`initiatives::lifecycle::auto_spawn_orchestrator_session_in_tx`
     // doc comment §"task_id == initiative_id by construction").
     let title = task_display_title(&t.task_id, &t.initiative_id);
-    TaskView {
+    Ok(TaskView {
         task_id: t.task_id.clone(),
         initiative_id: t.initiative_id.clone(),
+        initiative_display_name,
+        agent_type,
         title,
         state: t.state.clone(),
         session_id: t.session_id.clone(),
@@ -4620,7 +4684,7 @@ fn task_row_to_view(
         last_critique: None,
         reviewer_panel_results: Vec::new(),
         is_active,
-    }
+    })
 }
 
 /// Lifecycle-aware projection used by `get_task` /
@@ -4636,11 +4700,21 @@ fn task_row_to_view_with_lifecycle(
     conn: &raxis_store::ro::RoConn,
     audit_chain: &[lifecycle::AuditRow],
     t: &raxis_store::views::tasks::TaskRow,
-) -> TaskView {
-    let mut view = task_row_to_view(conn, t);
+) -> Result<TaskView, ApiError> {
+    let mut view = task_row_to_view(conn, t)?;
     let activations = read_activations_for_task(conn, &t.task_id);
     let (review_verdict, last_critique) = read_review_state(conn, &t.task_id);
-    let reviewer_verdicts = read_reviewer_verdicts_for_task(conn, &t.task_id);
+    let mut reviewer_verdicts = read_reviewer_verdicts_for_task(conn, &t.task_id);
+    if reviewer_verdicts.is_empty() {
+        if let Some(verdict) = review_verdict.clone() {
+            reviewer_verdicts.push(ReviewerVerdictView {
+                verdict,
+                critique: last_critique.clone().unwrap_or_default(),
+                reviewer_session_id: t.session_id.clone().unwrap_or_default(),
+                at: t.transitioned_at,
+            });
+        }
+    }
     let annotations = lifecycle::classify_for_task(
         audit_chain,
         &t.task_id,
@@ -4655,7 +4729,7 @@ fn task_row_to_view_with_lifecycle(
     view.last_critique = last_critique;
     view.reviewer_verdicts = reviewer_verdicts;
     view.reviewer_panel_results = panel;
-    view
+    Ok(view)
 }
 
 /// Indexed variant for list surfaces. The DB lookups stay
@@ -4665,11 +4739,21 @@ fn task_row_to_view_with_lifecycle_indexed(
     conn: &raxis_store::ro::RoConn,
     audit_index: &LifecycleAuditIndex<'_>,
     t: &raxis_store::views::tasks::TaskRow,
-) -> TaskView {
-    let mut view = task_row_to_view(conn, t);
+) -> Result<TaskView, ApiError> {
+    let mut view = task_row_to_view(conn, t)?;
     let activations = read_activations_for_task(conn, &t.task_id);
     let (review_verdict, last_critique) = read_review_state(conn, &t.task_id);
-    let reviewer_verdicts = read_reviewer_verdicts_for_task(conn, &t.task_id);
+    let mut reviewer_verdicts = read_reviewer_verdicts_for_task(conn, &t.task_id);
+    if reviewer_verdicts.is_empty() {
+        if let Some(verdict) = review_verdict.clone() {
+            reviewer_verdicts.push(ReviewerVerdictView {
+                verdict,
+                critique: last_critique.clone().unwrap_or_default(),
+                reviewer_session_id: t.session_id.clone().unwrap_or_default(),
+                at: t.transitioned_at,
+            });
+        }
+    }
     let annotations = lifecycle::classify_for_task_rows(
         audit_index.task_rows(&t.task_id),
         &t.task_id,
@@ -4685,7 +4769,7 @@ fn task_row_to_view_with_lifecycle_indexed(
     view.last_critique = last_critique;
     view.reviewer_verdicts = reviewer_verdicts;
     view.reviewer_panel_results = panel;
-    view
+    Ok(view)
 }
 
 /// Lifecycle-aware projection for [`SessionView`]. Mirrors
@@ -5030,7 +5114,7 @@ fn read_predecessors_by_successor(
 fn read_sessions_all_for_recent(
     conn: &raxis_store::ro::RoConn,
     limit: usize,
-) -> Vec<RecentSessionEntry> {
+) -> Result<Vec<RecentSessionEntry>, ApiError> {
     let mut out: Vec<RecentSessionEntry> = Vec::new();
     // Sub-select avoids LEFT JOIN multi-row ambiguity when one
     // session backs multiple tasks. We pick the lowest task_id
@@ -5038,6 +5122,7 @@ fn read_sessions_all_for_recent(
     let sql = format!(
         "SELECT s.session_id, \
                        COALESCE(s.session_agent_type, ''), \
+                       s.role_id, \
                        s.created_at, \
                        s.revoked_at, \
                        (SELECT t.task_id FROM {TBL_TASKS} t \
@@ -5051,33 +5136,51 @@ fn read_sessions_all_for_recent(
                 LIMIT ?1"
     );
     let Ok(mut stmt) = conn.prepare(&sql) else {
-        return out;
+        return Ok(out);
     };
     let rows = stmt.query_map([limit as i64], |r| {
         let session_id: String = r.get(0)?;
         let agent_type: String = r.get(1)?;
-        let created_at: i64 = r.get(2)?;
-        let revoked_at: Option<i64> = r.get(3)?;
-        let task_id: Option<String> = r.get(4)?;
-        let init_id: Option<String> = r.get(5)?;
-        Ok(RecentSessionEntry {
-            session_id,
-            agent_type,
-            task_id,
-            initiative_id: init_id,
-            created_at: created_at.max(0) as u64,
-            terminated_at: revoked_at.map(|v| v.max(0) as u64),
-            terminated_reason: None,
-            final_annotation: None,
-            capture_bytes: 0,
-        })
+        let role_id: String = r.get(2)?;
+        let created_at: i64 = r.get(3)?;
+        let revoked_at: Option<i64> = r.get(4)?;
+        let task_id: Option<String> = r.get(5)?;
+        let init_id: Option<String> = r.get(6)?;
+        Ok((
+            session_id, agent_type, role_id, task_id, init_id, created_at, revoked_at,
+        ))
     });
     if let Ok(rows) = rows {
         for row in rows.flatten() {
-            out.push(row);
+            let (session_id, raw_agent_type, role_id, task_id, init_id, created_at, revoked_at) =
+                row;
+            let owning = SessionOwningTask {
+                initiative_id: init_id.clone(),
+                task_id: task_id.clone(),
+                input_tokens: 0,
+                output_tokens: 0,
+            };
+            let agent_type = if raw_agent_type.trim().is_empty() {
+                semantic_agent_type_for_session(conn, &session_id, &role_id, Some(&owning))
+            } else {
+                raw_agent_type
+            };
+            let initiative_display_name = initiative_name_for_id_opt(conn, init_id.as_deref())?;
+            out.push(RecentSessionEntry {
+                session_id,
+                agent_type,
+                task_id,
+                initiative_id: init_id,
+                initiative_display_name,
+                created_at: created_at.max(0) as u64,
+                terminated_at: revoked_at.map(|v| v.max(0) as u64),
+                terminated_reason: None,
+                final_annotation: None,
+                capture_bytes: 0,
+            });
         }
     }
-    out
+    Ok(out)
 }
 
 /// Build the per-reviewer panel results table for one executor
@@ -5564,12 +5667,53 @@ mod tests {
         // create one with the standard migrations applied.
         let store_path = tmp.path().join("kernel.db");
         {
-            let _store = raxis_store::Store::open(&store_path).unwrap();
+            let store = raxis_store::Store::open(&store_path).unwrap();
+            let g = store.lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {init} \
+                     (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                     VALUES ('init-state', 'Executing', '{{}}', 'sha-state', 1)",
+                    init = raxis_store::Table::Initiatives.as_str()
+                ),
+                [],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {tasks} \
+                     (task_id, initiative_id, lane_id, state, actor, \
+                      policy_epoch, admitted_at, transitioned_at) \
+                     VALUES ('t-state', 'init-state', 'default', 'Running', 'kernel', 1, 1, 1)",
+                    tasks = raxis_store::Table::Tasks.as_str()
+                ),
+                [],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {plans} \
+                     (initiative_id, plan_bytes, plan_sig, stored_at) \
+                     VALUES ('init-state', ?1, x'00', 1)",
+                    plans = raxis_store::Table::SignedPlanArtifacts.as_str()
+                ),
+                [br#"[plan.initiative]
+description = "fixture"
+
+[workspace]
+name = "State projection"
+lane_id = "default"
+
+[[tasks]]
+task_id = "t-state"
+"# as &[u8]],
+            )
+            .unwrap();
         }
         let conn = raxis_store::ro::open(tmp.path()).unwrap();
         for &variant in &raxis_types::TaskState::ALL {
             let row = synth_task_row(variant);
-            let view = task_row_to_view(&conn, &row);
+            let view = task_row_to_view(&conn, &row).unwrap();
             assert_eq!(
                 view.state,
                 variant.as_sql_str(),
@@ -5855,8 +5999,6 @@ mod tests {
             session_agent_type_for_session(&conn, "sess-a").as_deref(),
             Some("Reviewer")
         );
-        let mapped = session_agent_types_for_sessions(&conn, &["sess-a".into()]);
-        assert_eq!(mapped.get("sess-a").map(String::as_str), Some("Reviewer"));
     }
 
     /// A session without any tasks (orchestrator-only,
@@ -5921,6 +6063,7 @@ mod tests {
             session_id: "sess-a".into(),
             role: "Executor".into(),
             initiative_id: None,
+            initiative_display_name: None,
             task_id: None,
             state: "Active".into(),
             provider: None,
@@ -5966,6 +6109,7 @@ mod tests {
             session_id: "sess-a".into(),
             role: "Executor".into(),
             initiative_id: Some("init-existing".into()),
+            initiative_display_name: Some("Existing initiative".into()),
             task_id: Some("task-existing".into()),
             state: "Active".into(),
             provider: Some("anthropic-prod".into()),
@@ -6285,6 +6429,7 @@ mod tests {
             session_id: "sess-a".into(),
             role: "Orchestrator".into(),
             initiative_id: None,
+            initiative_display_name: None,
             task_id: None,
             state: "Active".into(),
             provider: None,
@@ -6320,6 +6465,7 @@ mod tests {
             session_id: "sess-a".into(),
             role: "Executor".into(),
             initiative_id: None,
+            initiative_display_name: None,
             task_id: None,
             state: "Active".into(),
             provider: None,

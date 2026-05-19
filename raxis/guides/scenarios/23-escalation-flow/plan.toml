@@ -5,7 +5,7 @@ description = """
 Escalation flow (scenario 23)
 """
 [workspace]
-name        = "Escalation flow"
+name = "Escalation Flow"
 lane_id     = "escalation-lane"
 
 [[tasks]]

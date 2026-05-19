@@ -11,10 +11,12 @@
 // Coverage (in evaluation order, deterministic):
 //   1. TOML parse              — operator-typed syntax errors
 //   2. Required sections       — `[plan.initiative]`, `[workspace]`, `[[tasks]]`
-//   3. `[plan.initiative] description` —
+//   3. `[workspace] name` —
+//      present + non-empty + single-line + ≤ 64 characters
+//   4. `[plan.initiative] description` —
 //      present + non-empty + ≤ 64 KiB
-//   4. `[workspace] lane_id`   — present + non-empty
-//   5. Per-task fields:
+//   5. `[workspace] lane_id`   — present + non-empty
+//   6. Per-task fields:
 //        - `task_id` required
 //        - `description` — present +
 //          non-empty + ≤ 64 KiB
@@ -24,12 +26,12 @@
 //          (V2 §27 typed clone strategy)
 //        - valid `session_agent_type` ∈ {`Executor`, `Reviewer`} when
 //          declared
-//   6. DAG family:
+//   7. DAG family:
 //        - duplicate `task_id`
 //        - self-loop (`task.predecessors` lists itself)
 //        - dangling predecessor (id not declared in this plan)
 //        - cyclic dependency (DFS over the predecessor graph)
-//   7. Cross-cutting artifacts (`[orchestrator] cross_cutting_artifacts`):
+//   8. Cross-cutting artifacts (`[orchestrator] cross_cutting_artifacts`):
 //        - empty entry, leading `!`, leading or trailing `/`,
 //          `..` segments, embedded `/`, glob characters
 // Output format (stable wire shape; tests pin the leading line):
@@ -131,13 +133,18 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
         r.fail(
             "required sections",
             "missing [plan.initiative] (V2 §1.1: declare \
-             `[plan.initiative]\\ndescription = \"...\"` to seed the \
-             orchestrator agent)"
+             `[plan.initiative]\\ndescription = \"...\"` \
+             to seed the orchestrator agent)"
                 .to_owned(),
         );
     }
     if workspace.is_none() {
-        r.fail("required sections", "missing [workspace]".to_owned());
+        r.fail(
+            "required sections",
+            "missing [workspace] (declare `name` for dashboard display and \
+             `lane_id` for budget/session propagation)"
+                .to_owned(),
+        );
     }
     if tasks_arr.is_none() {
         r.fail("required sections", "missing [[tasks]]".to_owned());
@@ -147,12 +154,57 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
     }
     r.ok("required sections present");
 
-    // ── Step 3: [plan.initiative] description (V2 §1.1) ──────────────────
+    // ── Step 3: [workspace] name ───────────────────────────────────────
+    const MAX_WORKSPACE_NAME_CHARS: usize = 64;
+    let workspace = workspace.unwrap();
+    match workspace.get("name") {
+        Some(toml::Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                r.fail(
+                    "[workspace] name",
+                    "is empty; declare a short dashboard label".to_owned(),
+                );
+                return r;
+            }
+            if trimmed.chars().any(|c| c.is_control()) {
+                r.fail(
+                    "[workspace] name",
+                    "must be a single line with no control characters".to_owned(),
+                );
+                return r;
+            }
+            let count = trimmed.chars().count();
+            if count > MAX_WORKSPACE_NAME_CHARS {
+                r.fail(
+                    "[workspace] name",
+                    format!(
+                        "is {count} characters, exceeds {MAX_WORKSPACE_NAME_CHARS} character cap"
+                    ),
+                );
+                return r;
+            }
+            r.ok(&format!("[workspace] name = \"{trimmed}\""));
+        }
+        Some(_) => {
+            r.fail("[workspace] name", "must be a TOML string".to_owned());
+            return r;
+        }
+        None => {
+            r.fail(
+                "[workspace] name",
+                "is missing; declare `[workspace] name = \"<short label>\"".to_owned(),
+            );
+            return r;
+        }
+    }
+
+    let plan_initiative = plan_initiative.unwrap();
+    // ── Step 4: [plan.initiative] description (V2 §1.1) ──────────────────
     // Mirrors the kernel `parse_plan_orchestrator` validator. Same
     // 64 KiB cap so an operator catches `execve(2)` `ARG_MAX` issues
     // client-side instead of after the round-trip.
     const MAX_DESCRIPTION_BYTES: usize = 64 * 1024;
-    let plan_initiative = plan_initiative.unwrap();
     match plan_initiative.get("description") {
         Some(toml::Value::String(s)) => {
             let trimmed = s.trim_end();
@@ -200,8 +252,7 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
         }
     }
 
-    // ── Step 4: [workspace] lane_id ───────────────────────────────────────
-    let workspace = workspace.unwrap();
+    // ── Step 5: [workspace] lane_id ───────────────────────────────────────
     let lane_id = match workspace.get("lane_id").and_then(|v| v.as_str()) {
         None | Some("") => {
             r.fail(
@@ -575,6 +626,7 @@ mod tests {
 description = "Add a healthz endpoint"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -624,6 +676,7 @@ description = "do thing"
 description = "fixture"
 
 [workspace]
+name = "fixture"
 
 [[tasks]]
 task_id     = "a"
@@ -642,6 +695,7 @@ description = "do thing"
 description = "fixture"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -663,6 +717,7 @@ session_agent_type = "Orchestrator"
 description = "fixture"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -684,6 +739,7 @@ clone_strategy = "shallow"
 description = "fixture"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -704,6 +760,7 @@ lane_id     = "other"
 description = "fixture"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -726,6 +783,7 @@ description = "do thing again"
 description = "fixture"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -746,6 +804,7 @@ predecessors = ["a"]
 description = "fixture"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -766,6 +825,7 @@ predecessors = ["ghost"]
 description = "fixture"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -791,6 +851,7 @@ predecessors = ["a"]
 description = "fixture"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [orchestrator]
@@ -813,6 +874,7 @@ description = "do thing"
 description = "fixture"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -833,6 +895,7 @@ path_allowlist = ["src/*.rs"]
 description = "fixture"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -843,13 +906,14 @@ description = "do thing"
         assert!(r.first_error.is_none(), "report: {:#?}", r.lines);
     }
 
-    // ── description checks ────────────────
+    // ── initiative metadata checks ────────────────
 
     #[test]
     fn missing_plan_initiative_section_is_rejected() {
         let r = validate_plan_text(
             r#"
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -863,12 +927,76 @@ description = "do thing"
     }
 
     #[test]
+    fn missing_workspace_name_is_rejected() {
+        let r = validate_plan_text(
+            r#"
+[plan.initiative]
+description = "fixture"
+
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id     = "a"
+description = "do thing"
+"#,
+        );
+        let err = r.first_error.unwrap();
+        assert!(err.contains("[workspace] name"), "err = {err}");
+        assert!(err.contains("missing"), "err = {err}");
+    }
+
+    #[test]
+    fn empty_workspace_name_is_rejected() {
+        let r = validate_plan_text(
+            r#"
+[plan.initiative]
+description = "fixture"
+
+[workspace]
+name = "   "
+lane_id = "default"
+
+[[tasks]]
+task_id     = "a"
+description = "do thing"
+"#,
+        );
+        let err = r.first_error.unwrap();
+        assert!(err.contains("[workspace] name"), "err = {err}");
+        assert!(err.contains("empty"), "err = {err}");
+    }
+
+    #[test]
+    fn oversized_workspace_name_is_rejected() {
+        let name = "x".repeat(65);
+        let plan = format!(
+            r#"
+[plan.initiative]
+description = "fixture"
+
+[workspace]
+name = "{name}"
+lane_id = "default"
+
+[[tasks]]
+task_id     = "a"
+description = "do thing"
+"#
+        );
+        let r = validate_plan_text(&plan);
+        let err = r.first_error.unwrap();
+        assert!(err.contains("[workspace] name"), "err = {err}");
+        assert!(err.contains("64"), "err = {err}");
+    }
+
+    #[test]
     fn missing_plan_initiative_description_is_rejected() {
         let r = validate_plan_text(
             r#"
 [plan.initiative]
-
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -889,6 +1017,7 @@ description = "do thing"
 description = "   "
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -909,6 +1038,7 @@ description = "do thing"
 description = "fixture"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -929,6 +1059,7 @@ task_id = "a"
 description = "fixture"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]
@@ -950,6 +1081,7 @@ description = "   "
 description = "fixture"
 
 [workspace]
+name = "fixture"
 lane_id = "default"
 
 [[tasks]]

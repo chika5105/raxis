@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
@@ -84,6 +84,8 @@ interface ShellProps {
 
 export function Shell({ children }: ShellProps) {
   const navigate = useNavigate();
+  const location = useLocation();
+  const routeViewportRef = useRef<HTMLDivElement | null>(null);
   const [profile, setProfile] = useState(() => getStoredProfile());
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -115,6 +117,17 @@ export function Shell({ children }: ShellProps) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
+
+  // The route viewport owns both dashboard axes so forensic
+  // tables can be inspected without clipping. Reset only on a
+  // path change; query-only changes such as table filters should
+  // keep the operator's local scroll context.
+  useEffect(() => {
+    const el = routeViewportRef.current;
+    if (!el) return;
+    el.scrollTop = 0;
+    el.scrollLeft = 0;
+  }, [location.pathname]);
 
   // Lightweight badge counts for the nav. Refresh every 10s
   // so the operator sees inbox / escalation drops without
@@ -285,7 +298,7 @@ export function Shell({ children }: ShellProps) {
       </aside>
 
       {/* Main column */}
-      <main className="flex-1 min-w-0 flex flex-col">
+      <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
         <header className="h-12 border-b border-edge bg-panel-raised flex items-center px-5 shrink-0">
           <Breadcrumb />
           <div className="ml-auto flex items-center gap-3">
@@ -302,8 +315,15 @@ export function Shell({ children }: ShellProps) {
             <ThemeToggle />
           </div>
         </header>
-        <div className="flex-1 overflow-y-auto scroll-thin">
-          <div className="px-5 py-5 max-w-[1600px] mx-auto w-full space-y-3">
+        <div
+          ref={routeViewportRef}
+          className="flex-1 min-h-0 min-w-0 overflow-auto scroll-thin"
+          data-testid="dashboard-scroll-viewport"
+        >
+          <div
+            className="px-5 py-5 min-w-[1600px] max-w-[1600px] mx-auto w-full space-y-3"
+            data-testid="dashboard-route-frame"
+          >
             {/*
               Supervisor lifecycle banner. Mounted globally so an
               operator-noticed restart-in-flight or halted state

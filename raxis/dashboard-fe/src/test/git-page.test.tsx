@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 
@@ -35,6 +35,8 @@ function worktree(over: Partial<WorktreeListEntry>): WorktreeListEntry {
     session_id: "session-live-1234567890",
     task_id: "task-live",
     initiative_id: "init-a",
+    initiative_display_name: "Alpha pipeline",
+    agent_type: "Executor",
     session_state: "Active",
     observed_head_sha: null,
     observed_branch: null,
@@ -72,5 +74,34 @@ describe("<GitPage>", () => {
     expect(screen.getByText("Executor:session-past")).toBeInTheDocument();
     expect(screen.getByText("Browse only")).toBeInTheDocument();
     expect(screen.getAllByText("Past").length).toBeGreaterThan(0);
+  });
+
+  it("filters worktrees by workspace name", async () => {
+    vi.spyOn(dashboardApi.git, "list").mockResolvedValue([
+      worktree({}),
+      worktree({
+        name: "session-beta",
+        label: "Executor:session-beta",
+        path: "/tmp/raxis/worktrees/session-beta",
+        session_id: "session-beta-1234567890",
+        initiative_id: "init-b",
+        initiative_display_name: "Beta import",
+        task_id: "task-beta",
+      }),
+    ]);
+
+    renderWithProviders(<GitPage />);
+
+    expect(await screen.findByText("Executor:session-live")).toBeInTheDocument();
+    expect(screen.getByText("Executor:session-beta")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByDisplayValue("All workspaces"), {
+      target: { value: "Beta import" },
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("Executor:session-live")).toBeNull();
+      expect(screen.getByText("Executor:session-beta")).toBeInTheDocument();
+    });
   });
 });

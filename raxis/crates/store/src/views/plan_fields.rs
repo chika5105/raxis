@@ -5,10 +5,11 @@
 //!
 //! `task_plan_fields` is a logical view, not a real table. The §2.5.8
 //! path-scope fields (`path_allowlist`, `path_export_to_successors`,
-//! `path_export_globs`, `path_scope_override`) are stored on the
-//! immutable `signed_plan_artifacts.plan_bytes` BLOB, NOT in a
-//! materialised column on `tasks`. To answer "what paths can task X
-//! touch?" the kernel parses the plan TOML once at boot
+//! `path_export_globs`, `path_scope_override`) and the semantic
+//! `session_agent_type` are stored on the immutable
+//! `signed_plan_artifacts.plan_bytes` BLOB, NOT in a materialised
+//! column on `tasks`. To answer "what paths can task X touch?" the
+//! kernel parses the plan TOML once at boot
 //! (`initiatives::lifecycle::repopulate_plan_registry`); the read-only
 //! CLI does the same parse on demand here.
 //!
@@ -46,25 +47,42 @@ use crate::Table;
 /// in-memory `TaskPlanFields` struct (deliberately not shared, to
 /// keep `raxis-store` independent from `raxis-kernel` per the
 /// dependency-direction rule in `views/mod.rs`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanPathFields {
     pub path_allowlist: Vec<String>,
     pub path_export_to_successors: bool,
     pub path_export_globs: Vec<String>,
     pub path_scope_override: bool,
+    /// Plan-declared semantic agent type for this task. Defaults to
+    /// `"Executor"` when omitted, matching the kernel admission
+    /// parser.
+    pub session_agent_type: String,
 }
 
-/// `[plan.initiative]` metadata pulled out of the same plan TOML
-/// blob. The dashboard list/detail views render `title` so the
-/// operator does not have to read raw initiative_ids; if the plan
-/// omits the field (V1 plans pre-`[plan.initiative]`, malformed
-/// plans, etc.) we fall back to an empty string and let the caller
-/// substitute initiative_id.
+impl Default for PlanPathFields {
+    fn default() -> Self {
+        Self {
+            path_allowlist: Vec::new(),
+            path_export_to_successors: false,
+            path_export_globs: Vec::new(),
+            path_scope_override: false,
+            session_agent_type: "Executor".to_owned(),
+        }
+    }
+}
+
+/// Dashboard-facing initiative metadata pulled out of the same plan
+/// TOML blob. The operator-visible label is `[workspace].name`; the
+/// kernel-owned `initiative_id` remains the uniqueness boundary.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InitiativeMeta {
-    pub title: String,
+    pub name: String,
     pub description: String,
 }
+
+/// Dashboard-visible initiative name budget. Counted in Unicode
+/// scalar values, not bytes, because this is an operator-facing label.
+pub const WORKSPACE_NAME_MAX_CHARS: usize = 64;
 
 /// Failure modes specific to the plan-fields reveal view.
 #[derive(Debug, Error)]
@@ -163,15 +181,14 @@ pub fn submitted_toml_for_initiative(
     }
 }
 
-/// Read the `[plan.initiative]` block (`title`, `description`) out
-/// of the plan TOML for `initiative_id`. Same V1 → V2.1 fallback
-/// chain as [`reveal_for_task`], same fail-soft default — a plan
-/// that omits the block, or pre-`[plan.initiative]` V1 plans, both
-/// return `Ok(InitiativeMeta::default())` (empty strings) so the
-/// dashboard can substitute `initiative_id` instead of 500-ing.
+/// Read the dashboard-visible initiative metadata out of the plan
+/// TOML for `initiative_id`. Same V1 → V2.1 fallback chain as
+/// [`reveal_for_task`]. `[workspace].name` is required and bounded;
+/// no read-side UUID fallback is applied because this label is the
+/// operator-facing initiative identity.
 ///
-/// Returns `Err(_)` only on hard failures (sqlite, malformed TOML,
-/// missing plan blob entirely) — those are operator-visible
+/// Returns `Err(_)` on sqlite trouble, malformed TOML, missing plan
+/// blob, or an invalid/missing name — those are operator-visible
 /// diagnostics, not blank-view paper-cuts.
 pub fn reveal_initiative_meta(
     conn: &RoConn,
@@ -298,15 +315,19 @@ fn parse_plan_path_fields(
             .get("path_scope_override")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        session_agent_type: entry
+            .get("session_agent_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Executor")
+            .to_owned(),
     })
 }
 
-/// Pull `[plan.initiative]` `title` + `description` out of the
-/// plan TOML. Both fields default to `""` so a V1 plan (which has
-/// no `[plan.initiative]` block) renders as an empty meta and the
-/// caller substitutes `initiative_id` for display. We deliberately
-/// do NOT 500 on a missing block: the only invariant we enforce is
-/// "the TOML parses".
+/// Pull `[workspace].name` plus `[plan.initiative].description` out
+/// of the plan TOML. The workspace name is mandatory for the
+/// dashboard identity contract; malformed historical/test rows surface as
+/// [`PlanFieldsError::PlanInvalid`] instead of falling back to a UUID
+/// label.
 fn parse_initiative_meta(
     plan_toml: &str,
     initiative_id: &str,
@@ -316,23 +337,63 @@ fn parse_initiative_meta(
         reason: format!("TOML parse error: {e}"),
     })?;
 
-    let block = doc
+    let initiative_block = doc
         .get("plan")
         .and_then(|p| p.get("initiative"))
         .and_then(|i| i.as_table());
+    let workspace_block = doc.get("workspace").and_then(|w| w.as_table());
 
-    let title = block
-        .and_then(|t| t.get("title"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    let description = block
+    let name = match workspace_block.and_then(|t| t.get("name")) {
+        Some(toml::Value::String(s)) => normalize_workspace_name(s, initiative_id)?,
+        Some(other) => {
+            return Err(PlanFieldsError::PlanInvalid {
+                initiative_id: initiative_id.to_owned(),
+                reason: format!(
+                    "[workspace] name must be a TOML string, got {}",
+                    other.type_str()
+                ),
+            });
+        }
+        None => {
+            return Err(PlanFieldsError::PlanInvalid {
+                initiative_id: initiative_id.to_owned(),
+                reason: "[workspace] is missing required `name` field".to_owned(),
+            });
+        }
+    };
+    let description = initiative_block
         .and_then(|t| t.get("description"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_owned();
 
-    Ok(InitiativeMeta { title, description })
+    Ok(InitiativeMeta { name, description })
+}
+
+fn normalize_workspace_name(raw: &str, initiative_id: &str) -> Result<String, PlanFieldsError> {
+    let name = raw.trim().to_owned();
+    if name.is_empty() {
+        return Err(PlanFieldsError::PlanInvalid {
+            initiative_id: initiative_id.to_owned(),
+            reason: "[workspace] name is empty".to_owned(),
+        });
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err(PlanFieldsError::PlanInvalid {
+            initiative_id: initiative_id.to_owned(),
+            reason: "[workspace] name must be a single line with no control characters".to_owned(),
+        });
+    }
+    let count = name.chars().count();
+    if count > WORKSPACE_NAME_MAX_CHARS {
+        return Err(PlanFieldsError::PlanInvalid {
+            initiative_id: initiative_id.to_owned(),
+            reason: format!(
+                "[workspace] name is {count} characters, exceeds cap {WORKSPACE_NAME_MAX_CHARS}"
+            ),
+        });
+    }
+    Ok(name)
 }
 
 /// Read an optional TOML field as a `Vec<String>`. Missing field,
@@ -438,6 +499,7 @@ mod tests {
             path_export_to_successors = true
             path_export_globs         = ["src/ipc/**", "src/auth/**"]
             path_scope_override       = true
+            session_agent_type        = "Reviewer"
         "#;
         let (tmp, _init, task) = fresh_store_with_plan(plan);
         let conn = open_ro(tmp.path()).unwrap();
@@ -447,6 +509,52 @@ mod tests {
         assert!(f.path_export_to_successors);
         assert_eq!(f.path_export_globs, vec!["src/ipc/**", "src/auth/**"]);
         assert!(f.path_scope_override);
+        assert_eq!(f.session_agent_type, "Reviewer");
+    }
+
+    #[test]
+    fn reveal_initiative_meta_requires_workspace_name_and_returns_it() {
+        let plan = r#"
+            [plan.initiative]
+            description = "Make operator review faster"
+
+            [workspace]
+            name = "Ship dashboard polish"
+
+            [[tasks]]
+            task_id = "t-1"
+        "#;
+        let (tmp, init, _task) = fresh_store_with_plan(plan);
+        let conn = open_ro(tmp.path()).unwrap();
+
+        let meta = reveal_initiative_meta(&conn, &init).unwrap();
+        assert_eq!(meta.name, "Ship dashboard polish");
+        assert_eq!(meta.description, "Make operator review faster");
+    }
+
+    #[test]
+    fn reveal_initiative_meta_rejects_missing_workspace_name() {
+        let plan = r#"
+            [plan.initiative]
+            description = "No workspace label"
+
+            [workspace]
+            lane_id = "default"
+
+            [[tasks]]
+            task_id = "t-1"
+        "#;
+        let (tmp, init, _task) = fresh_store_with_plan(plan);
+        let conn = open_ro(tmp.path()).unwrap();
+
+        let err = reveal_initiative_meta(&conn, &init).unwrap_err();
+        match err {
+            PlanFieldsError::PlanInvalid { reason, .. } => {
+                assert!(reason.contains("[workspace]"), "got: {reason}");
+                assert!(reason.contains("name"), "got: {reason}");
+            }
+            other => panic!("expected PlanInvalid; got {other:?}"),
+        }
     }
 
     #[test]
@@ -595,7 +703,7 @@ mod tests {
     /// `INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`.
     #[test]
     fn submitted_toml_returns_v1_plan_bytes_byte_for_byte() {
-        let plan = "[plan.initiative]\ntitle = \"original\"\n[[tasks]]\ntask_id = \"t-1\"\n";
+        let plan = "[workspace]\nname = \"original\"\n[[tasks]]\ntask_id = \"t-1\"\n";
         let (tmp, init, _task) = fresh_store_with_plan(plan);
         let conn = open_ro(tmp.path()).unwrap();
         let bytes = submitted_toml_for_initiative(&conn, &init).unwrap();

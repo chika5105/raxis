@@ -5,7 +5,7 @@ description = """
 Block everything by default (scenario 40)
 """
 [workspace]
-name        = "Default deny"
+name = "Block Everything By Default"
 lane_id     = "default-deny-lane"
 
 [[tasks]]

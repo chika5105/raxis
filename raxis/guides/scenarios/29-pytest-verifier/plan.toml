@@ -5,7 +5,7 @@ description = """
 Pytest verifier (scenario 29)
 """
 [workspace]
-name        = "pytest verifier"
+name = "Pytest Verifier"
 lane_id     = "pytest-lane"
 
 [[tasks]]

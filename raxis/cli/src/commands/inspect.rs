@@ -197,6 +197,10 @@ fn render_plan_fields<W: Write>(out: &mut W, revealed: Option<&PlanPathFields>) 
                 out,
                 "  path_scope_override:       <pass --reveal-paths to show>"
             );
+            let _ = writeln!(
+                out,
+                "  session_agent_type:        <pass --reveal-paths to show>"
+            );
         }
         Some(fields) => {
             render_path_list(out, "path_allowlist", &fields.path_allowlist);
@@ -210,6 +214,11 @@ fn render_plan_fields<W: Write>(out: &mut W, revealed: Option<&PlanPathFields>) 
                 out,
                 "  path_scope_override:       {}",
                 fields.path_scope_override,
+            );
+            let _ = writeln!(
+                out,
+                "  session_agent_type:        {}",
+                fields.session_agent_type,
             );
         }
     }
@@ -354,6 +363,7 @@ fn serialize_plan_fields(revealed: Option<&PlanPathFields>) -> serde_json::Value
                 "path_export_to_successors",
                 "path_export_globs",
                 "path_scope_override",
+                "session_agent_type",
             ],
             "hint": "pass --reveal-paths to expand (writes PathReadAccessed audit event)",
         }),
@@ -363,6 +373,7 @@ fn serialize_plan_fields(revealed: Option<&PlanPathFields>) -> serde_json::Value
             "path_export_to_successors": f.path_export_to_successors,
             "path_export_globs":         f.path_export_globs,
             "path_scope_override":       f.path_scope_override,
+            "session_agent_type":        f.session_agent_type,
         }),
     }
 }
@@ -539,6 +550,7 @@ mod tests {
             path_export_to_successors: true,
             path_export_globs: vec!["src/ipc/**".to_owned()],
             path_scope_override: false,
+            session_agent_type: "Executor".to_owned(),
         }
     }
 

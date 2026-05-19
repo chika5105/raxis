@@ -29,6 +29,7 @@ export function SessionsPage() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const initiativeId = params.get("initiative_id") ?? undefined;
+  const workspaceName = params.get("workspace") ?? "All";
   const scope = parseLifecycleScope(params.get("scope"));
   const activeStatuses = useMemo(
     () => parseStatusParam(params.get("status")),
@@ -44,6 +45,17 @@ export function SessionsPage() {
     const sp = new URLSearchParams(params);
     if (next.length === 0) sp.delete("status");
     else sp.set("status", serializeStatusParam(next));
+    setParams(sp, { replace: true });
+  };
+  const writeWorkspaceName = (next: string) => {
+    const sp = new URLSearchParams(params);
+    if (next === "All") sp.delete("workspace");
+    else sp.set("workspace", next);
+    setParams(sp, { replace: true });
+  };
+  const clearInitiativeFilter = () => {
+    const sp = new URLSearchParams(params);
+    sp.delete("initiative_id");
     setParams(sp, { replace: true });
   };
   const handleToggle = (status: string, multiSelect: boolean) =>
@@ -75,12 +87,20 @@ export function SessionsPage() {
     if (!q.data) return [];
     return q.data.filter((s) => {
       if (role !== "All" && s.role !== role) return false;
+      if (
+        workspaceName !== "All" &&
+        (s.initiative_display_name ?? "") !== workspaceName
+      ) {
+        return false;
+      }
       if (search) {
         const needle = search.toLowerCase();
         const haystack = [
           s.session_id,
+          s.role,
           s.task_id ?? "",
           s.initiative_id ?? "",
+          s.initiative_display_name ?? "",
           s.provider ?? "",
           s.model ?? "",
         ]
@@ -90,7 +110,15 @@ export function SessionsPage() {
       }
       return true;
     });
-  }, [q.data, role, search]);
+  }, [q.data, role, search, workspaceName]);
+  const workspaceOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const s of q.data ?? []) {
+      const name = s.initiative_display_name?.trim();
+      if (name) names.add(name);
+    }
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [q.data]);
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
     for (const s of roleSearchFiltered.filter((s) =>
@@ -161,10 +189,22 @@ export function SessionsPage() {
           </div>
           <input
             className="input w-56"
-            placeholder="Search id / provider / model..."
+            placeholder="Search workspace / id / provider..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
+          <select
+            className="input max-w-[220px]"
+            value={workspaceName}
+            onChange={(e) => writeWorkspaceName(e.target.value)}
+          >
+            <option value="All">All workspaces</option>
+            {workspaceOptions.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
           <select
             className="input"
             value={role}
@@ -184,7 +224,20 @@ export function SessionsPage() {
           Filtered to initiative <Mono pill>{initiativeId}</Mono>{" "}
           <button
             type="button"
-            onClick={() => setParams({})}
+            onClick={clearInitiativeFilter}
+            className="text-accent hover:underline ml-2"
+          >
+            clear
+          </button>
+        </div>
+      )}
+
+      {workspaceName !== "All" && (
+        <div className="text-xs text-ink-muted">
+          Filtered to workspace <Mono pill>{workspaceName}</Mono>{" "}
+          <button
+            type="button"
+            onClick={() => writeWorkspaceName("All")}
             className="text-accent hover:underline ml-2"
           >
             clear
@@ -235,8 +288,12 @@ export function SessionsPage() {
                 <th className="text-left px-4 py-2 font-medium">Role</th>
                 <th className="text-left px-4 py-2 font-medium">Lifecycle</th>
                 <th className="text-left px-4 py-2 font-medium">State</th>
-                <th className="text-left px-4 py-2 font-medium">Initiative / Task</th>
-                <th className="text-left px-4 py-2 font-medium">Provider / Model</th>
+                <th className="text-left px-4 py-2 font-medium">
+                  Workspace / Task
+                </th>
+                <th className="text-left px-4 py-2 font-medium">
+                  Provider / Model
+                </th>
                 <th className="text-right px-4 py-2 font-medium">Tokens</th>
                 <th className="text-right px-4 py-2 font-medium">Updated</th>
               </tr>
@@ -272,7 +329,11 @@ export function SessionsPage() {
                         <Mono>{s.session_id.slice(0, 16)}...</Mono>
                       </Link>
                     </td>
-                    <td className="px-4 py-2 text-ink-muted">{s.role}</td>
+                    <td className="px-4 py-2 text-ink-muted">
+                      <span className="badge bg-panel border-edge text-ink-muted">
+                        {s.role}
+                      </span>
+                    </td>
                     <td className="px-4 py-2 align-top">
                       <LifecyclePill state={s.state} />
                     </td>
@@ -296,10 +357,16 @@ export function SessionsPage() {
                         <Link
                           to={`/initiatives/${s.initiative_id}`}
                           onClick={(e) => e.stopPropagation()}
-                          className="text-accent hover:underline font-mono"
+                          className="text-accent hover:underline"
+                          title={s.initiative_id}
                         >
-                          {s.initiative_id}
+                          {s.initiative_display_name}
                         </Link>
+                      )}
+                      {s.initiative_id && (
+                        <div className="font-mono text-[11px] text-ink-subtle break-all">
+                          {s.initiative_id}
+                        </div>
                       )}
                       {s.task_id && (
                         <div>

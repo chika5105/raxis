@@ -1,5 +1,5 @@
 // raxis-cli::commands::plan_init — `raxis plan init [--template] [--output]
-// [--initiative-name]`.
+// [--name]`.
 //
 // Normative reference: `specs/v2/operator-ergonomics.md §6`
 // (`raxis-cli plan init`). The command scaffolds a `plan.toml`
@@ -17,7 +17,7 @@
 // `--list-templates` flag enumerates the registry and exits
 // without writing.
 //
-// V3 follow-up — interactive prompts, `--initiative-name`
+// V3 follow-up — interactive prompts, richer `--name`
 // integrated with the `genesis` operator profile, and
 // per-organisation custom templates loaded from
 // `<data_dir>/templates/` — are deferred to a later release.
@@ -28,6 +28,8 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::CliError;
 use crate::GlobalFlags;
+
+const WORKSPACE_NAME_MAX_CHARS: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -64,10 +66,10 @@ pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
                 output = PathBuf::from(v);
                 i += 1;
             }
-            "--initiative-name" => {
+            "--name" | "--initiative-name" => {
                 let v = args
                     .get(i + 1)
-                    .ok_or_else(|| CliError::Usage("missing value for --initiative-name".into()))?;
+                    .ok_or_else(|| CliError::Usage(format!("missing value for {a}")))?;
                 initiative_name = Some(v.clone());
                 i += 1;
             }
@@ -118,7 +120,11 @@ pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         )));
     }
 
-    let body = render_template(tpl, initiative_name.as_deref());
+    let workspace_name = initiative_name
+        .as_deref()
+        .map(validate_workspace_name)
+        .transpose()?;
+    let body = render_template(tpl, workspace_name.as_deref());
     write_atomic(&output, body.as_bytes())?;
 
     println!(
@@ -142,7 +148,7 @@ pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 
 fn print_usage() {
     println!("Usage: raxis plan init [--template <name>] [--output <path>]");
-    println!("                       [--initiative-name <text>] [--force]");
+    println!("                       [--name <text>] [--force]");
     println!("                       [--list-templates]");
     println!();
     println!("Scaffolds a plan.toml from a bundled template.");
@@ -187,8 +193,30 @@ const TEMPLATES: &[Template] = &[
     },
 ];
 
-fn render_template(tpl: &Template, initiative_name: Option<&str>) -> String {
-    let name = initiative_name
+fn validate_workspace_name(raw: &str) -> Result<String, CliError> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(CliError::Usage(
+            "FAIL_PLAN_INIT_WORKSPACE_NAME_INVALID: --name must not be empty".to_owned(),
+        ));
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err(CliError::Usage(
+            "FAIL_PLAN_INIT_WORKSPACE_NAME_INVALID: --name must be a single line with no control characters"
+                .to_owned(),
+        ));
+    }
+    let count = name.chars().count();
+    if count > WORKSPACE_NAME_MAX_CHARS {
+        return Err(CliError::Usage(format!(
+            "FAIL_PLAN_INIT_WORKSPACE_NAME_INVALID: --name is {count} characters, exceeds {WORKSPACE_NAME_MAX_CHARS} character cap"
+        )));
+    }
+    Ok(name.to_owned())
+}
+
+fn render_template(tpl: &Template, workspace_name: Option<&str>) -> String {
+    let name = workspace_name
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("<rename me>");
@@ -267,6 +295,19 @@ mod tests {
     fn render_uses_default_placeholder_when_none() {
         let body = render_template(&TEMPLATES[0], None);
         assert!(body.contains("<rename me>"));
+    }
+
+    #[test]
+    fn workspace_name_validation_enforces_dashboard_cap() {
+        assert!(validate_workspace_name("Ship auth flow").is_ok());
+        let err = validate_workspace_name(&"x".repeat(65)).unwrap_err();
+        assert!(format!("{err}").contains("64"), "err = {err}");
+    }
+
+    #[test]
+    fn workspace_name_validation_rejects_control_characters() {
+        let err = validate_workspace_name("bad\nname").unwrap_err();
+        assert!(format!("{err}").contains("single line"), "err = {err}");
     }
 
     #[test]

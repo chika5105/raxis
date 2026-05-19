@@ -5,7 +5,7 @@ description = """
 Generate openapi from handlers (scenario 20)
 """
 [workspace]
-name        = "Generate OpenAPI"
+name = "Generate Openapi From Handlers"
 lane_id     = "openapi-gen-lane"
 
 [[tasks]]

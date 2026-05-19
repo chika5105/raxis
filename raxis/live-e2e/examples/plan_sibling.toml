@@ -12,7 +12,7 @@ materially testable.
 """
 
 [workspace]
-name    = "E2E realistic sibling"
+name = "E2E realistic sibling"
 lane_id = "e2e-realistic-sibling-lane"
 
 # ── Sibling materializer Executor (P3-6) ────────────────

@@ -5,7 +5,7 @@ description = """
 Pre merge symbol index (scenario 31)
 """
 [workspace]
-name        = "Pre-merge symbol index"
+name = "Pre Merge Symbol Index"
 lane_id     = "premerge-index-lane"
 
 [[tasks]]

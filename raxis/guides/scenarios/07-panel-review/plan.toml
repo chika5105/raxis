@@ -8,7 +8,7 @@ The implementer Executor adds a tiny URL-parsing function. Three
   combined critique.
 """
 [workspace]
-name        = "Panel review"
+name = "Panel Review"
 lane_id     = "panel-review-lane"
 
 [[tasks]]

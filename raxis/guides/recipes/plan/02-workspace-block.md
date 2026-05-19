@@ -14,7 +14,7 @@ admission.
 
 | Field | Type | Required | Default | Effect |
 |---|---|---|---|---|
-| `name` | `String` | yes | — | Human-readable initiative title. Surfaces in `raxis initiative list` and audit events. No length limit beyond plan-bundle byte caps. |
+| `name` | `String` | yes | — | Human-readable initiative label. Surfaces in `raxis initiative list`, dashboards, and audit pivots. Single-line, max 64 characters. |
 | `lane_id` | `String` | yes | — | The lane the initiative pins to. Must match a `[[lanes]] lane_id` in policy. Per-task `lane_id` overrides are rejected (`single_lane_propagation` rule). |
 | `description` | `String` | optional | `""` | One-paragraph operator note. Distinct from `[plan.initiative].description` — agents do **not** see this. Surfaces in `raxis initiative show`. |
 | `target_ref` | `String` | optional | (policy default; ultimately `refs/heads/main`) | The git ref the kernel fast-forwards on a successful IntegrationMerge. Must be fully-qualified (`refs/heads/...`). |
