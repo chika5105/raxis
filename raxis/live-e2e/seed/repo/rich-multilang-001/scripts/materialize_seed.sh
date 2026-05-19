@@ -108,12 +108,13 @@ git commit --quiet -m "chore: initial scaffolding (README, .gitignore)"
 # ── Commit 1: rust workspace root + crate skeleton.
 _set_date_for_tick 1
 cp "$fixture_root/Cargo.toml" .
+cp "$fixture_root/Cargo.lock" .
 mkdir -p rust-crate/src
 cp "$fixture_root/rust-crate/Cargo.toml" rust-crate/Cargo.toml
 # Commit just the workspace root + crate Cargo.toml in this tick;
 # the source files arrive in the next two ticks so the history has
 # a few non-trivial inter-file diffs rather than one big drop.
-git add Cargo.toml rust-crate/Cargo.toml
+git add Cargo.toml Cargo.lock rust-crate/Cargo.toml
 git commit --quiet -m "feat(rust): workspace root + rust-crate scaffolding"
 
 # ── Commit 2: rust crate `lib.rs` (initial implementation under

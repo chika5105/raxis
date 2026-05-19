@@ -2477,8 +2477,9 @@ pub trait DashboardData: Send + Sync + 'static {
     /// any other credential the kernel exposes via the system
     /// scope.
     ///
-    /// Admin-only at the route layer; the data layer does not
-    /// re-check the role.
+    /// Metadata-only and read-role visible at the route layer;
+    /// plaintext reveal remains admin-only. The data layer does
+    /// not re-check the role.
     fn list_system_credentials(&self) -> Result<Vec<CredentialMetadata>, ApiError>;
 
     /// Reveal the plaintext bytes of one system-wide credential.

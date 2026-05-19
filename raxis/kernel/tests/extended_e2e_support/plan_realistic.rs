@@ -398,13 +398,13 @@ const REALISTIC_PLAN_XFILE_HEAD: &str = r#"# ── Cross-file refactor Executor
 task_id            = "xfile-refactor"
 name               = "Cross-file rename across Rust / TS / Python"
 session_agent_type = "Executor"
-# Mechanical cross-file rename across 3 language trees: read 3 files,
-# rewrite each, verify with grep, commit. ~5 turns per file × 3 = 15
-# plus retry/iteration headroom = 40. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+# Mechanical cross-file rename across 3 language trees: read, edit,
+# run the full smoke check, commit. Keep enough headroom for one
+# focused correction loop without encouraging open-ended exploration.
 # `Cargo.lock` is admitted because `scripts/check.sh` runs the root
 # Cargo workspace and may materialise/update the lockfile before the
 # executor commits.
-max_turns          = 40
+max_turns          = 80
 path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/", "Cargo.lock"]
 description = """
 "#;
@@ -932,7 +932,7 @@ description = """
 const REALISTIC_PLAN_SERVICE_ROUND_TRIP_HEAD: &str = r#"# -- Service-evidence round-trip Executor (P3-9) ----------
 [[tasks]]
 task_id            = "service-round-trip"
-name               = "Round-trip every credential-proxy upstream + commit per-service canonical outputs"
+name               = "Round-trip every configured backing service + commit canonical outputs"
 session_agent_type = "Executor"
 predecessors       = ["allowlist-positive-codegen"]
 # Round-trip 4 service proxies (postgres + mongodb + redis + smtp) and
@@ -985,7 +985,7 @@ const REALISTIC_PLAN_SERVICE_ROUND_TRIP_CREDS: &str = r#"
     kind = "plain"
     user = "raxis-tenant@live-e2e.test""#;
 
-const REALISTIC_PLAN_TRANSPARENT_PROXY_HEAD: &str = r#"# -- Transparent-proxy real-scripts Executor (P3-10) ------
+const REALISTIC_PLAN_TRANSPARENT_PROXY_HEAD: &str = r#"# -- Service-integrity real-scripts Executor (P3-10) ------
 [[tasks]]
 task_id            = "transparent-proxy-realscripts"
 name               = "Run stock-Python service-integrity scripts; commit per-service outputs"
@@ -1121,10 +1121,10 @@ const REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_CREDS: &str = r#"
 // surface egress wiring breakage early (failing this task does
 // NOT block the rest of the plan; the witness fires terminally
 // at the end of the run alongside the other global witnesses).
-const REALISTIC_PLAN_DEP_FETCH_EVIDENCE_HEAD: &str = r#"# -- Dep-fetch-evidence Executor (Path A3 mediated egress) ----
+const REALISTIC_PLAN_DEP_FETCH_EVIDENCE_HEAD: &str = r#"# -- Dep-fetch-evidence Executor ----
 [[tasks]]
 task_id            = "dep-fetch-evidence"
-name               = "Fetch example.com over HTTPS + pip install certifi from PyPI (Path A3 mediated egress)"
+name               = "Fetch example.com over HTTPS + pip install certifi from PyPI"
 session_agent_type = "Executor"
 # iter69 — bumped from 30 → 90 to absorb the additional pip
 # install arm (multi-host: pypi.org → files.pythonhosted.org).

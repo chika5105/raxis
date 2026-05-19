@@ -46,7 +46,7 @@ files inside this worktree, then commit the result.
 
 ## Data sources
 
-The kernel has injected two credential URLs into your environment:
+Use these environment variables directly:
 
 * `DATABASE_URL` — postgres connection string. The seeded table is
   `seeded_rows` with columns `(id TEXT, payload JSONB, created_at
@@ -56,10 +56,6 @@ The kernel has injected two credential URLs into your environment:
   has fields `_id` (`ObjectId`), `doc_id` (`string`), `payload`
   (`object`), `created_at` (`int64`). There are exactly **25**
   documents.
-
-Both URLs point at credential proxies — you will not see real
-upstream addresses, and no other endpoints are reachable from your
-worktree.
 
 ## Files to write
 
@@ -95,9 +91,8 @@ The fastest, lowest-tool-call path is to write a single Python
 helper to `/tmp/materialize.py` and run it once. Both `pymongo`
 and `psycopg2-binary` are pre-installed in the executor VM
 (`live-e2e/src/slice_vm_capabilities.rs::CANONICAL_EXECUTOR_PYTHON_DB_CLIENTS`).
-The proxy is allowlisted to forward `find` on `seeded_docs` and
-`SELECT` on `seeded_rows`, so the helper below has been tested
-end-to-end against the canonical proxy plumbing.
+The helper below uses `find` on `seeded_docs` and `SELECT` on
+`seeded_rows`.
 
 > **Why `/tmp/` and not the worktree root?** `path_allowlist` is
 > enforced against the full `base..head` git diff at
@@ -155,18 +150,16 @@ def materialize_postgres() -> int:
     return len(rows)
 
 def materialize_mongo() -> int:
-    # The proxy is a `mongodb://127.0.0.1:PORT/` URL with no
-    # userinfo and no default-database segment — pass the database
-    # name explicitly with `client["raxis_e2e_mongo"]`, do NOT call
-    # `client.get_default_database()` (it would raise
+    # MONGO_URL does not carry a default-database segment — pass
+    # the database name explicitly with `client["raxis_e2e_mongo"]`,
+    # do NOT call `client.get_default_database()` (it would raise
     # `ConfigurationError: No default database name defined`).
     url = os.environ["MONGO_URL"]
     # serverSelectionTimeoutMS=60_000 rides out the few seconds the
     # docker-compose mongo container might still be in `starting`
     # health-check during a fresh stack `up`. `directConnection=True`
-    # forces standalone topology so the driver does not try to
-    # speculate about replica-set / mongos shapes that the proxy
-    # does not emulate.
+    # forces standalone topology so the driver does not speculate
+    # about replica-set / mongos shapes.
     last_err: PyMongoError | None = None
     for attempt in range(12):
         try:
@@ -237,12 +230,9 @@ do not silently swallow it.
 
 ## Constraints
 
-* Your `path_allowlist` is **enforced at `task_complete` time
-  against the full git diff** (`base..head`). Any file that
-  appears in the commit but is NOT under `out/postgres/`,
-  `out/mongo/`, or `out/manifest.json` will fail the path-scope
-  check with `FailPathPolicyViolation`, the kernel will mark the
-  task `Failed`, and you will burn a `crash_retry_count` slot.
+* Only commit files under `out/postgres/`, `out/mongo/`, or
+  `out/manifest.json`. Any other committed path fails the
+  path-scope check.
 * In particular: if you need a helper script (e.g. a Python
   driver to iterate the postgres rows and mongo docs), write it
   to **`/tmp/`** (outside the worktree), not to the worktree
@@ -253,9 +243,8 @@ do not silently swallow it.
   do **not** run `git add .` / `git add -A` / `git commit -a`
   (these stage every untracked or modified file, including any
   scratch you forgot was in the worktree).
-* Do NOT make any HTTP request other than the database queries
-  through the credential proxies. Network egress is policy-gated
-  and any other host is blocked at the host boundary.
+* Do NOT make any HTTP request. This task only needs the database
+  queries above.
 * Determinism: the seeded data is byte-stable. If your output
   files do not match the canonical expected JSON in the test's
   witness oracle, the test will surface a per-row diff and fail.
@@ -265,7 +254,6 @@ do not silently swallow it.
   helper" pattern (write file → run file → git add → git commit
   → task_complete). Exploratory tool calls (`ls`, `cat`,
   per-row `db.find`, `pip list`) burn turns without progress.
-
 """
 
   [[tasks.credentials]]
@@ -320,10 +308,10 @@ do not silently swallow it.
 task_id            = "xfile-refactor"
 name               = "Cross-file rename across Rust / TS / Python"
 session_agent_type = "Executor"
-# Mechanical cross-file rename across 3 language trees: read 3 files,
-# rewrite each, verify with grep, commit. ~5 turns per file × 3 = 15
-# plus retry/iteration headroom = 40. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
-max_turns          = 40
+# Mechanical cross-file rename across 3 language trees: read, edit,
+# run the full smoke check, commit. Keep enough headroom for one
+# focused correction loop without encouraging open-ended exploration.
+max_turns          = 80
 path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/"]
 description = """
 # Cross-file refactor Executor prompt — extended e2e realistic scenario
@@ -383,8 +371,10 @@ MUST propagate consistently across all three trees:
 
 ## Constraints
 
-* Your `path_allowlist` is `rust-crate/`, `ts-pkg/`, `py-pkg/`
-  ONLY. You MUST NOT modify `README.md`, `.gitignore`,
+* Your `path_allowlist` is `rust-crate/`, `ts-pkg/`, `py-pkg/`,
+  and root `Cargo.lock` only. `scripts/check.sh` may create or
+  refresh `Cargo.lock`; include it in the commit if it changed.
+  You MUST NOT modify [`README.md`](../../../../README.md), `.gitignore`,
   `scripts/`, or `fixtures/`. The binary fixture under
   `fixtures/logo.bin` is explicitly not yours to touch — any
   modification there is a deliberate breakage and will be
@@ -401,10 +391,9 @@ MUST propagate consistently across all three trees:
 
 ## After every file is written
 
-1. `git add rust-crate/ ts-pkg/ py-pkg/`
+1. `git add rust-crate/ ts-pkg/ py-pkg/ Cargo.lock`
 2. `git commit -m "refactor: add optional salutation to greet API across Rust/TS/Python"`
 3. Call `task_complete` with a brief summary of which files changed.
-
 """
 
 
@@ -999,7 +988,7 @@ the INV-TASK-PATH-01 invariant against real executor behaviour.
 # -- Service-evidence round-trip Executor (P3-9) ----------
 [[tasks]]
 task_id            = "service-round-trip"
-name               = "Round-trip every credential-proxy upstream + commit per-service canonical outputs"
+name               = "Round-trip every configured backing service + commit canonical outputs"
 session_agent_type = "Executor"
 predecessors       = ["allowlist-positive-codegen"]
 # Round-trip 4 service proxies (postgres + mongodb + redis + smtp) and
@@ -1021,17 +1010,14 @@ description = """
 ---
 
 You are the RAXIS service-evidence executor. Your task is to
-exercise every credential-proxy upstream the kernel has mounted
-for you, by READING a small set of pre-seeded data from each real
-backing service through the proxy and committing the per-service
-results to deterministic worktree files. The witness compares
-your output BYTE-FOR-BYTE against the canonical seed.
+READ a small set of pre-seeded data from each configured backing
+service and commit the per-service results to deterministic
+worktree files. The witness compares your output BYTE-FOR-BYTE
+against the canonical seed.
 
-## Mounted credential proxies
+## Service URLs
 
-The kernel has injected these proxy-backed URLs into your
-environment. You will not see real upstream addresses, and no
-other endpoints are reachable from your worktree.
+Use these environment variables directly:
 
 * `DATABASE_URL` — postgres connection string. Real upstream is
   the docker `postgres:16-alpine` container the un-mock worker
@@ -1039,17 +1025,13 @@ other endpoints are reachable from your worktree.
 * `MONGO_URL` — mongodb connection string. Real upstream is the
   docker `mongo:7` container.
 * `REDIS_URL` — redis connection string. Real upstream is the
-  docker `redis:7-alpine` container. The credential proxy
-  rewrites your `AUTH` to the real `requirepass`.
-* `SMTP_URL` — smtp credential-proxy URL. The proxy submits your
-  envelope upstream against the docker `docker-mailserver`
-  container after gating the sender / recipient list.
+  docker `redis:7-alpine` container.
+* `SMTP_URL` — smtp URL. Real upstream is the docker
+  `docker-mailserver` container.
 
 (MySQL `MYSQL_URL` and MSSQL `MSSQL_URL` are mounted only when the
-operator exports `RAXIS_LIVE_MYSQL_URL` / `RAXIS_LIVE_MSSQL_URL`
-respectively — the credential-proxy handshake regressions tracked
-separately keep these opt-in for now. The witness is bypassed
-non-fatally when the env var is absent.)
+operator exports `RAXIS_LIVE_MYSQL_URL` / `RAXIS_LIVE_MSSQL_URL`.
+The witness is bypassed non-fatally when the env var is absent.)
 
 ## Per-service expectations
 
@@ -1069,7 +1051,7 @@ The test driver pre-seeded 5 rows whose `id` values are
 one row per line, sorted ASCENDING by `id`, in pipe-delimited
 form:
 
-```
+```text
 pg_seed_row_1|service-evidence-name-1|7919
 pg_seed_row_2|service-evidence-name-2|15838
 pg_seed_row_3|service-evidence-name-3|23757
@@ -1091,7 +1073,7 @@ The seed collection is `service_evidence_mongo` in database
 `find` all five, sort ASCENDING by `doc_id`, and write one
 canonical JSON object per line:
 
-```
+```json
 {"doc_id":"mongo_seed_doc_1","label":"service-evidence-label-1","magic":1000003}
 {"doc_id":"mongo_seed_doc_2","label":"service-evidence-label-2","magic":2000006}
 {"doc_id":"mongo_seed_doc_3","label":"service-evidence-label-3","magic":3000009}
@@ -1110,7 +1092,7 @@ The driver pre-seeded 5 keys under the prefix
 `service-evidence:`. SCAN every key under that prefix, GET each
 value, and write `<key>=<value>` lines sorted ASCENDING by key:
 
-```
+```text
 service-evidence:redis_seed_key_1=redis_seed_value_1
 service-evidence:redis_seed_key_2=redis_seed_value_2
 service-evidence:redis_seed_key_3=redis_seed_value_3
@@ -1118,50 +1100,46 @@ service-evidence:redis_seed_key_4=redis_seed_value_4
 service-evidence:redis_seed_key_5=redis_seed_value_5
 ```
 
-Each line ends with `\n`. The credential proxy will reject any
-command outside the allowlisted set (`PING`, `AUTH`, `SCAN`,
-`GET`, `MGET`, `EXISTS`) with `-ERR command … not allowed by
-RAXIS policy`; do not attempt `KEYS`, `MSET`, `FLUSHDB`, etc.
+Each line ends with `\n`. Use read-only Redis commands only:
+`PING`, `AUTH`, `SCAN`, `GET`, `MGET`, or `EXISTS`. Do not
+attempt `KEYS`, `MSET`, `FLUSHDB`, etc.
 
 ### `out/services/smtp.txt`
 
-The credential proxy is outbound-only — it relays an envelope you
-submit to the upstream relay. SEND one canonical message through
-the proxy and WRITE the canonical envelope record locally:
+Send one canonical message and write the canonical envelope record
+locally:
 
 * From:     `sender@live-e2e.test`
 * To:       `raxis-tenant@live-e2e.test`
 * Subject:  `smtp_seed_subject_1`
 * Body:     `smtp_seed_body_1: service-evidence smtp round-trip`
 
-After the proxy replies `250 2.0.0 Ok`, write the local
+After the SMTP server replies `250 2.0.0 Ok`, write the local
 `out/services/smtp.txt` file with this canonical content (note:
 `from:`, `to:`, `subject:`, `body:` — lowercase keys, one field
 per line, no quoting):
 
-```
+```yaml
 from: sender@live-e2e.test
 to: raxis-tenant@live-e2e.test
 subject: smtp_seed_subject_1
 body: smtp_seed_body_1: service-evidence smtp round-trip
 ```
 
-Each line ends with `\n`. The witness independently confirms the
-proxy emitted `SmtpMessageRelayed` with the expected
-`envelope_sha256` (a SHA-256 over `sender\nrcpt`).
+Each line ends with `\n`.
 
 ### `out/services/mysql.txt` (opt-in)
 
-When `MYSQL_URL` is mounted, repeat the postgres shape against
+When `MYSQL_URL` is available, repeat the postgres shape against
 the table `service_evidence_mysql` (rows
 `mysql_seed_row_1`..`mysql_seed_row_5`, formula
 `value = i * 1299709`). The witness is bypassed non-fatally
-when the credential-proxy regression keeps the env var unset, so
-your code should gracefully handle a missing `MYSQL_URL`.
+when the env var is unset, so your code should gracefully handle
+a missing `MYSQL_URL`.
 
 ### `out/services/mssql.txt` (opt-in)
 
-When `MSSQL_URL` is mounted, repeat the postgres shape against
+When `MSSQL_URL` is available, repeat the postgres shape against
 `dbo.service_evidence_mssql` (rows
 `mssql_seed_row_1`..`mssql_seed_row_5`, formula
 `value = i * 15485863`).
@@ -1169,8 +1147,7 @@ When `MSSQL_URL` is mounted, repeat the postgres shape against
 ## Constraints
 
 * Your `path_allowlist` is `out/services/` only. Do NOT touch
-  any other directory; the kernel's INV-TASK-PATH-01 gate will
-  reject the commit otherwise.
+  any other directory.
 * **TWO distinct file locations.** Read this carefully — confusing
   these two is the #1 way the task fails:
   1. **Helper scripts go in `/tmp/`.** The Python / shell driver
@@ -1187,9 +1164,8 @@ When `MSSQL_URL` is mounted, repeat the postgres shape against
      root, but the explicit absolute form `f.write_text(...)`
      against an absolute path under `os.getcwd()` is safer
      against subprocess cwd quirks).
-* Do NOT make any HTTP request other than the proxy-mediated
-  database / SMTP calls. Network egress is policy-gated and any
-  other host is blocked at the host boundary.
+* Do NOT make any HTTP request. This task only needs the service
+  client libraries and URLs listed above.
 * Determinism: the seeded data is byte-stable. The witness
   computes the SAME canonical bytes from the formula and rejects
   any byte-level drift with a per-service diff preview.
@@ -1206,8 +1182,8 @@ mkdir -p out/services
 cat > /tmp/round_trip.py <<'PY'
 # /tmp/round_trip.py — service-evidence round-trip writer.
 #   Reads seeded rows / docs / keys / SMTP envelope through the
-#   credential proxies mounted in the executor env, then writes
-#   one canonical-form file per service into out/services/.
+#   service URLs mounted in the executor env, then writes one
+#   canonical-form file per service into out/services/.
 #   Idempotent: rerunning overwrites any prior partial output.
 import json, os, smtplib, ssl, sys, time
 from email.message import EmailMessage
@@ -1273,9 +1249,7 @@ for k in keys:
 (OUT_DIR / "redis.txt").write_text("".join(redis_lines))
 
 # ── smtp ────────────────────────────────────────────────────
-# SMTP_URL is `smtp://127.0.0.1:NNN` (no auth in the agent-side
-# URL — the proxy injects upstream auth). Compose the canonical
-# envelope and let the proxy relay it.
+# Compose the canonical envelope and submit it to SMTP_URL.
 import urllib.parse as _u
 smtp_url = _u.urlparse(os.environ["SMTP_URL"])
 host = smtp_url.hostname
@@ -1288,8 +1262,7 @@ msg["Subject"] = "smtp_seed_subject_1"
 msg.set_content("smtp_seed_body_1: service-evidence smtp round-trip")
 
 with smtplib.SMTP(host, port, timeout=30) as s:
-    # No EHLO/STARTTLS — the proxy speaks plain SMTP on
-    # loopback and synthesises a `250 2.0.0 Ok` for the agent.
+    # Plain SMTP is sufficient for the local e2e service URL.
     s.send_message(msg)
 
 # Canonical envelope record (lowercase keys, one field per line).
@@ -1327,10 +1300,8 @@ python3 /tmp/round_trip.py
    `mongodb.txt`, `redis.txt`, `smtp.txt`. If a file is missing
    the python script crashed; fix it and rerun before
    committing. **Do not call `task_complete` until every
-   in-scope file is present** — the kernel's
-   `compute_touched_paths` runs over the commit you submit and
-   the witness re-reads the files from `out/services/`, so a
-   missing file fails both gates.
+   in-scope file is present** — the witness re-reads the files
+   from `out/services/`, so a missing file fails the task.
 2. `git add out/services/` (explicit path; do NOT run
    `git add .` / `git add -A` / `git commit -a` — those stage
    every untracked file in the worktree, including any helper
@@ -1338,15 +1309,10 @@ python3 /tmp/round_trip.py
 3. `git commit -m "service-evidence: round-trip"`
 4. **Capture the new HEAD SHA** with `git rev-parse HEAD` and
    pass it as the `head_sha` argument to `task_complete`. If
-   you submit a head_sha that doesn't match the actual commit
-   the kernel returns `FailInvalidDiff` and the task burns a
-   crash-retry slot (live-e2e iter35 root cause: agent called
-   `task_complete` without ever running `git commit`, so the
-   submitted head_sha referenced a SHA that didn't exist in
-   the worktree's history).
+   you submit a head_sha that doesn't match the actual commit,
+   the task will fail validation.
 5. Call `task_complete` with `head_sha = <the SHA above>` and
    a brief summary of which services round-tripped.
-
 """
 
   [[tasks.credentials]]
@@ -1384,7 +1350,7 @@ python3 /tmp/round_trip.py
     kind = "plain"
     user = "raxis-tenant@live-e2e.test"
 
-# -- Transparent-proxy real-scripts Executor (P3-10) ------
+# -- Service-integrity real-scripts Executor (P3-10) ------
 [[tasks]]
 task_id            = "transparent-proxy-realscripts"
 name               = "Run stock-Python service-integrity scripts; commit per-service outputs"
@@ -1397,7 +1363,7 @@ predecessors       = ["service-round-trip"]
 max_turns          = 60
 path_allowlist     = ["out/services/", "scripts/last_run_summary.txt"]
 description = """
-# Transparent-proxy real-scripts Executor prompt
+# Service-integrity real-scripts Executor prompt
 
 We have a small collection of Python scripts in `scripts/` that
 connect to our backing services and dump per-service data into text
@@ -1435,7 +1401,7 @@ then run the wrapper script to confirm everything is in place.
 
 ## Allowed writes
 
-The kernel's `path_allowlist` for this task admits only:
+This task may write only:
 
 * `out/services/`              — per-service text files
 * `scripts/last_run_summary.txt` — wrapper transcript
@@ -1465,8 +1431,7 @@ exit 0 (no output file produced, summary line says `skipped`).
 
 * You should be able to read each script, see that it just calls
   the upstream client library with the URL from an env var, and
-  trust that the kernel has wired the env so the URL points at
-  whatever the kernel decided is appropriate.
+  use that URL directly.
 * You should NOT need to modify the scripts, add infrastructure-
   specific shims, or interrogate the environment for non-standard
   variable names. If something doesn't work, the right answer is
@@ -1476,7 +1441,6 @@ exit 0 (no output file produced, summary line says `skipped`).
 
 When you have committed both the per-service outputs and the
 wrapper summary, you are done.
-
 """
 
   [[tasks.credentials]]

@@ -61,6 +61,12 @@ MUST propagate consistently across all three trees:
   `fixtures/logo.bin` is explicitly not yours to touch — any
   modification there is a deliberate breakage and will be
   rejected.
+* Paths are relative to the repository root. Do NOT prefix paths
+  with `workspace/`.
+* The executor image already contains the Rust, TypeScript, and
+  Python lint/test toolchains needed by `scripts/check.sh`. Do NOT
+  run `npm install`, `pip install`, `cargo install`, or similar
+  package-install commands for this task.
 * Run `scripts/check.sh` before calling `task_complete`. The
   reviewer will run it again as part of the review; an executor
   that submits a diff that fails `check.sh` is wasting reviewer

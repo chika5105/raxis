@@ -18,11 +18,11 @@
 //! invoke language-native lint pipelines verbatim inside an
 //! executor VM whose default egress allowlist is empty. Iter56
 //! exposed the failure mode: the executor-starter rootfs did not
-//! ship `ruff` (Python) or `eslint`/`prettier`/`tsc`/`tsx` (JS), so
-//! the task body's `python -m ruff check` / `npx --no-install
-//! eslint` failed deterministically. The fix bakes pinned linters
-//! into the rootfs at Containerfile-build time and asserts the
-//! bake via `images/executor-starter/verify.sh`.
+//! ship `ruff` (Python) or `eslint`/`prettier`/`tsc`/`tsx` plus a
+//! TypeScript parser (JS), so the task body's `python -m ruff check`
+//! / `npx --no-install eslint` failed deterministically. The fix
+//! bakes pinned linters into the rootfs at Containerfile-build time
+//! and asserts the bake via `images/executor-starter/verify.sh`.
 //!
 //! These witness tests drive `verify.sh` against synthetic-rootfs
 //! fixtures so the invariants' fail-closed remediation contract
@@ -171,11 +171,17 @@ fn install_js_toolchain(rootfs: &Path, include_packages: &[&str], include_shims:
     }
 }
 
-/// All four JS toolchain global node_modules entries the verifier
+/// All JS toolchain global node_modules entries the verifier
 /// asserts. Kept centralised so a future contract change (e.g.,
 /// adding a `@types/node` check) updates every witness in one
 /// place.
-const JS_PACKAGES: &[&str] = &["eslint", "prettier", "typescript", "tsx"];
+const JS_PACKAGES: &[&str] = &[
+    "eslint",
+    "prettier",
+    "typescript",
+    "tsx",
+    "@typescript-eslint/parser",
+];
 
 /// CLI shims `verify.sh` asserts are on `$PATH`. Note that the
 /// `typescript` npm package provides the `tsc` shim (not `typescript`).
@@ -576,6 +582,10 @@ fn lint_toolchain_pins_agree_across_containerfile_manifest_and_verifier() {
         ("prettier", "prettier_version"),
         ("typescript", "typescript_version"),
         ("tsx", "tsx_version"),
+        (
+            "@typescript-eslint/parser",
+            "typescript_eslint_parser_version",
+        ),
     ] {
         let needle_cf = format!("\"{pkg}@");
         let cf_ver = extract_after(&containerfile, &needle_cf, "\"")

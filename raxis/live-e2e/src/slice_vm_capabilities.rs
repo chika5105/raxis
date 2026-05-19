@@ -33,8 +33,8 @@
 //!
 //!   4. The **system-prompt hint** (`build_capability_hint`)
 //!      produces a coherent string: contains the `## VM Environment`
-//!      header, the `Image:` line, the `No outbound network`
-//!      warning, and the credential-proxy env-var NAMES (never
+//!      header, the `Image:` line, the normal-client network warning,
+//!      and the credential-proxy env-var NAMES (never
 //!      their values — the hint is a name-only summary so the
 //!      provider's prompt cache is value-stable). Same probe
 //!      backs both surfaces, so this also pins the byte-coherence
@@ -85,6 +85,9 @@ const KERNEL_PRIVATE_SENTINEL: &str = "live-e2e-loopback-plan-payload-MUST-NOT-L
 /// alongside other slices via the `all` subcommand.
 const STAGED_KEYS: &[&str] = &[
     "RAXIS_VSOCK_LOOPBACK_PLAN",
+    "RAXIS_TPROXY_KERNEL_TCP",
+    "RAXIS_AIRGAP_A3_ADMISSION_PORT",
+    "RAXIS_AIRGAP_A3_TUNNEL_PORT",
     "RAXIS_SESSION_TOKEN",
     "RAXIS_PLANNER_SIDECAR_HMAC_SECRET",
     "RAXIS_PLANNER_KSB",
@@ -126,6 +129,9 @@ pub async fn run() -> Result<()> {
     unsafe {
         for k in [
             "RAXIS_VSOCK_LOOPBACK_PLAN",
+            "RAXIS_TPROXY_KERNEL_TCP",
+            "RAXIS_AIRGAP_A3_ADMISSION_PORT",
+            "RAXIS_AIRGAP_A3_TUNNEL_PORT",
             "RAXIS_SESSION_TOKEN",
             "RAXIS_PLANNER_SIDECAR_HMAC_SECRET",
             "RAXIS_PLANNER_KSB",
@@ -287,6 +293,9 @@ fn run_assertions(
     //    leaks into stderr).
     for key in [
         "RAXIS_VSOCK_LOOPBACK_PLAN",
+        "RAXIS_TPROXY_KERNEL_TCP",
+        "RAXIS_AIRGAP_A3_ADMISSION_PORT",
+        "RAXIS_AIRGAP_A3_TUNNEL_PORT",
         "RAXIS_SESSION_TOKEN",
         "RAXIS_PLANNER_SIDECAR_HMAC_SECRET",
         "RAXIS_PLANNER_KSB",
@@ -329,7 +338,7 @@ fn run_assertions(
         // Pinned by `build_capability_hint`. If a future change
         // re-formats this header, update the slice in lockstep.
         "Image role:",
-        "No outbound network",
+        "Use normal HTTP(S) clients",
         // env-var NAMES surface in the hint (so the LLM knows which
         // proxies are wired) — but never their VALUES (so the hint
         // is value-stable for prompt caching across sessions that

@@ -1419,6 +1419,14 @@ impl DashboardData for KernelDashboardData {
         let sha = kind.sha256_of(&view).ok_or(ApiError::NotFound {
             kind: "worktree_snapshot_blob_empty".into(),
         })?;
+        if !is_sha256_hex(sha) {
+            return Err(ApiError::Internal {
+                log_only: format!(
+                    "worktree snapshot {snapshot_id} carries invalid {} blob sha",
+                    kind.as_path_segment()
+                ),
+            });
+        }
         let path = self
             .data_dir
             .join("worktree-snapshots")
@@ -2765,6 +2773,57 @@ impl DashboardData for KernelDashboardData {
     }
 }
 
+fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+#[cfg(test)]
+mod snapshot_blob_path_tests {
+    use super::is_sha256_hex;
+
+    #[test]
+    fn sha256_blob_names_must_be_lower_hex_only() {
+        assert!(is_sha256_hex(&"a".repeat(64)));
+        assert!(!is_sha256_hex(&"A".repeat(64)));
+        assert!(!is_sha256_hex(&"g".repeat(64)));
+        assert!(!is_sha256_hex("../escape"));
+        assert!(!is_sha256_hex(&"a".repeat(63)));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod credential_metadata_security_tests {
+    use super::stat_credential_bytes;
+    use raxis_credentials::CredentialName;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn credential_metadata_hash_requires_backend_file_security_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = CredentialName::new("providers.anthropic-test");
+        let path = raxis_credentials_file::credential_file_path(dir.path(), &name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"api_key = \"test\"\n").unwrap();
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            stat_credential_bytes(dir.path(), &name),
+            (0, None),
+            "metadata listing must not hash or size loose-mode credential files",
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (size, prefix) = stat_credential_bytes(dir.path(), &name);
+        assert_eq!(size, b"api_key = \"test\"\n".len() as u64);
+        assert!(
+            prefix.is_some(),
+            "0600 credential should expose metadata hash"
+        );
+    }
+}
+
 /// Pulls best-effort `(session_id, task_id, initiative_id)`
 /// correlation fields out of a freshly-built `Operator*` audit
 /// event so the chain row carries the existing dashboard
@@ -2980,7 +3039,7 @@ fn project_credential_metadata(
     };
     let upstream_host_port = upstream_host_port_for_decl(&decl.proxy);
     let path = raxis_credentials_file::credential_file_path(data_dir, &decl.name);
-    let (byte_size, sha256_prefix) = stat_credential_bytes(&path);
+    let (byte_size, sha256_prefix) = stat_credential_bytes(data_dir, &decl.name);
     CredentialMetadata {
         name,
         proxy_type: proxy_type.to_owned(),
@@ -3018,26 +3077,38 @@ fn upstream_host_port_for_decl(proxy: &raxis_plan_credentials::ProxyDecl) -> Opt
     }
 }
 
-/// `stat(2)` the credential file and compute the SHA-256 prefix.
-/// Returns `(0, None)` for a missing or unreadable file so the
-/// FE can render a clear "missing on disk" affordance. Reads the
-/// full bytes once — credential files are bounded at < 1 MiB
-/// each by the kernel admission pipeline.
-fn stat_credential_bytes(path: &std::path::Path) -> (u64, Option<String>) {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+/// Resolve the credential through the same file backend used for
+/// actual reveals, then compute a byte-size + SHA-256 prefix.
+/// Returns `(0, None)` for missing, malformed, loose-mode,
+/// foreign-owned, or otherwise unreadable files so the FE can
+/// render a clear "missing/invalid on disk" affordance without
+/// leaking metadata for a file that would fail closed on reveal.
+///
+/// Reads the full bytes once — credential files are bounded at
+/// < 1 MiB each by the kernel admission pipeline.
+fn stat_credential_bytes(
+    data_dir: &std::path::Path,
+    name: &raxis_credentials::CredentialName,
+) -> (u64, Option<String>) {
+    use raxis_credentials::{ConsumerIdentity, CredentialBackend};
+
+    let backend = raxis_credentials_file::FileCredentialBackend::open(data_dir);
+    let value = match backend.resolve(name, ConsumerIdentity::new("dashboard", "metadata-stat")) {
+        Ok(v) => v,
         Err(_) => return (0, None),
     };
-    use sha2::Digest;
-    let mut h = sha2::Sha256::new();
-    h.update(&bytes);
-    let digest = h.finalize();
-    let mut hex_prefix = String::with_capacity(8);
-    for b in &digest[..4] {
-        use std::fmt::Write;
-        let _ = write!(&mut hex_prefix, "{b:02x}");
-    }
-    (bytes.len() as u64, Some(hex_prefix))
+    value.with_bytes(|bytes| {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(bytes);
+        let digest = h.finalize();
+        let mut hex_prefix = String::with_capacity(8);
+        for b in &digest[..4] {
+            use std::fmt::Write;
+            let _ = write!(&mut hex_prefix, "{b:02x}");
+        }
+        (bytes.len() as u64, Some(hex_prefix))
+    })
 }
 
 /// Read the credential bytes and project them onto the wire
@@ -3146,7 +3217,8 @@ fn list_system_credential_metadata(
             None => continue,
         };
         let name = format!("providers.{stem}");
-        let (byte_size, sha256_prefix) = stat_credential_bytes(&path);
+        let credential_name = raxis_credentials::CredentialName::new(name.clone());
+        let (byte_size, sha256_prefix) = stat_credential_bytes(data_dir, &credential_name);
         // The Anthropic credential is the canonical example; we
         // hint at the wire format so operators can sanity-check
         // before they reveal.

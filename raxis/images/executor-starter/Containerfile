@@ -86,8 +86,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # runs `npx --no-install eslint --max-warnings 0 . && npx
 # --no-install prettier --check . && npx --no-install tsc
 # --noEmit` against `live-e2e/seed/repo/rich-multilang-001/ts-pkg/`,
-# whose `package.json` lists `eslint`, `prettier`, `tsx`, and
-# `typescript` as devDependencies. The seed materializer
+# whose `package.json` lists `eslint`, `prettier`, `tsx`,
+# `typescript`, and `@typescript-eslint/parser` as devDependencies.
+# The seed materializer
 # (`scripts/materialize_seed.sh`) does NOT pre-fetch a
 # `ts-pkg/node_modules/` (every node_modules ships ~thousands of
 # files; baking it into the seed git history would dwarf the
@@ -110,13 +111,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # `package.json`'s `^` ranges (eslint ^9.0.0, prettier ^3.2.5,
 # typescript ^5.4.0, tsx ^4.7.0, @types/node ^20.11.0) AND are
 # stable November-2024 / late-2024 releases so the rule surface
-# does not drift under a transitive bump.
+# does not drift under a transitive bump. The parser is required
+# because ESLint 9's stock parser cannot parse TypeScript syntax.
 RUN npm install -g --no-audit --no-fund --loglevel=error \
         "eslint@9.15.0" \
         "prettier@3.3.3" \
         "typescript@5.6.3" \
         "tsx@4.19.2" \
-        "@types/node@20.17.6"
+        "@types/node@20.17.6" \
+        "@typescript-eslint/parser@8.15.0"
 
 # Python 3.11 (Debian bookworm ships 3.11 in the default repo).
 RUN apt-get update && apt-get install --no-install-recommends -y \

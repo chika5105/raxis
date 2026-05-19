@@ -1806,6 +1806,15 @@ async fn handle_a3_tunnel_connection(
                 error = %e,
                 "A3 tunnel handshake read failed",
             );
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "level": "warn",
+                    "event": "a3_tunnel_handshake_read_failed",
+                    "session_id": session_id_for_log,
+                    "error": e.to_string(),
+                })
+            );
             return;
         }
         Err(_) => {
@@ -1813,6 +1822,15 @@ async fn handle_a3_tunnel_connection(
                 session_id = %session_id_for_log,
                 timeout_ms = A3_TUNNEL_HANDSHAKE_TIMEOUT.as_millis() as u64,
                 "A3 tunnel handshake timed out",
+            );
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "level": "warn",
+                    "event": "a3_tunnel_handshake_timed_out",
+                    "session_id": session_id_for_log,
+                    "timeout_ms": A3_TUNNEL_HANDSHAKE_TIMEOUT.as_millis() as u64,
+                })
             );
             return;
         }
@@ -1831,9 +1849,29 @@ async fn handle_a3_tunnel_connection(
                 tunnel_id = %tunnel_id,
                 "A3 tunnel handshake rejected",
             );
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "level": "warn",
+                    "event": "a3_tunnel_handshake_rejected",
+                    "session_id": session_id_for_log,
+                    "tunnel_id": tunnel_id.to_string(),
+                })
+            );
             return;
         }
     };
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "level": "info",
+            "event": "a3_tunnel_claimed",
+            "session_id": tunnel.session_id.as_str(),
+            "tunnel_id": tunnel_id.to_string(),
+            "destination": tunnel.destination.to_string(),
+            "host_or_sni": tunnel.host_or_sni.as_deref(),
+        })
+    );
 
     let mut upstream = match tokio::time::timeout(
         A3_TUNNEL_UPSTREAM_CONNECT_TIMEOUT,
@@ -1851,6 +1889,18 @@ async fn handle_a3_tunnel_connection(
                 error = %e,
                 "A3 tunnel upstream connect failed",
             );
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "level": "warn",
+                    "event": "a3_tunnel_upstream_connect_failed",
+                    "session_id": tunnel.session_id.as_str(),
+                    "tunnel_id": tunnel_id.to_string(),
+                    "destination": tunnel.destination.to_string(),
+                    "host_or_sni": tunnel.host_or_sni.as_deref(),
+                    "error": e.to_string(),
+                })
+            );
             return;
         }
         Err(_) => {
@@ -1862,9 +1912,32 @@ async fn handle_a3_tunnel_connection(
                 timeout_ms = A3_TUNNEL_UPSTREAM_CONNECT_TIMEOUT.as_millis() as u64,
                 "A3 tunnel upstream connect timed out",
             );
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "level": "warn",
+                    "event": "a3_tunnel_upstream_connect_timed_out",
+                    "session_id": tunnel.session_id.as_str(),
+                    "tunnel_id": tunnel_id.to_string(),
+                    "destination": tunnel.destination.to_string(),
+                    "host_or_sni": tunnel.host_or_sni.as_deref(),
+                    "timeout_ms": A3_TUNNEL_UPSTREAM_CONNECT_TIMEOUT.as_millis() as u64,
+                })
+            );
             return;
         }
     };
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "level": "info",
+            "event": "a3_tunnel_upstream_connected",
+            "session_id": tunnel.session_id.as_str(),
+            "tunnel_id": tunnel_id.to_string(),
+            "destination": tunnel.destination.to_string(),
+            "host_or_sni": tunnel.host_or_sni.as_deref(),
+        })
+    );
 
     match tokio::io::copy_bidirectional(&mut sock, &mut upstream).await {
         Ok((guest_to_upstream, upstream_to_guest)) => {
@@ -1877,6 +1950,19 @@ async fn handle_a3_tunnel_connection(
                 upstream_to_guest,
                 "A3 tunnel closed",
             );
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "level": "info",
+                    "event": "a3_tunnel_closed",
+                    "session_id": tunnel.session_id.as_str(),
+                    "tunnel_id": tunnel_id.to_string(),
+                    "destination": tunnel.destination.to_string(),
+                    "host_or_sni": tunnel.host_or_sni.as_deref(),
+                    "guest_to_upstream_bytes": guest_to_upstream,
+                    "upstream_to_guest_bytes": upstream_to_guest,
+                })
+            );
         }
         Err(e) => {
             tracing::warn!(
@@ -1886,6 +1972,18 @@ async fn handle_a3_tunnel_connection(
                 host_or_sni = ?tunnel.host_or_sni,
                 error = %e,
                 "A3 tunnel copy failed",
+            );
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "level": "warn",
+                    "event": "a3_tunnel_copy_failed",
+                    "session_id": tunnel.session_id.as_str(),
+                    "tunnel_id": tunnel_id.to_string(),
+                    "destination": tunnel.destination.to_string(),
+                    "host_or_sni": tunnel.host_or_sni.as_deref(),
+                    "error": e.to_string(),
+                })
             );
         }
     }

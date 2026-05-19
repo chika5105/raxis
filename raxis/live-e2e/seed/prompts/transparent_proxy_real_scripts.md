@@ -1,4 +1,4 @@
-# Transparent-proxy real-scripts Executor prompt
+# Service-integrity real-scripts Executor prompt
 
 We have a small collection of Python scripts in `scripts/` that
 connect to our backing services and dump per-service data into text
@@ -36,7 +36,7 @@ then run the wrapper script to confirm everything is in place.
 
 ## Allowed writes
 
-The kernel's `path_allowlist` for this task admits only:
+This task may write only:
 
 * `out/services/`              — per-service text files
 * `scripts/last_run_summary.txt` — wrapper transcript
@@ -66,8 +66,7 @@ exit 0 (no output file produced, summary line says `skipped`).
 
 * You should be able to read each script, see that it just calls
   the upstream client library with the URL from an env var, and
-  trust that the kernel has wired the env so the URL points at
-  whatever the kernel decided is appropriate.
+  use that URL directly.
 * You should NOT need to modify the scripts, add infrastructure-
   specific shims, or interrogate the environment for non-standard
   variable names. If something doesn't work, the right answer is

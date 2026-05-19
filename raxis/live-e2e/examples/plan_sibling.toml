@@ -42,7 +42,7 @@ files inside this worktree, then commit the result.
 
 ## Data sources
 
-The kernel has injected two credential URLs into your environment:
+Use these environment variables directly:
 
 * `DATABASE_URL` — postgres connection string. The seeded table is
   `seeded_rows` with columns `(id TEXT, payload JSONB, created_at
@@ -52,10 +52,6 @@ The kernel has injected two credential URLs into your environment:
   has fields `_id` (`ObjectId`), `doc_id` (`string`), `payload`
   (`object`), `created_at` (`int64`). There are exactly **25**
   documents.
-
-Both URLs point at credential proxies — you will not see real
-upstream addresses, and no other endpoints are reachable from your
-worktree.
 
 ## Files to write
 
@@ -91,9 +87,8 @@ The fastest, lowest-tool-call path is to write a single Python
 helper to `/tmp/materialize.py` and run it once. Both `pymongo`
 and `psycopg2-binary` are pre-installed in the executor VM
 (`live-e2e/src/slice_vm_capabilities.rs::CANONICAL_EXECUTOR_PYTHON_DB_CLIENTS`).
-The proxy is allowlisted to forward `find` on `seeded_docs` and
-`SELECT` on `seeded_rows`, so the helper below has been tested
-end-to-end against the canonical proxy plumbing.
+The helper below uses `find` on `seeded_docs` and `SELECT` on
+`seeded_rows`.
 
 > **Why `/tmp/` and not the worktree root?** `path_allowlist` is
 > enforced against the full `base..head` git diff at
@@ -151,18 +146,16 @@ def materialize_postgres() -> int:
     return len(rows)
 
 def materialize_mongo() -> int:
-    # The proxy is a `mongodb://127.0.0.1:PORT/` URL with no
-    # userinfo and no default-database segment — pass the database
-    # name explicitly with `client["raxis_e2e_mongo"]`, do NOT call
-    # `client.get_default_database()` (it would raise
+    # MONGO_URL does not carry a default-database segment — pass
+    # the database name explicitly with `client["raxis_e2e_mongo"]`,
+    # do NOT call `client.get_default_database()` (it would raise
     # `ConfigurationError: No default database name defined`).
     url = os.environ["MONGO_URL"]
     # serverSelectionTimeoutMS=60_000 rides out the few seconds the
     # docker-compose mongo container might still be in `starting`
     # health-check during a fresh stack `up`. `directConnection=True`
-    # forces standalone topology so the driver does not try to
-    # speculate about replica-set / mongos shapes that the proxy
-    # does not emulate.
+    # forces standalone topology so the driver does not speculate
+    # about replica-set / mongos shapes.
     last_err: PyMongoError | None = None
     for attempt in range(12):
         try:
@@ -233,12 +226,9 @@ do not silently swallow it.
 
 ## Constraints
 
-* Your `path_allowlist` is **enforced at `task_complete` time
-  against the full git diff** (`base..head`). Any file that
-  appears in the commit but is NOT under `out/postgres/`,
-  `out/mongo/`, or `out/manifest.json` will fail the path-scope
-  check with `FailPathPolicyViolation`, the kernel will mark the
-  task `Failed`, and you will burn a `crash_retry_count` slot.
+* Only commit files under `out/postgres/`, `out/mongo/`, or
+  `out/manifest.json`. Any other committed path fails the
+  path-scope check.
 * In particular: if you need a helper script (e.g. a Python
   driver to iterate the postgres rows and mongo docs), write it
   to **`/tmp/`** (outside the worktree), not to the worktree
@@ -249,9 +239,8 @@ do not silently swallow it.
   do **not** run `git add .` / `git add -A` / `git commit -a`
   (these stage every untracked or modified file, including any
   scratch you forgot was in the worktree).
-* Do NOT make any HTTP request other than the database queries
-  through the credential proxies. Network egress is policy-gated
-  and any other host is blocked at the host boundary.
+* Do NOT make any HTTP request. This task only needs the database
+  queries above.
 * Determinism: the seeded data is byte-stable. If your output
   files do not match the canonical expected JSON in the test's
   witness oracle, the test will surface a per-row diff and fail.
@@ -261,7 +250,6 @@ do not silently swallow it.
   helper" pattern (write file → run file → git add → git commit
   → task_complete). Exploratory tool calls (`ls`, `cat`,
   per-row `db.find`, `pip list`) burn turns without progress.
-
 """
 
   [[tasks.credentials]]

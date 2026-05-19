@@ -74,8 +74,9 @@ const CONTROL_KINDS = new Set<string>([
 ///
 /// The plain `EventSource` API does not allow custom headers, so
 /// we attach the JWT via `?token=…`. The dashboard backend
-/// accepts the bearer in either the `Authorization` header or
-/// the `token` query string for SSE specifically.
+/// accepts query-string bearer tokens only on this SSE stream
+/// route; ordinary JSON API routes require the `Authorization`
+/// header that `apiFetch` injects.
 ///
 /// Backpressure: token-streamed model output can arrive at >60
 /// events/sec. The renderer buffers inbound events in a ref and

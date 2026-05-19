@@ -531,18 +531,44 @@ pub mod macos {
             .spawn(move || {
                 let mut g = vsock_for_g2u;
                 let mut u = upstream_for_g2u;
-                let _ = pump_until_eof(&mut g, &mut u);
+                let copied = pump_until_eof(&mut g, &mut u);
                 // Half-close upstream's write side so any in-flight
                 // server-side response can drain back to the guest.
                 let _ = u.shutdown(Shutdown::Write);
+                copied
             })?;
 
         // upstream -> guest
         let mut u = upstream;
         let mut g = vsock_stream;
-        let _ = pump_until_eof(&mut u, &mut g);
+        let upstream_to_guest = pump_until_eof(&mut u, &mut g)?;
         let _ = g.shutdown(Shutdown::Write);
-        let _ = g2u.join();
+        let guest_to_upstream = match g2u.join() {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(e)) => {
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("vsock-loopback guest->upstream pump: {e}"),
+                ));
+            }
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "vsock-loopback guest->upstream pump panicked",
+                ));
+            }
+        };
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "level": "info",
+                "event": "avf_vsock_loopback_splice_closed",
+                "vsock_port": vsock_port_for_log,
+                "host_loopback_port": host_loopback_port,
+                "guest_to_host_bytes": guest_to_upstream,
+                "host_to_guest_bytes": upstream_to_guest,
+            })
+        );
         Ok(())
     }
 
@@ -552,16 +578,18 @@ pub mod macos {
     /// close and must NOT bubble up as a noisy "error" — the
     /// other direction may still have buffered bytes the peer
     /// is waiting on.
-    fn pump_until_eof<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> std::io::Result<()> {
+    fn pump_until_eof<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> std::io::Result<u64> {
         let mut buf = [0u8; 16 * 1024];
+        let mut total = 0u64;
         loop {
             let n = match reader.read(&mut buf) {
-                Ok(0) => return Ok(()),
+                Ok(0) => return Ok(total),
                 Ok(n) => n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             };
             writer.write_all(&buf[..n])?;
+            total += n as u64;
         }
     }
 

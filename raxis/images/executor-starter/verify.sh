@@ -116,7 +116,7 @@ fi
 # default egress, so the binaries MUST resolve from the image's
 # global npm root (`/usr/lib/node_modules/<pkg>` with symlinks
 # in `/usr/bin/` or `/usr/local/bin/`).
-for js_pkg in eslint prettier typescript tsx; do
+for js_pkg in eslint prettier typescript tsx @typescript-eslint/parser; do
     found=""
     for root in usr/lib/node_modules usr/local/lib/node_modules; do
         if [ -d "$ROOTFS/$root/$js_pkg" ]; then
@@ -129,7 +129,8 @@ for js_pkg in eslint prettier typescript tsx; do
 either /usr/lib/node_modules/ or /usr/local/lib/node_modules/ — \
 INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 VIOLATED. Remediation: \
 re-bake the executor-starter rootfs; the Containerfile pins \
-eslint@9.15.0, prettier@3.3.3, typescript@5.6.3, tsx@4.19.2." >&2
+eslint@9.15.0, prettier@3.3.3, typescript@5.6.3, tsx@4.19.2, \
+@typescript-eslint/parser@8.15.0." >&2
         exit 1
     fi
 done

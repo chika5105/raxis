@@ -9,17 +9,14 @@
 ---
 
 You are the RAXIS service-evidence executor. Your task is to
-exercise every credential-proxy upstream the kernel has mounted
-for you, by READING a small set of pre-seeded data from each real
-backing service through the proxy and committing the per-service
-results to deterministic worktree files. The witness compares
-your output BYTE-FOR-BYTE against the canonical seed.
+READ a small set of pre-seeded data from each configured backing
+service and commit the per-service results to deterministic
+worktree files. The witness compares your output BYTE-FOR-BYTE
+against the canonical seed.
 
-## Mounted credential proxies
+## Service URLs
 
-The kernel has injected these proxy-backed URLs into your
-environment. You will not see real upstream addresses, and no
-other endpoints are reachable from your worktree.
+Use these environment variables directly:
 
 * `DATABASE_URL` — postgres connection string. Real upstream is
   the docker `postgres:16-alpine` container the un-mock worker
@@ -27,17 +24,13 @@ other endpoints are reachable from your worktree.
 * `MONGO_URL` — mongodb connection string. Real upstream is the
   docker `mongo:7` container.
 * `REDIS_URL` — redis connection string. Real upstream is the
-  docker `redis:7-alpine` container. The credential proxy
-  rewrites your `AUTH` to the real `requirepass`.
-* `SMTP_URL` — smtp credential-proxy URL. The proxy submits your
-  envelope upstream against the docker `docker-mailserver`
-  container after gating the sender / recipient list.
+  docker `redis:7-alpine` container.
+* `SMTP_URL` — smtp URL. Real upstream is the docker
+  `docker-mailserver` container.
 
 (MySQL `MYSQL_URL` and MSSQL `MSSQL_URL` are mounted only when the
-operator exports `RAXIS_LIVE_MYSQL_URL` / `RAXIS_LIVE_MSSQL_URL`
-respectively — the credential-proxy handshake regressions tracked
-separately keep these opt-in for now. The witness is bypassed
-non-fatally when the env var is absent.)
+operator exports `RAXIS_LIVE_MYSQL_URL` / `RAXIS_LIVE_MSSQL_URL`.
+The witness is bypassed non-fatally when the env var is absent.)
 
 ## Per-service expectations
 
@@ -106,23 +99,21 @@ service-evidence:redis_seed_key_4=redis_seed_value_4
 service-evidence:redis_seed_key_5=redis_seed_value_5
 ```
 
-Each line ends with `\n`. The credential proxy will reject any
-command outside the allowlisted set (`PING`, `AUTH`, `SCAN`,
-`GET`, `MGET`, `EXISTS`) with `-ERR command … not allowed by
-RAXIS policy`; do not attempt `KEYS`, `MSET`, `FLUSHDB`, etc.
+Each line ends with `\n`. Use read-only Redis commands only:
+`PING`, `AUTH`, `SCAN`, `GET`, `MGET`, or `EXISTS`. Do not
+attempt `KEYS`, `MSET`, `FLUSHDB`, etc.
 
 ### `out/services/smtp.txt`
 
-The credential proxy is outbound-only — it relays an envelope you
-submit to the upstream relay. SEND one canonical message through
-the proxy and WRITE the canonical envelope record locally:
+Send one canonical message and write the canonical envelope record
+locally:
 
 * From:     `sender@live-e2e.test`
 * To:       `raxis-tenant@live-e2e.test`
 * Subject:  `smtp_seed_subject_1`
 * Body:     `smtp_seed_body_1: service-evidence smtp round-trip`
 
-After the proxy replies `250 2.0.0 Ok`, write the local
+After the SMTP server replies `250 2.0.0 Ok`, write the local
 `out/services/smtp.txt` file with this canonical content (note:
 `from:`, `to:`, `subject:`, `body:` — lowercase keys, one field
 per line, no quoting):
@@ -134,22 +125,20 @@ subject: smtp_seed_subject_1
 body: smtp_seed_body_1: service-evidence smtp round-trip
 ```
 
-Each line ends with `\n`. The witness independently confirms the
-proxy emitted `SmtpMessageRelayed` with the expected
-`envelope_sha256` (a SHA-256 over `sender\nrcpt`).
+Each line ends with `\n`.
 
 ### `out/services/mysql.txt` (opt-in)
 
-When `MYSQL_URL` is mounted, repeat the postgres shape against
+When `MYSQL_URL` is available, repeat the postgres shape against
 the table `service_evidence_mysql` (rows
 `mysql_seed_row_1`..`mysql_seed_row_5`, formula
 `value = i * 1299709`). The witness is bypassed non-fatally
-when the credential-proxy regression keeps the env var unset, so
-your code should gracefully handle a missing `MYSQL_URL`.
+when the env var is unset, so your code should gracefully handle
+a missing `MYSQL_URL`.
 
 ### `out/services/mssql.txt` (opt-in)
 
-When `MSSQL_URL` is mounted, repeat the postgres shape against
+When `MSSQL_URL` is available, repeat the postgres shape against
 `dbo.service_evidence_mssql` (rows
 `mssql_seed_row_1`..`mssql_seed_row_5`, formula
 `value = i * 15485863`).
@@ -157,8 +146,7 @@ When `MSSQL_URL` is mounted, repeat the postgres shape against
 ## Constraints
 
 * Your `path_allowlist` is `out/services/` only. Do NOT touch
-  any other directory; the kernel's INV-TASK-PATH-01 gate will
-  reject the commit otherwise.
+  any other directory.
 * **TWO distinct file locations.** Read this carefully — confusing
   these two is the #1 way the task fails:
   1. **Helper scripts go in `/tmp/`.** The Python / shell driver
@@ -175,9 +163,8 @@ When `MSSQL_URL` is mounted, repeat the postgres shape against
      root, but the explicit absolute form `f.write_text(...)`
      against an absolute path under `os.getcwd()` is safer
      against subprocess cwd quirks).
-* Do NOT make any HTTP request other than the proxy-mediated
-  database / SMTP calls. Network egress is policy-gated and any
-  other host is blocked at the host boundary.
+* Do NOT make any HTTP request. This task only needs the service
+  client libraries and URLs listed above.
 * Determinism: the seeded data is byte-stable. The witness
   computes the SAME canonical bytes from the formula and rejects
   any byte-level drift with a per-service diff preview.
@@ -194,8 +181,8 @@ mkdir -p out/services
 cat > /tmp/round_trip.py <<'PY'
 # /tmp/round_trip.py — service-evidence round-trip writer.
 #   Reads seeded rows / docs / keys / SMTP envelope through the
-#   credential proxies mounted in the executor env, then writes
-#   one canonical-form file per service into out/services/.
+#   service URLs mounted in the executor env, then writes one
+#   canonical-form file per service into out/services/.
 #   Idempotent: rerunning overwrites any prior partial output.
 import json, os, smtplib, ssl, sys, time
 from email.message import EmailMessage
@@ -261,9 +248,7 @@ for k in keys:
 (OUT_DIR / "redis.txt").write_text("".join(redis_lines))
 
 # ── smtp ────────────────────────────────────────────────────
-# SMTP_URL is `smtp://127.0.0.1:NNN` (no auth in the agent-side
-# URL — the proxy injects upstream auth). Compose the canonical
-# envelope and let the proxy relay it.
+# Compose the canonical envelope and submit it to SMTP_URL.
 import urllib.parse as _u
 smtp_url = _u.urlparse(os.environ["SMTP_URL"])
 host = smtp_url.hostname
@@ -276,8 +261,7 @@ msg["Subject"] = "smtp_seed_subject_1"
 msg.set_content("smtp_seed_body_1: service-evidence smtp round-trip")
 
 with smtplib.SMTP(host, port, timeout=30) as s:
-    # No EHLO/STARTTLS — the proxy speaks plain SMTP on
-    # loopback and synthesises a `250 2.0.0 Ok` for the agent.
+    # Plain SMTP is sufficient for the local e2e service URL.
     s.send_message(msg)
 
 # Canonical envelope record (lowercase keys, one field per line).
@@ -315,10 +299,8 @@ python3 /tmp/round_trip.py
    `mongodb.txt`, `redis.txt`, `smtp.txt`. If a file is missing
    the python script crashed; fix it and rerun before
    committing. **Do not call `task_complete` until every
-   in-scope file is present** — the kernel's
-   `compute_touched_paths` runs over the commit you submit and
-   the witness re-reads the files from `out/services/`, so a
-   missing file fails both gates.
+   in-scope file is present** — the witness re-reads the files
+   from `out/services/`, so a missing file fails the task.
 2. `git add out/services/` (explicit path; do NOT run
    `git add .` / `git add -A` / `git commit -a` — those stage
    every untracked file in the worktree, including any helper
@@ -326,11 +308,7 @@ python3 /tmp/round_trip.py
 3. `git commit -m "service-evidence: round-trip"`
 4. **Capture the new HEAD SHA** with `git rev-parse HEAD` and
    pass it as the `head_sha` argument to `task_complete`. If
-   you submit a head_sha that doesn't match the actual commit
-   the kernel returns `FailInvalidDiff` and the task burns a
-   crash-retry slot (live-e2e iter35 root cause: agent called
-   `task_complete` without ever running `git commit`, so the
-   submitted head_sha referenced a SHA that didn't exist in
-   the worktree's history).
+   you submit a head_sha that doesn't match the actual commit,
+   the task will fail validation.
 5. Call `task_complete` with `head_sha = <the SHA above>` and
    a brief summary of which services round-tripped.

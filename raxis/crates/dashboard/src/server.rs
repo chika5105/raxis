@@ -374,9 +374,10 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
                 .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_AUTH))
                 .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
         )
-        // System-wide credential viewer (admin-only — even the
-        // listing requires the admin role so a `read` operator
-        // cannot enumerate which providers the kernel uses).
+        // System-wide credential viewer. Listing is metadata-only
+        // and read-role visible so operators can see which shared
+        // providers the kernel is bound to; reveal stays admin-only
+        // with rate limiting and paired audit.
         .route(
             "/api/system/credentials",
             get(credentials::list_system::<D>),
@@ -725,19 +726,23 @@ impl<D: DashboardData> FromRequestParts<AppState<D>> for AuthorizedOperator {
         state: &AppState<D>,
     ) -> Result<Self, Self::Rejection> {
         // Primary auth path: `Authorization: Bearer <jwt>` header.
-        // Fallback (browser SSE only): `?token=<jwt>` query param,
-        // because the EventSource API does not let JS attach
-        // headers. The SSE handler is the only consumer in
-        // practice; other endpoints continue to require the
-        // header (the dashboard frontend always sets it).
+        // Fallback: the browser EventSource API cannot attach
+        // headers, so the session SSE stream alone may carry
+        // `?token=<jwt>`. Do not accept query-string bearer
+        // tokens on ordinary API routes; they leak too easily via
+        // browser history, proxy logs, and copied URLs.
         let token_owned: String = if let Some(h) = parts.headers.get(header::AUTHORIZATION) {
             let s = h.to_str().map_err(|_| ApiError::MissingAuth)?.trim();
             match s.strip_prefix("Bearer ") {
                 Some(rest) => rest.trim().to_owned(),
                 None => return Err(ApiError::MissingAuth),
             }
-        } else if let Some(qs) = parts.uri.query() {
-            extract_query_token(qs).ok_or(ApiError::MissingAuth)?
+        } else if is_sse_stream_path(parts.uri.path()) {
+            parts
+                .uri
+                .query()
+                .and_then(extract_query_token)
+                .ok_or(ApiError::MissingAuth)?
         } else {
             return Err(ApiError::MissingAuth);
         };
@@ -780,6 +785,11 @@ async fn not_found() -> impl IntoResponse {
 /// an `Authorization` header, so the JWT is passed via the
 /// query string instead). Performs minimal percent-decoding so
 /// JWTs with `=` padding round-trip.
+///
+/// The shared [`AuthorizedOperator`] extractor calls this only
+/// when [`is_sse_stream_path`] is true. Keeping that check beside
+/// the extractor prevents query-string bearer tokens from becoming
+/// an accidental general dashboard auth mechanism.
 fn extract_query_token(qs: &str) -> Option<String> {
     for pair in qs.split('&') {
         let mut it = pair.splitn(2, '=');
@@ -794,6 +804,10 @@ fn extract_query_token(qs: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn is_sse_stream_path(path: &str) -> bool {
+    path.starts_with("/api/sessions/") && path.ends_with("/stream")
 }
 
 fn percent_decode(s: &str) -> String {

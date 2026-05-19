@@ -369,6 +369,51 @@ async fn serve_authed_in_memory() -> (
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bearer_token_query_param_is_rejected_on_non_sse_routes() {
+    let (handle, base, token, _data) = serve_authed_in_memory().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!("{base}/api/initiatives?token={token}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        res.status(),
+        401,
+        "ordinary JSON API routes must require Authorization header auth; \
+         query-string bearer tokens are only allowed on the EventSource stream route",
+    );
+    let body: serde_json::Value = res.json().await.expect("json body");
+    assert_eq!(body["code"], "FAIL_DASHBOARD_AUTH_MISSING");
+    handle.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bearer_token_query_param_still_authenticates_sse_stream_route() {
+    let (handle, base, token, _data) = serve_authed_in_memory().await;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("build client");
+    let res = client
+        .get(format!(
+            "{base}/api/sessions/no-such-session/stream?tail=1&token={token}"
+        ))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        res.status(),
+        404,
+        "SSE needs query-token auth because EventSource cannot set Authorization; \
+         with a valid token the unknown-session path should pass auth and return 404",
+    );
+    let body: serde_json::Value = res.json().await.expect("json body");
+    assert_eq!(body["code"], "FAIL_DASHBOARD_NOT_FOUND");
+    handle.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sessions_list_with_initiative_id_filter_narrows_results() {
     use raxis_dashboard::data::SessionView;
 

@@ -356,7 +356,7 @@ the executor-starter Containerfile is the structural answer:
 | -------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
 | Rust     | `cargo`, `rustfmt`, `clippy` (rustup stable)                                                                                | [`images/executor-starter/Containerfile`](../images/executor-starter/Containerfile) |
 | Python   | `ruff==0.7.4` (pip → system site-packages; CLI shim at `/usr/local/bin/ruff`; importable as `python -m ruff`)               | Containerfile + [`manifest.toml`](../images/executor-starter/manifest.toml) `[lint_toolchain] ruff_version` |
-| JS / TS  | `eslint@9.15.0`, `prettier@3.3.3`, `typescript@5.6.3`, `tsx@4.19.2`, `@types/node@20.17.6` (npm install -g; `/usr/bin/<bin>` shims) | Containerfile + `manifest.toml` `[lint_toolchain]` |
+| JS / TS  | `eslint@9.15.0`, `prettier@3.3.3`, `typescript@5.6.3`, `tsx@4.19.2`, `@types/node@20.17.6`, `@typescript-eslint/parser@8.15.0` (npm install -g; `/usr/bin/<bin>` shims) | Containerfile + `manifest.toml` `[lint_toolchain]` |
 
 [`images/executor-starter/verify.sh`](../images/executor-starter/verify.sh)
 asserts the bake actually contains both:
@@ -367,7 +367,7 @@ asserts the bake actually contains both:
   Linux-on-Linux bake the verifier additionally runs
   `python3 -c "import ruff" && python3 -m ruff --version` and
   asserts the version matches the pin.
-* JS — `usr/lib/node_modules/{eslint,prettier,typescript,tsx}/`
+* JS — `usr/lib/node_modules/{eslint,prettier,typescript,tsx,@typescript-eslint/parser}/`
   (or the `usr/local/lib/...` mirror) plus the
   `/usr/bin/{eslint,prettier,tsc}` (or `/usr/local/bin/...`)
   CLI shims so `npx --no-install` can resolve them via `$PATH`

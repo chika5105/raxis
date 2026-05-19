@@ -10,10 +10,10 @@
 //! whose contents we cannot enumerate at kernel build time
 //! (`canonical-images.md §INV-OPERATOR-CUSTOM-IMAGE-01`). Either
 //! way, the LLM cannot do trial-and-error `pip install` /
-//! `npm install` of packages: egress is gated by the kernel's
-//! allowlist (most tasks have NO outbound net) and the credential
-//! proxies only forward DB / cloud traffic, not package mirrors. If
-//! the LLM doesn't know what's already baked in, it will either
+//! `npm install` of packages: egress is mediated by the kernel's
+//! allowlist (most tasks do not allow package mirrors) and the
+//! credential proxies only forward DB / cloud traffic. If the LLM
+//! doesn't know what's already baked in, it will either
 //! write a script importing a missing module and fail at runtime
 //! OR try to install a package and burn a turn on a tproxy denial.
 //!
@@ -67,12 +67,12 @@
 //! ## Kernel-private env redaction
 //!
 //! The env section of the manifest MUST NOT leak the
-//! `RAXIS_VSOCK_LOOPBACK_PLAN` payload, `RAXIS_SESSION_TOKEN`, the
-//! `RAXIS_PLANNER_KSB` JSON, the sidecar HMAC secret, or any name
-//! containing a credential-shaped substring (`SECRET`, `PASSWORD`,
-//! `API_KEY`, `PRIVATE_KEY`, `_TOKEN`). The closed predicate
-//! [`is_kernel_private_env`] is the chokepoint; every probe that
-//! collects env vars routes through it.
+//! `RAXIS_VSOCK_LOOPBACK_PLAN` payload, the A3 tproxy control-plane
+//! ports, `RAXIS_SESSION_TOKEN`, the `RAXIS_PLANNER_KSB` JSON, the
+//! sidecar HMAC secret, or any name containing a credential-shaped
+//! substring (`SECRET`, `PASSWORD`, `API_KEY`, `PRIVATE_KEY`,
+//! `_TOKEN`). The closed predicate [`is_kernel_private_env`] is the
+//! chokepoint; every probe that collects env vars routes through it.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -457,8 +457,9 @@ pub fn project_manifest(
 /// Two layers:
 ///
 /// 1. **Explicit name list.** The kernel's own session-spawn env
-///    (`RAXIS_SESSION_TOKEN`, `RAXIS_VSOCK_LOOPBACK_PLAN`, the KSB
-///    snapshot, the task prompt, sidecar HMAC).
+///    (`RAXIS_SESSION_TOKEN`, `RAXIS_VSOCK_LOOPBACK_PLAN`, the A3
+///    tproxy control-plane ports, the KSB snapshot, the task prompt,
+///    sidecar HMAC).
 ///
 /// 2. **Pattern denylist.** Anything whose name (case-insensitively)
 ///    contains `SECRET`, `PASSWORD`, `PASSWD`, `API_KEY`, `APIKEY`,
@@ -470,6 +471,11 @@ pub fn is_kernel_private_env(name: &str) -> bool {
         name,
         "RAXIS_SESSION_TOKEN"
             | "RAXIS_VSOCK_LOOPBACK_PLAN"
+            | "RAXIS_TPROXY_KERNEL_TCP"
+            | "RAXIS_AIRGAP_A3_HOST_CID"
+            | "RAXIS_AIRGAP_A3_ADMISSION_PORT"
+            | "RAXIS_AIRGAP_A3_TUNNEL_PORT"
+            | "RAXIS_AIRGAP_A3_TPROXY_PORT"
             | "RAXIS_PLANNER_KSB"
             | "RAXIS_PLANNER_KSB_PATH"
             | "RAXIS_PLANNER_TASK_PROMPT"
@@ -1205,9 +1211,10 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
     ));
 
     s.push_str(
-        "No outbound network: `pip install` / `npm install` / `cargo install` / \
-         `go get` usually fail unless policy allows egress. Use preinstalled \
-         packages; call `vm_capabilities` for focused queries.",
+        "Use normal HTTP(S) clients when the task asks for network access. \
+         Do not configure custom proxy settings unless the task gives one. \
+         Prefer preinstalled packages when they satisfy the task. Call \
+         `vm_capabilities` for focused queries.",
     );
     s
 }
@@ -1318,6 +1325,9 @@ mod tests {
     #[test]
     fn redacts_kernel_private_loopback_plan() {
         assert!(is_kernel_private_env("RAXIS_VSOCK_LOOPBACK_PLAN"));
+        assert!(is_kernel_private_env("RAXIS_TPROXY_KERNEL_TCP"));
+        assert!(is_kernel_private_env("RAXIS_AIRGAP_A3_ADMISSION_PORT"));
+        assert!(is_kernel_private_env("RAXIS_AIRGAP_A3_TUNNEL_PORT"));
     }
 
     #[test]
@@ -1359,6 +1369,10 @@ mod tests {
                 "RAXIS_VSOCK_LOOPBACK_PLAN".to_owned(),
                 "<base64-payload>".to_owned(),
             ),
+            (
+                "RAXIS_TPROXY_KERNEL_TCP".to_owned(),
+                "127.0.0.1:50000".to_owned(),
+            ),
             ("RAXIS_SESSION_TOKEN".to_owned(), "secret-token".to_owned()),
             (
                 "DATABASE_URL".to_owned(),
@@ -1371,6 +1385,10 @@ mod tests {
         assert!(
             !env.contains_key("RAXIS_VSOCK_LOOPBACK_PLAN"),
             "RAXIS_VSOCK_LOOPBACK_PLAN must be redacted"
+        );
+        assert!(
+            !env.contains_key("RAXIS_TPROXY_KERNEL_TCP"),
+            "RAXIS_TPROXY_KERNEL_TCP must be redacted"
         );
         assert!(
             !env.contains_key("RAXIS_SESSION_TOKEN"),
@@ -1462,10 +1480,16 @@ mod tests {
         // dumped inline).
         assert!(hint.contains("DATABASE_URL"));
         assert!(hint.contains("MONGO_URL"));
-        // The egress warning MUST be present so the LLM doesn't
-        // try `pip install`.
-        assert!(hint.contains("No outbound network"));
-        assert!(hint.contains("pip install"));
+        // The package-install warning MUST be present so the LLM
+        // doesn't try `pip install`, while the network guidance
+        // stays operator-facing and hides substrate internals.
+        assert!(hint.contains("Use normal HTTP(S) clients"));
+        assert!(hint.contains("Do not configure custom proxy settings"));
+        assert!(hint.contains("Prefer preinstalled packages"));
+        assert!(!hint.contains("Do not install new packages"));
+        assert!(!hint.contains("kernel-mediated"));
+        assert!(!hint.contains("transparent proxy"));
+        assert!(!hint.contains("RAXIS_TPROXY_KERNEL_TCP"));
     }
 
     #[test]

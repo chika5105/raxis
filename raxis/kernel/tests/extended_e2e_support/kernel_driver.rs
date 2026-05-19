@@ -2059,6 +2059,7 @@ const EXAMPLE_SEED_PROMPTS: &[&str] = &[
     "allowlist_positive.md",
     "credential_substitution_canary.md",
     "cross_file_refactor.md",
+    "dep_fetch_evidence.md",
     "injection_payloads.toml",
     "lint_defect.md",
     "materializer.md",

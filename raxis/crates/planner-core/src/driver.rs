@@ -2477,9 +2477,13 @@ mod tests {
              capability hint header; got: {sys}"
         );
         assert!(
-            sys.contains("No outbound network"),
-            "capability hint MUST warn the LLM that egress is \
-             gated and `pip install` will fail; got: {sys}"
+            sys.contains("Use normal HTTP(S) clients"),
+            "capability hint MUST explain normal-client network use and \
+             package-install constraints; got: {sys}"
+        );
+        assert!(
+            !sys.contains("RAXIS_TPROXY_KERNEL_TCP"),
+            "capability hint MUST NOT expose internal egress env vars; got: {sys}"
         );
     }
 
