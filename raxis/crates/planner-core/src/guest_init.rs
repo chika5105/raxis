@@ -665,7 +665,11 @@ pub const A3_DEFAULT_TPROXY_PORT: u16 = 3129;
 ///      every `getaddrinfo` through `127.0.0.1:53` — i.e. the
 ///      in-guest DNS stub that fans queries out over vsock to
 ///      the kernel-side resolver.
-///   3. Install native nftables `nat OUTPUT` REDIRECT rules to send
+///   3. Install a loopback-backed IPv4 default route. The A3 guest
+///      has no NIC by design; without a default route Linux can
+///      return `ENETUNREACH` before the `nat OUTPUT` hook sees the
+///      socket and redirects it to the in-guest tproxy.
+///   4. Install native nftables `nat OUTPUT` REDIRECT rules to send
 ///      outbound TCP to the local tproxy listener
 ///      (`127.0.0.1:<tproxy_port>`). UDP port 53 is REDIRECTed
 ///      to the local DNS stub on port 53. The canonical path uses
@@ -692,6 +696,7 @@ pub fn init_pid1_a3_egress() {
             .unwrap_or(A3_DEFAULT_TPROXY_PORT);
         linux_a3::disable_ipv6_via_sysfs();
         linux_a3::write_resolv_conf_for_stub();
+        linux_a3::install_loopback_default_route();
         linux_a3::install_nftables_redirect(tproxy_port);
     }
 }
@@ -1273,6 +1278,57 @@ mod linux_a3 {
         );
     }
 
+    /// Route otherwise-unroutable IPv4 destinations through `lo`
+    /// so Linux reaches the `nat OUTPUT` hook and nftables can
+    /// REDIRECT the socket to the in-guest tproxy.
+    ///
+    /// This does not grant network access by itself: the guest still
+    /// has no NIC, and the tproxy opens the upstream through the
+    /// kernel-side A3 tunnel only after admission. The nft ruleset
+    /// separately exempts real loopback destinations (`127.0.0.0/8`)
+    /// so credential-proxy loopback ports and in-VM control sockets
+    /// are not captured.
+    pub(super) fn install_loopback_default_route() {
+        let binaries: &[&str] = &["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip", "ip"];
+        let mut installed_any = false;
+        for binary in binaries {
+            match run_ip_route_replace_default_lo(binary) {
+                Ok(()) => {
+                    installed_any = true;
+                    eprintln!(
+                        "{{\"level\":\"info\",\"step\":\"guest-init-a3\",\
+                          \"event\":\"loopback_default_route_installed\",\
+                          \"binary\":{binary:?}}}"
+                    );
+                    break;
+                }
+                Err(RouteInstallError::Missing { reason }) => {
+                    eprintln!(
+                        "{{\"level\":\"info\",\"step\":\"guest-init-a3\",\
+                          \"event\":\"ip_binary_missing\",\
+                          \"binary\":{binary:?},\"err\":{reason:?}}}"
+                    );
+                }
+                Err(RouteInstallError::Failed { reason }) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"step\":\"guest-init-a3\",\
+                          \"event\":\"loopback_default_route_candidate_failed\",\
+                          \"binary\":{binary:?},\"err\":{reason:?}}}"
+                    );
+                }
+            }
+        }
+        if !installed_any {
+            eprintln!(
+                "{{\"level\":\"warn\",\"step\":\"guest-init-a3\",\
+                  \"event\":\"loopback_default_route_failed\",\
+                  \"note\":\"egress will fail closed — the guest has no NIC, \
+                  and Linux may reject outbound connects before nftables \
+                  can redirect them to the in-guest tproxy\"}}"
+            );
+        }
+    }
+
     /// Shell out to native `nft` to install the A3 REDIRECT chain.
     ///
     /// We deliberately avoid the iptables compatibility frontends:
@@ -1339,7 +1395,6 @@ mod linux_a3 {
             r#"table ip raxis_a3 {{
   chain output {{
     type nat hook output priority -100; policy accept;
-    oifname "lo" return
     ip daddr 127.0.0.0/8 return
     ip protocol tcp redirect to :{tproxy_port}
     udp dport 53 redirect to :53
@@ -1352,6 +1407,40 @@ mod linux_a3 {
     enum NftInstallError {
         Missing { reason: String },
         Failed { reason: String },
+    }
+
+    enum RouteInstallError {
+        Missing { reason: String },
+        Failed { reason: String },
+    }
+
+    fn run_ip_route_replace_default_lo(binary: &str) -> Result<(), RouteInstallError> {
+        let output = std::process::Command::new(binary)
+            .args(["-4", "route", "replace", "default", "dev", "lo"])
+            .output()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    RouteInstallError::Missing {
+                        reason: e.to_string(),
+                    }
+                } else {
+                    RouteInstallError::Failed {
+                        reason: e.to_string(),
+                    }
+                }
+            })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            Err(RouteInstallError::Failed {
+                reason: if stderr.is_empty() {
+                    format!("exit {:?}", output.status.code())
+                } else {
+                    format!("exit {:?}: {stderr}", output.status.code())
+                },
+            })
+        }
     }
 
     fn run_nft_ruleset(binary: &str, ruleset: &str) -> Result<(), NftInstallError> {
@@ -1429,10 +1518,10 @@ mod tests_a3 {
         let ruleset = linux_a3::nft_redirect_ruleset(3129);
         assert!(ruleset.contains("table ip raxis_a3"));
         assert!(ruleset.contains("type nat hook output priority -100"));
-        assert!(ruleset.contains("oifname \"lo\" return"));
         assert!(ruleset.contains("ip daddr 127.0.0.0/8 return"));
         assert!(ruleset.contains("ip protocol tcp redirect to :3129"));
         assert!(ruleset.contains("udp dport 53 redirect to :53"));
+        assert!(!ruleset.contains("oifname \"lo\" return"));
         assert!(!ruleset.contains("iptables"));
     }
 }
