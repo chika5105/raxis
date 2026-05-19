@@ -2810,11 +2810,14 @@ fn handle_complete_task(
             ) {
                 Ok(Ok(())) => {}
                 Ok(Err(violation)) => {
+                    let violation_paths = serde_json::to_string(&violation.paths)
+                        .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned());
                     eprintln!(
                         "{{\"level\":\"warn\",\"event\":\"CompleteTaskAdmitPathViolation\",\
-                         \"task_id\":\"{}\",\"violation_count\":{}}}",
+                         \"task_id\":\"{}\",\"violation_count\":{},\"paths\":{}}}",
                         req.task_id.as_str(),
                         violation.paths.len(),
+                        violation_paths,
                     );
                     return Err((PlannerErrorCode::FailPathPolicyViolation, task_state));
                 }
