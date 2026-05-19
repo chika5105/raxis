@@ -70,7 +70,9 @@ describe("<SessionsPage>", () => {
     expect(screen.getByText("openai-prod")).toBeInTheDocument();
 
     fireEvent.change(
-      screen.getByPlaceholderText("Search workspace / id / provider..."),
+      screen.getByPlaceholderText(
+        "Search workspace / session / initiative / provider...",
+      ),
       { target: { value: "openai" } },
     );
 

@@ -972,6 +972,7 @@ export interface WorktreeListEntry {
   observed_branch?: string | null;
   observed_dirty_paths?: number | null;
   base_sha: string | null;
+  comparison_head_sha?: string | null;
 }
 
 export interface WorktreeDetail extends WorktreeListEntry {

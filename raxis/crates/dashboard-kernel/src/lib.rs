@@ -2165,23 +2165,39 @@ impl DashboardData for KernelDashboardData {
         // slowest single probe. The route layer wraps this call in
         // `tokio::task::spawn_blocking` so even the parallel
         // blocking wait does not pin a tokio worker.
-        let summary = git::probe_worktree_summary(&path, resolved.summary.base_sha.as_deref());
+        let probe_base = if resolved.summary.comparison_head_sha.is_some() {
+            None
+        } else {
+            resolved.summary.base_sha.as_deref()
+        };
+        let summary = git::probe_worktree_summary(&path, probe_base);
         let git::WorktreeProbeSummary {
             head_sha,
             branch,
             status_lines,
             ahead_behind,
         } = summary;
-        let (ahead, behind) = match (resolved.summary.base_sha.as_ref(), head_sha.as_ref()) {
-            (Some(_), Some(_)) => match ahead_behind {
-                Some((behind, ahead)) => (Some(ahead), Some(behind)),
-                None => (None, None),
-            },
+        let review_head_sha = resolved
+            .summary
+            .comparison_head_sha
+            .clone()
+            .or_else(|| head_sha.clone());
+        let (ahead, behind) = match (resolved.summary.base_sha.as_ref(), review_head_sha.as_ref()) {
+            (Some(base), Some(head)) => {
+                let counts = match resolved.summary.comparison_head_sha.as_ref() {
+                    Some(_) => git::ahead_behind_between(&path, base, head),
+                    None => ahead_behind,
+                };
+                match counts {
+                    Some((behind, ahead)) => (Some(ahead), Some(behind)),
+                    None => (None, None),
+                }
+            }
             _ => (None, None),
         };
         Ok(WorktreeDetail {
             summary: resolved.summary,
-            head_sha,
+            head_sha: review_head_sha,
             branch,
             ahead,
             behind,
@@ -2197,10 +2213,17 @@ impl DashboardData for KernelDashboardData {
                 kind: "worktree-path".into(),
             });
         }
-        match resolved.summary.base_sha.as_deref() {
-            Some(base) => git::log_entries_since_base(&path, base, limit.clamp(1, 200))
+        match (
+            resolved.summary.base_sha.as_deref(),
+            resolved.summary.comparison_head_sha.as_deref(),
+        ) {
+            (Some(base), Some(head)) => {
+                git::log_entries_between(&path, base, head, limit.clamp(1, 200))
+                    .map_err(map_git_error_to_api)
+            }
+            (Some(base), None) => git::log_entries_since_base(&path, base, limit.clamp(1, 200))
                 .map_err(map_git_error_to_api),
-            None => git::log_entries(&path, limit.clamp(1, 200)).map_err(map_git_error_to_api),
+            (None, _) => git::log_entries(&path, limit.clamp(1, 200)).map_err(map_git_error_to_api),
         }
     }
 
@@ -2219,9 +2242,12 @@ impl DashboardData for KernelDashboardData {
             .ok_or(ApiError::NotFound {
                 kind: "default-diff".into(),
             })?;
-        let to = git::head_sha(&path).ok_or(ApiError::NotFound {
-            kind: "head-sha".into(),
-        })?;
+        let to = match resolved.summary.comparison_head_sha.clone() {
+            Some(head) => head,
+            None => git::head_sha(&path).ok_or(ApiError::NotFound {
+                kind: "head-sha".into(),
+            })?,
+        };
         let files = git::diff_files(&path, &from, &to).map_err(map_git_error_to_api)?;
         Ok(WorktreeDiff {
             name: resolved.summary.name,
@@ -3650,6 +3676,10 @@ impl KernelDashboardData {
             "main-repository".to_owned(),
             "repositories/main".to_owned(),
             main_repo_path.clone(),
+            None,
+            None,
+            None,
+            None,
         ));
         let bundle = self.policy.load_full();
         for (idx, raw) in bundle.allowed_worktree_roots().iter().enumerate() {
@@ -3669,9 +3699,60 @@ impl KernelDashboardData {
                     label
                 },
                 path,
+                None,
+                None,
+                None,
+                None,
             );
             if entry.summary.observed_head_sha.is_some() {
                 out.push(entry);
+            }
+        }
+        if let Ok(conn) = self.open_ro() {
+            let mut seen_main_initiatives = std::collections::HashSet::new();
+            if let Ok(mut stmt) = conn.prepare(&format!(
+                "SELECT snapshot_id, task_id, initiative_id, base_sha, head_sha \
+                 FROM {TBL_WORKTREE_SNAPSHOTS} \
+                 WHERE trigger = 'IntegrationMerge' \
+                   AND initiative_id IS NOT NULL \
+                 ORDER BY taken_at DESC, snapshot_id DESC \
+                 LIMIT 200"
+            )) {
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                });
+                if let Ok(rows) = rows {
+                    for row in rows.flatten() {
+                        let (_snapshot_id, task_id, initiative_id, base_sha, head_sha) = row;
+                        if !seen_main_initiatives.insert(initiative_id.clone()) {
+                            continue;
+                        }
+                        let initiative_display_name =
+                            initiative_name_for_id_opt(&conn, Some(&initiative_id))?;
+                        let short = short_stable_id(&initiative_id, 12);
+                        let label = match initiative_display_name.as_deref() {
+                            Some(name) if !name.trim().is_empty() => {
+                                format!("Main:{name}")
+                            }
+                            _ => format!("Main:{short}"),
+                        };
+                        out.push(main_worktree_entry(
+                            format!("main-integration-{short}"),
+                            label,
+                            main_repo_path.clone(),
+                            Some(task_id),
+                            Some(initiative_id),
+                            initiative_display_name,
+                            Some((base_sha, head_sha)),
+                        ));
+                    }
+                }
             }
         }
         // Session overlay — include active, revoked, and expired rows.
@@ -3778,6 +3859,7 @@ impl KernelDashboardData {
                                 observed_branch: None,
                                 observed_dirty_paths: None,
                                 base_sha,
+                                comparison_head_sha: None,
                             },
                         });
                     }
@@ -3821,10 +3903,21 @@ impl KernelDashboardData {
     }
 }
 
-fn main_worktree_entry(name: String, label: String, path: String) -> ResolvedWorktree {
+fn main_worktree_entry(
+    name: String,
+    label: String,
+    path: String,
+    task_id: Option<String>,
+    initiative_id: Option<String>,
+    initiative_display_name: Option<String>,
+    review_range: Option<(String, String)>,
+) -> ResolvedWorktree {
     let observed = std::path::Path::new(&path)
         .exists()
         .then(|| git::probe_worktree_summary(std::path::Path::new(&path), None));
+    let (base_sha, comparison_head_sha) = review_range
+        .map(|(base, head)| (Some(base), Some(head)))
+        .unwrap_or((None, None));
     ResolvedWorktree {
         summary: WorktreeListEntry {
             name,
@@ -3832,19 +3925,26 @@ fn main_worktree_entry(name: String, label: String, path: String) -> ResolvedWor
             kind: "Main".into(),
             path,
             session_id: None,
-            task_id: None,
-            initiative_id: None,
-            initiative_display_name: None,
+            task_id,
+            initiative_id,
+            initiative_display_name,
             agent_type: None,
             session_state: None,
-            observed_head_sha: observed.as_ref().and_then(|s| s.head_sha.clone()),
+            observed_head_sha: comparison_head_sha
+                .clone()
+                .or_else(|| observed.as_ref().and_then(|s| s.head_sha.clone())),
             observed_branch: observed.as_ref().and_then(|s| s.branch.clone()),
             observed_dirty_paths: observed
                 .as_ref()
                 .map(|s| u32::try_from(s.status_lines.len()).unwrap_or(u32::MAX)),
-            base_sha: None,
+            base_sha,
+            comparison_head_sha,
         },
     }
+}
+
+fn short_stable_id(id: &str, max_chars: usize) -> String {
+    id.chars().take(max_chars).collect()
 }
 
 fn same_display_path(a: &str, b: &str) -> bool {

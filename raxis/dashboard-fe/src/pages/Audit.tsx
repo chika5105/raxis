@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import clsx from "clsx";
 
@@ -41,6 +41,10 @@ export function AuditPage() {
   // surface (input, "clear", browser back/forward) drove the
   // change.
   const [highlightDraft, setHighlightDraft] = useState(highlightInitiativeId ?? "");
+  const [search, setSearch] = useState("");
+  const [sessionFilter, setSessionFilter] = useState("");
+  const [initiativeFilter, setInitiativeFilter] = useState("");
+  const [workspaceName, setWorkspaceName] = useState("All");
   useEffect(() => {
     setHighlightDraft(highlightInitiativeId ?? "");
   }, [highlightInitiativeId]);
@@ -90,11 +94,57 @@ export function AuditPage() {
       last.length === PAGE_SIZE ? last[last.length - 1].seq : undefined,
   });
 
+  const initiatives = useQuery({
+    queryKey: ["initiatives", "audit-filter", { limit: 500 }],
+    queryFn: ({ signal }) =>
+      dashboardApi.initiatives.list({ limit: 500 }, signal),
+    staleTime: 30_000,
+  });
+
   const all = useMemo(() => q.data?.pages.flat() ?? [], [q.data]);
+  const workspaceOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const i of initiatives.data ?? []) {
+      const name = i.display_name?.trim();
+      if (name) names.add(name);
+    }
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [initiatives.data]);
+  const workspaceInitiativeIds = useMemo(() => {
+    if (workspaceName === "All") return null;
+    const ids = new Set<string>();
+    for (const i of initiatives.data ?? []) {
+      if (i.display_name === workspaceName) ids.add(i.initiative_id);
+    }
+    return ids;
+  }, [initiatives.data, workspaceName]);
+  const filtered = useMemo(
+    () =>
+      all.filter((row) =>
+        auditRowMatchesFilters(row, {
+          query: search,
+          sessionId: sessionFilter,
+          initiativeId: initiativeFilter,
+          workspaceInitiativeIds,
+        }),
+      ),
+    [all, search, sessionFilter, initiativeFilter, workspaceInitiativeIds],
+  );
   const highlightedCount = useMemo(
     () => all.filter((a) => rowHighlighted(a, highlightInitiativeId)).length,
     [all, highlightInitiativeId],
   );
+  const filterActive =
+    search.trim() !== "" ||
+    sessionFilter.trim() !== "" ||
+    initiativeFilter.trim() !== "" ||
+    workspaceName !== "All";
+  const clearFilters = () => {
+    setSearch("");
+    setSessionFilter("");
+    setInitiativeFilter("");
+    setWorkspaceName("All");
+  };
 
   if (q.isPending) return <PageSpinner />;
   if (q.error) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
@@ -136,6 +186,77 @@ export function AuditPage() {
 
       <ChainStatusBanner />
 
+      <section
+        className="card px-3 py-3 flex flex-wrap items-end gap-3 text-xs"
+        aria-label="Audit filters"
+      >
+        <label className="flex flex-col gap-1 min-w-[18rem] flex-1">
+          <span className="text-[11px] uppercase tracking-wider text-ink-subtle">
+            Search
+          </span>
+          <input
+            className="input"
+            placeholder="Event name, payload text, task..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1 min-w-[13rem]">
+          <span className="text-[11px] uppercase tracking-wider text-ink-subtle">
+            Session ID
+          </span>
+          <input
+            className="input font-mono text-xs"
+            placeholder="session id"
+            value={sessionFilter}
+            onChange={(e) => setSessionFilter(e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1 min-w-[13rem]">
+          <span className="text-[11px] uppercase tracking-wider text-ink-subtle">
+            Initiative ID
+          </span>
+          <input
+            className="input font-mono text-xs"
+            placeholder="initiative id"
+            value={initiativeFilter}
+            onChange={(e) => setInitiativeFilter(e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1 min-w-[13rem]">
+          <span className="text-[11px] uppercase tracking-wider text-ink-subtle">
+            Workspace
+          </span>
+          <select
+            className="input"
+            value={workspaceName}
+            onChange={(e) => setWorkspaceName(e.target.value)}
+          >
+            <option value="All">All workspaces</option>
+            {workspaceOptions.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="ml-auto flex items-center gap-3 pb-1">
+          <span className="text-ink-subtle">
+            <span className="tabular text-ink">{filtered.length}</span> /{" "}
+            <span className="tabular">{all.length}</span> loaded
+          </span>
+          {filterActive && (
+            <button
+              type="button"
+              className="text-accent hover:underline"
+              onClick={clearFilters}
+            >
+              clear filters
+            </button>
+          )}
+        </div>
+      </section>
+
       {highlightInitiativeId && (
         <div className="card px-3 py-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
           <span className="text-ink-muted">
@@ -165,10 +286,15 @@ export function AuditPage() {
 
       {all.length === 0 ? (
         <Empty title="No audit events." />
+      ) : filtered.length === 0 ? (
+        <Empty
+          title="No audit rows match these filters."
+          hint="Search is partial and matches event names, ids, and payload text. Load more rows if the event is older than the current page."
+        />
       ) : (
         <div className="card p-0 overflow-hidden">
           <ul className="divide-y divide-edge/50">
-            {all.map((a) => {
+            {filtered.map((a) => {
               const rowId = String(a.seq);
               const rowKey = a.event_id || `seq-${a.seq}`;
               const isOpen = expanded === rowKey;
@@ -318,6 +444,65 @@ function payloadInitiativeId(payload: unknown): string | null {
     return null;
   }
   const value = (payload as Record<string, unknown>).initiative_id;
+  return typeof value === "string" ? value : null;
+}
+
+function auditRowMatchesFilters(
+  row: AuditEntryView,
+  filters: {
+    query: string;
+    sessionId: string;
+    initiativeId: string;
+    workspaceInitiativeIds: Set<string> | null;
+  },
+): boolean {
+  const rowSession = row.session_id ?? payloadString(row.payload, "session_id") ?? "";
+  const rowInitiative =
+    row.initiative_id ?? payloadString(row.payload, "initiative_id") ?? "";
+  if (
+    filters.sessionId.trim() &&
+    !rowSession.toLowerCase().includes(filters.sessionId.trim().toLowerCase())
+  ) {
+    return false;
+  }
+  if (
+    filters.initiativeId.trim() &&
+    !rowInitiative
+      .toLowerCase()
+      .includes(filters.initiativeId.trim().toLowerCase())
+  ) {
+    return false;
+  }
+  if (
+    filters.workspaceInitiativeIds &&
+    !filters.workspaceInitiativeIds.has(rowInitiative)
+  ) {
+    return false;
+  }
+  const query = filters.query.trim().toLowerCase();
+  if (!query) return true;
+  const haystack = [
+    String(row.seq),
+    row.event_id,
+    row.event_kind,
+    row.initiative_id ?? "",
+    row.task_id ?? "",
+    row.session_id ?? "",
+    JSON.stringify(row.payload ?? {}),
+  ]
+    .join(" ")
+    .toLowerCase();
+  return query
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((token) => haystack.includes(token));
+}
+
+function payloadString(payload: unknown, key: string): string | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const value = (payload as Record<string, unknown>)[key];
   return typeof value === "string" ? value : null;
 }
 

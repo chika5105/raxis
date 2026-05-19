@@ -402,11 +402,43 @@ where
 /// sent to the agent and the underlying `TransparentProxyDenied`
 /// is the authoritative record).
 pub async fn run_admission_loop_with_stall_tracker<R, W, S>(
+    reader: R,
+    writer: W,
+    service: Arc<S>,
+    audit: Arc<dyn AuditSink>,
+    session_id: String,
+    stall_tracker: Option<Arc<EgressStallTracker>>,
+) -> Result<(), LoopError>
+where
+    R: AsyncReadExt + Unpin + Send,
+    W: AsyncWriteExt + Unpin + Send,
+    S: AdmissionService + ?Sized,
+{
+    run_admission_loop_with_context(
+        reader,
+        writer,
+        service,
+        audit,
+        session_id,
+        None,
+        stall_tracker,
+    )
+    .await
+}
+
+/// V3 context-aware admission loop. This is the production entry
+/// point used by the session-spawn service so low-level transparent
+/// proxy admission and stall events retain the owning initiative in
+/// the top-level audit envelope. The older helpers intentionally
+/// delegate with `initiative_id = None` for standalone tests and
+/// non-kernel consumers that only know the session id.
+pub async fn run_admission_loop_with_context<R, W, S>(
     mut reader: R,
     mut writer: W,
     service: Arc<S>,
     audit: Arc<dyn AuditSink>,
     session_id: String,
+    initiative_id: Option<String>,
     stall_tracker: Option<Arc<EgressStallTracker>>,
 ) -> Result<(), LoopError>
 where
@@ -478,7 +510,12 @@ where
                 reason: reason.as_str().to_owned(),
             },
         };
-        audit.emit(audit_kind, Some(&session_id), None, None)?;
+        audit.emit(
+            audit_kind,
+            Some(&session_id),
+            None,
+            initiative_id.as_deref(),
+        )?;
 
         // V2 reviewer-egress-defaults-decision.md §7 — feed the
         // denial through the stall tracker, if one is wired.
@@ -507,7 +544,7 @@ where
                     },
                     Some(&session_id),
                     None,
-                    None,
+                    initiative_id.as_deref(),
                 ) {
                     eprintln!(
                         "{{\"level\":\"warn\",\"event\":\"SessionEgressStallDetected\",\

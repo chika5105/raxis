@@ -59,6 +59,7 @@ export function GitPage() {
         w.agent_type ?? "",
         w.session_state ?? "",
         w.base_sha ?? "",
+        w.comparison_head_sha ?? "",
       ]
         .join(" ")
         .toLowerCase()
@@ -205,7 +206,7 @@ export function GitPage() {
           </select>
           <input
             className="input w-72"
-            placeholder="Search workspace / path / session..."
+            placeholder="Search workspace / path / session / initiative..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -220,8 +221,8 @@ export function GitPage() {
           hint="Switch the scope filter or search text to inspect browse-only roots and older sessions."
         />
       ) : (
-        <div className="card p-0 overflow-hidden">
-          <table className="w-full text-sm">
+        <div className="card p-0 overflow-x-auto">
+          <table className="min-w-[1280px] w-full text-sm">
             <thead className="text-xs text-ink-subtle bg-panel-high">
               <tr>
                 <th className="text-left px-4 py-2 font-medium">Worktree</th>
@@ -282,130 +283,116 @@ export function GitPage() {
                     group.items.map((w) => {
                       const href = `/git/${encodeURIComponent(w.name)}`;
                       return (
-                  <tr
-                    key={w.name}
-                    tabIndex={0}
-                    onClick={() => navigate(href)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        navigate(href);
-                      }
-                    }}
-                    className="border-t border-edge/40 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
-                  >
-                    <td className="px-4 py-2.5">
-                      <Link
-                        to={href}
-                        onClick={(e) => e.stopPropagation()}
-                        className="text-ink hover:text-accent"
-                      >
-                        {w.label}
-                      </Link>
-                      <div className="text-[11px] text-ink-subtle">
-                        <Mono>{w.name}</Mono>
-                      </div>
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <div className="flex flex-col items-start gap-1">
-                        <span
-                          className={`badge ${
-                            w.kind === "Main"
-                              ? "bg-info-muted/30 border-info text-info"
-                              : "bg-edge/40 border-edge-strong text-ink-muted"
-                          }`}
+                        <tr
+                          key={w.name}
+                          tabIndex={0}
+                          onClick={() => navigate(href)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              navigate(href);
+                            }
+                          }}
+                          className="border-t border-edge/40 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
                         >
-                          {w.kind}
-                        </span>
-                        {w.agent_type && (
-                          <span className="text-[11px] text-ink-subtle">
-                            {w.agent_type}
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <WorktreeLifecyclePill worktree={w} />
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <RepoStateCell worktree={w} />
-                    </td>
-                    <td
-                      className="px-4 py-2.5 font-mono text-[11px] text-ink-muted truncate max-w-[280px]"
-                      title={w.path}
-                    >
-                      {w.path}
-                    </td>
-                    <td className="px-4 py-2.5 text-xs">
-                      {w.initiative_id && w.initiative_display_name ? (
-                        <Link
-                          to={`/initiatives/${w.initiative_id}`}
-                          onClick={(e) => e.stopPropagation()}
-                          className="text-accent hover:underline"
-                          title={w.initiative_id}
-                        >
-                          {w.initiative_display_name}
-                        </Link>
-                      ) : (
-                        <span className="text-ink-subtle">-</span>
-                      )}
-                      {w.initiative_id && (
-                        <div className="font-mono text-[11px] text-ink-subtle break-all">
-                          {w.initiative_id}
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-4 py-2.5 text-xs">
-                      {w.session_id ? (
-                        <Link
-                          to={`/sessions/${w.session_id}`}
-                          onClick={(e) => e.stopPropagation()}
-                          className="text-accent hover:underline font-mono"
-                        >
-                          {w.session_id.slice(0, 12)}...
-                        </Link>
-                      ) : (
-                        <span className="text-ink-subtle">-</span>
-                      )}
-                      {w.task_id && (
-                        <div>
-                          <Link
-                            to={`/tasks/${w.task_id}`}
-                            onClick={(e) => e.stopPropagation()}
-                            className="text-ink-muted hover:text-accent font-mono text-[11px]"
+                          <td className="px-4 py-2.5">
+                            <Link
+                              to={href}
+                              onClick={(e) => e.stopPropagation()}
+                              className="text-ink hover:text-accent"
+                            >
+                              {w.label}
+                            </Link>
+                            <div className="text-[11px] text-ink-subtle">
+                              <Mono>{w.name}</Mono>
+                            </div>
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <div className="flex flex-col items-start gap-1">
+                              <span
+                                className={`badge ${
+                                  w.kind === "Main"
+                                    ? "bg-info-muted/30 border-info text-info"
+                                    : "bg-edge/40 border-edge-strong text-ink-muted"
+                                }`}
+                              >
+                                {w.kind}
+                              </span>
+                              {w.agent_type && (
+                                <span className="text-[11px] text-ink-subtle">
+                                  {w.agent_type}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <WorktreeLifecyclePill worktree={w} />
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <RepoStateCell worktree={w} />
+                          </td>
+                          <td
+                            className="px-4 py-2.5 font-mono text-[11px] text-ink-muted truncate max-w-[280px]"
+                            title={w.path}
                           >
-                            {w.task_id}
-                          </Link>
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      {w.base_sha ? (
-                        <div className="flex items-center gap-2 text-xs">
-                          <Mono className="text-ink-muted">
-                            {shortSha(w.base_sha)}
-                          </Mono>
-                          <span className="text-ink-subtle">to</span>
-                          <span className="badge bg-ok-muted/20 border-ok text-ok">
-                            HEAD
-                          </span>
-                        </div>
-                      ) : (
-                        <span className="badge bg-panel-high border-edge text-ink-subtle">
-                          Browse only
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-4 py-2.5 text-right">
-                      <Link
-                        to={href}
-                        onClick={(e) => e.stopPropagation()}
-                        className="btn text-xs py-1"
-                      >
-                        Review
-                      </Link>
-                    </td>
-                  </tr>
+                            {w.path}
+                          </td>
+                          <td className="px-4 py-2.5 text-xs">
+                            {w.initiative_id && w.initiative_display_name ? (
+                              <Link
+                                to={`/initiatives/${w.initiative_id}`}
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-accent hover:underline"
+                                title={w.initiative_id}
+                              >
+                                {w.initiative_display_name}
+                              </Link>
+                            ) : (
+                              <span className="text-ink-subtle">-</span>
+                            )}
+                            {w.initiative_id && (
+                              <div className="font-mono text-[11px] text-ink-subtle break-all">
+                                {w.initiative_id}
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-2.5 text-xs">
+                            {w.session_id ? (
+                              <Link
+                                to={`/sessions/${w.session_id}`}
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-accent hover:underline font-mono"
+                              >
+                                {w.session_id.slice(0, 12)}...
+                              </Link>
+                            ) : (
+                              <span className="text-ink-subtle">-</span>
+                            )}
+                            {w.task_id && (
+                              <div>
+                                <Link
+                                  to={`/tasks/${w.task_id}`}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="text-ink-muted hover:text-accent font-mono text-[11px]"
+                                >
+                                  {w.task_id}
+                                </Link>
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <ReviewRangeCell worktree={w} />
+                          </td>
+                          <td className="px-4 py-2.5 text-right">
+                            <Link
+                              to={href}
+                              onClick={(e) => e.stopPropagation()}
+                              className="btn text-xs py-1"
+                            >
+                              Review
+                            </Link>
+                          </td>
+                        </tr>
                       );
                     })}
                 </Fragment>
@@ -434,7 +421,7 @@ function groupWorktrees(
   for (const w of worktrees) {
     const initiativeName = w.initiative_display_name?.trim() || undefined;
     const key =
-      w.kind === "Main"
+      w.kind === "Main" && !w.initiative_id
         ? "__main"
         : w.initiative_id
           ? groupBy === "id"
@@ -569,6 +556,40 @@ function RepoStateCell({ worktree }: { worktree: WorktreeListEntry }) {
       <span className="text-[11px] text-ink-subtle">
         {worktree.observed_branch ?? "(detached)"}
       </span>
+    </div>
+  );
+}
+
+function ReviewRangeCell({ worktree }: { worktree: WorktreeListEntry }) {
+  if (!worktree.base_sha) {
+    return (
+      <span className="badge bg-panel-high border-edge text-ink-subtle">
+        Browse only
+      </span>
+    );
+  }
+  const toSha = worktree.comparison_head_sha ?? worktree.observed_head_sha;
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <Mono className="text-ink-muted" title={worktree.base_sha}>
+        {shortSha(worktree.base_sha)}
+      </Mono>
+      <span className="text-ink-subtle">to</span>
+      {toSha ? (
+        <Mono
+          className={clsx(
+            "badge",
+            worktree.comparison_head_sha
+              ? "bg-info-muted/30 border-info text-info"
+              : "bg-ok-muted/20 border-ok text-ok",
+          )}
+          title={toSha}
+        >
+          {shortSha(toSha)}
+        </Mono>
+      ) : (
+        <span className="badge bg-ok-muted/20 border-ok text-ok">HEAD</span>
+      )}
     </div>
   );
 }

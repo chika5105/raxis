@@ -302,12 +302,27 @@ pub fn probe_worktree_summary(root: &Path, base_sha: Option<&str>) -> WorktreePr
 /// `git rev-list --left-right --count <base>..HEAD` →
 /// `Some((behind, ahead))` or `None` on failure.
 pub fn ahead_behind(root: &Path, base: &str) -> Option<(u32, u32)> {
+    ahead_behind_range(root, base, "HEAD")
+}
+
+/// `git rev-list --left-right --count <base>...<head>` →
+/// `Some((behind, ahead))` or `None` on failure.
+///
+/// This is the bounded counterpart to [`ahead_behind`]. It keeps
+/// IntegrationMerge snapshot detail pages honest after `HEAD`
+/// advances: the UI should describe the captured merge result, not
+/// whatever the main repository happens to point at now.
+pub fn ahead_behind_between(root: &Path, base: &str, head: &str) -> Option<(u32, u32)> {
+    ahead_behind_range(root, base, head)
+}
+
+fn ahead_behind_range(root: &Path, base: &str, head: &str) -> Option<(u32, u32)> {
     match run_git(
         &[
             "rev-list",
             "--left-right",
             "--count",
-            &format!("{base}...HEAD"),
+            &format!("{base}...{head}"),
         ],
         root,
     ) {
@@ -351,6 +366,20 @@ pub fn log_entries_since_base(
     limit: u32,
 ) -> Result<Vec<WorktreeLogEntry>, GitError> {
     log_entries_inner(root, limit, Some(format!("{base}..HEAD")))
+}
+
+/// `git log <base>..<head> -n <limit>` for bounded forensic
+/// ranges. Used for per-initiative main-state rows whose exact
+/// integration-merge head is captured in `worktree_snapshots`;
+/// reviewing those rows must not float to whatever `HEAD` becomes
+/// after a later initiative merges.
+pub fn log_entries_between(
+    root: &Path,
+    base: &str,
+    head: &str,
+    limit: u32,
+) -> Result<Vec<WorktreeLogEntry>, GitError> {
+    log_entries_inner(root, limit, Some(format!("{base}..{head}")))
 }
 
 fn log_entries_inner(
@@ -601,6 +630,44 @@ mod tests {
         assert_eq!(
             rows[0].at, 1_700_000_000,
             "dashboard log timestamps must use committer/system time, not author time"
+        );
+    }
+
+    #[test]
+    fn ahead_behind_between_stays_bounded_after_head_advances() {
+        let Some(dir) = make_seed_repo() else {
+            eprintln!("skipping: no working git binary on PATH");
+            return;
+        };
+        let Some(base) = head_sha(dir.path()) else {
+            eprintln!("skipping: seed repo has no HEAD");
+            return;
+        };
+        for msg in ["captured merge", "later merge"] {
+            let status = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(["commit", "--allow-empty", "-q", "-m", msg])
+                .status()
+                .expect("git commit");
+            if !status.success() {
+                eprintln!("skipping: git commit failed");
+                return;
+            }
+            if msg == "captured merge" {
+                let Some(captured) = head_sha(dir.path()) else {
+                    eprintln!("skipping: captured commit missing");
+                    return;
+                };
+                assert_eq!(
+                    ahead_behind_between(dir.path(), &base, &captured),
+                    Some((0, 1))
+                );
+            }
+        }
+        assert_eq!(
+            ahead_behind(dir.path(), &base),
+            Some((0, 2)),
+            "unbounded base..HEAD sees the later merge"
         );
     }
 

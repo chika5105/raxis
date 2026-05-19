@@ -92,7 +92,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use raxis_audit_tools::{AuditEventKind, AuditSink};
+use raxis_audit_tools::{AuditEvent, AuditEventKind, AuditSink, AuditWriterError};
 use raxis_credentials::CredentialBackend;
 use raxis_plan_credentials::{
     AwsForwardingDecl, AwsRestrictions, AzureForwardingDecl, AzureRestrictions, GcpForwardingDecl,
@@ -161,6 +161,30 @@ use raxis_credential_proxy_smtp::{
     ProxyError as SmtpProxyError, ProxyStats as SmtpProxyStats,
     Restrictions as SmtpProxyRestrictions, SmtpProxy,
 };
+
+struct ContextualAuditSink {
+    inner: Arc<dyn AuditSink>,
+    session_id: String,
+    task_id: String,
+    initiative_id: String,
+}
+
+impl AuditSink for ContextualAuditSink {
+    fn emit(
+        &self,
+        kind: AuditEventKind,
+        session_id: Option<&str>,
+        task_id: Option<&str>,
+        initiative_id: Option<&str>,
+    ) -> Result<AuditEvent, AuditWriterError> {
+        self.inner.emit(
+            kind,
+            session_id.or(Some(&self.session_id)),
+            task_id.or(Some(&self.task_id)),
+            initiative_id.or(Some(&self.initiative_id)),
+        )
+    }
+}
 
 /// Errors surfaced by the manager.
 #[derive(Debug, thiserror::Error)]
@@ -378,6 +402,7 @@ struct PostgresKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
     task_id: String,
+    initiative_id: String,
 }
 
 impl PgAuditChannel for PostgresKernelAuditAdapter {
@@ -404,10 +429,12 @@ impl PgAuditChannel for PostgresKernelAuditAdapter {
                     duration_ms,
                     upstream_error,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -433,10 +460,12 @@ impl PgAuditChannel for PostgresKernelAuditAdapter {
                     tls,
                     handshake_ms,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -462,10 +491,12 @@ impl PgAuditChannel for PostgresKernelAuditAdapter {
                     reason,
                     detail,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -490,10 +521,12 @@ impl PgAuditChannel for PostgresKernelAuditAdapter {
                     sql_plaintext: sql_text,
                     blocked,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -514,10 +547,12 @@ impl PgAuditChannel for PostgresKernelAuditAdapter {
                     real_resolved: true,
                     substitution_shape,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -534,6 +569,7 @@ struct HttpKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
     task_id: String,
+    initiative_id: String,
 }
 
 impl HttpAuditChannel for HttpKernelAuditAdapter {
@@ -557,10 +593,12 @@ impl HttpAuditChannel for HttpKernelAuditAdapter {
                     status_code,
                     blocked,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -577,6 +615,7 @@ struct SmtpKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
     task_id: String,
+    initiative_id: String,
     credential_name: String,
 }
 
@@ -606,10 +645,12 @@ impl EnvelopeAuditSink for SmtpKernelAuditAdapter {
                 }
             }
         };
-        if let Err(e) =
-            self.audit_sink
-                .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-        {
+        if let Err(e) = self.audit_sink.emit(
+            kind,
+            Some(&self.session_id),
+            Some(&self.task_id),
+            Some(&self.initiative_id),
+        ) {
             tracing::warn!(
                 target:     "raxis::credential_proxy::manager",
                 session_id = %self.session_id,
@@ -624,6 +665,7 @@ struct AwsKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
     task_id: String,
+    initiative_id: String,
 }
 
 impl AwsAuditChannel for AwsKernelAuditAdapter {
@@ -649,10 +691,12 @@ impl AwsAuditChannel for AwsKernelAuditAdapter {
                     allowed_regions,
                     blocked,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -669,6 +713,7 @@ struct RedisKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
     task_id: String,
+    initiative_id: String,
 }
 
 impl RedisAuditChannel for RedisKernelAuditAdapter {
@@ -693,10 +738,12 @@ impl RedisAuditChannel for RedisKernelAuditAdapter {
                     tls,
                     handshake_ms,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -722,10 +769,12 @@ impl RedisAuditChannel for RedisKernelAuditAdapter {
                     reason,
                     detail,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -749,10 +798,12 @@ impl RedisAuditChannel for RedisKernelAuditAdapter {
                     frame_sha256,
                     blocked,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -769,6 +820,7 @@ struct GcpKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
     task_id: String,
+    initiative_id: String,
 }
 
 impl GcpAuditChannel for GcpKernelAuditAdapter {
@@ -792,10 +844,12 @@ impl GcpAuditChannel for GcpKernelAuditAdapter {
                     allowed_scopes,
                     blocked,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -812,6 +866,7 @@ struct AzureKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
     task_id: String,
+    initiative_id: String,
 }
 
 impl AzureAuditChannel for AzureKernelAuditAdapter {
@@ -837,10 +892,12 @@ impl AzureAuditChannel for AzureKernelAuditAdapter {
                     allowed_actions,
                     blocked,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -857,6 +914,7 @@ struct MysqlKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
     task_id: String,
+    initiative_id: String,
 }
 
 impl MysqlAuditChannel for MysqlKernelAuditAdapter {
@@ -878,10 +936,12 @@ impl MysqlAuditChannel for MysqlKernelAuditAdapter {
                     sql_plaintext: sql_text,
                     blocked,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -911,10 +971,12 @@ impl MysqlAuditChannel for MysqlKernelAuditAdapter {
                     duration_ms,
                     upstream_error,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -940,10 +1002,12 @@ impl MysqlAuditChannel for MysqlKernelAuditAdapter {
                     tls,
                     handshake_ms,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -969,10 +1033,12 @@ impl MysqlAuditChannel for MysqlKernelAuditAdapter {
                     reason,
                     detail,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1000,6 +1066,7 @@ struct MssqlKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
     task_id: String,
+    initiative_id: String,
 }
 
 impl MssqlAuditChannel for MssqlKernelAuditAdapter {
@@ -1021,10 +1088,12 @@ impl MssqlAuditChannel for MssqlKernelAuditAdapter {
                     sql_plaintext: sql_text,
                     blocked,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1054,10 +1123,12 @@ impl MssqlAuditChannel for MssqlKernelAuditAdapter {
                     duration_ms,
                     upstream_error,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1083,10 +1154,12 @@ impl MssqlAuditChannel for MssqlKernelAuditAdapter {
                     tls,
                     handshake_ms,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1112,10 +1185,12 @@ impl MssqlAuditChannel for MssqlKernelAuditAdapter {
                     reason,
                     detail,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1143,6 +1218,7 @@ struct MongodbKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
     task_id: String,
+    initiative_id: String,
 }
 
 impl MongodbAuditChannel for MongodbKernelAuditAdapter {
@@ -1162,10 +1238,12 @@ impl MongodbAuditChannel for MongodbKernelAuditAdapter {
                     body_sha256,
                     blocked,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1195,10 +1273,12 @@ impl MongodbAuditChannel for MongodbKernelAuditAdapter {
                     duration_ms,
                     upstream_error,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1224,10 +1304,12 @@ impl MongodbAuditChannel for MongodbKernelAuditAdapter {
                     tls,
                     handshake_ms,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1253,10 +1335,12 @@ impl MongodbAuditChannel for MongodbKernelAuditAdapter {
                     reason,
                     detail,
                 };
-                if let Err(e) =
-                    self.audit_sink
-                        .emit(kind, Some(&self.session_id), Some(&self.task_id), None)
-                {
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
+                ) {
                     tracing::warn!(
                         target:     "raxis::credential_proxy::manager",
                         session_id = %self.session_id,
@@ -1477,6 +1561,8 @@ pub struct StoppedProxy {
 /// Tests assert that callers always use `shutdown`.
 pub struct SessionProxyHandles {
     session_id: String,
+    task_id: String,
+    initiative_id: String,
     proxies: Vec<ActiveProxy>,
     audit: Arc<dyn AuditSink>,
     /// Once `shutdown` has run, the destructor must NOT emit a
@@ -1616,8 +1702,8 @@ impl SessionProxyHandles {
                         forwards_blocked: counters.forwards_blocked,
                     },
                     Some(&self.session_id),
-                    None,
-                    None,
+                    Some(&self.task_id),
+                    Some(&self.initiative_id),
                 )
                 .map_err(|e| ManagerError::Audit(e.to_string()))?;
             stopped.push(StoppedProxy {
@@ -1675,6 +1761,20 @@ impl CredentialProxyManager {
         Self { backend, audit }
     }
 
+    fn contextual_audit_sink(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        initiative_id: &str,
+    ) -> Arc<dyn AuditSink> {
+        Arc::new(ContextualAuditSink {
+            inner: Arc::clone(&self.audit),
+            session_id: session_id.to_owned(),
+            task_id: task_id.to_owned(),
+            initiative_id: initiative_id.to_owned(),
+        })
+    }
+
     /// Bind every credential proxy declared for a task and emit one
     /// `CredentialProxyStarted` audit event per proxy.
     ///
@@ -1686,6 +1786,7 @@ impl CredentialProxyManager {
         &self,
         session_id: &str,
         task_id: &str,
+        initiative_id: &str,
         decls: &[TaskCredentialDecl],
     ) -> Result<SessionProxyHandles, ManagerError> {
         // ── Defense-in-depth: mount_as uniqueness ────────────────────
@@ -1719,6 +1820,7 @@ impl CredentialProxyManager {
                     self.bind_postgres(
                         session_id,
                         task_id,
+                        initiative_id,
                         &decl.name,
                         &decl.mount_as,
                         restrictions,
@@ -1733,6 +1835,7 @@ impl CredentialProxyManager {
                     self.bind_http(
                         session_id,
                         task_id,
+                        initiative_id,
                         &decl.name,
                         &decl.mount_as,
                         auth_mode,
@@ -1759,6 +1862,7 @@ impl CredentialProxyManager {
                         .bind_http(
                             session_id,
                             task_id,
+                            initiative_id,
                             &decl.name,
                             &decl.mount_as,
                             &HttpAuthMode::Bearer,
@@ -1778,6 +1882,7 @@ impl CredentialProxyManager {
                     self.bind_smtp(
                         session_id,
                         task_id,
+                        initiative_id,
                         &decl.name,
                         &decl.mount_as,
                         auth_mode,
@@ -1795,6 +1900,7 @@ impl CredentialProxyManager {
                     self.bind_redis(
                         session_id,
                         task_id,
+                        initiative_id,
                         &decl.name,
                         &decl.mount_as,
                         upstream_host_port,
@@ -1812,6 +1918,7 @@ impl CredentialProxyManager {
                     self.bind_aws(
                         session_id,
                         task_id,
+                        initiative_id,
                         &decl.name,
                         &decl.mount_as,
                         role_arn.as_deref(),
@@ -1831,6 +1938,7 @@ impl CredentialProxyManager {
                     self.bind_gcp(
                         session_id,
                         task_id,
+                        initiative_id,
                         &decl.name,
                         &decl.mount_as,
                         project,
@@ -1851,6 +1959,7 @@ impl CredentialProxyManager {
                     self.bind_azure(
                         session_id,
                         task_id,
+                        initiative_id,
                         &decl.name,
                         &decl.mount_as,
                         tenant_id,
@@ -1865,6 +1974,7 @@ impl CredentialProxyManager {
                     self.bind_mysql(
                         session_id,
                         task_id,
+                        initiative_id,
                         &decl.name,
                         &decl.mount_as,
                         restrictions,
@@ -1875,6 +1985,7 @@ impl CredentialProxyManager {
                     self.bind_mssql(
                         session_id,
                         task_id,
+                        initiative_id,
                         &decl.name,
                         &decl.mount_as,
                         restrictions,
@@ -1885,6 +1996,7 @@ impl CredentialProxyManager {
                     self.bind_mongodb(
                         session_id,
                         task_id,
+                        initiative_id,
                         &decl.name,
                         &decl.mount_as,
                         restrictions,
@@ -1906,7 +2018,7 @@ impl CredentialProxyManager {
                     },
                     Some(session_id),
                     Some(task_id),
-                    None,
+                    Some(initiative_id),
                 )
                 .map_err(|e| ManagerError::Audit(e.to_string()))?;
 
@@ -1915,6 +2027,8 @@ impl CredentialProxyManager {
 
         Ok(SessionProxyHandles {
             session_id: session_id.to_owned(),
+            task_id: task_id.to_owned(),
+            initiative_id: initiative_id.to_owned(),
             proxies,
             audit: Arc::clone(&self.audit),
             drained: false,
@@ -1925,6 +2039,7 @@ impl CredentialProxyManager {
         &self,
         session_id: &str,
         task_id: &str,
+        initiative_id: &str,
         name: &raxis_credentials::CredentialName,
         mount_as: &str,
         restrictions: &PostgresRestrictions,
@@ -1945,6 +2060,7 @@ impl CredentialProxyManager {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
+            initiative_id: initiative_id.to_owned(),
         });
         let proxy = PostgresProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
@@ -2014,6 +2130,7 @@ impl CredentialProxyManager {
         &self,
         session_id: &str,
         task_id: &str,
+        initiative_id: &str,
         name: &raxis_credentials::CredentialName,
         mount_as: &str,
         auth_mode: &HttpAuthMode,
@@ -2038,6 +2155,7 @@ impl CredentialProxyManager {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
+            initiative_id: initiative_id.to_owned(),
         });
         let proxy = HttpProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
@@ -2070,6 +2188,7 @@ impl CredentialProxyManager {
         &self,
         session_id: &str,
         task_id: &str,
+        initiative_id: &str,
         name: &raxis_credentials::CredentialName,
         mount_as: &str,
         auth_mode: &SmtpAuthMode,
@@ -2112,6 +2231,7 @@ impl CredentialProxyManager {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
+            initiative_id: initiative_id.to_owned(),
             credential_name: name.as_str().to_owned(),
         });
         let proxy = SmtpProxy::bind(Arc::clone(&self.backend), cfg, envelope_sink)
@@ -2146,6 +2266,7 @@ impl CredentialProxyManager {
         &self,
         session_id: &str,
         task_id: &str,
+        initiative_id: &str,
         name: &raxis_credentials::CredentialName,
         mount_as: &str,
         upstream_host_port: &str,
@@ -2166,6 +2287,7 @@ impl CredentialProxyManager {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
+            initiative_id: initiative_id.to_owned(),
         });
         let proxy = RedisProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
@@ -2198,6 +2320,7 @@ impl CredentialProxyManager {
         &self,
         session_id: &str,
         task_id: &str,
+        initiative_id: &str,
         name: &raxis_credentials::CredentialName,
         mount_as: &str,
         role_arn: Option<&str>,
@@ -2231,14 +2354,17 @@ impl CredentialProxyManager {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
+            initiative_id: initiative_id.to_owned(),
         });
         let proxy = match v3 {
             Some(v3) => {
+                let forwarding_audit =
+                    self.contextual_audit_sink(session_id, task_id, initiative_id);
                 AwsProxy::bind_v3(
                     Arc::clone(&self.backend),
                     cfg,
                     audit_channel,
-                    Arc::clone(&self.audit),
+                    forwarding_audit,
                     Arc::new(v3.http),
                     Arc::new(v3.cache),
                 )
@@ -2275,6 +2401,7 @@ impl CredentialProxyManager {
         &self,
         session_id: &str,
         task_id: &str,
+        initiative_id: &str,
         name: &raxis_credentials::CredentialName,
         mount_as: &str,
         project: &str,
@@ -2309,14 +2436,17 @@ impl CredentialProxyManager {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
+            initiative_id: initiative_id.to_owned(),
         });
         let proxy = match v3 {
             Some(v3) => {
+                let forwarding_audit =
+                    self.contextual_audit_sink(session_id, task_id, initiative_id);
                 GcpProxy::bind_v3(
                     Arc::clone(&self.backend),
                     cfg,
                     audit_channel,
-                    Arc::clone(&self.audit),
+                    forwarding_audit,
                     Arc::new(v3.http),
                     Arc::new(v3.cache),
                 )
@@ -2353,6 +2483,7 @@ impl CredentialProxyManager {
         &self,
         session_id: &str,
         task_id: &str,
+        initiative_id: &str,
         name: &raxis_credentials::CredentialName,
         mount_as: &str,
         tenant_id: &str,
@@ -2391,14 +2522,17 @@ impl CredentialProxyManager {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
+            initiative_id: initiative_id.to_owned(),
         });
         let proxy = match v3 {
             Some(v3) => {
+                let forwarding_audit =
+                    self.contextual_audit_sink(session_id, task_id, initiative_id);
                 AzureProxy::bind_v3(
                     Arc::clone(&self.backend),
                     cfg,
                     audit_channel,
-                    Arc::clone(&self.audit),
+                    forwarding_audit,
                     Arc::new(v3.http),
                     Arc::new(v3.cache),
                 )
@@ -2434,6 +2568,7 @@ impl CredentialProxyManager {
         &self,
         session_id: &str,
         task_id: &str,
+        initiative_id: &str,
         name: &raxis_credentials::CredentialName,
         mount_as: &str,
         restrictions: &MysqlRestrictions,
@@ -2456,6 +2591,7 @@ impl CredentialProxyManager {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
+            initiative_id: initiative_id.to_owned(),
         });
         let proxy = MysqlProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
@@ -2487,6 +2623,7 @@ impl CredentialProxyManager {
         &self,
         session_id: &str,
         task_id: &str,
+        initiative_id: &str,
         name: &raxis_credentials::CredentialName,
         mount_as: &str,
         restrictions: &MssqlRestrictions,
@@ -2509,6 +2646,7 @@ impl CredentialProxyManager {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
+            initiative_id: initiative_id.to_owned(),
         });
         let proxy = MssqlProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
@@ -2540,6 +2678,7 @@ impl CredentialProxyManager {
         &self,
         session_id: &str,
         task_id: &str,
+        initiative_id: &str,
         name: &raxis_credentials::CredentialName,
         mount_as: &str,
         restrictions: &MongodbRestrictions,
@@ -2560,6 +2699,7 @@ impl CredentialProxyManager {
             audit_sink: Arc::clone(&self.audit),
             session_id: session_id.to_owned(),
             task_id: task_id.to_owned(),
+            initiative_id: initiative_id.to_owned(),
         });
         let proxy = MongodbProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
@@ -2940,6 +3080,39 @@ users:
         (mgr, audit, tmp)
     }
 
+    #[test]
+    fn contextual_audit_sink_fills_missing_cloud_forwarding_scope() {
+        let audit = Arc::new(FakeAuditSink::new());
+        let contextual = ContextualAuditSink {
+            inner: Arc::clone(&audit) as Arc<dyn AuditSink>,
+            session_id: "sess-cloud".to_owned(),
+            task_id: "task-cloud".to_owned(),
+            initiative_id: "initiative-cloud".to_owned(),
+        };
+
+        contextual
+            .emit(
+                AuditEventKind::CloudCredentialCacheHit {
+                    session_id: "sess-cloud".to_owned(),
+                    credential_name: "aws-staging".to_owned(),
+                    provider: "aws".to_owned(),
+                    exchange_kind: "sts_assume_role".to_owned(),
+                    age_ms: 10,
+                    ttl_remaining_ms: 1000,
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("contextual emit");
+
+        let events = audit.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_id.as_deref(), Some("sess-cloud"));
+        assert_eq!(events[0].task_id.as_deref(), Some("task-cloud"));
+        assert_eq!(events[0].initiative_id.as_deref(), Some("initiative-cloud"));
+    }
+
     #[tokio::test]
     async fn start_then_shutdown_emits_paired_audit_events_for_postgres() {
         let (mgr, audit, _tmp) = build_manager();
@@ -2956,7 +3129,7 @@ users:
         }];
 
         let handles = mgr
-            .start_for_session("sess-1", "task-1", &decls)
+            .start_for_session("sess-1", "task-1", "initiative-1", &decls)
             .await
             .expect("start");
         assert_eq!(handles.len(), 1);
@@ -2984,6 +3157,10 @@ users:
         assert_eq!(started_events.len(), 1, "exactly one Started event");
         assert_eq!(started_events[0].session_id.as_deref(), Some("sess-1"));
         assert_eq!(started_events[0].task_id.as_deref(), Some("task-1"));
+        assert_eq!(
+            started_events[0].initiative_id.as_deref(),
+            Some("initiative-1")
+        );
 
         let report = handles.shutdown().expect("shutdown");
         assert_eq!(report.stopped.len(), 1);
@@ -2996,6 +3173,11 @@ users:
             .collect();
         assert_eq!(stopped_events.len(), 1, "exactly one Stopped event");
         assert_eq!(stopped_events[0].session_id.as_deref(), Some("sess-1"));
+        assert_eq!(stopped_events[0].task_id.as_deref(), Some("task-1"));
+        assert_eq!(
+            stopped_events[0].initiative_id.as_deref(),
+            Some("initiative-1")
+        );
     }
 
     #[tokio::test]
@@ -3013,7 +3195,7 @@ users:
         }];
 
         let handles = mgr
-            .start_for_session("sess-2", "task-2", &decls)
+            .start_for_session("sess-2", "task-2", "initiative-2", &decls)
             .await
             .expect("start");
         assert_eq!(handles.len(), 1);
@@ -3064,7 +3246,7 @@ users:
         }];
 
         let handles = mgr
-            .start_for_session("sess-smtp", "task-smtp", &decls)
+            .start_for_session("sess-smtp", "task-smtp", "initiative-smtp", &decls)
             .await
             .expect("smtp bind should succeed");
         assert_eq!(handles.len(), 1);
@@ -3114,7 +3296,9 @@ users:
             proxy: ProxyDecl::Unknown,
         }];
 
-        let result = mgr.start_for_session("sess-3", "task-3", &decls).await;
+        let result = mgr
+            .start_for_session("sess-3", "task-3", "initiative-3", &decls)
+            .await;
         let err = result.err().expect("start should fail for unknown proxy");
         match err {
             ManagerError::UnknownProxyType { credential_name } => {
@@ -3145,7 +3329,7 @@ users:
         }];
 
         let handles = mgr
-            .start_for_session("sess-4", "task-4", &decls)
+            .start_for_session("sess-4", "task-4", "initiative-4", &decls)
             .await
             .expect("k8s bind should succeed when kubeconfig has a server URL");
         let summaries = handles.started_summaries();
@@ -3184,7 +3368,7 @@ users:
         }];
 
         let err = mgr
-            .start_for_session("sess-4b", "task-4b", &decls)
+            .start_for_session("sess-4b", "task-4b", "initiative-4b", &decls)
             .await
             .err()
             .expect("broken kubeconfig should be rejected");
@@ -3215,7 +3399,7 @@ users:
         let (mgr, audit, _tmp) = build_manager();
 
         let handles = mgr
-            .start_for_session("sess-5", "task-5", &[])
+            .start_for_session("sess-5", "task-5", "initiative-5", &[])
             .await
             .expect("start with no decls");
         assert!(handles.is_empty());
@@ -3259,7 +3443,7 @@ users:
         ];
 
         let handles = mgr
-            .start_for_session("sess-6", "task-6", &decls)
+            .start_for_session("sess-6", "task-6", "initiative-6", &decls)
             .await
             .expect("multi-decl start");
         assert_eq!(handles.len(), 2);

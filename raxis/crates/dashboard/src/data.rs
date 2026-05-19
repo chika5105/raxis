@@ -1495,6 +1495,14 @@ pub struct WorktreeListEntry {
     /// Recorded base SHA (sessions only — `None` when the
     /// session never recorded one or for main roots).
     pub base_sha: Option<String>,
+    /// Recorded upper SHA for a bounded review range. Normal
+    /// live worktrees compare `base_sha..HEAD`, so this is `None`.
+    /// Per-initiative main-state rows created from
+    /// `IntegrationMerge` worktree snapshots set this to the
+    /// snapshot head so the dashboard reviews the exact merge
+    /// result even if the main repository advances later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison_head_sha: Option<String>,
 }
 
 /// Worktree detail surfaced by `GET /api/git/worktrees/:name`.
@@ -4128,6 +4136,7 @@ mod tests {
             observed_branch: None,
             observed_dirty_paths: None,
             base_sha: Some(from.clone()),
+            comparison_head_sha: None,
         };
         let detail = WorktreeDetail {
             summary: summary.clone(),

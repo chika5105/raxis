@@ -189,7 +189,7 @@ export function SessionsPage() {
           </div>
           <input
             className="input w-56"
-            placeholder="Search workspace / id / provider..."
+            placeholder="Search workspace / session / initiative / provider..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />

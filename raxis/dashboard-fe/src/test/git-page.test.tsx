@@ -104,4 +104,82 @@ describe("<GitPage>", () => {
       expect(screen.getByText("Executor:session-beta")).toBeInTheDocument();
     });
   });
+
+  it("keeps integration-merge main rows attributable to each workspace", async () => {
+    vi.spyOn(dashboardApi.git, "list").mockResolvedValue([
+      worktree({
+        name: "main-repository",
+        label: "repositories/main",
+        kind: "Main",
+        path: "/tmp/raxis/repositories/main",
+        session_id: null,
+        task_id: null,
+        initiative_id: null,
+        initiative_display_name: null,
+        agent_type: null,
+        session_state: null,
+        observed_head_sha: "c".repeat(40),
+        observed_branch: "main",
+        observed_dirty_paths: 0,
+        base_sha: null,
+        comparison_head_sha: null,
+      }),
+      worktree({
+        name: "main-integration-init-a",
+        label: "Main:Alpha pipeline",
+        kind: "Main",
+        path: "/tmp/raxis/repositories/main",
+        session_id: null,
+        task_id: "init-a",
+        initiative_id: "init-a",
+        initiative_display_name: "Alpha pipeline",
+        agent_type: null,
+        session_state: null,
+        observed_head_sha: "b".repeat(40),
+        observed_branch: "main",
+        observed_dirty_paths: 0,
+        base_sha: "a".repeat(40),
+        comparison_head_sha: "b".repeat(40),
+      }),
+      worktree({
+        name: "main-integration-init-b",
+        label: "Main:Beta import",
+        kind: "Main",
+        path: "/tmp/raxis/repositories/main",
+        session_id: null,
+        task_id: "init-b",
+        initiative_id: "init-b",
+        initiative_display_name: "Beta import",
+        agent_type: null,
+        session_state: null,
+        observed_head_sha: "d".repeat(40),
+        observed_branch: "main",
+        observed_dirty_paths: 0,
+        base_sha: "c".repeat(40),
+        comparison_head_sha: "d".repeat(40),
+      }),
+    ]);
+
+    renderWithProviders(<GitPage />);
+
+    expect(await screen.findByText("Main repository")).toBeInTheDocument();
+    expect(screen.getAllByText("Alpha pipeline").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Beta import").length).toBeGreaterThan(0);
+    expect(screen.getByText("Main:Alpha pipeline")).toBeInTheDocument();
+    expect(screen.getByText("Main:Beta import")).toBeInTheDocument();
+    expect(screen.getAllByText("bbbbbbbb").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("dddddddd").length).toBeGreaterThan(0);
+
+    fireEvent.change(
+      screen.getByPlaceholderText(
+        "Search workspace / path / session / initiative...",
+      ),
+      { target: { value: "Beta import" } },
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByText("Main:Alpha pipeline")).toBeNull();
+      expect(screen.getByText("Main:Beta import")).toBeInTheDocument();
+    });
+  });
 });

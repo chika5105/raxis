@@ -57,7 +57,7 @@ async fn postgres_listener_accepts_connection_and_counter_increments_through_shu
     }];
 
     let handles = mgr
-        .start_for_session("sess-int-1", "task-int-1", &decls)
+        .start_for_session("sess-int-1", "task-int-1", "initiative-int-1", &decls)
         .await
         .expect("start");
     let summary = &handles.started_summaries()[0];
@@ -98,6 +98,11 @@ async fn postgres_listener_accepts_connection_and_counter_increments_through_shu
         .filter(|e| e.kind.as_str() == "CredentialProxyStopped")
         .collect();
     assert_eq!(stopped_events.len(), 1);
+    assert_eq!(
+        stopped_events[0].initiative_id.as_deref(),
+        Some("initiative-int-1"),
+    );
+    assert_eq!(stopped_events[0].task_id.as_deref(), Some("task-int-1"));
     let raxis_audit_tools::AuditEventKind::CredentialProxyStopped {
         connections_served, ..
     } = &stopped_events[0].kind

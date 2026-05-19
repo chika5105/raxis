@@ -115,7 +115,7 @@ use raxis_credential_proxy_manager::{
     CredentialProxyManager, ManagerError, SessionProxyHandles, ShutdownReport,
 };
 use raxis_egress_admission::{
-    run_admission_loop_with_stall_tracker, AdmissionService, AdmissionVerdict, EgressStallTracker,
+    run_admission_loop_with_context, AdmissionService, AdmissionVerdict, EgressStallTracker,
 };
 use raxis_ipc::message::IpcMessage;
 use raxis_ipc::{read_frame, write_frame, FrameError};
@@ -406,6 +406,8 @@ pub struct SessionSpawnService {
 
 /// Live state for one running session.
 struct ActiveSession {
+    task_id: Option<String>,
+    initiative_id: String,
     session: Box<dyn IsolationSession>,
     credential_proxy_handles: SessionProxyHandles,
     admission_loop_task: JoinHandle<()>,
@@ -629,7 +631,7 @@ impl SessionSpawnService {
         // We hold the handles for the lifetime of the session.
         let cred_handles = self
             .proxies
-            .start_for_session(&session_id, &task_id, &req.credentials)
+            .start_for_session(&session_id, &task_id, &req.initiative_id, &req.credentials)
             .await?;
 
         // ── Step 2: bind per-session egress-admission listener. ──────
@@ -1011,6 +1013,7 @@ impl SessionSpawnService {
         };
         let audit_for_loop = Arc::clone(&self.audit);
         let session_id_for_loop = session_id.clone();
+        let initiative_id_for_loop = req.initiative_id.clone();
         // V2 reviewer-egress-defaults-decision.md §7. Clone the
         // (optional) shared tracker handle into the per-loop task
         // so deny verdicts feed into the sliding-window detector
@@ -1039,14 +1042,16 @@ impl SessionSpawnService {
                 let svc = Arc::clone(&admission_service);
                 let audit_for_inner = Arc::clone(&audit_for_loop);
                 let sid_for_inner = session_id_for_loop.clone();
+                let initiative_id_for_inner = initiative_id_for_loop.clone();
                 let stall_for_inner = stall_tracker_for_loop.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = run_admission_loop_with_stall_tracker(
+                    if let Err(e) = run_admission_loop_with_context(
                         read,
                         write,
                         svc,
                         audit_for_inner,
                         sid_for_inner.clone(),
+                        Some(initiative_id_for_inner),
                         stall_for_inner,
                     )
                     .await
@@ -1105,6 +1110,8 @@ impl SessionSpawnService {
         table.insert(
             session_id.clone(),
             ActiveSession {
+                task_id: req.task_id.clone(),
+                initiative_id: req.initiative_id.clone(),
                 session,
                 credential_proxy_handles: cred_handles,
                 admission_loop_task: admission_task,
@@ -1181,8 +1188,8 @@ impl SessionSpawnService {
                 console_log_path: None,
             },
             Some(session_id),
-            None,
-            None,
+            entry.task_id.as_deref(),
+            Some(entry.initiative_id.as_str()),
         ) {
             // Audit emission is fail-loud: the VM is already down,
             // we cannot un-mutate it, but we still need to drain

@@ -226,6 +226,40 @@ async fn spawn_session_binds_proxies_admission_and_vm_then_terminates_cleanly() 
 
     // --- Audit chain: paired SessionVmSpawned / SessionVmExited. ------
     let events = audit.events();
+    let spawned = events
+        .iter()
+        .find(|e| matches!(e.kind, AuditEventKind::SessionVmSpawned { .. }))
+        .expect("SessionVmSpawned event");
+    assert_eq!(spawned.session_id.as_deref(), Some("sess-spawn-1"));
+    assert_eq!(spawned.task_id.as_deref(), Some("task-spawn-1"));
+    assert_eq!(spawned.initiative_id.as_deref(), Some("init-spawn-1"));
+    let exited = events
+        .iter()
+        .find(|e| matches!(e.kind, AuditEventKind::SessionVmExited { .. }))
+        .expect("SessionVmExited event");
+    assert_eq!(exited.session_id.as_deref(), Some("sess-spawn-1"));
+    assert_eq!(exited.task_id.as_deref(), Some("task-spawn-1"));
+    assert_eq!(exited.initiative_id.as_deref(), Some("init-spawn-1"));
+    let transparent_admitted = events
+        .iter()
+        .find(|e| matches!(e.kind, AuditEventKind::TransparentProxyAdmitted { .. }))
+        .expect("TransparentProxyAdmitted event");
+    assert_eq!(
+        transparent_admitted.initiative_id.as_deref(),
+        Some("init-spawn-1")
+    );
+    let proxy_started = events
+        .iter()
+        .find(|e| matches!(e.kind, AuditEventKind::CredentialProxyStarted { .. }))
+        .expect("CredentialProxyStarted event");
+    assert_eq!(proxy_started.task_id.as_deref(), Some("task-spawn-1"));
+    assert_eq!(proxy_started.initiative_id.as_deref(), Some("init-spawn-1"));
+    let proxy_stopped = events
+        .iter()
+        .find(|e| matches!(e.kind, AuditEventKind::CredentialProxyStopped { .. }))
+        .expect("CredentialProxyStopped event");
+    assert_eq!(proxy_stopped.task_id.as_deref(), Some("task-spawn-1"));
+    assert_eq!(proxy_stopped.initiative_id.as_deref(), Some("init-spawn-1"));
     assert!(
         events.iter().any(|e| matches!(
             e.kind,

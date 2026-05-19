@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_egress_admission::{
-    run_admission_loop, run_admission_loop_with_stall_tracker, AdmissionDecision, AdmissionService,
-    AdmissionVerdict, EgressAllowlist, EgressStallTracker, PolicyAdmissionService,
+    run_admission_loop, run_admission_loop_with_context, run_admission_loop_with_stall_tracker,
+    AdmissionDecision, AdmissionService, AdmissionVerdict, EgressAllowlist, EgressStallTracker,
+    PolicyAdmissionService,
 };
 use raxis_test_support::FakeAuditSink;
 use raxis_tproxy_protocol::{
@@ -98,6 +99,66 @@ async fn admission_loop_admits_a_real_anthropic_api_request_over_real_unix_socke
         }
         other => panic!("expected TransparentProxyAdmitted, got {other:?}"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_aware_admission_loop_attributes_events_to_initiative() {
+    let (kernel_side, mut proxy_side) = tokio::net::UnixStream::pair().expect("pair");
+    let (kr, kw) = kernel_side.into_split();
+
+    let service = Arc::new(PolicyAdmissionService::new(EgressAllowlist {
+        patterns: vec!["*.allowed.example".into()],
+        ..Default::default()
+    }));
+    let audit: Arc<FakeAuditSink> = Arc::new(FakeAuditSink::new());
+    let audit_dyn: Arc<dyn AuditSink> = audit.clone();
+    let session_id = "sess-context-1".to_owned();
+    let initiative_id = "initiative-context-1".to_owned();
+
+    let loop_handle = {
+        let session_for_loop = session_id.clone();
+        let initiative_for_loop = initiative_id.clone();
+        tokio::spawn(async move {
+            run_admission_loop_with_context(
+                kr,
+                kw,
+                service,
+                audit_dyn,
+                session_for_loop,
+                Some(initiative_for_loop),
+                None,
+            )
+            .await
+        })
+    };
+
+    let req = ProxyAdmissionRequest {
+        connection_id: 11,
+        original_dst_ip: "1.2.3.4".into(),
+        original_dst_port: 443,
+        host_or_sni: Some("api.allowed.example".into()),
+        protocol: AdmissionProtocol::Https,
+    };
+    proxy_side
+        .write_all(&encode_request(&req).unwrap())
+        .await
+        .unwrap();
+
+    let mut len_buf = [0u8; 4];
+    proxy_side.read_exact(&mut len_buf).await.unwrap();
+    let body_len = u32::from_be_bytes(len_buf) as usize;
+    let mut body = vec![0u8; body_len];
+    proxy_side.read_exact(&mut body).await.unwrap();
+    drop(proxy_side);
+    loop_handle.await.unwrap().unwrap();
+
+    let events = audit.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].session_id.as_deref(), Some(session_id.as_str()));
+    assert_eq!(
+        events[0].initiative_id.as_deref(),
+        Some(initiative_id.as_str())
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

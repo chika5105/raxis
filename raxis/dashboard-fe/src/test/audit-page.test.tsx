@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 
@@ -71,6 +71,7 @@ describe("<AuditPage>", () => {
       last_error: null,
       fresh: true,
     });
+    vi.spyOn(dashboardApi.initiatives, "list").mockResolvedValue([]);
 
     renderAudit("/audit?highlight_initiative_id=init-a");
 
@@ -104,6 +105,7 @@ describe("<AuditPage>", () => {
       last_error: null,
       fresh: true,
     });
+    vi.spyOn(dashboardApi.initiatives, "list").mockResolvedValue([]);
 
     renderAudit("/audit?initiative_id=init-a");
 
@@ -113,5 +115,67 @@ describe("<AuditPage>", () => {
       expect.objectContaining({ highlight_initiative_id: "init-a" }),
       expect.anything(),
     );
+  });
+
+  it("filters loaded rows by partial event name and workspace", async () => {
+    vi.spyOn(dashboardApi.audit, "list").mockResolvedValue([
+      row({
+        seq: 2,
+        event_kind: "TproxyAdmissionGranted",
+        initiative_id: "init-alpha",
+      }),
+      row({
+        seq: 1,
+        event_kind: "CredentialProxyStarted",
+        initiative_id: "init-beta",
+      }),
+    ]);
+    vi.spyOn(dashboardApi.audit, "chainStatus").mockResolvedValue({
+      status: "ok",
+      last_verified_seq: 2,
+      total_records: 2,
+      segment_count: 1,
+      verified_at_ms: 1_700_000_000_000,
+      last_error: null,
+      fresh: true,
+    });
+    vi.spyOn(dashboardApi.initiatives, "list").mockResolvedValue([
+      {
+        initiative_id: "init-alpha",
+        display_name: "Alpha workspace",
+        state: "Completed",
+        task_count: 1,
+        completed_tasks: 1,
+        failed_tasks: 0,
+        created_at: 1,
+        updated_at: 1,
+      },
+      {
+        initiative_id: "init-beta",
+        display_name: "Beta workspace",
+        state: "Completed",
+        task_count: 1,
+        completed_tasks: 1,
+        failed_tasks: 0,
+        created_at: 1,
+        updated_at: 1,
+      },
+    ]);
+
+    renderAudit("/audit");
+
+    expect(await screen.findByText("TproxyAdmissionGranted")).toBeInTheDocument();
+    expect(screen.getByText("CredentialProxyStarted")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Event name, payload text, task..."), {
+      target: { value: "tproxy" },
+    });
+    expect(screen.getByText("TproxyAdmissionGranted")).toBeInTheDocument();
+    expect(screen.queryByText("CredentialProxyStarted")).toBeNull();
+
+    fireEvent.change(screen.getByDisplayValue("All workspaces"), {
+      target: { value: "Beta workspace" },
+    });
+    expect(await screen.findByText("No audit rows match these filters.")).toBeInTheDocument();
   });
 });
