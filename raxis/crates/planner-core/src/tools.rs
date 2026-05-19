@@ -1534,7 +1534,10 @@ impl Tool for IntegrationMergeTool {
     }
     fn description(&self) -> &'static str {
         "TERMINAL — fast-forward `target_ref` from full-hex `base_sha` to \
-         `head_sha` after all executors/reviewers are complete and accepted."
+         `head_sha` after all executors/reviewers are complete and accepted. \
+         The kernel rejects unfinished reviewer panels \
+         (`aggregate=AwaitingReviewerVerdicts`) and rejected panels \
+         (`aggregate=AtLeastOneRejected`)."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({

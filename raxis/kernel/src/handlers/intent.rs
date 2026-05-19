@@ -1242,20 +1242,19 @@ fn run_phase_a(
     // verdict-fold is `AtLeastOneRejected`. The structured
     // `eprintln` carries the offending executor task id so the
     // operator can read it from the kernel log without joining
-    // SQLite. Aggregate verdicts of `AllPassed`, `Pending`, and
-    // `NoSuccessors` all pass the gate — `Pending` is the
-    // partial-vote race window (sibling Reviewer still owes a
-    // verdict; aggregator hasn't fired) and the orchestrator's
-    // own NNSP rule 4 already gates the merge on every reviewer
-    // being `complete`, so a `Pending` verdict at this point
-    // implies the orchestrator went rogue against rule 4 and the
-    // failure should surface as a `FailMissingWitness` /
-    // `FailPolicyViolation` from a downstream gate, not here.
+    // SQLite. Aggregate verdicts of `AllPassed` and `NoSuccessors`
+    // pass the gate. `AtLeastOneRejected` and
+    // `AwaitingReviewerVerdicts` reject as `FAIL_REVIEW_OUTSTANDING`:
+    // the merge boundary is the kernel's last reviewer-consistency
+    // backstop, so it must not rely on the LLM prompt or a downstream
+    // witness to catch an unfinished/rejected reviewer panel.
     if matches!(req.intent_kind, IntentKind::IntegrationMerge) {
         let initiative_id = task.initiative_id.clone();
         let blocker: Option<(String, String)> = {
             use crate::initiatives::plan_registry::TaskKey;
-            use crate::initiatives::review_aggregation::compute_aggregate_review_outcome_with_conn;
+            use crate::initiatives::review_aggregation::{
+                compute_aggregate_review_outcome_with_conn, AgentTypeFilter, AggregateReviewVerdict,
+            };
             let conn = store.lock_sync();
             // Pull every task in the initiative once so the per-row
             // aggregate-verdict fold below borrows the registry +
@@ -1285,11 +1284,22 @@ fn run_phase_a(
                 if !is_executor {
                     continue;
                 }
-                match compute_aggregate_review_outcome_with_conn(&tid, &conn, None) {
+                match compute_aggregate_review_outcome_with_conn(
+                    &tid,
+                    &conn,
+                    Some(AgentTypeFilter {
+                        plan_registry: ctx.plan_registry.as_ref(),
+                        initiative_id: initiative_id.as_str(),
+                        reviewer_task_id: "<integration_merge_pre_gate>",
+                    }),
+                ) {
                     Ok(outcome) => {
-                        let v = outcome.verdict.wire_str();
-                        if v == "AtLeastOneRejected" {
-                            found = Some((tid, v.to_owned()));
+                        if matches!(
+                            outcome.verdict,
+                            AggregateReviewVerdict::Pending
+                                | AggregateReviewVerdict::AtLeastOneRejected
+                        ) {
+                            found = Some((tid, outcome.verdict.wire_str().to_owned()));
                             break;
                         }
                     }
@@ -1307,12 +1317,25 @@ fn run_phase_a(
             found
         };
         if let Some((blocker_task, verdict_str)) = blocker {
+            let diagnostic = if verdict_str == "AtLeastOneRejected" {
+                format!(
+                    "executor task {blocker_task} has aggregate verdict {verdict_str}; \
+                     orchestrator must retry_subtask before integration_merge per \
+                     agent-disagreement.md §3.6 (paradigm-R-6 Fail-Closed Default)"
+                )
+            } else {
+                format!(
+                    "executor task {blocker_task} has aggregate verdict {verdict_str}; \
+                     reviewer panel is unfinished, so orchestrator must activate or \
+                     await reviewers before integration_merge"
+                )
+            };
             eprintln!(
                 "{{\"level\":\"warn\",\"event\":\"IntegrationMergeBlockedByOutstandingReview\",\
                  \"task_id\":\"{}\",\"initiative_id\":\"{initiative_id}\",\
                  \"blocker_executor_task_id\":\"{blocker_task}\",\
                  \"blocker_aggregate_verdict\":\"{verdict_str}\",\
-                 \"diagnostic\":\"executor task {blocker_task} has aggregate verdict {verdict_str}; orchestrator must retry_subtask before integration_merge per agent-disagreement.md §3.6 (paradigm-R-6 Fail-Closed Default)\"}}",
+                 \"diagnostic\":\"{diagnostic}\"}}",
                 req.task_id.as_str(),
             );
             return PreGateOutcome::Reject(PlannerErrorCode::FailReviewOutstanding, task_state);
@@ -10445,6 +10468,32 @@ mod tests {
         }
     }
 
+    fn make_integration_merge_request(task_id: &str, seq: u64) -> IntentRequest {
+        IntentRequest {
+            session_token: "tok-orch".into(),
+            sequence_number: seq,
+            envelope_nonce: format!("{:0>32}", seq),
+            intent_kind: IntentKind::IntegrationMerge,
+            task_id: raxis_types::TaskId::parse(task_id).unwrap(),
+            base_sha: Some(
+                raxis_types::CommitSha::parse("1111111111111111111111111111111111111111").unwrap(),
+            ),
+            head_sha: Some(
+                raxis_types::CommitSha::parse("2222222222222222222222222222222222222222").unwrap(),
+            ),
+            submitted_claims: vec![],
+            justification: None,
+            idempotency_key: None,
+            approval_token: None,
+            approved: None,
+            critique: None,
+            resolved_via_escalation: None,
+            tokens_used: None,
+            structured_output: None,
+            batch_task_ids: None,
+        }
+    }
+
     /// Default policy bundle for tests that exercise the budget snapshot
     /// path on success (the snapshot is not asserted on; we just need
     /// the call to not panic).
@@ -10501,6 +10550,103 @@ mod tests {
             domain,
         ));
         (ctx, sink)
+    }
+
+    /// Live-e2e regression: `integration_merge` must not proceed
+    /// while a real Reviewer successor still has no verdict. This
+    /// pins the kernel-side backstop to the same plan-declared
+    /// Reviewer-only aggregate semantics used by the KSB. The
+    /// orchestrator prompt should avoid this call, but the kernel
+    /// still has to fail closed if the model goes off-script.
+    #[test]
+    fn integration_merge_rejects_awaiting_reviewer_verdicts() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let init = "init-im-review-pending";
+        let merge_task = "integration-merge";
+        let executor = "lint-runner-rust";
+        let reviewer = "review-lint-runner-rust";
+
+        seed_orchestrator_session(&store);
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            init,
+            &[
+                (executor, raxis_types::SessionAgentType::Executor),
+                (reviewer, raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
+
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        conn.execute(
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
+            ),
+            rusqlite::params![init, InitiativeState::Executing.as_sql_str(), now],
+        )
+        .unwrap();
+        for (task_id, state) in [
+            (merge_task, TaskState::Running.as_sql_str()),
+            (executor, TaskState::Completed.as_sql_str()),
+            (reviewer, TaskState::Admitted.as_sql_str()),
+        ] {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at,
+                         evaluation_sha, actual_cost)
+                     VALUES (?1, ?2, 'default', ?3, 'kernel',
+                             1, ?4, ?4, ?5, 0)"
+                ),
+                rusqlite::params![
+                    task_id,
+                    init,
+                    state,
+                    now,
+                    if task_id == executor {
+                        Some("3333333333333333333333333333333333333333")
+                    } else {
+                        None
+                    },
+                ],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASK_DAG_EDGES}
+                    (initiative_id, predecessor_task_id, successor_task_id,
+                     predecessor_satisfied)
+                 VALUES (?1, ?2, ?3, 1)"
+            ),
+            rusqlite::params![init, executor, reviewer],
+        )
+        .unwrap();
+        drop(conn);
+
+        let outcome = run_phase_a(
+            make_integration_merge_request(merge_task, 1),
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            Arc::new(default_test_policy()),
+            ctx,
+        );
+
+        match outcome {
+            PreGateOutcome::Reject(code, state) => {
+                assert_eq!(code, PlannerErrorCode::FailReviewOutstanding);
+                assert_eq!(state, TaskState::Running);
+            }
+            PreGateOutcome::EarlyResponse(_) | PreGateOutcome::Proceed(_) => {
+                panic!("integration_merge must reject while reviewer verdict is missing")
+            }
+        }
     }
 
     /// Approval path: the handler transitions the Reviewer from

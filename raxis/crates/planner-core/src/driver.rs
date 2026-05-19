@@ -1263,7 +1263,7 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
              \n\
              Authority: trust only the KSB for kernel state. The `dag=` block \
              row shape is `<task_id> <state> reviewers=N preds_ready=<true|false> \
-             [aggregate=<Pending|AllPassed|AtLeastOneRejected|NoSuccessors>] \
+             [aggregate=<AwaitingReviewerVerdicts|AllPassed|AtLeastOneRejected|NoSuccessors>] \
              sha=<40-hex|<none>> \"<title>\"`. `dag=` is forensic context only; \
              `capabilities.ready_now=[...]` is the authoritative activation \
              menu. NEVER activate a task id that is NOT in `ready_now=[...]`. \
@@ -1288,21 +1288,26 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
              The plan `max_rounds` / retry ceilings are exhausted; emit a \
              `structured_output` diagnostic if useful and wait for the kernel's \
              failure/escalation path.\n\
-             3. NEVER call `retry_subtask` while `aggregate=Pending`; sibling \
-             reviewers still owe votes. Use `reviewer_verdicts=` only for \
-             critique text; retry decisions use `aggregate=` plus \
-             `retry_admissible`.\n\
+             3. NEVER call `retry_subtask` while \
+             `aggregate=AwaitingReviewerVerdicts`; sibling reviewers still \
+             owe votes. This is not a background kernel computation. If \
+             `ready_now=[]`, only sleep when reviewer rows are still active; \
+             otherwise surface a critical diagnostic for a review deadlock. \
+             Use `reviewer_verdicts=` only for critique text; retry decisions \
+             use `aggregate=` plus `retry_admissible`.\n\
              4. If `ready_now` has one id, call `activate_subtask`. If it has \
              multiple ids, use `batch_activate_subtasks` with up to \
              `concurrency: ... headroom=K` ids; prefer batch for parallelism. \
              The kernel ignores input order and returns per-id outcomes.\n\
-             5. If `ready_now=[]`, merge only when every executor is complete \
-             with `aggregate=AllPassed` or `aggregate=NoSuccessors` and every \
+             5. If `ready_now=[]`, do not wait for aggregates to \"resolve\". \
+             KSB is a snapshot and changes only after a child session/tool \
+             action. Merge when every executor is complete with \
+             `aggregate=AllPassed` or `aggregate=NoSuccessors` and every \
              reviewer is complete. Call `integration_merge { base_sha, head_sha }` \
              using full 40-char lowercase hex: `base_sha` from KSB `base_sha=`, \
              `head_sha` from the executor row `sha=`. Never submit `<none>` or \
-             `<unset>`. If work is merely in flight, use `sleep` briefly instead \
-             of free text.\n\
+             `<unset>`, and never emit progress/diagnostic text instead of an \
+             admissible terminal tool.\n\
              \n\
              Track `planner_max_turns=N`, token/wallclock budgets, and \
              `orch_no_progress_respawns=`. Free text without a tool is an Idle \
@@ -1986,10 +1991,10 @@ mod tests {
              `aggregate=AtLeastOneRejected` rows"
         );
         assert!(
-            prompt.contains("aggregate=Pending"),
+            prompt.contains("aggregate=AwaitingReviewerVerdicts"),
             "orchestrator NNSP MUST forbid retry while \
-             `aggregate=Pending` (sibling reviewer still owes a \
-             vote — premature retry race per iter42)"
+             `aggregate=AwaitingReviewerVerdicts` (sibling reviewer \
+             still owes a vote — premature retry race per iter42)"
         );
         assert!(
             prompt.contains("aggregate=AllPassed"),
@@ -2015,25 +2020,32 @@ mod tests {
 
     /// Regression test for the `iter42` respawn loop: the
     /// orchestrator NNSP MUST forbid `retry_subtask` while the
-    /// aggregator is `Pending`. The exact phrasing this pins is
-    /// "NEVER call `retry_subtask` while `aggregate=Pending`" so
-    /// a future reword cannot weaken the rule without bumping the
-    /// witness. Pairs with the
+    /// aggregator is awaiting reviewer verdicts. The exact phrasing
+    /// this pins is "NEVER call `retry_subtask` while
+    /// `aggregate=AwaitingReviewerVerdicts`" so a future reword
+    /// cannot weaken the rule without bumping the witness. Pairs with the
     /// `ReviewerSubstantiveDisagreementWitness` end-to-end
     /// check that `saw_executor_respawn = true` only AFTER both
     /// reviewers have voted (i.e. the aggregator has fired).
     #[test]
-    fn render_system_prompt_for_orchestrator_forbids_retry_while_aggregate_pending() {
+    fn render_system_prompt_for_orchestrator_forbids_retry_while_aggregate_awaits_reviewers() {
         let args = BootArgs {
             initiative_id: "init-A".to_owned(),
             task_id: None,
         };
         let prompt = render_system_prompt_for_role(Role::Orchestrator, &args);
         assert!(
-            prompt.contains("NEVER call `retry_subtask` while `aggregate=Pending`"),
+            prompt.contains("NEVER call `retry_subtask` while")
+                && prompt.contains("aggregate=AwaitingReviewerVerdicts"),
             "orchestrator NNSP MUST explicitly forbid \
-             `retry_subtask` while `aggregate=Pending` per \
+             `retry_subtask` while `aggregate=AwaitingReviewerVerdicts` per \
              iter42 regression; got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("This is not a background kernel computation"),
+            "orchestrator NNSP MUST prevent the live-e2e failure mode \
+             where the model waits for the kernel to resolve aggregates; \
+             got prompt: {prompt}",
         );
     }
 

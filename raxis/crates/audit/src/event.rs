@@ -1614,8 +1614,9 @@ pub enum AuditEventKind {
         reviewer_count: u32,
         /// Stable string verdict — exactly one of:
         /// `"AllPassed"` / `"AtLeastOneRejected"` / `"NoSuccessors"`.
-        /// `"Pending"` is NEVER emitted (the aggregator is silent
-        /// while any Reviewer is still pending).
+        /// `"AwaitingReviewerVerdicts"` is NEVER emitted (the
+        /// aggregator is silent while any Reviewer still owes a
+        /// verdict).
         verdict: String,
     },
 
@@ -1773,7 +1774,7 @@ pub enum AuditEventKind {
     /// **What this captures.** The structural backstop against an
     /// unbounded orchestrator respawn loop where the agent boots,
     /// reads the KSB, calls a kernel-rejected terminal tool (e.g.
-    /// `retry_subtask` while `aggregate=Pending`), exits cleanly,
+    /// `retry_subtask` while `aggregate=AwaitingReviewerVerdicts`), exits cleanly,
     /// and is re-spawned by the post-exit hook — repeating
     /// indefinitely with no `Failed` FSM transition to drive the
     /// existing `crash_count` ceiling (observed on iter42 second

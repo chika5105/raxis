@@ -2882,7 +2882,7 @@ pub async fn respawn_orchestrator_for_initiative(
             // values are the structurally-by-construction values for
             // the iter42 pathology (the only loop class this ceiling
             // can reach in V2.5b is "rejected RetrySubTask while
-            // aggregate=Pending"); the audit chain immediately
+            // aggregate=AwaitingReviewerVerdicts"); the audit chain immediately
             // preceding this event carries the wire-exact
             // `IntentRejected` rows for forensic readers.
             // TODO(later): per-session "last rejected intent"

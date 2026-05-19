@@ -144,7 +144,7 @@ pub const PLANNER_TASK_PROMPT_FILE_NAME: &str = "task-prompt.txt";
 
 /// Current schema version. Incremented when a field is *removed* or
 /// *renamed*. Adding a field is non-breaking.
-pub const KSB_SCHEMA_VERSION: u32 = 1;
+pub const KSB_SCHEMA_VERSION: u32 = 2;
 
 /// iter65 — `INV-WITNESS-AGENT-HINT-WIRE-VALID-01` mirror.
 /// Maximum size of the `agent_hint` field carried in
@@ -707,8 +707,9 @@ pub struct DagRow {
     /// `raxis_kernel::initiatives::review_aggregation::
     /// AggregateReviewVerdict::wire_str`):
     ///
-    /// * `"Pending"` — at least one sibling Reviewer still owes a
-    ///   verdict.
+    /// * `"AwaitingReviewerVerdicts"` — at least one sibling Reviewer
+    ///   still owes a verdict. This is deliberately action-shaped;
+    ///   it is not a vague background "pending" state.
     /// * `"AllPassed"` — every Reviewer Approved.
     /// * `"AtLeastOneRejected"` — every Reviewer voted; at least one
     ///   Rejected (the kernel already bumped
@@ -876,7 +877,7 @@ pub enum KsbError {
 /// system prompt. The rendered block has the shape:
 ///
 /// ```text
-///   [RAXIS:KERNEL_STATE version=1
+///   [RAXIS:KERNEL_STATE version=2
 ///   initiative_id=init-7
 ///   task_id=task-42
 ///   role=executor
@@ -1513,7 +1514,7 @@ mod tests {
 
     fn fixture_snapshot() -> KsbSnapshot {
         KsbSnapshot {
-            version: 1,
+            version: KSB_SCHEMA_VERSION,
             initiative_id: "init-7".to_owned(),
             task_id: Some("task-42".to_owned()),
             role: "executor".to_owned(),
@@ -1594,7 +1595,7 @@ mod tests {
     #[test]
     fn render_includes_required_fields() {
         let s = render_ksb(&fixture_snapshot()).unwrap();
-        assert!(s.contains("version=1"));
+        assert!(s.contains("version=2"));
         assert!(s.contains("initiative_id=init-7"));
         assert!(s.contains("task_id=task-42"));
         assert!(s.contains("role=executor"));

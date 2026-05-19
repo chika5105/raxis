@@ -44,7 +44,9 @@ use crate::orch_respawn_ceiling::MAX_ORCH_NO_PROGRESS_RESPAWNS;
 use raxis_types::intent_admit::{admit_retry_subtask_check, AdmitOutcome, RetryAdmitInputs};
 
 use crate::initiatives::plan_registry::{PlanRegistry, TaskKey};
-use crate::initiatives::review_aggregation::compute_aggregate_review_outcome_with_conn;
+use crate::initiatives::review_aggregation::{
+    compute_aggregate_review_outcome_with_conn, AgentTypeFilter,
+};
 
 /// `task_description` cap. The kernel
 /// truncates `[[tasks]] description` (already capped at admission
@@ -688,20 +690,27 @@ fn read_dag_rows_for_initiative(
             let reviewers: u32 = reviewer_counts.get(task_id.as_str()).copied().unwrap_or(0);
             // V2.5 — populate `aggregate_verdict` ONLY for Executor
             // rows whose plan-declared `session_agent_type` is
-            // `Executor`. Reviewer / Orchestrator rows leave it empty
-            // so the renderer omits the `aggregate=` field on the
-            // wire (the LLM only sees signal where it is relevant).
-            // Closes `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01` (the
-            // orchestrator's NNSP rule 3a pivots on this field per
-            // `iter42` regression — see
-            // `crates/planner-core/src/driver.rs::render_system_prompt_for_role`).
+            // `Executor`, and fold ONLY plan-declared Reviewer
+            // successors. A normal downstream Executor edge must not
+            // masquerade as an unsubmitted reviewer verdict; that
+            // false `Pending` projection stranded the live e2e
+            // orchestrator at the merge boundary. Reviewer /
+            // Orchestrator rows leave it empty so the renderer omits
+            // `aggregate=` where it carries no signal. Closes
+            // `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`.
             let aggregate_verdict = match task_fields.as_ref().map(|t| t.session_agent_type) {
-                Some(SessionAgentType::Executor) => {
-                    compute_aggregate_review_outcome_with_conn(&task_id, conn, None)?
-                        .verdict
-                        .wire_str()
-                        .to_owned()
-                }
+                Some(SessionAgentType::Executor) => compute_aggregate_review_outcome_with_conn(
+                    &task_id,
+                    conn,
+                    Some(AgentTypeFilter {
+                        plan_registry: registry,
+                        initiative_id,
+                        reviewer_task_id: "<ksb_assembly>",
+                    }),
+                )?
+                .verdict
+                .wire_str()
+                .to_owned(),
                 _ => String::new(),
             };
             let preds_ready = preds_ready_map
@@ -1852,7 +1861,7 @@ mod tests {
 
     /// Iter42 regression: when ONE of two sibling Reviewers has
     /// voted and the other has not, the executor's KSB dag-row
-    /// MUST surface `aggregate=Pending` — NOT
+    /// MUST surface `aggregate=AwaitingReviewerVerdicts` — NOT
     /// `aggregate=AtLeastOneRejected`. The earlier orchestrator
     /// NNSP rule 3a pivoted on per-Reviewer rows
     /// (`reviewer_verdicts[*].approved=false`) and therefore fired
@@ -1863,7 +1872,8 @@ mod tests {
     /// producing a respawn loop. This test pins the projection's
     /// part of the fix: as long as ANY sibling is still
     /// pending (NULL `review_verdict`), the dag row reads
-    /// `Pending` and the NNSP rule MUST NOT fire `retry_subtask`.
+    /// `AwaitingReviewerVerdicts` and the NNSP rule MUST NOT fire
+    /// `retry_subtask`.
     /// Closes `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01` and the
     /// iter42 regression on the projection side.
     #[test]
@@ -2000,8 +2010,8 @@ mod tests {
             .find(|r| r.task_id == exec)
             .expect("lint-defect dag row present");
         assert_eq!(
-            lint_row.aggregate_verdict, "Pending",
-            "lint-defect MUST read `Pending` while one Reviewer \
+            lint_row.aggregate_verdict, "AwaitingReviewerVerdicts",
+            "lint-defect MUST read `AwaitingReviewerVerdicts` while one Reviewer \
              still owes a verdict — iter42 regression; got: {:?}",
             lint_row.aggregate_verdict
         );
@@ -2011,8 +2021,8 @@ mod tests {
         // pre-fix code would have emitted.
         let rendered = raxis_ksb::render_ksb(&snap).expect("render");
         assert!(
-            rendered.contains("aggregate=Pending"),
-            "rendered KSB MUST carry `aggregate=Pending` while \
+            rendered.contains("aggregate=AwaitingReviewerVerdicts"),
+            "rendered KSB MUST carry `aggregate=AwaitingReviewerVerdicts` while \
              one Reviewer is still pending; got: {rendered}"
         );
         assert!(
@@ -2020,6 +2030,118 @@ mod tests {
             "rendered KSB MUST NOT carry `AtLeastOneRejected` \
              while any sibling Reviewer is pending — that is the \
              iter42 race; got: {rendered}"
+        );
+    }
+
+    /// Live-e2e regression: the KSB aggregate projection MUST fold
+    /// only plan-declared Reviewer successors. A normal downstream
+    /// Executor edge (`producer -> consumer`) has no review verdict
+    /// and therefore looked like `aggregate=AwaitingReviewerVerdicts` when the KSB
+    /// called the aggregator without the sealed-plan agent-type
+    /// filter. That stranded the orchestrator at the merge boundary:
+    /// it waited for nonexistent reviewer votes instead of calling
+    /// `integration_merge`.
+    #[test]
+    fn dag_row_aggregate_ignores_downstream_executor_successors() {
+        let (store, _dir) = fresh_store();
+        let registry = PlanRegistry::new();
+        let init = "init-downstream-executor";
+        let producer = "materialize-records";
+        let consumer = "service-round-trip";
+
+        registry.insert_orchestrator(
+            init.to_owned(),
+            OrchestratorPlanFields {
+                cross_cutting_artifacts: vec![],
+                description: "drive pipeline to merge".to_owned(),
+                target_ref: "refs/heads/main".to_owned(),
+                elastic: None,
+                ..Default::default()
+            },
+        );
+        for (task_id, description) in [(producer, "produce records"), (consumer, "consume records")]
+        {
+            registry.insert(
+                TaskKey::new(init.to_owned(), task_id.to_owned()),
+                TaskPlanFields {
+                    description: description.to_owned(),
+                    session_agent_type: SessionAgentType::Executor,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let conn = store.lock_sync();
+        conn.execute(
+            &format!(
+                "INSERT INTO {INITIATIVES} (
+                 initiative_id, state, terminal_criteria_json,
+                 plan_artifact_sha256, created_at
+             ) VALUES (?1, 'Executing', '{{}}', 'sha-test', 0)"
+            ),
+            rusqlite::params![init],
+        )
+        .expect("insert initiative");
+        let producer_sha = "1111111111111111111111111111111111111111";
+        for (task_id, sha) in [(producer, Some(producer_sha)), (consumer, None)] {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS} (
+                     task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at,
+                     evaluation_sha, last_critique, review_verdict
+                 ) VALUES (?1, ?2, 'default', 'Completed', 'op',
+                           0, 0, 0, ?3, NULL, NULL)"
+                ),
+                rusqlite::params![task_id, init, sha],
+            )
+            .expect("insert task");
+        }
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASK_DAG_EDGES} (
+                 initiative_id, predecessor_task_id, successor_task_id,
+                 predecessor_satisfied
+             ) VALUES (?1, ?2, ?3, 1)"
+            ),
+            rusqlite::params![init, producer, consumer],
+        )
+        .expect("insert dag edge");
+        drop(conn);
+
+        let conn = store.lock_sync();
+        let snap = assemble_ksb_snapshot(
+            &conn,
+            &registry,
+            &KsbInputs {
+                initiative_id: init,
+                task_id: None,
+                role: KsbRole::Orchestrator,
+                token_budget_remaining: 0,
+                wallclock_budget_remaining_s: 0,
+                credential_ports: Vec::new(),
+                session_id: "",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
+            },
+        )
+        .expect("assemble orchestrator snapshot");
+        drop(conn);
+
+        let row = snap
+            .dag_rows
+            .iter()
+            .find(|r| r.task_id == producer)
+            .expect("producer dag row present");
+        assert_eq!(row.reviewers, 0, "downstream Executor is not a Reviewer");
+        assert_eq!(
+            row.aggregate_verdict, "NoSuccessors",
+            "non-Reviewer successors must not be folded as missing reviewer votes"
+        );
+        let rendered = raxis_ksb::render_ksb(&snap).expect("render");
+        assert!(
+            !rendered.contains("aggregate=AwaitingReviewerVerdicts"),
+            "KSB must not tell the orchestrator to wait for nonexistent reviewer votes; got: {rendered}"
         );
     }
 

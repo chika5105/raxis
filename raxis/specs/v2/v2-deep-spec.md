@@ -1520,7 +1520,8 @@ evaluate the same frozen `evaluation_sha` — there is no semantic reason they m
      task's `review_reject_count` increment is deferred to plan-bundle-sealing alongside
      `subtask_activations` row population.
    - Runs the reverse DAG query (`compute_aggregate_review_verdict`) to fold every
-     successor's `review_verdict` into one of `Pending | AllPassed | AtLeastOneRejected`.
+     plan-declared Reviewer successor's `review_verdict` into one of
+     `Pending | AllPassed | AtLeastOneRejected | NoSuccessors`.
 4. When the last Reviewer submits (i.e., the aggregator transitions out of `Pending`):
    - If `AllPassed`: Kernel sends `KernelPush::AllReviewersPassed { task_id: <executor> }`.
    - If `AtLeastOneRejected`: Kernel sends `KernelPush::ReviewRejected { ... }`, with all
@@ -1533,13 +1534,14 @@ evaluate the same frozen `evaluation_sha` — there is no semantic reason they m
 - `raxis-kernel::initiatives::review_aggregation::compute_aggregate_review_verdict` /
   `compute_aggregate_review_outcome` (the `&Store` shim) / `compute_aggregate_review_outcome_with_conn`
   (the `&Connection`-borrowing variant the KSB projection uses without re-acquiring the store mutex) —
-  the pure read predicate folding successor verdicts to `AggregateReviewVerdict`. Returns
-  `Pending` when ANY successor's verdict is NULL (the wait-for-everyone gate);
-  `AllPassed` when every successor is `Approved`; `AtLeastOneRejected` when every
-  successor has submitted and at least one rejected; `NoSuccessors` when the executor has
-  no successor edges (malformed plan; caller fail-closes).
-- `AggregateReviewVerdict::wire_str()` — the wire-stable variant-name projection
-  (`"Pending"` / `"AllPassed"` / `"AtLeastOneRejected"` / `"NoSuccessors"`) the KSB
+  the pure read predicate folding Reviewer successor verdicts to `AggregateReviewVerdict`.
+  Returns `Pending` when ANY Reviewer successor's verdict is NULL (the
+  wait-for-everyone gate); `AllPassed` when every Reviewer successor is `Approved`;
+  `AtLeastOneRejected` when every Reviewer successor has submitted and at least one
+  rejected; `NoSuccessors` when the executor has no Reviewer successors after the
+  sealed-plan agent-type filter.
+- `AggregateReviewVerdict::wire_str()` — the wire-stable projection
+  (`"AwaitingReviewerVerdicts"` / `"AllPassed"` / `"AtLeastOneRejected"` / `"NoSuccessors"`) the KSB
   projection stamps into `DagRow::aggregate_verdict` and the orchestrator NNSP rule 3a
   parses positionally. Pinned by `wire_str_returns_stable_variant_names`. Closes
   `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`.
@@ -1547,14 +1549,13 @@ evaluate the same frozen `evaluation_sha` — there is no semantic reason they m
   Reviewer's FSM transition in the same SQLite transaction so the aggregator never
   observes a `(state=Completed, review_verdict=NULL)` row.
 - `kernel/src/initiatives/ksb_assembly.rs::read_dag_rows_for_initiative` — calls
-  `compute_aggregate_review_outcome_with_conn` per Executor row and stamps the result's
+  `compute_aggregate_review_outcome_with_conn` with `AgentTypeFilter` per Executor row and stamps the result's
   `wire_str()` into `DagRow::aggregate_verdict` so the orchestrator's NNSP rule 3a
   pivots on the kernel's TERMINAL verdict (not the per-Reviewer `reviewer_verdicts=`
   block, which fires `approved=false` as soon as the FIRST sibling votes Reject and
   produces a respawn loop per the regression — see [`agent-disagreement.md §3.6`](agent-disagreement.md)
   and `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`). The same function backs both the
-  kernel's admission gate (`handle_submit_review`'s post-commit aggregator branch) AND
-  the orchestrator's prompt logic — pinned equivalence in
+  integration-merge reviewer pre-gate AND the orchestrator's prompt logic — pinned equivalence in
   `with_conn_variant_matches_store_variant_pending` /
   `..._at_least_one_rejected` / `..._all_passed`.
 
@@ -1590,8 +1591,8 @@ evaluate the same frozen `evaluation_sha` — there is no semantic reason they m
       audit-only diagnostic — the Executor does NOT silently advance.
     * V1 compatibility: V1 plans never produce `SubmitReview` intents (Step 11 dispatch
       matrix rejects them), so V1 successors stay `review_verdict = NULL` and the
-      aggregator reports `Pending` indefinitely — the correct "wait for the missing
-      agent" semantic for V1.
+      unfiltered test-only aggregator reports `Pending` indefinitely — the correct
+      "wait for the missing agent" semantic for V1.
 
 * **`KernelPush::AllReviewersPassed` / `ReviewRejected` emission is deferred to
   plan-bundle-sealing.** The push channel itself is implemented in

@@ -82,13 +82,14 @@
 //     filter behaviour.
 //   * V1 plans never produce SubmitReview intents (the dispatch
 //     matrix rejects them) so `review_verdict` stays NULL on V1
-//     successors and they are reported as `Pending` — consistent
-//     with the "still has unsubmitted reviewers" semantic. V1
-//     code paths do not invoke this aggregator at all, so the
-//     filter does not affect them.
+//     successors and they are reported internally as `Pending`
+//     (rendered on the KSB wire as `AwaitingReviewerVerdicts`) —
+//     consistent with the "still has unsubmitted reviewers"
+//     semantic. V1 code paths do not invoke this aggregator at all,
+//     so the filter does not affect them.
 //
-// The aggregator returns `Pending` when ANY *Reviewer* successor
-// lacks a verdict, which is exactly the
+// The aggregator returns internal `Pending` when ANY *Reviewer*
+// successor lacks a verdict, which is exactly the
 // "wait-for-the-last-reviewer" pre-condition for the
 // `KernelPush::AllReviewersPassed` push.
 
@@ -218,8 +219,8 @@ impl AggregateReviewVerdict {
     /// NNSP rule 3a to pivot on `aggregate=<value>` (see
     /// `crates/planner-core/src/driver.rs::render_system_prompt_for_role`).
     ///
-    /// The values mirror the variant names verbatim — DO NOT rename
-    /// without bumping `raxis_ksb::KSB_SCHEMA_VERSION`. Closes
+    /// The values are the KSB wire strings — DO NOT rename without
+    /// bumping `raxis_ksb::KSB_SCHEMA_VERSION`. Closes
     /// `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01` (the orchestrator
     /// MUST pivot on this wire field, not on the per-reviewer
     /// `reviewer_verdicts=` rows — those fire `approved=false` as
@@ -229,7 +230,7 @@ impl AggregateReviewVerdict {
     /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`).
     pub fn wire_str(self) -> &'static str {
         match self {
-            Self::Pending => "Pending",
+            Self::Pending => "AwaitingReviewerVerdicts",
             Self::AllPassed => "AllPassed",
             Self::AtLeastOneRejected => "AtLeastOneRejected",
             Self::NoSuccessors => "NoSuccessors",
@@ -997,7 +998,10 @@ mod tests {
     /// side. Closes `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`.
     #[test]
     fn wire_str_returns_stable_variant_names() {
-        assert_eq!(AggregateReviewVerdict::Pending.wire_str(), "Pending");
+        assert_eq!(
+            AggregateReviewVerdict::Pending.wire_str(),
+            "AwaitingReviewerVerdicts"
+        );
         assert_eq!(AggregateReviewVerdict::AllPassed.wire_str(), "AllPassed");
         assert_eq!(
             AggregateReviewVerdict::AtLeastOneRejected.wire_str(),
