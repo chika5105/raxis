@@ -234,6 +234,16 @@ const VISUAL: Record<string, StateVisualTreatment> = {
     description: "passive lapse of `expires_at`; expected terminal lifecycle end",
   },
 
+  // ── Dashboard-derived review overlays ───────────────────────
+  ReviewRejected: {
+    tone: "bad", glyph: "✗", label: "ReviewRejected",
+    description: "executor completed, but at least one reviewer rejected the artifact",
+  },
+  RetryExhausted: {
+    tone: "bad", glyph: "⊠", label: "RetryExhausted",
+    description: "review rejection reached the retry ceiling; no automatic retry remains",
+  },
+
   // ── Legacy / human-typed aliases ────────────────────────────
   // Older callsites (and a few test fixtures) used these names
   // before the kernel FSM converged on the canonical set above;

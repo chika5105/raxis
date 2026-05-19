@@ -183,8 +183,15 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 RUN pip3 install --no-cache-dir --break-system-packages \
         "ruff==0.7.4"
 
-# Rust stable via rustup.
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+# Rust stable via rustup. The explicit envs are mirrored by the
+# executor PID-1 defaults so rustup shims resolve the baked toolchain
+# even when a substrate boots with HOME=/.
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+ENV RUSTUP_TOOLCHAIN=stable
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+    && rustup default stable \
+    && rustup component add rustfmt clippy
 ENV PATH=/root/.cargo/bin:$PATH
 
 # Go 1.22 — fetch the upstream tarball matching the build platform.

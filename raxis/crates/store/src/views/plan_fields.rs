@@ -57,6 +57,12 @@ pub struct PlanPathFields {
     /// `"Executor"` when omitted, matching the kernel admission
     /// parser.
     pub session_agent_type: String,
+    /// Plan-declared review rejection ceiling for this task.
+    /// Defaults mirror the kernel admission parser.
+    pub max_review_rejections: u32,
+    /// Plan-declared crash retry ceiling for this task. Defaults
+    /// mirror the kernel admission parser.
+    pub max_crash_retries: u32,
 }
 
 impl Default for PlanPathFields {
@@ -67,9 +73,15 @@ impl Default for PlanPathFields {
             path_export_globs: Vec::new(),
             path_scope_override: false,
             session_agent_type: "Executor".to_owned(),
+            max_review_rejections: DEFAULT_MAX_REVIEW_REJECTIONS,
+            max_crash_retries: DEFAULT_MAX_CRASH_RETRIES,
         }
     }
 }
+
+/// Keep in sync with `kernel::initiatives::plan_registry`.
+pub const DEFAULT_MAX_REVIEW_REJECTIONS: u32 = 2;
+pub const DEFAULT_MAX_CRASH_RETRIES: u32 = 3;
 
 /// Dashboard-facing initiative metadata pulled out of the same plan
 /// TOML blob. The operator-visible label is `[workspace].name`; the
@@ -320,6 +332,12 @@ fn parse_plan_path_fields(
             .and_then(|v| v.as_str())
             .unwrap_or("Executor")
             .to_owned(),
+        max_review_rejections: u32_field(
+            entry,
+            "max_review_rejections",
+            DEFAULT_MAX_REVIEW_REJECTIONS,
+        ),
+        max_crash_retries: u32_field(entry, "max_crash_retries", DEFAULT_MAX_CRASH_RETRIES),
     })
 }
 
@@ -409,6 +427,14 @@ fn string_array(entry: &toml::Value, field: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn u32_field(entry: &toml::Value, field: &str, default: u32) -> u32 {
+    entry
+        .get(field)
+        .and_then(|v| v.as_integer())
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(default)
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -510,6 +536,31 @@ mod tests {
         assert_eq!(f.path_export_globs, vec!["src/ipc/**", "src/auth/**"]);
         assert!(f.path_scope_override);
         assert_eq!(f.session_agent_type, "Reviewer");
+    }
+
+    #[test]
+    fn reveal_round_trips_retry_limits_and_uses_kernel_defaults() {
+        let defaults_plan = r#"
+            [[tasks]]
+            task_id = "t-1"
+        "#;
+        let (tmp, _init, task) = fresh_store_with_plan(defaults_plan);
+        let conn = open_ro(tmp.path()).unwrap();
+        let f = reveal_for_task(&conn, &task).expect("present");
+        assert_eq!(f.max_review_rejections, DEFAULT_MAX_REVIEW_REJECTIONS);
+        assert_eq!(f.max_crash_retries, DEFAULT_MAX_CRASH_RETRIES);
+
+        let explicit_plan = r#"
+            [[tasks]]
+            task_id                = "t-1"
+            max_review_rejections  = 4
+            max_crash_retries      = 5
+        "#;
+        let (tmp, _init, task) = fresh_store_with_plan(explicit_plan);
+        let conn = open_ro(tmp.path()).unwrap();
+        let f = reveal_for_task(&conn, &task).expect("present");
+        assert_eq!(f.max_review_rejections, 4);
+        assert_eq!(f.max_crash_retries, 5);
     }
 
     #[test]

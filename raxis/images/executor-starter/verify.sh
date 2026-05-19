@@ -148,4 +148,34 @@ VIOLATED (npx --no-install $js_bin will fail at task time)." >&2
     fi
 done
 
+# INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01.
+#
+# The realistic-scenario `lint-runner-rust` task invokes the standard
+# rustup shims (`cargo fmt --check`, `cargo clippy ...`). The image must
+# therefore ship both the shims under `/root/.cargo/bin` and the stable
+# toolchain payload under `/root/.rustup/toolchains/stable-*`; otherwise
+# rustup reports "no default toolchain configured" at task time and the
+# executor wastes a review-retry round on environment setup instead of
+# the code defect.
+for rust_bin in rustup cargo rustfmt cargo-clippy clippy-driver; do
+    if [ ! -e "$ROOTFS/root/.cargo/bin/$rust_bin" ]; then
+        echo "verify: missing /root/.cargo/bin/$rust_bin — \
+INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED. Remediation: \
+re-bake the executor-starter rootfs; the Containerfile installs \
+rustup stable plus rustfmt/clippy components." >&2
+        exit 1
+    fi
+done
+
+RUST_TOOLCHAIN_DIR="$(ls -d "$ROOTFS/root/.rustup/toolchains/stable-"* \
+    2>/dev/null | head -n1)"
+if [ -z "$RUST_TOOLCHAIN_DIR" ] || [ ! -e "$RUST_TOOLCHAIN_DIR/bin/cargo" ]; then
+    echo "verify: stable rustup toolchain payload not found under \
+/root/.rustup/toolchains/stable-* — \
+INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED. Remediation: \
+re-bake the executor-starter rootfs so rustup stable is installed \
+inside /root/.rustup." >&2
+    exit 1
+fi
+
 echo "verify: executor-starter rootfs at $ROOTFS passes structural checks"

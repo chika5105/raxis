@@ -101,6 +101,7 @@ fn build_base_rootfs_fixture(dst: &Path) {
     fs::create_dir_all(&sbin).unwrap();
     std::os::unix::fs::symlink("/usr/local/bin/raxis-planner-executor", sbin.join("init"))
         .expect("symlink /sbin/init");
+    install_rust_toolchain(dst);
 }
 
 /// Drop the pinned ruff layout under the fixture: the CLI shim at
@@ -121,6 +122,29 @@ fn install_ruff(rootfs: &Path, version: &str) {
         format!("Metadata-Version: 2.1\nName: ruff\nVersion: {version}\n"),
     )
     .unwrap();
+}
+
+/// Drop the stable rustup layout the verifier expects under the
+/// fixture: rustup shims in `/root/.cargo/bin` and the stable
+/// payload under `/root/.rustup/toolchains/stable-*`.
+fn install_rust_toolchain(rootfs: &Path) {
+    for bin in [
+        "rustup",
+        "cargo",
+        "rustfmt",
+        "cargo-clippy",
+        "clippy-driver",
+    ] {
+        let p = rootfs.join("root/.cargo/bin").join(bin);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = fs::metadata(&p).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&p, perms).unwrap();
+    }
+    let cargo = rootfs.join("root/.rustup/toolchains/stable-aarch64-unknown-linux-gnu/bin/cargo");
+    fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+    fs::write(&cargo, b"#!/bin/sh\nexit 0\n").unwrap();
 }
 
 /// Drop the pinned JS toolchain layout under the fixture: global
@@ -468,6 +492,46 @@ fn inv_executor_image_lint_toolchain_js_01_accepts_usr_local_lib_mirror() {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 witnesses
+// ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn inv_executor_image_lint_toolchain_rust_01_missing_rustfmt_fails_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rootfs = tmp.path();
+    build_base_rootfs_fixture(rootfs);
+    install_ruff(rootfs, "0.7.4");
+    install_js_toolchain(rootfs, JS_PACKAGES, JS_SHIMS);
+    fs::remove_file(rootfs.join("root/.cargo/bin/rustfmt")).unwrap();
+
+    let (code, out) = run_verify(rootfs);
+    assert_ne!(code, 0, "verify.sh must reject missing rustfmt shim");
+    assert!(
+        out.contains("INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED"),
+        "{out}",
+    );
+    assert!(out.contains("/root/.cargo/bin/rustfmt"), "{out}");
+}
+
+#[test]
+fn inv_executor_image_lint_toolchain_rust_01_missing_stable_payload_fails_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rootfs = tmp.path();
+    build_base_rootfs_fixture(rootfs);
+    install_ruff(rootfs, "0.7.4");
+    install_js_toolchain(rootfs, JS_PACKAGES, JS_SHIMS);
+    fs::remove_dir_all(rootfs.join("root/.rustup/toolchains")).unwrap();
+
+    let (code, out) = run_verify(rootfs);
+    assert_ne!(code, 0, "verify.sh must reject missing stable payload");
+    assert!(
+        out.contains("INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED"),
+        "{out}",
+    );
+    assert!(out.contains("/root/.rustup/toolchains/stable-*"), "{out}");
+}
+
+// ──────────────────────────────────────────────────────────────────
 // Containerfile / manifest / verify.sh pin-triple cross-check
 // ──────────────────────────────────────────────────────────────────
 
@@ -525,6 +589,20 @@ fn lint_toolchain_pins_agree_across_containerfile_manifest_and_verifier() {
              manifest.toml [lint_toolchain] {manifest_field} ({mf_ver})",
         );
     }
+
+    // ── Rust toolchain ────────────────────────────────────────
+    let manifest_rust_toolchain = extract_manifest_field(&manifest, "rust_toolchain")
+        .expect("manifest.toml must declare [lint_toolchain] rust_toolchain");
+    assert_eq!(manifest_rust_toolchain, "stable");
+    assert!(
+        containerfile.contains("rustup default stable")
+            && containerfile.contains("rustup component add rustfmt clippy"),
+        "Containerfile must install stable rustup with rustfmt/clippy components",
+    );
+    assert!(
+        verify.contains("INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01"),
+        "verify.sh must pin the Rust lint-toolchain invariant",
+    );
 }
 
 /// Extract a quoted-string TOML scalar value for `field` from

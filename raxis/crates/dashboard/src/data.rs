@@ -65,7 +65,7 @@ pub enum LifecycleAnnotation {
         critique: String,
         /// Cumulative review-reject count after this retry.
         review_reject_count: u32,
-        /// Per-task max review rejections (V2 default 3).
+        /// Per-task max review rejections (V2 default 2).
         max_review_rejections: u32,
         /// Cumulative crash-retry count carried through.
         crash_retry_count: u32,
@@ -955,7 +955,9 @@ pub struct TaskView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_annotation: Option<LifecycleAnnotation>,
     /// Most recent reviewer-panel verdict — `Approved`,
-    /// `Rejected`, or absent. Mirrors `tasks.review_verdict`.
+    /// `Rejected`, or absent. For executor tasks this is derived
+    /// from downstream reviewer rows when the executor row itself
+    /// has no aggregate verdict stamped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_verdict: Option<String>,
     /// Captured aggregated reviewer critique. Mirrors
@@ -968,6 +970,23 @@ pub struct TaskView {
     /// chain's `SubmitReview` events.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewer_panel_results: Vec<ReviewerPanelEntry>,
+    /// Latest review-rejection counter carried on the task's
+    /// activation lineage.
+    #[serde(default)]
+    pub review_reject_count: u32,
+    /// Plan-declared review-rejection ceiling for this task.
+    #[serde(default)]
+    pub max_review_rejections: u32,
+    /// True when a rejected review has reached the plan ceiling.
+    #[serde(default)]
+    pub review_retry_exhausted: bool,
+    /// Latest crash-retry counter carried on the task's activation
+    /// lineage.
+    #[serde(default)]
+    pub crash_retry_count: u32,
+    /// Plan-declared crash-retry ceiling for this task.
+    #[serde(default)]
+    pub max_crash_retries: u32,
     /// True when the task currently holds an `Active`
     /// `subtask_activations` row — i.e. an executor / reviewer
     /// VM is actively bound to the task in this very moment.
@@ -1155,6 +1174,9 @@ pub struct ReviewerVerdictView {
     pub verdict: String,
     /// Free-form critique text.
     pub critique: String,
+    /// Reviewer task id that produced this verdict.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reviewer_task_id: String,
     /// Reviewer session id.
     pub reviewer_session_id: String,
     /// Unix-seconds emit timestamp.
@@ -3777,6 +3799,11 @@ mod tests {
                     review_verdict: None,
                     last_critique: None,
                     reviewer_panel_results: vec![],
+                    review_reject_count: 0,
+                    max_review_rejections: 2,
+                    review_retry_exhausted: false,
+                    crash_retry_count: 0,
+                    max_crash_retries: 3,
                     is_active: false,
                 },
                 TaskView {
@@ -3799,6 +3826,11 @@ mod tests {
                     review_verdict: None,
                     last_critique: None,
                     reviewer_panel_results: vec![],
+                    review_reject_count: 0,
+                    max_review_rejections: 2,
+                    review_retry_exhausted: false,
+                    crash_retry_count: 0,
+                    max_crash_retries: 3,
                     is_active: true,
                 },
             ],
@@ -3895,6 +3927,11 @@ mod tests {
             review_verdict: None,
             last_critique: None,
             reviewer_panel_results: vec![],
+            review_reject_count: 0,
+            max_review_rejections: 2,
+            review_retry_exhausted: false,
+            crash_retry_count: 0,
+            max_crash_retries: 3,
             is_active: false,
         };
         let s = serde_json::to_string(&t).expect("serialises");
@@ -3936,6 +3973,11 @@ mod tests {
             review_verdict: None,
             last_critique: None,
             reviewer_panel_results: vec![],
+            review_reject_count: 0,
+            max_review_rejections: 2,
+            review_retry_exhausted: false,
+            crash_retry_count: 0,
+            max_crash_retries: 3,
             is_active: false,
         };
         let v = serde_json::to_value(&t).expect("serialises");

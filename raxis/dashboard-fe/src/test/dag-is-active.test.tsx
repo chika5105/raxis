@@ -157,4 +157,33 @@ describe("<DagGraph> is_active plumbing", () => {
     const gateBody = gate.querySelector("rect")!;
     expect(gateBody.getAttribute("stroke-dasharray")).toBe("7 5");
   });
+
+  it("renders rejected review exhaustion as the visible node state", () => {
+    const { container } = render(
+      <DagGraph
+        nodes={[
+          {
+            task_id: "lint-runner-rust",
+            title: "rust lint",
+            state: "Completed",
+            review_verdict: "Rejected",
+            review_reject_count: 2,
+            max_review_rejections: 2,
+            review_retry_exhausted: true,
+          },
+        ]}
+        edges={[]}
+      />,
+    );
+
+    const node = container.querySelector(
+      'g[data-review-exhausted="true"]',
+    )!;
+    expect(node).toBeTruthy();
+    expect(node.getAttribute("data-status")).toBe("RetryExhausted");
+    expect(node.getAttribute("data-raw-state")).toBe("Completed");
+    expect(node.getAttribute("data-review-verdict")).toBe("Rejected");
+    expect(node.textContent).toMatch(/EXHAUSTED/);
+    expect(node.textContent).toMatch(/review 2\/2 exhausted/);
+  });
 });

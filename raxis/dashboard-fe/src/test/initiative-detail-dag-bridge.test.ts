@@ -22,7 +22,7 @@ import { mapTasksToDagNodes } from "@/pages/InitiativeDetail";
 import type { TaskView } from "@/types/api";
 
 // Minimal `TaskView`-shaped fixture. The renderer only reads
-// task_id / title / state / is_active, so we keep this terse
+// task_id / title / state / is_active / review retry state, so we keep this terse
 // and let TypeScript's `Partial<TaskView>` cast remind future
 // editors that the bridge is INTENTIONALLY narrow.
 function task(over: Partial<TaskView> & { task_id: string }): TaskView {
@@ -39,6 +39,12 @@ function task(over: Partial<TaskView> & { task_id: string }): TaskView {
     path_allowlist: over.path_allowlist ?? [],
     created_at: over.created_at ?? 0,
     updated_at: over.updated_at ?? 0,
+    review_verdict: over.review_verdict,
+    review_reject_count: over.review_reject_count,
+    max_review_rejections: over.max_review_rejections,
+    review_retry_exhausted: over.review_retry_exhausted,
+    crash_retry_count: over.crash_retry_count,
+    max_crash_retries: over.max_crash_retries,
     is_active: over.is_active,
   };
 }
@@ -62,6 +68,10 @@ describe("mapTasksToDagNodes", () => {
       title: "execute-a",
       agent_type: "Executor",
       state: "Admitted",
+      review_verdict: undefined,
+      review_reject_count: undefined,
+      max_review_rejections: undefined,
+      review_retry_exhausted: undefined,
       is_active: undefined,
     });
     expect(nodes[1]).toEqual({
@@ -69,6 +79,10 @@ describe("mapTasksToDagNodes", () => {
       title: "execute-b",
       agent_type: "Executor",
       state: "Admitted",
+      review_verdict: undefined,
+      review_reject_count: undefined,
+      max_review_rejections: undefined,
+      review_retry_exhausted: undefined,
       is_active: true,
     });
     expect(nodes[2]).toEqual({
@@ -76,6 +90,10 @@ describe("mapTasksToDagNodes", () => {
       title: "execute-c",
       agent_type: "Executor",
       state: "Running",
+      review_verdict: undefined,
+      review_reject_count: undefined,
+      max_review_rejections: undefined,
+      review_retry_exhausted: undefined,
       is_active: undefined,
     });
   });

@@ -1752,6 +1752,153 @@ pub fn shutdown_or_exit(code: u8) -> ! {
 // Cargo-offline default (`INV-EXECUTOR-IMAGE-RUST-OFFLINE-01`)
 // ---------------------------------------------------------------------------
 
+/// Rustup/cargo env defaults for the executor starter image.
+///
+/// AVF boots PID 1 with `HOME=/` on some host/kernel combinations.
+/// Rustup then looks under `/.rustup` even though the starter image
+/// installs the stable toolchain under `/root/.rustup`, producing
+/// the misleading runtime error "no default toolchain configured".
+/// These defaults make the baked toolchain discoverable without
+/// requiring every executor prompt to know rustup internals.
+pub const EXECUTOR_HOME_ENV: &str = "HOME";
+/// Rustup home baked by `images/executor-starter/Containerfile`.
+pub const EXECUTOR_RUSTUP_HOME_ENV: &str = "RUSTUP_HOME";
+/// Cargo home baked by `images/executor-starter/Containerfile`.
+pub const EXECUTOR_CARGO_HOME_ENV: &str = "CARGO_HOME";
+/// Rustup selector used by shims when no default file is visible.
+pub const EXECUTOR_RUSTUP_TOOLCHAIN_ENV: &str = "RUSTUP_TOOLCHAIN";
+
+const EXECUTOR_HOME_DEFAULT: &str = "/root";
+const EXECUTOR_RUSTUP_HOME_DEFAULT: &str = "/root/.rustup";
+const EXECUTOR_CARGO_HOME_DEFAULT: &str = "/root/.cargo";
+const EXECUTOR_RUSTUP_TOOLCHAIN_DEFAULT: &str = "stable";
+
+/// Install executor Rust toolchain environment defaults before
+/// any shell tool can spawn `cargo`, `rustfmt`, or `clippy`.
+pub fn ensure_executor_rustup_env_defaults() -> RustupEnvDefaultOutcome {
+    let mut defaulted: Vec<&'static str> = Vec::new();
+    let mut preserved: Vec<&'static str> = Vec::new();
+    for (key, value) in [
+        (EXECUTOR_HOME_ENV, EXECUTOR_HOME_DEFAULT),
+        (EXECUTOR_RUSTUP_HOME_ENV, EXECUTOR_RUSTUP_HOME_DEFAULT),
+        (EXECUTOR_CARGO_HOME_ENV, EXECUTOR_CARGO_HOME_DEFAULT),
+        (
+            EXECUTOR_RUSTUP_TOOLCHAIN_ENV,
+            EXECUTOR_RUSTUP_TOOLCHAIN_DEFAULT,
+        ),
+    ] {
+        match std::env::var(key) {
+            Ok(v) if !v.is_empty() => preserved.push(key),
+            _ => {
+                // SAFETY: executor main calls this before building
+                // the tokio runtime, so no worker thread can race on
+                // process env.
+                unsafe {
+                    std::env::set_var(key, value);
+                }
+                defaulted.push(key);
+            }
+        }
+    }
+    RustupEnvDefaultOutcome {
+        defaulted,
+        preserved,
+    }
+}
+
+/// Outcome of [`ensure_executor_rustup_env_defaults`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RustupEnvDefaultOutcome {
+    /// Env vars this helper installed.
+    pub defaulted: Vec<&'static str>,
+    /// Env vars already set by the substrate/operator.
+    pub preserved: Vec<&'static str>,
+}
+
+#[cfg(test)]
+mod rustup_env_default_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn with_env_snapshot<F: FnOnce()>(f: F) {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = [
+            EXECUTOR_HOME_ENV,
+            EXECUTOR_RUSTUP_HOME_ENV,
+            EXECUTOR_CARGO_HOME_ENV,
+            EXECUTOR_RUSTUP_TOOLCHAIN_ENV,
+        ];
+        let prev: Vec<(&str, Option<String>)> =
+            keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        // SAFETY: serialised via the static mutex.
+        unsafe {
+            for key in keys {
+                std::env::remove_var(key);
+            }
+        }
+        f();
+        // SAFETY: serialised via the static mutex.
+        unsafe {
+            for (key, value) in prev {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ensure_executor_rustup_env_defaults_sets_baked_paths_when_absent() {
+        with_env_snapshot(|| {
+            let outcome = ensure_executor_rustup_env_defaults();
+            assert_eq!(
+                outcome.defaulted,
+                vec![
+                    EXECUTOR_HOME_ENV,
+                    EXECUTOR_RUSTUP_HOME_ENV,
+                    EXECUTOR_CARGO_HOME_ENV,
+                    EXECUTOR_RUSTUP_TOOLCHAIN_ENV
+                ]
+            );
+            assert_eq!(std::env::var(EXECUTOR_HOME_ENV).unwrap(), "/root");
+            assert_eq!(
+                std::env::var(EXECUTOR_RUSTUP_HOME_ENV).unwrap(),
+                "/root/.rustup"
+            );
+            assert_eq!(
+                std::env::var(EXECUTOR_CARGO_HOME_ENV).unwrap(),
+                "/root/.cargo"
+            );
+            assert_eq!(
+                std::env::var(EXECUTOR_RUSTUP_TOOLCHAIN_ENV).unwrap(),
+                "stable"
+            );
+        });
+    }
+
+    #[test]
+    fn ensure_executor_rustup_env_defaults_preserves_operator_values() {
+        with_env_snapshot(|| {
+            // SAFETY: serialised via `with_env_snapshot`.
+            unsafe {
+                std::env::set_var(EXECUTOR_HOME_ENV, "/custom-home");
+                std::env::set_var(EXECUTOR_RUSTUP_HOME_ENV, "/custom-rustup");
+                std::env::set_var(EXECUTOR_CARGO_HOME_ENV, "/custom-cargo");
+                std::env::set_var(EXECUTOR_RUSTUP_TOOLCHAIN_ENV, "1.85.0");
+            }
+            let outcome = ensure_executor_rustup_env_defaults();
+            assert!(outcome.defaulted.is_empty());
+            assert_eq!(std::env::var(EXECUTOR_HOME_ENV).unwrap(), "/custom-home");
+            assert_eq!(
+                std::env::var(EXECUTOR_RUSTUP_TOOLCHAIN_ENV).unwrap(),
+                "1.85.0"
+            );
+        });
+    }
+}
+
 /// Env var the executor planner-core sets at PID-1 boot so every
 /// `BashTool`-spawned `cargo` invocation defaults to offline mode.
 ///

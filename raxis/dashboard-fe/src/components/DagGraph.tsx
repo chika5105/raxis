@@ -30,6 +30,13 @@ export interface DagGraphNode {
     latest_verdict: string;
     recorded_at: number;
   }>;
+  /// Derived reviewer aggregate for executor tasks. The backend
+  /// derives this from downstream reviewer rows when the executor
+  /// task row itself has no aggregate verdict.
+  review_verdict?: string | null;
+  review_reject_count?: number;
+  max_review_rejections?: number;
+  review_retry_exhausted?: boolean;
 }
 
 /// Effective state for tone / chip / pulse derivation: an active
@@ -38,6 +45,18 @@ export interface DagGraphNode {
 function effectiveState(node: DagGraphNode): string {
   if (node.is_active && node.state === "Admitted") return "Running";
   return node.state;
+}
+
+function visualState(node: DagGraphNode): string {
+  if (node.node_kind !== "gate" && isRejectedReview(node.review_verdict)) {
+    return node.review_retry_exhausted ? "RetryExhausted" : "ReviewRejected";
+  }
+  return effectiveState(node);
+}
+
+function isRejectedReview(verdict: string | null | undefined): boolean {
+  const v = (verdict ?? "").toLowerCase();
+  return v === "rejected" || v === "reject" || v === "atleastonerejected";
 }
 
 export interface DagGraphEdge {
@@ -145,8 +164,10 @@ export function DagGraph({
     () => (activeStates && activeStates.length > 0 ? new Set(activeStates) : null),
     [activeStates],
   );
-  const dimNode = (state: string) => activeSet !== null && !activeSet.has(state);
-  const dimNodeFor = (node: DagGraphNode) => dimNode(effectiveState(node));
+  const dimNodeFor = (node: DagGraphNode) =>
+    activeSet !== null &&
+    !activeSet.has(effectiveState(node)) &&
+    !activeSet.has(visualState(node));
 
   const expanded = useMemo(() => expandGateNodes(nodes, edges), [nodes, edges]);
 
@@ -254,7 +275,9 @@ export function DagGraph({
             fromNode !== undefined &&
             toNode !== undefined &&
             !activeSet.has(effectiveState(fromNode)) &&
-            !activeSet.has(effectiveState(toNode));
+            !activeSet.has(visualState(fromNode)) &&
+            !activeSet.has(effectiveState(toNode)) &&
+            !activeSet.has(visualState(toNode));
           const hoverDim =
             hover !== null && hover !== e.from && hover !== e.to;
           const opacity = edgeDim ? 0.15 : hoverDim ? 0.25 : 0.85;
@@ -279,7 +302,8 @@ export function DagGraph({
           // reflect the operator's reality (a live executor) even
           // while the FSM row hasn't flipped state yet.
           const eff = effectiveState(n);
-          const tone = stateTone(eff);
+          const visual = visualState(n);
+          const tone = stateTone(visual);
           const fill = NODE_FILL_VAR[tone];
           const stroke = NODE_STROKE_VAR[tone];
           const isGate = n.node_kind === "gate";
@@ -291,7 +315,8 @@ export function DagGraph({
           const selectId = isGate ? n.parent_task_id : n.task_id;
           const chipLabel = isGate
             ? (n.latest_verdict ?? "Pending").toUpperCase()
-            : shortStateLabel(eff);
+            : reviewChipLabel(visual);
+          const detailLine = reviewLine(n) ?? (n.agent_type ?? "Task");
           // Filter-dim wins over hover-dim because it's the
           // explicit operator intent ("I want to see Running") vs.
           // an incidental mouseover.
@@ -310,11 +335,13 @@ export function DagGraph({
               aria-label={
                 isGate
                   ? `Witness gate ${n.gate_type ?? n.title} for task ${n.parent_task_id} (${n.latest_verdict ?? "Pending"}). Click to focus the task, double-click to open task page.`
-                  : `Task ${n.title} (state ${eff}). Click to focus, double-click to open task page.`
+                  : `Task ${n.title} (state ${eff}${reviewLine(n) ? `, ${reviewLine(n)}` : ""}). Click to focus, double-click to open task page.`
               }
               data-node-kind={n.node_kind ?? "task"}
-              data-status={eff}
+              data-status={visual}
               data-raw-state={n.state}
+              data-review-verdict={n.review_verdict || undefined}
+              data-review-exhausted={n.review_retry_exhausted || undefined}
               data-is-active={n.is_active || undefined}
               data-dimmed={dim || undefined}
               onKeyDown={(ev) => {
@@ -359,6 +386,7 @@ export function DagGraph({
                   : `${n.agent_type ?? "Task"}: ${n.task_id}`}
                 {"\n"}
                 {isGate ? `verdict: ${n.latest_verdict ?? "Pending"}` : `state: ${eff}`}
+                {!isGate && reviewLine(n) ? `\nreview: ${reviewLine(n)}` : ""}
                 {n.is_active && n.state !== eff
                   ? `\n(FSM row: ${n.state} · executor active)`
                   : ""}
@@ -431,7 +459,7 @@ export function DagGraph({
                   fontWeight={600}
                   fontFamily="Inter, system-ui, sans-serif"
                 >
-                  {n.agent_type ?? "Task"}
+                  {detailLine}
                 </text>
               )}
             </g>
@@ -477,6 +505,22 @@ function displayNodeId(n: DagGraphNode, isGate: boolean): string {
     return parent.length > 20 ? `${parent.slice(0, 20)}…` : parent;
   }
   return n.task_id.length > 20 ? `${n.task_id.slice(0, 20)}…` : n.task_id;
+}
+
+function reviewChipLabel(state: string): string {
+  if (state === "RetryExhausted") return "EXHAUSTED";
+  if (state === "ReviewRejected") return "REJECTED";
+  return shortStateLabel(state);
+}
+
+function reviewLine(node: DagGraphNode): string | null {
+  if (!isRejectedReview(node.review_verdict)) return null;
+  const count = node.review_reject_count ?? 0;
+  const max = node.max_review_rejections ?? 0;
+  if (node.review_retry_exhausted) {
+    return max > 0 ? `review ${count}/${max} exhausted` : "review exhausted";
+  }
+  return max > 0 ? `review rejected ${count}/${max}` : "review rejected";
 }
 
 interface ExpandedDagEdge extends DagGraphEdge {

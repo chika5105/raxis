@@ -81,6 +81,18 @@ pub struct ActivationRow {
     pub activation_state: String,
     /// Unix-seconds creation timestamp.
     pub created_at: i64,
+    /// `subtask_activations.crash_retry_count` carried across
+    /// respawns by the kernel retry handlers.
+    pub crash_retry_count: u32,
+    /// `subtask_activations.review_reject_count` carried across
+    /// review-rejection respawns.
+    pub review_reject_count: u32,
+    /// `subtask_activations.validation_reject_count` for
+    /// mechanically rejected planner intents.
+    pub validation_reject_count: u32,
+    /// Per-activation mechanical validation ceiling. Older DBs
+    /// default to the dashboard constant below.
+    pub max_validation_rejections: u32,
 }
 
 /// Minimal projection of `tasks` rows the orchestrator-gap
@@ -115,11 +127,11 @@ pub struct TaskRow {
 // ---------------------------------------------------------------------------
 
 /// V2 default budgets — mirror the kernel's
-/// `subtask_activations` retry policy (3 review rejections + 3
+/// `subtask_activations` retry policy (2 review rejections + 3
 /// crash retries by default). The dashboard does not own these
 /// numbers; we surface the cumulative counter and the cap so
-/// the operator can see "2 of 3 used" at a glance.
-const DEFAULT_MAX_REVIEW_REJECTIONS: u32 = 3;
+/// the operator can see "2 of 2 used" at a glance.
+const DEFAULT_MAX_REVIEW_REJECTIONS: u32 = 2;
 const DEFAULT_MAX_CRASH_RETRIES: u32 = 3;
 const DEFAULT_MAX_VALIDATION_REJECTIONS: u32 = 3;
 
@@ -268,8 +280,7 @@ pub fn classify_for_task_rows(
                     String::new()
                 };
                 let crash_count = activation_for(&new_act)
-                    .map(|a| a.activation_id.is_empty())
-                    .map(|_| 0)
+                    .map(|a| a.crash_retry_count)
                     .unwrap_or(0);
                 out.push(LifecycleAnnotation::RetryReviewReject {
                     retry_number: review_retry_n,
@@ -353,12 +364,18 @@ pub fn classify_for_task_rows(
                     .get("validation_reject_count")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(validation_retry_n as u64) as u32;
+                let max_validation_rejections = activations
+                    .iter()
+                    .rev()
+                    .find(|a| a.task_id == task_id)
+                    .map(|a| a.max_validation_rejections)
+                    .unwrap_or(DEFAULT_MAX_VALIDATION_REJECTIONS);
                 out.push(LifecycleAnnotation::RetryValidationReject {
                     retry_number: validation_retry_n,
                     validator_reason,
                     validator_detail,
                     validation_reject_count: n,
-                    max_validation_rejections: DEFAULT_MAX_VALIDATION_REJECTIONS,
+                    max_validation_rejections,
                     ts_unix: row.at,
                 });
             }
@@ -1014,6 +1031,10 @@ mod tests {
             task_id: "review-lint-defect-rust".into(),
             activation_state: "PendingActivation".into(),
             created_at: 1_700_000_000,
+            crash_retry_count: 0,
+            review_reject_count: 0,
+            validation_reject_count: 0,
+            max_validation_rejections: DEFAULT_MAX_VALIDATION_REJECTIONS,
         };
         let tasks = vec![
             TaskRow {
@@ -1176,6 +1197,10 @@ mod tests {
             task_id: "B".into(),
             activation_state: "PendingActivation".into(),
             created_at: 1_700_000_000,
+            crash_retry_count: 0,
+            review_reject_count: 0,
+            validation_reject_count: 0,
+            max_validation_rejections: DEFAULT_MAX_VALIDATION_REJECTIONS,
         };
         let tasks = vec![
             TaskRow {
@@ -1206,6 +1231,10 @@ mod tests {
             task_id: "B".into(),
             activation_state: "PendingActivation".into(),
             created_at: 1_700_000_000,
+            crash_retry_count: 0,
+            review_reject_count: 0,
+            validation_reject_count: 0,
+            max_validation_rejections: DEFAULT_MAX_VALIDATION_REJECTIONS,
         };
         let tasks = vec![TaskRow {
             task_id: "B".into(),

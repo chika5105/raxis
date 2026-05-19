@@ -101,6 +101,7 @@ export interface FailureInfo {
 export interface ReviewerVerdictView {
   verdict: string;
   critique: string;
+  reviewer_task_id?: string;
   reviewer_session_id: string;
   at: number;
 }
@@ -152,6 +153,11 @@ export interface TaskView {
   /// parsed from the audit chain's `SubmitReview` /
   /// `ReviewAggregationCompleted` events.
   reviewer_panel_results?: ReviewerPanelEntry[];
+  review_reject_count?: number;
+  max_review_rejections?: number;
+  review_retry_exhausted?: boolean;
+  crash_retry_count?: number;
+  max_crash_retries?: number;
   /// True when the task currently holds an `Active`
   /// `subtask_activations` row — i.e. an executor / reviewer
   /// VM is bound to the task in this very moment.
@@ -599,6 +605,10 @@ export interface DagNode {
   title: string;
   agent_type: string;
   state: string;
+  review_verdict?: string | null;
+  review_reject_count?: number;
+  max_review_rejections?: number;
+  review_retry_exhausted?: boolean;
   /// Mirror of `TaskView.is_active`: backend sets this when an
   /// executor/reviewer subtask activation is live for the task.
   /// The DAG renderer treats `is_active` as Running for tone +

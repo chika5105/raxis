@@ -280,6 +280,16 @@ export function InitiativeDagPage() {
                     Boolean(focusedNode.is_active)
                   }
                 />
+                {focusedNode.review_retry_exhausted && (
+                  <span
+                    className="badge border-bad bg-bad-muted/30 text-bad"
+                    title="Reviewer rejection reached the retry ceiling; no automatic retry remains."
+                  >
+                    review exhausted{" "}
+                    {focusedNode.review_reject_count ?? 0}/
+                    {focusedNode.max_review_rejections ?? 0}
+                  </span>
+                )}
               </div>
               <Link
                 to={`/tasks/${focusedNode.task_id}`}

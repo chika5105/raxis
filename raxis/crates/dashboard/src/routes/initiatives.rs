@@ -96,6 +96,19 @@ pub struct DagNode {
     pub agent_type: String,
     /// Task FSM state.
     pub state: String,
+    /// Derived reviewer aggregate (`Approved` / `Rejected`) for
+    /// executor tasks when reviewer rows exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_verdict: Option<String>,
+    /// Latest review-rejection counter for the task lineage.
+    #[serde(default)]
+    pub review_reject_count: u32,
+    /// Plan-declared review-rejection ceiling.
+    #[serde(default)]
+    pub max_review_rejections: u32,
+    /// True when the review-rejection ceiling has been reached.
+    #[serde(default)]
+    pub review_retry_exhausted: bool,
     /// `true` when an executor/reviewer subtask activation is live
     /// for this task. Mirrors `TaskView::is_active`: the FSM state
     /// can be `Admitted` while the task is mid-execution between
@@ -143,6 +156,10 @@ where
             title: t.title.clone(),
             agent_type: t.agent_type.clone(),
             state: t.state.clone(),
+            review_verdict: t.review_verdict.clone(),
+            review_reject_count: t.review_reject_count,
+            max_review_rejections: t.max_review_rejections,
+            review_retry_exhausted: t.review_retry_exhausted,
             is_active: t.is_active,
             gate_verdict_summary: chip_map.get(&t.task_id).cloned().unwrap_or_default(),
         })

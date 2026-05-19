@@ -4617,6 +4617,15 @@ fn task_row_to_view(
         .as_ref()
         .map(|f| f.path_allowlist.clone())
         .unwrap_or_default();
+    let max_review_rejections = plan_fields
+        .as_ref()
+        .map(|f| f.max_review_rejections)
+        .unwrap_or(raxis_store::views::plan_fields::DEFAULT_MAX_REVIEW_REJECTIONS);
+    let max_crash_retries = plan_fields
+        .as_ref()
+        .map(|f| f.max_crash_retries)
+        .unwrap_or(raxis_store::views::plan_fields::DEFAULT_MAX_CRASH_RETRIES);
+    let retry_counts = read_retry_counts_for_task(conn, &t.task_id);
     let agent_type = if t.task_id == t.initiative_id {
         "Orchestrator".to_owned()
     } else {
@@ -4683,6 +4692,11 @@ fn task_row_to_view(
         review_verdict: None,
         last_critique: None,
         reviewer_panel_results: Vec::new(),
+        review_reject_count: retry_counts.review_reject_count,
+        max_review_rejections,
+        review_retry_exhausted: false,
+        crash_retry_count: retry_counts.crash_retry_count,
+        max_crash_retries,
         is_active,
     })
 }
@@ -4703,18 +4717,21 @@ fn task_row_to_view_with_lifecycle(
 ) -> Result<TaskView, ApiError> {
     let mut view = task_row_to_view(conn, t)?;
     let activations = read_activations_for_task(conn, &t.task_id);
-    let (review_verdict, last_critique) = read_review_state(conn, &t.task_id);
+    let (own_review_verdict, own_last_critique) = read_review_state(conn, &t.task_id);
     let mut reviewer_verdicts = read_reviewer_verdicts_for_task(conn, &t.task_id);
     if reviewer_verdicts.is_empty() {
-        if let Some(verdict) = review_verdict.clone() {
+        if let Some(verdict) = own_review_verdict.clone() {
             reviewer_verdicts.push(ReviewerVerdictView {
                 verdict,
-                critique: last_critique.clone().unwrap_or_default(),
+                critique: own_last_critique.clone().unwrap_or_default(),
+                reviewer_task_id: t.task_id.clone(),
                 reviewer_session_id: t.session_id.clone().unwrap_or_default(),
                 at: t.transitioned_at,
             });
         }
     }
+    let (review_verdict, last_critique) =
+        aggregate_review_state(own_review_verdict, own_last_critique, &reviewer_verdicts);
     let annotations = lifecycle::classify_for_task(
         audit_chain,
         &t.task_id,
@@ -4722,9 +4739,17 @@ fn task_row_to_view_with_lifecycle(
         last_critique.as_deref(),
     );
     let latest = annotations.last().cloned();
-    let panel = extract_reviewer_panel_results(audit_chain, &t.task_id);
+    let mut panel = extract_reviewer_panel_results(audit_chain, &t.task_id);
+    if panel.is_empty() {
+        panel = reviewer_panel_entries_from_verdicts(&reviewer_verdicts);
+    }
     view.annotations = annotations;
     view.latest_annotation = latest;
+    view.review_retry_exhausted = review_retry_exhausted(
+        review_verdict.as_deref(),
+        view.review_reject_count,
+        view.max_review_rejections,
+    );
     view.review_verdict = review_verdict;
     view.last_critique = last_critique;
     view.reviewer_verdicts = reviewer_verdicts;
@@ -4742,18 +4767,21 @@ fn task_row_to_view_with_lifecycle_indexed(
 ) -> Result<TaskView, ApiError> {
     let mut view = task_row_to_view(conn, t)?;
     let activations = read_activations_for_task(conn, &t.task_id);
-    let (review_verdict, last_critique) = read_review_state(conn, &t.task_id);
+    let (own_review_verdict, own_last_critique) = read_review_state(conn, &t.task_id);
     let mut reviewer_verdicts = read_reviewer_verdicts_for_task(conn, &t.task_id);
     if reviewer_verdicts.is_empty() {
-        if let Some(verdict) = review_verdict.clone() {
+        if let Some(verdict) = own_review_verdict.clone() {
             reviewer_verdicts.push(ReviewerVerdictView {
                 verdict,
-                critique: last_critique.clone().unwrap_or_default(),
+                critique: own_last_critique.clone().unwrap_or_default(),
+                reviewer_task_id: t.task_id.clone(),
                 reviewer_session_id: t.session_id.clone().unwrap_or_default(),
                 at: t.transitioned_at,
             });
         }
     }
+    let (review_verdict, last_critique) =
+        aggregate_review_state(own_review_verdict, own_last_critique, &reviewer_verdicts);
     let annotations = lifecycle::classify_for_task_rows(
         audit_index.task_rows(&t.task_id),
         &t.task_id,
@@ -4761,10 +4789,18 @@ fn task_row_to_view_with_lifecycle_indexed(
         last_critique.as_deref(),
     );
     let latest = annotations.last().cloned();
-    let panel =
+    let mut panel =
         extract_reviewer_panel_results_from_rows(audit_index.reviewer_panel_rows(&t.task_id));
+    if panel.is_empty() {
+        panel = reviewer_panel_entries_from_verdicts(&reviewer_verdicts);
+    }
     view.annotations = annotations;
     view.latest_annotation = latest;
+    view.review_retry_exhausted = review_retry_exhausted(
+        review_verdict.as_deref(),
+        view.review_reject_count,
+        view.max_review_rejections,
+    );
     view.review_verdict = review_verdict;
     view.last_critique = last_critique;
     view.reviewer_verdicts = reviewer_verdicts;
@@ -4940,6 +4976,95 @@ fn read_review_state(
     row.unwrap_or((None, None))
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct RetryCounts {
+    review_reject_count: u32,
+    crash_retry_count: u32,
+}
+
+fn read_retry_counts_for_task(conn: &raxis_store::ro::RoConn, task_id: &str) -> RetryCounts {
+    let row = conn.query_row(
+        &format!(
+            "SELECT COALESCE(MAX(review_reject_count), 0), \
+                    COALESCE(MAX(crash_retry_count), 0) \
+             FROM {TBL_SUBTASK_ACTIVATIONS} WHERE task_id = ?1"
+        ),
+        [task_id],
+        |r| {
+            let review: i64 = r.get(0)?;
+            let crash: i64 = r.get(1)?;
+            Ok(RetryCounts {
+                review_reject_count: review.max(0) as u32,
+                crash_retry_count: crash.max(0) as u32,
+            })
+        },
+    );
+    row.unwrap_or_default()
+}
+
+fn aggregate_review_state(
+    own_verdict: Option<String>,
+    own_critique: Option<String>,
+    reviewer_verdicts: &[ReviewerVerdictView],
+) -> (Option<String>, Option<String>) {
+    if own_verdict.is_some() {
+        return (own_verdict, own_critique);
+    }
+    if reviewer_verdicts.is_empty() {
+        return (None, own_critique);
+    }
+    if let Some(rejected) = reviewer_verdicts
+        .iter()
+        .rev()
+        .find(|v| is_rejected_review_verdict(&v.verdict))
+    {
+        let critique = own_critique.or_else(|| {
+            let trimmed = rejected.critique.trim();
+            (!trimmed.is_empty()).then(|| rejected.critique.clone())
+        });
+        return (Some("Rejected".to_owned()), critique);
+    }
+    if reviewer_verdicts
+        .iter()
+        .all(|v| is_approved_review_verdict(&v.verdict))
+    {
+        let critique = own_critique.or_else(|| {
+            reviewer_verdicts
+                .iter()
+                .rev()
+                .map(|v| v.critique.trim())
+                .find(|c| !c.is_empty())
+                .map(str::to_owned)
+        });
+        return (Some("Approved".to_owned()), critique);
+    }
+    (None, own_critique)
+}
+
+fn review_retry_exhausted(
+    verdict: Option<&str>,
+    review_reject_count: u32,
+    max_review_rejections: u32,
+) -> bool {
+    verdict.map(is_rejected_review_verdict).unwrap_or(false)
+        && max_review_rejections > 0
+        && review_reject_count >= max_review_rejections
+}
+
+fn is_rejected_review_verdict(verdict: &str) -> bool {
+    matches!(
+        verdict.trim().to_ascii_lowercase().as_str(),
+        "rejected" | "reject" | "atleastonerejected"
+    )
+}
+
+fn is_approved_review_verdict(verdict: &str) -> bool {
+    matches!(
+        verdict.trim().to_ascii_lowercase().as_str(),
+        "approved" | "approve"
+    )
+}
+
 /// Read the concrete downstream reviewer tasks for an executor task.
 /// `tasks.review_verdict` is stored on the reviewer row itself, while
 /// the executor row carries only the aggregate critique. Joining
@@ -4952,6 +5077,7 @@ fn read_reviewer_verdicts_for_task(
     let mut out = Vec::new();
     let Ok(mut stmt) = conn.prepare(&format!(
         "SELECT rt.review_verdict, COALESCE(rt.last_critique, ''), \
+                rt.task_id, \
                 COALESCE(rt.session_id, ''), rt.transitioned_at \
          FROM {TBL_TASK_DAG_EDGES} e \
          JOIN {TBL_TASKS} rt ON rt.task_id = e.successor_task_id \
@@ -4965,8 +5091,9 @@ fn read_reviewer_verdicts_for_task(
         Ok(ReviewerVerdictView {
             verdict: r.get(0)?,
             critique: r.get(1)?,
-            reviewer_session_id: r.get(2)?,
-            at: r.get::<_, i64>(3)?.max(0) as u64,
+            reviewer_task_id: r.get(2)?,
+            reviewer_session_id: r.get(3)?,
+            at: r.get::<_, i64>(4)?.max(0) as u64,
         })
     });
     if let Ok(rows) = rows {
@@ -4985,7 +5112,11 @@ fn read_activations_for_task(
 ) -> Vec<lifecycle::ActivationRow> {
     let mut out: Vec<lifecycle::ActivationRow> = Vec::new();
     let Ok(mut stmt) = conn.prepare(&format!(
-        "SELECT activation_id, task_id, activation_state, created_at \
+        "SELECT activation_id, task_id, activation_state, created_at, \
+                COALESCE(crash_retry_count, 0), \
+                COALESCE(review_reject_count, 0), \
+                COALESCE(validation_reject_count, 0), \
+                COALESCE(max_validation_rejections, 3) \
              FROM {TBL_SUBTASK_ACTIVATIONS} WHERE task_id = ?1 ORDER BY created_at ASC"
     )) else {
         return out;
@@ -4996,6 +5127,10 @@ fn read_activations_for_task(
             task_id: r.get(1)?,
             activation_state: r.get(2)?,
             created_at: r.get::<_, i64>(3)?,
+            crash_retry_count: r.get::<_, i64>(4)?.max(0) as u32,
+            review_reject_count: r.get::<_, i64>(5)?.max(0) as u32,
+            validation_reject_count: r.get::<_, i64>(6)?.max(0) as u32,
+            max_validation_rejections: r.get::<_, i64>(7)?.max(0) as u32,
         })
     });
     if let Ok(rows) = rows {
@@ -5013,7 +5148,11 @@ fn read_activations_for_task(
 fn read_activations_all(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle::ActivationRow> {
     let mut out: Vec<lifecycle::ActivationRow> = Vec::new();
     let Ok(mut stmt) = conn.prepare(&format!(
-        "SELECT activation_id, task_id, activation_state, created_at \
+        "SELECT activation_id, task_id, activation_state, created_at, \
+                COALESCE(crash_retry_count, 0), \
+                COALESCE(review_reject_count, 0), \
+                COALESCE(validation_reject_count, 0), \
+                COALESCE(max_validation_rejections, 3) \
              FROM {TBL_SUBTASK_ACTIVATIONS} ORDER BY created_at ASC"
     )) else {
         return out;
@@ -5024,6 +5163,10 @@ fn read_activations_all(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle::Activa
             task_id: r.get(1)?,
             activation_state: r.get(2)?,
             created_at: r.get::<_, i64>(3)?,
+            crash_retry_count: r.get::<_, i64>(4)?.max(0) as u32,
+            review_reject_count: r.get::<_, i64>(5)?.max(0) as u32,
+            validation_reject_count: r.get::<_, i64>(6)?.max(0) as u32,
+            max_validation_rejections: r.get::<_, i64>(7)?.max(0) as u32,
         })
     });
     if let Ok(rows) = rows {
@@ -5240,6 +5383,32 @@ fn extract_reviewer_panel_results_from_rows(
                             completed_at: row.at,
                         });
                     }
+                } else {
+                    let reviewer_task_id = row
+                        .payload
+                        .get("triggered_by_reviewer_task_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    let verdict = row
+                        .payload
+                        .get("verdict")
+                        .and_then(|v| v.as_str())
+                        .map(aggregate_verdict_to_review_verdict)
+                        .unwrap_or_default();
+                    if !reviewer_task_id.is_empty() || !verdict.is_empty() {
+                        out.push(ReviewerPanelEntry {
+                            reviewer_task_id,
+                            verdict,
+                            critique_excerpt: row
+                                .payload
+                                .get("critique")
+                                .and_then(|v| v.as_str())
+                                .map(|s| first_n_lines_helper(s, 3))
+                                .unwrap_or_default(),
+                            completed_at: row.at,
+                        });
+                    }
                 }
             }
             "SubmitReview" | "ReviewerSubmittedVerdict" => {
@@ -5275,6 +5444,28 @@ fn extract_reviewer_panel_results_from_rows(
         }
     }
     out
+}
+
+fn reviewer_panel_entries_from_verdicts(
+    verdicts: &[ReviewerVerdictView],
+) -> Vec<ReviewerPanelEntry> {
+    verdicts
+        .iter()
+        .map(|v| ReviewerPanelEntry {
+            reviewer_task_id: v.reviewer_task_id.clone(),
+            verdict: v.verdict.clone(),
+            critique_excerpt: first_n_lines_helper(&v.critique, 3),
+            completed_at: v.at as i64,
+        })
+        .collect()
+}
+
+fn aggregate_verdict_to_review_verdict(verdict: &str) -> String {
+    match verdict {
+        "AllPassed" => "Approved".to_owned(),
+        "AtLeastOneRejected" => "Rejected".to_owned(),
+        other => other.to_owned(),
+    }
 }
 
 /// Local copy of the lifecycle-internal `first_n_lines` helper

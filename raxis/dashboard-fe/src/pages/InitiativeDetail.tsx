@@ -70,6 +70,10 @@ export function mapTasksToDagNodes(tasks: TaskView[]): DagGraphNode[] {
     agent_type: t.agent_type,
     state: t.state,
     is_active: t.is_active,
+    review_verdict: t.review_verdict,
+    review_reject_count: t.review_reject_count,
+    max_review_rejections: t.max_review_rejections,
+    review_retry_exhausted: t.review_retry_exhausted,
   }));
 }
 
@@ -368,6 +372,7 @@ export function InitiativeDetailPage() {
                             compact
                           />
                         )}
+                        <ReviewRetryPill task={t} compact />
                       </div>
                     </td>
                     <td className="px-4 py-2 text-xs">
@@ -453,6 +458,7 @@ export function InitiativeDetailPage() {
                   }
                   pulse={focusedTask.is_active || focusedTask.state === "Running"}
                 />
+                <ReviewRetryPill task={focusedTask} />
               </div>
               {(isTerminalFailureState(focusedTask.state) ||
                 focusedTask.failure) && (
@@ -604,6 +610,43 @@ export function InitiativeDetailPage() {
         )}
       </section>
     </div>
+  );
+}
+
+function ReviewRetryPill({
+  task,
+  compact = false,
+}: {
+  task: TaskView;
+  compact?: boolean;
+}) {
+  const verdict = (task.review_verdict ?? "").toLowerCase();
+  const rejected =
+    verdict === "rejected" || verdict === "reject" || verdict === "atleastonerejected";
+  if (!rejected) return null;
+  const count = task.review_reject_count ?? 0;
+  const max = task.max_review_rejections ?? 0;
+  const exhausted = Boolean(task.review_retry_exhausted);
+  const label =
+    max > 0
+      ? `${exhausted ? "Review exhausted" : "Review rejected"} ${count}/${max}`
+      : exhausted
+        ? "Review exhausted"
+        : "Review rejected";
+  return (
+    <span
+      className={clsx(
+        "badge border-bad bg-bad-muted/30 text-bad",
+        compact && "text-[10px] px-1.5 py-0.5",
+      )}
+      title={
+        exhausted
+          ? "Reviewer rejection reached the retry ceiling; no automatic retry remains."
+          : "At least one reviewer rejected this artifact; a retry may still be admissible."
+      }
+    >
+      {label}
+    </span>
   );
 }
 
