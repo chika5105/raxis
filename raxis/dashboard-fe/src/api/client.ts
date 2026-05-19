@@ -401,14 +401,11 @@ export const dashboardApi = {
       snapshotId: string,
       kind: "diff" | "log" | "tree" | "porcelain",
       signal?: AbortSignal,
-    ): Promise<string> => {
-      const url = `/api/worktree-snapshots/${encodeURIComponent(snapshotId)}/blob/${kind}`;
-      const res = await fetch(url, signal ? { signal, credentials: "include" } : { credentials: "include" });
-      if (!res.ok) {
-        throw new Error(`worktree-snapshot blob ${kind} fetch failed: ${res.status}`);
-      }
-      return res.text();
-    },
+    ): Promise<string> =>
+      apiFetch<string>(
+        `/api/worktree-snapshots/${encodeURIComponent(snapshotId)}/blob/${kind}`,
+        { asText: true, ...(signal ? { signal } : {}) },
+      ),
   },
 
   sessions: {

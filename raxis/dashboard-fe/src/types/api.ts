@@ -948,6 +948,7 @@ export interface WorktreeListEntry {
   path: string;
   session_id: string | null;
   task_id: string | null;
+  initiative_id?: string | null;
   session_state?: string | null;
   observed_head_sha?: string | null;
   observed_branch?: string | null;
@@ -965,6 +966,7 @@ export interface WorktreeDetail extends WorktreeListEntry {
 
 export interface WorktreeLogEntry {
   sha: string;
+  parent_sha?: string | null;
   short_sha: string;
   author: string;
   subject: string;

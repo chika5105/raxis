@@ -29,10 +29,19 @@ export function TaskDetailPage() {
     refetchInterval: 4_000,
     enabled: id.length > 0,
   });
+  const initiativeId = q.data?.initiative_id ?? "";
+  const initiativeQ = useQuery({
+    queryKey: ["initiative", initiativeId],
+    queryFn: ({ signal }) => dashboardApi.initiatives.get(initiativeId, signal),
+    enabled: initiativeId.length > 0,
+    staleTime: 10_000,
+  });
 
   if (q.isPending) return <PageSpinner />;
   if (q.error) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
   const t = q.data;
+  const initiativeName =
+    initiativeQ.data?.display_name?.trim() || t.initiative_id;
 
   return (
     <div className="space-y-5">
@@ -43,9 +52,10 @@ export function TaskDetailPage() {
             <span>/</span>
             <Link
               to={`/initiatives/${t.initiative_id}`}
-              className="hover:text-accent font-mono"
+              className="hover:text-accent"
+              title={t.initiative_id}
             >
-              {t.initiative_id}
+              {initiativeName}
             </Link>
             <span>/</span>
             {/* INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01:
@@ -57,6 +67,11 @@ export function TaskDetailPage() {
               {taskDisplayId(t.task_id, t.initiative_id)}
             </Mono>
             <CopyButton value={t.task_id} />
+          </div>
+          <div className="mt-1 flex items-center gap-2 text-[11px] text-ink-subtle">
+            <span>Initiative</span>
+            <Mono>{t.initiative_id}</Mono>
+            <CopyButton value={t.initiative_id} />
           </div>
           <h1 className="mt-1 text-xl font-semibold text-ink text-balance">
             {t.title}

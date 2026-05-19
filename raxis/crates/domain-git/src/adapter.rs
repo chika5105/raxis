@@ -307,6 +307,12 @@ impl DomainAdapter for GitAdapter {
             Err(MainMergeError::RefUpdateFailed(reason)) => Err(DomainError::Transient(format!(
                 "ref update failed: {reason}"
             ))),
+            Err(MainMergeError::WorktreeRefreshFailed { path, reason }) => {
+                Err(DomainError::Transient(format!(
+                    "worktree refresh at {} failed: {reason}",
+                    path.display(),
+                )))
+            }
             Err(MainMergeError::InvalidSha { sha, reason }) => Err(
                 DomainError::PreconditionFailed(format!("invalid commit_sha {sha}: {reason}")),
             ),

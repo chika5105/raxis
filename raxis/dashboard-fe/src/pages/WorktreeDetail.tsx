@@ -11,8 +11,8 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
 import { RepoBrowser } from "@/components/RepoBrowser";
 import { RepoFileTree } from "@/components/RepoFileTree";
-import { PageSpinner } from "@/components/Spinner";
-import { fmtRelative, plural, shortSha } from "@/lib/format";
+import { PageSpinner, Spinner } from "@/components/Spinner";
+import { fmtAbsolute, fmtRelative, plural, shortSha } from "@/lib/format";
 
 type Tab = "files" | "browse" | "log" | "diff" | "range";
 
@@ -44,6 +44,7 @@ export function WorktreeDetailPage() {
   const [tab, setTab] = useState<Tab>("files");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [expandedCommit, setExpandedCommit] = useState<string | null>(null);
   // Used by the "Files" tab to scroll the matching FileDiff
   // into view in the inline diff list when the operator picks
   // a file in the tree.
@@ -257,21 +258,17 @@ export function WorktreeDetailPage() {
           ) : (
             <ul className="card p-0 overflow-hidden divide-y divide-edge/40">
               {log.data.map((c) => (
-                <li
+                <CommitLogRow
                   key={c.sha}
-                  className="px-4 py-2.5 flex items-center gap-3 hover:bg-panel-high"
-                >
-                  <Mono className="text-ink-muted w-20 text-right">
-                    {c.short_sha}
-                  </Mono>
-                  <span className="flex-1 text-sm text-ink truncate">
-                    {c.subject}
-                  </span>
-                  <span className="text-xs text-ink-subtle">{c.author}</span>
-                  <span className="text-xs text-ink-subtle">
-                    {fmtRelative(c.at)}
-                  </span>
-                </li>
+                  worktreeName={w.name}
+                  commit={c}
+                  expanded={expandedCommit === c.sha}
+                  onToggle={() =>
+                    setExpandedCommit((current) =>
+                      current === c.sha ? null : c.sha,
+                    )
+                  }
+                />
               ))}
             </ul>
           )}
@@ -323,6 +320,117 @@ export function WorktreeDetailPage() {
         </>
       )}
     </div>
+  );
+}
+
+type WorktreeLogData = Awaited<ReturnType<typeof dashboardApi.git.log>>;
+type WorktreeLogCommit = WorktreeLogData[number];
+
+function CommitLogRow({
+  worktreeName,
+  commit,
+  expanded,
+  onToggle,
+}: {
+  worktreeName: string;
+  commit: WorktreeLogCommit;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const canDiff =
+    commit.parent_sha != null &&
+    commit.parent_sha.length === 40 &&
+    commit.sha.length === 40;
+  const diff = useQuery({
+    queryKey: ["worktree-commit-diff", worktreeName, commit.sha],
+    queryFn: ({ signal }) =>
+      dashboardApi.git.diffRange(
+        worktreeName,
+        commit.parent_sha ?? "",
+        commit.sha,
+        signal,
+      ),
+    enabled: expanded && canDiff,
+    staleTime: Infinity,
+    retry: false,
+  });
+
+  return (
+    <li className="hover:bg-panel-high">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full px-4 py-2.5 text-left flex items-center gap-3 cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+        aria-expanded={expanded}
+        aria-label={`${expanded ? "Collapse" : "Expand"} commit ${commit.short_sha}`}
+      >
+        <span
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border border-edge bg-panel text-xs font-semibold text-ink-subtle"
+          aria-hidden="true"
+        >
+          {expanded ? "-" : "+"}
+        </span>
+        <Mono className="text-accent w-20 text-right">{commit.short_sha}</Mono>
+        <span className="flex-1 text-sm text-ink truncate">
+          {commit.subject || "(no commit subject)"}
+        </span>
+        <span className="text-xs text-ink-subtle truncate max-w-[18rem]">
+          {commit.author}
+        </span>
+        <span
+          className="text-xs text-ink-subtle whitespace-nowrap"
+          title={fmtAbsolute(commit.at)}
+        >
+          {fmtRelative(commit.at)}
+        </span>
+        <span className="badge bg-info-muted/20 border-info text-info">
+          {expanded ? "Hide diff" : canDiff ? "View diff" : "Details"}
+        </span>
+      </button>
+      {expanded && (
+        <div className="border-t border-edge/40 bg-panel px-4 py-3 space-y-3">
+          <dl className="grid grid-cols-1 md:grid-cols-3 gap-2 text-[11px]">
+            <Row
+              label="Commit"
+              value={
+                <span className="font-mono text-ink-muted flex items-center gap-1 min-w-0">
+                  <span className="truncate">{commit.sha}</span>
+                  <CopyButton value={commit.sha} />
+                </span>
+              }
+            />
+            <Row
+              label="Parent"
+              value={
+                commit.parent_sha ? (
+                  <span className="font-mono text-ink-muted flex items-center gap-1 min-w-0">
+                    <span className="truncate">{commit.parent_sha}</span>
+                    <CopyButton value={commit.parent_sha} />
+                  </span>
+                ) : (
+                  "—"
+                )
+              }
+            />
+            <Row label="Committed" value={fmtAbsolute(commit.at)} />
+          </dl>
+          {!canDiff ? (
+            <div className="rounded border border-edge bg-panel-high px-3 py-2 text-sm text-ink-muted">
+              This commit has no parent diff to expand.
+            </div>
+          ) : diff.isPending ? (
+            <div className="flex items-center gap-2 rounded border border-edge bg-panel-high px-3 py-2 text-sm text-ink-muted">
+              <Spinner className="h-4 w-4" label="Loading commit diff" />
+              Loading commit diff...
+            </div>
+          ) : diff.error ? (
+            <ErrorBox error={diff.error} onRetry={() => diff.refetch()} />
+          ) : (
+            <DiffView diff={diff.data} />
+          )}
+        </div>
+      )}
+    </li>
   );
 }
 
@@ -487,7 +595,7 @@ function DiffErrorOrEmpty({
             </>
           ) : (
             <>
-              The main operator-allowed root tracks{" "}
+              The main repository root tracks{" "}
               <code className="font-mono">origin/main</code> directly. Use the{" "}
               <strong>Range diff</strong> tab to compare two arbitrary commits
               in this worktree.
@@ -534,7 +642,7 @@ function WorktreeLifecyclePill({
       )}
       title={
         lifecycle === "root"
-          ? "Operator-allowed repository root"
+          ? "Repository root"
           : sessionState
             ? `Owning session is ${sessionState}`
             : "Owning session lifecycle was not recorded"

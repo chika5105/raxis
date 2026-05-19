@@ -1430,6 +1430,10 @@ pub struct WorktreeListEntry {
     pub session_id: Option<String>,
     /// Owning task id when `kind == "Session"`, else `None`.
     pub task_id: Option<String>,
+    /// Owning initiative id when known. Session worktrees derive this
+    /// from the bound task / session row; main roots leave it empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiative_id: Option<String>,
     /// Derived session lifecycle state (`Active`, `Revoked`,
     /// `Expired`) when `kind == "Session"`, else `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1479,6 +1483,10 @@ pub struct WorktreeDetail {
 pub struct WorktreeLogEntry {
     /// 40-char hex commit SHA.
     pub sha: String,
+    /// First-parent commit SHA, if this commit has a parent. `None`
+    /// for root commits or when Git did not return a parseable parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_sha: Option<String>,
     /// Short SHA (first 8 chars).
     pub short_sha: String,
     /// `<author name> <author email>`.
@@ -4042,6 +4050,7 @@ mod tests {
             path: "/srv/work/raxis".into(),
             session_id: None,
             task_id: None,
+            initiative_id: None,
             session_state: None,
             observed_head_sha: None,
             observed_branch: None,
@@ -4058,6 +4067,7 @@ mod tests {
         };
         let log = vec![WorktreeLogEntry {
             sha: to.clone(),
+            parent_sha: Some(from.clone()),
             short_sha: to[..8].into(),
             author: "alice <alice@example>".into(),
             subject: "first".into(),

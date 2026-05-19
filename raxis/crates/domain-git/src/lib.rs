@@ -54,12 +54,14 @@
 //!   descends from `base_sha` BEFORE Phase 2 runs (Check 3 in the
 //!   admission pipeline).
 //! ## Failure handling
-//! Every public function is fail-closed: a transient I/O error
-//! returns a typed `MainMergeError` and leaves the main ODB +
-//! refs untouched at any partial state the underlying gix call
-//! would have produced. The kernel's recovery path
-//! (`integration-merge.md §11.3`) re-invokes both calls on next
-//! boot if Phase 2 was incomplete; both are safe to retry.
+//! Every public function is retry-safe: a transient I/O error
+//! returns a typed `MainMergeError`. Failures before the ref
+//! transaction leave refs untouched; a failure while refreshing the
+//! checked-out worktree can leave the target ref advanced but the
+//! index/worktree stale. The kernel's recovery path
+//! (`integration-merge.md §11.3`) re-invokes this operation on
+//! next boot; the idempotency short-circuit refreshes the worktree
+//! again when the ref already points at the target SHA.
 //! ## Invariants
 //! * **INV-MERGE-CONSISTENCY** — structurally enforced by the
 //!   gix-driven object-copy + ref-update sequence: the
@@ -71,6 +73,12 @@
 //!   advances the target ref past an unfetched commit because
 //!   `fetch_into_main` runs first and copies the full commit
 //!   graph before `update_target_ref` is invoked.
+//! * **INV-MERGE-WORKTREE-CONSISTENCY** — when the target ref is
+//!   the currently checked-out branch, Phase 2 refreshes the main
+//!   repository's index and working tree to the accepted commit
+//!   after the ref transaction. This keeps dashboard review and
+//!   post-merge inspection from seeing a dirty tree full of
+//!   apparent deletions after a successful fast-forward.
 //! * **INV-MERGE-WORKTREE-RETAIN** — structurally enforced by
 //!   absence: this crate exposes no worktree cleanup or
 //!   removal entry point. Successful Phase 2 leaves
@@ -139,6 +147,16 @@ pub enum MainMergeError {
     /// read-only.
     #[error("ref update failed: {0}")]
     RefUpdateFailed(String),
+
+    /// The target ref advanced but refreshing the checked-out
+    /// worktree/index to the new commit failed.
+    #[error("worktree refresh at {path} failed: {reason}")]
+    WorktreeRefreshFailed {
+        /// Repository root whose working tree was being refreshed.
+        path: PathBuf,
+        /// Underlying git error.
+        reason: String,
+    },
 
     /// The supplied SHA is not a valid 40-char hex string.
     #[error("invalid commit SHA {sha}: {reason}")]
@@ -218,6 +236,7 @@ pub fn commit_merge_to_target_ref(
 
     // Idempotency short-circuit: target ref already at the SHA.
     if previous.as_ref().map(|p| p == &oid).unwrap_or(false) {
+        refresh_checked_out_worktree(main_repo_root, &oid, target_ref)?;
         return Ok(MainAdvance {
             previous_sha: previous.as_ref().map(|p| p.to_string()),
             current_sha: oid.to_string(),
@@ -240,6 +259,7 @@ pub fn commit_merge_to_target_ref(
 
     // Phase 2b — atomically advance the target ref to oid.
     update_target_ref(&main_repo, &oid, previous.as_ref(), target_ref)?;
+    refresh_checked_out_worktree(main_repo_root, &oid, target_ref)?;
 
     Ok(MainAdvance {
         previous_sha: previous.as_ref().map(|p| p.to_string()),
@@ -502,6 +522,49 @@ pub fn update_target_ref(
 
     repo.edit_reference(edit)
         .map_err(|e| MainMergeError::RefUpdateFailed(format!("edit_reference: {e}")))?;
+    Ok(())
+}
+
+fn refresh_checked_out_worktree(
+    main_repo_root: &Path,
+    oid: &gix::ObjectId,
+    target_ref: &str,
+) -> Result<(), MainMergeError> {
+    let head_ref = std::process::Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .current_dir(main_repo_root)
+        .output()
+        .map_err(|e| MainMergeError::WorktreeRefreshFailed {
+            path: main_repo_root.to_path_buf(),
+            reason: format!("git symbolic-ref spawn failed: {e}"),
+        })?;
+    if !head_ref.status.success() {
+        return Ok(());
+    }
+    let checked_out_ref = String::from_utf8_lossy(&head_ref.stdout).trim().to_owned();
+    if checked_out_ref != target_ref {
+        return Ok(());
+    }
+
+    let oid_s = oid.to_string();
+    let reset = std::process::Command::new("git")
+        .args(["reset", "--hard", oid_s.as_str()])
+        .current_dir(main_repo_root)
+        .output()
+        .map_err(|e| MainMergeError::WorktreeRefreshFailed {
+            path: main_repo_root.to_path_buf(),
+            reason: format!("git reset --hard spawn failed: {e}"),
+        })?;
+    if !reset.status.success() {
+        return Err(MainMergeError::WorktreeRefreshFailed {
+            path: main_repo_root.to_path_buf(),
+            reason: format!(
+                "git reset --hard exited {:?}: {}",
+                reset.status.code(),
+                String::from_utf8_lossy(&reset.stderr)
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -799,6 +862,21 @@ mod tests {
         .trim()
         .to_owned();
         assert_eq!(head, merge, "main must fast-forward to the merge commit");
+        let readme = std::fs::read_to_string(main.join("README.md")).unwrap();
+        assert_eq!(
+            readme, "v1\nv2\n",
+            "checked-out main worktree must reflect the fast-forwarded commit"
+        );
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&main)
+            .output()
+            .unwrap();
+        assert!(
+            status.stdout.is_empty(),
+            "checked-out main worktree must stay clean after fast-forward, got {}",
+            String::from_utf8_lossy(&status.stdout)
+        );
     }
 
     #[test]
@@ -811,6 +889,7 @@ mod tests {
 
         let first = commit_merge_to_main(&main, &orch, &merge).unwrap();
         assert!(!first.already_at_target);
+        std::fs::write(main.join("README.md"), "local-drift\n").unwrap();
 
         // Re-run — idempotency guard: returns already_at_target.
         let second = commit_merge_to_main(&main, &orch, &merge).unwrap();
@@ -821,6 +900,11 @@ mod tests {
         );
         assert_eq!(second.previous_sha.as_deref(), Some(merge.as_str()));
         assert_eq!(second.current_sha, merge);
+        let readme = std::fs::read_to_string(main.join("README.md")).unwrap();
+        assert_eq!(
+            readme, "v1\nv2\n",
+            "idempotent replay must also heal a stale checked-out worktree"
+        );
         let _ = base;
     }
 

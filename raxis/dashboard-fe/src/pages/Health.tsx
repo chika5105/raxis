@@ -238,8 +238,12 @@ function SubsystemCard({ card }: { card: SubsystemHealthCard }) {
         <dl className="text-[11px] text-ink-muted space-y-0.5">
           {card.details.map((row) => (
             <div key={row.label} className="flex gap-2">
-              <dt className="shrink-0 text-ink-subtle">{row.label}:</dt>
-              <dd className="truncate">{row.value}</dd>
+              <dt className="shrink-0 text-ink-subtle">
+                {cleanSubsystemDetailLabel(row.label)}:
+              </dt>
+              <dd className="truncate">
+                {formatSubsystemDetailValue(row.label, row.value)}
+              </dd>
             </div>
           ))}
         </dl>
@@ -264,6 +268,24 @@ function SubsystemCard({ card }: { card: SubsystemHealthCard }) {
       </footer>
     </article>
   );
+}
+
+function cleanSubsystemDetailLabel(label: string): string {
+  return label.replace(/\s*\(unix-s\)\s*/gi, "").trim();
+}
+
+function formatSubsystemDetailValue(label: string, value: string): string {
+  const raw = value.trim();
+  if (
+    /\b(unix|heartbeat|booted|observed)\b/i.test(label) &&
+    /^\d{10}$/.test(raw)
+  ) {
+    const ts = Number(raw);
+    if (Number.isFinite(ts) && ts > 0) {
+      return `${fmtRelative(ts)} · ${fmtAbsolute(ts)}`;
+    }
+  }
+  return value;
 }
 
 /// Visible witness that the page IS polling — without this an

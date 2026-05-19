@@ -321,7 +321,7 @@ pub fn ahead_behind(root: &Path, base: &str) -> Option<(u32, u32)> {
     }
 }
 
-/// `git log -n <limit> --pretty=format:%H%x09%an <%ae>%x09%ct%x09%s`.
+/// `git log -n <limit> --pretty=format:%H%x09%P%x09%an <%ae>%x09%ct%x09%s`.
 /// Returns log entries newest-first.
 ///
 /// The timestamp is the **committer** unix timestamp (`%ct`), not
@@ -366,7 +366,7 @@ fn log_entries_inner(
     args.extend([
         "-n",
         &limit_str,
-        "--pretty=format:%H%x09%an <%ae>%x09%ct%x09%s",
+        "--pretty=format:%H%x09%P%x09%an <%ae>%x09%ct%x09%s",
     ]);
     let (stdout, stderr, code) = run_git(&args, root)?;
     if code != 0 {
@@ -382,8 +382,15 @@ fn log_entries_inner(
     }
     let mut out = Vec::new();
     for line in stdout.lines() {
-        let mut parts = line.splitn(4, '\t');
+        let mut parts = line.splitn(5, '\t');
         let sha = parts.next().unwrap_or("").to_owned();
+        let parent_sha = parts
+            .next()
+            .unwrap_or("")
+            .split_ascii_whitespace()
+            .next()
+            .map(str::to_owned)
+            .filter(|p| p.len() == 40 && p.bytes().all(|b| b.is_ascii_hexdigit()));
         let author = parts.next().unwrap_or("").to_owned();
         let at = parts.next().unwrap_or("0").parse::<i64>().unwrap_or(0);
         let subject = parts.next().unwrap_or("").to_owned();
@@ -393,6 +400,7 @@ fn log_entries_inner(
         let short_sha = sha[..8].to_owned();
         out.push(WorktreeLogEntry {
             sha,
+            parent_sha,
             short_sha,
             author,
             subject,

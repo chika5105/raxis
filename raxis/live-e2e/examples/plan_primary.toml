@@ -652,10 +652,13 @@ captured output from a committed artifact you produce here.
    exit code in a single file at the fixed path
    `out/lint/check-rust.txt`:
    ```bash
+   export PATH="/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+   cargo_bin="$(command -v cargo)"
+   status=0
    {
-     cargo fmt --all -- --check 2>&1
-     cargo clippy --all-targets -- -D warnings 2>&1
-     echo "raxis_check_sh_exit_code=$?"
+     "$cargo_bin" fmt --all -- --check 2>&1 || status=$?
+     "$cargo_bin" clippy --all-targets -- -D warnings 2>&1 || status=$?
+     echo "raxis_check_sh_exit_code=$status"
    } > out/lint/check-rust.txt
    ```
 3. `git add out/lint/check-rust.txt`

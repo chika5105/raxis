@@ -9,6 +9,7 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
 import { Spinner } from "@/components/Spinner";
 import { fmtAbsolute, fmtRelative } from "@/lib/format";
+import { toneClasses, type StateBadgeTone } from "@/lib/state-color";
 import type { WorktreeSnapshotView } from "@/types/api";
 
 /// `<TaskWorktreeSnapshots>` — iter68.
@@ -79,7 +80,11 @@ export function TaskWorktreeSnapshots({ taskId }: { taskId: string }) {
       ) : (
         <ul className="space-y-2">
           {rows.map((s) => (
-            <SnapshotRow key={s.snapshot_id} snapshot={s} />
+            <SnapshotRow
+              key={s.snapshot_id}
+              snapshot={s}
+              currentTaskId={taskId}
+            />
           ))}
         </ul>
       )}
@@ -87,8 +92,16 @@ export function TaskWorktreeSnapshots({ taskId }: { taskId: string }) {
   );
 }
 
-function SnapshotRow({ snapshot }: { snapshot: WorktreeSnapshotView }) {
+function SnapshotRow({
+  snapshot,
+  currentTaskId,
+}: {
+  snapshot: WorktreeSnapshotView;
+  currentTaskId: string;
+}) {
   const [open, setOpen] = useState(false);
+  const isRelatedSnapshot =
+    snapshot.task_id.length > 0 && snapshot.task_id !== currentTaskId;
   return (
     <li className="border border-edge rounded">
       <button
@@ -109,10 +122,18 @@ function SnapshotRow({ snapshot }: { snapshot: WorktreeSnapshotView }) {
           )}
           {snapshot.diff_truncated && (
             <span
-              className="badge bg-warning-muted/40 border-warning text-warning"
+              className={`badge ${toneClasses("warn")}`}
               title={`Diff was truncated at 1 MiB cap. Original size: ${snapshot.diff_bytes_total} bytes.`}
             >
               diff truncated
+            </span>
+          )}
+          {isRelatedSnapshot && (
+            <span
+              className="badge bg-info-muted/30 border-info text-info"
+              title="Captured on the related initiative/session row for this task."
+            >
+              related
             </span>
           )}
         </div>
@@ -121,7 +142,9 @@ function SnapshotRow({ snapshot }: { snapshot: WorktreeSnapshotView }) {
         </span>
       </button>
 
-      {open && <SnapshotDetail snapshot={snapshot} />}
+      {open && (
+        <SnapshotDetail snapshot={snapshot} currentTaskId={currentTaskId} />
+      )}
     </li>
   );
 }
@@ -131,24 +154,25 @@ function TriggerBadge({ trigger }: { trigger: string }) {
   // trigger the operator MUST trust as terminal-state-of-tree.
   // Pass / Fail / Inconclusive flow the witness-verdict colour
   // language so the timeline reads at a glance.
-  const klass = (() => {
-    switch (trigger) {
-      case "WitnessPass":
-        return "bg-success-muted/40 border-success text-success";
-      case "WitnessFail":
-        return "bg-danger-muted/40 border-danger text-danger";
-      case "WitnessInconclusive":
-        return "bg-warning-muted/40 border-warning text-warning";
-      case "PreGc":
-        return "bg-accent-muted/40 border-accent text-accent";
-      default:
-        return "bg-panel-high border-edge text-ink-muted";
-    }
-  })();
-  return <span className={`badge ${klass}`}>{trigger}</span>;
+  const tone = SNAPSHOT_TRIGGER_TONE[trigger] ?? "muted";
+  return <span className={`badge ${toneClasses(tone)}`}>{trigger}</span>;
 }
 
-function SnapshotDetail({ snapshot }: { snapshot: WorktreeSnapshotView }) {
+const SNAPSHOT_TRIGGER_TONE: Record<string, StateBadgeTone> = {
+  WitnessPass: "ok",
+  WitnessFail: "bad",
+  WitnessInconclusive: "warn",
+  IntegrationMerge: "info",
+  PreGc: "info",
+};
+
+function SnapshotDetail({
+  snapshot,
+  currentTaskId,
+}: {
+  snapshot: WorktreeSnapshotView;
+  currentTaskId: string;
+}) {
   type Kind = "diff" | "log" | "tree" | "porcelain";
   const available = useMemo(() => {
     const out: Kind[] = [];
@@ -180,6 +204,12 @@ function SnapshotDetail({ snapshot }: { snapshot: WorktreeSnapshotView }) {
           <CopyButton value={snapshot.head_sha} />
         </Field>
         <Field label="Commits">{snapshot.commit_count}</Field>
+        {snapshot.task_id && (
+          <Field label={snapshot.task_id === currentTaskId ? "Task" : "Related task"}>
+            <Mono className="truncate">{snapshot.task_id}</Mono>
+            <CopyButton value={snapshot.task_id} />
+          </Field>
+        )}
         {snapshot.session_id && (
           <Field label="Session">
             <Mono className="truncate">{snapshot.session_id}</Mono>
@@ -196,7 +226,7 @@ function SnapshotDetail({ snapshot }: { snapshot: WorktreeSnapshotView }) {
 
       {available.length === 0 ? (
         <p className="text-[11px] text-ink-subtle">
-          This snapshot captured no body bodies — the worktree had
+          This snapshot captured no body blobs — the worktree had
           no diff, log, tree-listing, or uncommitted changes at
           this point in time.
         </p>

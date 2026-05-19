@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import clsx from "clsx";
@@ -21,10 +21,18 @@ export function GitPage() {
   const [scope, setScope] = useState<WorktreeScope>("all");
   const [lifecycleScope, setLifecycleScope] =
     useState<LifecycleScope>("all");
+  const [collapsedGroups, setCollapsedGroups] = useState<
+    Record<string, boolean>
+  >({});
   const q = useQuery({
     queryKey: ["worktrees"],
     queryFn: ({ signal }) => dashboardApi.git.list(signal),
     refetchInterval: 10_000,
+  });
+  const initiatives = useQuery({
+    queryKey: ["initiatives", "git-worktree-labels"],
+    queryFn: ({ signal }) => dashboardApi.initiatives.list({ limit: 500 }, signal),
+    staleTime: 30_000,
   });
 
   const items = q.data ?? EMPTY_WORKTREES;
@@ -43,6 +51,7 @@ export function GitPage() {
         w.path,
         w.session_id ?? "",
         w.task_id ?? "",
+        w.initiative_id ?? "",
         w.session_state ?? "",
         w.base_sha ?? "",
       ]
@@ -51,6 +60,17 @@ export function GitPage() {
         .includes(needle);
     });
   }, [items, scope, lifecycleScope, search]);
+  const initiativeNames = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const i of initiatives.data ?? []) {
+      map.set(i.initiative_id, i.display_name || i.initiative_id);
+    }
+    return map;
+  }, [initiatives.data]);
+  const grouped = useMemo(
+    () => groupWorktrees(filtered, initiativeNames),
+    [filtered, initiativeNames],
+  );
   const sessionCount = items.filter((w) => w.kind !== "Main").length;
   const liveSessionCount = items.filter(
     (w) => worktreeLifecycle(w) === "live",
@@ -178,9 +198,47 @@ export function GitPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((w) => {
-                const href = `/git/${encodeURIComponent(w.name)}`;
-                return (
+              {grouped.map((group) => (
+                <Fragment key={group.key}>
+                  <tr className="border-t border-edge/60 bg-panel-high/70">
+                    <td colSpan={8} className="px-4 py-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCollapsedGroups((prev) => ({
+                            ...prev,
+                            [group.key]: !prev[group.key],
+                          }))
+                        }
+                        className="w-full flex items-center justify-between gap-3 text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-accent rounded-sm"
+                      >
+                        <span className="flex items-center gap-2 min-w-0">
+                          <span
+                            className="text-ink-subtle w-4 text-center"
+                            aria-hidden="true"
+                          >
+                            {collapsedGroups[group.key] ? "▸" : "▾"}
+                          </span>
+                          <span className="font-medium text-ink truncate">
+                            {group.label}
+                          </span>
+                          {group.initiativeId && (
+                            <Mono className="text-[11px] text-ink-subtle truncate">
+                              {group.initiativeId}
+                            </Mono>
+                          )}
+                        </span>
+                        <span className="badge bg-panel border-edge text-ink-muted">
+                          {group.items.length}{" "}
+                          {group.items.length === 1 ? "worktree" : "worktrees"}
+                        </span>
+                      </button>
+                    </td>
+                  </tr>
+                  {!collapsedGroups[group.key] &&
+                    group.items.map((w) => {
+                      const href = `/git/${encodeURIComponent(w.name)}`;
+                      return (
                   <tr
                     key={w.name}
                     tabIndex={0}
@@ -279,14 +337,64 @@ export function GitPage() {
                       </Link>
                     </td>
                   </tr>
-                );
-              })}
+                      );
+                    })}
+                </Fragment>
+              ))}
             </tbody>
           </table>
         </div>
       )}
     </div>
   );
+}
+
+interface WorktreeGroup {
+  key: string;
+  label: string;
+  initiativeId?: string;
+  items: WorktreeListEntry[];
+}
+
+function groupWorktrees(
+  worktrees: WorktreeListEntry[],
+  initiativeNames: Map<string, string>,
+): WorktreeGroup[] {
+  const groups = new Map<string, WorktreeGroup>();
+  for (const w of worktrees) {
+    const key =
+      w.kind === "Main"
+        ? "__main"
+        : w.initiative_id
+          ? `initiative:${w.initiative_id}`
+          : "__unscoped";
+    let group = groups.get(key);
+    if (!group) {
+      const initiativeName = w.initiative_id
+        ? initiativeNames.get(w.initiative_id)
+        : undefined;
+      group = {
+        key,
+        label:
+          key === "__main"
+            ? "Main repository"
+            : key === "__unscoped"
+              ? "Unscoped sessions"
+              : initiativeName || "Initiative",
+        initiativeId: w.initiative_id ?? undefined,
+        items: [],
+      };
+      groups.set(key, group);
+    }
+    group.items.push(w);
+  }
+  return [...groups.values()].sort((a, b) => {
+    if (a.key === "__main") return -1;
+    if (b.key === "__main") return 1;
+    if (a.key === "__unscoped") return 1;
+    if (b.key === "__unscoped") return -1;
+    return a.label.localeCompare(b.label);
+  });
 }
 
 function worktreeLifecycle(
@@ -341,7 +449,7 @@ function WorktreeLifecyclePill({
       )}
       title={
         lifecycle === "root"
-          ? "Operator-allowed repository root"
+          ? "Repository root"
           : worktree.session_state
             ? `Owning session is ${worktree.session_state}`
             : "Owning session lifecycle was not recorded"

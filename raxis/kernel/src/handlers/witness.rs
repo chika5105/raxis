@@ -619,12 +619,16 @@ async fn handle_inner(
     // landed. The trigger variant carries the verdict class so
     // an operator scanning the dashboard timeline can pivot on
     // "show me every worktree state at every gate failure". The
-    // worktree root is resolved through `resolve_worktree_root`
-    // (the same path `gate_recheck` uses for path-touch
-    // derivation) so a snapshot taken here always reflects what
-    // the gate evaluator saw. Best-effort: snapshot failure is
-    // structured-logged but does NOT block the gate-recheck
-    // pipeline; only `PreGc` is hard-required.
+    // worktree root normally resolves through `resolve_worktree_root`
+    // (the same path `gate_recheck` uses for path-touch derivation).
+    // Integration-merge witnesses are different: the verifier
+    // approves an evaluation SHA before the host-side target ref is
+    // fast-forwarded, so neither the orchestrator worktree HEAD nor
+    // `<data_dir>/repositories/main` necessarily points at the
+    // approved tree yet. Those snapshots are deferred to the
+    // IntegrationMerge success path, after the fast-forward lands.
+    // Best-effort: snapshot failure is structured-logged but does
+    // NOT block the gate-recheck pipeline; only `PreGc` is hard-required.
     {
         let trigger = match result_class {
             ResultClass::Pass => crate::worktree_snapshot::SnapshotTrigger::WitnessPass,
@@ -633,31 +637,39 @@ async fn handle_inner(
                 crate::worktree_snapshot::SnapshotTrigger::WitnessInconclusive
             }
         };
-        if let Some(base_sha) = task_row.base_sha.clone() {
-            let worktree_root = match resolve_worktree_root_on_blocking_pool(
+        let integration_merge_witness = sub.task_id.as_str() == task_row.initiative_id;
+        if integration_merge_witness {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"WorktreeSnapshotDeferred\",\
+                 \"trigger\":\"{}\",\"task_id\":\"{}\",\
+                 \"reason\":\"integration_merge_snapshot_after_fast_forward\"}}",
+                trigger.as_sql_str(),
+                sub.task_id.as_str(),
+            );
+        } else if let Some(base_sha) = task_row.base_sha.clone() {
+            let (worktree_root, session_for_snap) = match resolve_worktree_root_on_blocking_pool(
                 task_row.session_id.clone(),
                 ctx.store.clone(),
                 ctx.data_dir.clone(),
             )
             .await
             {
-                Ok(path) => Some(path),
+                Ok(path) => (Some(path), task_row.session_id.clone()),
                 Err(e) => {
                     eprintln!(
                         "{{\"level\":\"warn\",\"event\":\"WorktreeSnapshotRootResolveFailed\",\
-                         \"trigger\":\"{}\",\"task_id\":\"{}\",\"error\":\"{}\"}}",
+                             \"trigger\":\"{}\",\"task_id\":\"{}\",\"error\":\"{}\"}}",
                         trigger.as_sql_str(),
                         sub.task_id.as_str(),
                         e,
                     );
-                    None
+                    (None, task_row.session_id.clone())
                 }
             };
             if let Some(worktree_root) = worktree_root {
                 let store_for_snap = ctx.store.clone();
                 let data_dir_for_snap = ctx.data_dir.clone();
                 let task_id_for_snap = sub.task_id.as_str().to_owned();
-                let session_for_snap = task_row.session_id.clone();
                 let initiative_for_snap = task_row.initiative_id.clone();
                 let snap_res = tokio::task::spawn_blocking(move || {
                     crate::worktree_snapshot::snapshot_worktree(

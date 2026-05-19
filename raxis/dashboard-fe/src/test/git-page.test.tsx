@@ -34,6 +34,7 @@ function worktree(over: Partial<WorktreeListEntry>): WorktreeListEntry {
     path: "/tmp/raxis/worktrees/session-live",
     session_id: "session-live-1234567890",
     task_id: "task-live",
+    initiative_id: "init-a",
     session_state: "Active",
     observed_head_sha: null,
     observed_branch: null,

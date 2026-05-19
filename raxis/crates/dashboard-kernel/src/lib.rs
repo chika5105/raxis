@@ -1368,12 +1368,16 @@ impl DashboardData for KernelDashboardData {
     ) -> Result<Vec<raxis_dashboard::data::WorktreeSnapshotView>, ApiError> {
         let conn = self.open_ro()?;
         let sql = format!(
-            "SELECT snapshot_id, task_id, session_id, initiative_id, \
+            "SELECT DISTINCT snapshot_id, task_id, session_id, initiative_id, \
                     trigger, taken_at, base_sha, head_sha, commit_count, \
                     diff_blob_sha256, log_blob_sha256, tree_blob_sha256, \
                     porcelain_blob_sha256, diff_bytes_total, diff_truncated \
              FROM {TBL_WORKTREE_SNAPSHOTS} \
              WHERE task_id = ?1 \
+                OR (session_id IS NOT NULL \
+                    AND session_id = (SELECT session_id FROM {TBL_TASKS} WHERE task_id = ?1)) \
+                OR (task_id = (SELECT initiative_id FROM {TBL_TASKS} WHERE task_id = ?1) \
+                    AND initiative_id = (SELECT initiative_id FROM {TBL_TASKS} WHERE task_id = ?1)) \
              ORDER BY taken_at DESC, snapshot_id DESC"
         );
         let mut stmt = conn.prepare(&sql).map_err(|e| ApiError::Internal {
@@ -1676,17 +1680,22 @@ impl DashboardData for KernelDashboardData {
             .collect();
         let session_ids: Vec<String> = rows.iter().map(|s| s.session_id.clone()).collect();
         let owning_by_session = owning_tasks_for_sessions(&conn, &session_ids);
+        let role_by_session = session_agent_types_for_sessions(&conn, &session_ids);
         Ok(rows
             .into_iter()
             .map(|s| {
                 let state = session_row_state(&s);
+                let role = role_by_session
+                    .get(&s.session_id)
+                    .cloned()
+                    .unwrap_or_else(|| s.role_id.clone());
                 let owning = owning_by_session
                     .get(&s.session_id)
                     .cloned()
                     .unwrap_or_default();
                 let view = SessionView {
                     session_id: s.session_id,
-                    role: s.role_id,
+                    role,
                     initiative_id: None,
                     task_id: None,
                     state,
@@ -1788,9 +1797,11 @@ impl DashboardData for KernelDashboardData {
             .task_id
             .as_deref()
             .and_then(|tid| cumulative_tokens_for_task(self.task_llm_capture.as_ref(), tid));
+        let role = session_agent_type_for_session(&conn, s.session_id.as_str())
+            .unwrap_or_else(|| s.role_id.clone());
         let view = SessionView {
             session_id: s.session_id,
-            role: s.role_id,
+            role,
             initiative_id: None,
             task_id: None,
             state,
@@ -3567,38 +3578,35 @@ impl KernelDashboardData {
     ///     `<short-id>` is the first 12 hex chars of the
     ///     session id (or the whole session id if shorter).
     fn collect_worktrees(&self) -> Result<Vec<ResolvedWorktree>, ApiError> {
-        let bundle = self.policy.load_full();
         let mut out = Vec::new();
+        let main_repo_path = self.internal_main_repo_path();
+        out.push(main_worktree_entry(
+            "main-repository".to_owned(),
+            "repositories/main".to_owned(),
+            main_repo_path.clone(),
+        ));
+        let bundle = self.policy.load_full();
         for (idx, raw) in bundle.allowed_worktree_roots().iter().enumerate() {
             let path = raw.trim_end_matches('/').to_owned();
+            if same_display_path(&path, &main_repo_path) {
+                continue;
+            }
             let label = std::path::Path::new(&path)
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.clone());
-            let observed = std::path::Path::new(&path)
-                .exists()
-                .then(|| git::probe_worktree_summary(std::path::Path::new(&path), None));
-            out.push(ResolvedWorktree {
-                summary: WorktreeListEntry {
-                    name: format!("main-{idx}"),
-                    label: if label.is_empty() {
-                        format!("main-{idx}")
-                    } else {
-                        label
-                    },
-                    kind: "Main".into(),
-                    path,
-                    session_id: None,
-                    task_id: None,
-                    session_state: None,
-                    observed_head_sha: observed.as_ref().and_then(|s| s.head_sha.clone()),
-                    observed_branch: observed.as_ref().and_then(|s| s.branch.clone()),
-                    observed_dirty_paths: observed
-                        .as_ref()
-                        .map(|s| u32::try_from(s.status_lines.len()).unwrap_or(u32::MAX)),
-                    base_sha: None,
+            let entry = main_worktree_entry(
+                format!("main-{idx}"),
+                if label.is_empty() {
+                    format!("main-{idx}")
+                } else {
+                    label
                 },
-            });
+                path,
+            );
+            if entry.summary.observed_head_sha.is_some() {
+                out.push(entry);
+            }
         }
         // Session overlay — include active, revoked, and expired rows.
         //
@@ -3611,11 +3619,18 @@ impl KernelDashboardData {
         // needed for a PR-style diff.
         if let Ok(conn) = self.open_ro() {
             if let Ok(mut stmt) = conn.prepare(&format!(
-                "SELECT s.session_id, s.role_id, s.worktree_root, s.base_sha, \
+                "SELECT s.session_id, COALESCE(s.session_agent_type, s.role_id), \
+                        s.worktree_root, s.base_sha, \
                         s.created_at, s.expires_at, s.revoked, s.revoked_at, \
                         (SELECT t.task_id FROM {TBL_TASKS} t \
                           WHERE t.session_id = s.session_id \
-                          ORDER BY t.admitted_at DESC LIMIT 1) AS task_id \
+                          ORDER BY t.admitted_at DESC LIMIT 1) AS task_id, \
+                        COALESCE(\
+                          s.initiative_id, \
+                          (SELECT t.initiative_id FROM {TBL_TASKS} t \
+                           WHERE t.session_id = s.session_id \
+                           ORDER BY t.admitted_at DESC LIMIT 1)\
+                        ) AS initiative_id \
                  FROM {TBL_SESSIONS} s \
                  WHERE s.worktree_root IS NOT NULL \
                  ORDER BY COALESCE(s.revoked_at, s.created_at) DESC, \
@@ -3634,13 +3649,14 @@ impl KernelDashboardData {
                         r.get::<_, i64>(6)? != 0,
                         r.get::<_, Option<i64>>(7)?.map(|v| v.max(0) as u64),
                         r.get::<_, Option<String>>(8)?,
+                        r.get::<_, Option<String>>(9)?,
                     ))
                 });
                 if let Ok(rows) = rows {
                     for row in rows.flatten() {
                         let (
                             session_id,
-                            role_id,
+                            agent_type,
                             wt,
                             base_sha,
                             created_at,
@@ -3648,6 +3664,7 @@ impl KernelDashboardData {
                             revoked,
                             revoked_at,
                             task_id,
+                            initiative_id,
                         ) = row;
                         if wt.trim().is_empty() {
                             continue;
@@ -3660,11 +3677,12 @@ impl KernelDashboardData {
                         out.push(ResolvedWorktree {
                             summary: WorktreeListEntry {
                                 name: format!("session-{short}"),
-                                label: format!("{role_id}:{short}"),
+                                label: format!("{agent_type}:{short}"),
                                 kind: "Session".into(),
                                 path: wt,
                                 session_id: Some(session_id),
                                 task_id,
+                                initiative_id,
                                 session_state: Some(session_state_from_columns(
                                     revoked, revoked_at, created_at, expires_at,
                                 )),
@@ -3695,12 +3713,52 @@ impl KernelDashboardData {
                 kind: "worktree".into(),
             })?;
         if !bundle.worktree_root_allowed(&resolved.summary.path) {
-            return Err(ApiError::NotFound {
-                kind: "worktree".into(),
-            });
+            let is_internal_main = resolved.summary.kind == "Main"
+                && same_display_path(&resolved.summary.path, &self.internal_main_repo_path());
+            if !is_internal_main {
+                return Err(ApiError::NotFound {
+                    kind: "worktree".into(),
+                });
+            }
         }
         Ok(resolved)
     }
+
+    fn internal_main_repo_path(&self) -> String {
+        self.data_dir
+            .join("repositories")
+            .join("main")
+            .display()
+            .to_string()
+    }
+}
+
+fn main_worktree_entry(name: String, label: String, path: String) -> ResolvedWorktree {
+    let observed = std::path::Path::new(&path)
+        .exists()
+        .then(|| git::probe_worktree_summary(std::path::Path::new(&path), None));
+    ResolvedWorktree {
+        summary: WorktreeListEntry {
+            name,
+            label,
+            kind: "Main".into(),
+            path,
+            session_id: None,
+            task_id: None,
+            initiative_id: None,
+            session_state: None,
+            observed_head_sha: observed.as_ref().and_then(|s| s.head_sha.clone()),
+            observed_branch: observed.as_ref().and_then(|s| s.branch.clone()),
+            observed_dirty_paths: observed
+                .as_ref()
+                .map(|s| u32::try_from(s.status_lines.len()).unwrap_or(u32::MAX)),
+            base_sha: None,
+        },
+    }
+}
+
+fn same_display_path(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
 }
 
 // ---------------------------------------------------------------------------
@@ -3997,6 +4055,59 @@ fn owning_tasks_for_sessions(
         }
     }
     out
+}
+
+/// Read the semantic planner-agent role for session rows. The
+/// historical `role_id` column is the IPC/wire role (`Planner` for all
+/// planner VMs); the operator dashboard needs the V2 dispatch role
+/// (`Orchestrator` / `Executor` / `Reviewer`).
+fn session_agent_types_for_sessions(
+    conn: &rusqlite::Connection,
+    session_ids: &[String],
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if session_ids.is_empty() {
+        return out;
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(session_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT session_id, session_agent_type \
+         FROM {sessions} \
+         WHERE session_id IN ({placeholders}) \
+           AND session_agent_type IS NOT NULL",
+        sessions = raxis_store::Table::Sessions.as_str(),
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return out;
+    };
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(session_ids.iter().map(String::as_str)),
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    );
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            let (session_id, role) = row;
+            out.insert(session_id, role);
+        }
+    }
+    out
+}
+
+fn session_agent_type_for_session(conn: &rusqlite::Connection, session_id: &str) -> Option<String> {
+    conn.query_row(
+        &format!(
+            "SELECT session_agent_type FROM {} \
+             WHERE session_id = ?1 AND session_agent_type IS NOT NULL \
+             LIMIT 1",
+            raxis_store::Table::Sessions.as_str(),
+        ),
+        rusqlite::params![session_id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
 }
 
 /// iter69 — extract a model id from the most-recent LLM turn
@@ -4529,6 +4640,7 @@ fn task_row_to_view_with_lifecycle(
     let mut view = task_row_to_view(conn, t);
     let activations = read_activations_for_task(conn, &t.task_id);
     let (review_verdict, last_critique) = read_review_state(conn, &t.task_id);
+    let reviewer_verdicts = read_reviewer_verdicts_for_task(conn, &t.task_id);
     let annotations = lifecycle::classify_for_task(
         audit_chain,
         &t.task_id,
@@ -4541,6 +4653,7 @@ fn task_row_to_view_with_lifecycle(
     view.latest_annotation = latest;
     view.review_verdict = review_verdict;
     view.last_critique = last_critique;
+    view.reviewer_verdicts = reviewer_verdicts;
     view.reviewer_panel_results = panel;
     view
 }
@@ -4556,6 +4669,7 @@ fn task_row_to_view_with_lifecycle_indexed(
     let mut view = task_row_to_view(conn, t);
     let activations = read_activations_for_task(conn, &t.task_id);
     let (review_verdict, last_critique) = read_review_state(conn, &t.task_id);
+    let reviewer_verdicts = read_reviewer_verdicts_for_task(conn, &t.task_id);
     let annotations = lifecycle::classify_for_task_rows(
         audit_index.task_rows(&t.task_id),
         &t.task_id,
@@ -4569,6 +4683,7 @@ fn task_row_to_view_with_lifecycle_indexed(
     view.latest_annotation = latest;
     view.review_verdict = review_verdict;
     view.last_critique = last_critique;
+    view.reviewer_verdicts = reviewer_verdicts;
     view.reviewer_panel_results = panel;
     view
 }
@@ -4739,6 +4854,43 @@ fn read_review_state(
         },
     );
     row.unwrap_or((None, None))
+}
+
+/// Read the concrete downstream reviewer tasks for an executor task.
+/// `tasks.review_verdict` is stored on the reviewer row itself, while
+/// the executor row carries only the aggregate critique. Joining
+/// through the DAG makes completed reviewer verdicts visible on the
+/// executor task page instead of rendering a misleading empty panel.
+fn read_reviewer_verdicts_for_task(
+    conn: &raxis_store::ro::RoConn,
+    task_id: &str,
+) -> Vec<ReviewerVerdictView> {
+    let mut out = Vec::new();
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT rt.review_verdict, COALESCE(rt.last_critique, ''), \
+                COALESCE(rt.session_id, ''), rt.transitioned_at \
+         FROM {TBL_TASK_DAG_EDGES} e \
+         JOIN {TBL_TASKS} rt ON rt.task_id = e.successor_task_id \
+         WHERE e.predecessor_task_id = ?1 \
+           AND rt.review_verdict IS NOT NULL \
+         ORDER BY rt.transitioned_at ASC, rt.task_id ASC"
+    )) else {
+        return out;
+    };
+    let rows = stmt.query_map([task_id], |r| {
+        Ok(ReviewerVerdictView {
+            verdict: r.get(0)?,
+            critique: r.get(1)?,
+            reviewer_session_id: r.get(2)?,
+            at: r.get::<_, i64>(3)?.max(0) as u64,
+        })
+    });
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            out.push(row);
+        }
+    }
+    out
 }
 
 /// Read every `subtask_activations` row for `task_id` and
@@ -5675,6 +5827,36 @@ mod tests {
         assert_eq!(r.task_id.as_deref(), Some("task-a"));
         assert_eq!(r.input_tokens, 1234);
         assert_eq!(r.output_tokens, 567);
+    }
+
+    /// Planner VMs all carry `role_id = Planner` at the IPC layer.
+    /// The dashboard must render the semantic role stamped by the
+    /// session spawner, otherwise every Recent sessions / Sessions row
+    /// collapses to "Planner" and hides executor/reviewer activity.
+    #[test]
+    fn session_agent_type_helpers_prefer_semantic_role_over_wire_role() {
+        const SESSIONS: &str = raxis_store::Table::Sessions.as_str();
+        let tmp = seed_session_with_task();
+        let store = raxis_store::Store::open(&tmp.path().join("kernel.db")).unwrap();
+        {
+            let g = store.lock_sync();
+            g.execute(
+                &format!(
+                    "UPDATE {SESSIONS} \
+                     SET role_id = 'Planner', session_agent_type = 'Reviewer' \
+                     WHERE session_id = 'sess-a'"
+                ),
+                [],
+            )
+            .unwrap();
+        }
+        let conn = raxis_store::ro::open(tmp.path()).unwrap();
+        assert_eq!(
+            session_agent_type_for_session(&conn, "sess-a").as_deref(),
+            Some("Reviewer")
+        );
+        let mapped = session_agent_types_for_sessions(&conn, &["sess-a".into()]);
+        assert_eq!(mapped.get("sess-a").map(String::as_str), Some("Reviewer"));
     }
 
     /// A session without any tasks (orchestrator-only,

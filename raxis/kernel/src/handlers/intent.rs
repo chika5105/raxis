@@ -1857,6 +1857,42 @@ fn run_phase_c(
                     }
                 }
 
+                // iter68/v3 worktree snapshots — the integration witness
+                // runs before this host-side fast-forward, so the only
+                // faithful "what reached main?" snapshot is taken here,
+                // after `<data_dir>/repositories/main` points at the
+                // accepted evaluation SHA.
+                match crate::worktree_snapshot::snapshot_worktree(
+                    &ctx.store,
+                    &ctx.data_dir,
+                    crate::worktree_snapshot::SnapshotInput {
+                        task_id: task_id_owned.clone(),
+                        session_id: Some(session_id_str.clone()),
+                        initiative_id: Some(initiative_id_owned.clone()),
+                        trigger: crate::worktree_snapshot::SnapshotTrigger::IntegrationMerge,
+                        worktree_root: main_repo_root.clone(),
+                        base_sha: pre_state.base_sha_raw.clone(),
+                    },
+                ) {
+                    Ok(rec) => {
+                        eprintln!(
+                            "{{\"level\":\"info\",\"event\":\"WorktreeSnapshotted\",\
+                             \"trigger\":\"IntegrationMerge\",\
+                             \"task_id\":\"{}\",\"snapshot_id\":\"{}\",\
+                             \"head_sha\":\"{}\",\"commit_count\":{}}}",
+                            task_id_owned, rec.snapshot_id, rec.head_sha, rec.commit_count,
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"WorktreeSnapshotFailed\",\
+                             \"trigger\":\"IntegrationMerge\",\
+                             \"task_id\":\"{}\",\"error\":\"{}\"}}",
+                            task_id_owned, e,
+                        );
+                    }
+                }
+
                 true
             }
             Err(err) => {
@@ -7206,29 +7242,22 @@ async fn handle_retry_sub_task(
             //      Migration 5 line 51-52: "a retry inserts a NEW
             //      row, never updates the prior one."
             //
-            //      iter62 — `INV-RETRY-REVIEW-REJECT-COUNT-MONOTONIC-01`.
-            //      For Reviewer-rejection retries we bump the
-            //      `review_reject_count` on the NEW row (prior + 1)
-            //      instead of carrying the prior row's value
-            //      verbatim. Previously the counter relied on
-            //      `increment_executor_review_reject_count` firing
-            //      the bump in the SubmitReview aggregator's
-            //      terminal-`AtLeastOneRejected` branch, but
-            //      reviewers were not being reactivated on
-            //      executor retries (`INV-RETRY-REVIEWER-PANEL-
-            //      REACTIVATED-01`), so the aggregator never
-            //      re-fired and the counter stalled at 1 across
-            //      N retries (iter62 forensics on
-            //      `lint-runner-python` / `lint-runner-js`).
-            //      Bumping at admission gives the counter a
-            //      kernel-owned source of truth that does not
-            //      depend on the reviewer-side aggregator firing.
+            //      Carry the cumulative `review_reject_count` into
+            //      the NEW row verbatim. The counter represents
+            //      actual terminal rejected review rounds, and is
+            //      bumped exactly once by the SubmitReview
+            //      aggregator's `AtLeastOneRejected` branch. Retry
+            //      admission itself is not a rejection; bumping here
+            //      would double-count a single reviewer verdict and
+            //      make `max_review_rejections` one retry too tight.
             //
-            //      Crash retries (`prior_state == "Failed"`)
-            //      still carry the prior `review_reject_count`
+            //      The reviewer panel is reactivated below for
+            //      review-rejection retries, so subsequent rejected
+            //      rounds still advance the counter through the same
+            //      aggregator path that recorded the critique. Crash
+            //      retries also carry the prior review counter
             //      verbatim — only the crash counter advances on
-            //      that path, and the iter62-spec witness pins
-            //      it as a negative case.
+            //      that path.
             //
             //      `crash_retry_count` continues to be bumped
             //      out-of-band at the failure event (in the
@@ -7238,11 +7267,7 @@ async fn handle_retry_sub_task(
             let from_review_rejection_admit =
                 (prior_state == "Completed" || prior_state == "PendingActivation")
                     && review_reject_count > 0;
-            let new_review_reject_count = if from_review_rejection_admit {
-                review_reject_count.saturating_add(1)
-            } else {
-                review_reject_count
-            };
+            let new_review_reject_count = review_reject_count;
             let new_activation_id = uuid::Uuid::new_v4().to_string();
             tx.execute(
                 &format!(
@@ -7617,19 +7642,11 @@ async fn handle_retry_sub_task(
     // The `review_reject_count` payload is the value carried into
     // the new activation row (Step 2d insert).
     //
-    // iter62 — `INV-RETRY-REVIEW-REJECT-COUNT-MONOTONIC-01`. The
-    // value is now the **post-bump** count (`prior + 1` on
-    // Reviewer-rejection retries; `prior` verbatim on crash
-    // retries) so the audit payload aligns row-for-row with
-    // `subtask_activations.review_reject_count` on the new row.
-    // Previously the audit emitted the pre-bump value (the bump
-    // was assumed to fire later in the SubmitReview aggregator's
-    // terminal-`AtLeastOneRejected` branch); reviewer
-    // reactivation was broken, so the aggregator never re-fired
-    // and the SQL counter stalled at 1, while the audit event
-    // emitted 1 forever — the divergence was indistinguishable
-    // from "fix is working" to a forensic operator. Emitting the
-    // canonical row value closes that loop.
+    // The payload mirrors the new activation row exactly. Retry
+    // admission carries the reviewer-rejection count forward; the
+    // next rejected review aggregation, if any, performs the next
+    // bump. That keeps the audit payload aligned with the SQL row
+    // without burning retry budget for the act of respawning.
     if decision.from_review_rejection {
         let review_reject_count_u32 =
             u32::try_from(decision.review_reject_count).unwrap_or(u32::MAX);
@@ -8071,6 +8088,10 @@ fn classify_merge_ff_error(err: &raxis_domain_git::MainMergeError) -> (&'static 
                 ("git_failed", s.clone())
             }
         }
+        MainMergeError::WorktreeRefreshFailed { path, reason } => (
+            "worktree_refresh_failed",
+            format!("{}: {reason}", path.display()),
+        ),
         MainMergeError::InvalidSha { sha, reason } => {
             ("invalid_sha", format!("sha {sha}: {reason}"))
         }
@@ -13317,22 +13338,16 @@ mod tests {
             activations[1].2.is_none(),
             "new PendingActivation row MUST have NULL session_id"
         );
-        // iter62 — `INV-RETRY-REVIEW-REJECT-COUNT-MONOTONIC-01`.
-        // The retry handler now bumps `review_reject_count` to
-        // `prior + 1` on Reviewer-rejection retries. Before the
-        // iter62 fix the new row carried `1` verbatim, which made
-        // `max_review_rejections` structurally dead (the counter
-        // never advanced past 1 because reviewers were not being
-        // re-activated, so `increment_executor_review_reject_count`
-        // never re-fired in the SubmitReview aggregator). With the
-        // fix the counter is monotonic per activation row and the
-        // ceiling actually fires.
+        // The retry handler carries `review_reject_count` forward
+        // verbatim. The counter advances only when the reviewer
+        // aggregation records a real `AtLeastOneRejected` verdict;
+        // retry admission itself must not burn another review budget
+        // unit.
         assert_eq!(
-            activations[1].4, 2,
-            "iter62 — new row MUST carry review_reject_count = \
-             prior + 1 = 2 (kernel-bumped at admission, no longer \
-             dependent on the SubmitReview aggregator firing on the \
-             retry round)"
+            activations[1].4, 1,
+            "new row MUST carry the prior review_reject_count = 1; \
+             the next reviewer rejection, if any, performs the next \
+             bump"
         );
 
         // Audit anchor — the new event variant the witness matches
@@ -13377,12 +13392,10 @@ mod tests {
                      PendingActivation row"
                 );
                 assert_eq!(
-                    *review_reject_count, 2,
-                    "iter62 — audit payload MUST carry the new \
-                     row's post-bump review_reject_count = \
-                     prior + 1 = 2 so the audit event aligns \
-                     row-for-row with subtask_activations on \
-                     the new activation_id"
+                    *review_reject_count, 1,
+                    "audit payload MUST carry the carried \
+                     review_reject_count so the event aligns row-for-row \
+                     with subtask_activations on the new activation_id"
                 );
             }
             _ => unreachable!(),
@@ -13822,20 +13835,15 @@ mod tests {
 
     // ─── iter62 — C6 retry-counter + reviewer-reactivation witnesses ──
 
-    /// `INV-RETRY-REVIEW-REJECT-COUNT-MONOTONIC-01` — the new
-    /// activation row carries `review_reject_count = prior + 1`
-    /// on every Reviewer-rejection retry. Previously the counter
-    /// stalled at 1 across N retries (the SubmitReview aggregator
-    /// never re-fired because reviewers were not being re-
-    /// activated; see `INV-RETRY-REVIEWER-PANEL-REACTIVATED-01`).
-    /// Bumping at admission gives the counter a kernel-owned
-    /// source of truth that does not depend on the aggregator.
+    /// `INV-RETRY-REVIEW-REJECT-COUNT-MONOTONIC-01` — the retry
+    /// activation carries the prior `review_reject_count` verbatim,
+    /// and only a subsequent terminal rejected review aggregation
+    /// advances it. This keeps the column semantic honest: it counts
+    /// rejected review rounds, not retry admissions.
     ///
     /// The test drives THREE consecutive retries and asserts the
-    /// `review_reject_count` advances `1 → 2 → 3 → 4` on the
-    /// activation rows (round 0 was the initial completion;
-    /// rounds 1, 2, 3 are the retries) — exact monotonicity, exact
-    /// step of 1.
+    /// retries. Between retries the fixture simulates the reviewer
+    /// aggregation bump that happens after each rejected round.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn retry_review_reject_count_is_monotonic_across_three_retries() {
         let store = Arc::new(Store::open_in_memory().unwrap());
@@ -13859,7 +13867,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Round 1 retry — counter must bump 1 → 2.
+        // Round 1 retry — counter carries 1.
         let resp1 = handle_retry_sub_task(
             make_retry_request("exe-monotonic", 1),
             dummy_orchestrator_session_row(),
@@ -13873,14 +13881,16 @@ mod tests {
         let acts_round1 = read_activations(store.clone(), "exe-monotonic").await;
         assert_eq!(acts_round1.len(), 2);
         assert_eq!(
-            acts_round1[1].4, 2,
-            "round-1 retry MUST bump review_reject_count to 2"
+            acts_round1[1].4, 1,
+            "round-1 retry MUST carry review_reject_count = 1"
         );
 
         // To drive a round-2 retry the test fixture flips the
         // round-1 PendingActivation row back to `Completed`
         // (simulating the cascade after a fresh CompleteTask
-        // landed and the reviewer panel rejected again).
+        // landed and the reviewer panel rejected again). The fixture
+        // increments `review_reject_count` here to mirror the
+        // SubmitReview aggregator's `AtLeastOneRejected` bump.
         // `tasks.state` returns to `Completed` so the retry
         // handler's prior_state filter matches.
         let store_for_flip1 = store.clone();
@@ -13890,9 +13900,10 @@ mod tests {
             conn.execute(
                 &format!(
                     "UPDATE {SUBTASK_ACTIVATIONS}
-                        SET activation_state = 'Completed',
-                            activated_at     = ?1,
-                            terminated_at    = ?1
+                        SET activation_state    = 'Completed',
+                            activated_at        = ?1,
+                            terminated_at       = ?1,
+                            review_reject_count = review_reject_count + 1
                       WHERE task_id = 'exe-monotonic'
                         AND activation_state = 'PendingActivation'"
                 ),
@@ -13913,7 +13924,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Round 2 retry — counter must bump 2 → 3.
+        // Round 2 retry — counter carries the reviewer-bumped 2.
         let resp2 = handle_retry_sub_task(
             make_retry_request("exe-monotonic", 2),
             dummy_orchestrator_session_row(),
@@ -13927,8 +13938,8 @@ mod tests {
         let acts_round2 = read_activations(store.clone(), "exe-monotonic").await;
         assert_eq!(acts_round2.len(), 3);
         assert_eq!(
-            acts_round2[2].4, 3,
-            "round-2 retry MUST bump review_reject_count to 3"
+            acts_round2[2].4, 2,
+            "round-2 retry MUST carry review_reject_count = 2"
         );
 
         // Same flip for round 3.
@@ -13939,9 +13950,10 @@ mod tests {
             conn.execute(
                 &format!(
                     "UPDATE {SUBTASK_ACTIVATIONS}
-                        SET activation_state = 'Completed',
-                            activated_at     = ?1,
-                            terminated_at    = ?1
+                        SET activation_state    = 'Completed',
+                            activated_at        = ?1,
+                            terminated_at       = ?1,
+                            review_reject_count = review_reject_count + 1
                       WHERE task_id = 'exe-monotonic'
                         AND activation_state = 'PendingActivation'"
                 ),
@@ -13962,7 +13974,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Round 3 retry — counter must bump 3 → 4.
+        // Round 3 retry — counter carries the reviewer-bumped 3.
         let resp3 = handle_retry_sub_task(
             make_retry_request("exe-monotonic", 3),
             dummy_orchestrator_session_row(),
@@ -13978,16 +13990,20 @@ mod tests {
         let counts: Vec<i64> = acts_round3.iter().map(|r| r.4).collect();
         assert_eq!(
             counts,
-            vec![1, 2, 3, 4],
-            "review_reject_count MUST advance 1 → 2 → 3 → 4 \
-             monotonically across the activation_id sequence"
+            vec![1, 2, 3, 3],
+            "review_reject_count MUST be monotonic across the \
+             activation_id sequence, with retry admission carrying \
+             the latest reviewer-bumped count"
         );
         for i in 1..counts.len() {
-            assert_eq!(
-                counts[i] - counts[i - 1],
-                1,
-                "iter62 monotonicity invariant: every step MUST be \
-                 exactly +1, not 0 (stall) or > 1 (double-bump)"
+            assert!(
+                counts[i] >= counts[i - 1],
+                "retry counter must never go backward"
+            );
+            assert!(
+                counts[i] - counts[i - 1] <= 1,
+                "retry admission must not double-bump the reviewer \
+                 rejection counter"
             );
         }
     }

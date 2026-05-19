@@ -7,6 +7,7 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
 import { Spinner } from "@/components/Spinner";
 import { fmtAbsolute, fmtRelative } from "@/lib/format";
+import { toneClasses, type StateBadgeTone } from "@/lib/state-color";
 import type { WitnessView } from "@/types/api";
 
 /// `<TaskWitnesses>` — iter68 PR 3.
@@ -174,17 +175,12 @@ function Field({
 }
 
 function VerdictPill({ kind, label }: { kind: string; label?: string }) {
-  const klass = (() => {
-    switch (kind) {
-      case "Pass":
-        return "bg-success-muted/40 border-success text-success";
-      case "Fail":
-        return "bg-danger-muted/40 border-danger text-danger";
-      case "Inconclusive":
-        return "bg-warning-muted/40 border-warning text-warning";
-      default:
-        return "bg-panel-high border-edge text-ink-muted";
-    }
-  })();
-  return <span className={`badge ${klass}`}>{label ?? kind}</span>;
+  const tone = WITNESS_TONE[kind] ?? "muted";
+  return <span className={`badge ${toneClasses(tone)}`}>{label ?? kind}</span>;
 }
+
+const WITNESS_TONE: Record<string, StateBadgeTone> = {
+  Pass: "ok",
+  Fail: "bad",
+  Inconclusive: "warn",
+};
