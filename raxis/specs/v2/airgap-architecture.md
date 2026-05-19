@@ -204,7 +204,6 @@ and no cargo feature flag any more. The chokepoint consists of:
 table ip raxis_a3 {
   chain output {
     type nat hook output priority -100; policy accept;
-    oifname "lo" return
     ip daddr 127.0.0.0/8 return
     ip protocol tcp redirect to :3129
     udp dport 53 redirect to :53
@@ -225,6 +224,17 @@ echo 1 > /proc/sys/net/ipv6/conf/lo/disable_ipv6
 
 # Point libc resolver at the in-guest DNS stub
 echo "nameserver 127.0.0.1" > /etc/resolv.conf
+
+# Let no-NIC outbound connects reach nat OUTPUT via loopback.
+# A3 still has no NIC; the only successful external path is the
+# tproxy's kernel-admitted AF_VSOCK tunnel.
+sysctl -w net.ipv4.conf.all.route_localnet=1
+sysctl -w net.ipv4.conf.lo.route_localnet=1
+sysctl -w net.ipv4.conf.all.accept_local=1
+sysctl -w net.ipv4.conf.lo.accept_local=1
+sysctl -w net.ipv4.conf.all.rp_filter=0
+sysctl -w net.ipv4.conf.lo.rp_filter=0
+ip -4 route replace default dev lo
 ```
 
 The credential-proxy loopback ports stay on `127.0.0.1` and so
@@ -313,28 +323,27 @@ invariants whose canonical home is [`planner-harness.md §10.6`](planner-harness
   globally installed at bake time so `npx --no-install`'s
   resolution-fallback to `$PATH` finds them before the
   `--no-install` branch fires.
-- `INV-EXECUTOR-IMAGE-RUST-OFFLINE-01` — the Executor
-  planner-core sets `CARGO_NET_OFFLINE=true` in its process
-  env at PID-1 boot so cargo never probes `crates.io`
-  against the canonical empty allowlist.
-- `INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01` — the umbrella
-  invariant: the realistic-scenario plan MUST be runnable
-  with the executor's per-session egress allowlist
-  restricted to the inference gateway. New per-language
-  tools added to the plan MUST extend the bake-time
-  prebundle BEFORE the task lands; opening the allowlist
-  for `registry.npmjs.org` / `pypi.org` / `crates.io` is
-  a documented last resort, never the default.
+- `INV-EXECUTOR-IMAGE-RUST-TOOLCHAIN-01` — Rust stable plus
+  `cargo`, `rustfmt`, and `clippy` are baked into the executor
+  image. Raxis does not stamp `CARGO_NET_OFFLINE=true`; agents
+  see normal Cargo behaviour and the kernel enforces any
+  package-host policy decision underneath.
+- `INV-EXECUTOR-EGRESS-PREINSTALLED-FIRST-01` — the umbrella
+  invariant: the realistic-scenario plan should use baked
+  dependencies first for speed and determinism. New per-language
+  tools added to the plan should extend the bake-time prebundle
+  first; if runtime fetches are genuinely required, the task or
+  policy must explicitly allow the package hosts.
 
-The structural rationale: the kernel's egress allowlist is
-the operator's mechanism for controlling which third-party
-networks the executor can reach. Forcing the canonical plan
-to add `registry.npmjs.org` to every operator's
-`policy.toml` would silently grant the executor's LLM the
-ability to fetch arbitrary npm packages (including
-post-install scripts) — a far broader capability than "lint
-a TypeScript file". Pre-bundling makes the offline-first
-default viable.
+The structural rationale: the kernel's egress allowlist is the
+operator's mechanism for controlling which third-party networks the
+executor can reach. Forcing the canonical plan to add
+`registry.npmjs.org` to every operator's `policy.toml` would
+silently grant the executor's LLM the ability to fetch arbitrary npm
+packages (including post-install scripts) — a far broader capability
+than "lint a TypeScript file". Pre-bundling keeps the common path
+fast and deterministic while preserving normal package-manager
+semantics when a task explicitly needs them.
 
 When pre-bundling IS infeasible (e.g. an operator-supplied
 custom tool needs a transitive PyPI package the canonical

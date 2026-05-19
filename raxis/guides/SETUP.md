@@ -73,6 +73,33 @@ The wrapper exists because these were the easy-to-miss setup hurdles:
 The remaining sections show the same flow by hand for operators who
 want to inspect or repeat individual phases.
 
+## Fast Local Builds
+
+The workspace keeps release builds production-shaped, but local
+`cargo build` and `cargo test` use lighter debug information:
+
+- `profile.dev` and `profile.test` emit line tables instead of full
+  variable debuginfo, so panic backtraces still point at source lines.
+- Build scripts and proc-macros compile without debuginfo; this is a
+  common hot path in large Rust workspaces and does not change the code
+  being tested.
+- Incremental compilation stays enabled for dev/test profiles.
+
+Optional machine-local accelerators are safe but intentionally not
+checked into `.cargo/config.toml`:
+
+```bash
+# Optional: cache rustc outputs across clean rebuilds and role bakes.
+brew install sccache        # macOS
+# or your distro package manager on Linux
+export RUSTC_WRAPPER=sccache
+sccache --show-stats
+```
+
+Do not replace validation commands with `cargo check` when correctness
+matters. Use `cargo check` for fast edit feedback, then run the same
+`cargo test`, image bake, and live-e2e commands you intend to release.
+
 ## 1. Host Prereqs
 
 Source builds require:

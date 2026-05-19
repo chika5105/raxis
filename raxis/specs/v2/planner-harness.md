@@ -2254,52 +2254,36 @@ identical mechanism for the canonical starter image and for
 operator-pinned BYO images per `INV-OPERATOR-CUSTOM-IMAGE-01`.
 Full schema and redaction rules: [`canonical-images.md §6`](canonical-images.md).
 
-**Cargo-offline default
-(`INV-EXECUTOR-IMAGE-RUST-OFFLINE-01`).** The Rust half of
-the per-language pre-bundling contract differs from Python /
-JS in shape: the realistic seed's `rust-crate/Cargo.toml`
-declares no third-party dependencies, so there is nothing to
-bake — `cargo fmt --all -- --check` and `cargo clippy
---all-targets -- -D warnings` succeed offline today. The
-load-bearing guard against a future seed dep accidentally
-introducing a registry probe is a **process-env default**:
-the Executor planner-core sets `CARGO_NET_OFFLINE=true` in
-its own process env at PID-1 boot (single-threaded
-`unsafe { set_var }` per the Rust 2024 contract, BEFORE
-tokio runtime construction so no worker thread can race),
-so every `BashTool`-spawned `cargo` invocation inherits
-`offline` mode by default. Operator override is preserved:
-any non-empty value (including the explicit string `"false"`)
-already in the env wins, so an operator who explicitly opts
-back into online cargo via the kernel-injected env channel
-gets that behaviour. The helper emits a structured
-`step="cargo-net-offline-default"` info line so the
-post-mortem audit-chain replay can prove which branch fired
-for each session. Adding a third-party Rust dep to the
-realistic seed in the future MUST either (a) prebundle the
-cargo crate set into the image (parallel to
-`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`'s
-`npm install -g` shape), OR (b) open the per-session egress
-allowlist for `crates.io` AND `index.crates.io` AND document
-the rationale in `v2/airgap-architecture.md §9`.
+**Rust toolchain network posture
+(`INV-EXECUTOR-IMAGE-RUST-TOOLCHAIN-01`).** The executor
+starter image bakes Rust stable plus `cargo`, `rustfmt`, and
+`clippy`. Raxis no longer stamps `CARGO_NET_OFFLINE=true` at
+PID-1 boot: that env var teaches the model the wrong global
+lesson ("networking is unavailable") and can make it give up
+even when the task legitimately needs a fetch. Rust tasks should
+prefer the baked toolchain and existing lockfiles, but ordinary
+`cargo` networking remains available when the task and policy
+allow it. If a future realistic seed adds a third-party Rust dep,
+either prebundle the crate set into the image or explicitly open
+the required package-host egress in the task/policy and document
+why.
 
-**Umbrella offline-first contract
-(`INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01`).** The realistic-
+**Umbrella preinstalled-first contract
+(`INV-EXECUTOR-EGRESS-PREINSTALLED-FIRST-01`).** The realistic-
 scenario plan
 (`raxis/kernel/tests/extended_e2e_support/plan_realistic.rs`)
-MUST be runnable with the executor's per-session egress
-allowlist restricted to the inference gateway. The three
-sibling invariants
+MUST prefer baked dependencies for speed and determinism. The
+three sibling invariants
 (`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01`,
 `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`,
-`INV-EXECUTOR-IMAGE-RUST-OFFLINE-01`) collectively pin the
-contract: each implements one slice of the offline-first
-deps surface for one language. New per-language tools added
-to the realistic plan MUST extend the bake-time prebundle
-BEFORE the task lands; opening the per-session allowlist for
-`registry.npmjs.org` / `pypi.org` / `crates.io` is a
-documented last resort, never the default. Cross-reference
-from the egress side: `v2/airgap-architecture.md §9`.
+`INV-EXECUTOR-IMAGE-RUST-TOOLCHAIN-01`) collectively pin the
+contract: each implements one language slice of the
+preinstalled-first surface. New per-language tools added to the
+realistic plan should extend the bake-time prebundle first; if
+runtime package fetches are required, use normal package-manager
+commands and make the package hosts explicit in the task/policy.
+Cross-reference from the egress side:
+`v2/airgap-architecture.md §9`.
 
 ### 10.7 Canonical Verifier Symbol-Index Image Manifest
 

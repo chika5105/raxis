@@ -77,7 +77,8 @@ impl Tool for VmCapabilitiesTool {
     fn description(&self) -> &'static str {
         "Return deterministic JSON for installed binaries/runtimes/packages, \
          credential-proxy env names, and workdir state. Use for focused \
-         capability checks; package installs usually fail without egress."
+         capability checks; prefer baked packages, but install normally \
+         when the task requires it."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -299,6 +300,10 @@ mod tests {
     fn tool_spec_advertises_categories_enum() {
         let spec = VmCapabilitiesTool.to_spec();
         assert_eq!(spec.name, "vm_capabilities");
+        assert!(spec.description.contains("prefer baked packages"));
+        assert!(spec.description.contains("install normally"));
+        assert!(!spec.description.contains("usually fail"));
+        assert!(!spec.description.contains("without egress"));
         let enum_arr = spec
             .input_schema
             .pointer("/properties/categories/items/enum")

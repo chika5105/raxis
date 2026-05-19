@@ -27,7 +27,6 @@ members = [
     "crates/credential-proxy-gcp",
     "crates/credential-proxy-azure",
     "crates/credential-proxy-cloud-shared",
-    "crates/credential-proxy-cloud-shared",
     "crates/credential-proxy-mysql",
     "crates/credential-proxy-mongodb",
     "crates/credential-proxy-mssql",
@@ -312,6 +311,24 @@ raxis-observability      = { path = "crates/observability" }
 # HTTP / SSH transports — the kernel only ever clones from local
 # disk paths held in `<data_dir>/`.
 gix = { version = "0.83", default-features = true, features = ["blocking-network-client"] }
+
+# Local build profiles keep correctness semantics unchanged while
+# avoiding expensive full debug-info generation on every edit/test
+# cycle. Line tables preserve useful panic backtraces; build scripts
+# and proc-macros do not need debuginfo in normal development.
+[profile.dev]
+debug       = "line-tables-only"
+incremental = true
+
+[profile.dev.build-override]
+debug = false
+
+[profile.test]
+debug       = "line-tables-only"
+incremental = true
+
+[profile.test.build-override]
+debug = false
 
 # Release profile pinned at the workspace root so per-crate
 # overrides in `kernel/Cargo.toml` and `gateway/Cargo.toml` are no

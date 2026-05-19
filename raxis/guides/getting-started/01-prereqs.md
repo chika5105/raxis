@@ -223,6 +223,21 @@ checked against the nftables config, the image-signing key under
 build, macOS AVF codesign is applied, and the bake prints progress
 before long quiet Docker/Cargo/cpio phases.
 
+The workspace is tuned for faster local Rust loops without changing
+release semantics. Dev/test builds keep line-table debuginfo for useful
+backtraces, skip debuginfo for build scripts and proc-macros, and keep
+incremental compilation enabled. For even faster repeated clean builds,
+install `sccache` locally and opt in with:
+
+```bash
+export RUSTC_WRAPPER=sccache
+```
+
+The wrapper is not committed into Cargo config because a missing
+machine-local binary would break fresh clones. Use `cargo check` for
+edit feedback, but run the real `cargo test`, image bake, and live-e2e
+commands before treating a change as release-ready.
+
 Once `cargo xtask dev-prereqs` (macOS) or `cargo xtask linux-prereqs`
 (Linux) is green, the workspace should build with the checked-in lock:
 

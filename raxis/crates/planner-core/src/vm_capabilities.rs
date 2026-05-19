@@ -9,13 +9,12 @@
 //! ripgrep, fd, build-essential, …) OR an operator-pinned BYO image
 //! whose contents we cannot enumerate at kernel build time
 //! (`canonical-images.md §INV-OPERATOR-CUSTOM-IMAGE-01`). Either
-//! way, the LLM cannot do trial-and-error `pip install` /
-//! `npm install` of packages: egress is mediated by the kernel's
-//! allowlist (most tasks do not allow package mirrors) and the
-//! credential proxies only forward DB / cloud traffic. If the LLM
-//! doesn't know what's already baked in, it will either
-//! write a script importing a missing module and fail at runtime
-//! OR try to install a package and burn a turn on a tproxy denial.
+//! way, the LLM should prefer baked-in dependencies when they
+//! satisfy the task: they are faster, deterministic, and already
+//! matched to the image. If the task genuinely needs another
+//! package, the agent should still use normal language tooling
+//! (`pip`, `npm`, `cargo`, `go`) and let the kernel enforce the
+//! task's network policy underneath.
 //!
 //! This module gives the planner-harness one **in-guest
 //! introspection** path that probes the VM's binaries, language
@@ -67,12 +66,14 @@
 //! ## Kernel-private env redaction
 //!
 //! The env section of the manifest MUST NOT leak the
-//! `RAXIS_VSOCK_LOOPBACK_PLAN` payload, the A3 tproxy control-plane
-//! ports, `RAXIS_SESSION_TOKEN`, the `RAXIS_PLANNER_KSB` JSON, the
-//! sidecar HMAC secret, or any name containing a credential-shaped
-//! substring (`SECRET`, `PASSWORD`, `API_KEY`, `PRIVATE_KEY`,
-//! `_TOKEN`). The closed predicate [`is_kernel_private_env`] is the
-//! chokepoint; every probe that collects env vars routes through it.
+//! `RAXIS_VSOCK_LOOPBACK_PLAN` payload, A3 control-plane ports,
+//! `RAXIS_SESSION_TOKEN`, the `RAXIS_PLANNER_KSB` JSON, the sidecar
+//! HMAC secret, runtime-control knobs that misstate task networking
+//! such as `CARGO_NET_OFFLINE`, or any name containing a
+//! credential-shaped substring (`SECRET`, `PASSWORD`, `API_KEY`,
+//! `PRIVATE_KEY`, `_TOKEN`). The closed predicate
+//! [`is_kernel_private_env`] is the chokepoint; every probe that
+//! collects env vars routes through it.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -458,8 +459,9 @@ pub fn project_manifest(
 ///
 /// 1. **Explicit name list.** The kernel's own session-spawn env
 ///    (`RAXIS_SESSION_TOKEN`, `RAXIS_VSOCK_LOOPBACK_PLAN`, the A3
-///    tproxy control-plane ports, the KSB snapshot, the task prompt,
-///    sidecar HMAC).
+///    control-plane ports, the KSB snapshot, the task prompt,
+///    sidecar HMAC) plus runtime knobs such as
+///    `CARGO_NET_OFFLINE` that are not task capabilities.
 ///
 /// 2. **Pattern denylist.** Anything whose name (case-insensitively)
 ///    contains `SECRET`, `PASSWORD`, `PASSWD`, `API_KEY`, `APIKEY`,
@@ -469,7 +471,8 @@ pub fn project_manifest(
 pub fn is_kernel_private_env(name: &str) -> bool {
     if matches!(
         name,
-        "RAXIS_SESSION_TOKEN"
+        "CARGO_NET_OFFLINE"
+            | "RAXIS_SESSION_TOKEN"
             | "RAXIS_VSOCK_LOOPBACK_PLAN"
             | "RAXIS_TPROXY_KERNEL_TCP"
             | "RAXIS_AIRGAP_A3_HOST_CID"
@@ -1062,7 +1065,9 @@ fn git_head_sha(cwd: &Path) -> Option<String> {
 ///   loopback URLs but the names alone are what the LLM needs to
 ///   wire its scripts).
 /// * Workdir + git state.
-/// * The "no outbound network — `pip install` will fail" warning.
+/// * A concise reminder to prefer baked packages while still using
+///   normal HTTP/package clients when the task genuinely needs
+///   network access.
 pub fn build_capability_hint(m: &CapabilityManifest) -> String {
     let mut s = String::with_capacity(2048);
     s.push_str("## VM Environment\n");
@@ -1213,7 +1218,8 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
     s.push_str(
         "Use normal HTTP(S) clients when the task asks for network access. \
          Do not configure custom proxy settings unless the task gives one. \
-         Prefer preinstalled packages when they satisfy the task. Call \
+         Prefer preinstalled packages when they satisfy the task; install \
+         additional packages normally when the task requires them. Call \
          `vm_capabilities` for focused queries.",
     );
     s
@@ -1320,6 +1326,7 @@ mod tests {
     #[test]
     fn redacts_kernel_private_session_token() {
         assert!(is_kernel_private_env("RAXIS_SESSION_TOKEN"));
+        assert!(is_kernel_private_env("CARGO_NET_OFFLINE"));
     }
 
     #[test]
@@ -1365,6 +1372,7 @@ mod tests {
     fn probe_env_with_iter_redacts_loopback_plan() {
         let env = probe_env_with_iter([
             ("PATH".to_owned(), "/usr/bin".to_owned()),
+            ("CARGO_NET_OFFLINE".to_owned(), "true".to_owned()),
             (
                 "RAXIS_VSOCK_LOOPBACK_PLAN".to_owned(),
                 "<base64-payload>".to_owned(),
@@ -1382,6 +1390,10 @@ mod tests {
         ]);
         // INV-EXEC-DISCOVERY-01: RAXIS_VSOCK_LOOPBACK_PLAN value
         // MUST NOT appear in the manifest's env section.
+        assert!(
+            !env.contains_key("CARGO_NET_OFFLINE"),
+            "CARGO_NET_OFFLINE is a runtime-control knob, not a task capability"
+        );
         assert!(
             !env.contains_key("RAXIS_VSOCK_LOOPBACK_PLAN"),
             "RAXIS_VSOCK_LOOPBACK_PLAN must be redacted"
@@ -1480,13 +1492,14 @@ mod tests {
         // dumped inline).
         assert!(hint.contains("DATABASE_URL"));
         assert!(hint.contains("MONGO_URL"));
-        // The package-install warning MUST be present so the LLM
-        // doesn't try `pip install`, while the network guidance
-        // stays operator-facing and hides substrate internals.
+        // Package/network guidance MUST preserve the normal-client
+        // illusion while hiding substrate internals.
         assert!(hint.contains("Use normal HTTP(S) clients"));
         assert!(hint.contains("Do not configure custom proxy settings"));
         assert!(hint.contains("Prefer preinstalled packages"));
+        assert!(hint.contains("install additional packages normally"));
         assert!(!hint.contains("Do not install new packages"));
+        assert!(!hint.contains("CARGO_NET_OFFLINE"));
         assert!(!hint.contains("kernel-mediated"));
         assert!(!hint.contains("transparent proxy"));
         assert!(!hint.contains("RAXIS_TPROXY_KERNEL_TCP"));

@@ -665,11 +665,17 @@ pub const A3_DEFAULT_TPROXY_PORT: u16 = 3129;
 ///      every `getaddrinfo` through `127.0.0.1:53` — i.e. the
 ///      in-guest DNS stub that fans queries out over vsock to
 ///      the kernel-side resolver.
-///   3. Install a loopback-backed IPv4 default route. The A3 guest
+///   3. Configure loopback routing sysctls for local transparent
+///      NAT. The route below intentionally makes non-local peers
+///      traverse `lo` before nftables redirects them; the reverse
+///      path can therefore look martian to stock IPv4 checks unless
+///      local routing is explicitly enabled and reverse-path
+///      filtering is disabled for the no-NIC guest.
+///   4. Install a loopback-backed IPv4 default route. The A3 guest
 ///      has no NIC by design; without a default route Linux can
 ///      return `ENETUNREACH` before the `nat OUTPUT` hook sees the
 ///      socket and redirects it to the in-guest tproxy.
-///   4. Install native nftables `nat OUTPUT` REDIRECT rules to send
+///   5. Install native nftables `nat OUTPUT` REDIRECT rules to send
 ///      outbound TCP to the local tproxy listener
 ///      (`127.0.0.1:<tproxy_port>`). UDP port 53 is REDIRECTed
 ///      to the local DNS stub on port 53. The canonical path uses
@@ -696,6 +702,7 @@ pub fn init_pid1_a3_egress() {
             .unwrap_or(A3_DEFAULT_TPROXY_PORT);
         linux_a3::disable_ipv6_via_sysfs();
         linux_a3::write_resolv_conf_for_stub();
+        linux_a3::configure_loopback_transparent_egress_sysctls();
         linux_a3::install_loopback_default_route();
         linux_a3::install_nftables_redirect(tproxy_port);
     }
@@ -721,10 +728,13 @@ pub const PLANNER_BINARY_PATHS_TO_MASK: &[&str] = &[
     "/usr/local/bin/raxis-verifier-no-secrets",
 ];
 
-/// Sensitive env vars that MUST be removed from the process
-/// environment BEFORE the agent's `BashTool` /
+/// Env vars that MUST be removed from the process environment
+/// BEFORE the agent's `BashTool` /
 /// [`crate::custom_tools::SubprocessTool`] is allowed to spawn a
-/// child. Each in-guest listener that needs one of these has
+/// child. Most are secrets or kernel transport handles; a few
+/// are runtime-control knobs whose presence would mislead the
+/// model about the VM's actual task-level capabilities. Each
+/// in-guest listener that needs one of these has
 /// already cloned the value into its task locals by the time
 /// [`harden_guest_for_agent`] runs (see
 /// `crates/planner-executor/src/main.rs::activate_airgap_a3_chokepoint`
@@ -736,6 +746,7 @@ pub const PLANNER_BINARY_PATHS_TO_MASK: &[&str] = &[
 /// Pinned alphabetically so a future addition does not silently
 /// reorder the audit-replay scrub log.
 pub const SENSITIVE_ENV_VARS_TO_SCRUB: &[&str] = &[
+    "CARGO_NET_OFFLINE",
     "RAXIS_AIRGAP_A3_ADMISSION_PORT",
     "RAXIS_AIRGAP_A3_HOST_CID",
     "RAXIS_AIRGAP_A3_TUNNEL_PORT",
@@ -743,6 +754,7 @@ pub const SENSITIVE_ENV_VARS_TO_SCRUB: &[&str] = &[
     "RAXIS_PLANNER_TASK_PROMPT",
     "RAXIS_PLANNER_TASK_PROMPT_PATH",
     "RAXIS_SESSION_TOKEN",
+    "RAXIS_TPROXY_KERNEL_TCP",
 ];
 
 /// `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` — last-line
@@ -917,12 +929,11 @@ pub fn scrub_sensitive_env_for_agent() {
                 // this on the main task before the agent's tool
                 // dispatch spawns any child. The tokio runtime
                 // worker pool may exist by this point, but no
-                // worker is concurrently mutating env (env mutation
-                // is single-call-site: only `cmdline_env::apply_*`,
-                // `ensure_cargo_offline_default`, and this
-                // function; the first two run pre-runtime in
-                // `main`, this one runs synchronously between
-                // listener-spawn and dispatch-loop-entry).
+                // worker is concurrently mutating env. The only
+                // writer before this point is
+                // `cmdline_env::apply_*` during pre-runtime
+                // hydration; this one runs synchronously between
+                // listener-spawn and dispatch-loop-entry.
                 unsafe {
                     std::env::remove_var(key);
                 }
@@ -1251,7 +1262,7 @@ mod linux_a3 {
         // sole resolver target when no `search` / `options` lines
         // are present. The stub forwarder is the dispatcher to
         // the kernel-side resolver via vsock.
-        let contents: &[u8] = b"# raxis Path A3 universal airgap -- kernel-mediated DNS.\n\
+        let contents: &[u8] = b"# raxis managed DNS.\n\
               nameserver 127.0.0.1\n\
               options single-request-reopen timeout:5 attempts:2\n";
         // `/etc` may or may not exist in the canonical executor
@@ -1277,6 +1288,55 @@ mod linux_a3 {
               \"event\":\"resolv_conf_pointed_at_stub\"}}"
         );
     }
+
+    /// Make Linux accept the deliberately unusual no-NIC routing
+    /// shape used by A3 transparent egress.
+    ///
+    /// `install_loopback_default_route` below sends otherwise
+    /// unroutable IPv4 destinations through `lo` so the local
+    /// `nat OUTPUT` hook can REDIRECT them to the in-guest tproxy.
+    /// The reverse direction of that NATed local TCP flow can
+    /// carry non-loopback peer addresses over `lo`; stock martian
+    /// checks and reverse-path filtering are allowed to reject that
+    /// traffic. In an A3 guest there is no external interface to
+    /// spoof through, so these knobs widen only the internal
+    /// loopback path that nftables immediately redirects into the
+    /// kernel-mediated tunnel.
+    pub(super) fn configure_loopback_transparent_egress_sysctls() {
+        let mut ok = 0u32;
+        let mut failed = 0u32;
+        for (path, value) in LOOPBACK_TRANSPARENT_EGRESS_SYSCTLS {
+            match std::fs::write(path, format!("{value}\n")) {
+                Ok(()) => ok += 1,
+                Err(e) => {
+                    failed += 1;
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"step\":\"guest-init-a3\",\
+                          \"event\":\"loopback_transparent_egress_sysctl_failed\",\
+                          \"path\":{path:?},\"value\":{value:?},\"err\":{:?}}}",
+                        e.to_string(),
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "{{\"level\":\"info\",\"step\":\"guest-init-a3\",\
+              \"event\":\"loopback_transparent_egress_sysctls_configured\",\
+              \"ok\":{ok},\"failed\":{failed}}}"
+        );
+    }
+
+    pub(super) const LOOPBACK_TRANSPARENT_EGRESS_SYSCTLS: &[(&str, &str)] = &[
+        ("/proc/sys/net/ipv4/conf/all/accept_local", "1"),
+        ("/proc/sys/net/ipv4/conf/all/route_localnet", "1"),
+        ("/proc/sys/net/ipv4/conf/all/rp_filter", "0"),
+        ("/proc/sys/net/ipv4/conf/default/accept_local", "1"),
+        ("/proc/sys/net/ipv4/conf/default/route_localnet", "1"),
+        ("/proc/sys/net/ipv4/conf/default/rp_filter", "0"),
+        ("/proc/sys/net/ipv4/conf/lo/accept_local", "1"),
+        ("/proc/sys/net/ipv4/conf/lo/route_localnet", "1"),
+        ("/proc/sys/net/ipv4/conf/lo/rp_filter", "0"),
+    ];
 
     /// Route otherwise-unroutable IPv4 destinations through `lo`
     /// so Linux reaches the `nat OUTPUT` hook and nftables can
@@ -1523,6 +1583,18 @@ mod tests_a3 {
         assert!(ruleset.contains("udp dport 53 redirect to :53"));
         assert!(!ruleset.contains("oifname \"lo\" return"));
         assert!(!ruleset.contains("iptables"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a3_loopback_transparent_egress_sysctls_pin_martian_relaxation() {
+        let sysctls = linux_a3::LOOPBACK_TRANSPARENT_EGRESS_SYSCTLS;
+        assert!(sysctls.contains(&("/proc/sys/net/ipv4/conf/all/route_localnet", "1")));
+        assert!(sysctls.contains(&("/proc/sys/net/ipv4/conf/lo/route_localnet", "1")));
+        assert!(sysctls.contains(&("/proc/sys/net/ipv4/conf/all/accept_local", "1")));
+        assert!(sysctls.contains(&("/proc/sys/net/ipv4/conf/lo/accept_local", "1")));
+        assert!(sysctls.contains(&("/proc/sys/net/ipv4/conf/all/rp_filter", "0")));
+        assert!(sysctls.contains(&("/proc/sys/net/ipv4/conf/lo/rp_filter", "0")));
     }
 }
 
@@ -1838,7 +1910,7 @@ pub fn shutdown_or_exit(code: u8) -> ! {
 }
 
 // ---------------------------------------------------------------------------
-// Cargo-offline default (`INV-EXECUTOR-IMAGE-RUST-OFFLINE-01`)
+// Executor Rust toolchain defaults
 // ---------------------------------------------------------------------------
 
 /// Rustup/cargo env defaults for the executor starter image.
@@ -1988,190 +2060,6 @@ mod rustup_env_default_tests {
     }
 }
 
-/// Env var the executor planner-core sets at PID-1 boot so every
-/// `BashTool`-spawned `cargo` invocation defaults to offline mode.
-///
-/// The realistic-scenario seed's `rust-crate/Cargo.toml` declares
-/// no third-party dependencies, so `cargo fmt --check` + `cargo
-/// clippy --all-targets -- -D warnings` succeed without any
-/// `index.crates.io` probe. Defaulting `CARGO_NET_OFFLINE=true`
-/// short-circuits cargo's first-invocation registry-index refresh
-/// — which would otherwise hit the canonical empty per-session
-/// egress allowlist (`INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01`),
-/// retry the resolver for the registry-fetch timeout window, and
-/// surface a flaky `failed to download` error rather than the
-/// crisp `no matching package … found (lock file only)` shape
-/// `--offline` produces.
-///
-/// The two sibling lint-toolchain invariants
-/// (`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-{PYTHON,JS}-01`, canonical
-/// home `v2/planner-harness.md §10.6`) bake their per-language
-/// deps directly into the executor-starter rootfs at image-build
-/// time. This invariant covers the Rust half of the same
-/// offline-first surface for the realistic-scenario plan
-/// (`raxis/kernel/tests/extended_e2e_support/plan_realistic.rs`):
-/// the seed's `rust-crate/` has no third-party deps so there's
-/// nothing to bake, and the env-default is the load-bearing
-/// guard against a future seed dep accidentally introducing a
-/// registry probe.
-pub const CARGO_OFFLINE_ENV: &str = "CARGO_NET_OFFLINE";
-
-/// Set [`CARGO_OFFLINE_ENV`] = `"true"` in the current process env
-/// IF AND ONLY IF the operator has not already set it (any
-/// non-empty value wins; an explicit `CARGO_NET_OFFLINE=false`
-/// stays in force). The executor planner-core invokes this once
-/// during PID-1 boot, BEFORE the tokio runtime spawns any worker
-/// thread, so the `unsafe { set_var }` call is single-threaded
-/// per Rust 2024's env-mutation contract.
-///
-/// Returns the action taken so the caller can log it (and a
-/// post-mortem audit-chain replay can prove which branch fired
-/// for each session).
-pub fn ensure_cargo_offline_default() -> CargoOfflineDefaultOutcome {
-    match std::env::var(CARGO_OFFLINE_ENV) {
-        Ok(v) if !v.is_empty() => CargoOfflineDefaultOutcome::PreservedExisting { value: v },
-        _ => {
-            // SAFETY: `set_var` is unsafe-by-Rust-2024 because of
-            // multi-threaded access semantics. This call runs
-            // from the planner's PID-1 main BEFORE the tokio
-            // runtime spawns any worker threads (the call site
-            // in planner-executor sits between
-            // `mount_workspace_shares()` and the
-            // `tokio::runtime::Builder::new_multi_thread()`
-            // construction), so there is no concurrent env
-            // reader/writer. The whole point of running this
-            // before runtime construction is to ensure the
-            // single-threaded contract holds.
-            unsafe {
-                std::env::set_var(CARGO_OFFLINE_ENV, "true");
-            }
-            CargoOfflineDefaultOutcome::DefaultedToOffline
-        }
-    }
-}
-
-/// Outcome of [`ensure_cargo_offline_default`]. Logged by the
-/// caller so a post-mortem can prove whether the executor's
-/// `cargo` invocations defaulted to offline OR inherited an
-/// operator-set value.
-#[derive(Clone, Debug)]
-pub enum CargoOfflineDefaultOutcome {
-    /// The env var was unset / empty when the helper ran; the
-    /// helper set it to `"true"`.
-    DefaultedToOffline,
-    /// The env var was already set; the helper preserved the
-    /// existing value.
-    PreservedExisting {
-        /// The value the operator pre-set.
-        value: String,
-    },
-}
-
-#[cfg(test)]
-mod cargo_offline_default_tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    /// Helper: snapshot/restore the env var around a test that
-    /// mutates it. Tests in the same process can race on env
-    /// mutation, so we serialise via a process-wide mutex around
-    /// the snapshot/restore pair.
-    fn with_env_snapshot<F: FnOnce()>(key: &str, f: F) {
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var(key).ok();
-        // SAFETY: holding the static mutex serialises every test
-        // in this module against any other test in this module
-        // that touches the same env key.
-        unsafe {
-            std::env::remove_var(key);
-        }
-        f();
-        // SAFETY: see above.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
-
-    #[test]
-    fn ensure_cargo_offline_default_sets_when_absent() {
-        with_env_snapshot(CARGO_OFFLINE_ENV, || {
-            let outcome = ensure_cargo_offline_default();
-            assert!(matches!(
-                outcome,
-                CargoOfflineDefaultOutcome::DefaultedToOffline
-            ));
-            assert_eq!(std::env::var(CARGO_OFFLINE_ENV).unwrap(), "true");
-        });
-    }
-
-    #[test]
-    fn ensure_cargo_offline_default_preserves_existing_truthy_value() {
-        with_env_snapshot(CARGO_OFFLINE_ENV, || {
-            // SAFETY: serialised via `with_env_snapshot`'s mutex.
-            unsafe {
-                std::env::set_var(CARGO_OFFLINE_ENV, "true");
-            }
-            let outcome = ensure_cargo_offline_default();
-            match outcome {
-                CargoOfflineDefaultOutcome::PreservedExisting { value } => {
-                    assert_eq!(value, "true");
-                }
-                other => panic!("expected PreservedExisting, got {other:?}"),
-            }
-        });
-    }
-
-    #[test]
-    fn ensure_cargo_offline_default_preserves_explicit_falsy_value() {
-        // Operator override: `CARGO_NET_OFFLINE=false` MUST win
-        // over the planner default. This is the load-bearing
-        // precedence contract — an operator who explicitly opts
-        // back into online cargo (e.g. a starter image embedded
-        // inside a tier-3 BYO workflow that genuinely needs the
-        // registry index) needs the planner to respect that
-        // choice.
-        with_env_snapshot(CARGO_OFFLINE_ENV, || {
-            // SAFETY: serialised via `with_env_snapshot`'s mutex.
-            unsafe {
-                std::env::set_var(CARGO_OFFLINE_ENV, "false");
-            }
-            let outcome = ensure_cargo_offline_default();
-            match outcome {
-                CargoOfflineDefaultOutcome::PreservedExisting { value } => {
-                    assert_eq!(value, "false");
-                }
-                other => panic!("expected PreservedExisting, got {other:?}"),
-            }
-            assert_eq!(std::env::var(CARGO_OFFLINE_ENV).unwrap(), "false");
-        });
-    }
-
-    #[test]
-    fn ensure_cargo_offline_default_treats_empty_as_unset() {
-        // Pin: an empty-string env var is treated as "unset" so
-        // an operator who exported the variable without a value
-        // still gets the default. This matches cargo's own
-        // env-handling: cargo treats `CARGO_NET_OFFLINE=` (empty)
-        // as "no preference set".
-        with_env_snapshot(CARGO_OFFLINE_ENV, || {
-            // SAFETY: serialised via `with_env_snapshot`'s mutex.
-            unsafe {
-                std::env::set_var(CARGO_OFFLINE_ENV, "");
-            }
-            let outcome = ensure_cargo_offline_default();
-            assert!(matches!(
-                outcome,
-                CargoOfflineDefaultOutcome::DefaultedToOffline
-            ));
-            assert_eq!(std::env::var(CARGO_OFFLINE_ENV).unwrap(), "true");
-        });
-    }
-}
-
 /// `INV-PLANNER-PID1-ONLY-EXEC-01` — unit tests for
 /// [`enforce_pid1_or_abort`]. Cannot exercise the abort path
 /// directly (would terminate the test runner), but cover the
@@ -2182,7 +2070,7 @@ mod pid1_enforcement_tests {
     use std::sync::Mutex;
 
     /// Serialise env mutations across tests (matches the
-    /// pattern in `cargo_offline_default_tests::with_env_snapshot`).
+    /// pattern used by the other env-mutating tests in this file.
     fn with_bypass_env<F: FnOnce()>(f: F) {
         static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2280,15 +2168,17 @@ mod guest_harden_tests {
         );
     }
 
-    /// Pin the sensitive-env scrub list. Every entry is a kernel-
-    /// stamped value an agent's `bash -lc 'env'` could otherwise
-    /// recover. A future env addition that holds a secret MUST
-    /// land here in the same commit.
+    /// Pin the scrub list. Every entry is a kernel-stamped value
+    /// or runtime-control knob an agent's `bash -lc 'env'` could
+    /// otherwise recover or misinterpret. A future env addition
+    /// that holds a secret or changes apparent capability posture
+    /// MUST land here in the same commit.
     #[test]
     fn sensitive_env_vars_to_scrub_pinned() {
         assert_eq!(
             SENSITIVE_ENV_VARS_TO_SCRUB,
             &[
+                "CARGO_NET_OFFLINE",
                 "RAXIS_AIRGAP_A3_ADMISSION_PORT",
                 "RAXIS_AIRGAP_A3_HOST_CID",
                 "RAXIS_AIRGAP_A3_TUNNEL_PORT",
@@ -2296,10 +2186,11 @@ mod guest_harden_tests {
                 "RAXIS_PLANNER_TASK_PROMPT",
                 "RAXIS_PLANNER_TASK_PROMPT_PATH",
                 "RAXIS_SESSION_TOKEN",
+                "RAXIS_TPROXY_KERNEL_TCP",
             ],
-            "SENSITIVE_ENV_VARS_TO_SCRUB is the agent token-recovery \
-             surface; any change must be paired with a spec update \
-             in specs/v3/guest-agent-jailbreak-defense.md §2.6"
+            "SENSITIVE_ENV_VARS_TO_SCRUB is the agent token/capability \
+             recovery surface; any change must be paired with a spec \
+             update in specs/v3/guest-agent-jailbreak-defense.md §2.6"
         );
     }
 

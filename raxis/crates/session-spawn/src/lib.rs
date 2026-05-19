@@ -982,11 +982,13 @@ impl SessionSpawnService {
                 let registry = Arc::clone(&registry);
                 let store = self.store.clone();
                 let session_id = session_id.clone();
+                let initiative_id = req.initiative_id.clone();
                 let session_token = session_token_for_a3.clone();
                 tokio::spawn(async move {
                     run_a3_control_loop(
                         control_listener,
                         session_id,
+                        initiative_id,
                         session_token,
                         svc,
                         audit,
@@ -1070,7 +1072,7 @@ impl SessionSpawnService {
             AuditEventKind::SessionVmSpawned {
                 session_id: session_id.clone(),
                 task_id: task_for_audit.clone(),
-                initiative_id: initiative_for_audit,
+                initiative_id: initiative_for_audit.clone(),
                 backend_id: self.isolation.backend_id().to_owned(),
                 egress_tier: format!("{:?}", req.vm_spec.egress_tier),
                 admission_loopback: admission_addr.to_string(),
@@ -1078,7 +1080,7 @@ impl SessionSpawnService {
             },
             Some(&session_id),
             task_for_audit.as_deref(),
-            None,
+            Some(initiative_for_audit.as_str()),
         ) {
             // Audit failure is fail-closed: tear down the VM, the
             // admission loop, and the credential proxies before
@@ -1335,6 +1337,7 @@ async fn bind_a3_listeners() -> Result<A3BoundListeners, std::io::Error> {
 async fn run_a3_control_loop(
     listener: TcpListener,
     session_id: String,
+    initiative_id: String,
     session_token: String,
     admission_service: Arc<dyn AdmissionService>,
     audit: Arc<dyn AuditSink>,
@@ -1363,11 +1366,13 @@ async fn run_a3_control_loop(
         let registry = Arc::clone(&registry);
         let store = store.clone();
         let session_id = session_id.clone();
+        let initiative_id = initiative_id.clone();
         let session_token = session_token.clone();
         tokio::spawn(async move {
             handle_a3_control_connection(
                 sock,
                 session_id,
+                initiative_id,
                 session_token,
                 svc,
                 audit,
@@ -1382,6 +1387,7 @@ async fn run_a3_control_loop(
 async fn handle_a3_control_connection(
     mut sock: tokio::net::TcpStream,
     session_id: String,
+    initiative_id: String,
     session_token: String,
     admission_service: Arc<dyn AdmissionService>,
     audit: Arc<dyn AuditSink>,
@@ -1416,12 +1422,21 @@ async fn handle_a3_control_connection(
 
     let response = match envelope {
         IpcMessage::DnsResolveRequest(req) => IpcMessage::KernelDnsResolveResponse(
-            handle_a3_dns_request(req, &session_id, &session_token, &audit, store.as_ref()).await,
+            handle_a3_dns_request(
+                req,
+                &session_id,
+                &initiative_id,
+                &session_token,
+                &audit,
+                store.as_ref(),
+            )
+            .await,
         ),
         IpcMessage::TproxyAdmissionRequest(req) => IpcMessage::KernelTproxyAdmissionResponse(
             handle_a3_tproxy_request(
                 req,
                 &session_id,
+                &initiative_id,
                 &session_token,
                 admission_service.as_ref(),
                 audit.as_ref(),
@@ -1462,6 +1477,7 @@ async fn handle_a3_control_connection(
 async fn handle_a3_dns_request(
     req: DnsResolveRequest,
     session_id: &str,
+    initiative_id: &str,
     session_token: &str,
     audit: &Arc<dyn AuditSink>,
     store: Option<&Arc<raxis_store::Store>>,
@@ -1473,6 +1489,11 @@ async fn handle_a3_dns_request(
         return a3_dns_audit_and_response(
             audit,
             audit_session,
+            if authenticated {
+                Some(initiative_id)
+            } else {
+                None
+            },
             &req,
             Vec::new(),
             A3_DNS_NEGATIVE_TTL_SECS,
@@ -1510,12 +1531,20 @@ async fn handle_a3_dns_request(
     } else {
         A3_DNS_DEFAULT_TTL_SECS
     };
-    a3_dns_audit_and_response(audit, audit_session, &req, addresses, ttl)
+    a3_dns_audit_and_response(
+        audit,
+        audit_session,
+        Some(initiative_id),
+        &req,
+        addresses,
+        ttl,
+    )
 }
 
 fn a3_dns_audit_and_response(
     audit: &Arc<dyn AuditSink>,
     session_id: &str,
+    initiative_id: Option<&str>,
     req: &DnsResolveRequest,
     addresses: Vec<IpAddr>,
     ttl_secs: u32,
@@ -1535,7 +1564,7 @@ fn a3_dns_audit_and_response(
     } else {
         Some(session_id)
     };
-    if let Err(e) = audit.emit(kind, session_anchor, None, None) {
+    if let Err(e) = audit.emit(kind, session_anchor, None, initiative_id) {
         tracing::error!(
             session_id,
             error = %e,
@@ -1559,6 +1588,7 @@ fn a3_dns_query_type_matches(query_type: DnsQueryType, ip: &IpAddr) -> bool {
 async fn handle_a3_tproxy_request(
     req: TproxyAdmissionRequest,
     session_id: &str,
+    initiative_id: &str,
     session_token: &str,
     admission_service: &dyn AdmissionService,
     audit: &dyn AuditSink,
@@ -1569,7 +1599,7 @@ async fn handle_a3_tproxy_request(
     if req.session_token != session_token
         || !a3_session_is_active(session_id, session_token, store).await
     {
-        let _ = a3_emit_denied_audit(audit, "", &req, "FAIL_SESSION_TOKEN_MISMATCH");
+        let _ = a3_emit_denied_audit(audit, "", None, &req, "FAIL_SESSION_TOKEN_MISMATCH");
         return a3_deny(request_id, "FAIL_SESSION_TOKEN_MISMATCH", None);
     }
 
@@ -1584,7 +1614,7 @@ async fn handle_a3_tproxy_request(
     match decision.verdict {
         AdmissionVerdict::Deny(reason) => {
             let reason = reason.as_str();
-            if !a3_emit_denied_audit(audit, session_id, &req, reason) {
+            if !a3_emit_denied_audit(audit, session_id, Some(initiative_id), &req, reason) {
                 return a3_deny(request_id, "FAIL_AUDIT_EMIT", None);
             }
             a3_deny(
@@ -1601,7 +1631,13 @@ async fn handle_a3_tproxy_request(
                     error = %e,
                     "A3 tproxy tunnel token generation failed",
                 );
-                let _ = a3_emit_denied_audit(audit, session_id, &req, "protocol_not_permitted");
+                let _ = a3_emit_denied_audit(
+                    audit,
+                    session_id,
+                    Some(initiative_id),
+                    &req,
+                    "protocol_not_permitted",
+                );
                 return a3_deny(request_id, "protocol_not_permitted", None);
             }
 
@@ -1615,6 +1651,7 @@ async fn handle_a3_tproxy_request(
             if !a3_emit_granted_audit(
                 audit,
                 session_id,
+                Some(initiative_id),
                 &req,
                 host_for_audit.as_deref(),
                 tunnel_id,
@@ -1688,6 +1725,7 @@ fn a3_host_or_sni_for_audit(req: &TproxyAdmissionRequest) -> Option<String> {
 fn a3_emit_denied_audit(
     audit: &dyn AuditSink,
     session_id: &str,
+    initiative_id: Option<&str>,
     req: &TproxyAdmissionRequest,
     reason: &str,
 ) -> bool {
@@ -1704,7 +1742,7 @@ fn a3_emit_denied_audit(
     } else {
         Some(session_id)
     };
-    match audit.emit(kind, session_anchor, None, None) {
+    match audit.emit(kind, session_anchor, None, initiative_id) {
         Ok(_) => true,
         Err(e) => {
             tracing::error!(
@@ -1720,6 +1758,7 @@ fn a3_emit_denied_audit(
 fn a3_emit_granted_audit(
     audit: &dyn AuditSink,
     session_id: &str,
+    initiative_id: Option<&str>,
     req: &TproxyAdmissionRequest,
     host_for_match: Option<&str>,
     tunnel_id: Uuid,
@@ -1732,7 +1771,7 @@ fn a3_emit_granted_audit(
         protocol: req.protocol.as_str().to_owned(),
         tunnel_id: tunnel_id.to_string(),
     };
-    match audit.emit(kind, Some(session_id), None, None) {
+    match audit.emit(kind, Some(session_id), None, initiative_id) {
         Ok(_) => true,
         Err(e) => {
             tracing::error!(
@@ -2044,6 +2083,7 @@ mod a3_tests {
         let resp = handle_a3_tproxy_request(
             req,
             "sess-a3",
+            "init-a3",
             "session-token",
             &AlwaysAdmit,
             audit.as_ref(),

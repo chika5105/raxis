@@ -117,6 +117,18 @@ use crate::initiatives::lifecycle as kernel_lifecycle;
 /// crate::session_spawn_orchestrator::PLANNER_TASK_PROMPT_ENV`).
 pub use raxis_types::planner_env::PLANNER_TASK_PROMPT_ENV;
 
+/// Env var consumed by `raxis-planner-core::vm_capabilities` to
+/// label the live capability manifest. Canonical roles stamp
+/// `orchestrator` / `executor` / `reviewer`; operator-published
+/// executor images stamp `byo`.
+pub const PLANNER_ROLE_ENV: &str = "RAXIS_PLANNER_ROLE";
+
+/// Optional env var consumed by `raxis-planner-core::vm_capabilities`
+/// to expose the verified operator-image digest as inert provenance.
+/// Canonical images are already named by `image_id`, so this is
+/// primarily stamped for `[[vm_images]]` / BYO executor images.
+pub const VM_IMAGE_DIGEST_ENV: &str = "RAXIS_VM_IMAGE_DIGEST";
+
 /// Failure modes specific to the kernel-side bridge.
 ///
 /// Wraps `SpawnError` for substrate failures and adds the kernel-
@@ -853,6 +865,7 @@ async fn spawn_orchestrator_for_initiative(
          reaching orchestrator spawn with an empty prompt is a parser bug",
     );
     let mut env: BTreeMap<String, String> = BTreeMap::new();
+    stamp_capability_manifest_env(&mut env, "orchestrator", None);
     if let Some(data_dir) = &spawn_ctx.data_dir {
         let sock = data_dir.join("sockets").join("planner.sock");
         env.insert(
@@ -4704,6 +4717,31 @@ pub enum ExecutorAgentKind {
     Reviewer,
 }
 
+fn planner_capability_role_for(
+    agent_kind: ExecutorAgentKind,
+    operator_image_override: bool,
+) -> &'static str {
+    if operator_image_override {
+        "byo"
+    } else {
+        match agent_kind {
+            ExecutorAgentKind::Executor => "executor",
+            ExecutorAgentKind::Reviewer => "reviewer",
+        }
+    }
+}
+
+fn stamp_capability_manifest_env(
+    env: &mut BTreeMap<String, String>,
+    planner_role: &'static str,
+    image_digest: Option<&str>,
+) {
+    env.insert(PLANNER_ROLE_ENV.to_owned(), planner_role.to_owned());
+    if let Some(digest) = image_digest.filter(|s| !s.is_empty()) {
+        env.insert(VM_IMAGE_DIGEST_ENV.to_owned(), digest.to_owned());
+    }
+}
+
 /// Free-function helper: spawn the Executor / Reviewer VM for a
 /// V2 sub-task activation directly through `SessionSpawnService`.
 ///
@@ -4798,6 +4836,7 @@ pub async fn spawn_executor_for_task(
     // resolution below. We still defensively reject overrides on
     // Reviewer kinds (operator-published Reviewer images are
     // structurally forbidden per `INV-PLANNER-HARNESS-02`).
+    let operator_image_override = image_override.is_some();
     let verified_image = if let Some(override_img) = image_override {
         if matches!(agent_kind, ExecutorAgentKind::Reviewer) {
             return Err(OrchestratorSpawnError::Substrate(SpawnError::Audit(
@@ -4987,6 +5026,11 @@ pub async fn spawn_executor_for_task(
     // scaffold/park mode — so populating only the socket here is
     // backward-compatible with every existing kernel test.
     let mut env = extra_env;
+    stamp_capability_manifest_env(
+        &mut env,
+        planner_capability_role_for(agent_kind, operator_image_override),
+        None,
+    );
     if let Some(data_dir) = &spawn_ctx.data_dir {
         let sock = data_dir.join("sockets").join("planner.sock");
         env.entry("RAXIS_KERNEL_PLANNER_SOCKET".to_owned())
@@ -5509,6 +5553,44 @@ mod tests {
         Arc::new(arc_swap::ArcSwap::from_pointee(
             raxis_policy::PolicyBundle::for_tests_with_operators(vec![]),
         ))
+    }
+
+    #[test]
+    fn capability_manifest_env_stamps_byo_role_and_digest() {
+        let mut env = BTreeMap::new();
+        stamp_capability_manifest_env(
+            &mut env,
+            planner_capability_role_for(ExecutorAgentKind::Executor, true),
+            Some("sha256:abc123"),
+        );
+        assert_eq!(env.get(PLANNER_ROLE_ENV).map(String::as_str), Some("byo"));
+        assert_eq!(
+            env.get(VM_IMAGE_DIGEST_ENV).map(String::as_str),
+            Some("sha256:abc123")
+        );
+    }
+
+    #[test]
+    fn capability_manifest_env_stamps_canonical_agent_roles() {
+        assert_eq!(
+            planner_capability_role_for(ExecutorAgentKind::Executor, false),
+            "executor"
+        );
+        assert_eq!(
+            planner_capability_role_for(ExecutorAgentKind::Reviewer, false),
+            "reviewer"
+        );
+
+        let mut env = BTreeMap::new();
+        stamp_capability_manifest_env(&mut env, "orchestrator", None);
+        assert_eq!(
+            env.get(PLANNER_ROLE_ENV).map(String::as_str),
+            Some("orchestrator")
+        );
+        assert!(
+            !env.contains_key(VM_IMAGE_DIGEST_ENV),
+            "canonical images do not stamp a digest env by default"
+        );
     }
 
     #[tokio::test]

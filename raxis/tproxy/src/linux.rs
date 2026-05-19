@@ -148,6 +148,20 @@ async fn handle_one_a3_connection(
         TproxyProtocol::Http => (None, peeked.host_or_sni.clone()),
         TproxyProtocol::Tcp => (None, None),
     };
+    let host_or_sni_for_log = match protocol {
+        TproxyProtocol::Tls => sni.clone(),
+        TproxyProtocol::Http => host_header.clone(),
+        TproxyProtocol::Tcp => None,
+    };
+    let host_or_sni_json = json_string_or_null(host_or_sni_for_log.as_deref());
+    let protocol_label = protocol_label(protocol);
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"a3_guest_flow_peeked\",\
+          \"destination\":{original_dst:?},\"protocol\":\"{protocol_label}\",\
+          \"host_or_sni\":{host_or_sni_json},\
+          \"peeked_prelude_bytes\":{}}}",
+        peeked.buffered.len()
+    );
 
     // Open the admission vsock channel.
     let mut admission_vsock = tokio::time::timeout(
@@ -183,8 +197,20 @@ async fn handle_one_a3_connection(
             tunnel_id,
             tunnel_token,
             ..
-        } => (tunnel_id, tunnel_token),
+        } => {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"a3_guest_flow_admitted\",\
+                  \"destination\":{original_dst:?},\"protocol\":\"{protocol_label}\",\
+                  \"host_or_sni\":{host_or_sni_json},\"tunnel_id\":\"{tunnel_id}\"}}"
+            );
+            (tunnel_id, tunnel_token)
+        }
         raxis_types::TproxyAdmissionResponse::Deny { reason, .. } => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"a3_guest_flow_denied\",\
+                  \"destination\":{original_dst:?},\"protocol\":\"{protocol_label}\",\
+                  \"host_or_sni\":{host_or_sni_json},\"reason\":{reason:?}}}"
+            );
             let _ = agent.shutdown().await;
             return Err(A3ConnectionError::Denied { reason });
         }
@@ -239,8 +265,31 @@ async fn handle_one_a3_connection(
             )
         })??;
     }
-    let _ = tokio::io::copy_bidirectional(&mut agent, &mut tunnel).await;
-    Ok(())
+    match tokio::io::copy_bidirectional(&mut agent, &mut tunnel).await {
+        Ok((agent_to_tunnel_bytes, tunnel_to_agent_bytes)) => {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"a3_guest_tunnel_closed\",\
+                  \"destination\":{original_dst:?},\"protocol\":\"{protocol_label}\",\
+                  \"host_or_sni\":{host_or_sni_json},\"tunnel_id\":\"{tunnel_id}\",\
+                  \"peeked_prelude_bytes\":{},\
+                  \"agent_to_tunnel_bytes\":{agent_to_tunnel_bytes},\
+                  \"tunnel_to_agent_bytes\":{tunnel_to_agent_bytes}}}",
+                peeked.buffered.len()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"a3_guest_tunnel_copy_failed\",\
+                  \"destination\":{original_dst:?},\"protocol\":\"{protocol_label}\",\
+                  \"host_or_sni\":{host_or_sni_json},\"tunnel_id\":\"{tunnel_id}\",\
+                  \"peeked_prelude_bytes\":{},\"err\":{:?}}}",
+                peeked.buffered.len(),
+                e.to_string(),
+            );
+            Err(A3ConnectionError::Io(e))
+        }
+    }
 }
 
 // On non-Linux we never actually run accept_loop_a3 (the tproxy
@@ -280,4 +329,19 @@ fn original_dst_v4(stream: &TcpStream) -> io::Result<SocketAddr> {
     let ip_bytes = u32::from_be(dst.sin_addr.s_addr).to_be_bytes();
     let ip = std::net::Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
     Ok(SocketAddr::new(IpAddr::V4(ip), port))
+}
+
+fn protocol_label(protocol: raxis_types::TproxyProtocol) -> &'static str {
+    match protocol {
+        raxis_types::TproxyProtocol::Http => "http",
+        raxis_types::TproxyProtocol::Tls => "https",
+        raxis_types::TproxyProtocol::Tcp => "tcp",
+    }
+}
+
+fn json_string_or_null(value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("{value:?}"),
+        None => "null".to_owned(),
+    }
 }

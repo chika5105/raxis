@@ -563,10 +563,11 @@ each planner-binary's `run()` async fn AFTER
 `BootContext::from_process` has consumed the env vars into
 `ctx.env` and BEFORE `run_role_session` enters the dispatch
 loop. The function iterates over `SENSITIVE_ENV_VARS_TO_SCRUB`
-(`RAXIS_AIRGAP_A3_*`, `RAXIS_KERNEL_VSOCK_LISTEN_PORT`,
-`RAXIS_PLANNER_TASK_PROMPT[_PATH]`, `RAXIS_SESSION_TOKEN`) and
-removes each from the process environment via
-`std::env::remove_var`. **Critically**, it ALSO snapshots each
+(`CARGO_NET_OFFLINE`, `RAXIS_AIRGAP_A3_*`,
+`RAXIS_KERNEL_VSOCK_LISTEN_PORT`,
+`RAXIS_PLANNER_TASK_PROMPT[_PATH]`, `RAXIS_SESSION_TOKEN`,
+`RAXIS_TPROXY_KERNEL_TCP`) and removes each from the process
+environment via `std::env::remove_var`. **Critically**, it ALSO snapshots each
 removed value into a process-local `OnceLock`
 (`SCRUBBED_ENV_SNAPSHOT`) so subsequent in-process readers — most
 notably `driver::run_role_session_with_env_fn`, which reads
@@ -609,21 +610,22 @@ references via task-local capture.
 **Log line confirming defense fired:**
 
 ```text
-{"level":"info","step":"guest-harden","event":"sensitive_env_scrubbed","scrubbed":7,"already_unset":0,"invariant":"INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01"}
+{"level":"info","step":"guest-harden","event":"sensitive_env_scrubbed","scrubbed":8,"already_unset":1,"invariant":"INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01"}
 ```
 
 **Operator verification:**
 
 ```bash
-$ bash -lc 'env | grep ^RAXIS_'
-(no output — every RAXIS_* var listed in
-`SENSITIVE_ENV_VARS_TO_SCRUB` is absent from the agent's env.)
+$ bash -lc 'env | grep -E "^(RAXIS_|CARGO_NET_OFFLINE=)"'
+(no output — every listed RAXIS_* var and `CARGO_NET_OFFLINE`
+are absent from the agent's env.)
 ```
 
 (Note: `RAXIS_SESSION_ID` is intentionally NOT scrubbed — it
 is the kernel-side correlator the agent's tool dispatch needs
 for audit logging; the scrub list pins only secrets and
-network-discovery values.)
+runtime-control values that could reveal or misstate the kernel's
+network posture.)
 
 ## 3. End-to-end log walkthrough
 
@@ -640,7 +642,6 @@ log (`<data_dir>/guests/<session_id>/console.log`):
 {"level":"info","step":"guest-init","event":"loopback_up"}
 {"level":"info","step":"planner-cmdline-env","role":"executor","outcome":"hydrated","applied":11,"skipped_already_set":0}
 {"level":"info","step":"planner-virtiofs-mount","role":"executor","outcome":"ok","tag":"workspace","guest_path":"/workspace","read_only":false}
-{"level":"info","step":"cargo-net-offline-default","role":"executor","event":"defaulted","value":"true"}
 {"level":"info","step":"guest-init-a3","event":"ipv6_disabled","scope":"all"}
 {"level":"info","step":"guest-init-a3","event":"ipv6_disabled","scope":"default"}
 {"level":"info","step":"guest-init-a3","event":"ipv6_disabled","scope":"lo"}
@@ -653,7 +654,7 @@ log (`<data_dir>/guests/<session_id>/console.log`):
 {"level":"info","step":"guest-harden","event":"pr_set_no_new_privs_enabled"}
 {"level":"info","step":"vsock-loopback-forwarder","role":"executor","outcome":"activated","entries":2}
 {"level":"info","step":"airgap-a3-chokepoint","role":"executor","outcome":"activated","host_cid":2,"admission_port":5380,"tunnel_port":5381}
-{"level":"info","step":"guest-harden","event":"sensitive_env_scrubbed","scrubbed":7,"already_unset":0,"invariant":"INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01"}
+{"level":"info","step":"guest-harden","event":"sensitive_env_scrubbed","scrubbed":8,"already_unset":1,"invariant":"INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01"}
 {"level":"info","step":"planner-boot","role":"executor",…}
 ```
 

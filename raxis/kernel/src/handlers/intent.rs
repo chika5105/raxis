@@ -5648,6 +5648,7 @@ async fn handle_activate_sub_task(
     // admission and activation is observed) and pull the rootfs
     // blob via the wired `ImageResolver`. The spawn helper
     // re-checks `INV-PLANNER-HARNESS-02` defensively.
+    let mut image_override_digest: Option<String> = None;
     let image_override = if !lookup.vm_image_alias.is_empty() {
         match resolve_vm_image_override(&policy_snapshot, &lookup.vm_image_alias, ctx).await {
             Ok(VmImageResolutionOk {
@@ -5673,7 +5674,7 @@ async fn handle_activate_sub_task(
                         task_id: Some(task_id_owned.clone()),
                         initiative_id: lookup.initiative_id.clone(),
                         alias: lookup.vm_image_alias.clone(),
-                        oci_digest: verified_oci_digest,
+                        oci_digest: verified_oci_digest.clone(),
                         // V2.5 only emits this for Executor activations
                         // (Reviewer / Orchestrator bypass this path
                         // entirely per INV-PLANNER-HARNESS-02 /
@@ -5692,6 +5693,7 @@ async fn handle_activate_sub_task(
                         lookup.vm_image_alias,
                     );
                 }
+                image_override_digest = Some(verified_oci_digest);
                 Some(verified)
             }
             Err(e) => {
@@ -5778,6 +5780,12 @@ async fn handle_activate_sub_task(
         crate::session_spawn_orchestrator::PLANNER_TASK_PROMPT_ENV.to_owned(),
         lookup.task_prompt.clone(),
     );
+    if let Some(digest) = image_override_digest.as_deref() {
+        extra_env.insert(
+            crate::session_spawn_orchestrator::VM_IMAGE_DIGEST_ENV.to_owned(),
+            digest.to_owned(),
+        );
+    }
 
     // V2 §Step 24 / §Step 24b — host-side worktree provisioning for
     // the new Executor / Reviewer session. Composes:
