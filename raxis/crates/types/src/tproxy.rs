@@ -244,16 +244,17 @@ pub struct DnsResolveRequest {
     pub query_type: DnsQueryType,
 }
 
-/// **Kernel → guest.** Resolved address list (empty = NXDOMAIN)
-/// plus an upper-bound TTL for the in-guest cache.
+/// **Kernel → guest.** Resolved address list (empty = no addresses
+/// for the requested family) plus an upper-bound TTL for the
+/// in-guest cache.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsResolveResponse {
     /// Echoes [`DnsResolveRequest::request_id`].
     pub request_id: Uuid,
     /// Resolved IP addresses. Empty when the kernel's resolver
-    /// returned NXDOMAIN or any other failure (the
-    /// `AuditEventKind::DnsResolveRequested` event records the
-    /// `resolved_count` regardless).
+    /// found no addresses for the requested family or encountered
+    /// a negative lookup/failure (the `AuditEventKind::DnsResolveRequested`
+    /// event records the `resolved_count` regardless).
     pub addresses: Vec<IpAddr>,
     /// Upper-bound TTL the in-guest stub MAY cache the answer
     /// for. `0` means "do not cache" (kernel resolver failure /
@@ -354,9 +355,10 @@ mod tests {
     }
 
     #[test]
-    fn dns_resolve_response_empty_is_nxdomain_signal() {
-        // An empty `addresses` vector is the wire signal for NXDOMAIN
-        // / resolver failure; pin the contract.
+    fn dns_resolve_response_empty_is_no_addresses_signal() {
+        // An empty `addresses` vector means no addresses for this
+        // query family or a resolver failure. The DNS stub decides
+        // the wire-level response code.
         let resp = DnsResolveResponse {
             request_id: Uuid::nil(),
             addresses: vec![],

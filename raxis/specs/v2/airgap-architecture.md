@@ -180,7 +180,7 @@ pub struct DnsResolveRequest {
 }
 
 pub struct DnsResolveResponse {
-    pub addresses: Vec<IpAddr>,   // empty = NXDOMAIN
+    pub addresses: Vec<IpAddr>,   // empty = no addresses for query family
     pub ttl_secs:  u32,
 }
 ```

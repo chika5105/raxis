@@ -13,8 +13,8 @@
 //!    the kernel admission vsock channel.
 //! 3. Read the `KernelDnsResolveResponse`, translate it to a
 //!    minimal DNS response packet (`NOERROR` + answer RRs, or
-//!    `NXDOMAIN` for an empty `addresses` list), and send it back
-//!    to the libc resolver.
+//!    `NOERROR`/NODATA for an empty `addresses` list), and send it
+//!    back to the libc resolver.
 //!
 //! The stub does NOT implement EDNS0, DNSSEC validation, or
 //! caching — the kernel-side resolver is the single source of
@@ -366,7 +366,14 @@ async fn build_response_for_query(
         IpcMessage::KernelDnsResolveResponse(r) => r,
         _ => return Err(DnsStubError::UnexpectedResponse),
     };
-    let nxdomain = resp.addresses.is_empty();
+    // Empty A/AAAA answers are not proof the name does not exist.
+    // In the A3 IPv4-only profile the kernel intentionally returns
+    // no AAAA addresses, and libc may issue AAAA and A lookups for
+    // one getaddrinfo call. Returning NXDOMAIN for the empty AAAA
+    // arm poisons the whole lookup on some resolvers even when the
+    // A arm has valid addresses. Use NOERROR/NODATA for empty
+    // kernel answers and reserve NXDOMAIN for unsupported qtypes.
+    let nxdomain = false;
     Ok(build_response(
         &parsed,
         &resp.addresses,
@@ -612,12 +619,22 @@ mod tests {
     }
 
     #[test]
-    fn build_response_emits_nxdomain_when_addresses_empty() {
+    fn build_response_emits_noerror_nodata_when_addresses_empty() {
         let q = encode_query_for("nope.example.com", QTYPE_A);
         let parsed = parse_query(&q).expect("parses");
-        let resp = build_response(&parsed, &[], true, 5);
+        let resp = build_response(&parsed, &[], false, 5);
         let flags = u16::from_be_bytes([resp[2], resp[3]]);
-        assert_eq!(flags & 0x000F, 3, "NXDOMAIN rcode");
+        assert_eq!(flags & 0x000F, 0, "NOERROR rcode");
+        assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 0, "ANCOUNT=0");
+    }
+
+    #[test]
+    fn empty_aaaa_answer_is_noerror_nodata() {
+        let q = encode_query_for("example.com", QTYPE_AAAA);
+        let parsed = parse_query(&q).expect("parses");
+        let resp = build_response(&parsed, &[], false, 5);
+        let flags = u16::from_be_bytes([resp[2], resp[3]]);
+        assert_eq!(flags & 0x000F, 0, "empty AAAA must not be NXDOMAIN");
         assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 0, "ANCOUNT=0");
     }
 

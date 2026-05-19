@@ -149,8 +149,9 @@ pub enum IpcMessage {
     DnsResolveRequest(DnsResolveRequest),
 
     /// **Kernel → guest.** Resolved addresses for a
-    /// [`Self::DnsResolveRequest`]. Empty `addresses` ⇒ NXDOMAIN /
-    /// resolver failure.
+    /// [`Self::DnsResolveRequest`]. Empty `addresses` means no
+    /// addresses were available for that family or lookup failed;
+    /// the guest DNS stub maps it to a no-answer response.
     KernelDnsResolveResponse(DnsResolveResponse),
 
     // -----------------------------------------------------------------------

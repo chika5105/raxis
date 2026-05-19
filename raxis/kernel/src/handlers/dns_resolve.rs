@@ -11,9 +11,8 @@
 //! DNS stub forwarder sends over the per-session vsock channel:
 //!
 //! 1. **Authenticate.** Validate `session_token` against the active
-//!    sessions table; mismatch → empty response (NXDOMAIN-equivalent)
-//!    with a `DnsResolveRequested` audit row tagged
-//!    `session_id=""`.
+//!    sessions table; mismatch → empty response with a
+//!    `DnsResolveRequested` audit row tagged `session_id=""`.
 //! 2. **Resolve.** Hand the hostname to `tokio::net::lookup_host` and
 //!    filter the resulting `SocketAddr`s by query type (A → IPv4,
 //!    AAAA → IPv6). The kernel binds to the host's resolver, never
@@ -67,8 +66,9 @@ const MAX_HOSTNAME_LEN: usize = 255;
 /// Handle one DNS resolution request.
 ///
 /// Returns `DnsResolveResponse` for every input. Empty `addresses`
-/// vector ⇒ NXDOMAIN-equivalent on the wire; the guest stub
-/// translates that to a DNS `NXDOMAIN` response packet.
+/// vector means "no addresses of the requested family"; the guest
+/// stub translates that to a DNS `NOERROR`/NODATA response so an
+/// empty AAAA arm does not poison an otherwise valid IPv4 lookup.
 pub async fn handle(req: DnsResolveRequest, ctx: &Arc<HandlerContext>) -> DnsResolveResponse {
     // ── Step 1: defence-in-depth hostname validation ──────────────
     if req.hostname.is_empty() || req.hostname.len() > MAX_HOSTNAME_LEN {
