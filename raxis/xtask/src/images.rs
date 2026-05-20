@@ -4985,7 +4985,7 @@ mod tests {
             &ws,
             &install,
             &key_hex,
-            &[Role::Reviewer, Role::Orchestrator],
+            &[Role::Reviewer],
             None,
             None,
             None,

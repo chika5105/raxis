@@ -233,7 +233,7 @@ fn install_sigint_handler<F: Fn() + Send + Sync + 'static>(f: F) {
     // we set its fields.
     unsafe {
         let mut act: libc::sigaction = std::mem::zeroed();
-        act.sa_sigaction = trampoline as usize;
+        act.sa_sigaction = trampoline as *const () as usize;
         // SA_RESTART: any pending read syscalls finish naturally
         // before we observe the flag. (We're polling a sleep, so
         // this mostly matters for the initial tail-print.)

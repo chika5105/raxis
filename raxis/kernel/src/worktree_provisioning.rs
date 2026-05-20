@@ -415,6 +415,7 @@ pub fn copy_executor_commit_to_orchestrator_odb(
     let ref_name = format!("{TRANSFER_REF_PREFIX}{task_id}");
     let orch_repo = gix::open(orch_worktree_root)
         .map_err(|e| format!("open orch repo at {}: {e}", orch_worktree_root.display()))?;
+    use gix::bstr::ByteSlice;
     use gix::refs::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
     let edit = RefEdit {
         change: Change::Update {
@@ -435,8 +436,13 @@ pub fn copy_executor_commit_to_orchestrator_odb(
             .map_err(|e| format!("invalid ref name {ref_name:?}: {e}"))?,
         deref: false,
     };
+    let committer = gix::actor::SignatureRef {
+        name: b"raxis-kernel".as_bstr(),
+        email: b"raxis-kernel@localhost".as_bstr(),
+        time: "0 +0000",
+    };
     orch_repo
-        .edit_reference(edit)
+        .edit_references_as(std::iter::once(edit), Some(committer))
         .map_err(|e| format!("write transfer ref {ref_name}: {e}"))?;
 
     Ok(())

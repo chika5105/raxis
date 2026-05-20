@@ -1697,17 +1697,16 @@ mod stub_round_trip {
 
     // ── Server-side: one-shot accept loop ─────────────────────────────────────
 
-    /// Run a single accept→handle→ack cycle on `socket_path`. Bound to
-    /// the kernel's actual production handler so the test exercises the
-    /// real witness-handling code path, not a re-implementation.
+    /// Run a single accept→handle→ack cycle on an already-bound listener.
+    /// Bound to the kernel's actual production handler so the test exercises
+    /// the real witness-handling code path, not a re-implementation.
     ///
     /// Returns the `WitnessAck` ack the kernel computed (for test-side
     /// assertions) AND whether the handler returned `Err`.
     async fn run_one_witness_round_trip(
-        socket_path: PathBuf,
+        listener: UnixListener,
         ctx: Arc<HandlerContext>,
     ) -> Result<witness_handler::WitnessAck, witness_handler::HandlerError> {
-        let listener = UnixListener::bind(&socket_path).expect("bind UDS");
         let (mut stream, _) = listener.accept().await.expect("accept stub connection");
 
         // Read the WitnessSubmission the stub sent.
@@ -1832,13 +1831,13 @@ mod stub_round_trip {
         };
 
         // Step 5: stand up the one-shot server BEFORE spawning the stub.
-        // Binding before spawn means the stub cannot race ahead and try
-        // to connect to a not-yet-bound socket. We spawn the server task
-        // detached and join it after the stub exits.
+        // Bind synchronously before the server task is spawned so the stub
+        // cannot race ahead and try to connect to a not-yet-bound socket.
+        // We spawn the server task detached and join it after the stub exits.
         let ctx = handler_ctx(store.clone(), witness_dir.clone());
-        let server_socket = socket_path.clone();
+        let listener = UnixListener::bind(&socket_path).expect("bind UDS");
         let server_handle =
-            tokio::spawn(async move { run_one_witness_round_trip(server_socket, ctx).await });
+            tokio::spawn(async move { run_one_witness_round_trip(listener, ctx).await });
 
         // Step 6: issue a real verifier_run_token via the same
         // production code path `spawn_verifier` would use, then exec
@@ -2052,9 +2051,9 @@ mod stub_round_trip {
         };
 
         let ctx = handler_ctx(store.clone(), witness_dir.clone());
-        let server_socket = socket_path.clone();
+        let listener = UnixListener::bind(&socket_path).expect("bind UDS");
         let server_handle =
-            tokio::spawn(async move { run_one_witness_round_trip(server_socket, ctx).await });
+            tokio::spawn(async move { run_one_witness_round_trip(listener, ctx).await });
 
         // Issue a token bound to the STORED SHA (this is what
         // production does: `spawn_verifier` is called with the SHA
@@ -2210,9 +2209,9 @@ mod stub_round_trip {
         };
 
         let ctx = handler_ctx(store.clone(), witness_dir.clone());
-        let server_socket = socket_path.clone();
+        let listener = UnixListener::bind(&socket_path).expect("bind UDS");
         let server_handle =
-            tokio::spawn(async move { run_one_witness_round_trip(server_socket, ctx).await });
+            tokio::spawn(async move { run_one_witness_round_trip(listener, ctx).await });
 
         // Token is valid, unexpired, and FK-backed, but scoped to a
         // different task/gate than the submitted witness envelope.

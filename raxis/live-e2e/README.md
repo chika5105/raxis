@@ -257,8 +257,8 @@ build, so rebuild it after the bake and run `verify-trust-anchor`.
 | `verify-trust-anchor` cannot find a kernel | Pass `--kernel target/release/raxis-kernel` or set `RAXIS_KERNEL_BINARY`. |
 | Planner frame decode errors after code changes | Re-run `cargo xtask images bake`; its cache now includes source fingerprints. Use `--no-cache` only when you intentionally want a full rebuild. |
 
-The `cargo:warning=raxis-canonical-images: trust anchor source = ...`
-line on a kernel-crate rebuild is the operator-visible diagnostic.
+With `cargo build -vv`, the `raxis-canonical-images: trust anchor source = ...`
+build-script stderr line is the operator-visible diagnostic.
 
 ---
 

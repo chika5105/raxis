@@ -51,6 +51,7 @@ async fn seed_initiatives(store: &Store) {
     let conn = store.lock().await;
     let initiatives = raxis_store::Table::Initiatives.as_str();
     let tasks = raxis_store::Table::Tasks.as_str();
+    let signed_plan_artifacts = raxis_store::Table::SignedPlanArtifacts.as_str();
     conn.execute_batch(&format!(
         "INSERT INTO {initiatives} \
          (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
@@ -65,6 +66,50 @@ async fn seed_initiatives(store: &Store) {
          ('task-A2', 'init-A', 'default', 'Completed', 'op', 1, 100, 120), \
          ('task-B1', 'init-B', 'default', 'Completed', 'op', 1, 200, 250);"
     ))
+    .unwrap();
+    let plan_a = br#"
+        [workspace]
+        name = "Dashboard Alpha"
+
+        [plan.initiative]
+        description = "Dashboard fixture initiative A"
+
+        [[tasks]]
+        task_id = "task-A1"
+        session_agent_type = "Executor"
+
+        [[tasks]]
+        task_id = "task-A2"
+        session_agent_type = "Reviewer"
+    "#;
+    let plan_b = br#"
+        [workspace]
+        name = "Dashboard Beta"
+
+        [plan.initiative]
+        description = "Dashboard fixture initiative B"
+
+        [[tasks]]
+        task_id = "task-B1"
+        session_agent_type = "Executor"
+    "#;
+    conn.execute(
+        &format!(
+            "INSERT INTO {signed_plan_artifacts} \
+             (initiative_id, plan_bytes, plan_sig, stored_at) \
+             VALUES (?1, ?2, X'00', 100)"
+        ),
+        rusqlite::params!["init-A", &plan_a[..]],
+    )
+    .unwrap();
+    conn.execute(
+        &format!(
+            "INSERT INTO {signed_plan_artifacts} \
+             (initiative_id, plan_bytes, plan_sig, stored_at) \
+             VALUES (?1, ?2, X'00', 200)"
+        ),
+        rusqlite::params!["init-B", &plan_b[..]],
+    )
     .unwrap();
 }
 
@@ -467,7 +512,11 @@ async fn worktree_endpoints_surface_real_git_state() {
         .cloned()
         .expect("revoked session worktree must remain visible for review");
     assert_eq!(session.base_sha.as_deref(), Some(base_sha.as_str()));
-    let main = listed.iter().find(|w| w.kind == "Main").unwrap().clone();
+    let main = listed
+        .iter()
+        .find(|w| w.kind == "Main" && w.path == repo.display().to_string())
+        .cloned()
+        .expect("seeded allowed root must be the reviewable main worktree");
 
     // 2) Detail returns the head SHA + branch + clean status.
     let detail = data.get_worktree(&main.name).expect("get_worktree");

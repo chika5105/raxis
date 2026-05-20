@@ -542,6 +542,7 @@ pub fn update_target_ref(
     expected_previous: Option<&gix::ObjectId>,
     target_ref: &str,
 ) -> Result<(), MainMergeError> {
+    use gix::bstr::ByteSlice;
     use gix::refs::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
     use gix::refs::{FullName, Target};
 
@@ -568,7 +569,13 @@ pub fn update_target_ref(
         deref: false,
     };
 
-    repo.edit_reference(edit)
+    let committer = gix::actor::SignatureRef {
+        name: b"raxis-kernel".as_bstr(),
+        email: b"raxis-kernel@localhost".as_bstr(),
+        time: "0 +0000",
+    };
+
+    repo.edit_references_as(std::iter::once(edit), Some(committer))
         .map_err(|e| MainMergeError::RefUpdateFailed(format!("edit_reference: {e}")))?;
     Ok(())
 }

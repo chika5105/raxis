@@ -208,11 +208,10 @@ fn main() {
     let profile = BuildProfile::from_env();
     let (trust_anchor, source) = resolve_trust_anchor_bytes(profile);
 
-    // Surface the resolution decision so a `cargo build -vv` reader
-    // and the iter62 integration witnesses can both observe which
-    // arm fired.
-    println!(
-        "cargo:warning=raxis-canonical-images: trust anchor source = {}",
+    // Surface the resolution decision for `cargo build -vv` readers
+    // without polluting normal CI output with a Cargo warning.
+    eprintln!(
+        "raxis-canonical-images: trust anchor source = {}",
         source.as_str()
     );
 

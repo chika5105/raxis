@@ -3254,6 +3254,11 @@ mod tests {
             //                entry above; the partial index is not a
             //                table and intentionally absent from this
             //                set.
+            // Migration 26 — v3: per-session VM environment snapshots.
+            //                The guest session token is intentionally not
+            //                present; this table powers dashboard debugging
+            //                of non-secret VM env state.
+            Table::SessionVmEnv,
             // Migration 24 — v3: content-addressed worktree snapshot
             //                store (specs/v3/worktree-snapshots.md).
             //                Per-task index of snapshots taken at every

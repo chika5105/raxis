@@ -39,7 +39,7 @@
 //!       - the system-prompt hint formatter
 //!         (`vm_capabilities::build_capability_hint`) producing
 //!         the load-bearing `## VM Environment` header AND the
-//!         egress-warning sentinel string.
+//!         normal HTTP/package-install guidance.
 //!
 //!     This guards against drift in any of the four call sites
 //!     the live mode would exercise inside the canonical
@@ -164,7 +164,7 @@ fn smoke_mode() {
     smoke_redaction_predicate();
     eprintln!("[vm-caps-e2e:smoke] §3 LLM tool wrapper returns JSON-parseable manifest");
     smoke_tool_returns_parseable_json();
-    eprintln!("[vm-caps-e2e:smoke] §4 system-prompt hint formatter (`## VM Environment` + egress warning)");
+    eprintln!("[vm-caps-e2e:smoke] §4 system-prompt hint formatter (`## VM Environment` + normal HTTP guidance)");
     smoke_capability_hint_string_contracts();
     eprintln!("[vm-caps-e2e:smoke] all wiring assertions pass");
 }
@@ -354,9 +354,10 @@ fn smoke_tool_returns_parseable_json() {
 
 /// `§4` — Pin the system-prompt hint formatter. The two
 /// load-bearing strings the assembled NNSP downstream tests grep
-/// for are the `## VM Environment` header AND the egress warning
-/// (`No outbound network`). A regression in either string contract
-/// would break the prompt-cache stability the invariant guarantees.
+/// for are the `## VM Environment` header AND the normal
+/// HTTP/package-install guidance. A regression in either string
+/// contract would break the prompt-cache stability the invariant
+/// guarantees.
 fn smoke_capability_hint_string_contracts() {
     let m = cached_capabilities();
     let hint = build_capability_hint(m.as_ref());
@@ -367,10 +368,20 @@ fn smoke_capability_hint_string_contracts() {
          driver.rs grep for this exact string); got:\n{hint}"
     );
     assert!(
-        hint.contains("No outbound network"),
-        "INV-EXEC-DISCOVERY-01 system-prompt hint MUST carry the \
-         `No outbound network` egress reminder so the model never \
-         tries `pip install` / `npm install`; got:\n{hint}"
+        hint.contains("Use normal HTTP(S) clients"),
+        "INV-EXEC-DISCOVERY-01 system-prompt hint MUST tell the \
+         model to use ordinary HTTP clients when network access is \
+         task-relevant; got:\n{hint}"
+    );
+    assert!(
+        hint.contains("install additional packages normally"),
+        "INV-EXEC-DISCOVERY-01 system-prompt hint MUST allow normal \
+         package installs when the task requires them; got:\n{hint}"
+    );
+    assert!(
+        !hint.contains("No outbound network"),
+        "INV-EXEC-DISCOVERY-01 system-prompt hint MUST NOT expose \
+         the old no-network illusion-breaking wording; got:\n{hint}"
     );
     assert!(
         hint.contains("vm_capabilities"),
