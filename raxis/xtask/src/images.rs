@@ -1760,7 +1760,7 @@ fn bake_one_role(
 /// children are reaped before we return.
 fn run_export_pipeline(
     builder: Builder,
-    public_registry_config: Option<&tempfile::TempDir>,
+    public_registry_config: Option<&PublicDockerConfig>,
     container_id: &str,
     rootfs_dir: &Path,
 ) -> Result<()> {
@@ -1815,16 +1815,24 @@ fn run_export_pipeline(
 
 fn builder_command(
     builder: Builder,
-    public_registry_config: Option<&tempfile::TempDir>,
+    public_registry_config: Option<&PublicDockerConfig>,
 ) -> Command {
     let mut cmd = Command::new(builder.binary());
     if let Some(config) = public_registry_config {
-        cmd.env("DOCKER_CONFIG", config.path());
+        cmd.env("DOCKER_CONFIG", config.dir.path());
+        if let Some(host) = config.docker_host.as_deref() {
+            cmd.env("DOCKER_HOST", host);
+        }
     }
     cmd
 }
 
-fn public_registry_docker_config(builder: Builder) -> Result<Option<tempfile::TempDir>> {
+struct PublicDockerConfig {
+    dir: tempfile::TempDir,
+    docker_host: Option<String>,
+}
+
+fn public_registry_docker_config(builder: Builder) -> Result<Option<PublicDockerConfig>> {
     if builder != Builder::Docker {
         return Ok(None);
     }
@@ -1837,16 +1845,57 @@ fn public_registry_docker_config(builder: Builder) -> Result<Option<tempfile::Te
         .context("create temporary Docker config for public rootfs bake")?;
     fs::write(dir.path().join("config.json"), b"{\"auths\":{}}\n")
         .with_context(|| format!("write {}", dir.path().join("config.json").display()))?;
+    let docker_host = current_docker_context_host().transpose()?;
     eprintln!(
         "{}",
         serde_json::json!({
             "level": "info",
             "event": "bake_docker_public_config",
             "docker_config": dir.path(),
+            "docker_host": docker_host.as_deref().unwrap_or("<default>"),
             "detail": "Using an auth-free Docker config for public rootfs pulls so Desktop credential helpers cannot stall a hermetic bake. Set RAXIS_DOCKER_CONFIG_PASSTHROUGH=1 to opt into the host Docker config.",
         })
     );
-    Ok(Some(dir))
+    Ok(Some(PublicDockerConfig { dir, docker_host }))
+}
+
+fn current_docker_context_host() -> Option<Result<String>> {
+    let current = Command::new("docker")
+        .args(["context", "show"])
+        .output()
+        .ok()?;
+    if !current.status.success() {
+        return None;
+    }
+    let context = String::from_utf8_lossy(&current.stdout).trim().to_owned();
+    if context.is_empty() || context == "default" {
+        return None;
+    }
+
+    let inspected = Command::new("docker")
+        .args([
+            "context",
+            "inspect",
+            &context,
+            "--format",
+            "{{ .Endpoints.docker.Host }}",
+        ])
+        .output()
+        .with_context(|| format!("inspect docker context {context:?}"));
+
+    Some(inspected.and_then(|out| {
+        if !out.status.success() {
+            bail!(
+                "docker context inspect {context:?} failed:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let host = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if host.is_empty() || host == "<no value>" {
+            bail!("docker context {context:?} has no docker endpoint host");
+        }
+        Ok(host)
+    }))
 }
 
 // ---------------------------------------------------------------------------
