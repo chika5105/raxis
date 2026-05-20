@@ -149,7 +149,7 @@ const A3_DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 const A3_DNS_DEFAULT_TTL_SECS: u32 = 60;
 const A3_DNS_NEGATIVE_TTL_SECS: u32 = 5;
 const A3_MAX_HOSTNAME_LEN: usize = 255;
-const AVF_PLANNER_LISTEN_PORT_ENV_VALUE: &str = "1024";
+const VM_PLANNER_LISTEN_PORT_ENV_VALUE: &str = "1024";
 
 // ---------------------------------------------------------------------------
 // V3 perf-telemetry helpers
@@ -184,10 +184,10 @@ fn build_vm_env_snapshot(
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
 
-    if backend_id.starts_with("apple-vz") {
+    if backend_uses_vsock_listen(backend_id) {
         env.insert(
             "RAXIS_KERNEL_VSOCK_LISTEN_PORT".to_owned(),
-            AVF_PLANNER_LISTEN_PORT_ENV_VALUE.to_owned(),
+            VM_PLANNER_LISTEN_PORT_ENV_VALUE.to_owned(),
         );
     }
 
@@ -198,11 +198,11 @@ fn build_vm_env_snapshot(
         if k == "RAXIS_SESSION_TOKEN" {
             continue;
         }
-        // AVF strips these host-only transport hints and replaces
+        // VM substrates strip these host-only transport hints and replace
         // them with `RAXIS_KERNEL_VSOCK_LISTEN_PORT`; mirror that
         // effective VM view so the dashboard does not imply the
         // guest saw a UDS path it cannot use.
-        if backend_id.starts_with("apple-vz")
+        if backend_uses_vsock_listen(backend_id)
             && matches!(
                 k.as_str(),
                 "RAXIS_KERNEL_PLANNER_SOCKET"
@@ -233,6 +233,10 @@ fn build_vm_env_snapshot(
     }
 
     env
+}
+
+fn backend_uses_vsock_listen(backend_id: &str) -> bool {
+    backend_id.starts_with("apple-vz") || backend_id.starts_with("firecracker")
 }
 
 async fn persist_vm_env_snapshot(

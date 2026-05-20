@@ -33,7 +33,7 @@ Three candidates were evaluated for the Linux KVM seat. The substrate ships **Fi
 
 | Candidate              | Cold-boot | Rust   | Vsock     | VirtioFS         | API model           | Attack surface    | Verdict |
 |------------------------|-----------|--------|-----------|------------------|---------------------|-------------------|---------|
-| **Firecracker**        | ~125 ms reference; ~30–80 ms achievable with stripped kernel | ✅ pure-Rust, rust-vmm based | ✅ vhost-vsock UDS multiplexer | ❌ not in upstream — operator-supplied virtiofsd is required for `/workspace` / `/raxis` mounts (workaround: drive table + vsock-mediated artifact RPC, current V2 strategy) | REST over UDS, supervised child process | minimal device set; ~50 KLOC of Rust; production-hardened by AWS Lambda / Fargate | **selected** |
+| **Firecracker**        | ~125 ms reference; ~30–80 ms achievable with stripped kernel | ✅ pure-Rust, rust-vmm based | ✅ vhost-vsock UDS multiplexer | ❌ no shipped `/workspace` path yet — Firecracker sessions fail closed on non-empty `WorkspaceMount` until `virtiofsd` or a block/artifact transport is implemented | REST over UDS, supervised child process | minimal device set; ~50 KLOC of Rust; production-hardened by AWS Lambda / Fargate | **selected for Linux once workspace delivery closes** |
 | Cloud Hypervisor       | ~150–250 ms | ✅ pure-Rust | ✅ vhost-vsock | ✅ virtiofs in tree | REST + library; can be linked as a crate | larger device set (full virtio-pci enumeration); ~200 KLOC | considered for V3 once virtiofs becomes the staging path; rejected for V2 because the larger device tree extends boot by ~50 ms even after trimming and the substrate gains nothing the workspace-RPC path doesn't already provide |
 | qemu `-M microvm`      | ~250–500 ms | ❌ C | ✅ vhost-vsock | ✅ virtiofsd | argv + QMP socket | full QEMU codebase (~1.5 MLOC); CVE-trail | rejected — wrong end of every axis we care about |
 
@@ -110,7 +110,12 @@ The canonical Reviewer / Orchestrator / Executor-starter rootfs initramfs (built
 
 * `/init` — the planner agent binary, statically linked against musl. No dynamic loader; no `ld.so` resolution.
 * `/dev`, `/proc`, `/sys` — empty mount points, populated by `/init`.
-* `/raxis` — empty mount point; the workspace artifact is staged via vsock-mediated RPC (V2) or virtiofs (V3+).
+* `/raxis` — empty mount point. Today the Firecracker substrate
+  rejects non-empty `WorkspaceMount`s because no Linux workspace
+  delivery path is implemented yet; AVF provides `/workspace` through
+  VirtioFS. Closing this requires either a Firecracker `virtiofsd`
+  sidecar/API path or a kernel-owned writable block/artifact transport
+  that can copy the admitted worktree changes back after shutdown.
 * `/etc/{passwd,group,resolv.conf}` — three-line files, pinned for libstd's `gethostname` / `getuid` paths.
 
 Total uncompressed size: ~6 MB (planner agent binary dominates). Gzip-compressed cpio: ~2.2 MB. The kernel's lazy-page-fault paging means only the pages PID 1 actually touches before connecting vsock are decompressed — ~1.5 MB worth.
@@ -215,7 +220,7 @@ The "follow-up" rows are tracked in [`isolation-platform-parity.md`](isolation-p
 | `Session::terminate()`                                           | Close channel, kill child, unlink UDS. Idempotent.                                             |
 | `Session::shutdown(grace) -> ExitStatus`                         | Send Ctrl-Alt-Del, poll `try_wait`, escalate to SIGKILL on timeout                             |
 | `Session::session_identity() -> SessionTransportId`              | `Vsock { cid: <assigned> }` — same shape as AVF                                                |
-| `Session::take_kernel_ipc_fd() -> Option<RawFd>`                 | (V2) `None` — kernel uses the synchronous `push`/`recv_intent` path; V3 will surrender the underlying `UnixStream` fd for the kernel's async dispatch loop, mirroring AVF's `surface_kernel_ipc_fd` seam |
+| `Session::take_kernel_ipc_fd() -> Option<RawFd>`                 | `Some(<UnixStream::into_raw_fd>)` after the Firecracker UDS-vsock `CONNECT 1024` handshake; mirrors AVF so `session-spawn` can drive the planner stream through the async dispatcher |
 
 The kernel's `kernel/src/isolation_select.rs::build_platform_backend` instantiates `FirecrackerBackend::new(runtime_dir)` on `cfg(target_os = "linux")` and `AppleVzBackend::new(runtime_dir)` on `cfg(target_os = "macos")`. No other code in the kernel branches on host OS for substrate selection.
 
@@ -247,7 +252,7 @@ The same checks are mirrored into `raxis doctor host`; the `xtask` entry point i
 | Gap                                                     | What would close it                                                                            | Target |
 |---------------------------------------------------------|------------------------------------------------------------------------------------------------|--------|
 | Snapshot / resume (sub-10ms boot)                       | Persist `/var/raxis/snapshots/<role>.snap` after first boot of each role; substrate `--restore-from-snapshot` arg | V3 |
-| VirtioFS for `/workspace` and `/raxis` (instead of vsock-RPC artifact staging) | Wire upstream `virtiofsd` as a sidecar; add `PUT /shared-directory/<id>` to the boot REST sequence | V3 |
+| Workspace delivery for `/workspace` and `/raxis`                 | Prefer a Firecracker `virtiofsd` sidecar/API if available; otherwise attach a kernel-owned writable block/artifact transport and copy changes back through the admission path | V3 |
 | `prctl(PR_SET_NO_NEW_PRIVS)` on Firecracker child       | Extend `vmm.rs::SpawnArgs` with a syscall-prefork hook                                          | V2.5 |
 | Cap-drop on the Firecracker child                       | Same hook; `prctl(PR_CAPBSET_DROP, ...)` + `setresuid` to a non-privileged user                 | V2.5 |
 | Operator-mandatory seccomp                              | Default `extra_args = ["--seccomp-level", "2"]` instead of operator-opt-in                      | V2.5 |

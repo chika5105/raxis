@@ -53,12 +53,12 @@ fn main() -> ! {
     // function body runs, so we run the hydration in the
     // synchronous `main` and only then hand off to the async
     // runner.
-    // The Apple-VZ substrate folds `VmSpec::env` into
-    // `raxis.envb64=<base64>` on the kernel cmdline because there
-    // is no `Command::env` analogue at the AVF surface. On other
-    // substrates (subprocess UDS, Firecracker — both inherit env
-    // through `Command::env` / the Firecracker config) the
-    // hydration is a no-op (`NoProcCmdline` / `NoEnvToken`).
+    // The microVM substrates (Apple-VZ and Firecracker) fold
+    // `VmSpec::env` into `raxis.envb64=<base64>` on the kernel
+    // cmdline because there is no `Command::env` analogue at the
+    // VM boot surface. On subprocess UDS, hydration is a no-op
+    // (`NoProcCmdline` / `NoEnvToken`) because the child process
+    // receives env through `Command::env`.
     let hydration = hydrate_from_proc_cmdline();
     log_hydration_outcome(&hydration);
 

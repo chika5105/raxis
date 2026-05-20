@@ -31,6 +31,8 @@
 
 use std::io::{Read, Write};
 #[cfg(unix)]
+use std::os::unix::io::{IntoRawFd, RawFd};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -230,6 +232,19 @@ impl HostVsockChannel {
     /// Drop the channel; the underlying stream is closed via the
     /// `UnixStream` Drop impl.
     pub fn close(self) {}
+
+    /// Transfer ownership of the negotiated UDS stream fd to the
+    /// kernel's async IPC dispatcher.
+    ///
+    /// After this call the substrate no longer owns the stream and
+    /// MUST NOT close it. This mirrors the AVF substrate's
+    /// `take_kernel_ipc_fd` behavior: `session-spawn` wraps the fd
+    /// in a nonblocking `tokio::net::UnixStream` and becomes the
+    /// lifetime owner.
+    #[cfg(unix)]
+    pub fn into_raw_fd(self) -> RawFd {
+        self.inner.into_raw_fd()
+    }
 }
 
 /// Reserve a host-side listener UDS for `<uds_path>_<host_port>` so

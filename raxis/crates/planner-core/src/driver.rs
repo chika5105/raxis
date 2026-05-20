@@ -456,9 +456,9 @@ where
     };
 
     // Resolve the kernel transport config from the same env-reader
-    // closure. Supports UDS (subprocess substrate), VSock dial-out
-    // (Firecracker), and VSock listen (Apple-VZ guest) — exactly the
-    // three substrates the kernel ships. `NotConfigured` from
+    // closure. Supports UDS (subprocess substrate), VSock listen
+    // (Apple-VZ / Firecracker production VMs), and the legacy /
+    // future VSock dial-out shape. `NotConfigured` from
     // `from_env_fn` maps to `KernelSocketMissing` so existing
     // callers' error handling stays compatible.
     let transport_cfg =

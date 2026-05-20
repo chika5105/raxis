@@ -3733,6 +3733,7 @@ dependencies = [
 name = "raxis-isolation-firecracker"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "raxis-isolation",
  "raxis-types",
  "serde",

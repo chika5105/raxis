@@ -38,7 +38,7 @@ This matrix tracks every observable that a reviewer might think to compare. Rows
 | `Session::terminate()`                           | Close channel; `vm.stop()`; `Drop` reaps                        | Close channel; SIGKILL Firecracker child; unlink UDS           | ✅ parity (per-OS mechanism, identical observable: idempotent teardown) |
 | `Session::shutdown(grace) -> ExitStatus`         | `vm.requestStop()`; poll vm state with 20 ms tick; SIGKILL on grace expiry | `SendCtrlAltDel`; poll `try_wait` with 20 ms tick; SIGKILL on grace expiry | ✅ parity (graceful → forced; both report `ExitStatus::SignalKilled { signum: 9 }` on timeout) |
 | `Session::session_identity()`                    | `SessionTransportId::Vsock { cid }`                             | `SessionTransportId::Vsock { cid }` (Firecracker-assigned)     | ✅ parity (both substrates surface the canonical `Vsock { cid }` shape) |
-| `Session::take_kernel_ipc_fd()`                  | `Some(<surfaced fd>)` when `surface_kernel_ipc_fd` was opted-in | `None` (V2); will return `Some(<UnixStream::as_raw_fd>)` in V3 once the kernel's async dispatch loop is the only consumer | ⚠️ partial (V3 closes; documented in [`isolation-linux-microvm.md §8`](isolation-linux-microvm.md)) |
+| `Session::take_kernel_ipc_fd()`                  | `Some(<surfaced fd>)` when `surface_kernel_ipc_fd` was opted-in | `Some(<UnixStream::into_raw_fd>)` after the Firecracker UDS-vsock `CONNECT 1024` handshake succeeds | ✅ parity (both substrates surrender the live planner IPC stream to `session-spawn`) |
 | `Backend::capability(KvmAvailable)`              | n/a (always returns `Bool(false)` on macOS)                     | Re-runs `probe_host`; `Bool(true)` iff `/dev/kvm` RW-openable | ✅ parity (per-OS-meaningful capability; kernel ignores on the wrong OS) |
 | `Backend::capability(VirtualizationFrameworkAvailable)` | Re-runs the AVF gate; `Bool(true)` on macOS 13+         | n/a (always `Bool(false)` on Linux)                            | ✅ parity (mirror of the previous row) |
 
@@ -51,13 +51,13 @@ This matrix tracks every observable that a reviewer might think to compare. Rows
 | VM monitor lifecycle                             | In-process via Virtualization.framework Objective-C bridge       | Subprocess (`firecracker --api-sock <path>`); REST over UDS   | Per-OS (mandatory); the kernel sees identical typed errors via `IsolationError` |
 | Kernel cmdline                                   | `console=hvc0 loglevel=8 ignore_loglevel reboot=k panic=10` (verbose for diagnostics; Apple's PL011 is async-flushed) | `console=ttyS0 reboot=k panic=1 pci=off i8042.noaux i8042.nokbd quiet loglevel=0 tsc=reliable clocksource=tsc 8250.nr_uarts=0 random.trust_cpu=on` (fast-boot recipe) | ⚠️ partial — divergence is intentional per-VMM tuning, not a contract gap. The substrate owns the cmdline; operator-supplied `boot_args` REPLACE on both substrates. |
 | Initramfs vs EROFS rootfs                        | Both supported; `ImageKind::RootfsInitramfsCpio` → `vz_initial_ram_disk_url`; `RootfsErofs` → `vz_block_device_initialization` | Both supported; initramfs → `BootSource.initrd_path`; EROFS → `PUT /drives/rootfs` | ✅ parity |
-| Workspace mount path                             | VirtioFS via `VZVirtioFileSystemDeviceConfiguration`            | V2: vsock-mediated artifact RPC (no virtiofs in upstream Firecracker); V3: virtiofsd sidecar | ⚠️ partial — observable to the planner agent but invisible to the kernel; `WorkspaceMount` typed contract is identical |
+| Workspace mount path                             | VirtioFS via `VZVirtioFileSystemDeviceConfiguration`            | Fail-closed for non-empty `WorkspaceMount` until Linux workspace delivery is implemented (`virtiofsd` sidecar or a typed block/artifact transport) | ❌ gap — normal planner sessions require `/workspace`; Firecracker must not be advertised as live-e2e-ready until this closes |
 | Network device                                   | No `VZ*NetworkDevice*` attachment for any tier (`EgressTier::None` and `EgressTier::Mediated` both produce a NIC-less VM) | No `PUT /network-interfaces` call for any tier (both `None` and `Mediated` omit it) | ✅ parity (Path A3 — [`airgap-architecture.md`](airgap-architecture.md) — is the only egress path; the legacy `Tier1Tproxy` virtio-net + NAT codepath was deleted alongside the variant) |
 | Vsock contract                                   | Host CID 2; per-session guest CID; planner port 1024            | Host CID 2; per-session guest CID (Firecracker-assigned); planner port 1024 | ✅ parity |
-| Host-side vsock channel                          | `VZVirtioSocketDevice` connect; raw bytes                       | UDS multiplexer + `CONNECT 1024\n`/`OK <peer_port>\n` handshake; raw bytes | ✅ parity (handshake invisible to the kernel; both surface a `dyn Read + Write`) |
+| Host-side vsock channel                          | `VZVirtioSocketDevice` connect; raw bytes; bounded retry until guest planner binds | UDS multiplexer + `CONNECT 1024\n`/`OK <peer_port>\n` handshake; raw bytes; bounded retry until guest planner binds | ✅ parity (handshake invisible to the kernel; both surface a `dyn Read + Write`; both tolerate the normal post-boot listener-bind race) |
 | Frame envelope                                   | 4-byte BE length + payload, 16 MiB cap (`MAX_FRAME_BYTES`)       | 4-byte BE length + payload, 16 MiB cap (`MAX_FRAME_BYTES`)     | ✅ parity (byte-identical) |
 | Boot grace deadline                              | 10 s (`DEFAULT_BOOT_GRACE`)                                     | 500 ms (`DEFAULT_BOOT_GRACE`)                                  | ⚠️ partial — divergence reflects per-VMM startup distribution (AVF cold path includes Objective-C bridge init); both surface `IsolationError::SpawnFailed` on grace expiry, semantically identical |
-| Console log capture                              | `vz_serial_port_attachment` → per-session `console.log`         | Firecracker stdout/stderr → per-session `console.log`          | ✅ parity (operator can `tail -f <runtime_dir>/<session>.console.log` on either OS) |
+| Console log capture                              | `vz_serial_port_attachment` → per-session `console.log`         | `VmSpec.guest_console_log` → Firecracker stdout/stderr → per-session `console.log` | ✅ parity (both refuse silent console discard and create the parent path before boot) |
 
 ---
 
@@ -137,10 +137,10 @@ The selector also runs `admit_backend` (also in `isolation_select.rs`) which cal
 
 ### §8.1 V2 (this matrix's scope)
 
-* Both substrates fully implement the trait.
+* Both substrates implement the trait surface.
 * All `R-*` invariants preserved on both substrates.
 * All ✅-parity rows above are testable against the trait conformance fixture in `crates/raxis-isolation/tests/`.
-* All ⚠️-partial rows have either (a) a documented per-OS divergence with no contract impact, or (b) a deferred-follow-up note pointing at the closing path below.
+* Firecracker is not production-ready for normal planner sessions until the `/workspace` delivery gap closes. The substrate now fails closed when a non-empty `WorkspaceMount` reaches it, so Linux operators see a deterministic admission error instead of a guest that boots and later fails in the tools layer.
 
 ### §8.2 V2.5 (next minor)
 
@@ -149,7 +149,6 @@ The selector also runs `admit_backend` (also in `isolation_select.rs`) which cal
 | `prctl(PR_SET_NO_NEW_PRIVS)` on Firecracker child       | `vmm.rs::SpawnArgs` — `Command` argv prefix `setpriv --no-new-privs --reuid <uid> --regid <gid> --` | Linux only (no-op on macOS) |
 | Cap-drop on Firecracker child                           | Same hook + `--clear-groups` / `--securebits noroot,no_setuid_fixup` | Linux only |
 | Operator-mandatory seccomp on Firecracker               | Default `extra_args = ["--seccomp-level", "2"]` instead of opt-in | Linux only |
-| `Session::take_kernel_ipc_fd()` on Linux                | Surface the `UnixStream` raw fd so the kernel's async dispatch loop can `epoll` it directly | Linux only (matches AVF surface) |
 | `EgressTier::Tier2CredProxy` wiring                     | New device row in both substrate boot sequences; per-credential socketpair | Both |
 | Wire `linux_prereqs::probe_linux_prereqs()` into `raxis doctor host` | One `r.checks.extend(...)` line; both surfaces already emit `Check`/`Outcome`/`Report` | CLI side, no substrate change |
 
@@ -158,17 +157,19 @@ The selector also runs `admit_backend` (also in `isolation_select.rs`) which cal
 | Feature                                                  | Notes                                                            |
 |----------------------------------------------------------|------------------------------------------------------------------|
 | Snapshot/resume (sub-10 ms cold-boot)                    | Firecracker has the primitive; AVF has `VZVirtualMachine.canPause`. Both substrate roadmaps converge on a `(role, kernel_sha, initramfs_sha) → snapshot.bin` cache. |
-| VirtioFS for `/workspace` and `/raxis` on Linux          | Wire upstream `virtiofsd` as a Firecracker sidecar; matches AVF's existing virtiofs path. |
+| Workspace delivery for `/workspace` and `/raxis` on Linux | Prefer a `virtiofsd` sidecar if the selected Firecracker build exposes the needed device/API; otherwise attach a kernel-owned writable block/artifact transport and copy changes back through the admission path. |
 | Memory-encrypted substrate (TDX / SEV-SNP)               | New `IsolationLevel::R1ConformantStrong`; requires either a third substrate crate (`raxis-isolation-tdx`) or a Firecracker fork once Firecracker upstreams TDX. |
 | Remote attestation                                       | TDX quote / SEV-SNP attestation report surfaced through `Backend::capability(AttestationReport) -> Bytes`. |
 
-None of the V3+ items are blocking for V2 GA on either platform.
+The Linux workspace-delivery row is blocking for Firecracker-backed V2
+planner sessions. Until it closes, macOS AVF is the production microVM
+path for workspace-backed live e2e runs.
 
 ---
 
 ## §9 How to read this matrix as a reviewer
 
-1. Grep for ❌ — there should be none. If you find one, V2 GA is not green on the affected platform.
+1. Grep for ❌ — each row is a real release blocker for the affected substrate. Firecracker's current `/workspace` gap is intentional fail-closed debt, not a hidden runtime surprise.
 2. Grep for ⚠️ — these are the documented divergences. Each one MUST come with either (a) a per-OS rationale that doesn't touch `R-*`, or (b) a closing-path entry in §8.
 3. Read every ✅ row and ask "would the kernel notice if I swapped the substrate?". The answer should be no for every row (modulo the per-OS capability hints that the kernel explicitly ignores per the `BootLatencyMs` / `MaxConcurrentVms` / `KvmAvailable` semantics).
 4. Compare against `crates/raxis-isolation/tests/` — every ✅ row should have a corresponding conformance test the kernel runs against `Arc<dyn Backend>` once the substrate is plugged in.

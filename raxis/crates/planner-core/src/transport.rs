@@ -22,9 +22,9 @@
 //! 2. **Apple-VZ / Firecracker VM** (production). The planner runs
 //!    inside a guest VM with no UDS connectivity to the host; the
 //!    `vsock` virtio device routes frames to a host-side VSock-to-UDS
-//!    proxy. The kernel-side spawn path stamps
-//!    `RAXIS_KERNEL_VSOCK_CID` + `RAXIS_KERNEL_VSOCK_PORT` into the
-//!    guest's environment.
+//!    proxy. The VM substrates stamp
+//!    `RAXIS_KERNEL_VSOCK_LISTEN_PORT` into the guest environment so
+//!    the planner binds one guest-side port and the host dials in.
 //! 3. **In-process unit tests** (this file's `#[cfg(test)]` mod). A
 //!    `tokio::io::duplex` pair stands in for the UDS / VSock socket
 //!    so tests can pin frame round-trips without standing up the
@@ -166,8 +166,8 @@ pub enum KernelTransportConfig {
         /// Filesystem path of the kernel's `planner.sock` socket.
         socket_path: PathBuf,
     },
-    /// Firecracker VM (and any future substrate where the planner
-    /// dials the host kernel). The planner binary reaches the
+    /// Legacy / future substrates where the planner dials the host
+    /// kernel. The planner binary reaches the
     /// kernel through the guest's `vsock` virtio device by
     /// **connecting outbound** to `(cid, port)`.
     /// Concrete connect logic lives behind the `vsock-transport`
@@ -177,30 +177,24 @@ pub enum KernelTransportConfig {
     /// returns [`TransportError::VsockUnavailable`].
     Vsock {
         /// Context ID of the host (`2` for AF_VSOCK on the standard
-        /// Apple-VZ / Firecracker host). Pinned by the kernel's
+        /// vsock host). Pinned by the kernel's
         /// session-spawn path.
         cid: u32,
         /// Port the kernel's host-side proxy is listening on.
         port: u32,
     },
-    /// **Apple-VZ guest** — the planner binds an AF_VSOCK listener
+    /// **VM host-dials-guest path** — the planner binds an AF_VSOCK listener
     /// on `port` and accepts exactly one connection from the host
     /// kernel (which dials in via
-    /// `VZVirtioSocketDevice.connectToPort:`). Once accepted the
-    /// socket is wrapped in the same `StreamTransport` the
-    /// `Vsock` and `Uds` variants use, so the framing protocol on
-    /// top is identical.
-    /// The asymmetry vs the Firecracker `Vsock` variant exists
-    /// because Apple-VZ's `VZVirtioSocketDevice` supports the
-    /// host-dials-guest direction natively but requires an
-    /// Objective-C delegate (`VZVirtioSocketListener`) to do the
-    /// inverse. Pinning the guest as the listener keeps the
-    /// substrate's vsock wiring symmetric with what AVF already
-    /// exposes from `connect_vsock`.
+    /// `VZVirtioSocketDevice.connectToPort:` on AVF or Firecracker's
+    /// UDS multiplexer `CONNECT <port>` handshake on Linux). Once
+    /// accepted the socket is wrapped in the same `StreamTransport`
+    /// the `Vsock` and `Uds` variants use, so the framing protocol
+    /// on top is identical.
     /// Behind the same `vsock-transport` feature gate as `Vsock`.
     VsockListen {
         /// AF_VSOCK port the planner binds. Always `1024` in the
-        /// canonical AVF substrate (matches
+        /// canonical VM substrates (matches
         /// `extensibility-traits.md §3.4` planner-port pin).
         port: u32,
     },
@@ -211,9 +205,9 @@ impl KernelTransportConfig {
     /// Precedence (matches the kernel-side spawn path):
     /// 1. `RAXIS_KERNEL_PLANNER_SOCKET` → [`KernelTransportConfig::Uds`]
     /// 2. `RAXIS_KERNEL_VSOCK_LISTEN_PORT` →
-    ///    [`KernelTransportConfig::VsockListen`] (Apple-VZ guest)
+    ///    [`KernelTransportConfig::VsockListen`] (production VM guest)
     /// 3. `RAXIS_KERNEL_VSOCK_CID` + `RAXIS_KERNEL_VSOCK_PORT` →
-    ///    [`KernelTransportConfig::Vsock`] (Firecracker / dial-out)
+    ///    [`KernelTransportConfig::Vsock`] (legacy / future dial-out)
     ///    All missing ⇒ [`TransportError::NotConfigured`].
     ///    The closure shape `&str -> Option<String>` mirrors
     ///    `std::env::var(_).ok()` so tests can inject a hermetic env.

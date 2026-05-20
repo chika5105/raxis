@@ -109,7 +109,14 @@ $ raxis doctor
 **macOS-specific limitations:**
 
 - Hard filesystem quotas are not natively supported on APFS; soft enforcement only.
-- File descriptor limits on macOS default to 256 per process; `raxis kernel start` automatically calls `setrlimit(RLIMIT_NOFILE, 65536)` on startup, but launchd plists also need `SoftResourceLimits.NumberOfFiles = 65536` (already in the generated plist per [`kernel-lifecycle.md §5`](kernel-lifecycle.md)).
+- File descriptor limits on macOS can default to 256 per process in
+  interactive or GUI-launched contexts. The kernel intentionally fails
+  closed when the inherited soft `RLIMIT_NOFILE` is below
+  `[host_capacity] required_min_fd_limit` (default 4096). Source-tree
+  runs must raise the limit in the launching shell (for example
+  `ulimit -n 8192` before `cargo test`); launchd plists must set
+  `SoftResourceLimits.NumberOfFiles = 65536` (already in the generated
+  plist per [`kernel-lifecycle.md §5`](kernel-lifecycle.md)).
 
 ### 2.3 Windows: not supported
 

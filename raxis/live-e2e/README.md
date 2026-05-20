@@ -1029,6 +1029,45 @@ RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1 RAXIS_E2E_KEEP_ALIVE_DURATION_SECS=7200 \
 The older short aliases `RAXIS_KEEP_ALIVE=1` and
 `RAXIS_KEEP_ALIVE_DURATION_SECS=7200` are accepted too.
 
+### Host file-descriptor limit preflight
+
+The kernel refuses to boot if the process soft `RLIMIT_NOFILE`
+is below `[host_capacity] required_min_fd_limit` (default
+`4096`; see `specs/v2/host-capacity.md §12.1`). In the
+live-e2e harness this can look like a readiness timeout:
+
+```text
+kernel never reported 'sockets_bound' within 15s
+BOOT_ERR_HOST_CAPACITY: FAIL_INSUFFICIENT_FD_LIMIT:
+RLIMIT_NOFILE soft limit 256 is below floor 4096
+```
+
+That failure happens before sockets bind, before the dashboard
+serves a live kernel, and before any VM, initiative, reviewer, or
+verifier starts. It is a host launch-environment problem, not an
+image, networking, Docker, or DAG problem.
+
+For source-tree runs, raise the limit in the same shell that
+launches `cargo test`:
+
+```bash
+ulimit -n 8192
+ulimit -n   # must print 4096 or higher
+
+RAXIS_INSTALL_DIR="${RAXIS_INSTALL_DIR:-/usr/local/lib/raxis}" \
+RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 \
+RAXIS_KEEP_ALIVE=1 RAXIS_KEEP_ALIVE_DURATION_SECS=7200 \
+  cargo test -p raxis-kernel --release \
+    --test extended_e2e_realistic_scenario \
+    realistic_session_lifecycle -- --nocapture --test-threads=1
+```
+
+If you use `nohup ... &`, run `ulimit -n 8192` first in that
+same shell. Packaged daemon installs should set the equivalent
+service-manager limit (`LimitNOFILE=` on systemd, or
+`SoftResourceLimits.NumberOfFiles` on launchd) instead of relying
+on an interactive shell.
+
 ---
 
 ## Credential-substitution canary (the secrets-model witness)

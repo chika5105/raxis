@@ -18,6 +18,9 @@
 //! service the kernel connects to over a different UDS) without
 //! touching the boot wire.
 
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -111,12 +114,22 @@ impl FirecrackerVmm {
         }
         // Per `system-requirements.md §5.1`: the kernel runs as a
         // member of `kvm`; child inherits. We never elevate.
-        cmd.stdout(Stdio::null());
-        cmd.stderr(if args.capture_stderr {
-            Stdio::piped()
+        if let Some(log_path) = &args.console_log_path {
+            let console_log = open_console_log(log_path)?;
+            let console_log_for_stderr =
+                console_log.try_clone().map_err(|e| VmmError::SpawnFailed {
+                    reason: format!("console.log clone {}: {e}", log_path.display()),
+                })?;
+            cmd.stdout(Stdio::from(console_log));
+            cmd.stderr(Stdio::from(console_log_for_stderr));
         } else {
-            Stdio::null()
-        });
+            cmd.stdout(Stdio::null());
+            cmd.stderr(if args.capture_stderr {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
+        }
 
         let child = cmd.spawn().map_err(|e| VmmError::SpawnFailed {
             reason: format!(
@@ -259,7 +272,15 @@ pub struct SpawnArgs {
     pub boot_grace: Duration,
     /// Capture stderr into a pipe (kernel forwards to the audit
     /// channel as `SessionVmStderr` lines). `false` ⇒ /dev/null.
+    ///
+    /// Ignored when [`Self::console_log_path`] is set, because the
+    /// per-session console file is the production forensic surface.
     pub capture_stderr: bool,
+    /// Per-session console log path supplied by the kernel. When set,
+    /// the supervisor creates/truncates the file with owner-only
+    /// permissions and routes Firecracker stdout/stderr into it so
+    /// guest serial output is retained for post-mortems.
+    pub console_log_path: Option<PathBuf>,
 }
 
 impl Default for SpawnArgs {
@@ -272,8 +293,43 @@ impl Default for SpawnArgs {
             extra_args: None,
             boot_grace: Duration::from_millis(2000),
             capture_stderr: false,
+            console_log_path: None,
         }
     }
+}
+
+fn open_console_log(path: &Path) -> Result<std::fs::File, VmmError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| VmmError::SpawnFailed {
+            reason: format!("console.log parent {}: {e}", parent.display()),
+        })?;
+    }
+
+    let mut opts = OpenOptions::new();
+    opts.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path).map_err(|e| VmmError::SpawnFailed {
+        reason: format!("console.log open {}: {e}", path.display()),
+    })?;
+
+    use std::io::Write as _;
+    writeln!(
+        file,
+        "{{\"level\":\"info\",\"step\":\"firecracker-console\",\
+          \"event\":\"host_marker\",\"path\":{:?}}}",
+        path.display().to_string(),
+    )
+    .map_err(|e| VmmError::SpawnFailed {
+        reason: format!("console.log marker {}: {e}", path.display()),
+    })?;
+    file.flush().map_err(|e| VmmError::SpawnFailed {
+        reason: format!("console.log flush {}: {e}", path.display()),
+    })?;
+
+    Ok(file)
 }
 
 /// Poll for the API socket up to `grace`.
@@ -360,6 +416,7 @@ mod tests {
             extra_args: None,
             boot_grace: Duration::from_secs(2),
             capture_stderr: false,
+            console_log_path: None,
         };
         let mut vmm = FirecrackerVmm::spawn(&args).expect("stub spawn must succeed");
         assert!(vmm.is_alive(), "child must be live after spawn");
@@ -393,6 +450,7 @@ mod tests {
             extra_args: None,
             boot_grace: Duration::from_secs(2),
             capture_stderr: false,
+            console_log_path: None,
         };
         let pid;
         {
@@ -426,6 +484,7 @@ mod tests {
             extra_args: None,
             boot_grace: Duration::from_millis(75),
             capture_stderr: false,
+            console_log_path: None,
         };
         let err = FirecrackerVmm::spawn(&args).unwrap_err();
         match err {
@@ -435,6 +494,37 @@ mod tests {
             }
             other => panic!("expected ApiSockTimeout, got {other:?}"),
         }
+        drop(dir);
+    }
+
+    /// Firecracker serial output is written to stdout/stderr by the
+    /// VMM. The supervisor must route those streams into the
+    /// per-session console log path supplied by the kernel so Linux
+    /// guests have the same post-mortem surface as AVF guests.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_with_console_log_path_captures_child_stdio() {
+        let (dir, sh_args) =
+            write_sh_stub_args("touch \"$SOCK\"; echo console-out; echo console-err >&2; sleep 30");
+        let sock = dir.path().join("api.sock");
+        let console_log = dir.path().join("guests").join("sid").join("console.log");
+        let args = SpawnArgs {
+            api_sock: sock.clone(),
+            binary: Some(PathBuf::from("/bin/sh")),
+            pre_args: Some(sh_args),
+            log_level: None,
+            extra_args: None,
+            boot_grace: Duration::from_secs(2),
+            capture_stderr: false,
+            console_log_path: Some(console_log.clone()),
+        };
+        let mut vmm = FirecrackerVmm::spawn(&args).expect("stub spawn must succeed");
+        std::thread::sleep(Duration::from_millis(50));
+        let body = std::fs::read_to_string(&console_log).expect("console log readable");
+        assert!(body.contains("firecracker-console"));
+        assert!(body.contains("console-out"));
+        assert!(body.contains("console-err"));
+        let _ = vmm.terminate();
         drop(dir);
     }
 

@@ -47,6 +47,7 @@ pub mod vsock;
 #[cfg(unix)]
 pub mod vsock_loopback_bridge;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -91,6 +92,45 @@ pub const DEFAULT_BOOT_GRACE: Duration = Duration::from_millis(500);
 
 /// Default per-API-call timeout when driving the boot REST sequence.
 pub const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Hard deadline for the host-side Firecracker UDS-vsock `CONNECT`
+/// retry loop after `InstanceStart`.
+///
+/// Firecracker creates the UDS multiplexer during boot, but the guest
+/// planner still needs to hydrate cmdline env, start its runtime, and
+/// bind the planner port. A single immediate connect races that path
+/// and makes healthy guests flap. This mirrors AVF's 30 s
+/// `connect_vsock` deadline while keeping the Firecracker API-socket
+/// grace separately tight.
+pub const DEFAULT_VSOCK_CONNECT_GRACE: Duration = Duration::from_secs(30);
+
+/// Fast-poll window for planner-vsock readiness.
+pub const VSOCK_CONNECT_BACKOFF_FAST: Duration = Duration::from_millis(5);
+
+/// Mid-window planner-vsock readiness poll interval.
+pub const VSOCK_CONNECT_BACKOFF_MID: Duration = Duration::from_millis(25);
+
+/// Steady-state planner-vsock readiness poll interval.
+pub const VSOCK_CONNECT_BACKOFF_STEADY: Duration = Duration::from_millis(100);
+
+/// End of the fast-poll window.
+pub const VSOCK_CONNECT_BACKOFF_FAST_END: Duration = Duration::from_millis(300);
+
+/// End of the mid-poll window.
+pub const VSOCK_CONNECT_BACKOFF_RAMP_END: Duration = Duration::from_secs(2);
+
+/// Pick the next inter-attempt sleep for Firecracker planner-vsock
+/// readiness based on how long the guest has been booting.
+#[inline]
+pub fn vsock_connect_next_backoff(elapsed: Duration) -> Duration {
+    if elapsed < VSOCK_CONNECT_BACKOFF_FAST_END {
+        VSOCK_CONNECT_BACKOFF_FAST
+    } else if elapsed < VSOCK_CONNECT_BACKOFF_RAMP_END {
+        VSOCK_CONNECT_BACKOFF_MID
+    } else {
+        VSOCK_CONNECT_BACKOFF_STEADY
+    }
+}
 
 /// Fast-boot kernel cmdline base — every token earns its place per the
 /// per-token rationale in `isolation-linux-microvm.md §3.2`.
@@ -137,6 +177,22 @@ pub const FAST_BOOT_CMDLINE_BASE: &str = "console=ttyS0 reboot=k panic=1 \
 /// does NOT gate session admission on this number (it's a hint, not
 /// a guarantee — see `isolation-linux-microvm.md §3.1`).
 pub const BOOT_LATENCY_MS_MEDIAN: u64 = 50;
+
+/// Firecracker guest CID used when the kernel did not assign a
+/// per-session CID. Firecracker requires CIDs > 2; `3` is the
+/// conventional first guest.
+pub const DEFAULT_GUEST_CID: u32 = 3;
+
+/// Env keys that are meaningful only on the host or on the old
+/// guest-dialed transport path. Firecracker now matches AVF's
+/// production shape: the guest listens on a planner port and the
+/// host dials through the substrate's vsock multiplexer.
+const STRIPPED_GUEST_ENV_KEYS: &[&str] = &[
+    "RAXIS_SESSION_TOKEN",
+    "RAXIS_KERNEL_PLANNER_SOCKET",
+    "RAXIS_KERNEL_VSOCK_CID",
+    "RAXIS_KERNEL_VSOCK_PORT",
+];
 
 // ---------------------------------------------------------------------------
 // Host probing
@@ -249,6 +305,8 @@ pub struct FirecrackerBackend {
     api_timeout: Duration,
     /// Boot grace period (API-sock-appearance deadline).
     boot_grace: Duration,
+    /// Planner-vsock readiness grace after `InstanceStart`.
+    vsock_connect_grace: Duration,
 }
 
 impl FirecrackerBackend {
@@ -264,6 +322,7 @@ impl FirecrackerBackend {
             planner_port: DEFAULT_PLANNER_PORT,
             api_timeout: DEFAULT_API_TIMEOUT,
             boot_grace: DEFAULT_BOOT_GRACE,
+            vsock_connect_grace: DEFAULT_VSOCK_CONNECT_GRACE,
         }
     }
 
@@ -292,6 +351,13 @@ impl FirecrackerBackend {
         self
     }
 
+    /// Override how long the substrate retries planner-vsock connect
+    /// after `InstanceStart`.
+    pub fn with_vsock_connect_grace(mut self, t: Duration) -> Self {
+        self.vsock_connect_grace = t;
+        self
+    }
+
     /// Construct per-session UDS paths.
     fn session_paths(&self, session_uuid: &str) -> (PathBuf, PathBuf) {
         let api_sock = self.runtime_dir.join(format!("{session_uuid}.api.sock"));
@@ -311,6 +377,13 @@ impl FirecrackerBackend {
         api_sock: PathBuf,
         vsock_uds: PathBuf,
     ) -> Result<FirecrackerSession, IsolationError> {
+        let boot_inputs = build_firecracker_boot_inputs(image, mounts, spec, self.planner_port)
+            .map_err(|e| {
+                IsolationError::SpawnFailed(format!(
+                    "{BACKEND_ID} boot input validation failed: {e}",
+                ))
+            })?;
+
         // ---- 1. Spawn VMM child ------------------------------------------
         let vmm = FirecrackerVmm::spawn(&SpawnArgs {
             api_sock: api_sock.clone(),
@@ -320,12 +393,14 @@ impl FirecrackerBackend {
             extra_args: None,
             boot_grace: self.boot_grace,
             capture_stderr: false,
+            console_log_path: spec.guest_console_log.clone(),
         })
         .map_err(|e| IsolationError::SpawnFailed(format!("{BACKEND_ID}: {e}")))?;
 
         // ---- 2. Drive boot REST ------------------------------------------
         let api = FirecrackerApi::new(&api_sock).with_timeout(self.api_timeout);
-        if let Err(e) = drive_boot(&api, image, mounts, spec, &vsock_uds) {
+        let guest_cid = spec.vsock_cid.unwrap_or(DEFAULT_GUEST_CID);
+        if let Err(e) = drive_boot_with_inputs(&api, spec, &vsock_uds, boot_inputs) {
             // Failed boot ⇒ tear down everything before returning the
             // error. The VMM Drop impl will clean up the api-sock; we
             // also remove the vsock UDS to avoid leaks.
@@ -337,10 +412,13 @@ impl FirecrackerBackend {
         }
 
         // ---- 3. Open the planner-port channel ----------------------------
-        let port = spec.vsock_cid.unwrap_or(self.planner_port);
-        let channel = HostVsockChannel::connect(&vsock_uds, port).map_err(|e| {
-            IsolationError::TransportFault(format!("{BACKEND_ID}: vsock CONNECT {port}: {e}"))
-        })?;
+        let port = self.planner_port;
+        let channel = connect_planner_vsock_with_retry(&vsock_uds, port, self.vsock_connect_grace)
+            .map_err(|reason| {
+                IsolationError::TransportFault(format!(
+                    "{BACKEND_ID}: vsock CONNECT {port}: {reason}"
+                ))
+            })?;
 
         // ---- 4. Build live Session handle --------------------------------
         Ok(FirecrackerSession {
@@ -348,7 +426,7 @@ impl FirecrackerBackend {
             vmm: Some(vmm),
             channel: Some(channel),
             terminated: false,
-            vsock_cid: spec.vsock_cid.unwrap_or(0),
+            vsock_cid: guest_cid,
             api_sock_path: api_sock,
             vsock_uds,
             #[cfg(unix)]
@@ -357,20 +435,90 @@ impl FirecrackerBackend {
     }
 }
 
-/// Drive the typed boot REST sequence. Pulled out so tests can run it
-/// against a fake VMM endpoint.
-fn drive_boot(
-    api: &FirecrackerApi,
-    image: &VerifiedImage,
-    _mounts: &[WorkspaceMount],
-    spec: &VmSpec,
+fn connect_planner_vsock_with_retry(
     vsock_uds: &std::path::Path,
-) -> Result<(), api::ApiError> {
-    api.put_machine_config(&MachineConfig {
-        vcpu_count: spec.vcpu_count,
-        mem_size_mib: spec.mem_mib,
-        smt: false,
-    })?;
+    port: u32,
+    grace: Duration,
+) -> Result<HostVsockChannel, String> {
+    let started_at = Instant::now();
+    let mut attempts: u64 = 0;
+
+    loop {
+        attempts += 1;
+        let last_err = match HostVsockChannel::connect(vsock_uds, port) {
+            Ok(channel) => return Ok(channel),
+            Err(e) => e.to_string(),
+        };
+
+        let elapsed = started_at.elapsed();
+        if elapsed >= grace {
+            return Err(format!(
+                "planner port did not become ready within {grace:?} \
+                 after {attempts} attempt(s); last error: {}",
+                last_err,
+            ));
+        }
+        std::thread::sleep(vsock_connect_next_backoff(elapsed));
+    }
+}
+
+fn session_runtime_name(token: &str) -> Result<&str, String> {
+    if token.is_empty() {
+        return Err("empty session token".to_owned());
+    }
+    if token.len() > 128 {
+        return Err(format!(
+            "session token too long for runtime socket names: {} bytes",
+            token.len()
+        ));
+    }
+    if !token
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("session token contains characters outside [A-Za-z0-9_-]; \
+             refusing to derive host socket paths"
+            .to_owned());
+    }
+    Ok(token)
+}
+
+fn build_firecracker_boot_inputs(
+    image: &VerifiedImage,
+    mounts: &[WorkspaceMount],
+    spec: &VmSpec,
+    planner_port: u32,
+) -> Result<(PathBuf, PathBuf, bool, String), api::ApiError> {
+    if spec.vcpu_count == 0 {
+        return Err(api::ApiError::MalformedResponse(
+            "vcpu_count must be >= 1".to_owned(),
+        ));
+    }
+    if spec.mem_mib == 0 {
+        return Err(api::ApiError::MalformedResponse(
+            "mem_mib must be >= 1".to_owned(),
+        ));
+    }
+    if planner_port == 0 {
+        return Err(api::ApiError::MalformedResponse(
+            "planner port must be >= 1".to_owned(),
+        ));
+    }
+
+    // Firecracker itself does not expose a virtiofs device. The old
+    // docs mentioned a vsock-mediated artifact RPC as the V2
+    // workaround, but no such RPC exists in the guest tools today:
+    // the planner works against `/workspace` as a real filesystem.
+    // Fail closed here instead of booting a guest that will later
+    // report confusing "missing workspace" tool errors.
+    if !mounts.is_empty() {
+        return Err(api::ApiError::MalformedResponse(format!(
+            "Firecracker workspace mounts are not implemented: received {} mount(s). \
+             Linux parity needs virtiofsd or a kernel-mediated workspace block/artifact \
+             transport before this substrate can run planner sessions with /workspace.",
+            mounts.len(),
+        )));
+    }
 
     // The Linux kernel binary is a host-canonical artefact lived
     // entirely on `VmSpec`; the rootfs payload lives on
@@ -401,8 +549,9 @@ fn drive_boot(
             image.kind,
         )));
     }
+
     let is_initramfs = matches!(image.kind, raxis_isolation::ImageKind::RootfsInitramfsCpio);
-    let boot_args = if spec.boot_args.is_empty() {
+    let mut boot_args = if spec.boot_args.is_empty() {
         // Canonical RAXIS fast-boot pin — see [`FAST_BOOT_CMDLINE_BASE`]
         // for the per-token rationale. Initramfs boots append
         // `rdinit=/init` so the cpio-archived `/init` becomes PID 1
@@ -411,17 +560,107 @@ fn drive_boot(
         // rootfs read-only. Operator-supplied
         // [`raxis_isolation::VmSpec::boot_args`] REPLACE these
         // defaults wholesale (per `isolation-linux-microvm.md §3.2`).
-        Some(if is_initramfs {
+        if is_initramfs {
             format!("{FAST_BOOT_CMDLINE_BASE} rdinit=/init")
         } else {
             format!("{FAST_BOOT_CMDLINE_BASE} root=/dev/vda ro")
-        })
+        }
     } else {
-        Some(spec.boot_args.join(" "))
+        spec.boot_args.join(" ")
     };
+
+    append_envb64(&mut boot_args, spec, planner_port);
+    append_entrypoint_argv(&mut boot_args, spec)?;
+
+    Ok((kernel_path, rootfs_path, is_initramfs, boot_args))
+}
+
+fn append_envb64(cmdline: &mut String, spec: &VmSpec, planner_port: u32) {
+    use base64::Engine as _;
+
+    let mut effective = BTreeMap::new();
+    effective.insert(
+        "RAXIS_KERNEL_VSOCK_LISTEN_PORT".to_owned(),
+        planner_port.to_string(),
+    );
+    for (k, v) in &spec.env {
+        if k.is_empty() || STRIPPED_GUEST_ENV_KEYS.contains(&k.as_str()) {
+            continue;
+        }
+        effective.insert(k.clone(), v.clone());
+    }
+
+    let mut payload = String::new();
+    for (k, v) in &effective {
+        payload.push_str(k);
+        payload.push('=');
+        payload.push_str(v);
+        payload.push('\n');
+    }
+    let b64 = base64::engine::general_purpose::STANDARD.encode(payload.as_bytes());
+    cmdline.push_str(" raxis.envb64=");
+    cmdline.push_str(&b64);
+}
+
+fn append_entrypoint_argv(cmdline: &mut String, spec: &VmSpec) -> Result<(), api::ApiError> {
+    if spec.entrypoint_argv.len() <= 1 {
+        return Ok(());
+    }
+    cmdline.push_str(" --");
+    for arg in spec.entrypoint_argv.iter().skip(1) {
+        if arg.is_empty() {
+            continue;
+        }
+        if arg.chars().any(|c| c.is_whitespace()) {
+            return Err(api::ApiError::MalformedResponse(format!(
+                "entrypoint_argv contains a whitespace-bearing token {arg:?}; \
+                 Firecracker cmdline tokeniser cannot pass it intact — route \
+                 the value through VmSpec.env instead",
+            )));
+        }
+        cmdline.push(' ');
+        cmdline.push_str(arg);
+    }
+    Ok(())
+}
+
+/// Drive the typed boot REST sequence. Pulled out so tests can run it
+/// against a fake VMM endpoint.
+#[cfg(test)]
+fn drive_boot(
+    api: &FirecrackerApi,
+    image: &VerifiedImage,
+    mounts: &[WorkspaceMount],
+    spec: &VmSpec,
+    vsock_uds: &std::path::Path,
+    planner_port: u32,
+) -> Result<(), api::ApiError> {
+    let (kernel_path, rootfs_path, is_initramfs, boot_args) =
+        build_firecracker_boot_inputs(image, mounts, spec, planner_port)?;
+    drive_boot_with_inputs(
+        api,
+        spec,
+        vsock_uds,
+        (kernel_path, rootfs_path, is_initramfs, boot_args),
+    )
+}
+
+fn drive_boot_with_inputs(
+    api: &FirecrackerApi,
+    spec: &VmSpec,
+    vsock_uds: &std::path::Path,
+    boot_inputs: (PathBuf, PathBuf, bool, String),
+) -> Result<(), api::ApiError> {
+    let (kernel_path, rootfs_path, is_initramfs, boot_args) = boot_inputs;
+    api.put_machine_config(&MachineConfig {
+        vcpu_count: spec.vcpu_count,
+        mem_size_mib: spec.mem_mib,
+        smt: false,
+    })?;
+
     api.put_boot_source(&BootSource {
         kernel_image_path: kernel_path,
-        boot_args,
+        boot_args: Some(boot_args),
         // For initramfs boots the rootfs is loaded by the kernel as
         // initrd; for EROFS boots we attach it as a virtio-blk drive
         // (`PUT /drives/rootfs`) and leave initrd empty.
@@ -464,7 +703,7 @@ fn drive_boot(
 
     api.put_vsock(&VsockConfig {
         vsock_id: "raxis".to_owned(),
-        guest_cid: spec.vsock_cid.unwrap_or(3),
+        guest_cid: spec.vsock_cid.unwrap_or(DEFAULT_GUEST_CID),
         uds_path: vsock_uds.to_path_buf(),
     })?;
 
@@ -519,8 +758,14 @@ impl Backend for FirecrackerBackend {
             }
         }
 
-        // Mint per-session UDS paths from the session token.
-        let session_uuid = &spec.session_token.0;
+        // Mint per-session UDS paths from the session token. The
+        // production token generator emits lowercase hex, but the
+        // substrate validates the string before it becomes a host
+        // path so a malformed caller cannot smuggle separators into
+        // the runtime directory.
+        let session_uuid = session_runtime_name(&spec.session_token.0).map_err(|e| {
+            IsolationError::SpawnFailed(format!("{BACKEND_ID}: invalid session token: {e}"))
+        })?;
         let (api_sock, vsock_uds) = self.session_paths(session_uuid);
         if !self.runtime_dir.exists() {
             return Err(IsolationError::BackendInternal(format!(
@@ -616,7 +861,15 @@ impl FirecrackerSession {
 
 impl Session for FirecrackerSession {
     fn push(&mut self, frame: &PushFrame) -> Result<(), IsolationError> {
-        let ch = self.channel.as_mut().ok_or(IsolationError::PeerClosed)?;
+        let ch = self.channel.as_mut().ok_or_else(|| {
+            if self.terminated {
+                IsolationError::PeerClosed
+            } else {
+                IsolationError::TransportFault(format!(
+                    "{BACKEND_ID}: push after kernel IPC fd was surrendered",
+                ))
+            }
+        })?;
         ch.send_frame(&frame.bytes).map_err(|e| match e {
             crate::vsock::VsockError::PeerClosed => IsolationError::PeerClosed,
             other => IsolationError::TransportFault(format!("{BACKEND_ID}: push: {other}")),
@@ -624,7 +877,15 @@ impl Session for FirecrackerSession {
     }
 
     fn recv_intent(&mut self) -> Result<IntentFrame, IsolationError> {
-        let ch = self.channel.as_mut().ok_or(IsolationError::PeerClosed)?;
+        let ch = self.channel.as_mut().ok_or_else(|| {
+            if self.terminated {
+                IsolationError::PeerClosed
+            } else {
+                IsolationError::TransportFault(format!(
+                    "{BACKEND_ID}: recv after kernel IPC fd was surrendered",
+                ))
+            }
+        })?;
         let bytes = ch.recv_frame().map_err(|e| match e {
             crate::vsock::VsockError::PeerClosed => IsolationError::PeerClosed,
             other => IsolationError::TransportFault(format!("{BACKEND_ID}: recv: {other}")),
@@ -769,6 +1030,20 @@ impl Session for FirecrackerSession {
     fn session_identity(&self) -> SessionTransportId {
         SessionTransportId::Vsock {
             cid: self.vsock_cid,
+        }
+    }
+
+    fn take_kernel_ipc_fd(&mut self) -> Option<std::os::unix::io::RawFd> {
+        if self.terminated {
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            self.channel.take().map(HostVsockChannel::into_raw_fd)
+        }
+        #[cfg(not(unix))]
+        {
+            None
         }
     }
 }
@@ -939,8 +1214,81 @@ mod tests {
         assert!(
             DEFAULT_BOOT_GRACE >= Duration::from_millis(100),
             "DEFAULT_BOOT_GRACE tightened below 100 ms ({DEFAULT_BOOT_GRACE:?}); \
-             healthy spawns may flap with this little headroom"
+            healthy spawns may flap with this little headroom"
         );
+    }
+
+    #[test]
+    fn vsock_connect_backoff_matches_avf_boot_race_shape() {
+        assert_eq!(
+            vsock_connect_next_backoff(Duration::from_millis(0)),
+            VSOCK_CONNECT_BACKOFF_FAST,
+        );
+        assert_eq!(
+            vsock_connect_next_backoff(VSOCK_CONNECT_BACKOFF_FAST_END),
+            VSOCK_CONNECT_BACKOFF_MID,
+        );
+        assert_eq!(
+            vsock_connect_next_backoff(VSOCK_CONNECT_BACKOFF_RAMP_END),
+            VSOCK_CONNECT_BACKOFF_STEADY,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planner_vsock_connect_retries_until_delayed_multiplexer_exists() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let uds = dir.path().join("delayed-vsock.sock");
+        let server_uds = uds.clone();
+        let server = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            let listener = UnixListener::bind(&server_uds).unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = Vec::with_capacity(32);
+            let mut byte = [0u8; 1];
+            loop {
+                let n = stream.read(&mut byte).unwrap();
+                if n == 0 || byte[0] == b'\n' {
+                    break;
+                }
+                line.push(byte[0]);
+            }
+            let text = std::str::from_utf8(&line).unwrap();
+            assert_eq!(text, "CONNECT 4242");
+            stream.write_all(b"OK 123\n").unwrap();
+            stream.flush().unwrap();
+        });
+
+        let channel = connect_planner_vsock_with_retry(&uds, 4242, Duration::from_secs(2)).unwrap();
+        assert_eq!(channel.guest_port(), 4242);
+        channel.close();
+        server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planner_vsock_connect_reports_timeout_with_last_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let uds = dir.path().join("never-created.sock");
+        let err = connect_planner_vsock_with_retry(&uds, 1, Duration::from_millis(20)).unwrap_err();
+        assert!(err.contains("did not become ready"));
+        assert!(err.contains("last error"));
+    }
+
+    #[test]
+    fn session_runtime_name_rejects_pathlike_or_unbounded_tokens() {
+        assert_eq!(session_runtime_name("abc-123_OK").unwrap(), "abc-123_OK");
+        for bad in ["", "../escape", "dir/name", "space bad", "colon:bad"] {
+            assert!(
+                session_runtime_name(bad).is_err(),
+                "token {bad:?} must not become a host path component",
+            );
+        }
+        let long = "a".repeat(129);
+        assert!(session_runtime_name(&long).is_err());
     }
 
     #[test]
@@ -1078,7 +1426,7 @@ mod tests {
         let api = FirecrackerApi::new(&api_sock).with_timeout(Duration::from_secs(2));
         let img = fixture_image_with_path(PathBuf::from("/tmp/vmlinux.bin"));
         let spec = fixture_spec("session-fixture");
-        drive_boot(&api, &img, &[fixture_mount()], &spec, &vsock_uds)
+        drive_boot(&api, &img, &[], &spec, &vsock_uds, DEFAULT_PLANNER_PORT)
             .expect("drive_boot must succeed against fake VMM");
 
         server.join().unwrap();
@@ -1154,7 +1502,7 @@ mod tests {
         let img = fixture_image_with_path(PathBuf::from("/tmp/vmlinux.bin"));
         let mut spec = fixture_spec("session-fixture-a3");
         spec.egress_tier = EgressTier::Mediated;
-        drive_boot(&api, &img, &[], &spec, &vsock_uds).unwrap();
+        drive_boot(&api, &img, &[], &spec, &vsock_uds, DEFAULT_PLANNER_PORT).unwrap();
 
         server.join().unwrap();
         let cap = captured.lock().unwrap();
@@ -1186,6 +1534,129 @@ mod tests {
     // above.
 
     #[test]
+    fn build_inputs_injects_envb64_strips_host_transport_and_appends_safe_argv() {
+        use base64::Engine as _;
+
+        let img = fixture_image_with_path(PathBuf::from("/tmp/rootfs.img"));
+        let mut spec = fixture_spec("session-env");
+        spec.env.insert(
+            "RAXIS_KERNEL_PLANNER_SOCKET".to_owned(),
+            "/host/planner.sock".to_owned(),
+        );
+        spec.env
+            .insert("RAXIS_KERNEL_VSOCK_CID".to_owned(), "2".to_owned());
+        spec.env
+            .insert("RAXIS_KERNEL_VSOCK_PORT".to_owned(), "9999".to_owned());
+        spec.env
+            .insert("RAXIS_SESSION_TOKEN".to_owned(), "secret".to_owned());
+        spec.env.insert(
+            "RAXIS_PLANNER_TASK_PROMPT".to_owned(),
+            "repair the thing with spaces".to_owned(),
+        );
+        spec.entrypoint_argv = vec![
+            "/usr/local/bin/raxis-executor".to_owned(),
+            "--task-id".to_owned(),
+            "task-123".to_owned(),
+        ];
+
+        let (_, _, _, cmdline) =
+            build_firecracker_boot_inputs(&img, &[], &spec, DEFAULT_PLANNER_PORT).unwrap();
+
+        assert!(cmdline.contains("root=/dev/vda ro"));
+        assert!(cmdline.ends_with(" -- --task-id task-123"));
+        let token = cmdline
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("raxis.envb64="))
+            .expect("envb64 token");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(token)
+            .expect("base64");
+        let payload = String::from_utf8(decoded).expect("utf8");
+        assert!(payload.contains("RAXIS_KERNEL_VSOCK_LISTEN_PORT=1024\n"));
+        assert!(payload.contains("RAXIS_PLANNER_TASK_PROMPT=repair the thing with spaces\n"));
+        assert!(!payload.contains("RAXIS_SESSION_TOKEN="));
+        assert!(!payload.contains("RAXIS_KERNEL_PLANNER_SOCKET="));
+        assert!(!payload.contains("RAXIS_KERNEL_VSOCK_CID="));
+        assert!(!payload.contains("RAXIS_KERNEL_VSOCK_PORT="));
+    }
+
+    #[test]
+    fn build_inputs_rejects_workspace_mounts_until_firecracker_workspace_transport_exists() {
+        let img = fixture_image_with_path(PathBuf::from("/tmp/rootfs.img"));
+        let spec = fixture_spec("session-mounts");
+        let err =
+            build_firecracker_boot_inputs(&img, &[fixture_mount()], &spec, DEFAULT_PLANNER_PORT)
+                .unwrap_err();
+        match err {
+            api::ApiError::MalformedResponse(reason) => {
+                assert!(reason.contains("workspace mounts are not implemented"));
+                assert!(reason.contains("virtiofsd"));
+            }
+            other => panic!("expected MalformedResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn boot_rejects_unimplemented_workspace_mounts_before_spawning_vmm() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FirecrackerBackend::new(dir.path()).with_binary("/nonexistent/firecracker");
+        let api_sock = dir.path().join("api.sock");
+        let vsock_uds = dir.path().join("vsock.sock");
+        let img = fixture_image_with_path(PathBuf::from("/tmp/rootfs.img"));
+        let spec = fixture_spec("session-preflight-mounts");
+
+        let err = backend
+            .boot_and_open_session(&img, &[fixture_mount()], &spec, api_sock.clone(), vsock_uds)
+            .unwrap_err();
+        match err {
+            IsolationError::SpawnFailed(reason) => {
+                assert!(reason.contains("boot input validation failed"));
+                assert!(reason.contains("workspace mounts are not implemented"));
+            }
+            other => panic!("expected SpawnFailed, got {other:?}"),
+        }
+        assert!(
+            !api_sock.exists(),
+            "mount preflight must fail before spawning a VMM child"
+        );
+    }
+
+    #[test]
+    fn build_inputs_rejects_whitespace_entrypoint_tokens() {
+        let img = fixture_image_with_path(PathBuf::from("/tmp/rootfs.img"));
+        let mut spec = fixture_spec("session-argv");
+        spec.entrypoint_argv = vec![
+            "/usr/local/bin/raxis-executor".to_owned(),
+            "--task-id".to_owned(),
+            "not safe".to_owned(),
+        ];
+        let err =
+            build_firecracker_boot_inputs(&img, &[], &spec, DEFAULT_PLANNER_PORT).unwrap_err();
+        match err {
+            api::ApiError::MalformedResponse(reason) => {
+                assert!(reason.contains("whitespace-bearing token"));
+                assert!(reason.contains("VmSpec.env"));
+            }
+            other => panic!("expected MalformedResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_inputs_rejects_zero_resource_envelope_before_api_calls() {
+        let img = fixture_image_with_path(PathBuf::from("/tmp/rootfs.img"));
+        let mut spec = fixture_spec("session-resources");
+        spec.vcpu_count = 0;
+        let err =
+            build_firecracker_boot_inputs(&img, &[], &spec, DEFAULT_PLANNER_PORT).unwrap_err();
+        match err {
+            api::ApiError::MalformedResponse(reason) => {
+                assert!(reason.contains("vcpu_count"));
+            }
+            other => panic!("expected MalformedResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn drive_boot_rejects_inline_image_bytes() {
         // Firecracker requires an mmap-able rootfs file on disk;
         // inline-bytes is reserved for Wasm/SGX and should not flow
@@ -1200,19 +1671,13 @@ mod tests {
         let api_sock = dir.path().join("api.sock");
         let vsock_uds = dir.path().join("vsock.sock");
         let api = FirecrackerApi::new(&api_sock);
-        // The first PUT (machine-config) will fail because the API
-        // socket isn't bound, BUT the inline-bytes guard fires *after*
-        // the machine-config PUT — meaning we still reach the typed
-        // error path. We assert on either branch since both indicate
-        // a healthy guard.
         let spec = fixture_spec("session-wasm");
-        let err = drive_boot(&api, &img, &[], &spec, &vsock_uds).unwrap_err();
+        let err = drive_boot(&api, &img, &[], &spec, &vsock_uds, DEFAULT_PLANNER_PORT).unwrap_err();
         match err {
-            api::ApiError::Transport(_)
-            | api::ApiError::MalformedResponse(_)
-            | api::ApiError::Status { .. }
-            | api::ApiError::Json(_) => {}
-            api::ApiError::Timeout(_) | api::ApiError::NotSupportedOnTarget => {}
+            api::ApiError::MalformedResponse(reason) => {
+                assert!(reason.contains("inline-bytes rootfs images not supported"));
+            }
+            other => panic!("expected MalformedResponse, got {other:?}"),
         }
     }
 }

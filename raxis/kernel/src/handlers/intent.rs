@@ -38,7 +38,7 @@ use std::sync::Arc;
 use raxis_store::{Store, Table};
 use raxis_types::{
     unix_now_secs, BudgetSnapshot, InitiativeState, IntentKind, IntentOutcome, IntentRequest,
-    IntentResponse, PlannerErrorCode, SessionId, SubmittedClaim, TaskState,
+    IntentResponse, PlannerErrorCode, SessionId, TaskState,
 };
 
 // INV-STORE-03 (kernel-store.md §2.5.1): table identifiers come from the
@@ -111,8 +111,11 @@ fn record_lane_budget_reserved_snapshot(ctx: &HandlerContext, lane_id: &str) {
 ///     Returns `PreGateOutcome::Proceed(PreGateState)`,
 ///     `EarlyResponse(IntentResponse)` for ReportFailure/CompleteTask,
 ///     or `Reject(code, state)`.
-///   - `Phase B` (async) — Step 9 `gates::evaluate_claims`, which spawns
-///     verifier subprocesses via `tokio::process::Command`.
+///   - `Phase B` (async) — Step 9 gate-state evaluation. Missing
+///     mechanical verifiers are deliberately not spawned here; they are
+///     spawned only after Phase C commits `GatesPending`, so a fast
+///     verifier cannot submit a witness against a task that is still
+///     durably `Admitted`.
 ///   - `Phase C` (`spawn_blocking`) — Steps 10-13 + final response.
 ///
 /// Each `spawn_blocking` clone of `ctx: Arc<HandlerContext>` is cheap
@@ -543,16 +546,18 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
 
     // ── Phase B (async) — Step 9: Gate evaluation ─────────────────────────
     //
-    // `gates::evaluate_claims` is genuinely async — it spawns verifier
-    // subprocesses via `tokio::process::Command`. It MUST run on the
-    // tokio runtime, not on a blocking-pool thread.
-    let submitted: Vec<SubmittedClaim> = req.submitted_claims.clone();
-    let gate_result = gates::evaluate_claims(
+    // `gates::evaluate_claims_defer_verifier_spawn` is genuinely async
+    // because it runs the DB-heavy pre-spawn gate evaluation through the
+    // blocking pool. The initial intent path MUST defer verifier spawn
+    // until after Phase C commits the `GatesPending` FSM transition;
+    // otherwise a fast mechanical verifier can submit its witness while
+    // the durable task row is still `Admitted`, and the witness handler
+    // correctly rejects it as `TaskNotGatesPending`.
+    let gate_result = gates::evaluate_claims_defer_verifier_spawn(
         &session_id,
         pre_state.head_sha_raw.as_str(),
         req.task_id.as_str(),
         &pre_state.touched_paths,
-        &submitted,
         &pre_state.worktree_path,
         ctx,
     )
@@ -626,7 +631,12 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     let session_id_str = session_id.as_str().to_owned();
     let ctx_arc = Arc::clone(ctx);
     let policy_arc = Arc::clone(&policy_snapshot);
-    tokio::task::spawn_blocking(move || {
+    let pending_gates_for_spawn = pending_gates.clone();
+    let task_id_for_spawn = task_id_owned.clone();
+    let evaluation_sha_for_spawn = pre_state.head_sha_raw.clone();
+    let worktree_for_spawn = pre_state.worktree_path.clone();
+    let policy_for_spawn = Arc::clone(&policy_snapshot);
+    let phase_c_result = tokio::task::spawn_blocking(move || {
         run_phase_c(
             pre_state,
             pending_gates,
@@ -640,7 +650,25 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
         )
     })
     .await
-    .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?
+    .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
+
+    if let Ok(resp) = &phase_c_result {
+        if !pending_gates_for_spawn.is_empty()
+            && matches!(resp.outcome, IntentOutcome::Accepted { .. })
+        {
+            gates::spawn_verifiers_for_missing_gates(
+                task_id_for_spawn.as_str(),
+                evaluation_sha_for_spawn.as_str(),
+                &pending_gates_for_spawn,
+                &worktree_for_spawn,
+                &policy_for_spawn,
+                ctx,
+            )
+            .await;
+        }
+    }
+
+    phase_c_result
 }
 
 // ---------------------------------------------------------------------------

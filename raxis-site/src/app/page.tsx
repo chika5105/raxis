@@ -1,5 +1,6 @@
 import Link from "next/link";
 import Image from "next/image";
+import { DemoPlayer } from "@/components/DemoPlayer";
 import { Section } from "@/components/Section";
 import { LinkedInBadge } from "@/components/LinkedInBadge";
 
@@ -8,6 +9,7 @@ export default function HomePage() {
     <>
       <Hero />
       <TrustBar />
+      <DemoVideo />
       <EnterpriseBlocker />
       <WhatItDoes />
       <Paradigm />
@@ -56,11 +58,14 @@ function Hero() {
             </span>
           </div>
           <div className="mt-10 flex flex-wrap items-center gap-4">
+            <Link href="/#demo" className="btn btn-primary">
+              Watch the demo
+            </Link>
             <a
               href="https://github.com/chika5105/raxis"
               target="_blank"
               rel="noopener noreferrer"
-              className="btn btn-primary"
+              className="btn btn-ghost"
             >
               View source
             </a>
@@ -76,6 +81,41 @@ function Hero() {
           </div>
         </div>
         <RuntimeDiagram />
+      </div>
+    </section>
+  );
+}
+
+function DemoVideo() {
+  return (
+    <section id="demo" className="border-b border-[var(--rule)]">
+      <div className="mx-auto grid max-w-5xl gap-8 px-4 py-14 sm:px-6 sm:py-16 lg:grid-cols-[0.9fr_1.1fr] lg:items-center">
+        <div>
+          <p className="eyebrow mb-4">Demo video</p>
+          <h2 className="h-section">Watch RAXIS govern a live agent run.</h2>
+          <p className="mt-5 leading-relaxed text-[var(--muted)]">
+            See the Runtime Attestation eXchange for Intelligent Systems
+            isolate an agent, enforce user-signed authority, mediate access,
+            and leave behind a tamper-evident record an operator can inspect.
+          </p>
+          <div className="mt-6 flex flex-wrap items-center gap-4">
+            <a
+              href="https://www.loom.com/share/a9e5673f410542bcb09b8ce7813e240c"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn btn-primary"
+            >
+              Open on Loom
+            </a>
+            <Link
+              href="/reference"
+              className="text-base text-[var(--muted)] underline decoration-[var(--rule)] underline-offset-4 transition hover:text-[var(--fg)] hover:decoration-[var(--rule-strong)]"
+            >
+              Read the architecture
+            </Link>
+          </div>
+        </div>
+        <DemoPlayer />
       </div>
     </section>
   );

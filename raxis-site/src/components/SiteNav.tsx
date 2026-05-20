@@ -10,6 +10,7 @@ type NavLink = {
 
 const NAV_LINKS: NavLink[] = [
   { href: "/", label: "Home" },
+  { href: "/#demo", label: "Demo" },
   {
     href: "https://paypal.me/chikajinanwa",
     label: "Buy me a coffee",

@@ -2,7 +2,10 @@
 //
 // Normative reference: kernel-core.md §2.3 `src/gates/mod.rs`.
 //
-// Single public entry point: evaluate_claims().
+// Public entry points:
+//   - evaluate_claims() — recheck path, spawns missing verifiers immediately.
+//   - evaluate_claims_defer_verifier_spawn() — initial intent path, returns
+//     missing gates so the caller can commit GatesPending before spawn.
 // Called by handlers/intent.rs after VCS path derivation.
 // Never called by the dispatcher directly.
 //
@@ -102,7 +105,9 @@ pub enum GateEvalResult {
     /// Contains a planner-facing reason string.
     ClaimInsufficient { reason: String },
 
-    /// One or more gate types are unsatisfied — verifiers are spawned/pending.
+    /// One or more gate types are unsatisfied. Depending on the caller,
+    /// verifiers may already be spawned or may be deliberately deferred
+    /// until the task's `GatesPending` transition commits.
     PendingWitness { missing_gates: Vec<String> },
 }
 
@@ -138,6 +143,57 @@ pub async fn evaluate_claims(
     _submitted_claims_discarded: &[SubmittedClaim],
     worktree_root: &Path,
     ctx: &HandlerContext,
+) -> Result<GateEvalResult, GateError> {
+    evaluate_claims_impl(
+        session_id,
+        evaluation_sha,
+        task_id,
+        touched_paths,
+        worktree_root,
+        ctx,
+        true,
+    )
+    .await
+}
+
+/// Evaluate gate state without spawning missing mechanical verifiers.
+///
+/// This is the initial intent-admission path used by
+/// `handlers::intent`: a missing gate must first be persisted as a
+/// `GatesPending` FSM transition. Only after that transaction commits
+/// may the kernel spawn a verifier, otherwise a fast verifier can submit
+/// its witness while `tasks.state` is still `Admitted` and the witness
+/// handler correctly rejects it as `TaskNotGatesPending`.
+pub async fn evaluate_claims_defer_verifier_spawn(
+    session_id: &SessionId,
+    evaluation_sha: &str,
+    task_id: &str,
+    touched_paths: &[PathBuf],
+    // Kept intentionally absent, matching `evaluate_claims`: planner-
+    // submitted claims are discarded by the kernel-owned claim pipeline.
+    worktree_root: &Path,
+    ctx: &HandlerContext,
+) -> Result<GateEvalResult, GateError> {
+    evaluate_claims_impl(
+        session_id,
+        evaluation_sha,
+        task_id,
+        touched_paths,
+        worktree_root,
+        ctx,
+        false,
+    )
+    .await
+}
+
+async fn evaluate_claims_impl(
+    session_id: &SessionId,
+    evaluation_sha: &str,
+    task_id: &str,
+    touched_paths: &[PathBuf],
+    worktree_root: &Path,
+    ctx: &HandlerContext,
+    spawn_missing_verifiers: bool,
 ) -> Result<GateEvalResult, GateError> {
     // Pin one snapshot of the policy bundle for the duration of this
     // gate evaluation. INV-POLICY-01: an in-process epoch advance must
@@ -222,32 +278,40 @@ pub async fn evaluate_claims(
         PreSpawnDecision::NeedsVerifierSpawn { missing_gates } => missing_gates,
     };
 
-    // ── Step 5: Spawn verifiers for missing gates ─────────────────────────
-    //
-    // Genuinely async — `tokio::process::Command` spawn. MUST run on the
-    // tokio runtime worker, not on the blocking pool (a blocking-pool
-    // thread cannot drive child-process I/O readiness). Per
-    // kernel-core.md §2.3 `verifier_runner.rs`, spawn errors are
-    // intentionally non-fatal at this point — the missing gate stays
-    // in `missing_gates` and the planner is told to wait. But
-    // "non-fatal" does NOT mean "silently swallowed": each error
-    // variant carries different operational meaning, and operators
-    // need to see them in structured logs so a permanently-broken
-    // verifier binary or an exhausted concurrent-verifier cap surfaces
-    // at telemetry time instead of being invisible.
-    //
-    //   - `Ok(_)`                    → verifier spawned, run_id reserved.
-    //   - `Err(VerifierCapExceeded)` → backpressure, expected under load.
-    //   - `Err(VerifierBudgetExhausted)` → cumulative-budget refusal
-    //                                      (INV-VERIFIER-CUMULATIVE-BUDGET-01).
-    //   - `Err(SpawnFailed)`         → the verifier binary is missing or
-    //                                  unexecutable — operator action.
-    //   - `Err(AuthorityError)`      → token issuance failed — likely a
-    //                                  store-level fault.
-    //   - `Err(_other)`              → defensive catch-all.
-    let policy: &raxis_policy::PolicyBundle = &policy_snapshot;
+    if spawn_missing_verifiers {
+        spawn_verifiers_for_missing_gates(
+            task_id,
+            evaluation_sha,
+            &missing_gates,
+            worktree_root,
+            &policy_snapshot,
+            ctx,
+        )
+        .await;
+    }
+
+    Ok(GateEvalResult::PendingWitness { missing_gates })
+}
+
+/// Spawn mechanical verifiers for gates known to be missing.
+///
+/// Genuinely async — `tokio::process::Command` spawn. MUST run on the
+/// tokio runtime worker, not on the blocking pool (a blocking-pool thread
+/// cannot drive child-process I/O readiness). Per kernel-core.md §2.3
+/// `verifier_runner.rs`, spawn errors are intentionally non-fatal: the
+/// missing gate remains missing and the planner is told to wait. But
+/// "non-fatal" does NOT mean "silently swallowed": each error variant
+/// is logged with the operational meaning an operator needs.
+pub async fn spawn_verifiers_for_missing_gates(
+    task_id: &str,
+    evaluation_sha: &str,
+    missing_gates: &[String],
+    worktree_root: &Path,
+    policy: &PolicyBundle,
+    ctx: &HandlerContext,
+) {
     let store = ctx.store.as_ref();
-    for gate_type in &missing_gates {
+    for gate_type in missing_gates {
         let vconfig =
             verifier_runner::VerifierConfig::from_policy(policy, gate_type, &ctx.data_dir);
         let Some(vconfig) = vconfig else { continue };
@@ -322,8 +386,6 @@ pub async fn evaluate_claims(
             }
         }
     }
-
-    Ok(GateEvalResult::PendingWitness { missing_gates })
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,6 +1201,101 @@ mod async_runtime_safety {
             }
             other => panic!("expected PendingWitness or Pass from evaluate_claims; got {other:?}",),
         }
+    }
+
+    /// **INV-GATES-VERIFY-AFTER-GATES-PENDING-COMMIT-01.**
+    ///
+    /// Initial intent admission must not spawn mechanical verifiers while
+    /// the task row is still durably `Admitted`. A fast verifier can run
+    /// to completion before Phase C commits `Admitted → GatesPending`;
+    /// the witness handler then rejects the otherwise-valid witness as
+    /// `TaskNotGatesPending`, stranding the synthetic integration task.
+    ///
+    /// This pins the new split: the deferred entry point reports missing
+    /// gates but writes no verifier token, proving no verifier process was
+    /// launched before the caller has a chance to commit the FSM state.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deferred_gate_eval_reports_missing_without_spawning_verifier_token() {
+        use std::path::Path;
+
+        use arc_swap::ArcSwap;
+        use raxis_audit_tools::AuditSink;
+        use raxis_store::Table;
+        use raxis_test_support::FakeAuditSink;
+
+        use crate::initiatives::PlanRegistry;
+        use crate::ipc::context;
+
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let worktree_root = tempfile::tempdir().expect("worktree tempdir");
+
+        let policy = policy_with_one_gate(worktree_root.path());
+        let store: Arc<Store> = Arc::new(mem_store());
+        let audit: Arc<dyn AuditSink> = Arc::new(FakeAuditSink::new());
+        let registry = Arc::new(crate::authority::keys::KeyRegistry::stub_for_tests());
+        let plan_registry = Arc::new(PlanRegistry::new());
+        let credentials =
+            context::build_default_test_credentials(data_dir.path(), Arc::clone(&audit));
+        let isolation = context::build_fail_closed_test_isolation();
+        let orchestrator_spawn = context::build_test_orchestrator_spawn();
+        let executor_spawn = context::build_test_executor_spawn();
+        let domain = context::build_default_test_domain(data_dir.path());
+
+        let ctx = Arc::new(context::HandlerContext::new(
+            Arc::new(ArcSwap::new(Arc::clone(&policy))),
+            registry,
+            Arc::clone(&store),
+            audit,
+            data_dir.path().to_path_buf(),
+            plan_registry,
+            Arc::new(crate::gateway::client::GatewayClient::new()),
+            Arc::new(crate::prompt::EpochBinding::new()),
+            credentials,
+            isolation,
+            orchestrator_spawn,
+            executor_spawn,
+            domain,
+        ));
+
+        let session_id = SessionId::new_v4();
+        let evaluation_sha = "face0123face0123face0123face0123face0123";
+        let task_id = "task-deferred-gate-spawn";
+        let touched_paths: Vec<PathBuf> = vec![worktree_root.path().join("src/lib.rs")];
+
+        let result = super::evaluate_claims_defer_verifier_spawn(
+            &session_id,
+            evaluation_sha,
+            task_id,
+            &touched_paths,
+            Path::new(worktree_root.path()),
+            &ctx,
+        )
+        .await
+        .expect("deferred gate evaluation must return");
+
+        match result {
+            super::GateEvalResult::PendingWitness { missing_gates } => {
+                assert_eq!(missing_gates, vec!["TestGate".to_owned()]);
+            }
+            other => panic!("expected PendingWitness from deferred gate eval, got {other:?}"),
+        }
+
+        let token_rows = tokio::task::spawn_blocking(move || {
+            let conn = store.lock_sync();
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM {}", Table::VerifierRunTokens.as_str()),
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .expect("count verifier_run_tokens")
+        })
+        .await
+        .expect("count join");
+
+        assert_eq!(
+            token_rows, 0,
+            "deferred gate eval must not mint verifier tokens before GatesPending commits"
+        );
     }
 
     /// **INV-GATES-EVALUATE-CLAIMS-ASYNC-SAFE-01** witness (negative).

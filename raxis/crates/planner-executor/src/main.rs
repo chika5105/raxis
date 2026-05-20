@@ -43,10 +43,10 @@ fn main() -> ! {
 
     // Step 2: pre-runtime cmdline-env hydration. See
     // `raxis-planner-orchestrator/src/main.rs` for the full
-    // rationale; the AVF substrate folds `VmSpec::env` into a
+    // rationale; the microVM substrates fold `VmSpec::env` into a
     // `raxis.envb64=<base64>` cmdline token because there is no
-    // `Command::env` analogue at the AVF surface. Other substrates
-    // are no-ops.
+    // `Command::env` analogue at the VM boot surface. Subprocess
+    // isolation is a no-op.
     let hydration = hydrate_from_proc_cmdline();
     log_hydration_outcome(&hydration);
 

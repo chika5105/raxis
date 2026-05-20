@@ -58,6 +58,11 @@ The wrapper exists because these were the easy-to-miss setup hurdles:
 - macOS AVF requires the kernel binary to be codesigned with
   `release/raxis.entitlements`, and the firewall allowlist avoids the
   recurring incoming-connection prompt.
+- The kernel refuses to boot when the inherited soft file-descriptor
+  limit is below `[host_capacity] required_min_fd_limit` (default
+  4096). For source-tree live-e2e runs, set `ulimit -n 8192` in the
+  same shell that launches `cargo test`; packaged services should set
+  `LimitNOFILE=` / launchd `SoftResourceLimits.NumberOfFiles`.
 - Docker, Podman, or Buildah can be quiet during base-image pulls,
   package-manager work, export, tar extraction, and large cpio packing.
   The bake now emits structured `bake_progress` and

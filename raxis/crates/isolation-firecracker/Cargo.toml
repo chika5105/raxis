@@ -43,6 +43,7 @@ repository.workspace  = true
 [dependencies]
 raxis-isolation = { workspace = true }
 raxis-types     = { workspace = true }
+base64          = { workspace = true }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
 thiserror       = { workspace = true }
