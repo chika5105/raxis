@@ -4,6 +4,7 @@
 // Resolution order:
 //   1. RAXIS_REPO_PATH=/abs/or/relative/path  → copy from local checkout
 //   2. RAXIS_REPO_URL=https://...git          → shallow clone into vendor/_raxis-clone, then copy
+//      Optional: RAXIS_REPO_SUBDIR=raxis      → copy from a subdirectory inside the clone
 //   3. existing vendor/raxis-docs/            → leave it alone (last good copy)
 //   4. nothing                                → emit a tiny placeholder so the site still builds
 //
@@ -59,6 +60,22 @@ function shouldSkipFile(name) {
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
+}
+
+function normalizeSubdir(value) {
+  return (value ?? "").trim().replace(/^\/+|\/+$/g, "");
+}
+
+function sourceRootWithSubdir(root, subdir, envName) {
+  const clean = normalizeSubdir(subdir);
+  if (!clean) return root;
+  const resolved = path.join(root, clean);
+  if (!fs.existsSync(resolved)) {
+    log(`${envName}=${clean} does not exist inside ${root}`);
+    process.exit(1);
+  }
+  log(`using source subdirectory ${clean}`);
+  return resolved;
 }
 
 function isScenarioToml(relPath) {
@@ -138,6 +155,8 @@ function writePlaceholder() {
       "    RAXIS_REPO_PATH=../raxis npm run build",
       "    # or",
       "    RAXIS_REPO_URL=https://github.com/chika5105/raxis.git npm run build",
+      "    # when cloning the public monorepo, use:",
+      "    RAXIS_REPO_URL=https://github.com/chika5105/raxis.git RAXIS_REPO_SUBDIR=raxis npm run build",
       "",
       "The `scripts/sync-docs.mjs` step copies every `.md` file from that",
       "source into `vendor/raxis-docs/`, and the rest of the site renders",
@@ -152,6 +171,8 @@ function main() {
   // Auto-detect the sibling raxis/ directory when no env var is set.
   let repoPath = process.env.RAXIS_REPO_PATH;
   const repoUrl = process.env.RAXIS_REPO_URL;
+  const repoSubdir = process.env.RAXIS_REPO_SUBDIR;
+  const repoUrlSubdir = repoSubdir ?? process.env.RAXIS_GITHUB_PREFIX;
   if (!repoPath && !repoUrl) {
     const candidate = path.resolve(ROOT, "..", "raxis");
     if (fs.existsSync(candidate)) {
@@ -172,15 +193,17 @@ function main() {
       log(`RAXIS_REPO_PATH=${repoPath} resolves to ${abs} which does not exist`);
       process.exit(1);
     }
-    log(`mirroring from ${abs}`);
-    const n = copyMarkdownTree(abs, DEST);
+    const src = repoSubdir ? sourceRootWithSubdir(abs, repoSubdir, "RAXIS_REPO_SUBDIR") : abs;
+    log(`mirroring from ${src}`);
+    const n = copyMarkdownTree(src, DEST);
     log(`copied ${n} markdown files into ${path.relative(ROOT, DEST)}`);
     return;
   }
 
   if (repoUrl) {
     const cloned = shallowClone(repoUrl);
-    const n = copyMarkdownTree(cloned, DEST);
+    const src = sourceRootWithSubdir(cloned, repoUrlSubdir, repoSubdir ? "RAXIS_REPO_SUBDIR" : "RAXIS_GITHUB_PREFIX");
+    const n = copyMarkdownTree(src, DEST);
     log(`copied ${n} markdown files into ${path.relative(ROOT, DEST)}`);
     rmRecursive(CLONE_DIR);
     return;

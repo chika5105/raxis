@@ -18,7 +18,7 @@ At `prebuild` time, two Node scripts run in order:
 
 1. **`scripts/sync-docs.mjs`** — mirrors every Markdown file from your raxis source into `vendor/raxis-docs/`. Resolution order:
    1. `RAXIS_REPO_PATH=/abs/or/relative/path` — copy from a local checkout.
-   2. `RAXIS_REPO_URL=https://...git` — shallow-clone the repo into `vendor/_raxis-clone/` and copy from there. (Used by Vercel.)
+   2. `RAXIS_REPO_URL=https://...git` — shallow-clone the repo into `vendor/_raxis-clone/` and copy from there. Set `RAXIS_REPO_SUBDIR=raxis` when cloning the public monorepo. (Used by Vercel.)
    3. Existing `vendor/raxis-docs/` — reuse the last good mirror.
    4. Nothing — emit a placeholder so the site still builds.
 2. **`scripts/build-search-index.mjs`** — walks the mirrored tree, extracts titles, headings, and plain-text bodies, builds a MiniSearch index, and writes it to `public/search-index.json`.
@@ -50,7 +50,7 @@ The site deploys without any custom configuration. The recommended setup:
 
 1. Push this repo to GitHub (or your git host of choice).
 2. Import it in the Vercel dashboard.
-3. Set one environment variable: **`RAXIS_REPO_URL`** = the public git URL of the raxis repository (e.g. `https://github.com/chika5105/raxis.git`). No GitHub token is required.
+3. Set production environment variables: **`RAXIS_REPO_URL`** = the public git URL of the raxis repository (e.g. `https://github.com/chika5105/raxis.git`) and **`RAXIS_REPO_SUBDIR=raxis`**. No GitHub token is required.
 4. Trigger a build. The `prebuild` step shallow-clones raxis, mirrors every `.md` into `vendor/raxis-docs/`, and the rest of the build works normally.
 
 For live docs that refresh from the public repository without a redeploy, set:
