@@ -108,14 +108,15 @@ jobs:
             aarch64|arm64) fc_arch="aarch64" ;;
             *) echo "::error::unsupported Firecracker CI architecture: $arch" >&2; exit 1 ;;
           esac
+          extract_dir="$(mktemp -d)"
           curl -fsSL \
             "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${fc_arch}.tgz" \
             -o /tmp/firecracker.tgz
-          tar -xzf /tmp/firecracker.tgz -C /tmp
-          fc_bin="$(find /tmp -type f -name "firecracker-${FIRECRACKER_VERSION}-${fc_arch}" -print -quit)"
+          tar -xzf /tmp/firecracker.tgz -C "$extract_dir"
+          fc_bin="$(find "$extract_dir" -type f -name "firecracker-${FIRECRACKER_VERSION}-${fc_arch}" -print -quit)"
           if [ -z "$fc_bin" ]; then
             echo "::error::firecracker binary not found in release archive" >&2
-            find /tmp -maxdepth 4 -type f -name 'firecracker*' -print >&2
+            find "$extract_dir" -maxdepth 4 -type f -name 'firecracker*' -print >&2
             exit 1
           fi
           sudo install -m 0755 "$fc_bin" /usr/local/bin/firecracker

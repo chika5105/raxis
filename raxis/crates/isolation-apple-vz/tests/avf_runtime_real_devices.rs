@@ -154,6 +154,7 @@ fn avf_runtime_drives_full_device_array_lifecycle_against_real_avf() {
     assert_eq!(cfg.block_devices.len(), 1, "rootfs drive present");
     assert_eq!(cfg.fs_shares.len(), 2, "two virtiofs shares");
 
+    #[allow(unused_mut)]
     let mut runtime = AvfRuntime::new(cfg);
 
     match runtime.start(Duration::from_secs(2)) {
@@ -211,6 +212,7 @@ fn avf_runtime_connect_vsock_without_started_vm_returns_typed_error() {
         &fixture_spec("vsock-pre-start", EgressTier::None, kernel_path),
     )
     .unwrap();
+    #[allow(unused_mut)]
     let mut runtime = AvfRuntime::new(cfg);
     match runtime.connect_vsock(1024) {
         Err(RuntimeError::VsockConnect { port, reason }) => {

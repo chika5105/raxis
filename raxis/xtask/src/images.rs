@@ -4981,6 +4981,11 @@ mod tests {
         write_test_vmlinux(&install.join("kernel").join("vmlinux"), b"k");
         let key_hex = tmp.path().join("k.hex");
         std::fs::write(&key_hex, "11".repeat(32)).unwrap();
+        // Pin a non-musl target so this witness isolates the
+        // builder-resolution branch. The musl-linker preflight has
+        // its own production path; a macOS CI runner should not need
+        // musl-cross installed merely to prove binary-only roles
+        // avoid Docker/Podman/Buildah.
         let outcome = preflight_bake_inputs(
             &ws,
             &install,
@@ -4989,7 +4994,7 @@ mod tests {
             None,
             None,
             None,
-            None,
+            Some("x86_64-unknown-linux-gnu"),
             false,
         )
         .expect("binary-only preflight must pass without a builder");
