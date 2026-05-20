@@ -10,7 +10,8 @@
 # What the job does today:
 #
 #   1. cargo check --workspace --all-targets    (compile every crate)
-#   2. cargo test  --workspace --all-targets    (unit + integration tests)
+#   2. cargo test  --workspace --all-targets --no-fail-fast
+#                                                   (unit + integration tests)
 #   3. cargo xtask spec-graph --strict          (cross-spec consistency, gating)
 #   4. cargo xtask license-check --strict       (SSPL-1.0 enforcement)
 #
@@ -252,16 +253,48 @@ jobs:
           grep -q 'com.apple.security.virtualization' /tmp/raxis-kernel.entitlements.plist
 
       - name: cargo test (workspace)
-        run: cargo test  --workspace --all-targets
+        id:   cargo_test
+        continue-on-error: true
+        run: cargo test --workspace --all-targets --no-fail-fast
 
       # Spec-graph + license check run on Linux only — they are
       # platform-independent text-corpus walks and double-running
       # them on macOS adds 60s for no incremental signal. Both run
-      # in strict mode: any finding fails the job and blocks merge.
+      # in strict mode and intentionally still run after cargo-test
+      # failures so one CI pass reports every independent finding.
       - name: spec-graph (strict)
-        if:   matrix.runner == 'ubuntu-22.04'
+        id:   spec_graph
+        if:   ${{ always() && matrix.runner == 'ubuntu-22.04' }}
+        continue-on-error: true
         run:  cargo xtask spec-graph --strict
 
       - name: license-check (strict)
-        if:   matrix.runner == 'ubuntu-22.04'
+        id:   license_check
+        if:   ${{ always() && matrix.runner == 'ubuntu-22.04' }}
+        continue-on-error: true
         run:  cargo xtask license-check --strict
+
+      - name: summarize check failures
+        if:   ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          check_step() {
+            local name="$1"
+            local outcome="$2"
+            if [ "$outcome" = "failure" ]; then
+              echo "::error::$name failed"
+              failed=1
+            fi
+          }
+
+          check_step "cargo test (workspace)" "${{ steps.cargo_test.outcome }}"
+          if [ "${{ matrix.runner }}" = "ubuntu-22.04" ]; then
+            check_step "spec-graph (strict)" "${{ steps.spec_graph.outcome }}"
+            check_step "license-check (strict)" "${{ steps.license_check.outcome }}"
+          fi
+
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi

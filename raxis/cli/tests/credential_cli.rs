@@ -11,7 +11,7 @@
 //! We avoid kernel / IPC code paths because both `list` and
 //! `rotate` are local-only.
 
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -80,6 +80,30 @@ fn run_raxis_with_stdin(args: &[&str], data_dir: &Path, stdin: &[u8]) -> std::pr
         .expect("stdin")
         .write_all(stdin)
         .expect("write stdin");
+    child.wait_with_output().expect("wait")
+}
+
+fn run_raxis_with_stdin_allow_early_close(
+    args: &[&str],
+    data_dir: &Path,
+    stdin: &[u8],
+) -> std::process::Output {
+    let mut child = Command::new(raxis_bin())
+        .arg("--data-dir")
+        .arg(data_dir)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn raxis");
+    if let Err(err) = child.stdin.as_mut().expect("stdin").write_all(stdin) {
+        assert_eq!(
+            err.kind(),
+            ErrorKind::BrokenPipe,
+            "unexpected stdin write error: {err}"
+        );
+    }
     child.wait_with_output().expect("wait")
 }
 
@@ -220,7 +244,7 @@ fn rotate_strips_one_trailing_newline_from_stdin() {
 #[test]
 fn rotate_fails_when_credential_does_not_exist() {
     let tmp = make_data_dir();
-    let out = run_raxis_with_stdin(
+    let out = run_raxis_with_stdin_allow_early_close(
         &["credential", "rotate", "nonexistent", "--stdin"],
         tmp.path(),
         b"new",
