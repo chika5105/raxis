@@ -3736,6 +3736,8 @@ impl KernelDashboardData {
                         if !seen_main_initiatives.insert(initiative_id.clone()) {
                             continue;
                         }
+                        let review_base_sha =
+                            initiative_review_base_sha(&conn, &initiative_id)?.unwrap_or(base_sha);
                         let initiative_display_name =
                             initiative_name_for_id_opt(&conn, Some(&initiative_id))?;
                         let short = short_stable_id(&initiative_id, 12);
@@ -3752,7 +3754,7 @@ impl KernelDashboardData {
                             Some(task_id),
                             Some(initiative_id),
                             initiative_display_name,
-                            Some((base_sha, head_sha)),
+                            Some((review_base_sha, head_sha)),
                         ));
                     }
                 }
@@ -4282,6 +4284,35 @@ fn initiative_name_for_id_opt(
     initiative_id
         .map(|id| initiative_name_for_id(conn, id).map(Some))
         .unwrap_or(Ok(None))
+}
+
+fn initiative_review_base_sha(
+    conn: &raxis_store::ro::RoConn,
+    initiative_id: &str,
+) -> Result<Option<String>, ApiError> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT base_sha \
+             FROM {TBL_SESSIONS} \
+             WHERE initiative_id = ?1 \
+               AND base_sha IS NOT NULL \
+               AND base_tracking_ref IS NOT NULL \
+             ORDER BY \
+               CASE WHEN session_agent_type = 'Orchestrator' THEN 0 ELSE 1 END, \
+               created_at ASC, \
+               session_id ASC \
+             LIMIT 1"
+        ))
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("initiative review-base query prepare: {e}"),
+        })?;
+    match stmt.query_row([initiative_id], |r| r.get::<_, String>(0)) {
+        Ok(base_sha) => Ok(Some(base_sha)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(ApiError::Internal {
+            log_only: format!("initiative review-base query: {e}"),
+        }),
+    }
 }
 
 fn session_vm_env_view_for_session(
@@ -6385,6 +6416,67 @@ task_id = "t-state"
         assert_eq!(
             session_agent_type_for_session(&conn, "sess-a").as_deref(),
             Some("Reviewer")
+        );
+    }
+
+    #[test]
+    fn integration_review_base_prefers_original_orchestrator_anchor() {
+        const SESSIONS: &str = raxis_store::Table::Sessions.as_str();
+        let tmp = seed_session_with_task();
+        let store = raxis_store::Store::open(&tmp.path().join("kernel.db")).unwrap();
+        let executor_base = "1".repeat(40);
+        let original_base = "a".repeat(40);
+        let late_base = "b".repeat(40);
+        {
+            let g = store.lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {SESSIONS} \
+                        (session_id, role_id, session_token, lineage_id, \
+                         worktree_root, base_sha, base_tracking_ref, \
+                         fetch_quota, created_at, expires_at, revoked, \
+                         session_agent_type, can_delegate, initiative_id) \
+                     VALUES ('exec-early', 'Planner', 'tok-exec-early', 'lin', \
+                             '/work/exec-early', ?1, 'refs/heads/main', \
+                             0, 50, 9999999999, 0, 'Executor', 0, 'init-a')",
+                ),
+                [&executor_base],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {SESSIONS} \
+                        (session_id, role_id, session_token, lineage_id, \
+                         worktree_root, base_sha, base_tracking_ref, \
+                         fetch_quota, created_at, expires_at, revoked, \
+                         session_agent_type, can_delegate, initiative_id) \
+                     VALUES ('orch-original', 'Planner', 'tok-orch-original', 'lin', \
+                             '/work/orch-original', ?1, 'refs/heads/main', \
+                             0, 100, 9999999999, 0, 'Orchestrator', 1, 'init-a')",
+                ),
+                [&original_base],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {SESSIONS} \
+                        (session_id, role_id, session_token, lineage_id, \
+                         worktree_root, base_sha, base_tracking_ref, \
+                         fetch_quota, created_at, expires_at, revoked, \
+                         session_agent_type, can_delegate, initiative_id) \
+                     VALUES ('orch-late', 'Planner', 'tok-orch-late', 'lin', \
+                             '/work/orch-late', ?1, 'refs/heads/main', \
+                             0, 200, 9999999999, 0, 'Orchestrator', 1, 'init-a')",
+                ),
+                [&late_base],
+            )
+            .unwrap();
+        }
+        let conn = raxis_store::ro::open(tmp.path()).unwrap();
+        assert_eq!(
+            initiative_review_base_sha(&conn, "init-a").unwrap(),
+            Some(original_base),
+            "integration-main diff reviews must anchor at the initiative's original target ref, not a late merge-hop SHA",
         );
     }
 

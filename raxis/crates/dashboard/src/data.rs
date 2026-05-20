@@ -1513,8 +1513,12 @@ pub struct WorktreeListEntry {
     /// be probed or is a session row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_dirty_paths: Option<u32>,
-    /// Recorded base SHA (sessions only — `None` when the
-    /// session never recorded one or for main roots).
+    /// Review-base SHA. Session rows use the session's recorded
+    /// base. Per-initiative `IntegrationMerge` main rows use the
+    /// initiative's original target-ref anchor so `Diff vs base`
+    /// shows the whole initiative, not only the final merge hop.
+    /// Plain main roots without a bounded review range leave this
+    /// empty and render as browse-only.
     pub base_sha: Option<String>,
     /// Recorded upper SHA for a bounded review range. Normal
     /// live worktrees compare `base_sha..HEAD`, so this is `None`.
