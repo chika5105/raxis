@@ -7,6 +7,7 @@
 //! * [`api`]   — typed Firecracker REST client over Unix domain sockets.
 //! * [`vmm`]   — process supervision for the `firecracker` binary.
 //! * [`vsock`] — host-side AF_VSOCK plumbing (length-prefixed frames).
+//! * [`workspace`] — ext4 virtio-blk workspace transport for `/workspace`.
 //!
 //! ## Substrate lifecycle
 //!
@@ -46,6 +47,7 @@ pub mod vmm;
 pub mod vsock;
 #[cfg(unix)]
 pub mod vsock_loopback_bridge;
+mod workspace;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -61,6 +63,7 @@ use crate::api::{
 };
 use crate::vmm::{FirecrackerVmm, SpawnArgs};
 use crate::vsock::HostVsockChannel;
+use crate::workspace::{PreparedWorkspaceMounts, WorkspaceSyncPlan};
 
 /// Stable backend identifier surfaced through [`Backend::backend_id`].
 ///
@@ -377,12 +380,17 @@ impl FirecrackerBackend {
         api_sock: PathBuf,
         vsock_uds: PathBuf,
     ) -> Result<FirecrackerSession, IsolationError> {
-        let boot_inputs = build_firecracker_boot_inputs(image, mounts, spec, self.planner_port)
-            .map_err(|e| {
-                IsolationError::SpawnFailed(format!(
-                    "{BACKEND_ID} boot input validation failed: {e}",
-                ))
-            })?;
+        let boot_inputs = build_firecracker_boot_inputs(
+            image,
+            mounts,
+            spec,
+            self.planner_port,
+            &self.runtime_dir,
+        )
+        .map_err(|e| {
+            IsolationError::SpawnFailed(format!("{BACKEND_ID} boot input validation failed: {e}",))
+        })?;
+        let workspace_sync = boot_inputs.workspace_mounts.sync_plan();
 
         // ---- 1. Spawn VMM child ------------------------------------------
         let vmm = FirecrackerVmm::spawn(&SpawnArgs {
@@ -406,6 +414,7 @@ impl FirecrackerBackend {
             // also remove the vsock UDS to avoid leaks.
             drop(vmm);
             let _ = std::fs::remove_file(&vsock_uds);
+            workspace_sync.cleanup_images();
             return Err(IsolationError::SpawnFailed(format!(
                 "{BACKEND_ID} boot REST failed: {e}",
             )));
@@ -429,6 +438,7 @@ impl FirecrackerBackend {
             vsock_cid: guest_cid,
             api_sock_path: api_sock,
             vsock_uds,
+            workspace_sync,
             #[cfg(unix)]
             loopback_bridges: Vec::new(),
         })
@@ -483,12 +493,22 @@ fn session_runtime_name(token: &str) -> Result<&str, String> {
     Ok(token)
 }
 
+#[derive(Debug, Clone)]
+struct FirecrackerBootInputs {
+    kernel_path: PathBuf,
+    rootfs_path: PathBuf,
+    is_initramfs: bool,
+    boot_args: String,
+    workspace_mounts: PreparedWorkspaceMounts,
+}
+
 fn build_firecracker_boot_inputs(
     image: &VerifiedImage,
     mounts: &[WorkspaceMount],
     spec: &VmSpec,
     planner_port: u32,
-) -> Result<(PathBuf, PathBuf, bool, String), api::ApiError> {
+    runtime_dir: &std::path::Path,
+) -> Result<FirecrackerBootInputs, api::ApiError> {
     if spec.vcpu_count == 0 {
         return Err(api::ApiError::MalformedResponse(
             "vcpu_count must be >= 1".to_owned(),
@@ -503,21 +523,6 @@ fn build_firecracker_boot_inputs(
         return Err(api::ApiError::MalformedResponse(
             "planner port must be >= 1".to_owned(),
         ));
-    }
-
-    // Firecracker itself does not expose a virtiofs device. The old
-    // docs mentioned a vsock-mediated artifact RPC as the V2
-    // workaround, but no such RPC exists in the guest tools today:
-    // the planner works against `/workspace` as a real filesystem.
-    // Fail closed here instead of booting a guest that will later
-    // report confusing "missing workspace" tool errors.
-    if !mounts.is_empty() {
-        return Err(api::ApiError::MalformedResponse(format!(
-            "Firecracker workspace mounts are not implemented: received {} mount(s). \
-             Linux parity needs virtiofsd or a kernel-mediated workspace block/artifact \
-             transport before this substrate can run planner sessions with /workspace.",
-            mounts.len(),
-        )));
     }
 
     // The Linux kernel binary is a host-canonical artefact lived
@@ -569,13 +574,36 @@ fn build_firecracker_boot_inputs(
         spec.boot_args.join(" ")
     };
 
-    append_envb64(&mut boot_args, spec, planner_port);
+    let root_drive_present = !is_initramfs;
+    let session_name = session_runtime_name(&spec.session_token.0).map_err(|e| {
+        api::ApiError::MalformedResponse(format!("invalid session token for workspace images: {e}"))
+    })?;
+    let workspace_mounts =
+        workspace::prepare(mounts, runtime_dir, session_name, root_drive_present)?;
+
+    append_envb64(
+        &mut boot_args,
+        spec,
+        planner_port,
+        workspace_mounts.block_mounts_env.as_deref(),
+    );
     append_entrypoint_argv(&mut boot_args, spec)?;
 
-    Ok((kernel_path, rootfs_path, is_initramfs, boot_args))
+    Ok(FirecrackerBootInputs {
+        kernel_path,
+        rootfs_path,
+        is_initramfs,
+        boot_args,
+        workspace_mounts,
+    })
 }
 
-fn append_envb64(cmdline: &mut String, spec: &VmSpec, planner_port: u32) {
+fn append_envb64(
+    cmdline: &mut String,
+    spec: &VmSpec,
+    planner_port: u32,
+    block_mounts_env: Option<&str>,
+) {
     use base64::Engine as _;
 
     let mut effective = BTreeMap::new();
@@ -588,6 +616,9 @@ fn append_envb64(cmdline: &mut String, spec: &VmSpec, planner_port: u32) {
             continue;
         }
         effective.insert(k.clone(), v.clone());
+    }
+    if let Some(block_mounts_env) = block_mounts_env {
+        effective.insert("RAXIS_BLOCK_MOUNTS".to_owned(), block_mounts_env.to_owned());
     }
 
     let mut payload = String::new();
@@ -635,23 +666,22 @@ fn drive_boot(
     vsock_uds: &std::path::Path,
     planner_port: u32,
 ) -> Result<(), api::ApiError> {
-    let (kernel_path, rootfs_path, is_initramfs, boot_args) =
-        build_firecracker_boot_inputs(image, mounts, spec, planner_port)?;
-    drive_boot_with_inputs(
-        api,
+    let boot_inputs = build_firecracker_boot_inputs(
+        image,
+        mounts,
         spec,
-        vsock_uds,
-        (kernel_path, rootfs_path, is_initramfs, boot_args),
-    )
+        planner_port,
+        std::path::Path::new("/tmp"),
+    )?;
+    drive_boot_with_inputs(api, spec, vsock_uds, boot_inputs)
 }
 
 fn drive_boot_with_inputs(
     api: &FirecrackerApi,
     spec: &VmSpec,
     vsock_uds: &std::path::Path,
-    boot_inputs: (PathBuf, PathBuf, bool, String),
+    boot_inputs: FirecrackerBootInputs,
 ) -> Result<(), api::ApiError> {
-    let (kernel_path, rootfs_path, is_initramfs, boot_args) = boot_inputs;
     api.put_machine_config(&MachineConfig {
         vcpu_count: spec.vcpu_count,
         mem_size_mib: spec.mem_mib,
@@ -659,13 +689,13 @@ fn drive_boot_with_inputs(
     })?;
 
     api.put_boot_source(&BootSource {
-        kernel_image_path: kernel_path,
-        boot_args: Some(boot_args),
+        kernel_image_path: boot_inputs.kernel_path,
+        boot_args: Some(boot_inputs.boot_args),
         // For initramfs boots the rootfs is loaded by the kernel as
         // initrd; for EROFS boots we attach it as a virtio-blk drive
         // (`PUT /drives/rootfs`) and leave initrd empty.
-        initrd_path: if is_initramfs {
-            Some(rootfs_path.clone())
+        initrd_path: if boot_inputs.is_initramfs {
+            Some(boot_inputs.rootfs_path.clone())
         } else {
             None
         },
@@ -674,13 +704,17 @@ fn drive_boot_with_inputs(
     // Drive registration is conditional on rootfs shape. EROFS uses
     // `/drives/rootfs`; initramfs leaves the drive table empty (the
     // kernel's initrd channel is the rootfs).
-    if !is_initramfs {
+    if !boot_inputs.is_initramfs {
         api.put_drive(&Drive {
             drive_id: "rootfs".to_owned(),
-            path_on_host: rootfs_path,
+            path_on_host: boot_inputs.rootfs_path,
             is_root_device: true,
             is_read_only: true,
         })?;
+    }
+
+    for drive in &boot_inputs.workspace_mounts.drives {
+        api.put_drive(drive)?;
     }
 
     // No virtio-net device. After the Tier1Tproxy deletion every
@@ -827,6 +861,8 @@ pub struct FirecrackerSession {
     api_sock_path: PathBuf,
     /// VSock UDS path; cleaned up on Drop.
     vsock_uds: PathBuf,
+    /// Firecracker workspace image copyback / cleanup plan.
+    workspace_sync: WorkspaceSyncPlan,
     /// Per-`(vsock_port)` reverse-direction loopback bridges. One
     /// entry per `register_loopback_listener` call. Drained on
     /// `terminate` / `shutdown` BEFORE the VMM child is reaped so
@@ -915,12 +951,24 @@ impl Session for FirecrackerSession {
         // `vsock_loopback_bridge::LoopbackListenerHandle` Drop docs.
         #[cfg(unix)]
         self.loopback_bridges.clear();
+        let mut terminate_error: Option<IsolationError> = None;
         if let Some(mut vmm) = self.vmm.take() {
-            vmm.terminate().map_err(|e| {
-                IsolationError::BackendInternal(format!("{BACKEND_ID}: terminate: {e}"))
-            })?;
+            if let Err(e) = vmm.terminate() {
+                terminate_error = Some(IsolationError::BackendInternal(format!(
+                    "{BACKEND_ID}: terminate: {e}"
+                )));
+            }
         }
+        if let Err(e) = self.workspace_sync.sync_readwrite(true) {
+            return Err(IsolationError::BackendInternal(format!(
+                "{BACKEND_ID}: workspace final sync: {e}"
+            )));
+        }
+        self.workspace_sync.cleanup_images();
         let _ = std::fs::remove_file(&self.vsock_uds);
+        if let Some(err) = terminate_error {
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -1023,8 +1071,23 @@ impl Session for FirecrackerSession {
             ExitStatus::GracefulExit { code: 0 }
         };
 
+        if let Err(e) = self.workspace_sync.sync_readwrite(true) {
+            return Err(IsolationError::BackendInternal(format!(
+                "{BACKEND_ID}: workspace final sync: {e}"
+            )));
+        }
+        self.workspace_sync.cleanup_images();
         let _ = std::fs::remove_file(&self.vsock_uds);
         Ok(status)
+    }
+
+    fn sync_workspace(&mut self) -> Result<(), IsolationError> {
+        if !self.workspace_sync.has_readwrite() {
+            return Ok(());
+        }
+        self.workspace_sync.sync_readwrite(false).map_err(|e| {
+            IsolationError::BackendInternal(format!("{BACKEND_ID}: workspace sync: {e}"))
+        })
     }
 
     fn session_identity(&self) -> SessionTransportId {
@@ -1559,8 +1622,15 @@ mod tests {
             "task-123".to_owned(),
         ];
 
-        let (_, _, _, cmdline) =
-            build_firecracker_boot_inputs(&img, &[], &spec, DEFAULT_PLANNER_PORT).unwrap();
+        let boot_inputs = build_firecracker_boot_inputs(
+            &img,
+            &[],
+            &spec,
+            DEFAULT_PLANNER_PORT,
+            std::path::Path::new("/tmp"),
+        )
+        .unwrap();
+        let cmdline = boot_inputs.boot_args;
 
         assert!(cmdline.contains("root=/dev/vda ro"));
         assert!(cmdline.ends_with(" -- --task-id task-123"));
@@ -1581,47 +1651,6 @@ mod tests {
     }
 
     #[test]
-    fn build_inputs_rejects_workspace_mounts_until_firecracker_workspace_transport_exists() {
-        let img = fixture_image_with_path(PathBuf::from("/tmp/rootfs.img"));
-        let spec = fixture_spec("session-mounts");
-        let err =
-            build_firecracker_boot_inputs(&img, &[fixture_mount()], &spec, DEFAULT_PLANNER_PORT)
-                .unwrap_err();
-        match err {
-            api::ApiError::MalformedResponse(reason) => {
-                assert!(reason.contains("workspace mounts are not implemented"));
-                assert!(reason.contains("virtiofsd"));
-            }
-            other => panic!("expected MalformedResponse, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn boot_rejects_unimplemented_workspace_mounts_before_spawning_vmm() {
-        let dir = tempfile::tempdir().unwrap();
-        let backend = FirecrackerBackend::new(dir.path()).with_binary("/nonexistent/firecracker");
-        let api_sock = dir.path().join("api.sock");
-        let vsock_uds = dir.path().join("vsock.sock");
-        let img = fixture_image_with_path(PathBuf::from("/tmp/rootfs.img"));
-        let spec = fixture_spec("session-preflight-mounts");
-
-        let err = backend
-            .boot_and_open_session(&img, &[fixture_mount()], &spec, api_sock.clone(), vsock_uds)
-            .unwrap_err();
-        match err {
-            IsolationError::SpawnFailed(reason) => {
-                assert!(reason.contains("boot input validation failed"));
-                assert!(reason.contains("workspace mounts are not implemented"));
-            }
-            other => panic!("expected SpawnFailed, got {other:?}"),
-        }
-        assert!(
-            !api_sock.exists(),
-            "mount preflight must fail before spawning a VMM child"
-        );
-    }
-
-    #[test]
     fn build_inputs_rejects_whitespace_entrypoint_tokens() {
         let img = fixture_image_with_path(PathBuf::from("/tmp/rootfs.img"));
         let mut spec = fixture_spec("session-argv");
@@ -1630,8 +1659,14 @@ mod tests {
             "--task-id".to_owned(),
             "not safe".to_owned(),
         ];
-        let err =
-            build_firecracker_boot_inputs(&img, &[], &spec, DEFAULT_PLANNER_PORT).unwrap_err();
+        let err = build_firecracker_boot_inputs(
+            &img,
+            &[],
+            &spec,
+            DEFAULT_PLANNER_PORT,
+            std::path::Path::new("/tmp"),
+        )
+        .unwrap_err();
         match err {
             api::ApiError::MalformedResponse(reason) => {
                 assert!(reason.contains("whitespace-bearing token"));
@@ -1646,8 +1681,14 @@ mod tests {
         let img = fixture_image_with_path(PathBuf::from("/tmp/rootfs.img"));
         let mut spec = fixture_spec("session-resources");
         spec.vcpu_count = 0;
-        let err =
-            build_firecracker_boot_inputs(&img, &[], &spec, DEFAULT_PLANNER_PORT).unwrap_err();
+        let err = build_firecracker_boot_inputs(
+            &img,
+            &[],
+            &spec,
+            DEFAULT_PLANNER_PORT,
+            std::path::Path::new("/tmp"),
+        )
+        .unwrap_err();
         match err {
             api::ApiError::MalformedResponse(reason) => {
                 assert!(reason.contains("vcpu_count"));

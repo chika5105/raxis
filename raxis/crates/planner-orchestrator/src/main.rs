@@ -62,11 +62,11 @@ fn main() -> ! {
     let hydration = hydrate_from_proc_cmdline();
     log_hydration_outcome(&hydration);
 
-    // Step 3: now that the env is hydrated, mount any VirtioFS
-    // workspace shares the substrate declared via
-    // `RAXIS_VIRTIOFS_MOUNTS`. The orchestrator role mounts
-    // `/workspace` (its initiative-scoped worktree) for the
-    // tools subsystem to read/write. Each share is best-effort:
+    // Step 3: now that the env is hydrated, mount any workspace
+    // shares the substrate declared via `RAXIS_VIRTIOFS_MOUNTS`
+    // (AVF) or `RAXIS_BLOCK_MOUNTS` (Firecracker). The orchestrator
+    // role mounts `/workspace` (its initiative-scoped worktree) for
+    // the tools subsystem to read/write. Each share is best-effort:
     // a single mount failure is logged on stderr but does not
     // panic — the planner surfaces the missing path through its
     // normal tool-error path so the operator sees a structured
@@ -219,18 +219,18 @@ fn driver_to_planner_error(e: DriverError) -> PlannerError {
     PlannerError::DriverFailure(e.to_string())
 }
 
-/// Structured-log the VirtioFS workspace-mount outcome on stderr.
+/// Structured-log the workspace-mount outcome on stderr.
 /// Mirrors the `log_hydration_outcome` shape so the kernel-side
 /// scraper can correlate per-role boot phases without bespoke
 /// parsers.
 fn log_workspace_mount_outcome(outcome: &WorkspaceMountOutcome) {
     match outcome {
         WorkspaceMountOutcome::NoEnvVar => eprintln!(
-            "{{\"level\":\"info\",\"step\":\"planner-virtiofs-mount\",\
+            "{{\"level\":\"info\",\"step\":\"planner-workspace-mount\",\
               \"role\":\"orchestrator\",\"outcome\":\"no-env-var\"}}"
         ),
         WorkspaceMountOutcome::BadEnvVar { reason, attempts } => eprintln!(
-            "{{\"level\":\"warn\",\"step\":\"planner-virtiofs-mount\",\
+            "{{\"level\":\"warn\",\"step\":\"planner-workspace-mount\",\
               \"role\":\"orchestrator\",\"outcome\":\"bad-env-var\",\
               \"reason\":{:?},\"attempts\":{}}}",
             reason,
@@ -245,22 +245,24 @@ fn log_workspace_mount_outcome(outcome: &WorkspaceMountOutcome) {
                 };
                 match reason {
                     Some(r) => eprintln!(
-                        "{{\"level\":\"warn\",\"step\":\"planner-virtiofs-mount\",\
+                        "{{\"level\":\"warn\",\"step\":\"planner-workspace-mount\",\
                           \"role\":\"orchestrator\",\"outcome\":{:?},\
-                          \"tag\":{:?},\"guest_path\":{:?},\"read_only\":{},\
+                          \"source\":{:?},\"fs_type\":{:?},\"guest_path\":{:?},\"read_only\":{},\
                           \"reason\":{:?}}}",
                         status_str,
                         attempt.spec.tag,
+                        attempt.spec.fs_type,
                         attempt.spec.guest_path,
                         attempt.spec.read_only,
                         r,
                     ),
                     None => eprintln!(
-                        "{{\"level\":\"info\",\"step\":\"planner-virtiofs-mount\",\
+                        "{{\"level\":\"info\",\"step\":\"planner-workspace-mount\",\
                           \"role\":\"orchestrator\",\"outcome\":{:?},\
-                          \"tag\":{:?},\"guest_path\":{:?},\"read_only\":{}}}",
+                          \"source\":{:?},\"fs_type\":{:?},\"guest_path\":{:?},\"read_only\":{}}}",
                         status_str,
                         attempt.spec.tag,
+                        attempt.spec.fs_type,
                         attempt.spec.guest_path,
                         attempt.spec.read_only,
                     ),

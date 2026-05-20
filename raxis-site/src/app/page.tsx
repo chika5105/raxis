@@ -57,24 +57,24 @@ function Hero() {
               Human-signed plans
             </span>
           </div>
-          <div className="mt-10 flex flex-wrap items-center gap-4">
-            <Link href="/#demo" className="btn btn-primary">
+          <div className="mt-10 grid gap-3 sm:flex sm:flex-wrap sm:items-center sm:gap-4">
+            <Link href="/#demo" className="btn btn-primary w-full sm:w-auto">
               Watch the demo
             </Link>
             <a
               href="https://github.com/chika5105/raxis"
               target="_blank"
               rel="noopener noreferrer"
-              className="btn btn-ghost"
+              className="btn btn-ghost w-full sm:w-auto"
             >
-              View source
+              View Source Code
             </a>
-            <Link href="/paradigm" className="btn btn-ghost">
+            <Link href="/paradigm" className="btn btn-ghost w-full sm:w-auto">
               Read the paradigm
             </Link>
             <Link
               href="/docs"
-              className="text-base text-[var(--muted)] underline decoration-[var(--rule)] underline-offset-4 transition hover:text-[var(--fg)] hover:decoration-[var(--rule-strong)]"
+              className="justify-self-center text-base text-[var(--muted)] underline decoration-[var(--rule)] underline-offset-4 transition hover:text-[var(--fg)] hover:decoration-[var(--rule-strong)] sm:justify-self-auto"
             >
               Browse docs
             </Link>
@@ -601,7 +601,7 @@ function Conformance() {
           <div
             key={t.tier}
             className={
-              "grid grid-cols-[3rem_minmax(0,1fr)] gap-4 py-6 sm:grid-cols-[3rem_8rem_minmax(0,1fr)_minmax(0,1fr)] sm:gap-6 " +
+              "grid gap-3 py-6 sm:grid-cols-[4rem_minmax(0,1fr)] sm:gap-x-6 sm:gap-y-4 md:grid-cols-[4rem_9rem_minmax(0,1fr)_minmax(0,1fr)] " +
               (i > 0 ? "border-t border-[var(--rule)]" : "")
             }
           >
@@ -778,7 +778,7 @@ function CTA() {
             rel="noopener noreferrer"
             className="btn btn-primary"
           >
-            View source
+            View Source Code
           </a>
           <Link href="/paradigm" className="btn btn-ghost">
             Read the paradigm

@@ -37,8 +37,11 @@
 //!    `/sys/fs/cgroup/cgroup.controllers` exists.
 //! 7. `linux.firecracker.binary` — `firecracker(1)` is on
 //!    `$PATH` (Warn — operator may install it later).
-//! 8. `linux.virtiofsd.binary` — `virtiofsd(1)` on `$PATH`
-//!    (Warn — V2 doesn't require it; V3 will).
+//! 8. `linux.e2fsprogs.{mkfs_ext4,debugfs,e2fsck}` — workspace
+//!    block-image tools are on `$PATH` (Fail — Firecracker cannot
+//!    stage/copy back `/workspace` without them).
+//! 9. `linux.virtiofsd.binary` — `virtiofsd(1)` on `$PATH`
+//!    (Warn — V2 doesn't require it; a future lower-copy transport may).
 //!
 //! Each check returns a typed [`Outcome`] (`Ok` | `Warn` | `Fail`)
 //! plus a human-readable detail string the rendering layer prints
@@ -149,6 +152,7 @@ pub fn probe_linux_prereqs() -> Report {
     check_vhost_vsock(&mut r);
     check_cgroup_v2(&mut r);
     check_firecracker_binary(&mut r);
+    check_e2fsprogs_tools(&mut r);
     check_virtiofsd_binary(&mut r);
     r
 }
@@ -401,6 +405,31 @@ fn check_firecracker_binary(r: &mut Report) {
     }
 }
 
+fn check_e2fsprogs_tools(r: &mut Report) {
+    for (tool, id_suffix) in [
+        ("mkfs.ext4", "mkfs_ext4"),
+        ("debugfs", "debugfs"),
+        ("e2fsck", "e2fsck"),
+    ] {
+        let id = format!("linux.e2fsprogs.{id_suffix}");
+        match which_on_path(tool) {
+            Some(p) => r.push(
+                &id,
+                Outcome::Ok,
+                format!("{tool} on PATH at {}", p.display()),
+            ),
+            None => r.push(
+                &id,
+                Outcome::Fail,
+                format!(
+                    "{tool} not on PATH — Firecracker workspace image staging/copy-back \
+                     will fail. Recovery: install e2fsprogs via your distro package manager."
+                ),
+            ),
+        }
+    }
+}
+
 fn check_virtiofsd_binary(r: &mut Report) {
     match which_on_path("virtiofsd") {
         Some(p) => r.push(
@@ -412,8 +441,8 @@ fn check_virtiofsd_binary(r: &mut Report) {
             "linux.virtiofsd.binary",
             Outcome::Warn,
             "virtiofsd not on PATH — V2 substrate does not require it \
-             (workspace is staged via vsock-mediated RPC); V3 will. \
-             No action required for V2.",
+             (workspace is staged via ext4 block images); no action \
+             required for V2.",
         ),
     }
 }
@@ -472,7 +501,8 @@ fn parse_opts(argv: &[String]) -> Result<Opts> {
                      - vhost_vsock module loaded (or /dev/vhost-vsock present)\n  \
                      - cgroup v2 mounted at /sys/fs/cgroup\n  \
                      - firecracker binary on PATH\n  \
-                     - virtiofsd binary on PATH (Warn-only; V3 prereq)\n\
+                     - e2fsprogs tools on PATH: mkfs.ext4, debugfs, e2fsck\n  \
+                     - virtiofsd binary on PATH (Warn-only; future optimization)\n\
                      \n\
                      Exit codes:\n  \
                      0   every check OK\n  \
@@ -698,6 +728,9 @@ mod tests {
             "linux.vhost_vsock.module",
             "linux.cgroup_v2.mounted",
             "linux.firecracker.binary",
+            "linux.e2fsprogs.mkfs_ext4",
+            "linux.e2fsprogs.debugfs",
+            "linux.e2fsprogs.e2fsck",
             "linux.virtiofsd.binary",
         ] {
             assert!(

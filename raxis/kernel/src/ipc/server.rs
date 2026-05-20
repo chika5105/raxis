@@ -551,6 +551,18 @@ where
         match msg {
             // ── IntentRequest ────────────────────────────────────────────
             IpcMessage::IntentRequest(mut req) => {
+                if let Some(sid) = session_id_for_activity.as_deref() {
+                    if let Err(e) = ctx.session_spawn.sync_session_workspace(sid).await {
+                        eprintln!(
+                            "{{\"level\":\"error\",\
+                             \"event\":\"planner_workspace_sync_failed\",\
+                             \"session_id\":\"{sid}\",\
+                             \"reason\":{:?}}}",
+                            e.to_string(),
+                        );
+                        return Err(format!("planner workspace sync failed: {e}").into());
+                    }
+                }
                 if let Some(token) = bound_session_token.as_ref() {
                     req.session_token = token.clone();
                 }

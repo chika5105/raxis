@@ -132,8 +132,9 @@ and [`specs/v2/release-and-distribution.md §6.3`](../../specs/v2/release-and-di
 ## Linux — one command for the host substrate
 
 The Firecracker substrate needs `/dev/kvm` reachable as your user,
-`vhost_vsock` loaded, cgroup v2 mounted, and the `firecracker(1)`
-binary on `$PATH`. The workspace ships a host preflight as an `xtask`:
+`vhost_vsock` loaded, cgroup v2 mounted, the `firecracker(1)` binary on
+`$PATH`, and `e2fsprogs` for Firecracker workspace images. The workspace
+ships a host preflight as an `xtask`:
 
 ```bash
 cd /path/to/raxis
@@ -152,7 +153,8 @@ What it verifies:
 | `vhost_vsock` module loaded                                    | **Fail** — `sudo modprobe vhost_vsock`                |
 | cgroup v2 mounted (`/sys/fs/cgroup/cgroup.controllers` exists) | **Fail** — Linux ≥ 5.14 systemd defaults              |
 | `firecracker(1)` on `$PATH`                                    | **Warn** — install before first kernel boot           |
-| `virtiofsd(1)` on `$PATH`                                      | **Warn** — V3 prereq, not blocking V2                 |
+| `mkfs.ext4`, `debugfs`, `e2fsck` on `$PATH`                    | **Fail** — install `e2fsprogs`                        |
+| `virtiofsd(1)` on `$PATH`                                      | **Warn** — future lower-copy workspace transport      |
 
 Exit codes mirror `raxis doctor`: `0` = all OK, `1` = any warn, `2` =
 any fail. Reference: [`xtask/src/linux_prereqs.rs`](../../xtask/src/linux_prereqs.rs)

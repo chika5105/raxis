@@ -181,6 +181,7 @@ fn build_vm_env_snapshot(
     spec: &VmSpec,
     mounts: &[WorkspaceMount],
     backend_id: &str,
+    image_kind: raxis_isolation::ImageKind,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
 
@@ -218,18 +219,35 @@ fn build_vm_env_snapshot(
     let mount_entries = mounts
         .iter()
         .filter(|m| !m.guest_path.is_empty())
+        .enumerate()
         .map(|m| {
-            let tag = m.guest_path.trim_start_matches('/').replace('/', "_");
+            let (idx, m) = m;
             let mode = if matches!(m.mode, raxis_isolation::MountMode::ReadOnly) {
                 "ro"
             } else {
                 "rw"
             };
-            format!("{tag}:{}:{mode}", m.guest_path)
+            if backend_id.starts_with("firecracker") {
+                let root_drive_present =
+                    matches!(image_kind, raxis_isolation::ImageKind::RootfsErofs);
+                let device_idx = idx + usize::from(root_drive_present);
+                let device = (device_idx < 26)
+                    .then(|| format!("/dev/vd{}", (b'a' + device_idx as u8) as char))
+                    .unwrap_or_else(|| "/dev/vd?".to_owned());
+                format!("{device}:{}:{mode}:ext4", m.guest_path)
+            } else {
+                let tag = m.guest_path.trim_start_matches('/').replace('/', "_");
+                format!("{tag}:{}:{mode}", m.guest_path)
+            }
         })
         .collect::<Vec<_>>();
     if !mount_entries.is_empty() {
-        env.insert("RAXIS_VIRTIOFS_MOUNTS".to_owned(), mount_entries.join(","));
+        let key = if backend_id.starts_with("firecracker") {
+            "RAXIS_BLOCK_MOUNTS"
+        } else {
+            "RAXIS_VIRTIOFS_MOUNTS"
+        };
+        env.insert(key.to_owned(), mount_entries.join(","));
     }
 
     env
@@ -688,6 +706,31 @@ impl SessionSpawnService {
         &self.audit
     }
 
+    /// Synchronize substrate-private workspace state for a live
+    /// session before the kernel admits a planner intent.
+    ///
+    /// Most substrates are coherent already (AVF VirtioFS,
+    /// subprocess fixtures), so their [`IsolationSession`] impls use
+    /// the trait default no-op. Firecracker's block-image workspace
+    /// transport overrides the hook to copy the guest-visible ext4
+    /// image back into the kernel-owned host worktree. The call is
+    /// intentionally synchronous from the trait's point of view; the
+    /// implementation keeps the lock scope tight and performs no
+    /// awaits while the live session handle is borrowed.
+    pub async fn sync_session_workspace(&self, session_id: &str) -> Result<(), SpawnError> {
+        let sid = session_id.to_owned();
+        let mut table = self.sessions.lock();
+        let entry = table
+            .get_mut(&sid)
+            .ok_or_else(|| SpawnError::SessionNotActive {
+                session_id: sid.clone(),
+            })?;
+        entry
+            .session
+            .sync_workspace()
+            .map_err(SpawnError::IsolationShutdown)
+    }
+
     /// Spawn a VM and bind every per-session listener for the given
     /// request. On error, every already-bound listener is torn down
     /// before the error returns.
@@ -869,6 +912,7 @@ impl SessionSpawnService {
             &req.vm_spec,
             &req.workspace_mounts,
             self.isolation.backend_id(),
+            req.image.kind,
         );
         persist_vm_env_snapshot(self.store.as_ref(), session_id.clone(), vm_env_snapshot).await;
 

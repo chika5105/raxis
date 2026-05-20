@@ -309,6 +309,7 @@ impl IntentSubmitter {
     /// kernel's EOF-driven Mode-B synthesis fires regardless of
     /// whether the notice arrives, e.g. SIGKILL mid-loop).
     pub async fn submit_exit_notice(&self, outcome: PlannerExitOutcome) -> Result<(), SubmitError> {
+        sync_block_mounts_before_outbound();
         let resp = self
             .transport
             .request(&IpcMessage::PlannerExitNotice { outcome })
@@ -347,11 +348,35 @@ impl IntentSubmitter {
     }
 
     async fn send(&self, outbound: IpcMessage) -> Result<IntentResponse, SubmitError> {
+        sync_block_mounts_before_outbound();
         let resp = self.transport.request(&outbound).await?;
         match resp {
             IpcMessage::KernelIntentResponse(r) => Ok(r),
             other => Err(SubmitError::UnexpectedResponse(format!("{other:?}"))),
         }
+    }
+}
+
+/// Firecracker workspace parity uses virtio-blk ext4 images as the
+/// guest-visible `/workspace` transport. Before any planner intent
+/// leaves the VM, flush dirty guest page-cache state so the host-side
+/// sync hook can copy a coherent tree back into the kernel-owned
+/// worktree before admission validation. AVF VirtioFS and subprocess
+/// runs do not set [`crate::guest_init::BLOCK_MOUNTS_ENV`], so this
+/// is a no-op there.
+fn sync_block_mounts_before_outbound() {
+    if std::env::var(crate::guest_init::BLOCK_MOUNTS_ENV)
+        .map(|v| v.is_empty())
+        .unwrap_or(true)
+    {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        // SAFETY: `sync(2)` takes no pointers and has no preconditions
+        // beyond running on Linux. It flushes dirty kernel buffers for
+        // every mounted filesystem in this guest namespace.
+        libc::sync();
     }
 }
 

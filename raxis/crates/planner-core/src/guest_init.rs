@@ -397,23 +397,23 @@ mod linux {
         }
     }
 
-    /// Mount one VirtioFS share inside the guest. Equivalent to
-    /// `mount -t virtiofs <tag> <guest_path>` (read/write) or
-    /// `mount -t virtiofs -o ro <tag> <guest_path>` (read-only).
-    pub(super) fn try_mount_virtiofs(
-        tag: &str,
+    /// Mount one substrate-declared filesystem inside the guest.
+    /// For AVF this is `mount -t virtiofs <tag> <guest_path>`.
+    /// For Firecracker this is
+    /// `mount -t ext4 /dev/vdX <guest_path>` over a kernel-owned
+    /// workspace block image.
+    pub(super) fn try_mount_filesystem(
+        source: &str,
         guest_path: &str,
+        fs_type: &str,
         read_only: bool,
     ) -> io::Result<()> {
         let source_c =
-            CString::new(tag).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            CString::new(source).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let target_c =
             CString::new(guest_path).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let fs_c = CString::new("virtiofs").expect("static fs_type has no NUL bytes");
-        // VirtioFS does not need a `data` parameter for the basic
-        // case; mount options like `cache=…` would be supplied
-        // here. The kernel's virtiofs driver pulls cache mode
-        // from the device descriptor by default.
+        let fs_c =
+            CString::new(fs_type).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let mut flags: libc::c_ulong = libc::MS_NOSUID | libc::MS_NODEV;
         if read_only {
             flags |= libc::MS_RDONLY;
@@ -1627,14 +1627,23 @@ mod tests_a3 {
 /// host/guest contract single-channel.
 pub const VIRTIOFS_MOUNTS_ENV: &str = "RAXIS_VIRTIOFS_MOUNTS";
 
-/// One parsed VirtioFS share spec extracted from
-/// [`VIRTIOFS_MOUNTS_ENV`]. The host-side substrate (AVF /
-/// Firecracker) already validated `host_path` and the
-/// `MountMode`; the guest only sees the post-validation triple.
+/// Environment variable the Firecracker substrate uses when it
+/// exposes workspace mounts as pre-attached virtio-blk ext4 images.
+/// Comma-separated entries of the form
+/// `<device_path>:<guest_path>:<rw|ro>:<fs_type>`, for example
+/// `/dev/vda:/workspace:rw:ext4`.
+pub const BLOCK_MOUNTS_ENV: &str = "RAXIS_BLOCK_MOUNTS";
+
+/// One parsed workspace share spec extracted from a substrate mount
+/// declaration. AVF declares VirtioFS tags; Firecracker declares
+/// virtio-blk device paths. The host-side substrate already validated
+/// `host_path` and the `MountMode`; the guest only sees the
+/// post-validation mount triple.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VirtioFsMountSpec {
-    /// VirtioFS tag — must match the host-side
-    /// `AvfVirtioFsShare.tag`. Used as the `source` argument to
+    /// Mount source. For AVF this is the host-side
+    /// `AvfVirtioFsShare.tag`; for Firecracker it is the block-device
+    /// path such as `/dev/vda`. Used as the `source` argument to
     /// `mount(2)`.
     pub tag: String,
     /// Absolute guest path the share is mounted at (the `/init`
@@ -1642,17 +1651,19 @@ pub struct VirtioFsMountSpec {
     pub guest_path: String,
     /// `true` ⇒ mount the share read-only (`MS_RDONLY`).
     pub read_only: bool,
+    /// Filesystem type passed to `mount(2)`.
+    pub fs_type: String,
 }
 
-/// Outcome of parsing [`VIRTIOFS_MOUNTS_ENV`] and attempting each
-/// mount. Aggregated and logged by the planner main entry-points
-/// so the kernel-side scraper can correlate a guest-side mount
-/// failure to the host-side substrate event.
+/// Outcome of parsing the substrate's workspace-mount env and
+/// attempting each mount. Aggregated and logged by the planner main
+/// entry-points so the kernel-side scraper can correlate a guest-side
+/// mount failure to the host-side substrate event.
 #[derive(Clone, Debug)]
 pub enum WorkspaceMountOutcome {
-    /// `RAXIS_VIRTIOFS_MOUNTS` was unset or empty — the substrate
-    /// did not wire any workspace shares, the guest has nothing to
-    /// mount.
+    /// Both workspace mount env vars were unset or empty — the
+    /// substrate did not wire any workspace shares, the guest has
+    /// nothing to mount.
     NoEnvVar,
     /// The env var existed but at least one entry was malformed.
     /// The guest still attempts to mount the well-formed entries
@@ -1667,7 +1678,7 @@ pub enum WorkspaceMountOutcome {
     /// All entries parsed cleanly; per-attempt status is in
     /// `attempts`.
     Mounted {
-        /// One [`MountAttempt`] per parsed [`VirtioFsMountSpec`].
+        /// One [`MountAttempt`] per parsed workspace mount spec.
         attempts: Vec<MountAttempt>,
     },
 }
@@ -1766,6 +1777,101 @@ pub fn parse_virtiofs_mounts(raw: &str) -> (Vec<VirtioFsMountSpec>, Option<Strin
             tag,
             guest_path,
             read_only: mode,
+            fs_type: "virtiofs".to_owned(),
+        });
+    }
+    (out, bad)
+}
+
+/// Parse one comma-separated `RAXIS_BLOCK_MOUNTS` payload into
+/// mount specs. Firecracker uses this for ext4 workspace images
+/// attached as virtio-blk devices.
+pub fn parse_block_mounts(raw: &str) -> (Vec<VirtioFsMountSpec>, Option<String>) {
+    let mut out: Vec<VirtioFsMountSpec> = Vec::new();
+    let mut bad: Option<String> = None;
+    for (idx, raw_entry) in raw.split(',').enumerate() {
+        let entry = raw_entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let mut parts = entry.split(':');
+        let source = match parts.next() {
+            Some(t) if t.starts_with("/dev/") => t.to_owned(),
+            Some(t) => {
+                if bad.is_none() {
+                    bad = Some(format!(
+                        "entry {idx}: <device_path> must start with /dev/ (got {t:?})"
+                    ));
+                }
+                continue;
+            }
+            None => {
+                if bad.is_none() {
+                    bad = Some(format!("entry {idx}: missing <device_path> field"));
+                }
+                continue;
+            }
+        };
+        let guest_path = match parts.next() {
+            Some(p) if p.starts_with('/') => p.to_owned(),
+            Some(p) => {
+                if bad.is_none() {
+                    bad = Some(format!(
+                        "entry {idx}: <guest_path> must be absolute (got {p:?})"
+                    ));
+                }
+                continue;
+            }
+            None => {
+                if bad.is_none() {
+                    bad = Some(format!("entry {idx}: missing <guest_path> field"));
+                }
+                continue;
+            }
+        };
+        let mode = match parts.next() {
+            Some("ro") => true,
+            Some("rw") => false,
+            Some(other) => {
+                if bad.is_none() {
+                    bad = Some(format!(
+                        "entry {idx}: <mode> must be 'ro' or 'rw' (got {other:?})"
+                    ));
+                }
+                continue;
+            }
+            None => {
+                if bad.is_none() {
+                    bad = Some(format!("entry {idx}: missing <mode> field"));
+                }
+                continue;
+            }
+        };
+        let fs_type = match parts.next() {
+            Some("ext4") => "ext4".to_owned(),
+            Some(other) => {
+                if bad.is_none() {
+                    bad = Some(format!(
+                        "entry {idx}: <fs_type> must be 'ext4' (got {other:?})"
+                    ));
+                }
+                continue;
+            }
+            None => {
+                if bad.is_none() {
+                    bad = Some(format!("entry {idx}: missing <fs_type> field"));
+                }
+                continue;
+            }
+        };
+        if parts.next().is_some() && bad.is_none() {
+            bad = Some(format!("entry {idx}: too many ':' separated fields"));
+        }
+        out.push(VirtioFsMountSpec {
+            tag: source,
+            guest_path,
+            read_only: mode,
+            fs_type,
         });
     }
     (out, bad)
@@ -1781,11 +1887,29 @@ pub fn parse_virtiofs_mounts(raw: &str) -> (Vec<VirtioFsMountSpec>, Option<Strin
 /// the env from `/proc/cmdline` into the process env). Otherwise
 /// the env var is invisible.
 pub fn mount_workspace_shares() -> WorkspaceMountOutcome {
-    let raw = match std::env::var(VIRTIOFS_MOUNTS_ENV) {
-        Ok(v) if !v.is_empty() => v,
-        _ => return WorkspaceMountOutcome::NoEnvVar,
-    };
-    let (specs, bad) = parse_virtiofs_mounts(&raw);
+    let mut specs = Vec::new();
+    let mut bad: Option<String> = None;
+
+    if let Ok(raw) = std::env::var(VIRTIOFS_MOUNTS_ENV) {
+        if !raw.is_empty() {
+            let (mut parsed, parse_bad) = parse_virtiofs_mounts(&raw);
+            specs.append(&mut parsed);
+            bad = bad.or(parse_bad.map(|e| format!("{VIRTIOFS_MOUNTS_ENV}: {e}")));
+        }
+    }
+
+    if let Ok(raw) = std::env::var(BLOCK_MOUNTS_ENV) {
+        if !raw.is_empty() {
+            let (mut parsed, parse_bad) = parse_block_mounts(&raw);
+            specs.append(&mut parsed);
+            bad = bad.or(parse_bad.map(|e| format!("{BLOCK_MOUNTS_ENV}: {e}")));
+        }
+    }
+
+    if specs.is_empty() && bad.is_none() {
+        return WorkspaceMountOutcome::NoEnvVar;
+    }
+
     let mut attempts: Vec<MountAttempt> = Vec::with_capacity(specs.len());
     for spec in specs {
         let status = mount_one(&spec);
@@ -1804,12 +1928,34 @@ fn mount_one(spec: &VirtioFsMountSpec) -> MountStatus {
             reason: format!("mkdir -p {target}: {e}", target = spec.guest_path,),
         };
     }
-    match linux::try_mount_virtiofs(&spec.tag, &spec.guest_path, spec.read_only) {
-        Ok(()) => MountStatus::Ok,
-        Err(e) if e.raw_os_error() == Some(libc::EBUSY) => MountStatus::Already,
-        Err(e) => MountStatus::Failed {
-            reason: e.to_string(),
-        },
+    for attempt in 0..40 {
+        match linux::try_mount_filesystem(
+            &spec.tag,
+            &spec.guest_path,
+            &spec.fs_type,
+            spec.read_only,
+        ) {
+            Ok(()) => return MountStatus::Ok,
+            Err(e) if e.raw_os_error() == Some(libc::EBUSY) => return MountStatus::Already,
+            Err(e)
+                if spec.tag.starts_with("/dev/")
+                    && matches!(
+                        e.raw_os_error(),
+                        Some(code) if code == libc::ENOENT || code == libc::ENODEV
+                    )
+                    && attempt < 39 =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => {
+                return MountStatus::Failed {
+                    reason: e.to_string(),
+                };
+            }
+        }
+    }
+    MountStatus::Failed {
+        reason: "mount retry loop exhausted".to_owned(),
     }
 }
 
@@ -1819,6 +1965,35 @@ fn mount_one(_spec: &VirtioFsMountSpec) -> MountStatus {
     // planner does not run as PID 1 there anyway.
     MountStatus::Failed {
         reason: "mount_workspace_shares is a no-op on non-Linux".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod workspace_mount_parse_tests {
+    use super::*;
+
+    #[test]
+    fn parse_block_mounts_accepts_ext4_devices() {
+        let (specs, bad) =
+            parse_block_mounts("/dev/vda:/workspace:rw:ext4,/dev/vdb:/raxis-meta:ro:ext4");
+        assert!(bad.is_none(), "unexpected parse error: {bad:?}");
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].tag, "/dev/vda");
+        assert_eq!(specs[0].guest_path, "/workspace");
+        assert!(!specs[0].read_only);
+        assert_eq!(specs[0].fs_type, "ext4");
+        assert_eq!(specs[1].tag, "/dev/vdb");
+        assert!(specs[1].read_only);
+    }
+
+    #[test]
+    fn parse_block_mounts_rejects_non_device_source() {
+        let (specs, bad) = parse_block_mounts("workspace:/workspace:rw:ext4");
+        assert!(specs.is_empty());
+        assert!(bad
+            .as_deref()
+            .unwrap_or_default()
+            .contains("must start with /dev/"));
     }
 }
 

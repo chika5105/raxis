@@ -50,10 +50,11 @@ fn main() -> ! {
     let hydration = hydrate_from_proc_cmdline();
     log_hydration_outcome(&hydration);
 
-    // Step 3: mount any VirtioFS workspace shares the substrate
-    // declared via `RAXIS_VIRTIOFS_MOUNTS`. The executor role
-    // mounts `/workspace` (its task-scoped worktree) RW for
-    // git/build/test tools to read/write. See
+    // Step 3: mount any workspace shares the substrate declared via
+    // `RAXIS_VIRTIOFS_MOUNTS` (AVF) or `RAXIS_BLOCK_MOUNTS`
+    // (Firecracker). The executor role mounts `/workspace` (its
+    // task-scoped worktree) RW for git/build/test tools to read/write.
+    // See
     // `raxis-planner-orchestrator/src/main.rs::main` for the full
     // rationale.
     let mount_outcome = mount_workspace_shares();
@@ -425,11 +426,11 @@ fn log_rustup_env_default_outcome(outcome: &RustupEnvDefaultOutcome) {
 fn log_workspace_mount_outcome(outcome: &WorkspaceMountOutcome) {
     match outcome {
         WorkspaceMountOutcome::NoEnvVar => eprintln!(
-            "{{\"level\":\"info\",\"step\":\"planner-virtiofs-mount\",\
+            "{{\"level\":\"info\",\"step\":\"planner-workspace-mount\",\
               \"role\":\"executor\",\"outcome\":\"no-env-var\"}}"
         ),
         WorkspaceMountOutcome::BadEnvVar { reason, attempts } => eprintln!(
-            "{{\"level\":\"warn\",\"step\":\"planner-virtiofs-mount\",\
+            "{{\"level\":\"warn\",\"step\":\"planner-workspace-mount\",\
               \"role\":\"executor\",\"outcome\":\"bad-env-var\",\
               \"reason\":{:?},\"attempts\":{}}}",
             reason,
@@ -444,22 +445,24 @@ fn log_workspace_mount_outcome(outcome: &WorkspaceMountOutcome) {
                 };
                 match reason {
                     Some(r) => eprintln!(
-                        "{{\"level\":\"warn\",\"step\":\"planner-virtiofs-mount\",\
+                        "{{\"level\":\"warn\",\"step\":\"planner-workspace-mount\",\
                           \"role\":\"executor\",\"outcome\":{:?},\
-                          \"tag\":{:?},\"guest_path\":{:?},\"read_only\":{},\
+                          \"source\":{:?},\"fs_type\":{:?},\"guest_path\":{:?},\"read_only\":{},\
                           \"reason\":{:?}}}",
                         status_str,
                         attempt.spec.tag,
+                        attempt.spec.fs_type,
                         attempt.spec.guest_path,
                         attempt.spec.read_only,
                         r,
                     ),
                     None => eprintln!(
-                        "{{\"level\":\"info\",\"step\":\"planner-virtiofs-mount\",\
+                        "{{\"level\":\"info\",\"step\":\"planner-workspace-mount\",\
                           \"role\":\"executor\",\"outcome\":{:?},\
-                          \"tag\":{:?},\"guest_path\":{:?},\"read_only\":{}}}",
+                          \"source\":{:?},\"fs_type\":{:?},\"guest_path\":{:?},\"read_only\":{}}}",
                         status_str,
                         attempt.spec.tag,
+                        attempt.spec.fs_type,
                         attempt.spec.guest_path,
                         attempt.spec.read_only,
                     ),

@@ -819,6 +819,19 @@ pub trait Session: Send + 'static {
     /// Returns `Err(IsolationError::PeerClosed)` when the guest exits.
     fn recv_intent(&mut self) -> Result<IntentFrame, IsolationError>;
 
+    /// Synchronize any substrate-private workspace transport back
+    /// into the host-side [`WorkspaceMount::host_path`] view before
+    /// the kernel evaluates an intent.
+    ///
+    /// AVF VirtioFS is coherent by construction: the guest mutates
+    /// the host directory directly, so the default no-op is correct.
+    /// Substrates that use a staging transport (for example a
+    /// Firecracker virtio-blk workspace image) MUST override this so
+    /// the admission pipeline never validates a stale host worktree.
+    fn sync_workspace(&mut self) -> Result<(), IsolationError> {
+        Ok(())
+    }
+
     /// Immediate termination (security kill). MUST NOT signal SIGTERM
     /// or wait for graceful shutdown. Used when the kernel detects an
     /// invariant violation (`R-6` fail-closed default).

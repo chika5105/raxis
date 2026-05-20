@@ -89,6 +89,7 @@ body {
   /* Aegis body scale: 17px → 19px */
   font-size: clamp(1.0625rem, 0.35vw + 1rem, 1.1875rem);
   line-height: 1.65;
+  overflow-x: clip;
 }
 
 ::selection {

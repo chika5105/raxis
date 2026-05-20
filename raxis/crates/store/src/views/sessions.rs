@@ -482,6 +482,7 @@ fn env_key_is_sensitive(key: &str) -> bool {
             | "RAXIS_KERNEL_VSOCK_CID"
             | "RAXIS_KERNEL_VSOCK_PORT"
             | "RAXIS_VIRTIOFS_MOUNTS"
+            | "RAXIS_BLOCK_MOUNTS"
     ) {
         return false;
     }

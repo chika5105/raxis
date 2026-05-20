@@ -33,7 +33,7 @@ Three candidates were evaluated for the Linux KVM seat. The substrate ships **Fi
 
 | Candidate              | Cold-boot | Rust   | Vsock     | VirtioFS         | API model           | Attack surface    | Verdict |
 |------------------------|-----------|--------|-----------|------------------|---------------------|-------------------|---------|
-| **Firecracker**        | ~125 ms reference; ~30–80 ms achievable with stripped kernel | ✅ pure-Rust, rust-vmm based | ✅ vhost-vsock UDS multiplexer | ❌ no shipped `/workspace` path yet — Firecracker sessions fail closed on non-empty `WorkspaceMount` until `virtiofsd` or a block/artifact transport is implemented | REST over UDS, supervised child process | minimal device set; ~50 KLOC of Rust; production-hardened by AWS Lambda / Fargate | **selected for Linux once workspace delivery closes** |
+| **Firecracker**        | ~125 ms reference; ~30–80 ms achievable with stripped kernel | ✅ pure-Rust, rust-vmm based | ✅ vhost-vsock UDS multiplexer | ✅ per-session ext4 workspace images attached as virtio-blk drives; guest mounts via `RAXIS_BLOCK_MOUNTS` | REST over UDS, supervised child process | minimal device set; ~50 KLOC of Rust; production-hardened by AWS Lambda / Fargate | **selected for Linux V2** |
 | Cloud Hypervisor       | ~150–250 ms | ✅ pure-Rust | ✅ vhost-vsock | ✅ virtiofs in tree | REST + library; can be linked as a crate | larger device set (full virtio-pci enumeration); ~200 KLOC | considered for V3 once virtiofs becomes the staging path; rejected for V2 because the larger device tree extends boot by ~50 ms even after trimming and the substrate gains nothing the workspace-RPC path doesn't already provide |
 | qemu `-M microvm`      | ~250–500 ms | ❌ C | ✅ vhost-vsock | ✅ virtiofsd | argv + QMP socket | full QEMU codebase (~1.5 MLOC); CVE-trail | rejected — wrong end of every axis we care about |
 
@@ -49,6 +49,7 @@ Three candidates were evaluated for the Linux KVM seat. The substrate ships **Fi
 * **Firecracker binary:** ≥ `v1.6.0` (the rust-vmm vsock multiplexer wire format settled in 1.6). The `BACKEND_ID` constant (`crates/raxis-isolation-firecracker/src/lib.rs`) reports `"firecracker-1.x"` so audit consumers can filter without coupling to a point release.
 * **Reference kernel:** Firecracker publishes a known-good vmlinux at `https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/<arch>/vmlinux-<kver>.bin`. RAXIS pins **5.10.225** for `x86_64` and `aarch64` as the floor (matches [`system-requirements.md §1.1`](system-requirements.md) "VM guest kernel ≥ 5.10"); the kernel-bundled canonical-image pipeline ships its own RAXIS-built vmlinux (5.14+) so operators on those images get the higher floor without re-staging.
 * **vhost-vsock kernel module:** `vhost_vsock` MUST be loaded (the substrate refuses to spawn otherwise). Modern distros load it on demand; air-gapped / minimal kernels need an explicit `modprobe vhost_vsock` in the boot path.
+* **Workspace image tools:** Linux hosts MUST provide `mkfs.ext4`; read/write mounts also require `debugfs` and `e2fsck`. These come from `e2fsprogs` on the supported distributions.
 
 ---
 
@@ -110,12 +111,12 @@ The canonical Reviewer / Orchestrator / Executor-starter rootfs initramfs (built
 
 * `/init` — the planner agent binary, statically linked against musl. No dynamic loader; no `ld.so` resolution.
 * `/dev`, `/proc`, `/sys` — empty mount points, populated by `/init`.
-* `/raxis` — empty mount point. Today the Firecracker substrate
-  rejects non-empty `WorkspaceMount`s because no Linux workspace
-  delivery path is implemented yet; AVF provides `/workspace` through
-  VirtioFS. Closing this requires either a Firecracker `virtiofsd`
-  sidecar/API path or a kernel-owned writable block/artifact transport
-  that can copy the admitted worktree changes back after shutdown.
+* `/raxis` and `/workspace` — empty mount points populated at boot from
+  `RAXIS_BLOCK_MOUNTS`. The substrate stages each host `WorkspaceMount`
+  into an ext4 image, attaches it as a virtio-blk drive, and the guest
+  mounts the device at the requested path. Read/write images are synced
+  back through the kernel before intent admission and on teardown; the
+  agent never receives a host path.
 * `/etc/{passwd,group,resolv.conf}` — three-line files, pinned for libstd's `gethostname` / `getuid` paths.
 
 Total uncompressed size: ~6 MB (planner agent binary dominates). Gzip-compressed cpio: ~2.2 MB. The kernel's lazy-page-fault paging means only the pages PID 1 actually touches before connecting vsock are decompressed — ~1.5 MB worth.
@@ -242,6 +243,8 @@ The substrate consumes two artefacts at spawn time:
 * Calling user is in the `kvm` group (parses `/proc/self/status` and `/etc/group`)
 * Host kernel version ≥ 5.10 (parses `/proc/sys/kernel/osrelease`)
 * `firecracker` binary on PATH (best-effort `which` shellout)
+* `mkfs.ext4`, `debugfs`, and `e2fsck` on PATH (from `e2fsprogs`) so
+  workspace images can be staged, inspected, and copied back
 
 The same checks are mirrored into `raxis doctor host`; the `xtask` entry point is the operator's pre-doctor probe.
 
@@ -252,7 +255,6 @@ The same checks are mirrored into `raxis doctor host`; the `xtask` entry point i
 | Gap                                                     | What would close it                                                                            | Target |
 |---------------------------------------------------------|------------------------------------------------------------------------------------------------|--------|
 | Snapshot / resume (sub-10ms boot)                       | Persist `/var/raxis/snapshots/<role>.snap` after first boot of each role; substrate `--restore-from-snapshot` arg | V3 |
-| Workspace delivery for `/workspace` and `/raxis`                 | Prefer a Firecracker `virtiofsd` sidecar/API if available; otherwise attach a kernel-owned writable block/artifact transport and copy changes back through the admission path | V3 |
 | `prctl(PR_SET_NO_NEW_PRIVS)` on Firecracker child       | Extend `vmm.rs::SpawnArgs` with a syscall-prefork hook                                          | V2.5 |
 | Cap-drop on the Firecracker child                       | Same hook; `prctl(PR_CAPBSET_DROP, ...)` + `setresuid` to a non-privileged user                 | V2.5 |
 | Operator-mandatory seccomp                              | Default `extra_args = ["--seccomp-level", "2"]` instead of operator-opt-in                      | V2.5 |

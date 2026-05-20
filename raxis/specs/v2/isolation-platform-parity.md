@@ -51,7 +51,7 @@ This matrix tracks every observable that a reviewer might think to compare. Rows
 | VM monitor lifecycle                             | In-process via Virtualization.framework Objective-C bridge       | Subprocess (`firecracker --api-sock <path>`); REST over UDS   | Per-OS (mandatory); the kernel sees identical typed errors via `IsolationError` |
 | Kernel cmdline                                   | `console=hvc0 loglevel=8 ignore_loglevel reboot=k panic=10` (verbose for diagnostics; Apple's PL011 is async-flushed) | `console=ttyS0 reboot=k panic=1 pci=off i8042.noaux i8042.nokbd quiet loglevel=0 tsc=reliable clocksource=tsc 8250.nr_uarts=0 random.trust_cpu=on` (fast-boot recipe) | ⚠️ partial — divergence is intentional per-VMM tuning, not a contract gap. The substrate owns the cmdline; operator-supplied `boot_args` REPLACE on both substrates. |
 | Initramfs vs EROFS rootfs                        | Both supported; `ImageKind::RootfsInitramfsCpio` → `vz_initial_ram_disk_url`; `RootfsErofs` → `vz_block_device_initialization` | Both supported; initramfs → `BootSource.initrd_path`; EROFS → `PUT /drives/rootfs` | ✅ parity |
-| Workspace mount path                             | VirtioFS via `VZVirtioFileSystemDeviceConfiguration`            | Fail-closed for non-empty `WorkspaceMount` until Linux workspace delivery is implemented (`virtiofsd` sidecar or a typed block/artifact transport) | ❌ gap — normal planner sessions require `/workspace`; Firecracker must not be advertised as live-e2e-ready until this closes |
+| Workspace mount path                             | VirtioFS via `VZVirtioFileSystemDeviceConfiguration`            | Per-session ext4 workspace images attached as virtio-blk drives; guest mounts are declared through `RAXIS_BLOCK_MOUNTS`; RW images sync back before intent admission and on teardown | ✅ parity (different transport, identical kernel contract; Linux hosts require `mkfs.ext4`, `debugfs`, and `e2fsck`) |
 | Network device                                   | No `VZ*NetworkDevice*` attachment for any tier (`EgressTier::None` and `EgressTier::Mediated` both produce a NIC-less VM) | No `PUT /network-interfaces` call for any tier (both `None` and `Mediated` omit it) | ✅ parity (Path A3 — [`airgap-architecture.md`](airgap-architecture.md) — is the only egress path; the legacy `Tier1Tproxy` virtio-net + NAT codepath was deleted alongside the variant) |
 | Vsock contract                                   | Host CID 2; per-session guest CID; planner port 1024            | Host CID 2; per-session guest CID (Firecracker-assigned); planner port 1024 | ✅ parity |
 | Host-side vsock channel                          | `VZVirtioSocketDevice` connect; raw bytes; bounded retry until guest planner binds | UDS multiplexer + `CONNECT 1024\n`/`OK <peer_port>\n` handshake; raw bytes; bounded retry until guest planner binds | ✅ parity (handshake invisible to the kernel; both surface a `dyn Read + Write`; both tolerate the normal post-boot listener-bind race) |
@@ -140,7 +140,7 @@ The selector also runs `admit_backend` (also in `isolation_select.rs`) which cal
 * Both substrates implement the trait surface.
 * All `R-*` invariants preserved on both substrates.
 * All ✅-parity rows above are testable against the trait conformance fixture in `crates/raxis-isolation/tests/`.
-* Firecracker is not production-ready for normal planner sessions until the `/workspace` delivery gap closes. The substrate now fails closed when a non-empty `WorkspaceMount` reaches it, so Linux operators see a deterministic admission error instead of a guest that boots and later fails in the tools layer.
+* Firecracker now has a production workspace path for normal planner sessions. It stages each mount into a kernel-owned ext4 image, attaches the image as a virtio-blk drive, asks the guest to mount it at the same logical path AVF exposes, then syncs RW images back to the host before every intent admission and on final teardown.
 
 ### §8.2 V2.5 (next minor)
 
@@ -157,19 +157,21 @@ The selector also runs `admit_backend` (also in `isolation_select.rs`) which cal
 | Feature                                                  | Notes                                                            |
 |----------------------------------------------------------|------------------------------------------------------------------|
 | Snapshot/resume (sub-10 ms cold-boot)                    | Firecracker has the primitive; AVF has `VZVirtualMachine.canPause`. Both substrate roadmaps converge on a `(role, kernel_sha, initramfs_sha) → snapshot.bin` cache. |
-| Workspace delivery for `/workspace` and `/raxis` on Linux | Prefer a `virtiofsd` sidecar if the selected Firecracker build exposes the needed device/API; otherwise attach a kernel-owned writable block/artifact transport and copy changes back through the admission path. |
+| Higher-performance Linux workspace sharing                 | The V2 block-image transport is correctness-first. A future `virtiofsd` or vsock-filesystem transport may reduce copy cost without changing the `IsolationBackend` contract. |
 | Memory-encrypted substrate (TDX / SEV-SNP)               | New `IsolationLevel::R1ConformantStrong`; requires either a third substrate crate (`raxis-isolation-tdx`) or a Firecracker fork once Firecracker upstreams TDX. |
 | Remote attestation                                       | TDX quote / SEV-SNP attestation report surfaced through `Backend::capability(AttestationReport) -> Bytes`. |
 
-The Linux workspace-delivery row is blocking for Firecracker-backed V2
-planner sessions. Until it closes, macOS AVF is the production microVM
-path for workspace-backed live e2e runs.
+The Firecracker workspace-delivery blocker is closed for V2 by the
+block-image transport. macOS AVF remains the lowest-copy path because
+VirtioFS shares host directories directly; Linux Firecracker pays a
+staging/sync cost but preserves the same `/workspace` semantics and
+fail-closed admission contract.
 
 ---
 
 ## §9 How to read this matrix as a reviewer
 
-1. Grep for ❌ — each row is a real release blocker for the affected substrate. Firecracker's current `/workspace` gap is intentional fail-closed debt, not a hidden runtime surprise.
+1. Grep for ❌ — each row is a real release blocker for the affected substrate. There should be no hidden Firecracker workspace caveat; Linux and macOS both expose `/workspace` to planner roles.
 2. Grep for ⚠️ — these are the documented divergences. Each one MUST come with either (a) a per-OS rationale that doesn't touch `R-*`, or (b) a closing-path entry in §8.
 3. Read every ✅ row and ask "would the kernel notice if I swapped the substrate?". The answer should be no for every row (modulo the per-OS capability hints that the kernel explicitly ignores per the `BootLatencyMs` / `MaxConcurrentVms` / `KvmAvailable` semantics).
 4. Compare against `crates/raxis-isolation/tests/` — every ✅ row should have a corresponding conformance test the kernel runs against `Arc<dyn Backend>` once the substrate is plugged in.

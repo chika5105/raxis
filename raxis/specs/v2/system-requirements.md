@@ -76,10 +76,9 @@ $ raxis doctor
 | Alpine Linux | 3.18+ | OpenRC default; daemon mode requires systemd or operator-provided init script |
 | NixOS | 23.11+ | systemd + journald via nixpkgs |
 
-**Required kernel features:**
+**Required host-kernel features:**
 
 - KVM (`CONFIG_KVM=y` or `CONFIG_KVM=m` and module loaded)
-- VirtIO drivers (`CONFIG_VIRTIO_NET`, `CONFIG_VIRTIO_BLK`, `CONFIG_VIRTIO_FS`)
 - VSOCK (`CONFIG_VSOCKETS`, `CONFIG_VHOST_VSOCK`)
 - cgroups v2 (`CONFIG_CGROUPS=y` and unified hierarchy mounted at `/sys/fs/cgroup`)
 
@@ -131,7 +130,7 @@ The host kernel runs the kernel daemon and the hypervisor; the **VM guest kernel
 | Concern | Host kernel | VM guest kernel |
 |---|---|---|
 | Minimum version | Linux 5.10+ (per §2.1) | **Linux 5.14+** (per [`planner-harness.md §10.2`](planner-harness.md)) |
-| Required features | KVM, VirtIO, VSOCK, cgroups v2 (host-side) | cgroup v2 mounted in-VM; `cpu`, `memory`, `pids` controllers in `cgroup.subtree_control` |
+| Required features | KVM, VSOCK, cgroups v2 (host-side) | cgroup v2 mounted in-VM; `cpu`, `memory`, `pids` controllers in `cgroup.subtree_control`; virtio-blk and ext4 for Firecracker workspace images; VirtioFS for Apple-VZ mounts |
 | Source of the kernel | Operator's distribution (Ubuntu, Debian, etc.) | Bundled with the OCI image used to boot the VM |
 
 **Why 5.14+ for the VM guest kernel.** The harness's process-containment substrate (`INV-PLANNER-HARNESS-03`) requires `cgroup.kill` (Linux 5.14, August 2021) for atomic, race-free process-tree teardown. Earlier kernels could only iterate `cgroup.procs` and `kill(pid, SIGKILL)` in a loop, which races against new forks; that fallback was rejected during V2 design ([`planner-harness.md §10.2`](planner-harness.md)). 5.14+ is mandatory; the kernel refuses to activate planner sessions whose VM image ships an older kernel.
@@ -323,6 +322,8 @@ Per [`host-capacity.md §6.3`](host-capacity.md), sizes per subsystem are indepe
   ```
   For system mode (per [`kernel-lifecycle.md §9.2`](kernel-lifecycle.md)), the dedicated `raxis` user must also be in `kvm` group.
 - CPU virtualization extensions enabled in firmware (VT-x or AMD-V on x86_64; EL2 on aarch64).
+- Firecracker on PATH.
+- `e2fsprogs` on PATH: `mkfs.ext4` for staging workspace images, and `debugfs` + `e2fsck` for read/write workspace copy-back.
 
 **Verification:**
 
@@ -336,6 +337,12 @@ alice ... kvm
 $ kvm-ok                               # ubuntu/debian: virt-host validation
 INFO: /dev/kvm exists
 KVM acceleration can be used
+
+$ command -v firecracker mkfs.ext4 debugfs e2fsck
+/usr/bin/firecracker
+/usr/sbin/mkfs.ext4
+/usr/sbin/debugfs
+/usr/sbin/e2fsck
 ```
 
 `raxis doctor` (§11) checks all of these.
@@ -360,12 +367,12 @@ $ xattr /usr/local/bin/raxis-kernel
 
 ### 5.3 Why no third hypervisor (Hyper-V, Xen, etc.)
 
-The hypervisor abstraction in V2 is opinionated: KVM for Linux, Virtualization.framework for macOS. Each is the platform-native choice with the strongest VirtioFS and VSOCK support and the simplest credential-proxy integration (per [`credential-proxy.md`](credential-proxy.md)).
+The hypervisor abstraction in V2 is opinionated: KVM for Linux, Virtualization.framework for macOS. Each is the platform-native choice with the smallest practical device surface, VSOCK support, and the simplest credential-proxy integration (per [`credential-proxy.md`](credential-proxy.md)); workspace delivery is substrate-specific (Firecracker virtio-blk images, Apple-VZ VirtioFS).
 
 Adding a third hypervisor (Hyper-V for Windows, Xen for some embedded Linux distros, or a userspace alternative like QEMU-without-KVM) would require:
 
 - A third backend in the kernel's hypervisor module
-- A third path through the VirtioFS/VSOCK protocol implementation
+- A third path through the workspace/VSOCK protocol implementation
 - A third validation matrix for credential proxy semantics
 - A third tested distribution channel
 
@@ -541,6 +548,8 @@ For operators wanting to build RAXIS from source rather than use pre-built binar
 - Linux kernel headers matching the running kernel (`linux-headers-$(uname -r)`)
 - KVM/vsock/cgroup prerequisites from `cargo xtask linux-prereqs`
 - `firecracker(1)` on `$PATH` before the first kernel boot on Linux
+- `e2fsprogs` (`mkfs.ext4`, `debugfs`, `e2fsck`) on `$PATH` for the
+  Firecracker workspace block-image transport
 
 **macOS:**
 

@@ -113,12 +113,13 @@ pub use error::PlannerError;
 pub use gemini_client::GeminiClient;
 pub use guest_init::{
     enforce_pid1_or_abort, ensure_executor_rustup_env_defaults, harden_guest_for_agent,
-    init_pid1_a3_egress, init_pid1_filesystem, mount_workspace_shares, parse_virtiofs_mounts,
-    read_scrubbed_env_snapshot, scrub_sensitive_env_for_agent, shutdown_or_exit, MountAttempt,
-    MountStatus, RustupEnvDefaultOutcome, VirtioFsMountSpec, WorkspaceMountOutcome,
-    A3_DEFAULT_TPROXY_PORT, A3_TPROXY_PORT_ENV, EXECUTOR_CARGO_HOME_ENV, EXECUTOR_HOME_ENV,
-    EXECUTOR_RUSTUP_HOME_ENV, EXECUTOR_RUSTUP_TOOLCHAIN_ENV, PID1_ENFORCEMENT_EXIT_CODE,
-    PLANNER_BINARY_PATHS_TO_MASK, SENSITIVE_ENV_VARS_TO_SCRUB, VIRTIOFS_MOUNTS_ENV,
+    init_pid1_a3_egress, init_pid1_filesystem, mount_workspace_shares, parse_block_mounts,
+    parse_virtiofs_mounts, read_scrubbed_env_snapshot, scrub_sensitive_env_for_agent,
+    shutdown_or_exit, MountAttempt, MountStatus, RustupEnvDefaultOutcome, VirtioFsMountSpec,
+    WorkspaceMountOutcome, A3_DEFAULT_TPROXY_PORT, A3_TPROXY_PORT_ENV, BLOCK_MOUNTS_ENV,
+    EXECUTOR_CARGO_HOME_ENV, EXECUTOR_HOME_ENV, EXECUTOR_RUSTUP_HOME_ENV,
+    EXECUTOR_RUSTUP_TOOLCHAIN_ENV, PID1_ENFORCEMENT_EXIT_CODE, PLANNER_BINARY_PATHS_TO_MASK,
+    SENSITIVE_ENV_VARS_TO_SCRUB, VIRTIOFS_MOUNTS_ENV,
 };
 pub use http_fetch::{
     DirectHttpFetch, HttpFetch, HttpFetchError, HttpFetchRequest, HttpFetchResponse,
