@@ -307,6 +307,13 @@ impl DomainAdapter for GitAdapter {
             Err(MainMergeError::RefUpdateFailed(reason)) => Err(DomainError::Transient(format!(
                 "ref update failed: {reason}"
             ))),
+            Err(MainMergeError::NonFastForwardCandidate {
+                target_ref,
+                previous_sha,
+                candidate_sha,
+            }) => Err(DomainError::PreconditionFailed(format!(
+                "candidate {candidate_sha} does not descend from live {target_ref} tip {previous_sha}"
+            ))),
             Err(MainMergeError::WorktreeRefreshFailed { path, reason }) => {
                 Err(DomainError::Transient(format!(
                     "worktree refresh at {} failed: {reason}",

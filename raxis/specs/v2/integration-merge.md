@@ -24,18 +24,18 @@
 ## 1. What IntegrationMerge Is
 
 `IntegrationMerge` is the intent the Orchestrator submits to the Kernel after it has
-successfully merged one or more Executor sub-task branches into a single commit in its
-ephemeral clone. Upon admission, the Kernel fast-forwards the initiative's main branch
-to the merged commit SHA. This is the **only** mechanism that writes agent-produced code
-to the main branch.
+successfully merged the completed Executor sub-task branches into a single commit in its
+ephemeral clone. Upon admission, the Kernel fast-forwards the initiative's resolved
+`target_ref` to the merged commit SHA. This is the **only** mechanism that writes
+agent-produced code to the canonical branch.
 
 Until `IntegrationMerge` is admitted:
-- The main branch is untouched
+- The resolved `target_ref` is untouched
 - All Executor commits exist only in ephemeral VM worktrees and Orchestrator staging bundles
 - The initiative state is `InProgress`
 
 After `IntegrationMerge` is admitted:
-- The main branch is updated to `commit_sha`
+- The resolved `target_ref` is updated to `commit_sha`
 - The Orchestrator's base SHA is advanced to `commit_sha`
 - The initiative logs `IntegrationMergeCompleted` in the audit chain
 - The Orchestrator may activate the next wave of sub-tasks (if the DAG has more)
@@ -166,6 +166,22 @@ main to `abc`, then later submits `IntegrationMerge { commit_sha: "def" }` where
 does not descend from `abc`, the main branch would lose the history of A's work. The
 ancestry check prevents this.
 
+**Concurrent-initiative hardening.** `base_sha` is the initiative/session anchor, not
+necessarily the live tip of `target_ref` at publish time. Another initiative may
+successfully advance the same `target_ref` after this initiative was approved. Therefore
+the reference git adapter performs a second domain-level fast-forward check immediately
+before the ref transaction:
+
+```bash
+git -C $RAXIS_DATA_DIR/repositories/main merge-base --is-ancestor \
+  <live_target_ref_tip> <commit_sha>
+```
+
+If this fails, publishing `commit_sha` would drop already-landed work from the
+canonical ref. The adapter rejects the candidate with `target_ref_non_fast_forward`;
+the kernel leaves `target_ref` untouched and surfaces the merge as a failed
+`IntegrationMerge` rather than silently rewriting history.
+
 ### Check 4 — `merged_task_ids` Validation
 Every `task_id` in `merged_task_ids`:
 - Must exist in `subtask_activations` for this initiative
@@ -175,6 +191,25 @@ Every `task_id` in `merged_task_ids`:
   (each sub-task may be merged exactly once)
 
 Failure for any of these: `FAIL_TASK_NOT_COMPLETED` with the offending task_id.
+
+**V2.7 implementation note — implicit full coverage.** The current wire tool still
+submits `{ base_sha, head_sha }` and has not yet carried the explicit
+`merged_task_ids` vector. Until that field is fully wired, the kernel derives the
+required merge set mechanically: every plan-declared Executor task in the same
+initiative with `tasks.state = 'Completed'` and a non-null `evaluation_sha`. For each
+such task, the submitted `head_sha` MUST contain that `evaluation_sha` as an ancestor:
+
+```bash
+git -C <orchestrator_worktree> merge-base --is-ancestor \
+  <executor_evaluation_sha> <head_sha>
+```
+
+Failure is `FAIL_INVALID_DIFF` and emits
+`IntegrationMergeMissingCompletedExecutorHead` in the kernel log with the missing
+executor `task_id` and SHA. This intentionally disables "publish one successful
+executor SHA" as a partial merge shortcut: partial merge waves require the explicit
+`merged_task_ids` field so the audit chain can prove which completed artifacts were
+included and which were deliberately deferred.
 
 **Interaction with [`agent-disagreement.md`](agent-disagreement.md).** A sub-task only reaches
 `state = 'Completed'` after its `CompleteTask` intent admits cleanly.
@@ -209,6 +244,9 @@ hybrid_effective_allow =
     UNION(task.path_allowlist for task in merged_task_ids)
     ∪ orchestrator.cross_cutting_artifacts
 ```
+
+In the V2.7 implicit-full-coverage implementation, `merged_task_ids` in this formula is
+the mechanically derived set of all completed Executor task ids for the initiative.
 
 Every touched path must match at least one entry in `hybrid_effective_allow`. Failure:
 `FAIL_PATH_POLICY_VIOLATION { path }` for the first out-of-scope path found.

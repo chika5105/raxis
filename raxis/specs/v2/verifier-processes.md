@@ -809,6 +809,10 @@ Reviewer activation gating (§5.2)
 ```text
 Orchestrator submits IntegrationMerge { commit_sha, merged_task_ids }
   │
+  ├─ V2.7 wire compatibility: if merged_task_ids is not present,
+  │  kernel derives it as all completed Executor tasks and first
+  │  verifies each Executor evaluation_sha is an ancestor of commit_sha
+  │
   ▼
 integration-merge.md Check 1..5c (all pass)
   │
@@ -1509,6 +1513,10 @@ Per [`integration-merge.md §4 Check 5d.2`](integration-merge.md):
    ```
    This is a separate worktree, NOT on main, NOT on any task
    branch.
+   In the V2.7 `{ base_sha, head_sha }` wire shape, the kernel uses
+   the mechanically derived "all completed Executor tasks" set from
+   [`integration-merge.md §4 Check 4`](integration-merge.md) as the
+   effective `merged_task_ids`.
 2. Kernel records `candidate_merge_sha` in the
    `integration_merge_attempts` table (new column) for crash
    recovery.

@@ -1305,7 +1305,7 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
              menu. NEVER activate a task id that is NOT in `ready_now=[...]`. \
              Outside-menu reviewer activation can hit `ActivateSubTaskReviewerNoEvalSha`. \
              Reviewer activation is handled transparently by `ready_now` after \
-             its predecessor stamps `evaluation_sha`.\n\
+             predecessor `evaluation_sha`.\n\
              \n\
              Decision order; end the session with exactly one terminal tool as \
              soon as one is admissible:\n\
@@ -1316,10 +1316,10 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
              waiting on reviewers. If any completed executor has \
              `aggregate=AtLeastOneRejected` and matching \
              `capabilities.tasks[*].retry_admissible=true`, call `retry_subtask` \
-             for that executor. DO NOT activate any pending task and do not \
-             `integration_merge` while a retry is admissible; outstanding-review \
-             merges are rejected as `FAIL_REVIEW_OUTSTANDING` / \
-             `IntegrationMergeBlockedByOutstandingReview`, burning \
+             for that executor. DO NOT activate any pending task or \
+             `integration_merge` while a retry is admissible; that is rejected as \
+             `FAIL_REVIEW_OUTSTANDING` / \
+             `IntegrationMergeBlockedByOutstandingReview` and burns \
              `orch_no_progress_respawns=`.\n\
              2. For failed executors or `aggregate=AtLeastOneRejected` with \
              `retry_admissible=false`: if reason contains `prior state \
@@ -1330,25 +1330,25 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
              `structured_output` diagnostic if useful and wait for the kernel's \
              failure/escalation path.\n\
              3. NEVER call `retry_subtask` while \
-             `aggregate=AwaitingReviewerVerdicts`; sibling reviewers still \
-             owe votes. This is not a background kernel computation. If \
-             `ready_now=[]`, only sleep when reviewer rows are still active; \
+             `aggregate=AwaitingReviewerVerdicts`; sibling reviewers still owe \
+             votes. This is not a background kernel computation. If `ready_now=[]`, \
+             only sleep when reviewer rows are still active; \
              otherwise surface a critical diagnostic for a review deadlock. \
              Use `reviewer_verdicts=` only for critique text; retry decisions \
              use `aggregate=` plus `retry_admissible`.\n\
              4. If `ready_now` has one id, call `activate_subtask`. If it has \
              multiple ids, use `batch_activate_subtasks` with up to \
-             `concurrency: ... headroom=K` ids; prefer batch for parallelism. \
-             The kernel ignores input order and returns per-id outcomes.\n\
-             5. If `ready_now=[]`, do not wait for aggregates to \"resolve\". \
-             KSB is a snapshot and changes only after a child session/tool \
-             action. Merge when every executor is complete with \
-             `aggregate=AllPassed` or `aggregate=NoSuccessors` and every \
-             reviewer is complete. Call `integration_merge { base_sha, head_sha }` \
-             using full 40-char lowercase hex: `base_sha` from KSB `base_sha=`, \
-             `head_sha` from the executor row `sha=`. Never submit `<none>` or \
-             `<unset>`, and never emit progress/diagnostic text instead of an \
-             admissible terminal tool.\n\
+             `concurrency: ... headroom=K` ids; prefer batch for parallelism.\n\
+             5. If `ready_now=[]`, do not wait for aggregates to \"resolve\"; \
+             KSB changes only after child/tool action. Merge only when every \
+             executor row is complete with `aggregate=AllPassed` or \
+             `aggregate=NoSuccessors` and reviewers are complete. Collect every \
+             completed executor row `sha=`, merge them into `/workspace`, resolve \
+             conflicts, verify each collected SHA is ancestor of `git rev-parse HEAD`, \
+             then call `integration_merge { base_sha, head_sha }` with KSB \
+             `base_sha=` and final integrated HEAD. Never submit one raw executor \
+             SHA unless it contains all completed executor SHAs; never submit \
+             `<none>`/`<unset>` or progress text.\n\
              \n\
              Track `planner_max_turns=N`, token/wallclock budgets, and \
              `orch_no_progress_respawns=`. Free text without a tool is an Idle \
@@ -2124,6 +2124,8 @@ mod tests {
             "retry_admissible=true",
             "batch_activate_subtasks",
             "integration_merge",
+            "every completed executor row `sha=`",
+            "final integrated HEAD",
             "orch_no_progress_respawns=",
         ] {
             assert!(
@@ -2177,6 +2179,11 @@ mod tests {
             prompt.contains("aggregate=AllPassed"),
             "orchestrator NNSP MUST gate `integration_merge` on \
              `aggregate=AllPassed` for every executor row"
+        );
+        assert!(
+            prompt.contains("verify each collected") && prompt.contains("ancestor"),
+            "orchestrator NNSP MUST require executor SHA coverage \
+             before `integration_merge`; got prompt: {prompt}"
         );
         assert!(
             prompt.contains("reviewer_verdicts="),

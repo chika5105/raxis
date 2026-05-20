@@ -1423,6 +1423,77 @@ fn run_phase_a(
         return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state);
     }
 
+    // ── Step 5b: IntegrationMerge executor-head coverage ────────────────
+    //
+    // The Orchestrator submits the semantic merge result, but the
+    // kernel verifies that the candidate actually contains every
+    // completed Executor artifact for the initiative. This catches the
+    // class of failures where the model submits one executor's SHA as
+    // `head_sha`, causing other approved task commits to remain in the
+    // object database but disappear from the published target ref.
+    if matches!(req.intent_kind, IntentKind::IntegrationMerge) {
+        let completed_executor_heads = match load_completed_executor_heads_for_merge(
+            task.initiative_id.as_str(),
+            ctx.plan_registry.as_ref(),
+            store,
+        ) {
+            Ok(heads) => heads,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"IntegrationMergeCoverageQueryFailed\",\
+                     \"task_id\":\"{}\",\"initiative_id\":\"{}\",\
+                     \"diagnostic\":\"{}\"}}",
+                    req.task_id.as_str(),
+                    task.initiative_id,
+                    e,
+                );
+                return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state);
+            }
+        };
+
+        for executor_head in completed_executor_heads {
+            let included = match rt_handle.block_on(ctx.domain.is_ancestor(
+                executor_head.evaluation_sha.as_str(),
+                &head_sha_raw,
+                &worktree_path,
+            )) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"IntegrationMergeCoverageCheckFailed\",\
+                         \"task_id\":\"{}\",\"initiative_id\":\"{}\",\
+                         \"missing_executor_task_id\":\"{}\",\
+                         \"missing_executor_sha\":\"{}\",\
+                         \"head_sha\":\"{}\",\"diagnostic\":\"{}\"}}",
+                        req.task_id.as_str(),
+                        task.initiative_id,
+                        executor_head.task_id,
+                        executor_head.evaluation_sha,
+                        head_sha_raw,
+                        e,
+                    );
+                    return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state);
+                }
+            };
+            if !included {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"IntegrationMergeMissingCompletedExecutorHead\",\
+                     \"task_id\":\"{}\",\"initiative_id\":\"{}\",\
+                     \"missing_executor_task_id\":\"{}\",\
+                     \"missing_executor_sha\":\"{}\",\
+                     \"head_sha\":\"{}\",\
+                     \"diagnostic\":\"candidate head does not contain a completed executor artifact; orchestrator must merge all completed executor SHAs before integration_merge\"}}",
+                    req.task_id.as_str(),
+                    task.initiative_id,
+                    executor_head.task_id,
+                    executor_head.evaluation_sha,
+                    head_sha_raw,
+                );
+                return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state);
+            }
+        }
+    }
+
     // ── Step 6: Topology check ────────────────────────────────────────────
     // SingleCommit: enforce parent(head) == base (no merge commits in range).
     // IntegrationMerge: topology check is skipped.
@@ -7988,6 +8059,11 @@ struct TaskRow {
     session_id: Option<String>,
 }
 
+struct CompletedExecutorHead {
+    task_id: String,
+    evaluation_sha: String,
+}
+
 fn load_task(task_id: &str, store: &Store) -> Result<TaskRow, ()> {
     let conn = store.lock_sync();
     conn.query_row(
@@ -8009,6 +8085,50 @@ fn load_task(task_id: &str, store: &Store) -> Result<TaskRow, ()> {
         },
     )
     .map_err(|_| ())
+}
+
+fn load_completed_executor_heads_for_merge(
+    initiative_id: &str,
+    plan_registry: &crate::initiatives::plan_registry::PlanRegistry,
+    store: &Store,
+) -> Result<Vec<CompletedExecutorHead>, String> {
+    use crate::initiatives::plan_registry::TaskKey;
+    use raxis_types::SessionAgentType;
+
+    let conn = store.lock_sync();
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT task_id, evaluation_sha
+               FROM {TASKS}
+              WHERE initiative_id = ?1
+                AND state = ?2
+                AND evaluation_sha IS NOT NULL
+              ORDER BY admitted_at ASC, task_id ASC"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![initiative_id, TaskState::Completed.as_sql_str()],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut heads = Vec::new();
+    for row in rows {
+        let (task_id, evaluation_sha) = row.map_err(|e| e.to_string())?;
+        let key = TaskKey::new(initiative_id, task_id.as_str());
+        let is_executor = plan_registry
+            .get(&key)
+            .map(|fields| fields.session_agent_type == SessionAgentType::Executor)
+            .unwrap_or(false);
+        if is_executor {
+            heads.push(CompletedExecutorHead {
+                task_id,
+                evaluation_sha,
+            });
+        }
+    }
+    Ok(heads)
 }
 
 /// Update intent-binding fields on the task row — standalone wrapper.
@@ -8151,6 +8271,14 @@ fn classify_merge_ff_error(err: &raxis_domain_git::MainMergeError) -> (&'static 
                 ("git_failed", s.clone())
             }
         }
+        MainMergeError::NonFastForwardCandidate {
+            target_ref,
+            previous_sha,
+            candidate_sha,
+        } => (
+            "target_ref_non_fast_forward",
+            format!("{candidate_sha} does not descend from live {target_ref} tip {previous_sha}"),
+        ),
         MainMergeError::WorktreeRefreshFailed { path, reason } => (
             "worktree_refresh_failed",
             format!("{}: {reason}", path.display()),

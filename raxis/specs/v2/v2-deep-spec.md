@@ -693,9 +693,13 @@ second merge will encounter a conflict with no agent capable of resolving it.
 **Decision (Step 8):** The Orchestrator performs all merges in its own ephemeral clone.
 It fetches each Executor's bundle, runs `git merge`, resolves conflicts using its inference
 loop, and then submits `IntegrationMerge { commit_sha }` to the Kernel. The Kernel verifies:
-ancestry (the merged SHA must be a descendant of `base_sha`), path containment (all touched
-paths are within the hybrid allowlist), and commit integrity (SHA is present and reachable in
-the Orchestrator's clone). Only then does the Kernel fast-forward the main branch.
+ancestry (the merged SHA must be a descendant of `base_sha`), completed-executor coverage
+(every completed Executor `evaluation_sha` must be an ancestor of the submitted head until
+explicit `merged_task_ids` is wired), path containment (all touched paths are within the
+hybrid allowlist), commit integrity (SHA is present and reachable in the Orchestrator's
+clone), and live target-ref fast-forward safety (the submitted head must descend from the
+current `target_ref` tip immediately before publication). Only then does the Kernel
+fast-forward the target branch.
 
 **Implementation reference (V2 init).** Three pieces collaborate to land an admitted
 `IntegrationMerge` on main:
@@ -718,8 +722,10 @@ the Orchestrator's clone). Only then does the Kernel fast-forward the main branc
   every commit/tree/blob reachable from the Orchestrator's `commit_sha` (skipping
   objects already in the main ODB) and writes them through `Repository::write_blob`
   / `objects::write_buf`, then advances `refs/heads/main` via a `gix-ref`
-  transaction whose `MustExistAndMatch` precondition catches concurrent writers. The
-  whole operation is idempotent: re-running with the same `commit_sha` returns
+  transaction whose `MustExistAndMatch` precondition catches concurrent writers. Before
+  that transaction, the adapter also verifies the candidate descends from the live
+  `target_ref` tip so a stale initiative cannot replace a sibling initiative's already
+  published merge. The whole operation is idempotent: re-running with the same `commit_sha` returns
   `MainAdvance { already_at_target: true }` and performs no work — the recovery
   path of [`integration-merge.md §11.3`](integration-merge.md) relies on this contract.
 

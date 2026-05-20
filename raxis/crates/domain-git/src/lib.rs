@@ -49,10 +49,14 @@
 //!   `[git_push]` upstream push (per `integration-merge.md §14`)
 //!   is a separate concern that flows through the credential
 //!   proxy.
-//! * It does not perform ancestry checks. The kernel's
+//! * It does not perform policy ancestry checks. The kernel's
 //!   `vcs::is_ancestor` already verifies that the merge commit
-//!   descends from `base_sha` BEFORE Phase 2 runs (Check 3 in the
-//!   admission pipeline).
+//!   descends from the initiative `base_sha` BEFORE Phase 2 runs
+//!   (Check 3 in the admission pipeline). This crate still verifies
+//!   the domain-level fast-forward invariant against the live
+//!   `target_ref` tip immediately before the ref transaction, because
+//!   concurrent initiatives can advance `target_ref` after an
+//!   initiative's original `base_sha` was minted.
 //! ## Failure handling
 //! Every public function is retry-safe: a transient I/O error
 //! returns a typed `MainMergeError`. Failures before the ref
@@ -73,6 +77,11 @@
 //!   advances the target ref past an unfetched commit because
 //!   `fetch_into_main` runs first and copies the full commit
 //!   graph before `update_target_ref` is invoked.
+//! * **INV-MERGE-FAST-FORWARD-LIVE-TIP** — before the ref
+//!   transaction, the candidate commit must descend from the live
+//!   `target_ref` tip. A candidate that descends only from an
+//!   initiative's stale `base_sha` is rejected, because publishing it
+//!   would drop work already landed by another initiative.
 //! * **INV-MERGE-WORKTREE-CONSISTENCY** — when the target ref is
 //!   the currently checked-out branch, Phase 2 refreshes the main
 //!   repository's index and working tree to the accepted commit
@@ -147,6 +156,21 @@ pub enum MainMergeError {
     /// read-only.
     #[error("ref update failed: {0}")]
     RefUpdateFailed(String),
+
+    /// The candidate commit does not descend from the live target-ref
+    /// tip observed immediately before the ref update. Publishing it
+    /// would replace already-merged work with an unrelated history.
+    #[error(
+        "non-fast-forward candidate for {target_ref}: candidate {candidate_sha} does not descend from current tip {previous_sha}"
+    )]
+    NonFastForwardCandidate {
+        /// Ref that was about to be advanced.
+        target_ref: String,
+        /// Live tip of the target ref.
+        previous_sha: String,
+        /// Candidate SHA submitted by the Orchestrator.
+        candidate_sha: String,
+    },
 
     /// The target ref advanced but refreshing the checked-out
     /// worktree/index to the new commit failed.
@@ -255,6 +279,10 @@ pub fn commit_merge_to_target_ref(
         return Err(MainMergeError::ShaMissingPostFetch {
             sha: oid.to_string(),
         });
+    }
+
+    if let Some(prev) = previous.as_ref() {
+        ensure_candidate_fast_forwards_target(main_repo_root, prev, &oid, target_ref)?;
     }
 
     // Phase 2b — atomically advance the target ref to oid.
@@ -566,6 +594,47 @@ fn refresh_checked_out_worktree(
         });
     }
     Ok(())
+}
+
+fn ensure_candidate_fast_forwards_target(
+    main_repo_root: &Path,
+    previous: &gix::ObjectId,
+    candidate: &gix::ObjectId,
+    target_ref: &str,
+) -> Result<(), MainMergeError> {
+    if previous == candidate {
+        return Ok(());
+    }
+
+    let previous_sha = previous.to_string();
+    let candidate_sha = candidate.to_string();
+    let status = std::process::Command::new("git")
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            previous_sha.as_str(),
+            candidate_sha.as_str(),
+        ])
+        .current_dir(main_repo_root)
+        .status()
+        .map_err(|e| {
+            MainMergeError::RefUpdateFailed(format!("git merge-base spawn failed: {e}"))
+        })?;
+
+    if status.success() {
+        return Ok(());
+    }
+    if status.code() == Some(1) {
+        return Err(MainMergeError::NonFastForwardCandidate {
+            target_ref: target_ref.to_owned(),
+            previous_sha,
+            candidate_sha,
+        });
+    }
+
+    Err(MainMergeError::RefUpdateFailed(format!(
+        "git merge-base --is-ancestor exited with {status}"
+    )))
 }
 
 /// Read the current SHA `target_ref` points at in the repository
@@ -906,6 +975,66 @@ mod tests {
             "idempotent replay must also heal a stale checked-out worktree"
         );
         let _ = base;
+    }
+
+    #[test]
+    fn commit_merge_to_main_rejects_non_fast_forward_candidate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((main, orch, _base, stale_merge)) = fixture_main_and_orchestrator(tmp.path())
+        else {
+            eprintln!("skipping: git CLI not available");
+            return;
+        };
+
+        let run = |args: &[&str], cwd: &Path| {
+            let s = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_AUTHOR_NAME", "RAXIS Test")
+                .env("GIT_AUTHOR_EMAIL", "test@raxis.local")
+                .env("GIT_COMMITTER_NAME", "RAXIS Test")
+                .env("GIT_COMMITTER_EMAIL", "test@raxis.local")
+                .env("GIT_AUTHOR_DATE", "1700000001 +0000")
+                .env("GIT_COMMITTER_DATE", "1700000001 +0000")
+                .output()
+                .expect("git invocation");
+            assert!(
+                s.status.success(),
+                "git {args:?} failed in {}: {} / {}",
+                cwd.display(),
+                String::from_utf8_lossy(&s.stdout),
+                String::from_utf8_lossy(&s.stderr),
+            );
+            s
+        };
+
+        std::fs::write(main.join("HOTFIX.md"), "already landed\n").unwrap();
+        run(&["add", "HOTFIX.md"], &main);
+        run(&["commit", "-q", "-m", "main: independent hotfix"], &main);
+        let live_tip = String::from_utf8(run(&["rev-parse", "HEAD"], &main).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+
+        let result = commit_merge_to_main(&main, &orch, &stale_merge);
+        match result {
+            Err(MainMergeError::NonFastForwardCandidate {
+                target_ref,
+                previous_sha,
+                candidate_sha,
+            }) => {
+                assert_eq!(target_ref, "refs/heads/main");
+                assert_eq!(previous_sha, live_tip);
+                assert_eq!(candidate_sha, stale_merge);
+            }
+            other => panic!("expected NonFastForwardCandidate, got {other:?}"),
+        }
+
+        let head = String::from_utf8(run(&["rev-parse", "HEAD"], &main).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert_eq!(head, live_tip, "target ref must remain untouched");
     }
 
     #[test]

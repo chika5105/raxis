@@ -1208,6 +1208,9 @@ pub enum AuditEventKind {
     ///   * `"target_ref_advanced_concurrently"` — someone else moved
     ///     `target_ref` during the merge and the fast-forward is no
     ///     longer trivial.
+    ///   * `"target_ref_non_fast_forward"` — the candidate does not
+    ///     descend from the live target-ref tip and would drop already
+    ///     published work.
     ///   * `"unopenable_main_repo"` — the central main repo is
     ///     missing or corrupt.
     ///   * `"missing_commit"` — the merge commit was not visible to

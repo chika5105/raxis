@@ -1523,8 +1523,9 @@ impl Tool for RetrySubtaskTool {
 
 /// Declaration-only `integration_merge` — orchestrator's terminal
 /// "all sub-tasks done — merge them" signal. Args: `base_sha`,
-/// `head_sha`. The kernel performs the canonical fast-forward
-/// against `target_ref` (from the KSB).
+/// `head_sha`. `head_sha` is the final integrated HEAD containing
+/// every completed executor artifact. The kernel performs the
+/// canonical fast-forward against `target_ref` (from the KSB).
 struct IntegrationMergeTool;
 
 #[async_trait::async_trait]
@@ -1533,8 +1534,9 @@ impl Tool for IntegrationMergeTool {
         "integration_merge"
     }
     fn description(&self) -> &'static str {
-        "TERMINAL — fast-forward `target_ref` from full-hex `base_sha` to \
-         `head_sha` after all executors/reviewers are complete and accepted. \
+        "TERMINAL — publish final integrated `head_sha` to `target_ref` after \
+         all executors/reviewers are complete and accepted. `head_sha` must \
+         contain every completed executor SHA, not just one executor row. \
          The kernel rejects unfinished reviewer panels \
          (`aggregate=AwaitingReviewerVerdicts`) and rejected panels \
          (`aggregate=AtLeastOneRejected`)."
