@@ -96,9 +96,9 @@ pub const PLANNER_MAX_TOKENS_TOTAL_ENV: &str = "RAXIS_PLANNER_MAX_TOKENS_TOTAL";
 
 /// Per-call ceiling for the `sleep`
 /// planner tool. Kernel stamps from
-/// `policy.budget.sleep_caps.max_seconds_per_call`. Absent ⇒ tool
-/// is registered as `SleepTool::disabled()` and refuses every
-/// invocation with `FAIL_SLEEP_DISABLED`.
+/// `policy.budget.sleep_caps.max_seconds_per_call`. Absent ⇒ canonical
+/// agents omit `sleep` from the advertised tool manifest; stale/custom
+/// callers still fail closed with `FAIL_SLEEP_DISABLED`.
 pub const PLANNER_MAX_SLEEP_PER_CALL_ENV: &str = "RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL";
 
 /// Cumulative ceiling across the

@@ -43,7 +43,7 @@
 //! ## Caching + audit
 //!
 //! The probe is cached per-process via
-//! [`crate::vm_capabilities::cached_capabilities`], so repeat
+//! [`crate::vm_capabilities::cached_capabilities_for_workdir`], so repeat
 //! invocations are O(1). The dispatch loop's existing tool-
 //! invocation audit chain records every call (`ToolAuditEvent`
 //! with the canonical query envelope); we deliberately do NOT
@@ -54,7 +54,7 @@
 
 use crate::tools::{Tool, ToolContext, ToolError, ToolOutput};
 use crate::vm_capabilities::{
-    cached_capabilities, project_manifest, CapabilityCategory, CapabilityFilter,
+    cached_capabilities_for_workdir, project_manifest, CapabilityCategory, CapabilityFilter,
 };
 
 /// The `vm_capabilities` LLM-callable tool. Returns the
@@ -76,7 +76,7 @@ impl Tool for VmCapabilitiesTool {
 
     fn description(&self) -> &'static str {
         "Return deterministic JSON for installed binaries/runtimes/packages, \
-         credential-proxy env names, and workdir state. Use for focused \
+         credential-proxy env names, and workspace state. Use for focused \
          capability checks; prefer baked packages, but install normally \
          when the task requires it."
     }
@@ -125,15 +125,15 @@ impl Tool for VmCapabilitiesTool {
     async fn execute(
         &self,
         input: &serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let categories = parse_categories(input)?;
         let filter = parse_filter(input)?;
 
-        // The probe cache is process-wide (cached_capabilities
-        // memoizes on first call), so this is O(1) on every
-        // invocation after the first.
-        let base = cached_capabilities();
+        // The probe cache is process-wide and initialized against the
+        // same workspace root as the rest of the tools, so this is O(1)
+        // after the first call and does not drift to process CWD `/`.
+        let base = cached_capabilities_for_workdir(&ctx.workspace_root);
         let projected = project_manifest(base.as_ref(), &categories, &filter);
 
         let json = serde_json::to_string_pretty(&projected).map_err(|e| ToolError::Internal {
@@ -340,12 +340,12 @@ mod tests {
             .unwrap();
         assert_eq!(out.is_error, None);
         let parsed: serde_json::Value = serde_json::from_str(&out.content).unwrap();
-        // Filesystem is requested → `workdir` must be populated.
-        let workdir = parsed
-            .pointer("/filesystem/workdir")
+        // Filesystem is requested → `workspace_path` must be populated.
+        let workspace = parsed
+            .pointer("/filesystem/workspace_path")
             .and_then(|v| v.as_str())
-            .expect("filesystem.workdir must be present");
-        assert!(!workdir.is_empty(), "workdir must be a non-empty path");
+            .expect("filesystem.workspace_path must be present");
+        assert!(!workspace.is_empty(), "workspace must be a non-empty path");
         // Python is NOT requested → must be `null`.
         match parsed.get("python") {
             None | Some(serde_json::Value::Null) => {}
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(out.is_error, None);
         let parsed: serde_json::Value = serde_json::from_str(&out.content).unwrap();
         // Filesystem MUST be present (every host has a cwd).
-        assert!(parsed.pointer("/filesystem/workdir").is_some());
+        assert!(parsed.pointer("/filesystem/workspace_path").is_some());
         // Binaries section present (may or may not be empty
         // depending on host PATH).
         assert!(parsed.get("binaries").is_some());

@@ -202,7 +202,7 @@ cosmetic:
   [`live-e2e/examples/README.md`](../../live-e2e/examples/README.md)).
 
 The formal invariant is `INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01`
-in [`specs/invariants.md §11.10`](../invariants.md).
+in [`specs/invariants.md`](../invariants.md).
 
 The shape of this discipline is identical to §2.5 above:
 operators MAY commit a placeholder-shape Anthropic credential

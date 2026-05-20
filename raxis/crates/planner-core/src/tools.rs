@@ -60,6 +60,17 @@ pub struct ToolOutput {
     /// `None` is the success case.
     #[serde(default)]
     pub is_error: Option<bool>,
+    /// Optional replacement input for a successful terminal tool.
+    ///
+    /// Most tools ignore this. Terminal tools use it when the
+    /// local tool has mechanically repaired or normalized the
+    /// model's submitted arguments before the driver converts the
+    /// terminal tool into a kernel intent. This keeps the model-facing
+    /// tool result auditable while ensuring the kernel receives the
+    /// verified input, not the stale speculative input the model first
+    /// typed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_override: Option<serde_json::Value>,
 }
 
 impl ToolOutput {
@@ -68,6 +79,16 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: None,
+            input_override: None,
+        }
+    }
+    /// Construct a success output that replaces the terminal-tool
+    /// input the driver will submit to the kernel.
+    pub fn ok_with_input(content: impl Into<String>, input_override: serde_json::Value) -> Self {
+        Self {
+            content: content.into(),
+            is_error: None,
+            input_override: Some(input_override),
         }
     }
     /// Construct a structured-error output.
@@ -75,6 +96,7 @@ impl ToolOutput {
         Self {
             content: message.into(),
             is_error: Some(true),
+            input_override: None,
         }
     }
 }
@@ -172,6 +194,29 @@ pub struct ToolContext {
     /// surface a structured-error output rather than blocking the
     /// dispatch loop indefinitely.
     pub deadline: Option<Duration>,
+    /// Orchestrator-only final merge checklist copied from the KSB.
+    /// Terminal `integration_merge` consults this so it can verify
+    /// and, when conflict-free, auto-prepare the exact integrated
+    /// head the kernel requires.
+    pub integration_merge: Option<IntegrationMergeToolContext>,
+}
+
+/// Orchestrator-visible final merge context for local tool validation.
+#[derive(Debug, Clone, Default)]
+pub struct IntegrationMergeToolContext {
+    /// KSB final-merge base SHA.
+    pub base_sha: String,
+    /// Required executor commits the integrated HEAD must contain.
+    pub required_executor_shas: Vec<IntegrationMergeRequiredSha>,
+}
+
+/// One required executor commit for final integration.
+#[derive(Debug, Clone)]
+pub struct IntegrationMergeRequiredSha {
+    /// Task id that produced the executor commit.
+    pub task_id: String,
+    /// Full 40-char executor commit SHA.
+    pub sha: String,
 }
 
 impl ToolContext {
@@ -181,7 +226,17 @@ impl ToolContext {
         Self {
             workspace_root: workspace_root.into(),
             deadline: None,
+            integration_merge: None,
         }
+    }
+
+    /// Attach orchestrator final-merge state from the KSB.
+    pub fn with_integration_merge_context(
+        mut self,
+        integration_merge: Option<IntegrationMergeToolContext>,
+    ) -> Self {
+        self.integration_merge = integration_merge;
+        self
     }
 }
 
@@ -552,16 +607,16 @@ impl Tool for BashTool {
             Ok(ToolOutput {
                 content: body,
                 is_error: Some(true),
+                input_override: None,
             })
         }
     }
 }
 
-/// `grep_search` — `grep -rn` over the workspace.
-/// Schema: `{ pattern: string, path: string? }`. Uses `grep -rn` so
-/// the binary is universal (every supported VM image ships `grep`);
-/// future versions will switch to `ripgrep` when the canonical
-/// image manifest pins it.
+/// `grep_search` — `rg -n` / `grep -rn` over the workspace.
+/// Schema: `{ pattern: string, path: string? }`. Prefer `rg` because
+/// the canonical scratch reviewer image ships only ripgrep; fall back
+/// to `grep` for developer shells and older images.
 pub struct GrepSearchTool;
 
 #[async_trait::async_trait]
@@ -570,8 +625,9 @@ impl Tool for GrepSearchTool {
         "grep_search"
     }
     fn description(&self) -> &'static str {
-        "Search with `grep -rn <pattern> [path]` under the workspace. \
-         Returns `relpath:line:content`, capped at 64 KiB."
+        "Search with ripgrep (`rg`) under the workspace in canonical images \
+         (fallback to grep in older/dev shells). Returns `relpath:line:content`, \
+         capped at 64 KiB."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -609,17 +665,34 @@ impl Tool for GrepSearchTool {
             },
             other => other,
         })?;
-        let out = match tokio::process::Command::new("grep")
-            .arg("-rn")
+        let rel_arg = if path.is_empty() { "." } else { path };
+        let out = match tokio::process::Command::new("rg")
+            .arg("-n")
+            .arg("--color")
+            .arg("never")
+            .arg("--no-heading")
             .arg(pattern)
-            .arg(&resolved)
+            .arg(rel_arg)
+            .current_dir(&ctx.workspace_root)
             .output()
             .await
         {
+            Ok(o) => Ok(o),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tokio::process::Command::new("grep")
+                    .arg("-rn")
+                    .arg(pattern)
+                    .arg(&resolved)
+                    .output()
+                    .await
+            }
+            Err(e) => Err(e),
+        };
+        let out = match out {
             Ok(o) => o,
             Err(e) => return Ok(ToolOutput::err(format!("grep_search: spawn failed: {e}"))),
         };
-        // grep exit code 1 means "no match" — treat as success with
+        // rg/grep exit code 1 means "no match" — treat as success with
         // an empty body so the model doesn't think the tool errored.
         const CAP: usize = 64 * 1024;
         let body = if out.stdout.len() > CAP {
@@ -786,8 +859,9 @@ impl Tool for GitCommitTool {
 // token-budget-preserving wait. Lets an
 // agent block on an external process (CI, deploy rollout) without
 // burning model turns on a polling loop. Available to executor and
-// orchestrator only — NOT to the reviewer (the Pure-Static Reviewer
-// has no external process to wait for; INV-PLANNER-HARNESS-02).
+// orchestrator only when policy declares `[budget.sleep_caps]` —
+// NOT to the reviewer (the Pure-Static Reviewer has no external
+// process to wait for; INV-PLANNER-HARNESS-02).
 // ---------------------------------------------------------------------------
 
 /// Hard upper bound on `seconds` regardless of policy. The §3.1
@@ -807,7 +881,8 @@ pub const SLEEP_TOOL_HARD_MAX_SECONDS: u32 = 600;
 /// * `seconds > SLEEP_TOOL_HARD_MAX_SECONDS` → `FAIL_SLEEP_HARD_MAX_EXCEEDED`.
 /// * `cumulative + seconds > max_cumulative` → `FAIL_SLEEP_BUDGET_EXCEEDED`.
 /// * `max_per_call == 0` → tool disabled, every call returns
-///   `FAIL_SLEEP_DISABLED`.
+///   `FAIL_SLEEP_DISABLED` (kept for direct tests / defense in
+///   depth, but not advertised in the default registry).
 ///   All errors are STRUCTURED (returned as `ToolOutput::err`) so the
 ///   model can recover; `Tool::execute` itself returns `Ok` in every
 ///   case (matches the dispatch loop's error contract — see `BashTool`).
@@ -819,9 +894,8 @@ pub struct SleepTool {
 
 impl SleepTool {
     /// Construct a new SleepTool with the given per-call and
-    /// cumulative ceilings (both in seconds). Use
-    /// [`SleepTool::disabled`] when the policy did not declare
-    /// `[budget.sleep_caps]`.
+    /// cumulative ceilings (both in seconds). Registries omit the
+    /// tool entirely when policy did not declare `[budget.sleep_caps]`.
     pub fn new(max_per_call_seconds: u32, max_cumulative_seconds: u32) -> Self {
         Self {
             max_per_call_seconds,
@@ -1521,6 +1595,222 @@ impl Tool for RetrySubtaskTool {
     }
 }
 
+/// Non-terminal helper for the orchestrator's final merge phase.
+/// It resets the session worktree to `base_sha`, merges every completed
+/// executor SHA in the supplied order, verifies coverage, and returns
+/// the final integrated `head_sha` the model should pass to
+/// `integration_merge`.
+struct PrepareIntegrationMergeTool;
+
+#[async_trait::async_trait]
+impl Tool for PrepareIntegrationMergeTool {
+    fn name(&self) -> &'static str {
+        "prepare_integration_merge"
+    }
+    fn description(&self) -> &'static str {
+        "NONTERMINAL — prepare the orchestrator worktree for final publish. \
+         Input the KSB `base_sha` and every completed executor row `sha`; \
+         returns the integrated `head_sha` to pass to `integration_merge`. \
+         Rejects malformed SHAs and verifies each executor SHA is an ancestor \
+         of the final HEAD."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type":     "object",
+            "required": ["base_sha", "executor_shas"],
+            "properties": {
+                "base_sha": {
+                    "type":        "string",
+                    "minLength":   40,
+                    "maxLength":   40,
+                    "pattern":     "^[0-9a-f]{40}$",
+                    "description": "40-char lowercase-hex KSB base SHA."
+                },
+                "executor_shas": {
+                    "type":        "array",
+                    "minItems":    1,
+                    "uniqueItems": true,
+                    "description": "Every completed executor row sha= from the KSB.",
+                    "items": {
+                        "type":      "string",
+                        "minLength": 40,
+                        "maxLength": 40,
+                        "pattern":   "^[0-9a-f]{40}$"
+                    }
+                }
+            }
+        })
+    }
+    async fn execute(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let base_sha = input
+            .get("base_sha")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidInput {
+                tool: "prepare_integration_merge".to_owned(),
+                reason: "missing or non-string `base_sha`".to_owned(),
+            })?;
+        if !is_lower_hex_40(base_sha) {
+            return Ok(ToolOutput::err(
+                "prepare_integration_merge: `base_sha` must be 40 lowercase hex chars",
+            ));
+        }
+
+        let executor_shas_json = input
+            .get("executor_shas")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| ToolError::InvalidInput {
+                tool: "prepare_integration_merge".to_owned(),
+                reason: "missing or non-array `executor_shas`".to_owned(),
+            })?;
+        if executor_shas_json.is_empty() {
+            return Ok(ToolOutput::err(
+                "prepare_integration_merge: `executor_shas` must contain at least one SHA",
+            ));
+        }
+        let mut executor_shas = Vec::with_capacity(executor_shas_json.len());
+        for value in executor_shas_json {
+            let Some(sha) = value.as_str() else {
+                return Ok(ToolOutput::err(
+                    "prepare_integration_merge: every `executor_shas` item must be a string",
+                ));
+            };
+            if !is_lower_hex_40(sha) {
+                return Ok(ToolOutput::err(format!(
+                    "prepare_integration_merge: malformed executor SHA {sha:?}"
+                )));
+            }
+            if !executor_shas.iter().any(|s: &String| s == sha) {
+                executor_shas.push(sha.to_owned());
+            }
+        }
+
+        match prepare_integration_merge(ctx, base_sha, &executor_shas).await {
+            Ok(prepared) => Ok(ToolOutput::ok(format!(
+                "prepared integration merge\nbase_sha: {base_sha}\nhead_sha: {}\nexecutor_shas:\n- {}",
+                prepared.head_sha,
+                prepared.merged.join("\n- ")
+            ))),
+            Err(e) => Ok(ToolOutput::err(format!("prepare_integration_merge: {e}"))),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedIntegrationMerge {
+    head_sha: String,
+    merged: Vec<String>,
+}
+
+async fn prepare_integration_merge(
+    ctx: &ToolContext,
+    base_sha: &str,
+    executor_shas: &[String],
+) -> Result<PreparedIntegrationMerge, String> {
+    if let Err(e) = run_git_for_merge(ctx, &["rev-parse", "--is-inside-work-tree"]).await {
+        return Err(format!("workspace is not a git repo: {e}"));
+    }
+    if let Err(e) = run_git_for_merge(ctx, &["reset", "--hard", base_sha]).await {
+        return Err(format!("git reset to base failed: {e}"));
+    }
+
+    let mut merged = Vec::new();
+    for sha in executor_shas {
+        match run_git_for_merge(ctx, &["merge-base", "--is-ancestor", sha, "HEAD"]).await {
+            Ok(_) => {
+                merged.push(format!("{sha} (already ancestor)"));
+                continue;
+            }
+            Err(_) => {}
+        }
+        if let Err(e) = run_git_for_merge(
+            ctx,
+            &[
+                "-c",
+                "user.name=RAXIS Orchestrator",
+                "-c",
+                "user.email=raxis-orchestrator@localhost",
+                "merge",
+                "--no-ff",
+                "--no-edit",
+                sha,
+            ],
+        )
+        .await
+        {
+            return Err(format!("git merge {sha} failed: {e}"));
+        }
+        merged.push(sha.to_owned());
+    }
+
+    let head = run_git_for_merge(ctx, &["rev-parse", "HEAD"])
+        .await
+        .map_err(|e| format!("git rev-parse HEAD failed: {e}"))?;
+    let head_sha = head.trim();
+    if !is_lower_hex_40(head_sha) {
+        return Err(format!("git returned malformed HEAD {head_sha:?}"));
+    }
+    for sha in executor_shas {
+        if let Err(e) =
+            run_git_for_merge(ctx, &["merge-base", "--is-ancestor", sha, head_sha]).await
+        {
+            return Err(format!(
+                "final HEAD {head_sha} does not contain executor SHA {sha}: {e}"
+            ));
+        }
+    }
+
+    Ok(PreparedIntegrationMerge {
+        head_sha: head_sha.to_owned(),
+        merged,
+    })
+}
+
+fn is_lower_hex_40(s: &str) -> bool {
+    s.len() == 40
+        && s.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+async fn run_git_for_merge(ctx: &ToolContext, args: &[&str]) -> Result<String, String> {
+    let child = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(&ctx.workspace_root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .spawn();
+    let child = match child {
+        Ok(c) => c,
+        Err(e) => return Err(format!("git spawn failed: {e}")),
+    };
+    let timeout = ctx.deadline.unwrap_or(Duration::from_secs(120));
+    let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return Err(format!("git wait failed: {e}")),
+        Err(_) => return Err(format!("git command timed out after {timeout:?}")),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if out.status.success() {
+        Ok(stdout)
+    } else {
+        Err(format!(
+            "git {:?} exited {}\nstdout:\n{}\nstderr:\n{}",
+            args,
+            out.status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "<signalled>".to_owned()),
+            stdout,
+            stderr
+        ))
+    }
+}
+
 /// Declaration-only `integration_merge` — orchestrator's terminal
 /// "all sub-tasks done — merge them" signal. Args: `base_sha`,
 /// `head_sha`. `head_sha` is the final integrated HEAD containing
@@ -1565,11 +1855,135 @@ impl Tool for IntegrationMergeTool {
     }
     async fn execute(
         &self,
-        _input: &serde_json::Value,
-        _ctx: &ToolContext,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        Ok(ToolOutput::ok("integration_merge"))
+        let input_base = input.get("base_sha").and_then(|v| v.as_str());
+        let input_head = input.get("head_sha").and_then(|v| v.as_str());
+        let merge_ctx = ctx.integration_merge.as_ref();
+
+        let Some(merge_ctx) = merge_ctx else {
+            let Some(base_sha) = input_base.filter(|s| is_lower_hex_40(s)) else {
+                return Ok(ToolOutput::err(
+                    "integration_merge: `base_sha` must be 40 lowercase hex chars",
+                ));
+            };
+            let Some(head_sha) = input_head.filter(|s| is_lower_hex_40(s)) else {
+                return Ok(ToolOutput::err(
+                    "integration_merge: `head_sha` must be 40 lowercase hex chars",
+                ));
+            };
+            return Ok(ToolOutput::ok_with_input(
+                "integration_merge verified input shape",
+                serde_json::json!({ "base_sha": base_sha, "head_sha": head_sha }),
+            ));
+        };
+
+        if merge_ctx.base_sha.is_empty() || !is_lower_hex_40(&merge_ctx.base_sha) {
+            return Ok(ToolOutput::err(
+                "integration_merge: KSB capabilities.integration_merge.base_sha is not set; \
+                 do not call integration_merge until integration_merge.ready=true",
+            ));
+        }
+        if let Some(base_sha) = input_base {
+            if is_lower_hex_40(base_sha) && base_sha != merge_ctx.base_sha {
+                return Ok(ToolOutput::err(format!(
+                    "integration_merge: base_sha {base_sha} does not match KSB \
+                     capabilities.integration_merge.base_sha {}; use the KSB base_sha",
+                    merge_ctx.base_sha
+                )));
+            }
+        }
+
+        let mut required = Vec::new();
+        for item in &merge_ctx.required_executor_shas {
+            if !is_lower_hex_40(&item.sha) {
+                return Ok(ToolOutput::err(format!(
+                    "integration_merge: KSB required executor SHA for task {} is malformed: {:?}",
+                    item.task_id, item.sha
+                )));
+            }
+            if !required.iter().any(|sha: &String| sha == &item.sha) {
+                required.push(item.sha.clone());
+            }
+        }
+        if required.is_empty() {
+            return Ok(ToolOutput::err(
+                "integration_merge: KSB required_executor_shas is empty; do not call \
+                 integration_merge until the KSB marks integration_merge.ready=true",
+            ));
+        }
+
+        if let Some(head_sha) = input_head.filter(|s| is_lower_hex_40(s)) {
+            if required.len() == 1 && required[0] == head_sha {
+                return Ok(ToolOutput::ok_with_input(
+                    format!(
+                        "integration_merge verified\nbase_sha: {}\nhead_sha: {head_sha}\ncontains_required_executor_shas: 1",
+                        merge_ctx.base_sha,
+                    ),
+                    serde_json::json!({
+                        "base_sha": merge_ctx.base_sha,
+                        "head_sha": head_sha,
+                    }),
+                ));
+            }
+            let missing =
+                missing_required_executor_shas(ctx, head_sha, &merge_ctx.required_executor_shas)
+                    .await;
+            if missing.is_empty() {
+                return Ok(ToolOutput::ok_with_input(
+                    format!(
+                        "integration_merge verified\nbase_sha: {}\nhead_sha: {head_sha}\ncontains_required_executor_shas: {}",
+                        merge_ctx.base_sha,
+                        required.len()
+                    ),
+                    serde_json::json!({
+                        "base_sha": merge_ctx.base_sha,
+                        "head_sha": head_sha,
+                    }),
+                ));
+            }
+        }
+
+        match prepare_integration_merge(ctx, &merge_ctx.base_sha, &required).await {
+            Ok(prepared) => Ok(ToolOutput::ok_with_input(
+                format!(
+                    "integration_merge auto-prepared missing executor commits before submit\nbase_sha: {}\nhead_sha: {}\nexecutor_shas:\n- {}",
+                    merge_ctx.base_sha,
+                    prepared.head_sha,
+                    prepared.merged.join("\n- ")
+                ),
+                serde_json::json!({
+                    "base_sha": merge_ctx.base_sha,
+                    "head_sha": prepared.head_sha,
+                }),
+            )),
+            Err(e) => {
+                let supplied = input_head.unwrap_or("<missing>");
+                Ok(ToolOutput::err(format!(
+                    "integration_merge blocked locally: candidate head_sha {supplied} does not contain every completed executor SHA, and automatic preparation failed: {e}\n\
+                     Run `prepare_integration_merge` with base_sha={} and executor_shas=[{}]. If it reports conflicts, resolve only those conflicts, commit the resolution on top, verify every required executor SHA is an ancestor of HEAD, then call integration_merge again with the final HEAD.",
+                    merge_ctx.base_sha,
+                    required.join(", ")
+                )))
+            }
+        }
     }
+}
+
+async fn missing_required_executor_shas(
+    ctx: &ToolContext,
+    head_sha: &str,
+    required: &[IntegrationMergeRequiredSha],
+) -> Vec<IntegrationMergeRequiredSha> {
+    let mut missing = Vec::new();
+    for item in required {
+        match run_git_for_merge(ctx, &["merge-base", "--is-ancestor", &item.sha, head_sha]).await {
+            Ok(_) => {}
+            Err(_) => missing.push(item.clone()),
+        }
+    }
+    missing
 }
 
 // ---------------------------------------------------------------------------
@@ -1578,9 +1992,12 @@ impl Tool for IntegrationMergeTool {
 
 /// **Executor registry.** Includes all tools the executor needs:
 /// `read_file`, `edit_file`, `bash`, `grep_search`, `git_commit`,
-/// `sleep` (V2 §3.1), and the three terminal-tool declarations
-/// (`task_complete`, `report_failure`, `single_commit`) so the
-/// model knows it can call them.
+/// and the three terminal-tool declarations (`task_complete`,
+/// `report_failure`, `single_commit`) so the model knows it can
+/// call them. `sleep` is only registered by
+/// [`build_executor_registry_with_sleep`] when policy declares a
+/// real sleep budget; unavailable tools should not be advertised to
+/// the model.
 pub fn build_executor_registry() -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
@@ -1588,10 +2005,6 @@ pub fn build_executor_registry() -> ToolRegistry {
     r.register(Arc::new(BashTool));
     r.register(Arc::new(GrepSearchTool));
     r.register(Arc::new(GitCommitTool));
-    // V2 §3.1 — disabled by default; the planner-binary main.rs
-    // overrides via [`build_executor_registry_with_sleep`] when the
-    // operator policy declares `[budget.sleep_caps]`.
-    r.register(Arc::new(SleepTool::disabled()));
     // V2 `INV-EXEC-DISCOVERY-01` — capability discovery. Available
     // unconditionally; cached per-process. The system-prompt
     // capability-hint block (`render_capability_hint`) covers the
@@ -1627,22 +2040,23 @@ pub fn build_reviewer_registry() -> ToolRegistry {
     r
 }
 
-/// **Orchestrator registry.** Read-only + Sleep: `read_file`,
-/// `grep_search`, `sleep` (V2 §3.1 — orchestrators wait on
-/// long-running sub-task lifecycle events). The orchestrator does
-/// not edit files — its authority is over the DAG (sub-task
-/// activation / merge), not over commit content. Includes the
-/// three orchestrator terminal-tool declarations so the model can
-/// drive the DAG (`activate_subtask`, `retry_subtask`,
-/// `integration_merge`).
+/// **Orchestrator registry.** DAG controls plus final integration
+/// tools. The orchestrator can inspect with `read_file` /
+/// `grep_search`, prepare the merge with
+/// `prepare_integration_merge`, and use `bash` / `edit_file` /
+/// `git_commit` only to resolve integration conflicts in its own
+/// integration worktree. It cannot bypass kernel publication checks:
+/// `integration_merge` still validates path scope and requires the
+/// final head to contain every completed executor artifact. `sleep`
+/// is only registered by [`build_orchestrator_registry_with_sleep`]
+/// when policy declares a real sleep budget.
 pub fn build_orchestrator_registry() -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
+    r.register(Arc::new(EditFileTool));
+    r.register(Arc::new(BashTool));
     r.register(Arc::new(GrepSearchTool));
-    // V2 §3.1 — disabled by default; the planner-binary main.rs
-    // overrides via [`build_orchestrator_registry_with_sleep`] when
-    // the operator policy declares `[budget.sleep_caps]`.
-    r.register(Arc::new(SleepTool::disabled()));
+    r.register(Arc::new(GitCommitTool));
     // V2 `INV-EXEC-DISCOVERY-01` — capability discovery. The
     // orchestrator rarely needs it (its toolchain is the
     // canonical orchestrator-core image) but registering keeps
@@ -1650,6 +2064,10 @@ pub fn build_orchestrator_registry() -> ToolRegistry {
     // simplifies reasoning about "which manifest fields can the
     // model query in which role" — answer: always all of them.
     r.register(Arc::new(VmCapabilitiesTool));
+    // Non-terminal merge helper. Keeps the sensitive orchestrator role
+    // on a narrow, typed path instead of making the LLM infer shell/git
+    // choreography from the DAG.
+    r.register(Arc::new(PrepareIntegrationMergeTool));
     // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
     r.register(Arc::new(ActivateSubtaskTool));
     // V3 iter70 — batch-admit primitive.
@@ -1698,13 +2116,17 @@ pub fn build_orchestrator_registry_with_sleep(
 ) -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
+    r.register(Arc::new(EditFileTool));
+    r.register(Arc::new(BashTool));
     r.register(Arc::new(GrepSearchTool));
+    r.register(Arc::new(GitCommitTool));
     r.register(Arc::new(SleepTool::new(
         max_per_call_seconds,
         max_cumulative_seconds,
     )));
     // V2 `INV-EXEC-DISCOVERY-01` — capability discovery.
     r.register(Arc::new(VmCapabilitiesTool));
+    r.register(Arc::new(PrepareIntegrationMergeTool));
     // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
     r.register(Arc::new(ActivateSubtaskTool));
     // V3 iter70 — batch-admit primitive.
@@ -1768,11 +2190,10 @@ mod tests {
         assert!(r.get("git_commit").is_some());
         assert!(r.get("edit_file").is_some());
         assert!(r.get("bash").is_some());
-        // V2 §3.1 — Sleep is registered (disabled by default, opt-in
-        // via `[budget.sleep_caps]`).
         assert!(
-            r.get("sleep").is_some(),
-            "executor registry MUST include the sleep tool (V2 §3.1)"
+            r.get("sleep").is_none(),
+            "executor registry MUST NOT advertise sleep unless policy \
+             declares a sleep budget"
         );
     }
 
@@ -1958,15 +2379,22 @@ mod tests {
     }
 
     #[test]
-    fn registry_role_asymmetry_orchestrator_excludes_write_tools() {
+    fn orchestrator_registry_includes_integration_conflict_tools() {
         let r = build_orchestrator_registry();
         assert!(
-            r.get("git_commit").is_none(),
-            "orchestrator registry MUST NOT include git_commit"
+            r.get("git_commit").is_some(),
+            "orchestrator registry MUST include git_commit so it can finish \
+             merge-conflict resolution commits"
         );
         assert!(
-            r.get("edit_file").is_none(),
-            "orchestrator registry MUST NOT include edit_file"
+            r.get("edit_file").is_some(),
+            "orchestrator registry MUST include edit_file so it can resolve \
+             integration conflicts"
+        );
+        assert!(
+            r.get("bash").is_some(),
+            "orchestrator registry MUST include bash for `git status`, \
+             `git diff`, and focused conflict diagnostics"
         );
     }
 
@@ -1993,6 +2421,11 @@ mod tests {
             r.get("integration_merge").is_some(),
             "orchestrator registry MUST declare `integration_merge`"
         );
+        assert!(
+            r.get("prepare_integration_merge").is_some(),
+            "orchestrator registry MUST include `prepare_integration_merge` \
+             so the LLM does not infer final merge choreography"
+        );
         // V3 iter70 — batch-admit primitive.
         assert!(
             r.get("batch_activate_subtasks").is_some(),
@@ -2009,6 +2442,7 @@ mod tests {
         assert!(r.get("activate_subtask").is_some());
         assert!(r.get("retry_subtask").is_some());
         assert!(r.get("integration_merge").is_some());
+        assert!(r.get("prepare_integration_merge").is_some());
         // V3 iter70 — batch-admit primitive.
         assert!(r.get("batch_activate_subtasks").is_some());
     }
@@ -2047,6 +2481,30 @@ mod tests {
         assert!(
             r.get("submit_review").is_some(),
             "reviewer registry MUST declare `submit_review`"
+        );
+    }
+
+    #[test]
+    fn sleep_only_appears_when_policy_declares_budget() {
+        assert!(
+            build_executor_registry().get("sleep").is_none(),
+            "default executor registry must not expose a disabled sleep tool"
+        );
+        assert!(
+            build_orchestrator_registry().get("sleep").is_none(),
+            "default orchestrator registry must not expose a disabled sleep tool"
+        );
+        assert!(
+            build_executor_registry_with_sleep(60, 300)
+                .get("sleep")
+                .is_some(),
+            "budgeted executor registry must expose sleep"
+        );
+        assert!(
+            build_orchestrator_registry_with_sleep(60, 300)
+                .get("sleep")
+                .is_some(),
+            "budgeted orchestrator registry must expose sleep"
         );
     }
 
@@ -2252,6 +2710,151 @@ mod tests {
             .unwrap();
         assert_eq!(out.is_error, None);
         assert!(out.content.contains("<no matches for"));
+    }
+
+    #[tokio::test]
+    async fn prepare_integration_merge_rejects_malformed_sha_without_git() {
+        let ws = fixture_workspace();
+        let ctx = ToolContext::for_workspace(ws.path());
+        let out = PrepareIntegrationMergeTool
+            .execute(
+                &serde_json::json!({
+                    "base_sha": "not-a-sha",
+                    "executor_shas": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.is_error, Some(true));
+        assert!(
+            out.content.contains("base_sha"),
+            "expected base_sha validation failure, got: {}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_merge_single_executor_head_does_not_require_git_probe() {
+        let ws = tempfile::tempdir().unwrap();
+        let base = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
+        let head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned();
+        let ctx = ToolContext::for_workspace(ws.path()).with_integration_merge_context(Some(
+            IntegrationMergeToolContext {
+                base_sha: base.clone(),
+                required_executor_shas: vec![IntegrationMergeRequiredSha {
+                    task_id: "sibling-materialize-records".to_owned(),
+                    sha: head.clone(),
+                }],
+            },
+        ));
+
+        let out = IntegrationMergeTool
+            .execute(
+                &serde_json::json!({
+                    "base_sha": base,
+                    "head_sha": head,
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.is_error, None, "tool output: {}", out.content);
+        assert!(
+            out.content.contains("contains_required_executor_shas: 1"),
+            "expected local single-SHA verification, got: {}",
+            out.content
+        );
+    }
+
+    fn run_git_sync(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} spawn failed: {e}"));
+        if !out.status.success() {
+            panic!(
+                "git {args:?} failed with {}\nstdout:\n{}\nstderr:\n{}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    fn fixture_integration_repo() -> (TempDir, String, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        run_git_sync(dir.path(), &["init"]);
+        run_git_sync(dir.path(), &["config", "user.name", "RAXIS Test"]);
+        run_git_sync(
+            dir.path(),
+            &["config", "user.email", "raxis-test@localhost"],
+        );
+
+        std::fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+        run_git_sync(dir.path(), &["add", "base.txt"]);
+        run_git_sync(dir.path(), &["commit", "-m", "base"]);
+        let base = run_git_sync(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git_sync(dir.path(), &["checkout", "-b", "executor-a"]);
+        std::fs::write(dir.path().join("a.txt"), "executor a\n").unwrap();
+        run_git_sync(dir.path(), &["add", "a.txt"]);
+        run_git_sync(dir.path(), &["commit", "-m", "executor a"]);
+        let sha_a = run_git_sync(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git_sync(dir.path(), &["checkout", "-B", "executor-b", &base]);
+        std::fs::write(dir.path().join("b.txt"), "executor b\n").unwrap();
+        run_git_sync(dir.path(), &["add", "b.txt"]);
+        run_git_sync(dir.path(), &["commit", "-m", "executor b"]);
+        let sha_b = run_git_sync(dir.path(), &["rev-parse", "HEAD"]);
+
+        run_git_sync(dir.path(), &["checkout", "-B", "orchestrator", &base]);
+        (dir, base, sha_a, sha_b)
+    }
+
+    #[tokio::test]
+    async fn integration_merge_auto_prepares_missing_executor_sha_and_overrides_input() {
+        let (repo, base, sha_a, sha_b) = fixture_integration_repo();
+        let ctx = ToolContext::for_workspace(repo.path()).with_integration_merge_context(Some(
+            IntegrationMergeToolContext {
+                base_sha: base.clone(),
+                required_executor_shas: vec![
+                    IntegrationMergeRequiredSha {
+                        task_id: "executor-a".to_owned(),
+                        sha: sha_a.clone(),
+                    },
+                    IntegrationMergeRequiredSha {
+                        task_id: "executor-b".to_owned(),
+                        sha: sha_b.clone(),
+                    },
+                ],
+            },
+        ));
+
+        let out = IntegrationMergeTool
+            .execute(
+                &serde_json::json!({
+                    "base_sha": base,
+                    "head_sha": sha_a,
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.is_error, None, "tool output: {}", out.content);
+        assert!(
+            out.content.contains("auto-prepared"),
+            "expected auto-prepare message, got: {}",
+            out.content
+        );
+        let input = out.input_override.expect("terminal input override");
+        let head = input["head_sha"].as_str().unwrap();
+        run_git_sync(repo.path(), &["merge-base", "--is-ancestor", &sha_a, head]);
+        run_git_sync(repo.path(), &["merge-base", "--is-ancestor", &sha_b, head]);
     }
 
     #[test]

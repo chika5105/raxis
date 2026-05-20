@@ -6,6 +6,7 @@
 > - [`v2-deep-spec.md §Step 9`](v2-deep-spec.md) — Bundle Routing (how Executor commits reach the Orchestrator)
 > - [`v2-deep-spec.md §Step 11`](v2-deep-spec.md) — Hybrid Allowlist computation
 > - [`v2-deep-spec.md §Step 24b`](v2-deep-spec.md) — Orchestrator Workspace Provisioning (RW clone from base SHA at initiative boot; the workspace this spec's merges happen in)
+> - [`v2-deep-spec.md §Step 24c`](v2-deep-spec.md) — Executor Workspace Input Base (successor Executors clone from predecessor `evaluation_sha`; IntegrationMerge then consolidates the resulting ancestry)
 > - [`v2-deep-spec.md §Step 30`](v2-deep-spec.md) — Audit Attribution for Operator-Assisted Commits
 > - [`planner-harness.md §4.7`](planner-harness.md) — Canonical Orchestrator Image (`INV-PLANNER-HARNESS-05`); the source of `bash`, `git`, `ripgrep`, and `edit_file` for V2 semantic conflict resolution
 > - [`planner-harness.md §4.8`](planner-harness.md) — Orchestrator Not Operator-Configurable (`INV-PLANNER-HARNESS-06`); explains why §8's workflow lives in kernel-pinned NNSP bytes rather than operator configuration
@@ -16,7 +17,7 @@
 >
 > This document is the **complete mechanical specification** for the `IntegrationMerge`
 > intent: its struct, the full admission pipeline, the multi-task merge sequencing model,
-> fast-forward vs. merge commit semantics, audit events, and idempotency behaviour.
+> target-ref preservation semantics, audit events, and idempotency behaviour.
 > The rationale for these decisions lives in the deep spec cross-references above.
 
 ---
@@ -25,9 +26,12 @@
 
 `IntegrationMerge` is the intent the Orchestrator submits to the Kernel after it has
 successfully merged the completed Executor sub-task branches into a single commit in its
-ephemeral clone. Upon admission, the Kernel fast-forwards the initiative's resolved
-`target_ref` to the merged commit SHA. This is the **only** mechanism that writes
-agent-produced code to the canonical branch.
+ephemeral clone. Upon admission, the Kernel advances the initiative's resolved
+`target_ref` to a commit that includes the Orchestrator's merged commit and preserves
+the live target-ref tip. In the common case this is a fast-forward to the submitted
+SHA; if another initiative advanced the same target ref first, the git adapter creates
+a deterministic conflict-free host-side merge commit with both histories as parents.
+This is the **only** mechanism that writes agent-produced code to the canonical branch.
 
 Until `IntegrationMerge` is admitted:
 - The resolved `target_ref` is untouched
@@ -35,8 +39,8 @@ Until `IntegrationMerge` is admitted:
 - The initiative state is `InProgress`
 
 After `IntegrationMerge` is admitted:
-- The resolved `target_ref` is updated to `commit_sha`
-- The Orchestrator's base SHA is advanced to `commit_sha`
+- The resolved `target_ref` is updated to the published SHA
+- The published SHA is either the submitted `commit_sha` or a deterministic host-side merge commit that preserves a concurrently advanced live target-ref tip
 - The initiative logs `IntegrationMergeCompleted` in the audit chain
 - The Orchestrator may activate the next wave of sub-tasks (if the DAG has more)
 
@@ -45,7 +49,7 @@ After `IntegrationMerge` is admitted:
 `IntegrationMerge` is the SE-domain instance of the *paradigm primitive* "authorised commit of agent-produced state to canonical external state" (`paradigm.md §2`, `R-11`). The trait that captures that paradigm primitive is `DomainAdapter::commit` ([`extensibility-traits.md §2.2.A`](extensibility-traits.md)). Concretely:
 
 - The intent struct (§2), the admission pipeline (§4), the multi-task wave model (§5), the audit chain emissions (§7), and the SQLite/git transactional boundary (§11) are *paradigm-layer* mechanisms that stay in the kernel binary unchanged. They apply to **any** domain.
-- The git-specific operations — `gix::diff_tree_to_tree` for the touched-set in Check 5, `git fetch && git update-ref` for the main fast-forward in Check 8 Phase 2, the optional `git push` to upstream in §14 — are *implementation-layer* and live entirely behind the `DomainAdapter` trait, in `crates/raxis-domain-git`. A `TradingAdapter::commit` plugged into the same Phase 2 call site instead submits an order via the credential proxy; an `HealthcareAdapter::commit` POSTs a FHIR resource. The kernel's `IntegrationMerge` handler is unchanged.
+- The git-specific operations — `gix::diff_tree_to_tree` for the touched-set in Check 5, object-copy plus target-ref advancement in Check 8 Phase 2, the optional `git push` to upstream in §14 — are *implementation-layer* and live entirely behind the `DomainAdapter` trait, in `crates/raxis-domain-git`. A `TradingAdapter::commit` plugged into the same Phase 2 call site instead submits an order via the credential proxy; an `HealthcareAdapter::commit` POSTs a FHIR resource. The kernel's `IntegrationMerge` handler is unchanged.
 
 Where this spec uses the word "git" in a normative paragraph, that paragraph describes the V2 reference adapter's behaviour; the underlying paradigm contract stays domain-agnostic.
 
@@ -169,18 +173,30 @@ ancestry check prevents this.
 **Concurrent-initiative hardening.** `base_sha` is the initiative/session anchor, not
 necessarily the live tip of `target_ref` at publish time. Another initiative may
 successfully advance the same `target_ref` after this initiative was approved. Therefore
-the reference git adapter performs a second domain-level fast-forward check immediately
-before the ref transaction:
+the reference git adapter performs a second domain-level live-tip preservation check
+immediately before the ref transaction:
 
 ```bash
 git -C $RAXIS_DATA_DIR/repositories/main merge-base --is-ancestor \
   <live_target_ref_tip> <commit_sha>
 ```
 
-If this fails, publishing `commit_sha` would drop already-landed work from the
-canonical ref. The adapter rejects the candidate with `target_ref_non_fast_forward`;
-the kernel leaves `target_ref` untouched and surfaces the merge as a failed
-`IntegrationMerge` rather than silently rewriting history.
+If this succeeds, publishing `commit_sha` is a normal fast-forward. If it fails,
+publishing `commit_sha` directly would drop already-landed work from the canonical ref,
+so the adapter attempts a deterministic host-side merge commit:
+
+```bash
+git -C $RAXIS_DATA_DIR/repositories/main worktree add --detach <tmp> <live_target_ref_tip>
+git -C <tmp> merge --no-ff --no-gpg-sign \
+  -m "raxis: preserve concurrent target-ref advancement" <commit_sha>
+git -C $RAXIS_DATA_DIR/repositories/main update-ref <target_ref> <published_sha>
+```
+
+The published SHA has both `<live_target_ref_tip>` and `<commit_sha>` as ancestors. If
+git reports conflicts or cannot synthesize the merge commit, the adapter rejects with
+`target_ref_concurrent_merge_failed`; the kernel leaves `target_ref` untouched and
+surfaces the merge as a failed `IntegrationMerge` rather than silently rewriting
+history.
 
 ### Check 4 — `merged_task_ids` Validation
 Every `task_id` in `merged_task_ids`:
@@ -205,11 +221,23 @@ git -C <orchestrator_worktree> merge-base --is-ancestor \
 ```
 
 Failure is `FAIL_INVALID_DIFF` and emits
-`IntegrationMergeMissingCompletedExecutorHead` in the kernel log with the missing
-executor `task_id` and SHA. This intentionally disables "publish one successful
-executor SHA" as a partial merge shortcut: partial merge waves require the explicit
-`merged_task_ids` field so the audit chain can prove which completed artifacts were
-included and which were deliberately deferred.
+`IntegrationMergeMissingCompletedExecutorHead` in the kernel log and an
+`IntentValidationRejected` audit row whose `validator_detail` includes the
+missing executor `task_id`, missing SHA, submitted `head_sha`, and diagnostic.
+This intentionally disables "publish one successful executor SHA" as a partial
+merge shortcut: partial merge waves require the explicit `merged_task_ids` field
+so the audit chain can prove which completed artifacts were included and which
+were deliberately deferred.
+
+The Orchestrator's KSB capabilities also project an `integration_merge:` line
+with `ready=<true|false>`, `base_sha`, `required_executor_shas=[task=sha, ...]`,
+and `blockers=[...]`. When `ready=true`, the Orchestrator should call
+`prepare_integration_merge { base_sha, executor_shas }`, then pass the returned
+`head_sha` to `integration_merge`. If `prepare_integration_merge` reports merge
+conflicts, the Orchestrator may resolve only those conflicted files in its
+integration worktree and create a conflict-resolution commit on top of the
+Executor commits; the same kernel coverage and hybrid-allowlist checks still
+gate publication.
 
 **Interaction with [`agent-disagreement.md`](agent-disagreement.md).** A sub-task only reaches
 `state = 'Completed'` after its `CompleteTask` intent admits cleanly.
@@ -628,10 +656,12 @@ ctx.domain.commit(
 UPDATE initiatives SET git_apply_pending = 0 WHERE id = :initiative_id;
 ```
 
-`GitAdapter::commit` (the V2 reference impl in `crates/raxis-domain-git/src/commit.rs`) executes:
+`GitAdapter::commit` (the V2 reference impl in `crates/raxis-domain-git/src/lib.rs`) executes:
 ```bash
 git -C <main_repo> fetch <orchestrator_worktree> <commit_sha>
-git -C <main_repo> update-ref refs/heads/main <commit_sha>
+git -C <main_repo> merge-base --is-ancestor <live_target_ref_tip> <commit_sha>
+# If true: update-ref <target_ref> <commit_sha>.
+# If false: synthesize a deterministic conflict-free merge commit, then update-ref.
 ```
 under the main-worktree lock, plus (when `[git_push]` is configured per §14) an upstream push via the credential proxy. Other adapters (`TradingAdapter::commit`, `HealthcareAdapter::commit`) substitute their own canonical-state write here without touching the kernel handler.
 
@@ -697,28 +727,28 @@ system prompt includes this instruction explicitly.
 
 ---
 
-## 6. Fast-Forward vs. True Merge Commit on Main
+## 6. Target-Ref Advancement Semantics
 
-The Kernel always uses `git update-ref` (equivalent to `--ff-only`) to advance main.
-It never produces a merge commit on main itself.
+The Kernel always uses `git update-ref` to publish the final SHA. The final SHA is
+selected by the git domain adapter:
 
-**Implication:** The Orchestrator must produce the merge commit in its ephemeral clone
-before submitting `IntegrationMerge`. The Orchestrator runs `git merge` — which produces
-a merge commit if the branches have diverged. The Orchestrator's merge commit becomes the
-new main HEAD directly.
+- If the submitted `commit_sha` descends from the live `target_ref` tip, the final SHA is exactly `commit_sha`.
+- If the live `target_ref` tip advanced concurrently and merges cleanly with `commit_sha`, the final SHA is a deterministic host-side merge commit whose parents are the live tip and `commit_sha`.
+- If the concurrent live tip conflicts with `commit_sha`, the adapter fails closed and the target ref is untouched.
 
-**Why not merge commit on main by the Kernel:** The Kernel runs as a deterministic
-policy enforcer. Producing a merge commit requires author identity, committer identity,
-and a commit message — all of which are either arbitrary (making the audit record
-non-deterministic) or would require the Kernel to run inference (catastrophic). The
-Orchestrator, as an LLM, can produce a contextually appropriate merge commit message
-("Merge auth-executor and payments-executor: add rate limiting and refunds").
+**Why the host-side merge is allowed only for concurrent live-tip preservation:** The
+Orchestrator still owns semantic integration of the initiative's executor commits. The
+host-side merge exists only to preserve work that another already-admitted initiative
+landed after this initiative's base was minted. It uses fixed author/committer identity
+(`RAXIS Kernel`), a fixed message, and deterministic dates derived from the submitted
+candidate, so retries and crash recovery do not require inference or arbitrary operator
+input.
 
-**When the result is a fast-forward on main:** If only one sub-task's branch is in
+**When the result is a fast-forward on the target ref:** If only one sub-task's branch is in
 the wave AND no cross-cutting artifacts were modified, `commit_sha` may be identical to
 the sub-task's `completed_sha` — a fast-forward with no merge commit at all. The Kernel
 handles this identically to a true merge commit: the ancestry check passes (the sub-task
-commit descends from base), and `git update-ref` fast-forwards main.
+commit descends from base), and `git update-ref` advances the target ref.
 
 ---
 

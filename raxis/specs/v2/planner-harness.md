@@ -846,18 +846,20 @@ binaries for semantic conflict resolution):**
 - Linux 5.14+ guest kernel (per `INV-PLANNER-HARNESS-03`)
 - cgroup v2 mounted with `cpu`, `memory`, `pids` controllers in
   `subtree_control`
-- `raxis-planner` binary (Orchestrator build target — includes `bash`,
-  `read_file`, `write_file`, `edit_file`, `glob_search`, `grep_search`,
-  `TodoWrite`, plus the Orchestrator-only intent set; explicitly
-  excludes `bash bg_*`, custom-tool dispatch, the Reviewer-only
-  `SubmitReview`, and the Executor-only commit intents)
+- `raxis-planner` binary (Orchestrator build target — includes
+  `read_file`, `grep_search` backed by `rg`, `bash`, `edit_file`,
+  `git_commit`, `prepare_integration_merge`, plus the Orchestrator-only
+  intent set; explicitly excludes `bash bg_*`, custom-tool dispatch,
+  the Reviewer-only `SubmitReview`, and the Executor-only task-completion
+  intents)
 - `git` (≥ 2.30, for semantic conflict resolution; the Orchestrator
   uses `git merge`, `git diff`, `git log`, `edit_file` to fix conflict
   markers, then submits `IntegrationMerge`)
 - `bash` (≥ 5.0)
 - Standard POSIX coreutils (`cat`, `head`, `tail`, `diff`, `patch`,
   `awk`, `sed`, `grep`, `sort`)
-- `ripgrep` (for `grep_search`)
+- `ripgrep` (`rg`; primary backend for `grep_search` and the preferred
+  shell-search command when the Orchestrator needs ad hoc diagnostics)
 - A minimal CA certificate bundle (no network is exposed to the
   Orchestrator, but `git`'s sanity checks expect one)
 
@@ -872,7 +874,13 @@ binaries for semantic conflict resolution):**
 - Build systems (`make`, `bazel`)
 
 The image is exactly large enough to perform 3-way semantic git merges
-with bash + git + edit_file, and nothing more.
+with `prepare_integration_merge`, foreground `bash`, `git`, `rg`, and
+`edit_file`, and nothing more. If automatic merge preparation hits
+conflicts, the Orchestrator may resolve only those conflicted files and
+create a conflict-resolution commit on top of the completed Executor
+commits; the kernel's `IntegrationMerge` admission gate still verifies
+the final head contains every completed Executor SHA and stays within
+the hybrid allowlist.
 
 **Composition with `INV-PLANNER-HARNESS-02`.** `INV-PLANNER-HARNESS-02`
 established the canonical-image pattern for the Reviewer (the
@@ -2102,7 +2110,7 @@ static review or merge:
 ├── /bin/bash       (≥ 5.0)
 ├── /bin/sh         → /bin/bash
 ├── /usr/bin/{node, npm, npx, yarn, pnpm}    (Node 20 LTS)
-├── /usr/bin/{python3, pip, pip3}            (Python 3.11)
+├── /usr/bin/{python, python3, pip, pip3}    (Python 3.11; `python` aliases `python3`)
 ├── /usr/local/bin/ruff                      (ruff 0.7.4 — Python lint;
 │                                             also importable as `python -m ruff`)
 ├── /usr/bin/{eslint, prettier, tsc, tsx}    (eslint 9.15.0, prettier 3.3.3,
@@ -2230,7 +2238,7 @@ Because the LLM cannot trial-and-error `pip install` /
 Reviewer / Orchestrator session receives a **capability
 manifest** at session start describing the binaries, language
 runtimes, pre-installed packages, credential-proxy env vars,
-and workdir state of its specific VM. The manifest is surfaced
+and workspace/git state of its specific VM. The manifest is surfaced
 through TWO coherent channels backed by the SAME in-guest probe
 (`crates/planner-core/src/vm_capabilities.rs`):
 
@@ -2937,17 +2945,17 @@ Each `images/<role>/` directory contains:
 - `manifest.toml` — pinned versions of every package, the EROFS version, and the `SOURCE_DATE_EPOCH` value used for reproducibility.
 - `Containerfile` — the build recipe (BuildKit-style; no `latest` tags; every `RUN` ends with package-cache cleanup so the resulting layer is deterministic).
 - `assets/` — any static configuration files (passwd, nsswitch, ldconfig caches) needed for offline boot.
-- `verify.sh` — tooling-side smoke test the builder runs after image creation; checks that `/init`, `/usr/local/bin/raxis-planner-{role}`, and required tools are present and executable.
+- `verify.sh` — tooling-side smoke test the builder runs after image creation; checks that `/init`, the role entrypoint under `/usr/local/bin/`, and required tools are present and executable.
 
 The Reviewer image manifest (canonical home `§10.5`) lists exactly:
 - BusyBox 1.36 (no shell built-in usable from raxis-planner-reviewer per §4.4).
-- The `raxis-planner-reviewer` binary at `/usr/local/bin/raxis-planner-reviewer`.
+- The `raxis-reviewer` binary at `/usr/local/bin/raxis-reviewer`.
 - An init wrapper at `/init` that mounts `/proc`, `/sys`, the workspace, then `execve`s the planner with no shell.
 - No `bash`, no `sh`, no compilers, no `git`, no `node`, no `python`, no LSP servers (per §6).
 
 The Orchestrator image manifest (canonical home `§10.7`) lists exactly:
 - BusyBox 1.36 + `bash` 5.2 + `git` 2.45 + `ripgrep` 14.1.
-- The `raxis-planner-orchestrator` binary at `/usr/local/bin/raxis-planner-orchestrator`.
+- The `raxis-orchestrator` binary at `/usr/local/bin/raxis-orchestrator`.
 - The same init wrapper.
 - No compilers, no test runners, no LSP servers — Orchestrator does NOT run code; it only runs `git` and `ripgrep` per §4.7.
 
@@ -3007,11 +3015,11 @@ canonical order:
    `required_os_binaries` allowlist and fails with a clear
    remediation hint if any are missing:
 
-   | Role               | Required binaries                                  |
-   | ------------------ | -------------------------------------------------- |
-   | `ExecutorStarter`  | `bin/bash`, `usr/bin/python3`, `usr/bin/git`       |
-   | `Orchestrator`     | — (intentionally binary-only per `INV-PLANNER-HARNESS-02`) |
-   | `Reviewer`         | — (intentionally binary-only per `INV-PLANNER-HARNESS-02`) |
+   | Role               | Required binaries                                                |
+   | ------------------ | ---------------------------------------------------------------- |
+   | `ExecutorStarter`  | `bin/bash`, `usr/bin/python3`, `usr/bin/python`, `usr/bin/git`   |
+   | `Orchestrator`     | `bin/bash`, `usr/bin/git`, `usr/bin/rg`                          |
+   | `Reviewer`         | — (intentionally binary-only per `INV-PLANNER-HARNESS-02`)       |
 
    The guard treats both regular files and symlinks-to-files as
    satisfied (real Linux rootfs trees use both:
@@ -3074,10 +3082,11 @@ initramfs producer emits, and the producer
 semantics — the cpio archive encodes the usrmerge `bin` directory as
 ONE `S_IFLNK` entry and never emits `bin/<file>` entries. The cpio
 preflight therefore uses the **canonical post-usrmerge paths**
-(`usr/bin/bash`, `usr/bin/python3`, `usr/bin/git`,
-`usr/local/bin/raxis-executor`) where the dev-stage guard uses the
-short staging-tree paths (`bin/bash`, `usr/bin/python3`,
-`usr/bin/git`). The intentional divergence is recorded inline in
+(`usr/bin/bash`, `usr/bin/python3`, `usr/bin/python`,
+`usr/bin/git`, `usr/local/bin/raxis-executor`) where the dev-stage
+guard uses the short staging-tree paths (`bin/bash`,
+`usr/bin/python3`, `usr/bin/python`, `usr/bin/git`). The intentional
+divergence is recorded inline in
 both call sites; unifying them by teaching the cpio walker to chase
 `S_IFLNK` entries is deferred to the final-cleanup-sweep when a
 non-usrmerge base image (e.g. an Alpine reviewer-core variant) makes
@@ -3087,7 +3096,7 @@ the divergence non-hypothetical.
 cpio-walk preflight are all load-bearing.** The dev-stage guard
 runs against the **staging tree** (post-bake, pre-cpio) and asserts
 the Containerfile-promised OS binaries (`bin/bash`, `usr/bin/git`,
-`usr/bin/python3` for executor-starter) are present. The build-all
+`usr/bin/python3` + `usr/bin/python` for executor-starter) are present. The build-all
 freshness check (`INV-IMAGE-BAKE-NO-STALE-CACHE-01`,) runs
 against the **staged planner binary's mtime** (pre-cpio) and
 asserts the binary is at least as new as the role's planner

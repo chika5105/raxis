@@ -18,7 +18,7 @@
 //!
 //! This module gives the planner-harness one **in-guest
 //! introspection** path that probes the VM's binaries, language
-//! runtimes, pre-installed packages, env vars, and workdir state,
+//! runtimes, pre-installed packages, env vars, and workspace state,
 //! and returns a typed [`CapabilityManifest`] the dispatch loop can:
 //!
 //! 1. Render into the executor / reviewer / orchestrator system
@@ -35,8 +35,8 @@
 //! ## Caching
 //!
 //! Every probe is bounded to sub-second on a warm VM: we do NOT
-//! recursively walk the filesystem (workdir-language detection
-//! peeks at the workdir's *top-level entries* only) and we do not
+//! recursively walk the filesystem (workspace-language detection
+//! peeks at the workspace's *top-level entries* only) and we do not
 //! shell out for binaries we did not specifically need a version
 //! string for. The result is cached for the lifetime of the
 //! planner-harness process via [`cached_capabilities`] —
@@ -169,46 +169,55 @@ pub struct GoToolchain {
     pub go: Option<String>,
 }
 
-/// Filesystem / workdir snapshot.
+/// Filesystem / workspace snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FilesystemSnapshot {
-    /// Working directory as observed at probe time
-    /// (`std::env::current_dir`).
-    pub workdir: String,
-    /// Languages we detected by inspecting the workdir's TOP-LEVEL
+    /// Workspace path the planner tools operate against.
+    pub workspace_path: String,
+    /// Languages we detected by inspecting the workspace's TOP-LEVEL
     /// entries only (`Cargo.toml` ⇒ rust, `package.json` ⇒ node,
     /// `pyproject.toml` / `setup.py` / `requirements.txt` ⇒ python,
     /// `go.mod` ⇒ go). No recursive walk — the goal is hint, not
     /// authoritative tagging.
-    pub workdir_languages_detected: Vec<String>,
-    /// `true` if the workdir contains a `.git/` directory.
-    pub git_initialized: bool,
-    /// `git rev-parse HEAD` if the workdir is a git repo, else
+    pub workspace_languages_detected: Vec<String>,
+    /// `true` if the workspace is inside a git worktree.
+    pub git_worktree: bool,
+    /// `git rev-parse HEAD` if the workspace is a git repo, else
     /// `None`.
     pub head_commit: Option<String>,
 }
 
-/// Image role tag — which planner-harness role this manifest was
-/// probed inside. The value is informational; the kernel
-/// authoritative role binding is whichever binary was spawned
+/// Session role tag — which planner-harness role this manifest was
+/// probed inside. The value is informational; the kernel authoritative
+/// role binding is whichever binary was spawned
 /// (`/usr/local/bin/raxis-{executor,reviewer,orchestrator}`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ImageRole {
+pub enum SessionRole {
     /// Executor binary spawned this manifest.
     Executor,
     /// Reviewer binary.
     Reviewer,
     /// Orchestrator binary.
     Orchestrator,
-    /// Operator-published BYO Executor image
-    /// (`canonical-images.md §3`). The role binary is still the
-    /// executor; the tag exists so the LLM knows the contents are
-    /// not the kernel-bundled defaults.
-    Byo,
-    /// We could not classify the image. Used by tests / non-VM
+    /// We could not classify the session. Used by tests / non-VM
     /// hosts where the introspection runs but the role context is
     /// absent.
+    Unknown,
+}
+
+/// Provenance of the VM image contents. This is distinct from
+/// [`SessionRole`]: a BYO executor is still an executor for authority
+/// purposes, but its runtime contents are operator-published rather
+/// than canonical.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageOrigin {
+    /// Kernel-bundled canonical image.
+    Canonical,
+    /// Operator-published BYO image (`canonical-images.md §3`).
+    Byo,
+    /// We could not classify the image provenance.
     Unknown,
 }
 
@@ -219,7 +228,9 @@ pub enum ImageRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityManifest {
     /// Which planner role this manifest was probed in.
-    pub image_role: ImageRole,
+    pub session_role: SessionRole,
+    /// Whether the image contents are canonical or operator-published.
+    pub image_origin: ImageOrigin,
     /// SHA-256 image digest (`sha256:<64-hex>`) when the kernel
     /// stamped one via the `RAXIS_VM_IMAGE_DIGEST` env at spawn,
     /// else `None`. Inert metadata for the LLM; the kernel-side
@@ -239,7 +250,7 @@ pub struct CapabilityManifest {
     pub go: GoToolchain,
     /// Env var name → value, after kernel-private redaction.
     pub env: BTreeMap<String, String>,
-    /// Workdir / git state.
+    /// Workspace / git state.
     pub filesystem: FilesystemSnapshot,
 }
 
@@ -264,7 +275,7 @@ pub enum CapabilityCategory {
     Go,
     /// Env vars (redacted).
     Env,
-    /// Filesystem / workdir snapshot.
+    /// Filesystem / workspace snapshot.
     Filesystem,
     /// Everything (default).
     All,
@@ -426,15 +437,16 @@ pub fn project_manifest(
         base.filesystem.clone()
     } else {
         FilesystemSnapshot {
-            workdir: String::new(),
-            workdir_languages_detected: Vec::new(),
-            git_initialized: false,
+            workspace_path: String::new(),
+            workspace_languages_detected: Vec::new(),
+            git_worktree: false,
             head_commit: None,
         }
     };
 
     CapabilityManifest {
-        image_role: base.image_role.clone(),
+        session_role: base.session_role.clone(),
+        image_origin: base.image_origin.clone(),
         image_digest: base.image_digest.clone(),
         binaries,
         python,
@@ -513,13 +525,14 @@ pub fn is_kernel_private_env(name: &str) -> bool {
 ///
 /// `env_reader` is the env-reader closure (matches the
 /// `BootEnv::from_env_fn` shape so unit tests can hermetically
-/// stub the process env). `cwd` is the workdir to inspect for
+/// stub the process env). `cwd` is the workspace to inspect for
 /// the `filesystem` section.
 ///
-/// The `image_role` field is filled from `RAXIS_PLANNER_ROLE`
-/// when present (kernel stamps it for every spawn), else
-/// [`ImageRole::Unknown`] — non-VM hosts (CI, dev workstation)
-/// hit the `Unknown` branch.
+/// The `session_role` field is filled from
+/// `RAXIS_PLANNER_SESSION_ROLE`; the `image_origin` field is filled
+/// from `RAXIS_VM_IMAGE_ORIGIN`. Missing / unknown values map to
+/// `Unknown` so non-VM hosts (CI, dev workstations) can still run
+/// the probe.
 pub fn probe_capabilities<F>(env_reader: &F, cwd: &Path) -> CapabilityManifest
 where
     F: Fn(&str) -> Option<String>,
@@ -532,17 +545,22 @@ where
     let go = probe_go(&binaries);
     let env = probe_env(env_reader);
     let filesystem = probe_filesystem(cwd);
-    let image_role = match env_reader("RAXIS_PLANNER_ROLE").as_deref() {
-        Some("executor") => ImageRole::Executor,
-        Some("reviewer") => ImageRole::Reviewer,
-        Some("orchestrator") => ImageRole::Orchestrator,
-        Some("byo") => ImageRole::Byo,
-        _ => ImageRole::Unknown,
+    let session_role = match env_reader("RAXIS_PLANNER_SESSION_ROLE").as_deref() {
+        Some("executor") => SessionRole::Executor,
+        Some("reviewer") => SessionRole::Reviewer,
+        Some("orchestrator") => SessionRole::Orchestrator,
+        _ => SessionRole::Unknown,
+    };
+    let image_origin = match env_reader("RAXIS_VM_IMAGE_ORIGIN").as_deref() {
+        Some("canonical") => ImageOrigin::Canonical,
+        Some("byo") => ImageOrigin::Byo,
+        _ => ImageOrigin::Unknown,
     };
     let image_digest = env_reader("RAXIS_VM_IMAGE_DIGEST").filter(|s| !s.is_empty());
 
     CapabilityManifest {
-        image_role,
+        session_role,
+        image_origin,
         image_digest,
         binaries,
         python,
@@ -560,11 +578,46 @@ where
 /// given (image, env) pair and the planner-harness is one-shot per
 /// session, so per-process == per-session caching is correct.
 pub fn cached_capabilities() -> Arc<CapabilityManifest> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    cached_capabilities_for_workdir(&cwd)
+}
+
+/// Cached process-wide accessor pinned to the workspace the driver
+/// will hand to tools. In production guests the process CWD may still
+/// be `/` while every tool runs with `current_dir=/workspace`; using
+/// the tool workspace here keeps the first-turn prompt hint and later
+/// `vm_capabilities` output from incorrectly reporting `workspace=/`
+/// / `no_git`.
+pub fn cached_capabilities_for_workdir(workspace_path: &Path) -> Arc<CapabilityManifest> {
     static CACHE: OnceLock<Arc<CapabilityManifest>> = OnceLock::new();
     Arc::clone(CACHE.get_or_init(|| {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let cwd = resolve_probe_workdir(&|k| std::env::var(k).ok(), workspace_path);
         Arc::new(probe_capabilities(&|k| std::env::var(k).ok(), &cwd))
     }))
+}
+
+fn resolve_probe_workdir<F>(env_reader: &F, preferred: &Path) -> PathBuf
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if preferred.is_dir() {
+        return preferred.to_path_buf();
+    }
+
+    if let Some(env_workspace) = env_reader("RAXIS_WORKSPACE_PATH")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+    {
+        return env_workspace;
+    }
+
+    let default_workspace = PathBuf::from("/workspace");
+    if default_workspace.is_dir() {
+        return default_workspace;
+    }
+
+    std::env::current_dir().unwrap_or_else(|_| preferred.to_path_buf())
 }
 
 // ---------------------------------------------------------------------------
@@ -973,9 +1026,9 @@ where
 }
 
 fn probe_filesystem(cwd: &Path) -> FilesystemSnapshot {
-    let workdir = cwd.to_string_lossy().into_owned();
-    let git_initialized = cwd.join(".git").is_dir();
-    let head_commit = if git_initialized {
+    let workspace = cwd.to_string_lossy().into_owned();
+    let git_worktree = git_worktree_detected(cwd);
+    let head_commit = if git_worktree {
         git_head_sha(cwd)
     } else {
         None
@@ -1017,10 +1070,38 @@ fn probe_filesystem(cwd: &Path) -> FilesystemSnapshot {
         }
     }
     FilesystemSnapshot {
-        workdir,
-        workdir_languages_detected: langs.into_iter().map(str::to_owned).collect(),
-        git_initialized,
+        workspace_path: workspace,
+        workspace_languages_detected: langs.into_iter().map(str::to_owned).collect(),
+        git_worktree,
         head_commit,
+    }
+}
+
+fn git_worktree_detected(cwd: &Path) -> bool {
+    if let Some(answer) = git_rev_parse_bool(cwd, "--is-inside-work-tree") {
+        return answer;
+    }
+    cwd.join(".git").exists()
+}
+
+fn git_rev_parse_bool(cwd: &Path, arg: &str) -> Option<bool> {
+    use std::process::{Command, Stdio};
+    let child = Command::new("git")
+        .args(["rev-parse", arg])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let out = wait_with_timeout(child, Duration::from_secs(2))?;
+    if !out.status.success() {
+        return None;
+    }
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
     }
 }
 
@@ -1056,7 +1137,7 @@ fn git_head_sha(cwd: &Path) -> Option<String> {
 ///
 /// The hint advertises:
 ///
-/// * Image role / digest (when stamped).
+/// * Session role / image origin / digest (when stamped).
 /// * Available language runtimes + versions.
 /// * The TOP curated subset of pre-installed Python / Node packages.
 /// * The curated subset of available CLI binaries (excluding
@@ -1064,7 +1145,7 @@ fn git_head_sha(cwd: &Path) -> Option<String> {
 /// * Credential-proxy env var names (NEVER values — values may be
 ///   loopback URLs but the names alone are what the LLM needs to
 ///   wire its scripts).
-/// * Workdir + git state.
+/// * Workspace + git state.
 /// * A concise reminder to prefer baked packages while still using
 ///   normal HTTP/package clients when the task genuinely needs
 ///   network access.
@@ -1072,14 +1153,19 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
     let mut s = String::with_capacity(2048);
     s.push_str("## VM Environment\n");
 
-    let role = match m.image_role {
-        ImageRole::Executor => "executor",
-        ImageRole::Reviewer => "reviewer",
-        ImageRole::Orchestrator => "orchestrator",
-        ImageRole::Byo => "byo (operator-published)",
-        ImageRole::Unknown => "unknown",
+    let role = match &m.session_role {
+        SessionRole::Executor => "executor",
+        SessionRole::Reviewer => "reviewer",
+        SessionRole::Orchestrator => "orchestrator",
+        SessionRole::Unknown => "unknown",
     };
     s.push_str(&format!("role={role}"));
+    let origin = match &m.image_origin {
+        ImageOrigin::Canonical => "canonical",
+        ImageOrigin::Byo => "byo",
+        ImageOrigin::Unknown => "unknown",
+    };
+    s.push_str(&format!(" image_origin={origin}"));
     if let Some(digest) = &m.image_digest {
         s.push_str(&format!(" digest={digest}"));
     }
@@ -1198,16 +1284,20 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
         ));
     }
 
-    // Workdir.
+    // Workspace.
     let fs = &m.filesystem;
     s.push_str(&format!(
-        "workdir={} {}{}{}\n",
-        fs.workdir,
-        if fs.git_initialized { "git" } else { "no_git" },
-        if fs.workdir_languages_detected.is_empty() {
+        "workspace={} {}{}{}\n",
+        fs.workspace_path,
+        if fs.git_worktree {
+            "git_worktree"
+        } else {
+            "no_git_worktree"
+        },
+        if fs.workspace_languages_detected.is_empty() {
             String::new()
         } else {
-            format!(" langs={}", fs.workdir_languages_detected.join("/"),)
+            format!(" langs={}", fs.workspace_languages_detected.join("/"),)
         },
         match &fs.head_commit {
             Some(sha) => format!(" head={}", &sha[..sha.len().min(12)]),
@@ -1301,7 +1391,8 @@ mod tests {
 
     fn empty_manifest() -> CapabilityManifest {
         CapabilityManifest {
-            image_role: ImageRole::Unknown,
+            session_role: SessionRole::Unknown,
+            image_origin: ImageOrigin::Unknown,
             image_digest: None,
             binaries: Vec::new(),
             python: None,
@@ -1313,9 +1404,9 @@ mod tests {
             go: GoToolchain { go: None },
             env: BTreeMap::new(),
             filesystem: FilesystemSnapshot {
-                workdir: "/workspace/repo".to_owned(),
-                workdir_languages_detected: Vec::new(),
-                git_initialized: false,
+                workspace_path: "/workspace/repo".to_owned(),
+                workspace_languages_detected: Vec::new(),
+                git_worktree: false,
                 head_commit: None,
             },
         }
@@ -1666,7 +1757,26 @@ mod tests {
             "binary table empty — PATH probe failed?"
         );
         // Workdir snapshot has a non-empty path.
-        assert!(!m.filesystem.workdir.is_empty());
+        assert!(!m.filesystem.workspace_path.is_empty());
+    }
+
+    #[test]
+    fn filesystem_probe_treats_git_file_as_worktree_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".git"), "gitdir: /tmp/elsewhere\n").unwrap();
+        let fs = probe_filesystem(tmp.path());
+        assert!(
+            fs.git_worktree,
+            "git worktrees use a .git file; capability discovery must not \
+             report no_git for them"
+        );
+    }
+
+    #[test]
+    fn resolve_probe_workdir_prefers_existing_tool_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolved = resolve_probe_workdir(&|_| None, tmp.path());
+        assert_eq!(resolved, tmp.path());
     }
 
     /// `cached_capabilities` returns the same `Arc` on repeated

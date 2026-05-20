@@ -611,9 +611,41 @@ pub struct OrchestratorCapabilities {
     /// `INV-KSB-CONCURRENCY-VIEW-MIRRORS-KERNEL-CAP-01`.
     #[serde(default)]
     pub concurrency: ConcurrencyCapabilityView,
+    /// Final-publish checklist for `prepare_integration_merge` /
+    /// `integration_merge`. This is intentionally denormalized from the
+    /// DAG rows so the orchestrator does not burn turns re-deriving "are
+    /// we merge-ready?" from aggregate/reviewer state.
+    #[serde(default)]
+    pub integration_merge: IntegrationMergeCapabilityView,
     /// V3 — progressive scaling view (this session's
     /// per-attempt budget breakdown).
     pub max_turns_scaling: MaxTurnsScalingView,
+}
+
+/// Orchestrator-visible final merge posture.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntegrationMergeCapabilityView {
+    /// True iff there are no activatable tasks, every executor has
+    /// completed, every review panel is accepted, and `base_sha` is set.
+    pub ready: bool,
+    /// The KSB `base_sha` to pass into `prepare_integration_merge` and
+    /// `integration_merge`.
+    #[serde(default)]
+    pub base_sha: String,
+    /// Every completed executor artifact the final integrated `head_sha`
+    /// must contain.
+    #[serde(default)]
+    pub required_executor_shas: Vec<IntegrationMergeExecutorSha>,
+    /// Human-readable blockers when `ready=false`.
+    #[serde(default)]
+    pub blockers: Vec<String>,
+}
+
+/// One required executor commit for final integration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntegrationMergeExecutorSha {
+    pub task_id: String,
+    pub sha: String,
 }
 
 /// Per-initiative concurrency posture surfaced to the orchestrator
@@ -1293,6 +1325,27 @@ fn check_capabilities_delimiter(caps: &Capabilities) -> Result<(), KsbError> {
                 });
             }
         }
+        if o.integration_merge.base_sha.contains(KSB_DELIMITER_CLOSE) {
+            return Err(KsbError::DelimiterInjection {
+                field: "capabilities",
+            });
+        }
+        for item in &o.integration_merge.required_executor_shas {
+            for s in [&item.task_id, &item.sha] {
+                if s.contains(KSB_DELIMITER_CLOSE) {
+                    return Err(KsbError::DelimiterInjection {
+                        field: "capabilities",
+                    });
+                }
+            }
+        }
+        for blocker in &o.integration_merge.blockers {
+            if blocker.contains(KSB_DELIMITER_CLOSE) {
+                return Err(KsbError::DelimiterInjection {
+                    field: "capabilities",
+                });
+            }
+        }
     }
     if let Capabilities::Reviewer(r) = caps {
         if r.artifact_task_id.contains(KSB_DELIMITER_CLOSE) {
@@ -1369,6 +1422,7 @@ fn push_capabilities(buf: &mut String, caps: &Capabilities) {
             buf.push_str(" headroom=");
             buf.push_str(&o.concurrency.headroom.to_string());
             buf.push('\n');
+            push_integration_merge_capability(buf, &o.integration_merge);
             buf.push_str("  tasks=\n");
             if o.tasks.is_empty() {
                 buf.push_str("    <empty>\n");
@@ -1394,6 +1448,34 @@ fn push_capabilities(buf: &mut String, caps: &Capabilities) {
             buf.push('\n');
         }
     }
+}
+
+fn push_integration_merge_capability(buf: &mut String, v: &IntegrationMergeCapabilityView) {
+    buf.push_str("  integration_merge: ready=");
+    buf.push_str(if v.ready { "true" } else { "false" });
+    buf.push_str(" base_sha=");
+    buf.push_str(if v.base_sha.is_empty() {
+        "<unset>"
+    } else {
+        v.base_sha.as_str()
+    });
+    buf.push_str(" required_executor_shas=[");
+    for (idx, item) in v.required_executor_shas.iter().enumerate() {
+        if idx > 0 {
+            buf.push_str(", ");
+        }
+        buf.push_str(&item.task_id);
+        buf.push('=');
+        buf.push_str(&item.sha);
+    }
+    buf.push_str("] blockers=[");
+    for (idx, blocker) in v.blockers.iter().enumerate() {
+        if idx > 0 {
+            buf.push_str("; ");
+        }
+        buf.push_str(blocker);
+    }
+    buf.push_str("]\n");
 }
 
 /// V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` — render the
@@ -2134,6 +2216,7 @@ mod tests {
             tasks: Vec::new(),
             ready_now: Vec::new(),
             concurrency: ConcurrencyCapabilityView::default(),
+            integration_merge: IntegrationMergeCapabilityView::default(),
             max_turns_scaling: MaxTurnsScalingView {
                 max_turns_attempt: 1,
                 max_turns_base: 77,

@@ -244,9 +244,9 @@ pub struct EnvelopeAudit {
     pub outcome: EnvelopeOutcome,
     /// Owned consumer identity (the agent session).
     pub consumer: OwnedConsumer,
-    /// `Sha256("<sender>\n<rcpt1>\n<rcpt2>...")` — the audit key
-    /// for cross-correlation with the upstream relay's logs without
-    /// revealing the recipient list.
+    /// `Sha256("<bare-sender>\n<sorted-bare-rcpt1>\n...")` — the audit
+    /// key for cross-correlation with the upstream relay's logs
+    /// without revealing the recipient list.
     pub envelope_sha256: [u8; 32],
     /// Number of recipients in the envelope.
     pub recipient_count: u32,
@@ -299,19 +299,36 @@ pub async fn bind(
     SmtpProxy::bind(backend, config, audit).await
 }
 
-/// Compute the canonical `Sha256("<sender>\n<rcpt1>\n<rcpt2>\n...")`
-/// envelope key. Pulled out as `pub` so out-of-band tools can
-/// reproduce the audit-key hash.
+/// Compute the canonical
+/// `Sha256("<bare-sender>\n<sorted-bare-rcpt1>\n<sorted-bare-rcpt2>...")`
+/// envelope key. SMTP clients may send envelope mailboxes in
+/// `<addr@example.com>` form, but the audit key strips those SMTP
+/// delimiters and hashes bare mailbox addresses so it can be
+/// correlated with upstream mailserver logs and fixture witnesses.
+/// The recipient set is sorted before hashing so mechanically
+/// equivalent SMTP envelopes produce the same audit-correlation key
+/// even if a client emits RCPT commands in a different order. Pulled
+/// out as `pub` so out-of-band tools can reproduce the audit-key hash.
 pub fn compute_envelope_sha256(sender: &str, recipients: &[String]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(sender.as_bytes());
-    h.update(b"\n");
-    for r in recipients {
-        h.update(r.as_bytes());
+    h.update(canonical_mailbox(sender).as_bytes());
+    let mut sorted: Vec<&str> = recipients.iter().map(|r| canonical_mailbox(r)).collect();
+    sorted.sort();
+    for r in sorted {
         h.update(b"\n");
+        h.update(r.as_bytes());
     }
     h.finalize().into()
+}
+
+fn canonical_mailbox(mailbox: &str) -> &str {
+    let s = mailbox.trim();
+    if s.starts_with('<') && s.ends_with('>') {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
 }
 
 #[cfg(test)]
@@ -319,30 +336,31 @@ mod tests {
     use super::*;
 
     /// `compute_envelope_sha256` is byte-stable against the canonical
-    /// input shape. Pin against accidental ordering changes.
+    /// input shape. Pin against accidental trailing-delimiter or
+    /// ordering changes.
     #[test]
     fn envelope_hash_matches_canonical_sender_then_newline_separated_rcpts() {
         let h = compute_envelope_sha256(
             "noreply@example.com",
-            &["alice@example.org".to_owned(), "bob@example.org".to_owned()],
+            &["bob@example.org".to_owned(), "alice@example.org".to_owned()],
         );
         assert_eq!(
             hex::encode(h),
             {
                 use sha2::{Digest, Sha256};
                 let mut s = Sha256::new();
-                s.update(b"noreply@example.com\nalice@example.org\nbob@example.org\n");
+                s.update(b"noreply@example.com\nalice@example.org\nbob@example.org");
                 hex::encode::<[u8; 32]>(s.finalize().into())
             },
-            "envelope hash must equal Sha256(\"<sender>\\n<rcpt>\\n...\")",
+            "envelope hash must equal Sha256(\"<sender>\\n<sorted-rcpt>...\")",
         );
     }
 
-    /// Envelope hash is sensitive to recipient order. Pins against an
-    /// accidental sort that would let a tamperer rotate the recipient
-    /// list without the audit hash changing.
+    /// Envelope hash is insensitive to recipient order. The audit key
+    /// identifies the recipient set; `recipient_count` records the
+    /// envelope cardinality.
     #[test]
-    fn envelope_hash_is_recipient_order_sensitive() {
+    fn envelope_hash_sorts_recipients() {
         let h_ab = compute_envelope_sha256(
             "noreply@example.com",
             &["alice@example.org".to_owned(), "bob@example.org".to_owned()],
@@ -351,6 +369,24 @@ mod tests {
             "noreply@example.com",
             &["bob@example.org".to_owned(), "alice@example.org".to_owned()],
         );
-        assert_ne!(h_ab, h_ba);
+        assert_eq!(h_ab, h_ba);
+    }
+
+    #[test]
+    fn envelope_hash_strips_smtp_angle_brackets() {
+        let h = compute_envelope_sha256(
+            "<sender@live-e2e.test>",
+            &["<raxis-tenant@live-e2e.test>".to_owned()],
+        );
+        assert_eq!(
+            hex::encode(h),
+            {
+                use sha2::{Digest, Sha256};
+                let mut s = Sha256::new();
+                s.update(b"sender@live-e2e.test\nraxis-tenant@live-e2e.test");
+                hex::encode::<[u8; 32]>(s.finalize().into())
+            },
+            "SMTP command mailbox delimiters are not part of the audit envelope key",
+        );
     }
 }

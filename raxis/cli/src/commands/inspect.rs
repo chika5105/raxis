@@ -551,6 +551,8 @@ mod tests {
             path_export_globs: vec!["src/ipc/**".to_owned()],
             path_scope_override: false,
             session_agent_type: "Executor".to_owned(),
+            max_review_rejections: 2,
+            max_crash_retries: 1,
         }
     }
 

@@ -12,9 +12,12 @@
 //     re-attaches to the existing worktree without re-cloning.
 //
 //   * `provision_executor_worktree` — activation-time clone of the
-//     Orchestrator's worktree (so the Executor inherits every
-//     commit the Orchestrator merged before activation). RW mount
-//     so the Executor can `git commit` its work.
+//     Orchestrator's worktree at the exact input base selected by
+//     the DAG. Root executors start at the Orchestrator anchor;
+//     successor executors start at their completed predecessor's
+//     `evaluation_sha` so they observe the upstream bytes they are
+//     supposed to consume. RW mount so the Executor can `git commit`
+//     its work.
 //
 //   * `provision_reviewer_worktree` — activation-time clone of the
 //     Orchestrator's worktree at `evaluation_sha` (the SHA the
@@ -92,6 +95,17 @@ pub struct OrchestratorAnchor {
     /// Persisted into `sessions.base_tracking_ref` so a future
     /// `git fetch` knows which branch to pull.
     pub base_tracking_ref: String,
+}
+
+/// Outcome of a successful Executor worktree provisioning pass.
+#[derive(Debug, Clone)]
+pub struct ExecutorWorkspace {
+    /// The mount handed to the substrate.
+    pub mount: WorkspaceMount,
+    /// The commit the executor starts from. The kernel persists this
+    /// on the session row as `base_sha`, and CompleteTask diffs are
+    /// evaluated relative to it.
+    pub input_base_sha: String,
 }
 
 /// Provision (or re-attach to) the per-initiative Orchestrator
@@ -232,7 +246,8 @@ pub fn provision_executor_worktree(
     data_dir: &Path,
     session_id: &str,
     orch_anchor: &OrchestratorAnchor,
-) -> Result<WorkspaceMount, ProvisionError> {
+    input_base_sha: &str,
+) -> Result<ExecutorWorkspace, ProvisionError> {
     let dest = data_dir.join(WORKTREES_DIR).join(session_id);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ProvisionError::DestUnusable {
@@ -242,30 +257,32 @@ pub fn provision_executor_worktree(
     }
 
     // The Executor's worktree IS structurally an Orchestrator-
-    // shaped clone (full clone, full worktree, HEAD at base_sha)
-    // — the Orchestrator clones from `main`, the Executor clones
-    // from the Orchestrator's worktree. So we re-use
+    // shaped clone (full clone, full worktree, HEAD at
+    // `input_base_sha`) — the Orchestrator clones from `main`, the
+    // Executor clones from the Orchestrator's worktree. So we re-use
     // `provision_orchestrator` (whose semantics are "clone source
-    // at base_sha, full worktree, no sparse"). The only
-    // distinction is that the source is the Orchestrator's
-    // worktree, not the bare `main` repo. `gix::clone` accepts
-    // either layout.
+    // at base_sha, full worktree, no sparse"). The only distinction
+    // is that the source is the Orchestrator's worktree, not the
+    // bare `main` repo. `gix::clone` accepts either layout.
     let provision = provision_orchestrator(
         &orch_anchor.worktree_root,
-        &orch_anchor.base_sha,
+        input_base_sha,
         &dest,
         CloneStrategy::Full,
     )?;
 
-    Ok(WorkspaceMount {
-        host_path: provision.worktree_root,
-        guest_path: GUEST_WORKSPACE_PATH.to_owned(),
-        mode: MountMode::ReadWrite,
-        // Content hashing the entire git working tree on every
-        // spawn would dominate the spawn-path latency budget;
-        // V2 leaves this `None` and the Reviewer's read-only
-        // snapshot covers the byte-equivalence audit need.
-        content_hash: None::<ContentHash>,
+    Ok(ExecutorWorkspace {
+        input_base_sha: input_base_sha.to_owned(),
+        mount: WorkspaceMount {
+            host_path: provision.worktree_root,
+            guest_path: GUEST_WORKSPACE_PATH.to_owned(),
+            mode: MountMode::ReadWrite,
+            // Content hashing the entire git working tree on every
+            // spawn would dominate the spawn-path latency budget;
+            // V2 leaves this `None` and the Reviewer's read-only
+            // snapshot covers the byte-equivalence audit need.
+            content_hash: None::<ContentHash>,
+        },
     })
 }
 
@@ -292,6 +309,7 @@ pub fn provision_reviewer_worktree(
     session_id: &str,
     orch_anchor: &OrchestratorAnchor,
     evaluation_sha: &str,
+    diff_base_sha: &str,
 ) -> Result<WorkspaceMount, ProvisionError> {
     let dest = data_dir.join(WORKTREES_DIR).join(session_id);
     if let Some(parent) = dest.parent() {
@@ -304,7 +322,7 @@ pub fn provision_reviewer_worktree(
     let provision = provision_reviewer(
         &orch_anchor.worktree_root,
         evaluation_sha,
-        &orch_anchor.base_sha,
+        diff_base_sha,
         &dest,
         // Reviewer V2 baseline is `Full`; sparse is a per-task
         // policy decision that lands on the planner-side. The
@@ -355,7 +373,7 @@ pub const TRANSFER_REF_PREFIX: &str = "refs/heads/raxis-transfer/";
 ///
 ///   * The Orchestrator's ODB at `<data_dir>/worktrees/orch-<initiative_id>/.git/`
 ///     contains every reachable object from `commit_sha`.
-///   * `refs/raxis/transfer/<task_id>` in that ODB points at
+///   * `refs/heads/raxis-transfer/<task_id>` in that ODB points at
 ///     `commit_sha`. The next `gix::clone` from the orch
 ///     worktree pulls the commit + tree + blobs because the
 ///     ref is in the default refspec set.
@@ -381,7 +399,7 @@ pub fn copy_executor_commit_to_orchestrator_odb(
     raxis_domain_git::fetch_into_main(orch_worktree_root, exec_worktree_root, &oid)
         .map_err(|e| format!("fetch_into_main: {e}"))?;
 
-    // 2. Publish a transfer ref at `refs/raxis/transfer/<task_id>`
+    // 2. Publish a transfer ref at `refs/heads/raxis-transfer/<task_id>`
     //    so the next `gix::clone::PrepareFetch` walk includes the
     //    commit. We refuse task_ids with embedded slashes /
     //    control chars defensively — the plan parser's task_id
@@ -446,6 +464,23 @@ mod tests {
         );
     }
 
+    fn git_stdout(cwd: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        String::from_utf8(out.stdout)
+            .expect("git stdout utf8")
+            .trim()
+            .to_owned()
+    }
+
     /// Initialise a real source repository at
     /// `<data_dir>/repositories/main` with one commit on the
     /// requested branch. Mirrors the live-e2e harness's
@@ -475,16 +510,7 @@ mod tests {
         std::fs::write(main_repo.join("README.md"), b"hello\n").unwrap();
         run_git(&main_repo, &["add", "README.md"]);
         run_git(&main_repo, &["commit", "-q", "-m", "initial"]);
-        let head = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&main_repo)
-            .output()
-            .expect("rev-parse")
-            .stdout;
-        String::from_utf8(head)
-            .expect("rev-parse stdout utf8")
-            .trim()
-            .to_owned()
+        git_stdout(&main_repo, &["rev-parse", "HEAD"])
     }
 
     #[test]
@@ -545,11 +571,82 @@ mod tests {
         )
         .expect("orch ok");
         let exec_session = "01900000-0000-7000-8000-0000000000ee";
-        let mount = provision_executor_worktree(dd.path(), exec_session, &anchor)
-            .expect("executor provisioning ok");
-        assert_eq!(mount.guest_path, "/workspace");
-        assert!(matches!(mount.mode, MountMode::ReadWrite));
-        assert!(mount.host_path.join(".git").exists());
-        assert!(mount.host_path.join("README.md").exists());
+        let provisioned =
+            provision_executor_worktree(dd.path(), exec_session, &anchor, &anchor.base_sha)
+                .expect("executor provisioning ok");
+        assert_eq!(provisioned.input_base_sha, anchor.base_sha);
+        assert_eq!(provisioned.mount.guest_path, "/workspace");
+        assert!(matches!(provisioned.mount.mode, MountMode::ReadWrite));
+        assert!(provisioned.mount.host_path.join(".git").exists());
+        assert!(provisioned.mount.host_path.join("README.md").exists());
+    }
+
+    #[test]
+    fn provision_executor_worktree_can_start_from_predecessor_evaluation_sha() {
+        if Command::new("git").arg("--version").output().is_err() {
+            eprintln!("skipping: git CLI not available");
+            return;
+        }
+        let dd = TempDir::new().unwrap();
+        let _ = bootstrap_source(dd.path(), "main");
+        let anchor = provision_orchestrator_worktree(
+            dd.path(),
+            "01900000-0000-7000-8000-000000000004",
+            "refs/heads/main",
+        )
+        .expect("orch ok");
+
+        let pred = provision_executor_worktree(
+            dd.path(),
+            "01900000-0000-7000-8000-0000000000aa",
+            &anchor,
+            &anchor.base_sha,
+        )
+        .expect("predecessor provisioning ok");
+        std::fs::write(
+            pred.mount.host_path.join("README.md"),
+            b"hello from predecessor\n",
+        )
+        .expect("write predecessor fixture");
+        run_git(
+            &pred.mount.host_path,
+            &["config", "user.email", "test@raxis.local"],
+        );
+        run_git(
+            &pred.mount.host_path,
+            &["config", "user.name", "raxis-test"],
+        );
+        run_git(&pred.mount.host_path, &["add", "README.md"]);
+        run_git(
+            &pred.mount.host_path,
+            &["commit", "-q", "-m", "predecessor"],
+        );
+        let predecessor_sha = git_stdout(&pred.mount.host_path, &["rev-parse", "HEAD"]);
+
+        copy_executor_commit_to_orchestrator_odb(
+            &anchor.worktree_root,
+            &pred.mount.host_path,
+            "predecessor-task",
+            &predecessor_sha,
+        )
+        .expect("copy predecessor commit to orchestrator ODB");
+
+        let successor = provision_executor_worktree(
+            dd.path(),
+            "01900000-0000-7000-8000-0000000000bb",
+            &anchor,
+            &predecessor_sha,
+        )
+        .expect("successor provisioning ok");
+        assert_eq!(successor.input_base_sha, predecessor_sha);
+        assert_eq!(
+            git_stdout(&successor.mount.host_path, &["rev-parse", "HEAD"]),
+            predecessor_sha
+        );
+        assert_eq!(
+            std::fs::read_to_string(successor.mount.host_path.join("README.md"))
+                .expect("read successor inherited file"),
+            "hello from predecessor\n"
+        );
     }
 }

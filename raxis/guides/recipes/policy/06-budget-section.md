@@ -57,11 +57,13 @@ dispatch loop (the kernel never sees individual token counts).
 
 | Field | Type | Required | Effect |
 |---|---|---|---|
-| `max_seconds_per_call` | `u32` | optional | Per-call ceiling on the in-VM `sleep` tool. 0 (or section omitted) ⇒ tool refuses every invocation with `FAIL_SLEEP_DISABLED`. |
+| `max_seconds_per_call` | `u32` | optional | Per-call ceiling on the in-VM `sleep` tool. 0 disables the tool; if the whole section is omitted, canonical agents do not advertise `sleep`. Stale/custom callers still fail closed with `FAIL_SLEEP_DISABLED`. |
 | `max_cumulative_seconds` | `u32` | optional | Cumulative cap across the session. Once reached, every subsequent `sleep` invocation fails with `FAIL_SLEEP_BUDGET_EXCEEDED`. |
 
 Both default to 0, which means **the sleep tool is disabled by
-default**. Operators must opt in.
+default**. Operators must opt in. When the section is absent, the
+canonical planner omits `sleep` from the tool manifest so the model
+does not spend turns calling a tool the operator did not enable.
 
 ---
 
@@ -130,7 +132,7 @@ tokens or dollars. They share neither units nor scale.
 |---|---|
 | `FAIL_LANE_BUDGET_EXCEEDED` immediately | Lane cap is too low for your per-intent cost. Either lower the costs in `base_cost_per_intent_kind` or raise the lane's `max_cost_per_epoch`. |
 | `FAIL_TASK_COST_EXCEEDED` on a long-running task | The task is hitting its per-task ceiling. Raise `max_cost_per_task`, OR lower `cost_per_touched_path` if it's path-count dominant, OR break the task in two. |
-| `FAIL_SLEEP_DISABLED` on every `sleep` call | The `[budget.sleep_caps]` section is missing. Opt in. |
+| `FAIL_SLEEP_DISABLED` on every `sleep` call | A stale/custom harness invoked `sleep` without an enabled `[budget.sleep_caps]` section, or the section set a zero ceiling. Opt in only when the task truly needs bounded waiting. |
 | `FAIL_SLEEP_BUDGET_EXCEEDED` mid-task | Cumulative cap reached. Either raise `max_cumulative_seconds` or shorten the agent's actual usage. |
 | Token cap ignored | Token caps are stamped into env at spawn time; only NEW sessions see updated values. Existing sessions keep their original env block. |
 
@@ -156,7 +158,8 @@ tokens or dollars. They share neither units nor scale.
   the lane budget to track *count* of intents, not their shape.
 - **Aggressive token policing.** Tight token_caps + low
   `max_cost_per_task` — agents that wander hit budgets fast.
-- **Disabled sleep.** Omit `[budget.sleep_caps]` entirely; every
-  `sleep` call inside an agent VM fails. This is the safest
-  default; only enable when a specific scenario needs it (e.g.
+- **Disabled sleep.** Omit `[budget.sleep_caps]` entirely; canonical
+  agents will not see a `sleep` tool, and stale/custom direct calls
+  fail with `FAIL_SLEEP_DISABLED`. This is the safest default; only
+  enable when a specific scenario needs bounded waiting (e.g.
   rate-limiting against an external service).

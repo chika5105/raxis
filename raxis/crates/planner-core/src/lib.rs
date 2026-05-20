@@ -167,8 +167,8 @@ pub use transport::{
 pub use vm_capabilities::{
     build_capability_hint, cached_capabilities, is_kernel_private_env, probe_capabilities,
     project_manifest, BinaryEntry, CapabilityCategory, CapabilityFilter, CapabilityManifest,
-    FilesystemSnapshot, GoToolchain, ImageRole, NodePackage, NodeRuntime, PythonPackage,
-    PythonRuntime, RustToolchain,
+    FilesystemSnapshot, GoToolchain, ImageOrigin, NodePackage, NodeRuntime, PythonPackage,
+    PythonRuntime, RustToolchain, SessionRole,
 };
 
 /// **The three valid planner-harness roles** — informational mirror

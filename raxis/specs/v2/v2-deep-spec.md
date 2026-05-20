@@ -1032,7 +1032,7 @@ Why per-initiative rather than per-`subtask_activations` row: the loop class is 
 
 Why a structural backstop on top of the orchestrator-side NNSP fix (`INV-PLANNER-ORCH-RETRY-ON-REJECT-01` + `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`): the NNSP-side fix closes the IMMEDIATE loop by surfacing the aggregator's terminal verdict on the wire. A future NNSP regression, KSB projection bug, or LLM hallucination could re-introduce the loop class with a different cause; the ceiling pins the worst-case observability + operator-recovery surface to four consecutive respawns regardless of the upstream cause. Defense in depth.
 
-**V2.5b extension — auto-escalation on logical deadlock.** `OrchestratorRespawnCeilingExceeded` alone is fail-loud-but-fire-and-forget: the operator gets a notification but no tracked approval workflow. The orchestrator cannot escalate about its own structural confusion (it just exits cleanly), so the kernel auto-creates a tracked `escalations` row inside the SAME SQLite transaction as the initiative-`Failed` flip. The row carries `class = 'LogicalDeadlock'`, `initiator = 'Kernel'` (Migration 20 added the `initiator` column), `status = 'Pending'`, and a `RequestedEscalationScope::LogicalDeadlock { initiative_id, attempts, window_secs, last_intent_kind, last_rejection_reason }` payload. The justification text is operator-facing, citing the attempt count, time window, last intent kind, and last rejection reason verbatim so the operator's failure-surface review needs no audit-chain join. Pinned by `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` (`invariants.md §6.5`).
+**V2.5b extension — auto-escalation on logical deadlock.** `OrchestratorRespawnCeilingExceeded` alone is fail-loud-but-fire-and-forget: the operator gets a notification but no tracked approval workflow. The orchestrator cannot escalate about its own structural confusion (it just exits cleanly), so the kernel auto-creates a tracked `escalations` row inside the SAME SQLite transaction as the initiative-`Failed` flip. The row carries `class = 'LogicalDeadlock'`, `initiator = 'Kernel'` (Migration 20 added the `initiator` column), `status = 'Pending'`, and a `RequestedEscalationScope::LogicalDeadlock { initiative_id, attempts, window_secs, last_intent_kind, last_rejection_reason }` payload. The justification text is operator-facing, citing the attempt count, time window, last intent kind, and last rejection reason verbatim so the operator's failure-surface review needs no audit-chain join. Pinned by `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` (`invariants.md §6` scheduler/lifecycle limits).
 
 The auto-escalation implementation lives in `orch_respawn_ceiling::insert_logical_deadlock_escalation_in_tx` (resolves anchor task / session / lineage from the most recently FSM-touched task on the failing initiative, then INSERTs the row with `ON CONFLICT(session_id, idempotency_key) DO NOTHING` for safe replay). Free-text fields are truncated on a UTF-8 boundary to `MAX_LOGICAL_DEADLOCK_REASON_LEN` (1 KiB) so a hostile orchestrator looping on a pathologically large intent shape cannot blow audit row size. The `escalations` table's `UNIQUE (session_id, idempotency_key)` constraint is satisfied by a deterministic key `kernel-orch-respawn-ceiling:{initiative_id}` so a second auto-create attempt for the same initiative within one kernel-process lifetime is a no-op.
 
@@ -1851,22 +1851,24 @@ The kernel:
 1. Allocates the Reviewer's worktree at `$RAXIS_DATA_DIR/worktrees/<reviewer_uuid>/`.
 2. Initializes a fresh `gix::Repository` at that path.
 3. Reads the git objects for `evaluation_sha` (and its ancestors back to
-   `main_base_sha`) from the Orchestrator's worktree's object store
+   the predecessor Executor session's `base_sha`) from the Orchestrator's worktree's object store
    (`gix::ObjectDatabase` opened in read-only mode against
    `$RAXIS_DATA_DIR/worktrees/<orchestrator_uuid>/.git/objects/`).
 4. Copies (does NOT hardlink, does NOT clone-by-reference) every object reachable
    from `evaluation_sha` into the Reviewer's object store, ending at
-   `main_base_sha` — the boundary commit, included.
+   the predecessor Executor session's `base_sha` — the boundary commit, included.
 5. Creates a single ref `refs/raxis/evaluation` pointing at `evaluation_sha`,
    sets `HEAD` to it, then performs a `gix::worktree::checkout` to materialize
    the working tree files (the Reviewer's `read_file` of `/workspace/<path>`
    reads these regular files, not git objects).
 6. Pre-renders artifacts under `$RAXIS_DATA_DIR/worktrees/<reviewer_uuid>/.raxis/`
    (this directory is mounted into the Reviewer VM as `/raxis/`, read-only):
-   - `/raxis/diff.patch` — the unified diff `main_base_sha..evaluation_sha`
+   - `/raxis/diff.patch` — the unified diff
+     `<predecessor_executor_session.base_sha>..evaluation_sha`
      produced via `gix::diff` (or `gix::object::tree::diff`); a textual patch
      ready for the Reviewer to `read_file`.
-   - `/raxis/log.txt` — `git log --oneline main_base_sha..evaluation_sha`
+   - `/raxis/log.txt` —
+     `git log --oneline <predecessor_executor_session.base_sha>..evaluation_sha`
      equivalent, produced via `gix::traverse`; one commit per line with
      short SHA + commit message subject + author + timestamp.
    - `/raxis/<verifier_name>/<artifact_basename>` — for each V2 task verifier
@@ -1941,14 +1943,17 @@ and 24b lives in the dedicated workspace crate
 [`raxis-worktree-provision`](../../crates/worktree-provision/src/lib.rs). It
 exposes two entry points:
 
-- `provision_reviewer(orch_repo_root, evaluation_sha, main_base_sha, dest_root)
+- `provision_reviewer(orch_repo_root, evaluation_sha, diff_base_sha, dest_root)
   → ReviewerProvision` clones the Orchestrator's repo via a `file://` URL
   (`gix::clone::PrepareFetch::fetch_then_checkout` → `main_worktree`), pins
   `refs/raxis/evaluation` at `evaluation_sha`, re-materialises the worktree at
   that SHA (a tree walk that copies blobs and sweeps stale paths so the cloned
   HEAD does not bleed through), then pre-renders `.raxis/diff.patch` and
-  `.raxis/log.txt` covering `main_base_sha..evaluation_sha`. The crate's unit
-  tests prove that the destination ODB is **independent** of the source: a
+  `.raxis/log.txt` covering `diff_base_sha..evaluation_sha`. `diff_base_sha`
+  is the predecessor Executor session's `base_sha`, not necessarily the
+  initiative base SHA; this keeps Reviewer evidence scoped to the task's own
+  delta even when that Executor inherited a completed predecessor's work. The
+  crate's unit tests prove that the destination ODB is **independent** of the source: a
   post-clone mutation in the source repo never appears in the destination. This
   is the on-disk realisation of "no hardlinks, no shared memory mappings".
 - `provision_orchestrator(main_repo_root, base_sha, dest_root) →
@@ -2077,6 +2082,46 @@ that outlives the merge step (e.g., a daemon that sees mid-merge
 worktree contents). Foreground-only `bash` keeps the Orchestrator's
 state machine tractable: every merge step is one inference call →
 one foreground bash invocation → one tool result, all serialized.
+
+### Step 24c: Executor Workspace Input Base — DAG State Handoff (V2)
+
+**Context:** Executor sessions are not independent islands when the
+plan DAG contains executor-to-executor edges. A successor executor is
+semantically consuming the accepted bytes of its predecessor. If the
+kernel clones the successor workspace from the initiative base SHA
+instead, the successor can pass its own checks while silently missing
+the upstream code it was meant to build on. The live e2e `lint-defect`
+→ `lint-runner-python` chain exposed exactly this failure mode: the
+lint runner checked the original Python file instead of the defect
+commit, so the review loop never exercised the intended repair path.
+
+**Decision (Step 24c):** Executor workspace provisioning is DAG-aware:
+
+1. Root Executor tasks (no `task_dag_edges` predecessor) clone the
+   Orchestrator anchor at the initiative base SHA.
+2. A single-predecessor Executor task clones the Orchestrator anchor at
+   the predecessor task's `tasks.evaluation_sha`.
+3. The successor session row stores that inherited SHA as
+   `sessions.base_sha`. `CompleteTask` admission, path checks, touched
+   path derivation, and dashboard diff rendering therefore evaluate the
+   successor's delta against the bytes it actually inherited, not
+   against the initiative root.
+4. Reviewer provisioning for that successor uses the successor
+   Executor session's `base_sha` as the diff/log boundary. The Reviewer
+   sees exactly the successor's contribution over its inherited input
+   base.
+5. Activation fails closed if a predecessor lacks `evaluation_sha`; the
+   dependency was not durably completed and the successor cannot receive
+   a coherent workspace.
+
+**Current multi-predecessor rule.** Multi-predecessor Executor tasks
+require an explicit kernel-synthesised merge base before VM boot. Until
+that synthesis lands, activation is refused with a typed provisioning
+failure rather than cloning from an arbitrary parent and dropping the
+other predecessors. IntegrationMerge is the place where multiple
+completed branches are currently consolidated; executor-level
+fan-in needs the same target-ref preservation discipline in a
+per-session input workspace before it is admitted.
 
 **Implementation reference (canonical image digest enforcement).**
 The compiled-in expected SHA-256 digests live in

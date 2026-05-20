@@ -350,13 +350,15 @@ pub fn classify_for_task_rows(
                 validation_retry_n += 1;
                 let validator_reason = row
                     .payload
-                    .get("reason")
+                    .get("validator_reason")
+                    .or_else(|| row.payload.get("reason"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_owned();
                 let validator_detail = row
                     .payload
-                    .get("detail")
+                    .get("validator_detail")
+                    .or_else(|| row.payload.get("detail"))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
                 let n = row
@@ -1017,6 +1019,57 @@ mod tests {
                 ..
             } if outcome == "completed_with_commit" && sha == "def456"
         ));
+    }
+
+    #[test]
+    fn classify_for_task_surfaces_intent_validation_reject_reason_and_detail() {
+        let task = "integration-coordinator";
+        let chain = vec![audit(
+            20,
+            "IntentValidationRejected",
+            Some(task),
+            Some("orch-session"),
+            json!({
+                "task_id": task,
+                "intent_kind": "IntegrationMerge",
+                "validator_reason": "diff_validation_failed",
+                "validator_detail": {
+                    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "missing_executor_task_id": "allowlist-positive-codegen",
+                    "missing_executor_sha": "cccccccccccccccccccccccccccccccccccccccc",
+                    "diagnostic": "candidate head does not contain a completed executor artifact"
+                },
+                "validation_reject_count": 1
+            }),
+        )];
+
+        let out = classify_for_task(&chain, task, &[], None);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            LifecycleAnnotation::RetryValidationReject {
+                validator_reason,
+                validator_detail,
+                validation_reject_count,
+                ..
+            } => {
+                assert_eq!(validator_reason, "diff_validation_failed");
+                assert_eq!(*validation_reject_count, 1);
+                assert_eq!(
+                    validator_detail
+                        .get("missing_executor_task_id")
+                        .and_then(|v| v.as_str()),
+                    Some("allowlist-positive-codegen")
+                );
+                assert_eq!(
+                    validator_detail
+                        .get("missing_executor_sha")
+                        .and_then(|v| v.as_str()),
+                    Some("cccccccccccccccccccccccccccccccccccccccc")
+                );
+            }
+            other => panic!("expected RetryValidationReject, got {other:?}"),
+        }
     }
 
     /// **iter62 review-lint-defect-rust fixture.** A

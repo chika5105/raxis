@@ -20,7 +20,7 @@ fi
 # Required binaries (the kernel refuses to boot the VM without these).
 for required in \
     "/sbin/init" \
-    "/usr/local/bin/raxis-planner-orchestrator" \
+    "/usr/local/bin/raxis-orchestrator" \
     "/bin/bash" \
     "/bin/sh" \
     "/usr/bin/git" \
@@ -91,7 +91,7 @@ done
 # guard; this is a post-build sanity check that the resulting binary
 # does not link against any `bg_*` symbol exporters from
 # `raxis-planner-tools`. The check is left to the
-# `raxis-planner-orchestrator` build target's `cargo deny` lints; we
+# `raxis-orchestrator` build target's `cargo deny` lints; we
 # only smoke-check the image structure here.
 
 echo "verify: orchestrator-core rootfs at $ROOTFS passes structural checks"

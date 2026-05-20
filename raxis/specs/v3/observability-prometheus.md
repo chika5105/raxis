@@ -261,7 +261,7 @@ projection of every dispatched `IpcMessage` request variant in
 `kernel/src/ipc/server.rs::drive_planner_stream`, plus an
 `unexpected` collapse for the catch-all arm. Pinned by
 `INV-OBS-IPC-ROUNDTRIP-COVERAGE-01`; full discussion in
-`invariants.md §11.13`. The histogram uses the IPC bucket
+`invariants.md`. The histogram uses the IPC bucket
 override `[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]`
 ms — substrate IPC round-trips span sub-millisecond ksb-update
 probes through multi-second `planner_fetch_request` tool calls.
@@ -436,7 +436,7 @@ The provisioning surface — datasource YAML, dashboard provider
 YAML, dashboard JSONs, and the three Grafana bind/named volume
 mounts in `raxis/live-e2e/docker-compose.extended.e2e.yml` — is
 pinned by `INV-GRAFANA-DATASOURCE-PROVISIONED-AT-STACK-UP-01`
-(`specs/invariants.md §11.14`). After `docker compose -p
+(`specs/invariants.md`). After `docker compose -p
 raxis-live-e2e-test -f docker-compose.extended.e2e.yml up -d
 --wait` returns, the Grafana HTTP API MUST report (a) the
 Prometheus datasource at uid `prometheus` with `url:
@@ -465,7 +465,7 @@ process is actively forwarding the kernel's metric ring to
 that Prometheus reports `up{job=~"raxis.*"} = 1` for at least
 one raxis target. Pinned by
 `INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01`
-(`specs/invariants.md §11.10`).
+(`specs/invariants.md`).
 
 The harness either spawns and supervises the pusher itself
 (default — auto-locate then auto-build via `cargo build

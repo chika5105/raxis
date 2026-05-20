@@ -118,10 +118,13 @@ use crate::initiatives::lifecycle as kernel_lifecycle;
 pub use raxis_types::planner_env::PLANNER_TASK_PROMPT_ENV;
 
 /// Env var consumed by `raxis-planner-core::vm_capabilities` to
-/// label the live capability manifest. Canonical roles stamp
-/// `orchestrator` / `executor` / `reviewer`; operator-published
-/// executor images stamp `byo`.
-pub const PLANNER_ROLE_ENV: &str = "RAXIS_PLANNER_ROLE";
+/// label the live session role. BYO images still stamp
+/// `executor` / `reviewer` here; image provenance is separate.
+pub const PLANNER_SESSION_ROLE_ENV: &str = "RAXIS_PLANNER_SESSION_ROLE";
+
+/// Env var consumed by `raxis-planner-core::vm_capabilities` to
+/// label image provenance. Values are `canonical` or `byo`.
+pub const VM_IMAGE_ORIGIN_ENV: &str = "RAXIS_VM_IMAGE_ORIGIN";
 
 /// Optional env var consumed by `raxis-planner-core::vm_capabilities`
 /// to expose the verified operator-image digest as inert provenance.
@@ -860,7 +863,7 @@ async fn spawn_orchestrator_for_initiative(
          reaching orchestrator spawn with an empty prompt is a parser bug",
     );
     let mut env: BTreeMap<String, String> = BTreeMap::new();
-    stamp_capability_manifest_env(&mut env, "orchestrator", None);
+    stamp_capability_manifest_env(&mut env, "orchestrator", "canonical", None);
     if let Some(data_dir) = &spawn_ctx.data_dir {
         let sock = data_dir.join("sockets").join("planner.sock");
         env.insert(
@@ -3949,9 +3952,11 @@ fn log_planner_max_turns_resolved(
 
 /// stamp the `[budget.sleep_caps]`
 /// per-call and cumulative ceilings into the spawned VM env.
-/// Absent ⇒ the in-VM `SleepTool::disabled()` refuses every
-/// invocation; opting in requires both keys to be present
-/// (validated at policy load).
+/// Absent ⇒ the canonical planner omits `sleep` from the advertised
+/// tool manifest. Stale/custom harnesses that invoke `sleep` without
+/// these env ceilings still fail closed via `SleepTool::disabled()`.
+/// Opting in requires both keys to be present (validated at policy
+/// load).
 fn populate_sleep_cap_env(
     env: &mut BTreeMap<String, String>,
     caps: Option<&raxis_policy::SleepCapsSection>,
@@ -4709,26 +4714,21 @@ pub enum ExecutorAgentKind {
     Reviewer,
 }
 
-fn planner_capability_role_for(
-    agent_kind: ExecutorAgentKind,
-    operator_image_override: bool,
-) -> &'static str {
-    if operator_image_override {
-        "byo"
-    } else {
-        match agent_kind {
-            ExecutorAgentKind::Executor => "executor",
-            ExecutorAgentKind::Reviewer => "reviewer",
-        }
+fn planner_capability_session_role_for(agent_kind: ExecutorAgentKind) -> &'static str {
+    match agent_kind {
+        ExecutorAgentKind::Executor => "executor",
+        ExecutorAgentKind::Reviewer => "reviewer",
     }
 }
 
 fn stamp_capability_manifest_env(
     env: &mut BTreeMap<String, String>,
-    planner_role: &'static str,
+    session_role: &'static str,
+    image_origin: &'static str,
     image_digest: Option<&str>,
 ) {
-    env.insert(PLANNER_ROLE_ENV.to_owned(), planner_role.to_owned());
+    env.insert(PLANNER_SESSION_ROLE_ENV.to_owned(), session_role.to_owned());
+    env.insert(VM_IMAGE_ORIGIN_ENV.to_owned(), image_origin.to_owned());
     if let Some(digest) = image_digest.filter(|s| !s.is_empty()) {
         env.insert(VM_IMAGE_DIGEST_ENV.to_owned(), digest.to_owned());
     }
@@ -5020,7 +5020,12 @@ pub async fn spawn_executor_for_task(
     let mut env = extra_env;
     stamp_capability_manifest_env(
         &mut env,
-        planner_capability_role_for(agent_kind, operator_image_override),
+        planner_capability_session_role_for(agent_kind),
+        if operator_image_override {
+            "byo"
+        } else {
+            "canonical"
+        },
         None,
     );
     if let Some(data_dir) = &spawn_ctx.data_dir {
@@ -5544,14 +5549,22 @@ mod tests {
     }
 
     #[test]
-    fn capability_manifest_env_stamps_byo_role_and_digest() {
+    fn capability_manifest_env_stamps_session_role_origin_and_digest() {
         let mut env = BTreeMap::new();
         stamp_capability_manifest_env(
             &mut env,
-            planner_capability_role_for(ExecutorAgentKind::Executor, true),
+            planner_capability_session_role_for(ExecutorAgentKind::Executor),
+            "byo",
             Some("sha256:abc123"),
         );
-        assert_eq!(env.get(PLANNER_ROLE_ENV).map(String::as_str), Some("byo"));
+        assert_eq!(
+            env.get(PLANNER_SESSION_ROLE_ENV).map(String::as_str),
+            Some("executor")
+        );
+        assert_eq!(
+            env.get(VM_IMAGE_ORIGIN_ENV).map(String::as_str),
+            Some("byo")
+        );
         assert_eq!(
             env.get(VM_IMAGE_DIGEST_ENV).map(String::as_str),
             Some("sha256:abc123")
@@ -5561,19 +5574,23 @@ mod tests {
     #[test]
     fn capability_manifest_env_stamps_canonical_agent_roles() {
         assert_eq!(
-            planner_capability_role_for(ExecutorAgentKind::Executor, false),
+            planner_capability_session_role_for(ExecutorAgentKind::Executor),
             "executor"
         );
         assert_eq!(
-            planner_capability_role_for(ExecutorAgentKind::Reviewer, false),
+            planner_capability_session_role_for(ExecutorAgentKind::Reviewer),
             "reviewer"
         );
 
         let mut env = BTreeMap::new();
-        stamp_capability_manifest_env(&mut env, "orchestrator", None);
+        stamp_capability_manifest_env(&mut env, "orchestrator", "canonical", None);
         assert_eq!(
-            env.get(PLANNER_ROLE_ENV).map(String::as_str),
+            env.get(PLANNER_SESSION_ROLE_ENV).map(String::as_str),
             Some("orchestrator")
+        );
+        assert_eq!(
+            env.get(VM_IMAGE_ORIGIN_ENV).map(String::as_str),
+            Some("canonical")
         );
         assert!(
             !env.contains_key(VM_IMAGE_DIGEST_ENV),

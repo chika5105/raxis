@@ -124,6 +124,7 @@ RUN npm install -g --no-audit --no-fund --loglevel=error \
 # Python 3.11 (Debian bookworm ships 3.11 in the default repo).
 RUN apt-get update && apt-get install --no-install-recommends -y \
     python3 python3-pip \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*
 
 # Pinned Python client libraries used by the operator's stock

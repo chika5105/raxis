@@ -107,21 +107,23 @@ enum Role {
 impl Role {
     /// Does this role's rootfs come from a `Containerfile`-driven OCI
     /// bake (`bake-rootfs`), or is it binary-only (just the staged
-    /// planner PID-1 binary)? Orchestrator + Reviewer are deliberately
-    /// binary-only per `INV-PLANNER-HARNESS-02` minimalism;
-    /// `executor-starter` and both verifier images need the
-    /// OS-tooling-rich Containerfile bake — the verifier ships the
-    /// runtime alongside the binary.
+    /// planner PID-1 binary)? Reviewer is deliberately binary-only
+    /// per `INV-PLANNER-HARNESS-02` minimalism; Orchestrator,
+    /// `executor-starter`, and both verifier images need the
+    /// OS-tooling-rich Containerfile bake. Orchestrator requires
+    /// bash/git/ripgrep for integration merge and conflict
+    /// resolution, while the verifier ships the runtime alongside
+    /// the binary.
     ///
     /// This single helper is the only place the dispatch lives so a
     /// future role that flips between the two shapes stays a one-line
-    /// edit. The harness's `role_needs_rootfs_bake` mirrors this
-    /// taxonomy and is kept in lockstep by
-    /// `INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01`'s witness test.
+    /// edit. The live-e2e harness cpio preflight mirrors the resulting
+    /// runtime-tool contract and is kept in lockstep by
+    /// `INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01`'s witness tests.
     fn needs_rootfs_bake(self) -> bool {
         matches!(
             self,
-            Role::ExecutorStarter | Role::Verifier | Role::VerifierSymbolIndex,
+            Role::Orchestrator | Role::ExecutorStarter | Role::Verifier | Role::VerifierSymbolIndex,
         )
     }
 
@@ -372,19 +374,28 @@ impl DevStageArgs {
 /// at the first invocation if absent.
 ///
 /// * `bin/bash` — `BashTool` spawn (`tokio::process::Command::new("bash")`).
-/// * `usr/bin/python3` — required by the executor's "LLM writes a
-///   `psycopg2` script and pipes it through `bash -c 'python3 -c "..."'`"
-///   canonical pattern. Without python the credential-proxy round-trip
-///   tests can never run.
-/// * `usr/bin/git` — `GitCommitTool` spawn.
+/// * `usr/bin/python3` + `usr/bin/python` — required by the
+///   executor's "LLM writes a `psycopg2` script and pipes it
+///   through Python" canonical pattern. The `python` symlink is
+///   deliberate: many real repos and agents invoke `python -m ...`;
+///   forcing discovery of the Debian-only `python3` spelling burns
+///   LLM turns without adding isolation value.
+/// * `usr/bin/git` — `GitCommitTool` spawn and orchestrator semantic
+///   merge/conflict-resolution flow.
 ///
-/// Orchestrator and Reviewer are intentionally binary-only today
-/// (`INV-PLANNER-HARNESS-02 — minimalism`); their `required_binaries`
-/// list is empty so the guard always passes for those roles.
+/// Reviewer remains intentionally binary-only today
+/// (`INV-PLANNER-HARNESS-02 — minimalism`); its `required_binaries`
+/// list is empty so the guard always passes for that role.
 fn required_os_binaries(role: Role) -> &'static [&'static str] {
     match role {
-        Role::ExecutorStarter => &["bin/bash", "usr/bin/python3", "usr/bin/git"],
-        Role::Orchestrator | Role::Reviewer => &[],
+        Role::ExecutorStarter => &[
+            "bin/bash",
+            "usr/bin/python3",
+            "usr/bin/python",
+            "usr/bin/git",
+        ],
+        Role::Orchestrator => &["bin/bash", "usr/bin/git", "usr/bin/rg"],
+        Role::Reviewer => &[],
         // === iter62 verifier-runtime ===
         //
         // `verifier-starter` carries `bash` (for `RAXIS_VERIFIER_COMMAND
@@ -3815,14 +3826,37 @@ mod tests {
 
     #[test]
     fn stub_guard_passes_when_role_has_no_required_binaries() {
-        // Orchestrator + Reviewer ship binary-only today
-        // (INV-PLANNER-HARNESS-02 minimalism), so the guard is a
-        // no-op. This pins that contract: a future change that adds
-        // entries to `required_os_binaries(Role::Reviewer)` MUST
-        // also amend the spec.
+        // Reviewer ships binary-only today (INV-PLANNER-HARNESS-02
+        // minimalism), so the guard is a no-op. This pins that
+        // contract: a future change that adds entries to
+        // `required_os_binaries(Role::Reviewer)` MUST also amend the
+        // spec.
         let tmp = tempfile::tempdir().unwrap();
-        assert!(assert_no_stub_after_stage(Role::Orchestrator, tmp.path()).is_ok());
         assert!(assert_no_stub_after_stage(Role::Reviewer, tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn stub_guard_rejects_orchestrator_without_merge_toolchain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = assert_no_stub_after_stage(Role::Orchestrator, tmp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("bin/bash"),
+            "remediation must name bash: {err}"
+        );
+        assert!(
+            err.contains("usr/bin/git"),
+            "remediation must name git:  {err}"
+        );
+        assert!(
+            err.contains("usr/bin/rg"),
+            "remediation must name rg:   {err}"
+        );
+        assert!(
+            err.contains("images bake --role orchestrator"),
+            "remediation must point at bake: {err}"
+        );
     }
 
     #[test]
@@ -3838,6 +3872,10 @@ mod tests {
         assert!(
             err.contains("usr/bin/python3"),
             "remediation must name python3: {err}"
+        );
+        assert!(
+            err.contains("usr/bin/python"),
+            "remediation must name python alias: {err}"
         );
         assert!(
             err.contains("usr/bin/git"),
@@ -4917,14 +4955,13 @@ mod tests {
 
     #[test]
     fn inv_image_bake_preflight_fail_closed_01_binary_only_skips_builder_probe() {
-        // When the selected roles are all binary-only
-        // (`Role::Reviewer`, `Role::Orchestrator`), the preflight
-        // must NOT require a container builder — a fresh macOS
-        // dev box without docker/podman/buildah can still bake
-        // the two canonical binary-only roles.
+        // When the selected roles are all binary-only (`Role::Reviewer`),
+        // the preflight must NOT require a container builder — a fresh
+        // macOS dev box without docker/podman/buildah can still bake
+        // the canonical pure-static reviewer role.
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().to_owned();
-        for r in &[Role::Reviewer, Role::Orchestrator] {
+        for r in &[Role::Reviewer] {
             let dir = ws.join(STAGING_PARENT).join(r.images_subdir());
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
@@ -4966,11 +5003,11 @@ mod tests {
     fn inv_image_bake_preflight_fail_closed_01_role_needs_rootfs_bake_taxonomy() {
         // Pin which roles need the OCI bake. A future change to
         // this table MUST update the harness's
-        // `role_needs_rootfs_bake` in lockstep — they MUST agree
-        // because the harness auto-bake mirrors the bake driver.
+        // the live-e2e cpio preflight in lockstep — they MUST agree
+        // because harness auto-bake mirrors the bake driver.
         assert!(
-            !Role::Orchestrator.needs_rootfs_bake(),
-            "Orchestrator is binary-only by spec"
+            Role::Orchestrator.needs_rootfs_bake(),
+            "Orchestrator needs bash/git/rg via Containerfile bake"
         );
         assert!(
             !Role::Reviewer.needs_rootfs_bake(),

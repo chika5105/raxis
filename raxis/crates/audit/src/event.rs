@@ -3437,10 +3437,11 @@ pub enum AuditEventKind {
     /// Emitted by the SMTP credential proxy when an envelope passes
     /// every restriction gate and is forwarded to the upstream
     /// relay. Carries the SHA-256 of the canonical
-    /// `<sender>\n<rcpt1>\n<rcpt2>...` envelope key (so reviewers
-    /// can cross-correlate against the upstream relay's logs
-    /// without having the recipient list itself land in the audit
-    /// chain), the recipient count, and the bytes-relayed counter.
+    /// `<bare-sender>\n<sorted-bare-rcpt1>\n<sorted-bare-rcpt2>...`
+    /// envelope key (so reviewers can cross-correlate against the
+    /// upstream relay's logs without having the recipient list
+    /// itself land in the audit chain), the recipient count, and
+    /// the bytes-relayed counter.
     /// Single-class observability event — the underlying
     /// `task_credential_proxies` row is paired through the
     /// lifecycle pair (`CredentialProxyStarted` /
@@ -3457,7 +3458,8 @@ pub enum AuditEventKind {
         /// Policy-declared credential name.
         credential_name: String,
         /// SHA-256 (hex-encoded) of the canonical envelope key
-        /// (`<sender>\n<rcpt1>\n<rcpt2>...`). Always present.
+        /// (`<bare-sender>\n<sorted-bare-rcpt1>\n<sorted-bare-rcpt2>...`).
+        /// Always present.
         envelope_sha256: String,
         /// Number of recipients in the envelope (>= 1, post-gate).
         recipient_count: u32,
@@ -3480,7 +3482,7 @@ pub enum AuditEventKind {
         /// Policy-declared credential name.
         credential_name: String,
         /// SHA-256 (hex-encoded) of the canonical envelope key
-        /// (`<sender>\n<rcpt1>\n<rcpt2>...`).
+        /// (`<bare-sender>\n<sorted-bare-rcpt1>\n<sorted-bare-rcpt2>...`).
         envelope_sha256: String,
         /// Number of recipients in the envelope (may be 0 if
         /// rejected pre-RCPT TO).

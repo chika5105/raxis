@@ -1231,7 +1231,7 @@ not the bare `plan.toml` hash, but the FAIL code is unchanged.
 
 The `FAIL_TASK_ENVIRONMENT_INCONSISTENT` and
 `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION` codes enforce `INV-ENV-01`
-(`invariants.md §11.5`). Both fire at `approve_plan` and are not
+(`invariants.md §12`). Both fire at `approve_plan` and are not
 downgradable by `--no-strict` — they are structural invariants, not
 warning-class hygiene checks. Each code's canonical semantics live in
 [`environment-access-control.md`](environment-access-control.md); this catalog is the failure-code
@@ -2290,7 +2290,7 @@ admission, but conceptually they remain distinct gates):
           - ≥ 2 labels: FAIL_TASK_ENVIRONMENT_INCONSISTENT { task,
             environments, sources }
             (hard; not bypassable by --no-strict; INV-ENV-01 is
-            structural per invariants.md §11.5)
+            structural per invariants.md §12)
     - Reviewer and Orchestrator tasks are processed but always record
       as Neutral by structural prohibition
       (per environment-access-control.md §11.6 — INV-PLANNER-HARNESS-01,

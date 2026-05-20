@@ -9,7 +9,7 @@
 > `INV-PROVIDER-CACHE-PARITY-02`,
 > `INV-PROVIDER-CACHE-OPT-OUT-BYTE-STABLE-03`,
 > `INV-PROVIDER-CACHE-USAGE-FOLD-04` (see
-> `specs/invariants.md §11.15`).
+> `specs/invariants.md`).
 >
 > **Code surface.**
 > `raxis/crates/planner-core/src/model.rs` (canonical types +
@@ -269,7 +269,7 @@ should derive:
 
 ## References
 
-* `specs/invariants.md §11.15` — `INV-PROVIDER-CACHE-*`.
+* `specs/invariants.md` — `INV-PROVIDER-CACHE-*`.
 * Anthropic prompt caching docs:
   <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>
 * OpenAI prompt caching docs:

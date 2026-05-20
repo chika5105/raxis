@@ -1,4 +1,4 @@
-//! Host-side main-branch fast-forward for V2 `IntegrationMerge`
+//! Host-side target-ref advancement for V2 `IntegrationMerge`
 //! Phase 2.
 //! Normative reference:
 //! * `integration-merge.md §4 Check 8` (Phase 2: idempotent domain
@@ -12,7 +12,7 @@
 //!   domain.
 //! * `v2-deep-spec.md §Step 8` (Orchestrator owns
 //!   `IntegrationMerge`; Kernel verifies ancestry and path
-//!   containment, then fast-forwards the main branch).
+//!   containment, then advances the target ref).
 //! ## What this crate does
 //! Two operations, both deliberately simple:
 //! 1. [`fetch_into_main`] — copy the merge commit (and its
@@ -53,10 +53,10 @@
 //!   `vcs::is_ancestor` already verifies that the merge commit
 //!   descends from the initiative `base_sha` BEFORE Phase 2 runs
 //!   (Check 3 in the admission pipeline). This crate still verifies
-//!   the domain-level fast-forward invariant against the live
-//!   `target_ref` tip immediately before the ref transaction, because
-//!   concurrent initiatives can advance `target_ref` after an
-//!   initiative's original `base_sha` was minted.
+//!   the domain-level live-tip preservation invariant immediately
+//!   before the ref transaction, because concurrent initiatives can
+//!   advance `target_ref` after an initiative's original `base_sha`
+//!   was minted.
 //! ## Failure handling
 //! Every public function is retry-safe: a transient I/O error
 //! returns a typed `MainMergeError`. Failures before the ref
@@ -77,17 +77,20 @@
 //!   advances the target ref past an unfetched commit because
 //!   `fetch_into_main` runs first and copies the full commit
 //!   graph before `update_target_ref` is invoked.
-//! * **INV-MERGE-FAST-FORWARD-LIVE-TIP** — before the ref
-//!   transaction, the candidate commit must descend from the live
-//!   `target_ref` tip. A candidate that descends only from an
-//!   initiative's stale `base_sha` is rejected, because publishing it
-//!   would drop work already landed by another initiative.
+//! * **INV-MERGE-PRESERVE-LIVE-TIP** — before the ref transaction,
+//!   the final published commit must descend from the live
+//!   `target_ref` tip. If the Orchestrator candidate was prepared
+//!   against a stale initiative `base_sha`, the adapter creates a
+//!   deterministic host-side merge commit that has both the live tip
+//!   and the Orchestrator candidate as parents. Conflict-free
+//!   concurrent initiatives therefore compose; conflicting changes
+//!   fail closed without advancing the ref.
 //! * **INV-MERGE-WORKTREE-CONSISTENCY** — when the target ref is
 //!   the currently checked-out branch, Phase 2 refreshes the main
 //!   repository's index and working tree to the accepted commit
 //!   after the ref transaction. This keeps dashboard review and
 //!   post-merge inspection from seeing a dirty tree full of
-//!   apparent deletions after a successful fast-forward.
+//!   apparent deletions after a successful advancement.
 //! * **INV-MERGE-WORKTREE-RETAIN** — structurally enforced by
 //!   absence: this crate exposes no worktree cleanup or
 //!   removal entry point. Successful Phase 2 leaves
@@ -157,19 +160,23 @@ pub enum MainMergeError {
     #[error("ref update failed: {0}")]
     RefUpdateFailed(String),
 
-    /// The candidate commit does not descend from the live target-ref
-    /// tip observed immediately before the ref update. Publishing it
-    /// would replace already-merged work with an unrelated history.
+    /// The target ref advanced since the Orchestrator cloned its
+    /// workspace and the adapter attempted the deterministic
+    /// host-side preservation merge, but git reported conflicts (or
+    /// another merge-time failure) before a publishable commit could
+    /// be produced. The target ref is untouched.
     #[error(
-        "non-fast-forward candidate for {target_ref}: candidate {candidate_sha} does not descend from current tip {previous_sha}"
+        "concurrent target merge failed for {target_ref}: candidate {candidate_sha} could not merge with live tip {previous_sha}: {reason}"
     )]
-    NonFastForwardCandidate {
+    ConcurrentMergeFailed {
         /// Ref that was about to be advanced.
         target_ref: String,
         /// Live tip of the target ref.
         previous_sha: String,
         /// Candidate SHA submitted by the Orchestrator.
         candidate_sha: String,
+        /// stderr/stdout summary from git.
+        reason: String,
     },
 
     /// The target ref advanced but refreshing the checked-out
@@ -206,8 +213,10 @@ pub struct MainAdvance {
     /// did not yet exist — initial-commit case).
     pub previous_sha: Option<String>,
     /// Where main points after this call. Equals the `commit_sha`
-    /// argument on success, or equals `previous_sha` when the
-    /// idempotency short-circuit fires.
+    /// argument on ordinary fast-forward success, equals a
+    /// deterministic host-side merge commit when the live target ref
+    /// advanced concurrently and merged cleanly, or equals
+    /// `previous_sha` when the idempotency short-circuit fires.
     pub current_sha: String,
     /// `true` iff this call was a no-op because main already
     /// pointed at the requested SHA. The kernel's audit chain
@@ -281,17 +290,28 @@ pub fn commit_merge_to_target_ref(
         });
     }
 
-    if let Some(prev) = previous.as_ref() {
-        ensure_candidate_fast_forwards_target(main_repo_root, prev, &oid, target_ref)?;
-    }
+    let final_oid = if let Some(prev) = previous.as_ref() {
+        if candidate_fast_forwards_target(main_repo_root, prev, &oid)? {
+            oid
+        } else {
+            synthesize_concurrent_target_merge(main_repo_root, prev, &oid, target_ref)?
+        }
+    } else {
+        oid
+    };
 
-    // Phase 2b — atomically advance the target ref to oid.
-    update_target_ref(&main_repo, &oid, previous.as_ref(), target_ref)?;
-    refresh_checked_out_worktree(main_repo_root, &oid, target_ref)?;
+    // Phase 2b — atomically advance the target ref to the final
+    // publishable commit. In the common case this is the
+    // Orchestrator candidate; when another initiative advanced the
+    // same target ref, this is the deterministic host-side merge
+    // commit that preserves both histories.
+    let main_repo = open_main(main_repo_root)?;
+    update_target_ref(&main_repo, &final_oid, previous.as_ref(), target_ref)?;
+    refresh_checked_out_worktree(main_repo_root, &final_oid, target_ref)?;
 
     Ok(MainAdvance {
         previous_sha: previous.as_ref().map(|p| p.to_string()),
-        current_sha: oid.to_string(),
+        current_sha: final_oid.to_string(),
         already_at_target: false,
     })
 }
@@ -539,7 +559,7 @@ pub fn update_target_ref(
             log: LogChange {
                 mode: RefLog::AndReference,
                 force_create_reflog: false,
-                message: "raxis: IntegrationMerge fast-forward".into(),
+                message: "raxis: IntegrationMerge advance".into(),
             },
             expected: previous,
             new: Target::Object(*oid),
@@ -596,14 +616,13 @@ fn refresh_checked_out_worktree(
     Ok(())
 }
 
-fn ensure_candidate_fast_forwards_target(
+fn candidate_fast_forwards_target(
     main_repo_root: &Path,
     previous: &gix::ObjectId,
     candidate: &gix::ObjectId,
-    target_ref: &str,
-) -> Result<(), MainMergeError> {
+) -> Result<bool, MainMergeError> {
     if previous == candidate {
-        return Ok(());
+        return Ok(true);
     }
 
     let previous_sha = previous.to_string();
@@ -622,19 +641,154 @@ fn ensure_candidate_fast_forwards_target(
         })?;
 
     if status.success() {
-        return Ok(());
+        return Ok(true);
     }
     if status.code() == Some(1) {
-        return Err(MainMergeError::NonFastForwardCandidate {
-            target_ref: target_ref.to_owned(),
-            previous_sha,
-            candidate_sha,
-        });
+        return Ok(false);
     }
 
     Err(MainMergeError::RefUpdateFailed(format!(
         "git merge-base --is-ancestor exited with {status}"
     )))
+}
+
+fn synthesize_concurrent_target_merge(
+    main_repo_root: &Path,
+    previous: &gix::ObjectId,
+    candidate: &gix::ObjectId,
+    target_ref: &str,
+) -> Result<gix::ObjectId, MainMergeError> {
+    let previous_sha = previous.to_string();
+    let candidate_sha = candidate.to_string();
+    let temp_dir = unique_merge_worktree_path(main_repo_root);
+
+    let add = std::process::Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            "--quiet",
+            temp_dir.to_string_lossy().as_ref(),
+            previous_sha.as_str(),
+        ])
+        .current_dir(main_repo_root)
+        .output()
+        .map_err(|e| MainMergeError::RefUpdateFailed(format!("git worktree add: {e}")))?;
+    if !add.status.success() {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(MainMergeError::RefUpdateFailed(format!(
+            "git worktree add exited {:?}: {}{}",
+            add.status.code(),
+            String::from_utf8_lossy(&add.stdout),
+            String::from_utf8_lossy(&add.stderr)
+        )));
+    }
+
+    let merge_date = commit_committer_date(main_repo_root, &candidate_sha)
+        .unwrap_or_else(|| "1970-01-01T00:00:00+00:00".to_owned());
+    let mut merge = std::process::Command::new("git");
+    merge
+        .args([
+            "merge",
+            "--no-ff",
+            "--no-gpg-sign",
+            "-m",
+            "raxis: preserve concurrent target-ref advancement",
+            candidate_sha.as_str(),
+        ])
+        .current_dir(&temp_dir)
+        .env("GIT_AUTHOR_NAME", "RAXIS Kernel")
+        .env("GIT_AUTHOR_EMAIL", "kernel@raxis.local")
+        .env("GIT_COMMITTER_NAME", "RAXIS Kernel")
+        .env("GIT_COMMITTER_EMAIL", "kernel@raxis.local")
+        .env("GIT_AUTHOR_DATE", merge_date.as_str())
+        .env("GIT_COMMITTER_DATE", merge_date.as_str());
+    let merge = merge
+        .output()
+        .map_err(|e| MainMergeError::RefUpdateFailed(format!("git merge spawn failed: {e}")))?;
+    if !merge.status.success() {
+        let _ = std::process::Command::new("git")
+            .args(["merge", "--abort"])
+            .current_dir(&temp_dir)
+            .output();
+        cleanup_merge_worktree(main_repo_root, &temp_dir);
+        return Err(MainMergeError::ConcurrentMergeFailed {
+            target_ref: target_ref.to_owned(),
+            previous_sha,
+            candidate_sha,
+            reason: format!(
+                "git merge exited {:?}: {}{}",
+                merge.status.code(),
+                String::from_utf8_lossy(&merge.stdout),
+                String::from_utf8_lossy(&merge.stderr)
+            ),
+        });
+    }
+
+    let rev = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&temp_dir)
+        .output()
+        .map_err(|e| MainMergeError::RefUpdateFailed(format!("git rev-parse spawn failed: {e}")))?;
+    if !rev.status.success() {
+        cleanup_merge_worktree(main_repo_root, &temp_dir);
+        return Err(MainMergeError::RefUpdateFailed(format!(
+            "git rev-parse HEAD exited {:?}: {}{}",
+            rev.status.code(),
+            String::from_utf8_lossy(&rev.stdout),
+            String::from_utf8_lossy(&rev.stderr)
+        )));
+    }
+    let merge_sha = String::from_utf8_lossy(&rev.stdout).trim().to_owned();
+    cleanup_merge_worktree(main_repo_root, &temp_dir);
+    parse_oid(&merge_sha)
+}
+
+fn unique_merge_worktree_path(main_repo_root: &Path) -> PathBuf {
+    let parent = main_repo_root.parent().unwrap_or(main_repo_root);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    parent.join(format!(
+        ".raxis-domain-git-merge-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+fn commit_committer_date(main_repo_root: &Path, sha: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["show", "-s", "--format=%cI", sha])
+        .current_dir(main_repo_root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn cleanup_merge_worktree(main_repo_root: &Path, temp_dir: &Path) {
+    let remove = std::process::Command::new("git")
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            temp_dir.to_string_lossy().as_ref(),
+        ])
+        .current_dir(main_repo_root)
+        .output();
+    if let Ok(out) = remove {
+        if out.status.success() {
+            return;
+        }
+    }
+    let _ = std::fs::remove_dir_all(temp_dir);
 }
 
 /// Read the current SHA `target_ref` points at in the repository
@@ -978,7 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_merge_to_main_rejects_non_fast_forward_candidate() {
+    fn commit_merge_to_main_preserves_concurrent_target_ref_advance() {
         let tmp = tempfile::tempdir().unwrap();
         let Some((main, orch, _base, stale_merge)) = fixture_main_and_orchestrator(tmp.path())
         else {
@@ -1016,25 +1170,106 @@ mod tests {
             .trim()
             .to_owned();
 
+        let advance = commit_merge_to_main(&main, &orch, &stale_merge).unwrap();
+        assert_eq!(advance.previous_sha.as_deref(), Some(live_tip.as_str()));
+        assert_ne!(
+            advance.current_sha, stale_merge,
+            "a stale but conflict-free candidate should publish a new \
+             host-side merge commit that preserves the live target tip"
+        );
+
+        let head = String::from_utf8(run(&["rev-parse", "HEAD"], &main).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert_eq!(head, advance.current_sha, "target ref must advance");
+        run(
+            &[
+                "merge-base",
+                "--is-ancestor",
+                live_tip.as_str(),
+                head.as_str(),
+            ],
+            &main,
+        );
+        run(
+            &[
+                "merge-base",
+                "--is-ancestor",
+                stale_merge.as_str(),
+                head.as_str(),
+            ],
+            &main,
+        );
+        let readme = std::fs::read_to_string(main.join("README.md")).unwrap();
+        assert_eq!(readme, "v1\nv2\n");
+        let hotfix = std::fs::read_to_string(main.join("HOTFIX.md")).unwrap();
+        assert_eq!(hotfix, "already landed\n");
+    }
+
+    #[test]
+    fn commit_merge_to_main_fails_closed_on_concurrent_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((main, orch, _base, stale_merge)) = fixture_main_and_orchestrator(tmp.path())
+        else {
+            eprintln!("skipping: git CLI not available");
+            return;
+        };
+
+        let run = |args: &[&str], cwd: &Path| {
+            let s = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_AUTHOR_NAME", "RAXIS Test")
+                .env("GIT_AUTHOR_EMAIL", "test@raxis.local")
+                .env("GIT_COMMITTER_NAME", "RAXIS Test")
+                .env("GIT_COMMITTER_EMAIL", "test@raxis.local")
+                .env("GIT_AUTHOR_DATE", "1700000002 +0000")
+                .env("GIT_COMMITTER_DATE", "1700000002 +0000")
+                .output()
+                .expect("git invocation");
+            assert!(
+                s.status.success(),
+                "git {args:?} failed in {}: {} / {}",
+                cwd.display(),
+                String::from_utf8_lossy(&s.stdout),
+                String::from_utf8_lossy(&s.stderr),
+            );
+            s
+        };
+
+        std::fs::write(main.join("README.md"), "v1\nconflicting-main\n").unwrap();
+        run(&["add", "README.md"], &main);
+        run(&["commit", "-q", "-m", "main: conflicting hotfix"], &main);
+        let live_tip = String::from_utf8(run(&["rev-parse", "HEAD"], &main).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+
         let result = commit_merge_to_main(&main, &orch, &stale_merge);
         match result {
-            Err(MainMergeError::NonFastForwardCandidate {
+            Err(MainMergeError::ConcurrentMergeFailed {
                 target_ref,
                 previous_sha,
                 candidate_sha,
+                reason,
             }) => {
                 assert_eq!(target_ref, "refs/heads/main");
                 assert_eq!(previous_sha, live_tip);
                 assert_eq!(candidate_sha, stale_merge);
+                assert!(
+                    reason.contains("CONFLICT") || reason.contains("conflict"),
+                    "conflict diagnostic should mention the merge conflict: {reason}"
+                );
             }
-            other => panic!("expected NonFastForwardCandidate, got {other:?}"),
+            other => panic!("expected ConcurrentMergeFailed, got {other:?}"),
         }
 
         let head = String::from_utf8(run(&["rev-parse", "HEAD"], &main).stdout)
             .unwrap()
             .trim()
             .to_owned();
-        assert_eq!(head, live_tip, "target ref must remain untouched");
+        assert_eq!(head, live_tip, "conflicting merge must not advance main");
     }
 
     #[test]

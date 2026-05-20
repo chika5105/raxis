@@ -778,10 +778,10 @@ pub fn require_canonical_images() {
     );
 
     // Auto-bake: if the canonical images are missing or are stub
-    // builds (no `/bin/bash` etc.), drive the full xtask pipeline
-    // (`bake-rootfs → dev-stage → build-all`) so the live-e2e harness
-    // is self-contained on a fresh dev host. Idempotent: re-runs
-    // skip every role whose .img already passes the cpio preflight.
+    // builds (no `/bin/bash` etc.), drive the public one-shot xtask
+    // bake pipeline so the live-e2e harness is self-contained on a
+    // fresh dev host. Idempotent: re-runs skip every role whose .img
+    // already passes the cpio preflight.
     //
     // Opt-out via `RAXIS_LIVE_E2E_SKIP_AUTO_BAKE=1` for operators
     // who manage canonical images themselves (e.g. CI machines that
@@ -829,20 +829,16 @@ pub fn require_canonical_images() {
         // even boots — the test fails fast with an actionable
         // remediation instead of timing out 4 minutes in.
         //
-        // Fix: `cargo xtask images bake-rootfs --role <ROLE>`. The
-        // remediation in the panic message points at it.
+        // Fix: `cargo xtask images bake --role <ROLE> --install-dir ...`.
+        // The remediation in the panic message points at the
+        // single public bake command operators use.
         let required = required_binaries_for_canonical_role(role);
-        if required.is_empty() {
-            // Orch + reviewer are intentionally binary-only today;
-            // the planner binary is checked below.
-        }
+        let xtask_role = xtask_cli_role_for(role);
         let entries = crate::common::cpio_inspect::list_initramfs_paths(&img).unwrap_or_else(|e| {
             panic!(
                 "failed to walk canonical image {}: {e}\n\
                  The cpio.gz may be corrupted; rebuild via:\n  \
-                 cargo xtask images bake-rootfs --role {role}\n  \
-                 cargo xtask images dev-stage    --role {role}\n  \
-                 cargo xtask images build-all    --role {role}",
+                 cargo xtask images bake --role {xtask_role}",
                 img.display(),
             )
         });
@@ -855,17 +851,15 @@ pub fn require_canonical_images() {
             "canonical {role} image is a stub — missing {n} required \
              binar{plural} from {img}:\n{lines}\n\
              \n\
-             This usually means `cargo xtask images bake-rootfs --role {role}` \
-             was skipped before `dev-stage` / `build-all`. The dev-host \
-             pipeline now bakes the rootfs FROM the canonical \
-             images/{role}/Containerfile via docker / podman / buildah; \
-             without that step the cpio.gz contains only the \
-             cross-compiled planner binary and `BashTool` returns ENOENT \
-             for every LLM-issued shell command (the iter-12 failure \
-             mode). Remediation:\n  \
-             cargo xtask images bake-rootfs --role {role}\n  \
-             cargo xtask images dev-stage    --role {role}\n  \
-             cargo xtask images build-all    --role {role}\n\
+             This usually means the image was produced by an obsolete \
+             partial pipeline or the role taxonomy skipped its Containerfile \
+             rootfs bake. The public dev-host pipeline now bakes the rootfs \
+             FROM images/{role}/Containerfile via docker / podman / buildah, \
+             overlays the guest binary, packs the cpio.gz, and signs the \
+             manifest in one command. Without that rootfs step, the cpio.gz \
+             contains only the planner binary and runtime tools return ENOENT \
+             (the iter-12/merge-orchestrator failure mode). Remediation:\n  \
+             cargo xtask images bake --role {xtask_role}\n\
              then re-run this test.",
             n = missing.len(),
             plural = if missing.len() == 1 { "y" } else { "ies" },
@@ -916,12 +910,15 @@ fn required_binaries_for_canonical_role(role: &str) -> &'static [&'static str] {
             "usr/bin/git",
             "usr/local/bin/raxis-executor",
         ],
-        // Orchestrator + Reviewer are binary-only by current spec
-        // (INV-PLANNER-HARNESS-02 minimalism) — only the planner
-        // PID-1 binary is required to ship in the canonical cpio.
-        // Branch B follow-up will enrich orch / reviewer Containerfiles
-        // and update this table in lockstep.
-        "orchestrator-core" => &["usr/local/bin/raxis-orchestrator"],
+        // Orchestrator performs semantic integration-merge work. A
+        // binary-only image can boot, but every `prepare_integration_merge`
+        // or conflict-resolution attempt fails with ENOENT for git/bash.
+        "orchestrator-core" => &[
+            "usr/bin/bash",
+            "usr/bin/git",
+            "usr/bin/rg",
+            "usr/local/bin/raxis-orchestrator",
+        ],
         "reviewer-core" => &["usr/local/bin/raxis-reviewer"],
         other => panic!(
             "unknown canonical role {other:?}; \
@@ -931,18 +928,17 @@ fn required_binaries_for_canonical_role(role: &str) -> &'static [&'static str] {
     }
 }
 
-/// Drive the three-stage `xtask images` pipeline (`bake-rootfs →
-/// dev-stage → build-all`) for any canonical role whose
+/// Drive the public one-shot `cargo xtask images bake` pipeline for
+/// any canonical role whose
 /// `<install_dir>/images/raxis-<role>-<v>.img` is missing or is a
 /// binary-only stub. Idempotent: roles that already pass the cpio
 /// preflight are skipped — we never re-run the docker bake when a
 /// good image is already on disk.
 ///
 /// This is the live-e2e harness's "self-contained on a fresh dev
-/// host" feature. Without it, every operator (and the iter-13
-/// fix-loop) had to remember to run six xtask invocations by hand
-/// before kicking the test off, and a forgotten `bake-rootfs` step
-/// surfaced as the iter-12 `BashTool: ENOENT` storm.
+/// host" feature. Without it, operators could accidentally boot stale
+/// partial images whose cpio contained only the guest binary; that
+/// surfaced as `BashTool`/`git` ENOENT storms deep into the run.
 ///
 /// # Panics
 ///
@@ -950,7 +946,7 @@ fn required_binaries_for_canonical_role(role: &str) -> &'static [&'static str] {
 /// We deliberately do NOT surface a `Result` — a test that cannot
 /// boot the kernel cannot proceed and a panic produces a clearer
 /// `cargo test` failure than a silent skip. The panic message
-/// includes the failed stage and the role.
+/// includes the failed one-shot bake command and the role.
 ///
 /// # Workspace location
 ///
@@ -998,58 +994,11 @@ fn ensure_canonical_images_baked(install_dir: &Path, kernel_version: &str) {
         // / reviewer / executor-starter). Translate once here.
         let xtask_role = xtask_cli_role_for(role);
 
-        // ── 1. bake-rootfs ───────────────────────────────────────
-        // Only `executor-starter` needs a Docker rootfs bake today
-        // (its planner LLM shells out to `bash`/`python3`/`git`).
-        // Orch + reviewer ship binary-only per INV-PLANNER-HARNESS-02
-        // minimalism; their `required_binaries_for_canonical_role`
-        // contains only the planner binary, which `dev-stage`
-        // produces, so no Containerfile bake is required.
-        if role_needs_rootfs_bake(role) {
-            run_xtask_or_panic(
-                &cargo,
-                &workspace_root,
-                role,
-                "bake-rootfs",
-                &["--role", xtask_role],
-            );
-        } else {
-            eprintln!(
-                "[live-e2e auto-bake] skip bake-rootfs for {role} \
-                 (binary-only by spec; no Containerfile build needed)"
-            );
-        }
-
-        // ── 2. dev-stage ─────────────────────────────────────────
-        // For binary-only roles, pass --allow-stub so the post-stage
-        // guard does not fire; for executor-starter (which DID just
-        // bake the rootfs) the guard validates the bake worked.
-        let stage_args: Vec<&str> = if role_needs_rootfs_bake(role) {
-            vec!["--role", xtask_role]
-        } else {
-            vec!["--role", xtask_role, "--allow-stub"]
-        };
-        run_xtask_or_panic(&cargo, &workspace_root, role, "dev-stage", &stage_args);
-
-        // ── 3. build-all ────────────────────────────────────────
-        // Pack into the signed cpio.gz at <install_dir>/images/.
-        run_xtask_or_panic(
-            &cargo,
-            &workspace_root,
-            role,
-            "build-all",
-            &[
-                "--role",
-                xtask_role,
-                "--install-dir",
-                install_dir.to_str().unwrap_or_else(|| {
-                    panic!(
-                        "install_dir contains non-utf8 bytes: {}",
-                        install_dir.display(),
-                    )
-                }),
-            ],
-        );
+        // The public image pipeline is intentionally one command. Older
+        // live-e2e helpers drove the retired intermediate subcommands
+        // (`bake-rootfs`, `dev-stage`, `build-all`) and could drift out of
+        // lockstep with production. Exercise the same path operators use.
+        run_xtask_images_bake_or_panic(&cargo, &workspace_root, role, xtask_role, install_dir);
     }
 }
 
@@ -1060,9 +1009,8 @@ fn ensure_canonical_images_baked(install_dir: &Path, kernel_version: &str) {
 /// → `$RAXIS_DEV_KERNEL_SOURCE` → already-staged → canonical
 /// host install), so the harness no longer needs the pre-bake
 /// copy logic this helper used to carry. The assertion is kept
-/// so that an operator who ran the legacy 3-step pipeline
-/// (`bake-rootfs → dev-stage → build-all`, which does NOT stage
-/// vmlinux) gets a clean, actionable diagnostic instead of the
+/// so that an operator with a partial/stale image setup gets a clean,
+/// actionable diagnostic instead of the
 /// fatal `AVF VM start failed: Invalid virtual machine
 /// configuration. The boot loader is invalid.` two seconds into
 /// the run.
@@ -1109,9 +1057,8 @@ fn ensure_canonical_kernel_binary_staged(install_dir: &Path) {
 /// CLI uses the planner-crate-short name (`orchestrator` instead
 /// of `orchestrator-core`, `reviewer` instead of `reviewer-core`,
 /// and the unchanged `executor-starter`). Drift between these two
-/// surfaced as iter-46 where auto-bake invoked
-/// `cargo xtask images bake-rootfs --role orchestrator-core` and
-/// xtask rejected the role with an `unsupported --role` error.
+/// once surfaced as an auto-bake invocation with the directory-style
+/// role name and an `unsupported --role` error.
 ///
 /// Rather than teach `xtask::Role::parse` a second name per role,
 /// we keep the CLI surface minimal (each role has exactly one
@@ -1124,28 +1071,6 @@ fn xtask_cli_role_for(image_subdir_role: &str) -> &'static str {
         "orchestrator-core" => "orchestrator",
         "reviewer-core" => "reviewer",
         "executor-starter" => "executor-starter",
-        other => panic!(
-            "unknown canonical role {other:?}; \
-             expected one of: orchestrator-core, executor-starter, reviewer-core"
-        ),
-    }
-}
-
-/// Whether the role needs a Docker rootfs bake (`bake-rootfs`)
-/// before `dev-stage`.
-///
-/// Orchestrator + reviewer are binary-only by current spec
-/// (INV-PLANNER-HARNESS-02 minimalism) — their canonical cpio
-/// contains only the planner binary, which `dev-stage` produces
-/// directly. The Docker rootfs bake is reserved for roles whose
-/// LLM shells out to OS tooling (`bash` / `python3` / `git` for
-/// executor-starter). Branch B will enrich orch / reviewer
-/// Containerfiles and flip the corresponding entries here.
-fn role_needs_rootfs_bake(image_subdir_role: &str) -> bool {
-    match image_subdir_role {
-        "executor-starter" => true,
-        "orchestrator-core" => false,
-        "reviewer-core" => false,
         other => panic!(
             "unknown canonical role {other:?}; \
              expected one of: orchestrator-core, executor-starter, reviewer-core"
@@ -1193,9 +1118,28 @@ fn workspace_root_from_manifest_dir() -> PathBuf {
     }
 }
 
-fn run_xtask_or_panic(cargo: &str, workspace_root: &Path, role: &str, sub: &str, extra: &[&str]) {
-    let mut argv: Vec<&str> = vec!["xtask", "images", sub];
-    argv.extend(extra);
+fn run_xtask_images_bake_or_panic(
+    cargo: &str,
+    workspace_root: &Path,
+    role: &str,
+    xtask_role: &str,
+    install_dir: &Path,
+) {
+    let install_dir = install_dir.to_str().unwrap_or_else(|| {
+        panic!(
+            "install_dir contains non-utf8 bytes: {}",
+            install_dir.display(),
+        )
+    });
+    let argv: Vec<&str> = vec![
+        "xtask",
+        "images",
+        "bake",
+        "--role",
+        xtask_role,
+        "--install-dir",
+        install_dir,
+    ];
     eprintln!(
         "[live-e2e auto-bake] {role}: running {} {}",
         cargo,
@@ -1208,7 +1152,7 @@ fn run_xtask_or_panic(cargo: &str, workspace_root: &Path, role: &str, sub: &str,
         .unwrap_or_else(|e| panic!("spawn `{cargo} {}`: {e}", argv.join(" "),));
     if !status.success() {
         panic!(
-            "live-e2e auto-bake stage `{sub}` failed for role {role:?} \
+            "live-e2e auto-bake failed for role {role:?} \
              (exit {status}). Re-run manually for richer diagnostics:\n  \
              {cargo} {}\n\
              Set RAXIS_LIVE_E2E_SKIP_AUTO_BAKE=1 to disable auto-bake \

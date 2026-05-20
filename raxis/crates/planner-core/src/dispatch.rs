@@ -681,9 +681,21 @@ impl DispatchLoop {
                              dispatch loop returning input verbatim>"
                         )),
                     };
+                    if output.is_error == Some(true) {
+                        next_user_blocks.push(ContentBlock::ToolResult {
+                            tool_use_id: tu_id.clone(),
+                            content: output.content,
+                            is_error: output.is_error,
+                        });
+                        continue;
+                    }
+                    let terminal_input = output
+                        .input_override
+                        .clone()
+                        .unwrap_or_else(|| input.clone());
                     return Ok(DispatchOutcome::TerminalTool {
                         tool_name: tool_name.clone(),
-                        input: input.clone(),
+                        input: terminal_input,
                         output,
                         cum_input_tokens: cum_in,
                         cum_output_tokens: cum_out,
@@ -970,9 +982,21 @@ impl DispatchLoop {
                              dispatch loop returning input verbatim>"
                         )),
                     };
+                    if output.is_error == Some(true) {
+                        next_user_blocks.push(ContentBlock::ToolResult {
+                            tool_use_id: tu_id.clone(),
+                            content: output.content,
+                            is_error: output.is_error,
+                        });
+                        continue;
+                    }
+                    let terminal_input = output
+                        .input_override
+                        .clone()
+                        .unwrap_or_else(|| input.clone());
                     return Ok(DispatchOutcome::TerminalTool {
                         tool_name: tool_name.clone(),
-                        input: input.clone(),
+                        input: terminal_input,
                         output,
                         cum_input_tokens: cum_in,
                         cum_output_tokens: cum_out,
@@ -1061,6 +1085,7 @@ impl DispatchLoop {
 mod tests {
     use super::*;
     use crate::model::{MessageResponse, MockModelClient, Usage};
+    use crate::tools::Tool;
 
     fn empty_response_end_turn(text: &str) -> MessageResponse {
         MessageResponse {
@@ -1269,6 +1294,81 @@ mod tests {
                 assert_eq!(input["head_sha"], "abc123def456");
             }
             other => panic!("expected TerminalTool, got {other:?}"),
+        }
+    }
+
+    struct RecoverableTerminalTool;
+
+    #[async_trait::async_trait]
+    impl Tool for RecoverableTerminalTool {
+        fn name(&self) -> &'static str {
+            "finish"
+        }
+
+        fn description(&self) -> &'static str {
+            "test terminal"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(
+            &self,
+            input: &serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolOutput, ToolError> {
+            if input.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+                Ok(ToolOutput::ok_with_input(
+                    "finish accepted",
+                    serde_json::json!({"ok": true, "normalized": true}),
+                ))
+            } else {
+                Ok(ToolOutput::err("finish needs ok=true"))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_tool_structured_error_returns_to_model_before_terminating() {
+        let r1 = tool_use_response("tu1", "finish", serde_json::json!({"ok": false}));
+        let r2 = tool_use_response("tu2", "finish", serde_json::json!({"ok": true}));
+        let model = Arc::new(MockModelClient::new(vec![r1, r2]));
+        let captured = model.seen.clone();
+        let mut registry = crate::tools::ToolRegistry::new();
+        registry.register(Arc::new(RecoverableTerminalTool));
+        let ws = fixture_workspace();
+        let mut d = DispatchLoop::new(
+            model,
+            Arc::new(registry),
+            DispatchConfig::new("test-model"),
+            ToolContext::for_workspace(ws.path()),
+        )
+        .with_terminal_tools(vec!["finish"]);
+
+        let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
+        match out {
+            DispatchOutcome::TerminalTool {
+                tool_name, input, ..
+            } => {
+                assert_eq!(tool_name, "finish");
+                assert_eq!(input["ok"], true);
+                assert_eq!(input["normalized"], true);
+            }
+            other => panic!("expected TerminalTool, got {other:?}"),
+        }
+
+        let seen = captured.lock().await;
+        assert_eq!(seen.len(), 2, "model should get a recovery turn");
+        let last_user = seen[1].messages.last().unwrap();
+        match &last_user.content[0] {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert_eq!(*is_error, Some(true));
+                assert!(content.contains("finish needs ok=true"));
+            }
+            other => panic!("expected terminal error ToolResult, got {other:?}"),
         }
     }
 

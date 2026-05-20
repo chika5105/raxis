@@ -13,7 +13,7 @@
 > - [`planner-harness.md §4.7`](planner-harness.md) (Reviewer) and `§4.8` (Orchestrator) —
 >   the per-role harness contracts that anchor
 >   `INV-PLANNER-HARNESS-02` and `INV-PLANNER-HARNESS-05`.
-> - `invariants.md §10.5` — the three normative trust contracts
+> - [`invariants.md §14`](../invariants.md) — the image-trust home for the three normative trust contracts
 >   (`INV-IMAGE-RESOLUTION-PER-ROLE-01`,
 >   `INV-OPERATOR-CUSTOM-IMAGE-01`, `INV-OPERATOR-CUSTOM-IMAGE-02`).
 > - [`audit-paired-writes.md §4.3`](audit-paired-writes.md) — the single-class roster that
@@ -427,8 +427,7 @@ For copy-pasteable end-to-end recipes, see:
 
 ## §6 — In-VM capability discovery (`vm_capabilities`)
 
-This section anchors `INV-EXEC-DISCOVERY-01`
-(`invariants.md §10.4a`).
+This section anchors the local `INV-EXEC-DISCOVERY-01` capability-discovery contract.
 
 ### §6.1 — Why this exists
 
@@ -459,7 +458,7 @@ by the **same** in-guest introspection probe
 1. **System-prompt capability hint.** At session start, the
    planner driver
    (`crates/planner-core/src/driver.rs::run_role_session_with_connected_transport`)
-   calls `cached_capabilities()` once per process, renders the
+   calls `cached_capabilities_for_workdir()` once per process, renders the
    manifest into a `## VM Environment` paragraph via
    `build_capability_hint()`, and folds it into the role NNSP
    before the KSB delimiter block. The LLM sees this on its
@@ -468,7 +467,7 @@ by the **same** in-guest introspection probe
    registry (executor, reviewer, orchestrator — see
    `crates/planner-core/src/tools.rs::build_*_registry`); the
    LLM can call it on any subsequent turn for a finer query
-   (e.g. "is `numpy` available?", "what's the workdir's git
+   (e.g. "is `numpy` available?", "what's the workspace's git
    HEAD?").
 
 Both surfaces read from the **same** memoized
@@ -483,7 +482,8 @@ The probe returns a `CapabilityManifest` (defined in
 
 ```jsonc
 {
-  "image_role": "executor" | "reviewer" | "orchestrator" | "byo",
+  "session_role": "executor" | "reviewer" | "orchestrator" | "unknown",
+  "image_origin": "canonical" | "byo" | "unknown",
   "image_digest": "sha256:..." | null,
   "binaries": [
     { "name": "bash",    "path": "/bin/bash",    "version": "5.2.15" },
@@ -508,9 +508,9 @@ The probe returns a `CapabilityManifest` (defined in
                 "REDIS_URL":    "redis://...",
                 "SMTP_URL":     "smtp://..." },
   "filesystem": {
-    "workdir":                   "/workspace/repo",
-    "workdir_languages_detected": ["rust", "python"],
-    "git_initialized":           true,
+    "workspace_path":               "/workspace/repo",
+    "workspace_languages_detected": ["rust", "python"],
+    "git_worktree":                 true,
     "head_commit":               "<sha>" | null
   }
 }
@@ -579,11 +579,11 @@ The probe is sub-second on a warm VM:
   dir (NO `pip list` subprocess — pip startup is >100 ms).
 * `npm list -g --json --depth=0` — capped at 500 ms.
 * `git rev-parse HEAD` — capped at 100 ms.
-* No recursive filesystem walks (`workdir_languages_detected`
+* No recursive filesystem walks (`workspace_languages_detected`
   uses depth=1 globs only).
 
 The probe runs **once** per process; subsequent
-`cached_capabilities()` calls are O(1) Arc clones.
+`cached_capabilities_for_workdir()` calls are O(1) Arc clones.
 
 ### §6.7 — Image-agnosticism
 

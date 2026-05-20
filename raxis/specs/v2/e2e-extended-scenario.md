@@ -239,7 +239,7 @@ spawning the kernel, with a clean error message naming the
 #### §3.5a — Harness auto-bring-up + bounded waits
 
 Per `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`
-(see `specs/invariants.md §11.10`) the realistic-scenario harness
+(see `specs/invariants.md`) the realistic-scenario harness
 verifies the docker-compose project `raxis-live-e2e-test` is up
 + healthy BEFORE the first `seed_*` call:
 

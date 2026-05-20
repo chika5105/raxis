@@ -150,7 +150,7 @@ If `on_max_rounds = "fail_task"`, step 6 instead transitions the task directly t
 
 > **Authority boundary (paradigm-`R-2` / `R-5` / `R-11` / `INV-KERNEL-DAG-AUTHORITY-01`).**
 > The kernel — NOT the Orchestrator — owns every DAG-release decision. The Orchestrator is an
-> untrusted LLM agent confined to its own VM (`paradigm.md §3.4`) and has *no* "release this
+> untrusted LLM agent confined to its own VM (the `R-1` / `R-2` paradigm invariants) and has *no* "release this
 > task" capability. Its only DAG-driving primitive is to *emit advisory intents*
 > (`activate_subtask`, `retry_subtask`, `integration_merge`) over the kernel's IPC surface;
 > every such intent is adjudicated by the kernel against (a) the static
@@ -262,7 +262,7 @@ The retry inserts a NEW `PendingActivation` row carrying both counters forward v
 | Criterion | Option A (chosen) | Option B (rejected) |
 |---|---|---|
 | FSM contract | Preserved — forward-only | Violated — backward `Completed → Failed` transition |
-| Spec alignment | `paradigm.md §3.6` — executor task-FSM independent of review verdicts | Conflicts with `paradigm.md §3.6` |
+| Spec alignment | `R-6` fail-closed discipline — executor task-FSM independent of review verdicts | Conflicts with `R-6` fail-closed discipline |
 | `Failed` semantic | Preserved — "executor reported failure" | Overloaded — "executor failed" OR "reviewers rejected" |
 | Dashboard counters | Monotonic | Flap on every rejection round |
 | Audit chain | Forward-only history (`Completed`, then `ExecutorRespawnFromReviewRejection`, then `Completed` again) | Audit chain reads as zig-zag |

@@ -214,6 +214,7 @@ struct PreGateState {
 /// we proceed into the gate-evaluation pipeline carrying `PreGateState`.
 enum PreGateOutcome {
     Reject(PlannerErrorCode, TaskState),
+    RejectWithDetail(PlannerErrorCode, TaskState, serde_json::Value),
     EarlyResponse(IntentResponse),
     /// Boxed because `PreGateState` is the largest variant by far
     /// (>200 B vs. <40 B for the other two); without the box every
@@ -422,6 +423,23 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
                     req.intent_kind.as_str(),
                     &validator_reason,
                     &req,
+                    None,
+                )
+                .await;
+            }
+            return Err((code, state));
+        }
+        PreGateOutcome::RejectWithDetail(code, state, validator_detail) => {
+            if code == PlannerErrorCode::FailInvalidDiff {
+                let validator_reason = classify_validation_reason(&req);
+                emit_intent_validation_rejected_and_bump_count(
+                    ctx,
+                    session_id.as_str(),
+                    req.task_id.as_str(),
+                    req.intent_kind.as_str(),
+                    &validator_reason,
+                    &req,
+                    Some(validator_detail),
                 )
                 .await;
             }
@@ -1173,7 +1191,7 @@ fn run_phase_a(
     // The IntegrationMerge three-phase commit (integration-merge.md
     // §11) sets `initiatives.git_apply_pending = 1` inside the same
     // SQLite transaction that records the intent (Phase 1) and clears
-    // it after the host-side fast-forward of the operator-configured
+    // it after the host-side advancement of the operator-configured
     // `target_ref` returns (Phase 3). Between Phase 1 commit and
     // Phase 3 clear, NO other IntegrationMerge for that initiative
     // may proceed:
@@ -1244,7 +1262,7 @@ fn run_phase_a(
     // despite the reviewer's objection (paradigm-`R-6` Fail-Closed
     // Default), so a regressed NNSP / blind-asking LLM cannot turn
     // an outstanding `AtLeastOneRejected` cross-Reviewer verdict
-    // into a fast-forward of `target_ref`.
+    // into an advancement of `target_ref`.
     //
     // Iter49 reproduced the failure mode: both Reviewers rejected
     // the lint-defect → lint-runner pipeline, the kernel-side
@@ -1447,7 +1465,18 @@ fn run_phase_a(
                     task.initiative_id,
                     e,
                 );
-                return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state);
+                return PreGateOutcome::RejectWithDetail(
+                    PlannerErrorCode::FailInvalidDiff,
+                    task_state,
+                    serde_json::json!({
+                        "intent_kind": req.intent_kind.as_str(),
+                        "task_id": req.task_id.as_str(),
+                        "base_sha": req.base_sha.as_ref().map(|s| s.as_str()),
+                        "head_sha": req.head_sha.as_ref().map(|s| s.as_str()),
+                        "coverage_reason": "integration_merge_coverage_query_failed",
+                        "diagnostic": e.to_string(),
+                    }),
+                );
             }
         };
 
@@ -1472,7 +1501,20 @@ fn run_phase_a(
                         head_sha_raw,
                         e,
                     );
-                    return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state);
+                    return PreGateOutcome::RejectWithDetail(
+                        PlannerErrorCode::FailInvalidDiff,
+                        task_state,
+                        serde_json::json!({
+                            "intent_kind": req.intent_kind.as_str(),
+                            "task_id": req.task_id.as_str(),
+                            "base_sha": req.base_sha.as_ref().map(|s| s.as_str()),
+                            "head_sha": req.head_sha.as_ref().map(|s| s.as_str()),
+                            "coverage_reason": "integration_merge_coverage_check_failed",
+                            "missing_executor_task_id": executor_head.task_id,
+                            "missing_executor_sha": executor_head.evaluation_sha,
+                            "diagnostic": e.to_string(),
+                        }),
+                    );
                 }
             };
             if !included {
@@ -1489,7 +1531,20 @@ fn run_phase_a(
                     executor_head.evaluation_sha,
                     head_sha_raw,
                 );
-                return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state);
+                return PreGateOutcome::RejectWithDetail(
+                    PlannerErrorCode::FailInvalidDiff,
+                    task_state,
+                    serde_json::json!({
+                        "intent_kind": req.intent_kind.as_str(),
+                        "task_id": req.task_id.as_str(),
+                        "base_sha": req.base_sha.as_ref().map(|s| s.as_str()),
+                        "head_sha": req.head_sha.as_ref().map(|s| s.as_str()),
+                        "coverage_reason": "integration_merge_missing_completed_executor_head",
+                        "missing_executor_task_id": executor_head.task_id,
+                        "missing_executor_sha": executor_head.evaluation_sha,
+                        "diagnostic": "candidate head does not contain a completed executor artifact; orchestrator must merge all completed executor SHAs before integration_merge",
+                    }),
+                );
             }
         }
     }
@@ -1781,7 +1836,7 @@ fn run_phase_c(
     //
     // For IntegrationMerge ONLY. Inside the SAME transaction as the
     // intent record so the flag flips atomically with the kernel's
-    // commitment to apply the merge. Phase 2 (host-side fast-forward
+    // commitment to apply the merge. Phase 2 (host-side target-ref advancement
     // below, after `tx.commit()`) is the side-effect; Phase 3 clears
     // the flag once Phase 2 returns. If the kernel crashes between
     // commit and Phase 3, boot recovery scans `git_apply_pending = 1`
@@ -1896,7 +1951,7 @@ fn run_phase_c(
     // kernel-store.md §2.5.2: a failed audit emit logs and proceeds
     // (the reconciler closes the gap on next boot).
     //
-    // V2 host-side fast-forward of the operator-configured
+    // V2 host-side advancement of the operator-configured
     // `target_ref`. Performed inline here, AFTER the SQLite
     // intent commit and BEFORE the audit emission + optional
     // push. The kernel reads the per-initiative
@@ -1918,7 +1973,7 @@ fn run_phase_c(
             None => (false, None),
         };
 
-        // ── V2 §1.2 Phase 2 — host-side fast-forward ───────────────
+        // ── V2 §1.2 Phase 2 — host-side target-ref advancement ─────
         let main_repo_root = ctx.data_dir.join("repositories").join("main");
         let orch_worktree_root = pre_state.worktree_path.clone();
         let initiative_target_ref = ctx
@@ -1934,13 +1989,17 @@ fn run_phase_c(
             &pre_state.head_sha_raw,
             &initiative_target_ref,
         );
+        let mut applied_commit_sha = pre_state.head_sha_raw.clone();
         let host_merge_succeeded = match &host_merge_result {
             Ok(advance) => {
+                applied_commit_sha = advance.current_sha.clone();
                 eprintln!(
-                    "{{\"level\":\"info\",\"event\":\"IntegrationMergeFastForward\",\
+                    "{{\"level\":\"info\",\"event\":\"IntegrationMergeTargetAdvanced\",\
                      \"initiative_id\":\"{initiative_id_owned}\",\
                      \"target_ref\":\"{initiative_target_ref}\",\
-                     \"current_sha\":\"{cur}\",\"already_at_target\":{aat}}}",
+                     \"requested_sha\":\"{req}\",\"current_sha\":\"{cur}\",\
+                     \"already_at_target\":{aat}}}",
+                    req = pre_state.head_sha_raw,
                     cur = advance.current_sha,
                     aat = advance.already_at_target,
                 );
@@ -1980,7 +2039,7 @@ fn run_phase_c(
                 }
 
                 // iter68/v3 worktree snapshots — the integration witness
-                // runs before this host-side fast-forward, so the only
+                // runs before this host-side target-ref advancement, so the only
                 // faithful "what reached main?" snapshot is taken here,
                 // after `<data_dir>/repositories/main` points at the
                 // accepted evaluation SHA.
@@ -2020,7 +2079,7 @@ fn run_phase_c(
             Err(err) => {
                 let (category, reason) = classify_merge_ff_error(err);
                 eprintln!(
-                    "{{\"level\":\"error\",\"event\":\"IntegrationMergeFastForwardFailed\",\
+                    "{{\"level\":\"error\",\"event\":\"IntegrationMergeTargetAdvanceFailed\",\
                      \"initiative_id\":\"{initiative_id_owned}\",\
                      \"target_ref\":\"{initiative_target_ref}\",\
                      \"category\":\"{category}\",\"reason\":\"{reason}\"}}",
@@ -2036,7 +2095,7 @@ fn run_phase_c(
                 // didn't succeed and re-trying boot recovery is the
                 // operator's recourse.
                 let merge_failure_reason =
-                    format!("IntegrationMerge fast-forward failed ({category}): {reason}",);
+                    format!("IntegrationMerge target advance failed ({category}): {reason}",);
                 {
                     let conn = store.lock_sync();
                     if let Err(e) = conn.execute(
@@ -2092,7 +2151,7 @@ fn run_phase_c(
                     );
                 }
                 // `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
-                // (iter65-review). The fast-forward failure cascades the
+                // (iter65-review). The target-ref advancement failure cascades the
                 // initiative to `Failed` (the SQL UPDATE above already
                 // ran); fire the generalised permanent-failure
                 // helper so the operator inbox surfaces a Critical-
@@ -2129,7 +2188,7 @@ fn run_phase_c(
         // INV-INITIATIVE-COMPLETES-WHEN-INTEGRATION-MERGE-SUCCEEDS-01
         //
         // The IntegrationMerge intent is the orchestrator's "I'm done"
-        // signal — once Phase 2 (host-side fast-forward) succeeds, the
+        // signal — once Phase 2 (host-side target-ref advancement) succeeds, the
         // synthetic coordinator task (`task_id == initiative_id`, see
         // `lifecycle.rs::spawn_orchestrator_session_for_initiative`)
         // transitions Running → Completed and the parent initiative
@@ -2181,7 +2240,7 @@ fn run_phase_c(
                         raxis_audit_tools::AuditEventKind::IntegrationMergeCompleted {
                             initiative_id: initiative_id_owned.clone(),
                             session_id: session_id_str.clone(),
-                            commit_sha: pre_state.head_sha_raw.clone(),
+                            commit_sha: applied_commit_sha.clone(),
                             previous_sha: pre_state.base_sha_raw.clone(),
                             operator_assisted,
                             escalation_id,
@@ -2266,7 +2325,7 @@ fn run_phase_c(
         // failure is informational and emits `PushFailed` without
         // rolling back the merge.
         //
-        // Push is skipped when Phase 2 (host-side fast-forward) failed
+        // Push is skipped when Phase 2 (host-side target-ref advancement) failed
         // — pushing the un-advanced `target_ref` to the upstream
         // remote would race the operator's manual recovery and could
         // surface a misleading "successful push" to the audit chain.
@@ -2304,7 +2363,7 @@ fn run_phase_c(
                 if let Err(e) = ctx.audit.emit(
                     raxis_audit_tools::AuditEventKind::PushFailed {
                         initiative_id: initiative_id_owned.clone(),
-                        commit_sha: pre_state.head_sha_raw.clone(),
+                        commit_sha: applied_commit_sha.clone(),
                         remote: remote.clone(),
                         refspec: refspec.clone(),
                         category: "pending_git_apply".to_owned(),
@@ -2364,7 +2423,7 @@ fn run_phase_c(
             if let Err(e) = ctx.audit.emit(
                 raxis_audit_tools::AuditEventKind::PushAttempted {
                     initiative_id: initiative_id_owned.clone(),
-                    commit_sha: pre_state.head_sha_raw.clone(),
+                    commit_sha: applied_commit_sha.clone(),
                     remote: remote.clone(),
                     refspec: refspec.clone(),
                 },
@@ -2391,7 +2450,7 @@ fn run_phase_c(
                     if let Err(e) = ctx.audit.emit(
                         raxis_audit_tools::AuditEventKind::PushCompleted {
                             initiative_id: initiative_id_owned.clone(),
-                            commit_sha: pre_state.head_sha_raw.clone(),
+                            commit_sha: applied_commit_sha.clone(),
                             remote: outcome.remote,
                             refspec: outcome.refspec,
                             summary: outcome.summary,
@@ -2426,7 +2485,7 @@ fn run_phase_c(
                     if let Err(e) = ctx.audit.emit(
                         raxis_audit_tools::AuditEventKind::PushFailed {
                             initiative_id: initiative_id_owned.clone(),
-                            commit_sha: pre_state.head_sha_raw.clone(),
+                            commit_sha: applied_commit_sha.clone(),
                             remote: remote.clone(),
                             refspec: refspec.clone(),
                             category: category.to_owned(),
@@ -3541,13 +3600,17 @@ async fn emit_intent_validation_rejected_and_bump_count(
     intent_kind: &str,
     validator_reason: &str,
     req: &IntentRequest,
+    validator_detail_extra: Option<serde_json::Value>,
 ) {
-    let validator_detail = serde_json::json!({
+    let mut validator_detail = serde_json::json!({
         "intent_kind": intent_kind,
         "task_id": task_id,
         "base_sha": req.base_sha.as_ref().map(|s| s.as_str()),
         "head_sha": req.head_sha.as_ref().map(|s| s.as_str()),
     });
+    if let Some(extra) = validator_detail_extra {
+        merge_validation_detail(&mut validator_detail, extra);
+    }
 
     // Bump the counter on the spawn_blocking pool — `Store::lock_sync`
     // panics on the tokio worker.
@@ -3634,6 +3697,23 @@ async fn emit_intent_validation_rejected_and_bump_count(
              \"task_id\":\"{task_id}\",\"validator_reason\":\"{validator_reason}\",\
              \"error\":\"{e}\"}}",
         );
+    }
+}
+
+fn merge_validation_detail(base: &mut serde_json::Value, extra: serde_json::Value) {
+    let Some(base_obj) = base.as_object_mut() else {
+        *base = extra;
+        return;
+    };
+    match extra {
+        serde_json::Value::Object(extra_obj) => {
+            for (key, value) in extra_obj {
+                base_obj.insert(key, value);
+            }
+        }
+        other => {
+            base_obj.insert("detail".to_owned(), other);
+        }
     }
 }
 
@@ -5951,11 +6031,27 @@ async fn handle_activate_sub_task(
             .map(|o| o.target_ref)
             .unwrap_or_else(|| policy_for_target.git_default_target_ref().to_owned());
 
-        // For Reviewer: read predecessor Executor's evaluation_sha
-        // BEFORE provisioning, so we can short-circuit with a
-        // typed error if it's missing instead of half-staging
-        // a worktree.
-        let (evaluation_sha_for_reviewer, dispatch_kind) = match lookup.agent_kind {
+        enum ProvisionTarget {
+            Reviewer {
+                evaluation_sha: String,
+                diff_base_sha: String,
+            },
+            Executor {
+                predecessor_input_sha: Option<String>,
+            },
+        }
+
+        // For Reviewer: read predecessor Executor's evaluation_sha and base_sha
+        // BEFORE provisioning, so we can short-circuit with a typed error if the
+        // predecessor session did not record a coherent git boundary.
+        //
+        // For Executor: read completed predecessor evaluation SHAs. A root
+        // executor starts from the orchestrator anchor. A successor executor
+        // starts from its predecessor's evaluation SHA so it actually observes
+        // the upstream bytes it is meant to consume, and so its own diff/path
+        // checks are measured from that inherited state instead of the
+        // initiative's original base.
+        let (provision_target, dispatch_kind) = match lookup.agent_kind {
             crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer => {
                 let store_for_eval = Arc::clone(&ctx.store);
                 let task_id_for_eval = task_id_owned.clone();
@@ -5971,21 +6067,24 @@ async fn handle_activate_sub_task(
                     let dag = raxis_store::Table::TaskDagEdges.as_str();
                     conn.query_row(
                         &format!(
-                            "SELECT t.evaluation_sha
+                            "SELECT t.evaluation_sha, s.base_sha
                                FROM {tasks} AS t
                                JOIN {dag} AS d ON d.predecessor_task_id = t.task_id
+                               LEFT JOIN {sessions} AS s ON s.session_id = t.session_id
                               WHERE d.successor_task_id = ?1
                                 AND t.evaluation_sha IS NOT NULL
+                                AND s.base_sha IS NOT NULL
                               LIMIT 1",
                             tasks = TASKS,
                             dag = dag,
+                            sessions = SESSIONS,
                         ),
                         rusqlite::params![&task_id_for_eval],
-                        |r| r.get::<_, Option<String>>(0),
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
                     )
                 })
                 .await;
-                let row: Result<Option<String>, _> = match row_join {
+                let row: Result<(String, String), _> = match row_join {
                     Ok(row) => row,
                     Err(_) => {
                         cleanup_unactivated_session_after_activation_failure(
@@ -5999,14 +6098,15 @@ async fn handle_activate_sub_task(
                         return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
                     }
                 };
-                let sha = match row {
-                    Ok(Some(s)) => s,
+                let (evaluation_sha, diff_base_sha) = match row {
+                    Ok(pair) => pair,
                     _ => {
                         eprintln!(
                             "{{\"level\":\"error\",\"event\":\"ActivateSubTaskReviewerNoEvalSha\",\
                              \"task_id\":\"{}\",\"diagnostic\":\"reviewer activation but no \
-                             predecessor task carries evaluation_sha — Executor's \
-                             commit_task_completion must run first\"}}",
+                             predecessor task carries evaluation_sha plus session base_sha — \
+                             Executor's commit_task_completion and worktree provisioning must \
+                             run first\"}}",
                             task_id_owned,
                         );
                         cleanup_unactivated_session_after_activation_failure(
@@ -6020,9 +6120,109 @@ async fn handle_activate_sub_task(
                         return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
                     }
                 };
-                (Some(sha), "reviewer")
+                (
+                    ProvisionTarget::Reviewer {
+                        evaluation_sha,
+                        diff_base_sha,
+                    },
+                    "reviewer",
+                )
             }
-            crate::session_spawn_orchestrator::ExecutorAgentKind::Executor => (None, "executor"),
+            crate::session_spawn_orchestrator::ExecutorAgentKind::Executor => {
+                let store_for_inputs = Arc::clone(&ctx.store);
+                let task_id_for_inputs = task_id_owned.clone();
+                let row_join = tokio::task::spawn_blocking(move || {
+                    let conn = store_for_inputs.lock_sync();
+                    let dag = raxis_store::Table::TaskDagEdges.as_str();
+                    let mut stmt = conn.prepare(&format!(
+                        "SELECT t.task_id, t.evaluation_sha
+                           FROM {dag} AS d
+                           JOIN {tasks} AS t ON t.task_id = d.predecessor_task_id
+                          WHERE d.successor_task_id = ?1
+                          ORDER BY d.predecessor_task_id",
+                        dag = dag,
+                        tasks = TASKS,
+                    ))?;
+                    let rows = stmt.query_map(rusqlite::params![&task_id_for_inputs], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                    })?;
+                    let mut out = Vec::new();
+                    for row in rows {
+                        out.push(row?);
+                    }
+                    Ok::<Vec<(String, Option<String>)>, rusqlite::Error>(out)
+                })
+                .await;
+                let predecessor_rows = match row_join {
+                    Ok(Ok(rows)) => rows,
+                    _ => {
+                        cleanup_unactivated_session_after_activation_failure(
+                            ctx,
+                            &lookup.new_session_id,
+                            &task_id_owned,
+                            &lookup.initiative_id,
+                            "executor_predecessor_eval_sha_lookup_failed",
+                        )
+                        .await;
+                        return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
+                    }
+                };
+                let predecessor_input_sha = match predecessor_rows.as_slice() {
+                    [] => None,
+                    [(pred_task_id, Some(sha))] => {
+                        eprintln!(
+                            "{{\"level\":\"info\",\"event\":\"ExecutorWorktreeInheritedPredecessor\",\
+                             \"task_id\":\"{}\",\"predecessor_task_id\":\"{}\",\
+                             \"input_base_sha\":\"{}\"}}",
+                            task_id_owned, pred_task_id, sha,
+                        );
+                        Some(sha.clone())
+                    }
+                    [(pred_task_id, None)] => {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"ActivateSubTaskExecutorPredecessorNoEvalSha\",\
+                             \"task_id\":\"{}\",\"predecessor_task_id\":\"{}\",\
+                             \"diagnostic\":\"executor successor activation requires predecessor \
+                             evaluation_sha\"}}",
+                            task_id_owned, pred_task_id,
+                        );
+                        cleanup_unactivated_session_after_activation_failure(
+                            ctx,
+                            &lookup.new_session_id,
+                            &task_id_owned,
+                            &lookup.initiative_id,
+                            "executor_missing_predecessor_evaluation_sha",
+                        )
+                        .await;
+                        return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
+                    }
+                    _ => {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"ActivateSubTaskExecutorMultiplePredecessors\",\
+                             \"task_id\":\"{}\",\"predecessor_count\":{},\
+                             \"diagnostic\":\"multi-predecessor executor workspace synthesis \
+                             requires an explicit kernel merge base and is refused here\"}}",
+                            task_id_owned,
+                            predecessor_rows.len(),
+                        );
+                        cleanup_unactivated_session_after_activation_failure(
+                            ctx,
+                            &lookup.new_session_id,
+                            &task_id_owned,
+                            &lookup.initiative_id,
+                            "executor_multi_predecessor_input_base_unsupported",
+                        )
+                        .await;
+                        return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
+                    }
+                };
+                (
+                    ProvisionTarget::Executor {
+                        predecessor_input_sha,
+                    },
+                    "executor",
+                )
+            }
         };
 
         let initiative_for_provision = lookup.initiative_id.clone();
@@ -6037,22 +6237,38 @@ async fn handle_activate_sub_task(
                 &target_ref_for_provision,
             )
             .map_err(|e| format!("orchestrator anchor: {e}"))?;
-            let mount = match evaluation_sha_for_reviewer.as_deref() {
-                Some(eval_sha) => crate::worktree_provisioning::provision_reviewer_worktree(
-                    &data_dir_for_provision,
-                    &session_for_provision,
-                    &anchor,
-                    eval_sha,
-                )
-                .map_err(|e| format!("reviewer provisioning: {e}"))?,
-                None => crate::worktree_provisioning::provision_executor_worktree(
-                    &data_dir_for_provision,
-                    &session_for_provision,
-                    &anchor,
-                )
-                .map_err(|e| format!("executor provisioning: {e}"))?,
+            let (mount, session_base_sha) = match provision_target {
+                ProvisionTarget::Reviewer {
+                    evaluation_sha,
+                    diff_base_sha,
+                } => (
+                    crate::worktree_provisioning::provision_reviewer_worktree(
+                        &data_dir_for_provision,
+                        &session_for_provision,
+                        &anchor,
+                        &evaluation_sha,
+                        &diff_base_sha,
+                    )
+                    .map_err(|e| format!("reviewer provisioning: {e}"))?,
+                    diff_base_sha,
+                ),
+                ProvisionTarget::Executor {
+                    predecessor_input_sha,
+                } => {
+                    let input_base_sha = predecessor_input_sha
+                        .as_deref()
+                        .unwrap_or(anchor.base_sha.as_str());
+                    let provisioned = crate::worktree_provisioning::provision_executor_worktree(
+                        &data_dir_for_provision,
+                        &session_for_provision,
+                        &anchor,
+                        input_base_sha,
+                    )
+                    .map_err(|e| format!("executor provisioning: {e}"))?;
+                    (provisioned.mount, provisioned.input_base_sha)
+                }
             };
-            Ok((mount, anchor.base_sha, anchor.base_tracking_ref))
+            Ok((mount, session_base_sha, anchor.base_tracking_ref))
         })
         .await;
         let provisioned: Result<(raxis_isolation::WorkspaceMount, String, String), String> =
@@ -8271,13 +8487,16 @@ fn classify_merge_ff_error(err: &raxis_domain_git::MainMergeError) -> (&'static 
                 ("git_failed", s.clone())
             }
         }
-        MainMergeError::NonFastForwardCandidate {
+        MainMergeError::ConcurrentMergeFailed {
             target_ref,
             previous_sha,
             candidate_sha,
+            reason,
         } => (
-            "target_ref_non_fast_forward",
-            format!("{candidate_sha} does not descend from live {target_ref} tip {previous_sha}"),
+            "target_ref_concurrent_merge_failed",
+            format!(
+                "{candidate_sha} could not be merged with live {target_ref} tip {previous_sha}: {reason}"
+            ),
         ),
         MainMergeError::WorktreeRefreshFailed { path, reason } => (
             "worktree_refresh_failed",
@@ -10811,7 +11030,9 @@ mod tests {
                 assert_eq!(code, PlannerErrorCode::FailReviewOutstanding);
                 assert_eq!(state, TaskState::Running);
             }
-            PreGateOutcome::EarlyResponse(_) | PreGateOutcome::Proceed(_) => {
+            PreGateOutcome::EarlyResponse(_)
+            | PreGateOutcome::Proceed(_)
+            | PreGateOutcome::RejectWithDetail(_, _, _) => {
                 panic!("integration_merge must reject while reviewer verdict is missing")
             }
         }

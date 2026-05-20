@@ -1587,10 +1587,10 @@ pub(crate) struct BudgetSection {
     /// `[budget.sleep_caps]`.
     /// Per-call and cumulative ceilings for the `sleep` planner tool
     /// (executor + orchestrator only; reviewer NEVER has it). `None`
-    /// ⇒ section omitted ⇒ the in-VM tool itself is registered with
-    /// `max_per_call = 0`, which causes every `sleep` invocation to
-    /// fail with `FAIL_SLEEP_DISABLED`. Operators who want the tool
-    /// MUST opt in by declaring this section.
+    /// ⇒ section omitted ⇒ canonical agents do not advertise `sleep`;
+    /// stale/custom callers still fail closed with
+    /// `FAIL_SLEEP_DISABLED`. Operators who want the tool MUST opt in
+    /// by declaring this section.
     #[serde(default)]
     pub(crate) sleep_caps: Option<SleepCapsSection>,
 }
@@ -1601,10 +1601,10 @@ pub(crate) struct BudgetSection {
 /// max_seconds_per_call         = 60      # hard ceiling per Sleep call
 /// max_cumulative_seconds       = 300     # total over the session
 /// ```
-/// Both fields default to 0 when absent, which causes the in-VM
-/// Sleep tool to refuse every invocation (`FAIL_SLEEP_DISABLED`).
-/// This makes the §3.1 spec's "operators must opt in" requirement
-/// the codified default.
+/// Both fields default to 0 when absent. Canonical agents omit the tool
+/// unless this section is present; direct/stale invocations fail with
+/// `FAIL_SLEEP_DISABLED`. This makes the §3.1 spec's "operators must
+/// opt in" requirement the codified default.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SleepCapsSection {
     /// Maximum allowed `seconds` argument on any single `sleep` call.
@@ -4377,9 +4377,10 @@ pub struct PolicyBundle {
 
     /// `[budget.sleep_caps]`.
     /// Per-session `sleep` tool budgets. `None` ⇒ section omitted ⇒
-    /// the in-VM Sleep tool refuses every invocation
-    /// (`FAIL_SLEEP_DISABLED`). Operators MUST opt in by declaring
-    /// the section.
+    /// canonical agents omit `sleep` from the advertised tool
+    /// manifest; stale/custom invocations fail closed with
+    /// `FAIL_SLEEP_DISABLED`. Operators MUST opt in by declaring the
+    /// section.
     sleep_caps: Option<SleepCapsSection>,
 
     /// SHA-256 of the raw policy.toml bytes. Set by the loader after computing
@@ -5973,9 +5974,10 @@ impl PolicyBundle {
 
     /// Per-session `sleep` tool
     /// budgets (`[budget.sleep_caps]`). `None` ⇒ section omitted ⇒
-    /// the in-VM Sleep tool refuses every invocation
-    /// (`FAIL_SLEEP_DISABLED`); operators MUST opt in by declaring
-    /// the section.
+    /// canonical agents omit `sleep` from the advertised tool
+    /// manifest; stale/custom invocations fail closed with
+    /// `FAIL_SLEEP_DISABLED`. Operators MUST opt in by declaring the
+    /// section.
     pub fn sleep_caps(&self) -> Option<&SleepCapsSection> {
         self.sleep_caps.as_ref()
     }
@@ -7413,7 +7415,8 @@ priority             = 100
     // ── V2 §3.1 [budget.sleep_caps] — schema + accessor + validation ──
 
     /// Omitting `[budget.sleep_caps]` leaves the accessor as `None` —
-    /// the kernel uses that to register `SleepTool::disabled()`.
+    /// the canonical planner uses that to omit `sleep` from the
+    /// advertised tool manifest.
     #[test]
     fn sleep_caps_section_absent_is_none() {
         let bundle = write_and_load(&minimal_policy_toml())

@@ -32,9 +32,9 @@ use thiserror::Error;
 
 use raxis_ksb::{
     Capabilities, ConcurrencyCapabilityView, CredentialPort, DagRow, ExecutorCapabilities,
-    InitiativeCapabilityView, KsbSnapshot, OrchestratorCapabilities, PendingEscalation,
-    ReviewerCapabilities, ReviewerVerdict, SessionCapabilityView, TaskCapabilityView,
-    KSB_SCHEMA_VERSION,
+    InitiativeCapabilityView, IntegrationMergeCapabilityView, IntegrationMergeExecutorSha,
+    KsbSnapshot, OrchestratorCapabilities, PendingEscalation, ReviewerCapabilities,
+    ReviewerVerdict, SessionCapabilityView, TaskCapabilityView, KSB_SCHEMA_VERSION,
 };
 use raxis_store::Table;
 use raxis_types::SessionAgentType;
@@ -266,7 +266,7 @@ pub fn assemble_ksb_snapshot(
     // every other field above (no separate `BEGIN`/`COMMIT` —
     // SQLite serialises reads on a single connection so all reads
     // in this function see the same store snapshot).
-    let capabilities = Some(assemble_capabilities(conn, registry, inputs)?);
+    let capabilities = Some(assemble_capabilities(conn, registry, inputs, &base_sha)?);
 
     // ── iter62 — `INV-RETRY-LAST-CRITIQUE-IN-KSB-01` ─────────────
     // Surface the most-recent reviewer critique into the KSB so a
@@ -968,6 +968,7 @@ fn assemble_capabilities(
     conn: &Connection,
     registry: &PlanRegistry,
     inputs: &KsbInputs<'_>,
+    base_sha: &str,
 ) -> Result<Capabilities, KsbAssemblyError> {
     let session = SessionCapabilityView {
         session_id: inputs.session_id.to_owned(),
@@ -1015,12 +1016,20 @@ fn assemble_capabilities(
                 active_count,
                 headroom,
             };
+            let integration_merge = build_integration_merge_view(
+                conn,
+                registry,
+                inputs.initiative_id,
+                &base_sha,
+                &ready_now,
+            )?;
             Ok(Capabilities::Orchestrator(OrchestratorCapabilities {
                 session,
                 initiative,
                 tasks,
                 ready_now,
                 concurrency,
+                integration_merge,
                 // V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`
                 // orchestrator carries the scaling view so its
                 // NNSP can reason about retry economics (e.g. surface
@@ -1078,6 +1087,86 @@ fn build_initiative_view(initiative_id: &str, orch_count: u32) -> InitiativeCapa
         max_orchestrator_no_progress_respawns: max,
         orchestrator_respawns_remaining: max.saturating_sub(orch_count),
     }
+}
+
+fn build_integration_merge_view(
+    conn: &Connection,
+    registry: &PlanRegistry,
+    initiative_id: &str,
+    base_sha: &str,
+    ready_now: &[String],
+) -> Result<IntegrationMergeCapabilityView, KsbAssemblyError> {
+    let mut blockers = Vec::new();
+    if base_sha.is_empty() {
+        blockers.push("base_sha=<unset>".to_owned());
+    }
+    if !ready_now.is_empty() {
+        blockers.push(format!(
+            "ready_now has {} activatable task(s)",
+            ready_now.len()
+        ));
+    }
+
+    let mut task_entries = registry.tasks_in_initiative(initiative_id);
+    task_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut required_executor_shas = Vec::new();
+    for (task_id, fields) in task_entries {
+        if fields.session_agent_type != SessionAgentType::Executor {
+            continue;
+        }
+        let (state, evaluation_sha) = read_task_state_and_eval_sha(conn, &task_id)?;
+        match (state.as_deref(), evaluation_sha.as_deref()) {
+            (Some(s), Some(sha)) if s == TaskState::Completed.as_sql_str() => {
+                let aggregate = compute_aggregate_review_outcome_with_conn(
+                    &task_id,
+                    conn,
+                    Some(AgentTypeFilter {
+                        plan_registry: registry,
+                        initiative_id,
+                        reviewer_task_id: "<ksb_integration_merge>",
+                    }),
+                )?
+                .verdict
+                .wire_str()
+                .to_owned();
+                if aggregate == "AllPassed" || aggregate == "NoSuccessors" {
+                    required_executor_shas.push(IntegrationMergeExecutorSha {
+                        task_id,
+                        sha: sha.to_owned(),
+                    });
+                } else {
+                    blockers.push(format!("{task_id} aggregate={aggregate}"));
+                }
+            }
+            (Some(s), Some(_)) => blockers.push(format!("{task_id} state={s}")),
+            (Some(s), None) => blockers.push(format!("{task_id} state={s} sha=<none>")),
+            (None, _) => blockers.push(format!("{task_id} missing_task_row")),
+        }
+    }
+
+    let ready = blockers.is_empty() && !required_executor_shas.is_empty();
+    Ok(IntegrationMergeCapabilityView {
+        ready,
+        base_sha: base_sha.to_owned(),
+        required_executor_shas,
+        blockers,
+    })
+}
+
+fn read_task_state_and_eval_sha(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<(Option<String>, Option<String>), rusqlite::Error> {
+    let sql = format!(
+        "SELECT state, evaluation_sha FROM {} WHERE task_id = ?1",
+        Table::Tasks.as_str()
+    );
+    conn.query_row(&sql, rusqlite::params![task_id], |r| {
+        Ok((Some(r.get::<_, String>(0)?), r.get::<_, Option<String>>(1)?))
+    })
+    .optional()
+    .map(|o| o.unwrap_or((None, None)))
 }
 
 /// Read the per-initiative orchestrator no-progress respawn counter

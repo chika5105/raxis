@@ -1115,7 +1115,7 @@ should pipe stderr rather than re-route through the
 kernel-runtime dashboard surface.
 
 Cross-reference: `INV-HOST-HYGIENE-01`
-(`specs/invariants.md §11.11`),
+(`specs/invariants.md`),
 `guides/operator/18-host-hygiene.md`.
 
 ## 5.8 Plan visibility — `plan-view` (`INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`)
@@ -1367,7 +1367,7 @@ coordination ticket lives in
 [`self-healing-supervisor.md §10.7`](self-healing-supervisor.md).
 
 Cross-reference: `INV-DASHBOARD-KERNEL-LIFECYCLE-01`
-(`specs/invariants.md §11.12`),
+(`specs/invariants.md`),
 `specs/v2/self-healing-supervisor.md §5.4`,
 `specs/v2/self-healing-supervisor.md §10.7`,
 `crates/dashboard/src/routes/health.rs`,
@@ -1438,7 +1438,7 @@ from every other state so operators can read the current
 trajectory at a glance.
 
 Cross-reference: `INV-DASHBOARD-TASK-STATE-COMPLETENESS-01`
-(`specs/invariants.md §11.9`),
+(`specs/invariants.md`),
 `raxis_types::fsm::TaskState` (kernel-store.md §2.5.1 Table 5),
 `crates/dashboard-kernel/src/lib.rs::task_row_to_view`,
 `dashboard-fe/src/lib/state-color.ts::MAP`.
@@ -1594,7 +1594,7 @@ title contract.
 
 Cross-reference:
 `INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01`
-(`specs/invariants.md §11.9`),
+(`specs/invariants.md`),
 `v2/v2-deep-spec.md §IntegrationMerge / Operator surface`,
 `kernel/src/initiatives/lifecycle.rs::auto_spawn_orchestrator_session_in_tx`,
 `crates/dashboard-kernel/src/lib.rs::task_row_to_view`,
@@ -1675,7 +1675,7 @@ and the live operator bug only needed a one-line producer fix.
 
 Cross-reference:
 `INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01`
-(`specs/invariants.md §11.9`),
+(`specs/invariants.md`),
 `crates/dashboard/src/data.rs` (wire schema with per-field
 unit doc-comments),
 `crates/dashboard-kernel/src/lib.rs::unix_now_s` /

@@ -7,7 +7,7 @@
 # semantic git merges with bash + git + edit_file, and nothing more.
 # Per `planner-harness.md §10.5`:
 #
-#  - `raxis-planner-orchestrator` (PID 1, foreground bash only,
+#  - `raxis-orchestrator` (PID 1, foreground bash only,
 #    custom-tool dispatch excluded, SubmitReview / SingleCommit
 #    excluded at link time)
 #  - `bash` ≥ 5.0 (foreground only — bg_* paths excluded by build)
