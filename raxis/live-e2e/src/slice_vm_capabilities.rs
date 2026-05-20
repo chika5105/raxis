@@ -10,8 +10,9 @@
 //!      `dist-info` reads on a real Linux filesystem (NOT the
 //!      mocked-env unit-test harness). On any reasonable Linux
 //!      host the probe returns a manifest with at least `bash` on
-//!      PATH, a populated `filesystem.workdir`, and an `image_role`
-//!      of `Executor` (the slice stamps `RAXIS_PLANNER_ROLE` to
+//!      PATH, a populated `filesystem.workspace_path`, and a
+//!      `session_role` of `Executor` (the slice stamps
+//!      `RAXIS_PLANNER_SESSION_ROLE` to
 //!      simulate kernel-side spawn metadata).
 //!
 //!   2. The **kernel-private redaction** predicate
@@ -70,7 +71,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
 use raxis_planner_core::{
-    build_capability_hint, is_kernel_private_env, probe_capabilities, ImageRole,
+    build_capability_hint, is_kernel_private_env, probe_capabilities, SessionRole,
 };
 
 /// Sentinel payload stamped into kernel-private env vars. The slice
@@ -99,7 +100,8 @@ const STAGED_KEYS: &[&str] = &[
     "MONGO_URL",
     "REDIS_URL",
     "SMTP_URL",
-    "RAXIS_PLANNER_ROLE",
+    "RAXIS_PLANNER_SESSION_ROLE",
+    "RAXIS_VM_IMAGE_ORIGIN",
     "RAXIS_VM_IMAGE_DIGEST",
 ];
 
@@ -155,15 +157,16 @@ pub async fn run() -> Result<()> {
         std::env::set_var("MONGO_URL", "mongodb://127.0.0.1:54122/livee2e");
         std::env::set_var("REDIS_URL", "redis://127.0.0.1:54123/0");
         std::env::set_var("SMTP_URL", "smtp://127.0.0.1:54124");
-        std::env::set_var("RAXIS_PLANNER_ROLE", "executor");
+        std::env::set_var("RAXIS_PLANNER_SESSION_ROLE", "executor");
+        std::env::set_var("RAXIS_VM_IMAGE_ORIGIN", "canonical");
         std::env::set_var(
             "RAXIS_VM_IMAGE_DIGEST",
             "sha256:0000000000000000000000000000000000000000000000000000000000000000",
         );
     }
 
-    // ── Stage cwd. Real probe reads this for `filesystem.workdir`,
-    //    `git_initialized`, `head_commit`. Use a tempdir without git
+    // ── Stage cwd. Real probe reads this for `filesystem.workspace_path`,
+    //    `git_worktree`, `head_commit`. Use a tempdir without git
     //    init so the assertion is host-stable.
     let staged_cwd =
         std::env::temp_dir().join(format!("raxis-live-e2e-vm-caps-{}", std::process::id()));
@@ -201,13 +204,13 @@ fn run_assertions(
     manifest: &raxis_planner_core::CapabilityManifest,
     staged_cwd: &Path,
 ) -> Result<()> {
-    // ── Assertion 1: image_role + image_digest reflect the kernel
+    // ── Assertion 1: session_role + image_digest reflect the kernel
     //    spawn metadata.
-    if manifest.image_role != ImageRole::Executor {
+    if manifest.session_role != SessionRole::Executor {
         bail!(
-            "INV-EXEC-DISCOVERY-01: image_role MUST be Executor when \
-             RAXIS_PLANNER_ROLE=executor; got {:?}",
-            manifest.image_role,
+            "INV-EXEC-DISCOVERY-01: session_role MUST be Executor when \
+             RAXIS_PLANNER_SESSION_ROLE=executor; got {:?}",
+            manifest.session_role,
         );
     }
     let digest = manifest
@@ -217,7 +220,7 @@ fn run_assertions(
     if !digest.starts_with("sha256:") {
         bail!("image_digest MUST be sha256-prefixed; got {digest:?}");
     }
-    tracing::info!(image_role = ?manifest.image_role, image_digest = %digest,
+    tracing::info!(session_role = ?manifest.session_role, image_digest = %digest,
         "vm-capabilities: spawn metadata stamped correctly");
 
     // ── Assertion 2: binaries non-empty + at least one toolchain
@@ -242,17 +245,17 @@ fn run_assertions(
         "vm-capabilities: PATH walk found binaries"
     );
 
-    // ── Assertion 3: workdir reflects the staged cwd verbatim.
-    if manifest.filesystem.workdir != staged_cwd.to_string_lossy().into_owned() {
+    // ── Assertion 3: workspace_path reflects the staged cwd verbatim.
+    if manifest.filesystem.workspace_path != staged_cwd.to_string_lossy().into_owned() {
         bail!(
-            "filesystem.workdir MUST equal staged cwd; expected {}, got {}",
+            "filesystem.workspace_path MUST equal staged cwd; expected {}, got {}",
             staged_cwd.display(),
-            manifest.filesystem.workdir,
+            manifest.filesystem.workspace_path,
         );
     }
-    if manifest.filesystem.git_initialized {
+    if manifest.filesystem.git_worktree {
         bail!(
-            "filesystem.git_initialized MUST be false for the non-git tempdir; \
+            "filesystem.git_worktree MUST be false for the non-git tempdir; \
              got true"
         );
     }
@@ -337,7 +340,8 @@ fn run_assertions(
         "## VM Environment",
         // Pinned by `build_capability_hint`. If a future change
         // re-formats this header, update the slice in lockstep.
-        "Image role:",
+        "role=executor",
+        "image_origin=canonical",
         "Use normal HTTP(S) clients",
         // env-var NAMES surface in the hint (so the LLM knows which
         // proxies are wired) — but never their VALUES (so the hint
