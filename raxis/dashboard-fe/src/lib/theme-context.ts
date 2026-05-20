@@ -20,9 +20,9 @@ export interface ThemeContextValue {
   toggleTheme: () => void;
   /**
    * `true` when the current value was chosen by the operator;
-   * `false` when it still reflects the system preference. Exposed
-   * mainly for tests and for chrome that wants to surface a
-   * "follow system" affordance later.
+   * `false` when it is the dashboard's deterministic default.
+   * Exposed mainly for tests and for chrome that wants to surface
+   * an explicit "use default" affordance later.
    */
   hasExplicitPreference: boolean;
 }

@@ -1,28 +1,27 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en" class="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0d1117" />
+    <meta name="theme-color" content="#fafaf9" />
     <meta name="referrer" content="no-referrer" />
     <meta http-equiv="X-Content-Type-Options" content="nosniff" />
     <title>Raxis Dashboard</title>
     <link rel="icon" type="image/svg+xml" href="/raxis-logo.svg" />
     <!--
       Theme bootstrap — runs before first paint so the operator's
-      persisted preference (or system preference, on a virgin
-      first visit) wins over the default `class="dark"` shipped
-      in the HTML. Without this script the user would see a flash
-      of dark UI before React mounts and React's ThemeProvider
+      persisted preference wins over the default `class="light"`
+      shipped in the HTML. Without this script an operator with
+      an explicit dark preference would see a flash of light UI
+      before React mounts and React's ThemeProvider
       swaps to the chosen mode.
 
       Behaviour mirrors `lib/theme.tsx`:
         1. If `localStorage.theme` is "light" or "dark", honour it.
-        2. Otherwise, respect `prefers-color-scheme: light`.
-        3. Default to dark.
+        2. Otherwise, default to light.
 
       Errors (e.g. `localStorage` blocked in private mode) fall
-      through silently — the document already ships dark.
+      through silently — the document already ships light.
     -->
     <script>
       (function () {
@@ -31,13 +30,8 @@
           var theme;
           if (stored === "light" || stored === "dark") {
             theme = stored;
-          } else if (
-            window.matchMedia &&
-            window.matchMedia("(prefers-color-scheme: light)").matches
-          ) {
-            theme = "light";
           } else {
-            theme = "dark";
+            theme = "light";
           }
           var root = document.documentElement;
           if (theme === "dark") {
@@ -55,7 +49,7 @@
             );
           }
         } catch (_e) {
-          // Bootstrap is best-effort; default markup is dark.
+          // Bootstrap is best-effort; default markup is light.
         }
       })();
     </script>

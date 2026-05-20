@@ -3,10 +3,10 @@
 @tailwind utilities;
 
 /*
- * Operator-tooling base layer: dense, dark-first, calm.
+ * Operator-tooling base layer: dense, light-first, calm.
  *
  * — UI design
- * principle #1 (dark mode default), #2 (information density).
+ * principle #1 (light mode default), #2 (information density).
  *
  * Theming model — see dashboard-fe/README.md §"Theme system":
  *
@@ -17,7 +17,7 @@
  *
  *   * `:root` defines the LIGHT palette (default canvas).
  *   * `:root.dark` overrides with the DARK palette.
- *   * <html> ships with `class="dark"` so dark mode is the default
+ *   * <html> ships with `class="light"` so light mode is the default
  *     in the HTML, then a small inline script in index.html applies
  *     the operator's persisted preference before first paint to
  *     avoid a FOUC.
@@ -25,8 +25,7 @@
  *   * Operator can toggle via the header toggle (see
  *     `components/ThemeToggle.tsx`). Preference is persisted to
  *     `localStorage.theme`; when no explicit preference is stored,
- *     the system `prefers-color-scheme` media query wins on first
- *     load and live updates are honoured.
+ *     light mode wins on first load.
  */
 
 @layer base {

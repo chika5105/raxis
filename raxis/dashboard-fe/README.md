@@ -23,8 +23,8 @@ Path alias `@/*` resolves to `src/*` (configured in
 
 ## Theme system
 
-The dashboard ships with both dark and light modes. **Dark is the
-default**; light is opt-in via a toggle in the top-bar chrome.
+The dashboard ships with both light and dark modes. **Light is the
+default**; dark is opt-in via a toggle in the top-bar chrome.
 
 ### Resolution order
 
@@ -32,20 +32,17 @@ On every page load the resolved theme is:
 
 1. `localStorage.theme` ("dark" or "light"), if set explicitly by
    the operator via the toggle.
-2. `prefers-color-scheme: light` from the OS, if no preference is
-   stored.
-3. Dark (the operator-tooling default).
+2. Light, if no preference is stored.
 
-While the operator has no explicit stored preference, the provider
-subscribes to `prefers-color-scheme` changes — flipping the OS
-theme also flips the dashboard. The moment they click the toggle,
-that subscription stops and the stored preference wins forever
-(until cleared from devtools / browser settings).
+The dashboard intentionally does not follow the OS colour scheme on
+first visit. Fresh operator sessions, shared demo machines, and
+screenshots should open in the same readable light theme unless the
+operator explicitly chose dark earlier.
 
 A small inline bootstrap script in `index.html` runs the same
 resolution before first paint to prevent a flash of unstyled
-(wrong-themed) content. `<html>` still ships with `class="dark"`
-so the dark default is the worst-case render.
+(wrong-themed) content. `<html>` ships with `class="light"` so
+the worst-case render matches the product default.
 
 Cross-tab toggles are mirrored through the `storage` event, so
 flipping the theme in one operator window updates siblings on the
@@ -67,7 +64,7 @@ Colors flow from CSS custom properties → Tailwind utility classes
 
 ```mermaid
 flowchart TD
-    css[":root / :root.dark in global.css<br/>--c-panel: 13 17 23"]
+    css[":root / :root.dark in global.css<br/>--c-panel: 250 250 249"]
     tailwind["tailwind.config.js<br/>panel = rgb(var(--c-panel) / alpha)"]
     component["component<br/>className = 'bg-panel'"]
     css --> tailwind --> component
@@ -183,12 +180,11 @@ inside `<Shell>`'s top-bar. It calls `toggleTheme()`, which:
 
 1. Computes the next theme.
 2. Writes it to `localStorage.theme`.
-3. Sets `hasExplicitPreference = true` (so OS-level
-   `prefers-color-scheme` events stop overriding the choice).
+3. Sets `hasExplicitPreference = true`.
 4. Triggers the provider's effect that swaps the class on
    `<html>` and updates `<meta name="theme-color">`.
 
-A consumer can also surface a "follow system" affordance later by
+A consumer can also surface a "use default" affordance later by
 calling `localStorage.removeItem("theme")` and reloading; the
 context exposes `hasExplicitPreference` to support that UX if it
 ever lands.

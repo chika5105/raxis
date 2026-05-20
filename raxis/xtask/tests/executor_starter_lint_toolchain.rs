@@ -64,12 +64,12 @@ fn verify_sh_path() -> PathBuf {
 /// drive the specific invariant arm under test.
 ///
 /// The fixture writes regular-file stubs (not real binaries),
-/// which is sufficient because `verify.sh` only `-e`-tests for
-/// existence and runs `python3 -c "import ruff"` only on Linux
-/// hosts — the stubbed `usr/bin/python3` is harmless on macOS
-/// dev hosts (the verifier falls back to the static dist-info
-/// check) and the test compiles to a non-zero-byte file that
-/// `[ -e ]` accepts.
+/// which is sufficient because most `verify.sh` probes only
+/// `-e`-test for existence. `usr/bin/python3` is the one
+/// exception: on Linux hosts the verifier may execute it as a
+/// dynamic Ruff import/version probe, so the base fixture makes
+/// that import fail and `install_ruff` replaces it with a tiny
+/// Ruff-aware shim.
 fn build_base_rootfs_fixture(dst: &Path) {
     fs::create_dir_all(dst).expect("create fixture root");
     for rel in [
@@ -94,6 +94,7 @@ fn build_base_rootfs_fixture(dst: &Path) {
         perms.set_mode(0o755);
         fs::set_permissions(&p, perms).unwrap();
     }
+    install_base_python_shim(dst);
     // `/sbin/init` is symlinked from the dev-stage pipeline; we
     // emulate that here so the loop in verify.sh accepting either
     // a regular file or a symlink passes.
@@ -102,6 +103,27 @@ fn build_base_rootfs_fixture(dst: &Path) {
     std::os::unix::fs::symlink("../usr/local/bin/raxis-planner-executor", sbin.join("init"))
         .expect("symlink /sbin/init");
     install_rust_toolchain(dst);
+}
+
+/// Base Python fixture used before Ruff is installed. It behaves
+/// like a Python binary for the verifier's Linux-host dynamic
+/// probe, but reports that `import ruff` is unavailable so the
+/// verifier falls through to the static dist-info witness.
+fn install_base_python_shim(rootfs: &Path) {
+    let python = rootfs.join("usr/bin/python3");
+    fs::create_dir_all(python.parent().unwrap()).unwrap();
+    fs::write(
+        &python,
+        b"#!/bin/sh\n\
+if [ \"$1\" = \"-c\" ] && [ \"$2\" = \"import ruff\" ]; then\n\
+  exit 1\n\
+fi\n\
+exit 0\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&python).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&python, perms).unwrap();
 }
 
 /// Drop the pinned ruff layout under the fixture: the CLI shim at
@@ -122,6 +144,25 @@ fn install_ruff(rootfs: &Path, version: &str) {
         format!("Metadata-Version: 2.1\nName: ruff\nVersion: {version}\n"),
     )
     .unwrap();
+    let python = rootfs.join("usr/bin/python3");
+    fs::write(
+        &python,
+        format!(
+            "#!/bin/sh\n\
+if [ \"$1\" = \"-c\" ] && [ \"$2\" = \"import ruff\" ]; then\n\
+  exit 0\n\
+fi\n\
+if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"ruff\" ] && [ \"$3\" = \"--version\" ]; then\n\
+  echo 'ruff {version}'\n\
+  exit 0\n\
+fi\n\
+exit 0\n"
+        ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&python).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&python, perms).unwrap();
 }
 
 /// Drop the stable rustup layout the verifier expects under the

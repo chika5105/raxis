@@ -2,21 +2,18 @@
 // Theme context — light / dark with operator-controlled persistence
 // ─────────────────────────────────────────────────────────────────
 //
-// UI design: dark mode default, operator readability is
+// UI design: light mode default, operator readability is
 // non-negotiable.
 //
 // Operator UX contract:
 //
-//   * Dark is the default.
+//   * Light is the default.
 //   * Toggle preference is persisted to `localStorage.theme`
 //     ("dark" or "light"). The persisted value wins on every load.
-//   * On a first visit (nothing in `localStorage`), the system
-//     `prefers-color-scheme: light` media query is honoured.
-//   * As long as the operator has NOT explicitly chosen a mode,
-//     system-level theme changes (e.g. macOS Night Shift schedule
-//     flipping their preference at sundown) are mirrored live.
-//     Once they click the toggle, system events stop overriding
-//     their choice.
+//   * On a first visit (nothing in `localStorage`), the dashboard
+//     starts in light mode regardless of the OS colour scheme. This
+//     keeps shared demos, screenshots, and fresh operator sessions
+//     predictable.
 //
 // FOUC is handled by an inline bootstrap script in `index.html`
 // that applies the same resolution rules to <html> before React
@@ -41,6 +38,7 @@ export type { Theme, ThemeContextValue };
 // ─────────────────────────────────────────────────────────────────
 
 const STORAGE_KEY = "theme";
+const DEFAULT_THEME: Theme = "light";
 const META_THEME_DARK = "#0d1117";
 const META_THEME_LIGHT = "#fafaf9";
 
@@ -67,22 +65,13 @@ function writeStoredTheme(theme: Theme): void {
   }
 }
 
-function readSystemTheme(): Theme {
-  if (!isBrowser() || typeof window.matchMedia !== "function") {
-    return "dark";
-  }
-  return window.matchMedia("(prefers-color-scheme: light)").matches
-    ? "light"
-    : "dark";
-}
-
 function resolveInitialTheme(): {
   theme: Theme;
   hasExplicitPreference: boolean;
 } {
   const stored = readStoredTheme();
   if (stored) return { theme: stored, hasExplicitPreference: true };
-  return { theme: readSystemTheme(), hasExplicitPreference: false };
+  return { theme: DEFAULT_THEME, hasExplicitPreference: false };
 }
 
 function applyThemeToDocument(theme: Theme): void {
@@ -128,28 +117,6 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     applyThemeToDocument(theme);
   }, [theme]);
 
-  // Track the system preference *only* while the operator has no
-  // explicit choice — clicking the toggle pins them to a value
-  // and we stop reacting to OS-level changes from that point on.
-  useEffect(() => {
-    if (!isBrowser() || typeof window.matchMedia !== "function") return;
-    if (hasExplicitPreference) return;
-    const mq = window.matchMedia("(prefers-color-scheme: light)");
-    const onChange = (e: MediaQueryListEvent) => {
-      setState({
-        theme: e.matches ? "light" : "dark",
-        hasExplicitPreference: false,
-      });
-    };
-    // Safari < 14 only supports the deprecated `addListener` API.
-    if (typeof mq.addEventListener === "function") {
-      mq.addEventListener("change", onChange);
-      return () => mq.removeEventListener("change", onChange);
-    }
-    mq.addListener(onChange);
-    return () => mq.removeListener(onChange);
-  }, [hasExplicitPreference]);
-
   // Honour `localStorage.theme` writes from another tab so a
   // toggle in one operator window mirrors into siblings.
   useEffect(() => {
@@ -159,9 +126,10 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
       if (e.newValue === "dark" || e.newValue === "light") {
         setState({ theme: e.newValue, hasExplicitPreference: true });
       } else if (e.newValue === null) {
-        // Another tab cleared the preference — fall back to system.
+        // Another tab cleared the preference — fall back to the
+        // dashboard's deterministic default.
         setState({
-          theme: readSystemTheme(),
+          theme: DEFAULT_THEME,
           hasExplicitPreference: false,
         });
       }
