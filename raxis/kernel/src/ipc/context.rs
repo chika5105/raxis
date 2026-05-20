@@ -695,6 +695,23 @@ impl HandlerContext {
         self
     }
 
+    /// Replace the session-spawn service after construction.
+    ///
+    /// Production boot uses this to install the exact
+    /// [`SessionSpawnService`] instance handed to
+    /// `LiveOrchestratorSpawn`. The service owns the in-memory live
+    /// VM-handle table used by executor/reviewer spawns, orchestrator
+    /// spawns, explicit termination, and Firecracker workspace sync.
+    /// If those paths each construct their own service, the SQL
+    /// `sessions` rows still agree but the live-handle table does not:
+    /// a planner intent can arrive for a perfectly valid VM while
+    /// `sync_session_workspace` sees `SessionNotActive` in the wrong
+    /// table. Keeping one Arc is the runtime authority boundary.
+    pub fn with_session_spawn(mut self, session_spawn: Arc<SessionSpawnService>) -> Self {
+        self.session_spawn = session_spawn;
+        self
+    }
+
     /// Construct with an explicit witness_dir (useful in tests that use a
     /// non-standard layout or a temporary directory).
     pub fn with_witness_dir(mut self, witness_dir: PathBuf) -> Self {

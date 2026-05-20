@@ -1888,6 +1888,67 @@ async fn main() {
     let egress_stall_tracker: Arc<raxis_egress_admission::EgressStallTracker> =
         Arc::new(raxis_egress_admission::EgressStallTracker::with_defaults());
 
+    let proxy_manager_for_session_spawn =
+        Arc::new(raxis_credential_proxy_manager::CredentialProxyManager::new(
+            Arc::clone(&credentials),
+            Arc::clone(&audit),
+        ));
+    let session_spawn_shared = Arc::new(
+        raxis_session_spawn::SessionSpawnService::new(
+            Arc::clone(&isolation_backend),
+            proxy_manager_for_session_spawn,
+            Arc::clone(&audit),
+        )
+        // V3 perf-telemetry: stamp the four-tier VM cold-boot
+        // histograms from the very first spawn.
+        .with_observability(Arc::clone(&observability_hub))
+        // V2 reviewer-egress-defaults-decision.md §7 — share the
+        // kernel-wide tracker so every per-session admission loop
+        // emits `SessionEgressStallDetected` against one shared
+        // sliding-window state.
+        .with_egress_stall_tracker(Arc::clone(&egress_stall_tracker))
+        // `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01`
+        // (iter65) — the cap-admission gate derives active_count
+        // from SQLite instead of the in-memory live-handle map.
+        .with_store(Arc::clone(&store)),
+    );
+    // V2 `elastic-vm-scaling.md §4.4` — fresh scale-down tracker
+    // for the orchestrator-spawn context. The Executor / Reviewer
+    // spawn context owns its own tracker (see below); each
+    // tracker's windows key by `RoleKey` and the spawn contexts
+    // spawn disjoint roles, so two instances are semantically
+    // equivalent to one shared instance for the orchestrator role.
+    //
+    // The §5 rate limiter, in contrast, is the SAME `Arc` for
+    // both contexts (hoisted to `elastic_rate_limiter` above) so
+    // the budget remains a single global cap per INV-ELASTIC-04.
+    let orchestrator_scale_down_history = Arc::new(crate::elastic::ScaleDownHistory::new());
+    let orchestrator_spawn = Arc::new(
+        crate::session_spawn_orchestrator::LiveOrchestratorSpawn::new(
+            crate::session_spawn_orchestrator::OrchestratorSpawnContext::new(
+                install_dir.clone(),
+                kernel_version.to_owned(),
+            )
+            // wire data_dir so the spawn path can stamp
+            // `RAXIS_KERNEL_PLANNER_SOCKET` into the guest env
+            // (otherwise the planner binary has no transport to
+            // dial back to the kernel and falls through to
+            // scaffold/park mode).
+            .with_data_dir(data_dir.clone())
+            .with_scale_down_history(Arc::clone(&orchestrator_scale_down_history))
+            .with_rate_limiter(Arc::clone(&elastic_rate_limiter)),
+            Arc::clone(&session_spawn_shared),
+            Arc::clone(&store),
+            Arc::clone(&plan_registry),
+            // share the live policy ArcSwap so the spawn path
+            // always reads the most-recent operator-signed
+            // `[budget.token_caps]` when stamping per-session token
+            // caps into planner-VM env. Hot-reloads land within one
+            // spawn cycle.
+            Arc::clone(&policy),
+        ),
+    );
+
     let ctx_inner = ipc::context::HandlerContext::new(
         Arc::clone(&policy),
         Arc::clone(&registry),
@@ -1900,89 +1961,13 @@ async fn main() {
         Arc::clone(&credentials),
         Arc::clone(&isolation_backend),
         // Production wires the live orchestrator-spawn impl that
-        // drives the canonical Orchestrator VM via the kernel's
-        // `SessionSpawnService` (the same Arc that lands on
-        // `ctx.session_spawn` for future executor-spawn handlers).
-        // The boot-time install-dir + kernel-version are the only
-        // values the bridge needs that aren't already on
-        // `HandlerContext`. The pre-pass here clones the same
-        // `(isolation, proxy, audit)` trio that `HandlerContext::new`
-        // builds internally, so the bridge sees an equivalent
-        // service; both will be unified in a follow-up so there's
-        // a single SessionSpawnService instance shared across
-        // orchestrator + executor spawn paths.
-        {
-            let proxy_manager_for_orch =
-                Arc::new(raxis_credential_proxy_manager::CredentialProxyManager::new(
-                    Arc::clone(&credentials),
-                    Arc::clone(&audit),
-                ));
-            let session_spawn_for_orch = Arc::new(
-                raxis_session_spawn::SessionSpawnService::new(
-                    Arc::clone(&isolation_backend),
-                    proxy_manager_for_orch,
-                    Arc::clone(&audit),
-                )
-                // V3 perf-telemetry: stamp the four-tier VM cold-boot
-                // histograms from the very first spawn.
-                .with_observability(Arc::clone(&observability_hub))
-                // V2 reviewer-egress-defaults-decision.md §7 —
-                // share the kernel-wide tracker so every per-
-                // session admission loop emits
-                // `SessionEgressStallDetected` against one
-                // shared sliding-window state.
-                .with_egress_stall_tracker(Arc::clone(&egress_stall_tracker))
-                // `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01`
-                // (iter65) — the cap-admission gate
-                // (`crate::capacity::check_vm_concurrency_cap`)
-                // reads `active_count` which now derives its
-                // value from `SELECT COUNT(*) FROM sessions
-                // WHERE revoked = 0` instead of the in-memory
-                // live-handle map. Without this wire the
-                // cap-admission gate falls back to the leaky
-                // earlier in-memory projection.
-                .with_store(Arc::clone(&store)),
-            );
-            // V2 `elastic-vm-scaling.md §4.4` — fresh scale-down
-            // tracker for the orchestrator-spawn context. The
-            // Executor / Reviewer spawn context owns its own
-            // tracker (see below); each tracker's windows key by
-            // `RoleKey` and the spawn contexts spawn disjoint
-            // roles, so two instances are semantically equivalent
-            // to one shared instance for the orchestrator's role.
-            //
-            // The §5 rate limiter, in contrast, is the SAME
-            // `Arc` for both contexts (hoisted to
-            // `elastic_rate_limiter` above) so the budget remains
-            // a single global cap per INV-ELASTIC-04.
-            let scale_down_history = Arc::new(crate::elastic::ScaleDownHistory::new());
-            Arc::new(
-                crate::session_spawn_orchestrator::LiveOrchestratorSpawn::new(
-                    crate::session_spawn_orchestrator::OrchestratorSpawnContext::new(
-                        install_dir.clone(),
-                        kernel_version.to_owned(),
-                    )
-                    // wire data_dir so the spawn path
-                    // can stamp `RAXIS_KERNEL_PLANNER_SOCKET` into
-                    // the guest env (otherwise the planner binary
-                    // has no transport to dial back to the kernel
-                    // and falls through to scaffold/park mode).
-                    .with_data_dir(data_dir.clone())
-                    .with_scale_down_history(Arc::clone(&scale_down_history))
-                    .with_rate_limiter(Arc::clone(&elastic_rate_limiter)),
-                    session_spawn_for_orch,
-                    Arc::clone(&store),
-                    Arc::clone(&plan_registry),
-                    // share the live
-                    // policy ArcSwap so the spawn path always reads
-                    // the most-recent operator-signed
-                    // `[budget.token_caps]` when stamping the
-                    // per-session token caps into the planner-VM
-                    // env. Hot-reloads land within one spawn cycle.
-                    Arc::clone(&policy),
-                ),
-            )
-        },
+        // drives the canonical Orchestrator VM through the SAME
+        // `SessionSpawnService` Arc installed onto `HandlerContext`
+        // below. That shared service owns the live VM-handle table
+        // used by planner IPC workspace sync and explicit
+        // termination; splitting it makes live sessions appear
+        // inactive to the IPC path.
+        orchestrator_spawn,
         // V2 — Executor / Reviewer spawn-context. Reuses the same
         // boot-time install-dir + kernel-version as the orchestrator
         // spawn so all three canonical images
@@ -2045,6 +2030,7 @@ async fn main() {
     // mediated `planner_fetch` handler share one sliding-window
     // state with the orchestrator-spawn service wired above.
     let ctx_inner = ctx_inner.with_egress_stall_tracker(Arc::clone(&egress_stall_tracker));
+    let ctx_inner = ctx_inner.with_session_spawn(Arc::clone(&session_spawn_shared));
 
     // Step 8.6: Boot-time break-glass state (v1 Tier 4,
     // kernel-core.md §2.3 src/breakglass.rs). Opens the

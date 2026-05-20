@@ -231,6 +231,12 @@ fn validate_mount(mount: &WorkspaceMount) -> Result<(), ApiError> {
             mount.guest_path
         )));
     }
+    if mount.guest_path.contains([',', ':', '\n', '\r']) {
+        return Err(ApiError::MalformedResponse(format!(
+            "workspace mount guest_path {:?} contains a delimiter reserved by RAXIS_BLOCK_MOUNTS",
+            mount.guest_path
+        )));
+    }
     let md = fs::metadata(&mount.host_path).map_err(|e| {
         ApiError::MalformedResponse(format!(
             "workspace mount host_path {} not readable: {e}",
@@ -526,6 +532,18 @@ mod tests {
         match err {
             ApiError::MalformedResponse(reason) => {
                 assert!(reason.contains("guest_path must be absolute"));
+            }
+            other => panic!("expected malformed response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_mount_rejects_block_mount_env_delimiters() {
+        let mount = fixture_mount("/workspace:evil", MountMode::ReadOnly);
+        let err = validate_mount(&mount).unwrap_err();
+        match err {
+            ApiError::MalformedResponse(reason) => {
+                assert!(reason.contains("reserved by RAXIS_BLOCK_MOUNTS"));
             }
             other => panic!("expected malformed response, got {other:?}"),
         }

@@ -73,7 +73,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use raxis_types::TaskId;
+use raxis_types::{IntentOutcome, IntentResponse, PlannerErrorCode, TaskId, TaskState};
 
 use crate::bedrock_client::BedrockClient;
 use crate::dispatch::{DispatchConfig, DispatchError, DispatchLoop, DispatchOutcome};
@@ -337,6 +337,23 @@ pub enum DriverError {
         tool_name: String,
         /// The role binary that invoked the driver.
         role: Role,
+    },
+
+    /// A terminal tool mapped cleanly to an intent, but the kernel
+    /// rejected the intent. This is a failed planner session, not a
+    /// clean terminal completion; surfacing it here lets the kernel's
+    /// premature-exit synthesis carry the concrete rejection reason.
+    #[error(
+        "terminal tool {tool_name:?} was rejected by the kernel: {error_code} \
+         (state={task_state:?})"
+    )]
+    TerminalIntentRejected {
+        /// The terminal tool that produced the rejected intent.
+        tool_name: String,
+        /// Stable kernel rejection code.
+        error_code: PlannerErrorCode,
+        /// Kernel task state at rejection time.
+        task_state: TaskState,
     },
 
     /// A `task_id` (or `subtask_task_id`) emitted by the planner
@@ -1244,7 +1261,9 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
              preinstalled packages, but install new packages when the task \
              requires them.\n\
              \n\
-             Read `task_description`, `last_critique`, and `gate_fixup` when \
+             Use repo-relative paths only: commands already run at `/workspace`; \
+             never prefix paths with `workspace/` or `/workspace/`. Read \
+             `task_description`, `last_critique`, and `gate_fixup` when \
              present. For `gate_fixup`, repair only the cited gate for \
              `parent_task_id` / `parent_evaluation_sha` using `agent_hint`. \
              Track `token_budget_remaining`, `wallclock_budget_remaining_s`, \
@@ -1290,14 +1309,19 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
              \n\
              Decision order; end the session with exactly one terminal tool as \
              soon as one is admissible:\n\
-             1. PRIORITY: review retry has ABSOLUTE precedence over fresh \
-             activation. If any executor has `aggregate=AtLeastOneRejected` and \
-             matching `capabilities.tasks[*].retry_admissible=true`, call \
-             `retry_subtask` for that executor. DO NOT activate any pending task \
-             and do not `integration_merge`; the kernel rejects that merge as \
-             `FAIL_REVIEW_OUTSTANDING` / `IntegrationMergeBlockedByOutstandingReview`, \
-             burning `orch_no_progress_respawns=` budget.\n\
-             2. For `aggregate=AtLeastOneRejected` with \
+             1. PRIORITY: retry has ABSOLUTE precedence over fresh activation. \
+             If any executor row is \
+             `state=failed` and matching `capabilities.tasks[*].retry_admissible=true`, \
+             call `retry_subtask` for that executor; failed executors are not \
+             waiting on reviewers. If any completed executor has \
+             `aggregate=AtLeastOneRejected` and matching \
+             `capabilities.tasks[*].retry_admissible=true`, call `retry_subtask` \
+             for that executor. DO NOT activate any pending task and do not \
+             `integration_merge` while a retry is admissible; outstanding-review \
+             merges are rejected as `FAIL_REVIEW_OUTSTANDING` / \
+             `IntegrationMergeBlockedByOutstandingReview`, burning \
+             `orch_no_progress_respawns=`.\n\
+             2. For failed executors or `aggregate=AtLeastOneRejected` with \
              `retry_admissible=false`: if reason contains `prior state \
              PendingActivation`, call `activate_subtask` for the same task; if \
              reason contains `crash_retry_count ... >= max_crash_retries` or \
@@ -1360,28 +1384,37 @@ async fn submit_terminal(
     match kind {
         IntentKind::CompleteTask => {
             let head = pick_str(input, "head_sha").unwrap_or_default();
-            submitter.submit_complete_task(&head).await?;
+            ensure_terminal_accepted(tool_name, submitter.submit_complete_task(&head).await?)?;
         }
         IntentKind::SingleCommit => {
             let base = pick_str(input, "base_sha").unwrap_or_default();
             let head = pick_str(input, "head_sha").unwrap_or_default();
-            submitter.submit_single_commit(&base, &head).await?;
+            ensure_terminal_accepted(
+                tool_name,
+                submitter.submit_single_commit(&base, &head).await?,
+            )?;
         }
         IntentKind::ReportFailure => {
             let justification = pick_str(input, "justification").unwrap_or_default();
-            submitter.submit_report_failure(justification).await?;
+            ensure_terminal_accepted(
+                tool_name,
+                submitter.submit_report_failure(justification).await?,
+            )?;
         }
         IntentKind::IntegrationMerge => {
             let base = pick_str(input, "base_sha").unwrap_or_default();
             let head = pick_str(input, "head_sha").unwrap_or_default();
-            submitter.submit_integration_merge(&base, &head).await?;
+            ensure_terminal_accepted(
+                tool_name,
+                submitter.submit_integration_merge(&base, &head).await?,
+            )?;
         }
         IntentKind::ActivateSubTask => {
             let id = pick_str(input, "subtask_task_id").unwrap_or_default();
             let parsed = TaskId::parse(&id).map_err(|e| {
                 DriverError::InvalidTaskId(format!("subtask_task_id `{id}` failed validation: {e}"))
             })?;
-            submitter.submit_activate_subtask(parsed).await?;
+            ensure_terminal_accepted(tool_name, submitter.submit_activate_subtask(parsed).await?)?;
         }
         IntentKind::BatchActivateSubTasks => {
             // V3 iter70 — batch-admit primitive. The tool input
@@ -1419,14 +1452,17 @@ async fn submit_terminal(
                 })?;
                 parsed_ids.push(parsed);
             }
-            submitter.submit_batch_activate_subtasks(parsed_ids).await?;
+            ensure_terminal_accepted(
+                tool_name,
+                submitter.submit_batch_activate_subtasks(parsed_ids).await?,
+            )?;
         }
         IntentKind::RetrySubTask => {
             let id = pick_str(input, "subtask_task_id").unwrap_or_default();
             let parsed = TaskId::parse(&id).map_err(|e| {
                 DriverError::InvalidTaskId(format!("subtask_task_id `{id}` failed validation: {e}"))
             })?;
-            submitter.submit_retry_subtask(parsed).await?;
+            ensure_terminal_accepted(tool_name, submitter.submit_retry_subtask(parsed).await?)?;
         }
         IntentKind::SubmitReview => {
             let approved = input
@@ -1434,7 +1470,10 @@ async fn submit_terminal(
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             let critique = pick_str(input, "critique");
-            submitter.submit_review(approved, critique).await?;
+            ensure_terminal_accepted(
+                tool_name,
+                submitter.submit_review(approved, critique).await?,
+            )?;
         }
         IntentKind::StructuredOutput => {
             // V2 §3.2 — non-terminal tool: the dispatch loop never
@@ -1452,6 +1491,17 @@ async fn submit_terminal(
     }
     let _ = role;
     Ok(())
+}
+
+fn ensure_terminal_accepted(tool_name: &str, response: IntentResponse) -> Result<(), DriverError> {
+    match response.outcome {
+        IntentOutcome::Accepted { .. } | IntentOutcome::AcceptedBatch { .. } => Ok(()),
+        IntentOutcome::Rejected { error_code, .. } => Err(DriverError::TerminalIntentRejected {
+            tool_name: tool_name.to_owned(),
+            error_code,
+            task_state: response.task_state,
+        }),
+    }
 }
 
 fn pick_str(v: &serde_json::Value, key: &str) -> Option<String> {
@@ -2047,6 +2097,7 @@ mod tests {
             "planner_max_turns=N",
             "use normal clients",
             "install new packages when the task",
+            "repo-relative paths only",
             "task_complete",
             "report_failure",
         ] {
@@ -2067,6 +2118,8 @@ mod tests {
         }
         for required in [
             "capabilities.ready_now=[",
+            "state=failed",
+            "failed executors are not",
             "aggregate=AtLeastOneRejected",
             "retry_admissible=true",
             "batch_activate_subtasks",
@@ -2139,6 +2192,39 @@ mod tests {
         assert!(
             prompt.contains("max_rounds") || prompt.contains("MAX_REVIEW_ROUNDS"),
             "orchestrator NNSP MUST acknowledge the `max_rounds` ceiling"
+        );
+    }
+
+    /// Live-e2e regression: a failed Executor is no longer an
+    /// aggregate-review state. If policy still permits retry, the
+    /// orchestrator must call `retry_subtask` from
+    /// `capabilities.tasks[*].retry_admissible=true` instead of
+    /// waiting for reviewers that cannot run after the executor
+    /// failed.
+    #[test]
+    fn render_system_prompt_for_orchestrator_retries_failed_executor_before_waiting() {
+        let args = BootArgs {
+            initiative_id: "init-A".to_owned(),
+            task_id: None,
+        };
+        let prompt = render_system_prompt_for_role(Role::Orchestrator, &args);
+        assert!(
+            prompt.contains("state=failed")
+                && prompt.contains("retry_admissible=true")
+                && prompt.contains("call `retry_subtask`"),
+            "orchestrator NNSP MUST retry failed executors when \
+             retry_admissible=true; got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("failed executors are not") && prompt.contains("waiting on reviewers"),
+            "orchestrator NNSP MUST prevent failed executors from being \
+             treated as reviewer waits; got prompt: {prompt}",
+        );
+        assert!(
+            prompt.contains("DO NOT activate any pending task")
+                && prompt.contains("while a retry is admissible"),
+            "orchestrator NNSP MUST prioritize retry over fresh activation; \
+             got prompt: {prompt}",
         );
     }
 

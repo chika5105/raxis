@@ -688,29 +688,38 @@ fn read_dag_rows_for_initiative(
                 .map(|t| t.description.lines().next().unwrap_or("").to_owned())
                 .unwrap_or_default();
             let reviewers: u32 = reviewer_counts.get(task_id.as_str()).copied().unwrap_or(0);
-            // V2.5 — populate `aggregate_verdict` ONLY for Executor
-            // rows whose plan-declared `session_agent_type` is
-            // `Executor`, and fold ONLY plan-declared Reviewer
-            // successors. A normal downstream Executor edge must not
-            // masquerade as an unsubmitted reviewer verdict; that
-            // false `Pending` projection stranded the live e2e
-            // orchestrator at the merge boundary. Reviewer /
-            // Orchestrator rows leave it empty so the renderer omits
-            // `aggregate=` where it carries no signal. Closes
-            // `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`.
-            let aggregate_verdict = match task_fields.as_ref().map(|t| t.session_agent_type) {
-                Some(SessionAgentType::Executor) => compute_aggregate_review_outcome_with_conn(
-                    &task_id,
-                    conn,
-                    Some(AgentTypeFilter {
-                        plan_registry: registry,
-                        initiative_id,
-                        reviewer_task_id: "<ksb_assembly>",
-                    }),
-                )?
-                .verdict
-                .wire_str()
-                .to_owned(),
+            // V2.5 — populate `aggregate_verdict` ONLY for completed
+            // Executor rows. A failed Executor has no reviewable
+            // artifact for its current activation; any pending
+            // reviewer rows left over from a prior rejected-review
+            // retry must not make the orchestrator think it is
+            // `AwaitingReviewerVerdicts`. Retry admissibility for
+            // failures is projected through `capabilities.tasks[*]`.
+            // Completed executors still fold ONLY plan-declared
+            // Reviewer successors, so downstream executor edges do not
+            // masquerade as unsubmitted reviewer votes. Reviewer /
+            // Orchestrator rows leave this empty so the renderer omits
+            // `aggregate=` where it carries no signal.
+            let aggregate_verdict = match (
+                task_fields.as_ref().map(|t| t.session_agent_type),
+                state.as_str(),
+            ) {
+                (Some(SessionAgentType::Executor), state)
+                    if state == TaskState::Completed.as_sql_str() =>
+                {
+                    compute_aggregate_review_outcome_with_conn(
+                        &task_id,
+                        conn,
+                        Some(AgentTypeFilter {
+                            plan_registry: registry,
+                            initiative_id,
+                            reviewer_task_id: "<ksb_assembly>",
+                        }),
+                    )?
+                    .verdict
+                    .wire_str()
+                    .to_owned()
+                }
                 _ => String::new(),
             };
             let preds_ready = preds_ready_map
@@ -2030,6 +2039,136 @@ mod tests {
             "rendered KSB MUST NOT carry `AtLeastOneRejected` \
              while any sibling Reviewer is pending — that is the \
              iter42 race; got: {rendered}"
+        );
+    }
+
+    /// Live-e2e regression: once an Executor has failed, its row must
+    /// not look like it is awaiting reviewer votes. Reviewers cannot
+    /// complete a failed predecessor's artifact; retry admissibility is
+    /// carried through `capabilities.tasks[*]`, while
+    /// `DagRow::aggregate_verdict` stays empty until the Executor
+    /// reaches `Completed`.
+    #[test]
+    fn failed_executor_dag_row_does_not_surface_pending_reviewer_aggregate() {
+        let (store, _dir) = fresh_store();
+        let registry = PlanRegistry::new();
+        let init = "init-failed-executor";
+        let exec = "lint-runner-rust";
+        let rev = "review-lint-runner-rust";
+
+        registry.insert_orchestrator(
+            init.to_owned(),
+            OrchestratorPlanFields {
+                cross_cutting_artifacts: vec![],
+                description: "drive lint runners to merge".to_owned(),
+                target_ref: "refs/heads/main".to_owned(),
+                elastic: None,
+                ..Default::default()
+            },
+        );
+        registry.insert(
+            TaskKey::new(init.to_owned(), exec.to_owned()),
+            TaskPlanFields {
+                description: "run cargo fmt and cargo clippy".to_owned(),
+                session_agent_type: SessionAgentType::Executor,
+                ..Default::default()
+            },
+        );
+        registry.insert(
+            TaskKey::new(init.to_owned(), rev.to_owned()),
+            TaskPlanFields {
+                description: "review rust lint output".to_owned(),
+                session_agent_type: SessionAgentType::Reviewer,
+                ..Default::default()
+            },
+        );
+
+        let conn = store.lock_sync();
+        conn.execute(
+            &format!(
+                "INSERT INTO {INITIATIVES} (
+                 initiative_id, state, terminal_criteria_json,
+                 plan_artifact_sha256, created_at
+             ) VALUES (?1, 'Executing', '{{}}', 'sha-test', 0)"
+            ),
+            rusqlite::params![init],
+        )
+        .expect("insert initiative");
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS} (
+                 task_id, initiative_id, lane_id, state, actor,
+                 policy_epoch, admitted_at, transitioned_at,
+                 evaluation_sha, last_critique, review_verdict
+             ) VALUES (?1, ?2, 'default', 'Failed', 'op',
+                       0, 0, 0, ?3, ?4, NULL)"
+            ),
+            rusqlite::params![
+                exec,
+                init,
+                "2222222222222222222222222222222222222222",
+                "CompleteTask rejected: touched workspace/rust-crate/src/greeting.rs"
+            ],
+        )
+        .expect("insert failed executor");
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS} (
+                 task_id, initiative_id, lane_id, state, actor,
+                 policy_epoch, admitted_at, transitioned_at,
+                 evaluation_sha, last_critique, review_verdict
+             ) VALUES (?1, ?2, 'default', 'Admitted', 'op',
+                       0, 0, 0, NULL, NULL, NULL)"
+            ),
+            rusqlite::params![rev, init],
+        )
+        .expect("insert pending reviewer");
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASK_DAG_EDGES} (
+                 initiative_id, predecessor_task_id, successor_task_id,
+                 predecessor_satisfied
+             ) VALUES (?1, ?2, ?3, 1)"
+            ),
+            rusqlite::params![init, exec, rev],
+        )
+        .expect("insert dag edge");
+        drop(conn);
+
+        let conn = store.lock_sync();
+        let snap = assemble_ksb_snapshot(
+            &conn,
+            &registry,
+            &KsbInputs {
+                initiative_id: init,
+                task_id: None,
+                role: KsbRole::Orchestrator,
+                token_budget_remaining: 0,
+                wallclock_budget_remaining_s: 0,
+                credential_ports: Vec::new(),
+                session_id: "",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
+            },
+        )
+        .expect("assemble orchestrator snapshot");
+        drop(conn);
+
+        let row = snap
+            .dag_rows
+            .iter()
+            .find(|r| r.task_id == exec)
+            .expect("failed executor dag row present");
+        assert_eq!(
+            row.aggregate_verdict, "",
+            "failed executors must not be rendered as awaiting reviewer votes"
+        );
+
+        let rendered = raxis_ksb::render_ksb(&snap).expect("render");
+        assert!(
+            !rendered.contains("aggregate=AwaitingReviewerVerdicts"),
+            "rendered KSB must not make failed executor retries look like \
+             pending reviewer work; got: {rendered}"
         );
     }
 

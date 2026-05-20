@@ -422,12 +422,18 @@ impl FirecrackerBackend {
 
         // ---- 3. Open the planner-port channel ----------------------------
         let port = self.planner_port;
-        let channel = connect_planner_vsock_with_retry(&vsock_uds, port, self.vsock_connect_grace)
-            .map_err(|reason| {
-                IsolationError::TransportFault(format!(
-                    "{BACKEND_ID}: vsock CONNECT {port}: {reason}"
-                ))
-            })?;
+        let channel =
+            match connect_planner_vsock_with_retry(&vsock_uds, port, self.vsock_connect_grace) {
+                Ok(channel) => channel,
+                Err(reason) => {
+                    drop(vmm);
+                    let _ = std::fs::remove_file(&vsock_uds);
+                    workspace_sync.cleanup_images();
+                    return Err(IsolationError::TransportFault(format!(
+                        "{BACKEND_ID}: vsock CONNECT {port}: {reason}"
+                    )));
+                }
+            };
 
         // ---- 4. Build live Session handle --------------------------------
         Ok(FirecrackerSession {
@@ -959,13 +965,13 @@ impl Session for FirecrackerSession {
                 )));
             }
         }
+        let _ = std::fs::remove_file(&self.vsock_uds);
         if let Err(e) = self.workspace_sync.sync_readwrite(true) {
             return Err(IsolationError::BackendInternal(format!(
                 "{BACKEND_ID}: workspace final sync: {e}"
             )));
         }
         self.workspace_sync.cleanup_images();
-        let _ = std::fs::remove_file(&self.vsock_uds);
         if let Some(err) = terminate_error {
             return Err(err);
         }
@@ -1071,13 +1077,13 @@ impl Session for FirecrackerSession {
             ExitStatus::GracefulExit { code: 0 }
         };
 
+        let _ = std::fs::remove_file(&self.vsock_uds);
         if let Err(e) = self.workspace_sync.sync_readwrite(true) {
-            return Err(IsolationError::BackendInternal(format!(
-                "{BACKEND_ID}: workspace final sync: {e}"
+            return Ok(ExitStatus::BackendError(format!(
+                "{BACKEND_ID}: workspace final sync failed; workspace image retained for forensics: {e}"
             )));
         }
         self.workspace_sync.cleanup_images();
-        let _ = std::fs::remove_file(&self.vsock_uds);
         Ok(status)
     }
 

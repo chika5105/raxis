@@ -719,8 +719,9 @@ pub struct DagRow {
     ///   Executor (malformed in V2; surface so the operator sees the
     ///   misconfiguration).
     /// * `""` — non-Executor row (Reviewer / Orchestrator) OR an
-    ///   Executor row whose aggregate is not yet relevant (kept empty
-    ///   to keep the wire compact).
+    ///   Executor row that is not `Completed`. A failed Executor is
+    ///   retried from `capabilities.tasks[*].retry_admissible`; it is
+    ///   not reviewable until a later activation completes.
     ///
     /// Orchestrator NNSP rule 3a (see
     /// `crates/planner-core/src/driver.rs::render_system_prompt_for_role`)
