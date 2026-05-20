@@ -3747,8 +3747,13 @@ impl KernelDashboardData {
                             }
                             _ => format!("Main:{short}"),
                         };
+                        // Use the full initiative id in the route slug.
+                        // UUIDv7 initiatives admitted in the same moment can
+                        // share their first timestamp-heavy characters; a
+                        // short slug would collapse multiple main review rows
+                        // onto one `/git/:name` route.
                         out.push(main_worktree_entry(
-                            format!("main-integration-{short}"),
+                            format!("main-integration-{initiative_id}"),
                             label,
                             main_repo_path.clone(),
                             Some(task_id),

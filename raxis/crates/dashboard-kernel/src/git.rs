@@ -36,6 +36,7 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use raxis_dashboard::data::{WorktreeDiffFile, WorktreeLogEntry};
@@ -49,6 +50,7 @@ pub const MAX_PER_FILE_DIFF_BYTES: usize = 64 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Hard ceiling for `RAXIS_VCS_TIMEOUT_SECS` override.
 const MAX_TIMEOUT_SECS: u64 = 120;
+static GIT_CAPTURE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Resolved git subprocess timeout, env-overridable.
 fn git_timeout() -> Duration {
@@ -118,6 +120,13 @@ fn stderr_is_not_a_git_repo(stderr: &str) -> bool {
 /// Run `git -C <root> <args>` with a bounded timeout. Returns
 /// `(stdout, stderr, exit_code)`.
 ///
+/// Stdout/stderr are captured through temporary files instead of
+/// pipes. The dashboard often asks for one large per-file hunk
+/// (`git diff base..head -- big-file`); if the parent process polls
+/// `try_wait()` while a piped stdout is unread, Git can fill the OS
+/// pipe buffer and block forever. File-backed capture keeps the
+/// timeout meaningful and lets large hunks complete normally.
+///
 /// Latency notes (`INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01`):
 ///   * The poll cadence below dominates floor latency on
 ///     fast-finishing git probes — a 50 ms sleep meant a
@@ -134,27 +143,41 @@ fn stderr_is_not_a_git_repo(stderr: &str) -> bool {
 ///     calls it from `tokio::task::spawn_blocking` so the
 ///     blocking wait does not pin a tokio runtime worker.
 fn run_git(args: &[&str], root: &Path) -> Result<(String, String, i32), GitError> {
+    run_git_with_timeout(args, root, git_timeout())
+}
+
+fn run_git_with_timeout(
+    args: &[&str],
+    root: &Path,
+    timeout: Duration,
+) -> Result<(String, String, i32), GitError> {
     if !root.exists() {
         return Err(GitError::MissingPath {
             path: root.display().to_string(),
         });
     }
+    let (stdout_path, stdout_file) = create_capture_file("stdout")?;
+    let (stderr_path, stderr_file) = create_capture_file("stderr")?;
     let mut child = Command::new("git")
         .arg("-C")
         .arg(root)
         .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
         .spawn()
-        .map_err(|e| GitError::Spawn(e.to_string()))?;
+        .map_err(|e| {
+            cleanup_capture_files(&stdout_path, &stderr_path);
+            GitError::Spawn(e.to_string())
+        })?;
 
-    let timeout = git_timeout();
     let deadline = Instant::now() + timeout;
     let mut poll = Duration::from_millis(1);
     let max_poll = Duration::from_millis(5);
     loop {
         if Instant::now() >= deadline {
             let _ = child.kill();
+            let _ = child.wait();
+            cleanup_capture_files(&stdout_path, &stderr_path);
             return Err(GitError::Timeout {
                 secs: timeout.as_secs(),
             });
@@ -172,13 +195,57 @@ fn run_git(args: &[&str], root: &Path) -> Result<(String, String, i32), GitError
         }
     }
 
-    let out = child
-        .wait_with_output()
-        .map_err(|e| GitError::Spawn(format!("wait_with_output: {e}")))?;
-    let code = out.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let status = child.wait().map_err(|e| {
+        cleanup_capture_files(&stdout_path, &stderr_path);
+        GitError::Spawn(format!("wait: {e}"))
+    })?;
+    let code = status.code().unwrap_or(-1);
+    let stdout = std::fs::read(&stdout_path)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .map_err(|e| {
+            cleanup_capture_files(&stdout_path, &stderr_path);
+            GitError::Spawn(format!("read stdout capture: {e}"))
+        })?;
+    let stderr = std::fs::read(&stderr_path)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .map_err(|e| {
+            cleanup_capture_files(&stdout_path, &stderr_path);
+            GitError::Spawn(format!("read stderr capture: {e}"))
+        })?;
+    cleanup_capture_files(&stdout_path, &stderr_path);
     Ok((stdout, stderr, code))
+}
+
+fn create_capture_file(stream: &str) -> Result<(std::path::PathBuf, std::fs::File), GitError> {
+    for _ in 0..16 {
+        let seq = GIT_CAPTURE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "raxis-dashboard-git-{}-{seq}-{stream}.tmp",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(GitError::Spawn(format!(
+                    "create {stream} capture file: {e}"
+                )));
+            }
+        }
+    }
+    Err(GitError::Spawn(format!(
+        "create {stream} capture file: exhausted unique names"
+    )))
+}
+
+fn cleanup_capture_files(stdout_path: &Path, stderr_path: &Path) {
+    let _ = std::fs::remove_file(stdout_path);
+    let _ = std::fs::remove_file(stderr_path);
 }
 
 /// `git rev-parse HEAD` → `Some(40-char-hex)` or `None` on
@@ -551,6 +618,53 @@ mod tests {
         let small = "abc".to_owned();
         let cut = truncate_hunk(small);
         assert_eq!(cut, "abc");
+    }
+
+    #[test]
+    fn run_git_captures_large_stdout_without_pipe_deadlock() {
+        let Some(dir) = make_seed_repo() else {
+            eprintln!("skipping: no working git binary on PATH");
+            return;
+        };
+        let Some(base) = head_sha(dir.path()) else {
+            eprintln!("skipping: seed repo has no HEAD");
+            return;
+        };
+        let large_body = (0..20_000)
+            .map(|i| format!("certificate-line-{i:05}\n"))
+            .collect::<String>();
+        std::fs::write(dir.path().join("big.txt"), large_body).expect("write big fixture");
+        for args in [
+            &["add", "big.txt"][..],
+            &["commit", "-q", "-m", "add large file"][..],
+        ] {
+            let ok = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .status()
+                .expect("git")
+                .success();
+            if !ok {
+                eprintln!("skipping: git {:?} failed", args);
+                return;
+            }
+        }
+        let Some(head) = head_sha(dir.path()) else {
+            eprintln!("skipping: committed large file has no HEAD");
+            return;
+        };
+        let range = format!("{base}..{head}");
+        let (stdout, _stderr, code) = run_git_with_timeout(
+            &["diff", &range, "--", "big.txt"],
+            dir.path(),
+            Duration::from_secs(2),
+        )
+        .expect("large diff stdout must not deadlock behind a pipe");
+        assert_eq!(code, 0);
+        assert!(
+            stdout.len() > MAX_PER_FILE_DIFF_BYTES,
+            "fixture must exceed the historical pipe/backpressure threshold"
+        );
     }
 
     /// Stderr classification: matches the canonical phrasing
