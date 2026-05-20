@@ -24,6 +24,10 @@ Configures branch protection on `main` so that:
   - `spec-graph` — `cargo xtask spec-graph --strict` is green.
   - `build-images / cargo check + test (ubuntu-22.04)` — workspace
     compiles and tests pass on Linux.
+  - `build-images / dashboard-fe build` — changed operator-dashboard
+    frontend inputs produce a production Vite build.
+  - `build-images / raxis-site build` — changed marketing/docs-site
+    inputs produce a production Next.js build.
   - `cla-check / cla` — the CLA-agreement checkbox in the PR
     description (from [`.github/PULL_REQUEST_TEMPLATE.md`](../PULL_REQUEST_TEMPLATE.md)) is ticked.
     The CLA itself lives at [`raxis/CLA.md`](../../raxis/CLA.md).

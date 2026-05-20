@@ -46,6 +46,111 @@ permissions:
   contents: read
 
 jobs:
+  detect-ui-changes:
+    name: detect UI build inputs
+    runs-on: ubuntu-22.04
+    outputs:
+      dashboard_fe: ${{ steps.detect.outputs.dashboard_fe }}
+      raxis_site:   ${{ steps.detect.outputs.raxis_site }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: detect changed UI inputs
+        id:   detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          head="${{ github.sha }}"
+          if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]]; then
+            files="$(git ls-tree -r --name-only "$head")"
+          else
+            files="$(git diff --name-only "$base" "$head")"
+          fi
+
+          dashboard_fe=false
+          raxis_site=false
+          if [ -z "$files" ]; then
+            dashboard_fe=true
+            raxis_site=true
+          fi
+          if grep -Eq '^(\.github/workflows/build-images\.yml|raxis/dashboard-fe/)' <<<"$files"; then
+            dashboard_fe=true
+          fi
+          if grep -Eq '^(\.github/workflows/build-images\.yml|README\.md|raxis/README\.md|raxis/guides/|raxis/specs/|raxis-site/)' <<<"$files"; then
+            raxis_site=true
+          fi
+
+          echo "dashboard_fe=$dashboard_fe" >> "$GITHUB_OUTPUT"
+          echo "raxis_site=$raxis_site" >> "$GITHUB_OUTPUT"
+          printf 'Changed UI inputs:\n%s\n' "$files"
+
+  dashboard-fe-build:
+    name:  dashboard-fe build
+    runs-on: ubuntu-22.04
+    needs: detect-ui-changes
+    steps:
+      - name: skip unchanged dashboard frontend
+        if:   needs.detect-ui-changes.outputs.dashboard_fe != 'true'
+        run:  echo "dashboard-fe inputs unchanged; build check skipped."
+
+      - uses: actions/checkout@v4
+        if:   needs.detect-ui-changes.outputs.dashboard_fe == 'true'
+
+      - name: setup node
+        if:   needs.detect-ui-changes.outputs.dashboard_fe == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: raxis/dashboard-fe/package-lock.json
+
+      - name: npm ci
+        if:   needs.detect-ui-changes.outputs.dashboard_fe == 'true'
+        run:  npm ci
+        working-directory: raxis/dashboard-fe
+
+      - name: npm run build
+        if:   needs.detect-ui-changes.outputs.dashboard_fe == 'true'
+        run:  npm run build
+        working-directory: raxis/dashboard-fe
+
+  raxis-site-build:
+    name:  raxis-site build
+    runs-on: ubuntu-22.04
+    needs: detect-ui-changes
+    steps:
+      - name: skip unchanged raxis-site
+        if:   needs.detect-ui-changes.outputs.raxis_site != 'true'
+        run:  echo "raxis-site inputs unchanged; build check skipped."
+
+      - uses: actions/checkout@v4
+        if:   needs.detect-ui-changes.outputs.raxis_site == 'true'
+
+      - name: setup node
+        if:   needs.detect-ui-changes.outputs.raxis_site == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: raxis-site/package-lock.json
+
+      - name: npm ci
+        if:   needs.detect-ui-changes.outputs.raxis_site == 'true'
+        run:  npm ci
+        working-directory: raxis-site
+
+      - name: npm run build
+        if:   needs.detect-ui-changes.outputs.raxis_site == 'true'
+        run:  npm run build
+        working-directory: raxis-site
+
   workspace-check:
     name:    cargo check + test
     runs-on: ${{ matrix.runner }}

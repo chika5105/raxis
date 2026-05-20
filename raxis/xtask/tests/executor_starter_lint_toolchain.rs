@@ -99,7 +99,7 @@ fn build_base_rootfs_fixture(dst: &Path) {
     // a regular file or a symlink passes.
     let sbin = dst.join("sbin");
     fs::create_dir_all(&sbin).unwrap();
-    std::os::unix::fs::symlink("/usr/local/bin/raxis-planner-executor", sbin.join("init"))
+    std::os::unix::fs::symlink("../usr/local/bin/raxis-planner-executor", sbin.join("init"))
         .expect("symlink /sbin/init");
     install_rust_toolchain(dst);
 }

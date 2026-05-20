@@ -91,6 +91,8 @@ fi
 declare -a REQUIRED_CHECKS=(
     "spec-graph"
     "build-images / cargo check + test (ubuntu-22.04)"
+    "build-images / dashboard-fe build"
+    "build-images / raxis-site build"
     "cla-check / cla"
 )
 

@@ -90,6 +90,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use raxis_types::{CommitSha, GateType, TaskId, WitnessResultClass, WitnessSubmission};
@@ -712,8 +713,18 @@ async fn wait_for_child_with_timeout(
         .take()
         .expect("Stdio::piped() configured above");
 
-    let stdout_task = tokio::spawn(read_capped(stdout_pipe, stdout_max));
-    let stderr_task = tokio::spawn(read_capped(stderr_pipe, stderr_max));
+    let stdout_buf = Arc::new(Mutex::new(Vec::with_capacity(stdout_max.min(64 * 1024))));
+    let stderr_buf = Arc::new(Mutex::new(Vec::with_capacity(stderr_max.min(64 * 1024))));
+    let stdout_task = tokio::spawn(read_capped(
+        stdout_pipe,
+        stdout_max,
+        Arc::clone(&stdout_buf),
+    ));
+    let stderr_task = tokio::spawn(read_capped(
+        stderr_pipe,
+        stderr_max,
+        Arc::clone(&stderr_buf),
+    ));
 
     // Use `tokio::time::timeout` rather than a pinned `select!` over
     // `child.wait()` + `child.start_kill()` — the latter holds a `&mut`
@@ -725,16 +736,24 @@ async fn wait_for_child_with_timeout(
         Ok(Err(e)) => return Err(RunError::Wait(e)),
         Err(_) => {
             let _ = child.start_kill();
-            // Best-effort drain; if the child ignores the kill, we
-            // still return Timeout and the substrate tears down the
-            // VM after the binary exits.
-            let _ = child.wait().await;
+            // Best-effort reap of the shell process. Do not wait
+            // indefinitely here: `sh -lc` can leave a timed-out
+            // grandchild holding stdout/stderr open, and the verifier
+            // must still report Timeout promptly so the VM teardown can
+            // clean the process tree.
+            let _ = tokio::time::timeout(Duration::from_millis(250), child.wait()).await;
+            stdout_task.abort();
+            stderr_task.abort();
             (None, true)
         }
     };
 
-    let stdout = stdout_task.await.unwrap_or_default();
-    let stderr = stderr_task.await.unwrap_or_default();
+    if !timed_out {
+        let _ = stdout_task.await;
+        let _ = stderr_task.await;
+    }
+    let stdout = snapshot_capped_buffer(&stdout_buf);
+    let stderr = snapshot_capped_buffer(&stderr_buf);
 
     let exit_code = status_opt.and_then(|s| s.code());
     Ok(CommandOutcome {
@@ -745,29 +764,36 @@ async fn wait_for_child_with_timeout(
     })
 }
 
-async fn read_capped<R>(mut reader: R, cap: usize) -> Vec<u8>
+fn snapshot_capped_buffer(buf: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
+    buf.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+async fn read_capped<R>(mut reader: R, cap: usize, buf: Arc<Mutex<Vec<u8>>>)
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     use tokio::io::AsyncReadExt;
-    let mut buf = Vec::with_capacity(cap.min(64 * 1024));
     let mut chunk = vec![0u8; 8 * 1024];
     loop {
         match reader.read(&mut chunk).await {
             Ok(0) => break,
             Ok(n) => {
-                let remaining = cap.saturating_sub(buf.len());
-                if remaining == 0 {
+                let should_drain = {
+                    let mut locked = buf.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let remaining = cap.saturating_sub(locked.len());
+                    if remaining == 0 {
+                        true
+                    } else {
+                        let take = n.min(remaining);
+                        locked.extend_from_slice(&chunk[..take]);
+                        take < n
+                    }
+                };
+                if should_drain {
                     // Drain the rest without retaining — the cap is
                     // a hard ceiling on what the kernel sees.
-                    let mut sink = vec![0u8; 8 * 1024];
-                    while reader.read(&mut sink).await.unwrap_or(0) > 0 {}
-                    break;
-                }
-                let take = n.min(remaining);
-                buf.extend_from_slice(&chunk[..take]);
-                if take < n {
-                    // Cap hit mid-chunk; drain residue.
                     let mut sink = vec![0u8; 8 * 1024];
                     while reader.read(&mut sink).await.unwrap_or(0) > 0 {}
                     break;
@@ -776,7 +802,6 @@ where
             Err(_) => break,
         }
     }
-    buf
 }
 
 fn lossy_utf8(bytes: Vec<u8>) -> String {
