@@ -1,17 +1,15 @@
 // Docs loader.
 //
-// Two backends, selected automatically:
+// Docs can come from either the build-time mirror or the public GitHub API:
 //
 //   FILESYSTEM (dev + Vercel build)
 //     Reads from vendor/raxis-docs/ which is populated by scripts/sync-docs.mjs
 //     before every dev start or Vercel build.
 //
-//   GITHUB API (production, when RAXIS_GITHUB_REPO is set)
-//     Fetches the file tree + raw content from GitHub. Next.js caches each
-//     fetch() call for REVALIDATE seconds (default 3600 = 1 hour), so content
-//     refreshes in the background without a redeploy.
-//     Set RAXIS_GITHUB_REPO=owner/repo (e.g. "chika5105/raxis").
-//     Optional: RAXIS_GITHUB_BRANCH (default "main"), RAXIS_GITHUB_TOKEN.
+//   ANONYMOUS GITHUB API (production, when RAXIS_GITHUB_REPO is set)
+//     Fetches the file tree + raw content from the public repo without any
+//     token or auth header. Next.js caches each fetch() call for REVALIDATE
+//     seconds (default 3600 = 1 hour).
 
 import fs from "node:fs";
 import path from "node:path";
@@ -53,12 +51,13 @@ const DOCS_DIR = path.join(process.cwd(), "vendor", "raxis-docs");
 const IS_DEV = process.env.NODE_ENV === "development";
 const GITHUB_REPO = process.env.RAXIS_GITHUB_REPO; // "owner/repo"
 const GITHUB_BRANCH = process.env.RAXIS_GITHUB_BRANCH ?? "main";
-const GITHUB_TOKEN = process.env.RAXIS_GITHUB_TOKEN;
+const GITHUB_PREFIX = normalizeGithubPrefix(process.env.RAXIS_GITHUB_PREFIX);
 const REVALIDATE = 3600; // 1 hour
+const FORCE_GITHUB = process.env.RAXIS_FORCE_GITHUB === "true";
 
-// Use GitHub API when the repo is configured (production).
-// In dev we always use the filesystem for speed and offline support.
-const USE_GITHUB = !!GITHUB_REPO && !IS_DEV;
+// Use anonymous GitHub API when configured in production. In dev, prefer the
+// filesystem mirror unless explicitly forced for debugging.
+const USE_GITHUB = !!GITHUB_REPO && (!IS_DEV || FORCE_GITHUB);
 
 // ─── Exclusion rules ─────────────────────────────────────────────────────────
 
@@ -271,19 +270,39 @@ function getScenarioTomlFilesFromFS(meta: DocMeta): TomlFile[] {
   });
 }
 
-// ─── GitHub API backend ───────────────────────────────────────────────────────
+// ─── Anonymous GitHub API backend ────────────────────────────────────────────
+
+function normalizeGithubPrefix(prefix: string | undefined): string {
+  return (prefix ?? "").trim().replace(/^\/+|\/+$/g, "");
+}
+
+function stripGithubPrefix(repoPath: string): string | null {
+  if (!GITHUB_PREFIX) return repoPath;
+  if (repoPath === GITHUB_PREFIX) return "";
+  if (!repoPath.startsWith(GITHUB_PREFIX + "/")) return null;
+  return repoPath.slice(GITHUB_PREFIX.length + 1);
+}
+
+function withGithubPrefix(relPath: string): string {
+  const clean = relPath.replace(/^\/+/, "");
+  return GITHUB_PREFIX ? `${GITHUB_PREFIX}/${clean}` : clean;
+}
+
+function encodeGithubPath(repoPath: string): string {
+  return repoPath.split("/").map(encodeURIComponent).join("/");
+}
 
 async function ghFetch(url: string): Promise<Response> {
-  const headers: Record<string, string> = { Accept: "application/vnd.github.v3+json" };
-  if (GITHUB_TOKEN) headers["Authorization"] = `Bearer ${GITHUB_TOKEN}`;
-  return fetch(url, { headers, next: { revalidate: REVALIDATE } });
+  return fetch(url, {
+    headers: { Accept: "application/vnd.github.v3+json" },
+    next: { revalidate: REVALIDATE },
+  });
 }
 
 async function fetchRaw(filePath: string): Promise<string> {
-  const url = `https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/${filePath}`;
-  const rawHeaders: Record<string, string> = {};
-  if (GITHUB_TOKEN) rawHeaders["Authorization"] = `Bearer ${GITHUB_TOKEN}`;
-  const res = await fetch(url, { headers: rawHeaders, next: { revalidate: REVALIDATE } });
+  const repoPath = encodeGithubPath(withGithubPrefix(filePath));
+  const url = `https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/${repoPath}`;
+  const res = await fetch(url, { next: { revalidate: REVALIDATE } });
   if (!res.ok) throw new Error(`GitHub raw ${res.status}: ${filePath}`);
   return res.text();
 }
@@ -302,10 +321,11 @@ async function fetchGithubTree(): Promise<GithubTreeItem[]> {
 async function getAllDocsFromGitHub(): Promise<DocMeta[]> {
   const tree = await fetchGithubTree();
   const mdPaths = tree
-    .filter((item) => item.type === "blob" && item.path.endsWith(".md") && !isExcluded(item.path))
-    .map((item) => item.path);
+    .filter((item) => item.type === "blob")
+    .map((item) => stripGithubPrefix(item.path))
+    .filter((relPath): relPath is string => !!relPath)
+    .filter((relPath) => relPath.endsWith(".md") && !isExcluded(relPath));
 
-  // Fetch all files in parallel — Next.js deduplicates & caches each fetch.
   const results = await Promise.allSettled(
     mdPaths.map(async (filePath) => {
       const raw = await fetchRaw(filePath);
@@ -340,13 +360,14 @@ async function getScenarioTomlFilesFromGitHub(meta: DocMeta): Promise<TomlFile[]
   const dir = meta.relativePath.split("/").slice(0, -1).join("/");
   const tree = await fetchGithubTree();
   const tomlPaths = tree
+    .filter((item) => item.type === "blob")
+    .map((item) => stripGithubPrefix(item.path))
+    .filter((relPath): relPath is string => !!relPath)
     .filter(
-      (item) =>
-        item.type === "blob" &&
-        item.path.endsWith(".toml") &&
-        item.path.startsWith(dir + "/")
-    )
-    .map((item) => item.path);
+      (relPath) =>
+        relPath.endsWith(".toml") &&
+        relPath.startsWith(dir + "/")
+    );
 
   const results = await Promise.allSettled(
     tomlPaths.map(async (p) => ({
@@ -375,7 +396,7 @@ export async function getAllDocs(): Promise<DocMeta[]> {
     try {
       return await getAllDocsFromGitHub();
     } catch (err) {
-      console.warn("[docs] GitHub API unavailable, falling back to bundled filesystem copy:", err);
+      console.warn("[docs] anonymous GitHub API unavailable, falling back to bundled copy:", err);
       return getAllDocsFromFS();
     }
   }
@@ -389,7 +410,7 @@ export async function getDocBySlug(
     try {
       return await getDocBySlugFromGitHub(slug);
     } catch (err) {
-      console.warn("[docs] GitHub API unavailable, falling back to filesystem:", err);
+      console.warn("[docs] anonymous GitHub API unavailable, falling back to bundled copy:", err);
       return getDocBySlugFromFS(slug);
     }
   }
@@ -401,7 +422,7 @@ export async function getScenarioTomlFiles(meta: DocMeta): Promise<TomlFile[]> {
     try {
       return await getScenarioTomlFilesFromGitHub(meta);
     } catch (err) {
-      console.warn("[docs] GitHub API unavailable, falling back to filesystem:", err);
+      console.warn("[docs] anonymous GitHub API unavailable, falling back to bundled copy:", err);
       return getScenarioTomlFilesFromFS(meta);
     }
   }

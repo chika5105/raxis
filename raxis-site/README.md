@@ -23,7 +23,7 @@ At `prebuild` time, two Node scripts run in order:
    4. Nothing — emit a placeholder so the site still builds.
 2. **`scripts/build-search-index.mjs`** — walks the mirrored tree, extracts titles, headings, and plain-text bodies, builds a MiniSearch index, and writes it to `public/search-index.json`.
 
-At runtime, `src/lib/docs.ts` reads exclusively from `vendor/raxis-docs/`. The site has **zero runtime filesystem dependency** — all source markdown is baked in at build time.
+At runtime, `src/lib/docs.ts` reads from `vendor/raxis-docs/` by default. In production, you may instead set `RAXIS_GITHUB_REPO` to read the public repository through anonymous GitHub API calls. There is no GitHub auth flow and no GitHub token path.
 
 ## Getting started
 
@@ -50,10 +50,18 @@ The site deploys without any custom configuration. The recommended setup:
 
 1. Push this repo to GitHub (or your git host of choice).
 2. Import it in the Vercel dashboard.
-3. Set one environment variable: **`RAXIS_REPO_URL`** = the public git URL of the raxis repository (e.g. `https://github.com/chika5105/raxis.git`).
+3. Set one environment variable: **`RAXIS_REPO_URL`** = the public git URL of the raxis repository (e.g. `https://github.com/chika5105/raxis.git`). No GitHub token is required.
 4. Trigger a build. The `prebuild` step shallow-clones raxis, mirrors every `.md` into `vendor/raxis-docs/`, and the rest of the build works normally.
 
-If your raxis repo is private, set up a Vercel deploy hook with a personal access token in the URL, or use a Vercel git integration with read access to the private repo.
+For live docs that refresh from the public repository without a redeploy, set:
+
+```bash
+RAXIS_GITHUB_REPO=chika5105/raxis
+RAXIS_GITHUB_BRANCH=main
+RAXIS_GITHUB_PREFIX=raxis
+```
+
+Those runtime requests are anonymous GitHub API/raw-content requests. Do not configure a GitHub token for the public site.
 
 To trigger an automatic redeploy whenever raxis is updated, add a deploy hook to the raxis repo's CI: `curl -X POST $VERCEL_DEPLOY_HOOK_URL`.
 
