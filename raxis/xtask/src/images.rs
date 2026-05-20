@@ -1627,13 +1627,15 @@ fn bake_one_role(
     // suffix once the bake pipeline grows multi-version support; for
     // now a fixed `:dev` is enough since each role bakes one image.
     let tag = format!("raxis-rootfs-{}:dev", role.images_subdir());
+    let public_registry_config = public_registry_docker_config(builder)?;
     bake_role_progress(
         role,
         "rootfs_builder_build",
         "2-15 min on first run",
         "Running the OCI builder. Base-image pulls and apt/apk installs can sit quiet before printing progress.",
     );
-    let build_status = Command::new(builder.binary())
+    let mut build_cmd = builder_command(builder, public_registry_config.as_ref());
+    let build_status = build_cmd
         .args([
             "build",
             "--platform",
@@ -1675,7 +1677,8 @@ fn bake_one_role(
         "under 30 sec",
         "Creating a throwaway container so its filesystem can be exported.",
     );
-    let create_out = Command::new(builder.binary())
+    let mut create_cmd = builder_command(builder, public_registry_config.as_ref());
+    let create_out = create_cmd
         .args(["create", "--platform", platform, &tag])
         .output()
         .with_context(|| {
@@ -1725,15 +1728,19 @@ fn bake_one_role(
         "1-10 min for large rootfs images",
         "Streaming builder export directly into tar extraction; large executor images may not print while bytes move.",
     );
-    let extract_result = run_export_pipeline(builder, &container_id, &rootfs_dir);
+    let extract_result = run_export_pipeline(
+        builder,
+        public_registry_config.as_ref(),
+        &container_id,
+        &rootfs_dir,
+    );
 
     // ── Step 4: always remove the throwaway container. We swallow
     //    rm errors so a successful extract is not masked by a failed
     //    teardown; the dangling container is harmless and the next
     //    bake will overwrite the tag.
-    let _ = Command::new(builder.binary())
-        .args(["rm", "-f", &container_id])
-        .status();
+    let mut rm_cmd = builder_command(builder, public_registry_config.as_ref());
+    let _ = rm_cmd.args(["rm", "-f", &container_id]).status();
 
     extract_result?;
 
@@ -1751,10 +1758,16 @@ fn bake_one_role(
 /// without buffering a multi-GB tarball on disk. We use `Stdio::piped`
 /// on the builder side and feed the read end into tar's stdin; both
 /// children are reaped before we return.
-fn run_export_pipeline(builder: Builder, container_id: &str, rootfs_dir: &Path) -> Result<()> {
+fn run_export_pipeline(
+    builder: Builder,
+    public_registry_config: Option<&tempfile::TempDir>,
+    container_id: &str,
+    rootfs_dir: &Path,
+) -> Result<()> {
     use std::process::Stdio;
 
-    let mut export = Command::new(builder.binary())
+    let mut export_cmd = builder_command(builder, public_registry_config);
+    let mut export = export_cmd
         .args(["export", container_id])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1798,6 +1811,42 @@ fn run_export_pipeline(builder: Builder, container_id: &str, rootfs_dir: &Path) 
         );
     }
     Ok(())
+}
+
+fn builder_command(
+    builder: Builder,
+    public_registry_config: Option<&tempfile::TempDir>,
+) -> Command {
+    let mut cmd = Command::new(builder.binary());
+    if let Some(config) = public_registry_config {
+        cmd.env("DOCKER_CONFIG", config.path());
+    }
+    cmd
+}
+
+fn public_registry_docker_config(builder: Builder) -> Result<Option<tempfile::TempDir>> {
+    if builder != Builder::Docker {
+        return Ok(None);
+    }
+    if std::env::var_os("RAXIS_DOCKER_CONFIG_PASSTHROUGH").is_some() {
+        return Ok(None);
+    }
+    let dir = tempfile::Builder::new()
+        .prefix("raxis-docker-public-config-")
+        .tempdir()
+        .context("create temporary Docker config for public rootfs bake")?;
+    fs::write(dir.path().join("config.json"), b"{\"auths\":{}}\n")
+        .with_context(|| format!("write {}", dir.path().join("config.json").display()))?;
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "level": "info",
+            "event": "bake_docker_public_config",
+            "docker_config": dir.path(),
+            "detail": "Using an auth-free Docker config for public rootfs pulls so Desktop credential helpers cannot stall a hermetic bake. Set RAXIS_DOCKER_CONFIG_PASSTHROUGH=1 to opt into the host Docker config.",
+        })
+    );
+    Ok(Some(dir))
 }
 
 // ---------------------------------------------------------------------------
