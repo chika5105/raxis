@@ -10,6 +10,8 @@ admission. See [`raxis/specs/invariants.md`](raxis/specs/invariants.md)
 for the full invariant catalogue and [`raxis/README.md`](raxis/README.md)
 for a project-level overview.
 
+Watch the current demo: <https://www.loom.com/share/a9e5673f410542bcb09b8ce7813e240c>.
+
 ## Repository layout
 
 ```mermaid
