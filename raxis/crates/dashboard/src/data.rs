@@ -1256,6 +1256,27 @@ pub struct SessionView {
     /// revoke without a click-through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_annotation: Option<LifecycleAnnotation>,
+    /// Environment variables captured for the VM backing this
+    /// session. Present on detail responses; omitted from list
+    /// responses to keep the sessions index cheap.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<SessionVmEnvView>,
+}
+
+/// One VM environment variable captured for a session.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionVmEnvView {
+    /// Environment variable name.
+    pub key: String,
+    /// Stored environment value, or `"<redacted>"` for defense-in-depth
+    /// secrets that should never render raw.
+    pub value: String,
+    /// Whether `value` was redacted by the store view.
+    pub redacted: bool,
+    /// Capture source, usually `session-spawn`.
+    pub source: String,
+    /// Unix timestamp when the snapshot was captured.
+    pub captured_at: u64,
 }
 
 /// Pending escalation visible to operators.

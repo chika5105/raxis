@@ -3,7 +3,8 @@
 //! ## Lifecycle (V2.4)
 //! 1. Kernel session-spawn lands the canonical orchestrator image,
 //!    `execve`s `/usr/local/bin/raxis-orchestrator --initiative-id <ID>`
-//!    inside the guest with `RAXIS_SESSION_TOKEN=<opaque>` set.
+//!    inside the guest with `RAXIS_SESSION_ID=<uuid>` set. Bearer
+//!    session material stays host-side.
 //! 2. This `main` reduces argv + env to a [`raxis_planner_core::BootContext`].
 //! 3. It emits one `planner-boot` structured log line on stderr (the
 //!    kernel-side log scraper keys on `step:"planner-boot"`).
@@ -160,19 +161,12 @@ async fn run() -> Result<(), PlannerError> {
     eprintln!("{}", render_boot_log(&ctx));
 
     // `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` — scrub the
-    // session token and sister sensitive env vars from the
-    // process environment now that `BootContext::from_process`
-    // has captured the session token into `ctx.env`. The scrubber
-    // also keeps an in-process snapshot for the driver; `run_role_session`
-    // reduces that snapshot to a fixed runtime allowlist. The orchestrator
-    // dispatches HTTP fetches via `PlannerFetchRequest` over the
-    // kernel-IPC vsock (not the in-VM tproxy), so the only
-    // legitimate post-boot reader of `RAXIS_SESSION_TOKEN` is the
-    // kernel-transport handshake which has already cloned the
-    // value into `ctx.env`. The orchestrator's `BashTool` child
-    // processes now inherit a scrubbed env via `Command::spawn`,
-    // defanging the most common token-recovery vector
-    // (`bash -lc env | grep RAXIS_`).
+    // sensitive env vars from the process environment after
+    // `BootContext::from_process` has captured the safe session id.
+    // The scrubber also keeps an in-process snapshot for the driver;
+    // `run_role_session` reduces that snapshot to a fixed runtime
+    // allowlist. The orchestrator's child processes inherit the
+    // scrubbed env via `Command::spawn`.
     scrub_sensitive_env_for_agent();
 
     let outcome = run_role_session(ctx.role, ctx.args.clone(), ctx.env.clone())

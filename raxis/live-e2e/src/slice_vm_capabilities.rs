@@ -18,8 +18,8 @@
 //!      (`is_kernel_private_env`) holds against a real
 //!      `std::env::vars()` enumeration: the slice writes a sentinel
 //!      payload (`live-e2e-loopback-plan-payload-MUST-NOT-LEAK`)
-//!      into `RAXIS_VSOCK_LOOPBACK_PLAN`, into `RAXIS_SESSION_TOKEN`,
-//!      and into `RAXIS_PLANNER_SIDECAR_HMAC_SECRET`, then asserts
+//!      into `RAXIS_VSOCK_LOOPBACK_PLAN` and
+//!      `RAXIS_PLANNER_SIDECAR_HMAC_SECRET`, then asserts
 //!      neither the env keys NOR the sentinel value byte sequence
 //!      appears anywhere in the serialised manifest. Negative test
 //!      for `INV-EXEC-DISCOVERY-01`'s redaction clause.

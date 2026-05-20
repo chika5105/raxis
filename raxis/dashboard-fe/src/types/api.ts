@@ -663,6 +663,17 @@ export interface SessionView {
   /// rows so an operator sees self-exit vs operator-revoke
   /// without drilling in.
   latest_annotation?: LifecycleAnnotation | null;
+  /// VM environment variables captured at session spawn. Detail
+  /// responses populate this; list responses may omit it.
+  env?: SessionVmEnvView[];
+}
+
+export interface SessionVmEnvView {
+  key: string;
+  value: string;
+  redacted: boolean;
+  source: string;
+  captured_at: number;
 }
 
 /// One record from the per-session lifecycle capture ring

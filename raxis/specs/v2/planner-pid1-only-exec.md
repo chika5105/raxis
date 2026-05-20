@@ -18,11 +18,10 @@ intent — it was exploring the environment in a debugging spiral
 own VM** IS a jailbreak vector:
 
 1. The child inherits the parent PID 1's environment, including
-   `RAXIS_SESSION_TOKEN`, `RAXIS_PLANNER_TASK_PROMPT_PATH`, and
-   `RAXIS_KERNEL_VSOCK_LISTEN_PORT`. The child can dial the
-   kernel-side planner IPC socket and submit intents under the
-   parent's session token until the parent's session is
-   revoked.
+   `RAXIS_PLANNER_TASK_PROMPT_PATH` and
+   `RAXIS_KERNEL_VSOCK_LISTEN_PORT`. The child can collide with
+   the parent's kernel-side planner IPC setup until the parent's
+   session is revoked.
 2. The child can read the parent's `/proc/<parent_pid>/cmdline`
    to learn the parent's per-task arguments (initiative id, task
    id) and impersonate the parent's identity at the kernel-side

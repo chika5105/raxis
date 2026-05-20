@@ -36,16 +36,20 @@ The flag is read from three control surfaces. **Any one being "on" activates kee
 ### 2.1 Env var (primary)
 
 ```bash
+export RAXIS_INSTALL_DIR="${RAXIS_INSTALL_DIR:-/usr/local/lib/raxis}"
+RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 \
 RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1 cargo test --release \
-    --test extended_e2e_realistic_scenario -- --nocapture
+    -p raxis-kernel --test extended_e2e_realistic_scenario -- --nocapture
 ```
 
 The older short spelling remains accepted for operator runbooks that
 already use it:
 
 ```bash
+export RAXIS_INSTALL_DIR="${RAXIS_INSTALL_DIR:-/usr/local/lib/raxis}"
+RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 \
 RAXIS_KEEP_ALIVE=1 RAXIS_KEEP_ALIVE_DURATION_SECS=7200 cargo test --release \
-    --test extended_e2e_realistic_scenario -- --nocapture
+    -p raxis-kernel --test extended_e2e_realistic_scenario -- --nocapture
 ```
 
 | Value (case-insensitive)                     | Activates? |
@@ -218,10 +222,14 @@ The flag exists for one reason: an operator running `cargo test ... extended_e2e
 
 ```bash
 # Run the realism-e2e iter and keep everything live for post-mortem.
+export RAXIS_INSTALL_DIR="${RAXIS_INSTALL_DIR:-/usr/local/lib/raxis}"
+RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 \
 RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1 cargo test --release \
     -p raxis-kernel --test extended_e2e_realistic_scenario -- --nocapture
 
 # Older short spelling accepted by the harness too:
+export RAXIS_INSTALL_DIR="${RAXIS_INSTALL_DIR:-/usr/local/lib/raxis}"
+RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 \
 RAXIS_KEEP_ALIVE=1 RAXIS_KEEP_ALIVE_DURATION_SECS=7200 cargo test --release \
     -p raxis-kernel --test extended_e2e_realistic_scenario -- --nocapture
 

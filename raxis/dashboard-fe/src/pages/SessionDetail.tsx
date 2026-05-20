@@ -14,7 +14,11 @@ import { StateBadge } from "@/components/StateBadge";
 import { TaskLlmTurns } from "@/components/TaskLlmTurns";
 import { fmtAbsolute, fmtRelative, fmtTokens } from "@/lib/format";
 import { isTerminalFailureState } from "@/lib/state-color";
-import type { LifecycleAnnotation, SessionCaptureView } from "@/types/api";
+import type {
+  LifecycleAnnotation,
+  SessionCaptureView,
+  SessionVmEnvView,
+} from "@/types/api";
 
 export function SessionDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
@@ -185,12 +189,13 @@ export function SessionDetailPage() {
         owningTaskId={s.task_id ?? null}
         annotations={s.annotations ?? []}
         historical={historical}
+        env={s.env ?? []}
       />
     </div>
   );
 }
 
-type DetailTab = "stream" | "llm-turns" | "postmortem";
+type DetailTab = "stream" | "llm-turns" | "environment" | "postmortem";
 
 /// Tab strip for the bottom of the SessionDetail page. Three
 /// tabs:
@@ -226,11 +231,13 @@ function SessionDetailTabs({
   owningTaskId,
   annotations,
   historical,
+  env,
 }: {
   sessionId: string;
   owningTaskId: string | null;
   annotations: LifecycleAnnotation[];
   historical: boolean;
+  env: SessionVmEnvView[];
 }) {
   const [tab, setTab] = useState<DetailTab>("stream");
   const llmTurnsEnabled = !!owningTaskId;
@@ -262,6 +269,14 @@ function SessionDetailTabs({
           LLM turns
         </TabButton>
         <TabButton
+          active={tab === "environment"}
+          onClick={() => setTab("environment")}
+          testId="tab-environment"
+          title="Environment variables captured for the VM at session spawn"
+        >
+          Environment
+        </TabButton>
+        <TabButton
           active={tab === "postmortem"}
           onClick={() => setTab("postmortem")}
           testId="tab-postmortem"
@@ -279,6 +294,7 @@ function SessionDetailTabs({
       {tab === "llm-turns" && owningTaskId && (
         <TaskLlmTurns taskId={owningTaskId} />
       )}
+      {tab === "environment" && <SessionEnvironmentPanel env={env} />}
       {tab === "postmortem" && <SessionPostmortemPanel sessionId={sessionId} />}
     </section>
   );
@@ -363,6 +379,117 @@ function TabButton({
     >
       {children}
     </button>
+  );
+}
+
+function SessionEnvironmentPanel({ env }: { env: SessionVmEnvView[] }) {
+  const [query, setQuery] = useState("");
+  const normalized = query.trim().toLowerCase();
+  const filtered = useMemo(() => {
+    if (!normalized) return env;
+    return env.filter((row) => {
+      const haystack = [
+        row.key,
+        row.value,
+        row.source,
+        row.redacted ? "redacted" : "visible",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(normalized);
+    });
+  }, [env, normalized]);
+  const redactedCount = env.filter((row) => row.redacted).length;
+
+  return (
+    <div className="card p-0 overflow-hidden" data-testid="session-env-panel">
+      <header className="px-4 py-3 border-b border-edge flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="text-sm font-semibold text-ink">VM environment</h3>
+          <p className="mt-1 text-xs text-ink-muted">
+            Captured at session spawn after kernel control vars and credential
+            proxy loopback URLs were stamped.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 text-xs">
+          <span className="badge bg-panel border-edge text-ink-muted">
+            {env.length} var{env.length === 1 ? "" : "s"}
+          </span>
+          {redactedCount > 0 && (
+            <span className="badge bg-warn/10 border-warn/30 text-warn">
+              {redactedCount} redacted
+            </span>
+          )}
+        </div>
+      </header>
+      <div className="px-4 py-3 border-b border-edge/60">
+        <label className="sr-only" htmlFor="session-env-search">
+          Search environment variables
+        </label>
+        <input
+          id="session-env-search"
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search env key, value, or source..."
+          className="w-full rounded-md border border-edge bg-panel px-3 py-2 text-sm text-ink placeholder:text-ink-subtle focus:outline-none focus:ring-2 focus:ring-accent/30"
+        />
+      </div>
+      {env.length === 0 ? (
+        <div className="px-4 py-10 text-center text-sm text-ink-muted">
+          No VM environment snapshot was recorded for this session.
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="px-4 py-10 text-center text-sm text-ink-muted">
+          No environment variables match <Mono>{query}</Mono>.
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-[900px] w-full text-sm">
+            <thead className="bg-panel-high text-left text-xs uppercase tracking-wide text-ink-subtle">
+              <tr>
+                <th className="px-4 py-2.5 font-medium">Key</th>
+                <th className="px-4 py-2.5 font-medium">Value</th>
+                <th className="px-4 py-2.5 font-medium">Source</th>
+                <th className="px-4 py-2.5 font-medium">Captured</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-edge/50">
+              {filtered.map((row) => (
+                <tr key={row.key} className="align-top">
+                  <td className="px-4 py-3 w-[260px]">
+                    <div className="flex items-start gap-2 min-w-0">
+                      <Mono className="text-xs break-all">{row.key}</Mono>
+                      <CopyButton value={row.key} />
+                    </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-start gap-2 min-w-0">
+                      {row.redacted ? (
+                        <span className="badge bg-warn/10 border-warn/30 text-warn">
+                          redacted
+                        </span>
+                      ) : (
+                        <>
+                          <Mono className="text-xs break-all">{row.value}</Mono>
+                          <CopyButton value={row.value} />
+                        </>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-xs text-ink-muted">
+                    {row.source}
+                  </td>
+                  <td className="px-4 py-3 text-xs text-ink-muted whitespace-nowrap">
+                    {fmtAbsolute(row.captured_at)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
 

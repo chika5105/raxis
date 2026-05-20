@@ -112,9 +112,10 @@ pub struct TproxyAdmissionRequest {
     /// the response so concurrent admissions can be correlated.
     pub request_id: Uuid,
 
-    /// The session token the kernel stamped at spawn time. The
-    /// admission handler validates against `sessions.session_token`
-    /// for the connection; mismatch → `FAIL_SESSION_TOKEN_MISMATCH`.
+    /// Host-side session token. Session-bound guest requests send
+    /// this empty; the kernel-side A3 bridge authenticates the
+    /// already-bound listener and fills the legacy field before any
+    /// token-based handler path is used.
     pub session_token: String,
 
     /// SNI extracted from the agent's TLS ClientHello, when
@@ -233,7 +234,7 @@ pub enum DnsQueryType {
 pub struct DnsResolveRequest {
     /// Per-query UUIDv4 the guest mints. Echoed on the response.
     pub request_id: Uuid,
-    /// Session-token authenticator; same shape as
+    /// Host-side session token; same host-bound semantics as
     /// [`TproxyAdmissionRequest::session_token`].
     pub session_token: String,
     /// Hostname to resolve. Lowercased by the in-guest stub

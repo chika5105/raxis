@@ -11,7 +11,7 @@
 //!   <data_dir>/worktrees/<session_uuid>/
 //!     ├── .raxis/
 //!     │   ├── system_prompt.txt   ← non-negotiable prompt prefix (V2 §10)
-//!     │   ├── session.env         ← session token + VSock connect params
+//!     │   ├── session.env         ← VSock connect params (no bearer token)
 //!     │   └── bundles/            ← Executor bundle drop dir (per Reviewer §24/24b)
 //!     │
 //!     └── (clone destination filled by Steps 23/24/24b)
@@ -116,9 +116,8 @@ pub enum StagingError {
 /// Inputs the kernel hands the staging module per session.
 ///
 /// Pure data; the staging module does no policy / store work — the
-/// kernel's session-admission handler resolves the session token,
-/// VSock CID, and system prompt, then calls into staging exactly
-/// once.
+/// kernel resolves the VSock CID and system prompt, then calls into
+/// staging exactly once. Bearer session material stays host-side.
 #[derive(Debug, Clone)]
 pub struct StageInputs {
     /// `<data_dir>` — `<data_dir>/worktrees/<uuid>/` is what we mint.
@@ -133,10 +132,6 @@ pub struct StageInputs {
     /// this from `prompt::assembler` per `kernel-mechanics-prompt.md
     /// §3.1`.
     pub system_prompt: String,
-    /// Per-session secret the planner authenticates intent frames
-    /// with. Written verbatim to the `RAXIS_SESSION_TOKEN=...` line
-    /// in `session.env`.
-    pub session_token: String,
     /// VSock CID the substrate assigns the guest. Written to
     /// `RAXIS_VSOCK_CID=...`.
     pub vsock_cid: u32,
@@ -208,7 +203,7 @@ pub fn stage(inputs: &StageInputs) -> Result<StagedWorktree, StagingError> {
     let prompt_path = raxis_dir.join(SYSTEM_PROMPT_FILENAME);
     write_file(&prompt_path, inputs.system_prompt.as_bytes())?;
 
-    let env_body = render_session_env(&inputs.session_token, inputs.vsock_cid, inputs.vsock_port);
+    let env_body = render_session_env(inputs.vsock_cid, inputs.vsock_port);
     let env_path = raxis_dir.join(SESSION_ENV_FILENAME);
     write_file(&env_path, env_body.as_bytes())?;
 
@@ -267,10 +262,9 @@ pub fn worktree_root_path(data_dir: &Path, session_uuid: &str) -> PathBuf {
 ///
 /// This is `pub` so tests can pin the wire shape without touching
 /// the filesystem.
-pub fn render_session_env(token: &str, cid: u32, port: u32) -> String {
+pub fn render_session_env(cid: u32, port: u32) -> String {
     format!(
-        "RAXIS_SESSION_TOKEN={token}\n\
-         RAXIS_VSOCK_CID={cid}\n\
+        "RAXIS_VSOCK_CID={cid}\n\
          RAXIS_VSOCK_PORT={port}\n",
     )
 }
@@ -330,7 +324,6 @@ mod tests {
             data_dir,
             session_uuid: uuid.to_owned(),
             system_prompt: "You are an Executor. Follow the contract.".to_owned(),
-            session_token: "tok-test-1".to_owned(),
             vsock_cid: 7,
             vsock_port: 1024,
             mount_mode: MountMode::ReadWrite,
@@ -360,17 +353,17 @@ mod tests {
     }
 
     #[test]
-    fn stage_renders_session_env_three_lines() {
-        let env = render_session_env("tok-XYZ", 42, 1025);
+    fn stage_renders_session_env_without_bearer_token() {
+        let env = render_session_env(42, 1025);
         let lines: Vec<&str> = env.lines().collect();
         assert_eq!(
             lines.len(),
-            3,
-            "session.env must have exactly 3 lines, got {env:?}"
+            2,
+            "session.env must have exactly 2 lines, got {env:?}"
         );
-        assert_eq!(lines[0], "RAXIS_SESSION_TOKEN=tok-XYZ");
-        assert_eq!(lines[1], "RAXIS_VSOCK_CID=42");
-        assert_eq!(lines[2], "RAXIS_VSOCK_PORT=1025");
+        assert_eq!(lines[0], "RAXIS_VSOCK_CID=42");
+        assert_eq!(lines[1], "RAXIS_VSOCK_PORT=1025");
+        assert!(!env.contains("RAXIS_SESSION_TOKEN"));
     }
 
     #[test]
@@ -405,7 +398,6 @@ mod tests {
 
         let tmp2 = tempdir().unwrap();
         let mut inputs_b = fixture_inputs(tmp2.path().to_path_buf(), "uuid-a");
-        inputs_b.session_token = inputs_a.session_token.clone();
         inputs_b.vsock_cid = inputs_a.vsock_cid;
         inputs_b.vsock_port = inputs_a.vsock_port;
         inputs_b.system_prompt = inputs_a.system_prompt.clone();
@@ -428,19 +420,20 @@ mod tests {
     }
 
     #[test]
-    fn stage_content_hash_changes_when_session_token_changes() {
+    fn stage_content_hash_changes_when_vsock_endpoint_changes() {
         let tmp = tempdir().unwrap();
-        let inputs_a = fixture_inputs(tmp.path().to_path_buf(), "uuid-tok-a");
+        let inputs_a = fixture_inputs(tmp.path().to_path_buf(), "uuid-vsock-a");
         let mut inputs_b = inputs_a.clone();
-        inputs_b.session_uuid = "uuid-tok-b".to_owned();
-        inputs_b.session_token = "tok-different".to_owned();
+        inputs_b.session_uuid = "uuid-vsock-b".to_owned();
+        inputs_b.vsock_port = 2048;
 
         let a = stage(&inputs_a).unwrap();
         let b = stage(&inputs_b).unwrap();
         assert_ne!(
             a.mount.content_hash, b.mount.content_hash,
-            "different session tokens must produce different content hashes \
-             so the audit chain can detect a swapped token at replay time"
+            "different guest transport endpoints must produce different \
+             content hashes so the audit chain can detect swapped staging \
+             metadata at replay time"
         );
     }
 

@@ -42,7 +42,7 @@
 //! ## Live-mode env contract (kernel-stamped)
 //! | Variable                       | Required for live mode? | Default                              | Purpose                                    |
 //! |--------------------------------|-------------------------|--------------------------------------|--------------------------------------------|
-//! | `RAXIS_SESSION_TOKEN`          | yes (already in [`crate::BootEnv`]) | —                          | Session-auth token for the kernel UDS      |
+//! | `RAXIS_SESSION_ID`             | yes (already in [`crate::BootEnv`]) | —                          | Safe session correlator; bearer token stays host-side |
 //! | `RAXIS_PLANNER_TASK_PROMPT`    | yes                     | absent ⇒ hard error                  | Seed user message for the dispatch loop     |
 //! | `RAXIS_PLANNER_KSB`            | no (test-only fallback) | absent ⇒ NNSP-only system prompt     | JSON-encoded [`raxis_ksb::KsbSnapshot`] §2.4 |
 //! | `RAXIS_KERNEL_PLANNER_SOCKET`  | yes (live mode only)    | —                                    | UDS path to `<data_dir>/sockets/planner.sock` |
@@ -550,12 +550,9 @@ where
             Arc::new(crate::http_fetch::DirectHttpFetch::new())
         }
         crate::transport::KernelTransportConfig::Vsock { .. }
-        | crate::transport::KernelTransportConfig::VsockListen { .. } => {
-            Arc::new(crate::http_fetch::KernelMediatedHttpFetch::new(
-                Arc::clone(&transport),
-                env.session_token.as_str(),
-            ))
-        }
+        | crate::transport::KernelTransportConfig::VsockListen { .. } => Arc::new(
+            crate::http_fetch::KernelMediatedHttpFetch::new(Arc::clone(&transport)),
+        ),
     };
 
     // ── Construct the model client by dispatching on the resolved
@@ -946,11 +943,7 @@ pub async fn run_role_session_with_connected_transport(
     let task_id = TaskId::parse(&task_id_owned).map_err(|e| {
         DriverError::InvalidTaskId(format!("task id `{task_id_owned}` failed validation: {e}"))
     })?;
-    let submitter = Arc::new(IntentSubmitter::new(
-        Arc::clone(&transport),
-        env.session_token.clone(),
-        task_id,
-    ));
+    let submitter = Arc::new(IntentSubmitter::new(Arc::clone(&transport), task_id));
 
     // ── Step 2: build per-role registry + terminal tool list. ───────
     let (registry, terminal_tools) = build_role(role, Arc::clone(&submitter), sleep_caps);
@@ -979,7 +972,7 @@ pub async fn run_role_session_with_connected_transport(
         .task_id
         .clone()
         .unwrap_or_else(|| args.initiative_id.clone());
-    config.session_id_for_logs = env.session_token.clone();
+    config.session_id_for_logs = env.session_id.clone();
     config.role_for_logs = role.shortname().to_owned();
     let ctx = ToolContext::for_workspace(workspace);
     let mut loop_ = DispatchLoop::new(model, Arc::clone(&registry), config, ctx)
@@ -1584,7 +1577,6 @@ mod tests {
         let transport = Arc::new(StreamTransport::new(planner_side));
         Arc::new(crate::intent::IntentSubmitter::new(
             transport,
-            "stub-tok".to_owned(),
             TaskId::parse("stub-task").unwrap(),
         ))
     }
@@ -2422,7 +2414,7 @@ mod tests {
                 task_id: Some("task-FOLD".to_owned()),
             },
             BootEnv {
-                session_token: "tok".to_owned(),
+                session_id: "session-test".to_owned(),
             },
             "fold prompt".to_owned(),
             KernelTransportConfig::Uds {
@@ -2533,7 +2525,7 @@ mod tests {
                 task_id: Some("task-NO-KSB".to_owned()),
             },
             BootEnv {
-                session_token: "tok".to_owned(),
+                session_id: "session-test".to_owned(),
             },
             "no-ksb prompt".to_owned(),
             KernelTransportConfig::Uds {
@@ -2567,7 +2559,7 @@ mod tests {
     #[tokio::test]
     async fn run_role_session_errors_when_task_prompt_absent() {
         let env = BootEnv {
-            session_token: "tok".to_owned(),
+            session_id: "session-test".to_owned(),
         };
         let args = BootArgs {
             initiative_id: "init-A".to_owned(),
@@ -2699,7 +2691,7 @@ mod tests {
                 task_id: Some("task-1".to_owned()),
             },
             BootEnv {
-                session_token: "tok".to_owned(),
+                session_id: "session-test".to_owned(),
             },
             "Please run a review.".to_owned(),
             KernelTransportConfig::Uds {
@@ -2742,7 +2734,7 @@ mod tests {
                 task_id: Some("task-1".to_owned()),
             },
             BootEnv {
-                session_token: "tok".to_owned(),
+                session_id: "session-test".to_owned(),
             },
             env_fn,
         )
@@ -2818,7 +2810,7 @@ mod tests {
                 task_id: Some("task-CAP".to_owned()),
             },
             BootEnv {
-                session_token: "tok".to_owned(),
+                session_id: "session-test".to_owned(),
             },
             "review please".to_owned(),
             KernelTransportConfig::Uds {

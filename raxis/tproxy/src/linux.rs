@@ -68,17 +68,14 @@ pub async fn bind_default_listener() -> io::Result<TcpListener> {
 /// for `iptables -j REDIRECT`, then routes each accepted flow
 /// through the A3 admission protocol over vsock.
 ///
-/// The `session_token` comes from the spawned-guest environment
-/// (`RAXIS_SESSION_TOKEN`); the kernel stamps it at session-spawn
-/// time and the in-VM init script forwards it to the tproxy
-/// process. Without a token A3 cannot authenticate to the kernel
-/// and the loop refuses to start.
+/// The guest does not receive bearer session material. A3 control
+/// requests are authenticated by the host-side per-session listener
+/// that owns this accepted stream.
 pub async fn accept_loop_a3(
     listener: TcpListener,
     host_cid: u32,
     admission_port: u32,
     tunnel_port: u32,
-    session_token: String,
 ) -> Result<(), AcceptLoopError> {
     eprintln!(
         "raxis-tproxy(A3): listening 0.0.0.0:3129; kernel admission \
@@ -87,10 +84,8 @@ pub async fn accept_loop_a3(
     );
     loop {
         let (agent, _peer) = listener.accept().await?;
-        let token = session_token.clone();
         tokio::spawn(async move {
-            let _ =
-                handle_one_a3_connection(agent, host_cid, admission_port, tunnel_port, token).await;
+            let _ = handle_one_a3_connection(agent, host_cid, admission_port, tunnel_port).await;
         });
     }
 }
@@ -126,7 +121,6 @@ async fn handle_one_a3_connection(
     host_cid: u32,
     admission_port: u32,
     tunnel_port: u32,
-    session_token: String,
 ) -> Result<(), A3ConnectionError> {
     use raxis_types::TproxyProtocol;
     use tokio_vsock::{VsockAddr, VsockStream};
@@ -180,7 +174,6 @@ async fn handle_one_a3_connection(
     })??;
     let response = crate::a3::ask_admission(
         &mut admission_vsock,
-        &session_token,
         sni,
         host_header,
         original_dst,
@@ -302,7 +295,6 @@ async fn handle_one_a3_connection(
     _host_cid: u32,
     _admission_port: u32,
     _tunnel_port: u32,
-    _session_token: String,
 ) -> Result<(), A3ConnectionError> {
     Err(A3ConnectionError::Io(io::Error::new(
         io::ErrorKind::Unsupported,

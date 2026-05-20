@@ -380,7 +380,7 @@ kernel knows what your `Containerfile` installed. The probe reads
 the actual filesystem of the booted VM, so a BYO image and the
 canonical `raxis-executor-starter` go through **identical**
 discovery plumbing. Kernel-private env vars
-(`RAXIS_VSOCK_LOOPBACK_PLAN`, `RAXIS_SESSION_TOKEN`, sidecar HMAC
+(`RAXIS_VSOCK_LOOPBACK_PLAN`, `RAXIS_SESSION_TOKEN` if present in a stale image, sidecar HMAC
 secrets, anything matching `*SECRET*` / `*PASSWORD*` /
 `*API_KEY*` / `*_TOKEN`) are redacted from both surfaces;
 credential-proxy URLs (`DATABASE_URL` / `MONGO_URL` /

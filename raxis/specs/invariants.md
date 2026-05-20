@@ -25,12 +25,15 @@ exercised by the test suite.
 These are the structural promises that distinguish RAXIS from an
 LLM-with-a-shell. If any one of these fails, the paradigm fails.
 
-### INV-01 — Planner needs a kernel session token
+### INV-01 — Planner actions are bound to a kernel session
 
 **Statement.** The planner cannot perform any authorised action without
-a valid kernel-issued session token. Every IPC message carries the
-token; the kernel rejects at session-lookup if the token is missing,
-expired, or revoked.
+a valid kernel-issued session binding. For session-bound VM streams,
+the guest sends no bearer material; the host dispatcher resolves the
+session row and stamps the canonical session token onto legacy handler
+requests before admission. Unbound/manual planner-socket requests must
+still carry a valid token. In both cases the kernel rejects at
+session-lookup if the session is missing, expired, or revoked.
 
 **Justification.** Without this, authority is convention rather than
 enforcement: any process that knows the IPC wire format could pose
@@ -40,10 +43,11 @@ a single object that captures `(role, worktree_root, delegations,
 expiry)`.
 
 **Scenario.** A second planner-shaped process connects to the kernel
-and submits `IntentRequest`. With no session token it is rejected
-at the dispatcher; with a revoked token it is rejected at
-session-lookup; with an expired token it is rejected at the same
-gate. No authority leaks past these checks.
+and submits `IntentRequest`. On an unbound socket, no session token is
+rejected at the dispatcher. On a VM-bound stream, the host binding
+selects exactly one session row; revoked and expired sessions are
+rejected at session-lookup. No authority leaks past these checks, and
+the guest never needs to hold bearer material.
 
 **Canonical home.** [`v1/philosophy.md`](v1/philosophy.md) §1.2.
 
@@ -1113,9 +1117,9 @@ PID 1 (`/init` in the initramfs). After PID 1 boots, the binary
 remains at `/usr/local/bin/raxis-{executor,orchestrator,reviewer}`
 and is reachable from the agent's `bash` tool. A child
 invocation of the binary inside its own VM is a jailbreak: the
-child inherits the parent's session token, can read the parent's
-`/proc/<ppid>/cmdline`, and collides on the parent's
-port-binding setup. iter72 forensics observed this in the wild
+child inherits the parent's transport hints, can read the parent's
+`/proc/<ppid>/cmdline`, and collides on the parent's port-binding
+setup. iter72 forensics observed this in the wild
 (an executor's Claude agent ran `raxis-executor --help` while
 diagnosing DNS).
 

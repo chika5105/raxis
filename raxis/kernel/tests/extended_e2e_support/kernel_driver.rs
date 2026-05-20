@@ -71,6 +71,18 @@ pub const DEFAULT_GATEWAY_BUILD_TIMEOUT_SECS: u64 = 300;
 pub const MIN_GATEWAY_BUILD_TIMEOUT_SECS: u64 = 60;
 pub const MAX_GATEWAY_BUILD_TIMEOUT_SECS: u64 = 900;
 
+/// Mirrors the source-setup/images/doctor default so live-e2e runs
+/// do not fail before preflight on a fresh shell that has already
+/// used the standard install layout.
+pub const DEFAULT_INSTALL_DIR: &str = "/usr/local/lib/raxis";
+
+pub fn resolved_install_dir() -> PathBuf {
+    std::env::var_os("RAXIS_INSTALL_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_INSTALL_DIR))
+}
+
 // ---------------------------------------------------------------------------
 // Preflight — every external dependency reachable before we
 // bother bootstrapping a kernel.
@@ -181,9 +193,7 @@ fn convention_gateway_paths(workspace_root: &Path) -> Vec<PathBuf> {
             .join("debug")
             .join("raxis-gateway"),
     ];
-    if let Ok(raw) = std::env::var("RAXIS_INSTALL_DIR") {
-        out.push(PathBuf::from(raw).join("bin").join("raxis-gateway"));
-    }
+    out.push(resolved_install_dir().join("bin").join("raxis-gateway"));
     out
 }
 
@@ -760,10 +770,12 @@ mod hygiene_preflight_tests {
 }
 
 pub fn require_canonical_images() {
-    let install_dir_raw = std::env::var("RAXIS_INSTALL_DIR")
-        .unwrap_or_else(|_| panic!("RAXIS_INSTALL_DIR env var is required",));
-    let install_dir = PathBuf::from(&install_dir_raw);
+    let install_dir = resolved_install_dir();
     let kernel_version = env!("CARGO_PKG_VERSION");
+    eprintln!(
+        "[live-e2e] resolved RAXIS_INSTALL_DIR={}",
+        install_dir.display()
+    );
 
     // Auto-bake: if the canonical images are missing or are stub
     // builds (no `/bin/bash` etc.), drive the full xtask pipeline

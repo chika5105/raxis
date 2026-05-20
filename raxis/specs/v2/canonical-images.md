@@ -552,7 +552,8 @@ The exact predicate is `vm_capabilities::is_kernel_private_env`
 and covers:
 
 * The named set: `RAXIS_VSOCK_LOOPBACK_PLAN`,
-  `RAXIS_SESSION_TOKEN`, `RAXIS_PLANNER_KSB`,
+  `RAXIS_SESSION_TOKEN` (defense-in-depth for stale images),
+  `RAXIS_PLANNER_KSB`,
   `RAXIS_PLANNER_KSB_PATH`, `RAXIS_PLANNER_TASK_PROMPT`,
   `RAXIS_PLANNER_TASK_PROMPT_PATH`,
   `RAXIS_PLANNER_SIDECAR_HMAC_SECRET`,

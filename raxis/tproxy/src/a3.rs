@@ -139,7 +139,6 @@ pub enum A3AdmissionError {
 /// `tokio_vsock::VsockStream` in production.
 pub async fn ask_admission<S>(
     stream: &mut S,
-    session_token: &str,
     sni: Option<String>,
     host_header: Option<String>,
     destination: SocketAddr,
@@ -151,7 +150,7 @@ where
     let request_id = Uuid::new_v4();
     let req = TproxyAdmissionRequest {
         request_id,
-        session_token: session_token.to_owned(),
+        session_token: String::new(),
         sni,
         host_header,
         destination,
@@ -194,7 +193,6 @@ where
 /// (empty `addresses` ⇒ NXDOMAIN-equivalent).
 pub async fn ask_dns_resolve<S>(
     stream: &mut S,
-    session_token: &str,
     hostname: &str,
     query_type: DnsQueryType,
 ) -> Result<DnsResolveResponse, A3AdmissionError>
@@ -204,7 +202,7 @@ where
     let request_id = Uuid::new_v4();
     let req = DnsResolveRequest {
         request_id,
-        session_token: session_token.to_owned(),
+        session_token: String::new(),
         hostname: hostname.to_owned(),
         query_type,
     };
@@ -325,6 +323,7 @@ mod tests {
                 IpcMessage::TproxyAdmissionRequest(r) => r,
                 _ => panic!("expected admission request"),
             };
+            assert_eq!(req.session_token, "");
             let resp = TproxyAdmissionResponse::Admit {
                 request_id: req.request_id,
                 tunnel_id: Uuid::nil(),
@@ -340,7 +339,6 @@ mod tests {
 
         let resp = ask_admission(
             &mut guest_side,
-            "session-token",
             Some("api.example.com".to_owned()),
             None,
             "1.2.3.4:443".parse().unwrap(),
@@ -382,7 +380,6 @@ mod tests {
 
         let resp = ask_admission(
             &mut guest_side,
-            "session-token",
             None,
             Some("evil.example.com".to_owned()),
             "1.2.3.4:80".parse().unwrap(),
@@ -415,7 +412,6 @@ mod tests {
 
         let result = ask_admission(
             &mut guest_side,
-            "session-token",
             Some("api.example.com".to_owned()),
             None,
             "1.2.3.4:443".parse().unwrap(),
@@ -449,7 +445,6 @@ mod tests {
         });
         let result = ask_admission(
             &mut guest_side,
-            "session-token",
             Some("api.example.com".to_owned()),
             None,
             "1.2.3.4:443".parse().unwrap(),
@@ -473,6 +468,7 @@ mod tests {
                 IpcMessage::DnsResolveRequest(r) => r,
                 _ => panic!("expected dns request"),
             };
+            assert_eq!(req.session_token, "");
             let resp = DnsResolveResponse {
                 request_id: req.request_id,
                 addresses: vec![Ipv4Addr::new(1, 2, 3, 4).into()],
@@ -485,14 +481,9 @@ mod tests {
             .await
             .expect("write");
         });
-        let resp = ask_dns_resolve(
-            &mut guest_side,
-            "session-token",
-            "api.example.com",
-            DnsQueryType::A,
-        )
-        .await
-        .expect("dns round-trip");
+        let resp = ask_dns_resolve(&mut guest_side, "api.example.com", DnsQueryType::A)
+            .await
+            .expect("dns round-trip");
         assert_eq!(resp.addresses.len(), 1);
         assert_eq!(resp.ttl_secs, 60);
         kernel_task.await.expect("kernel task join");

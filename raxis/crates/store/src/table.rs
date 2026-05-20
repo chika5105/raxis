@@ -269,6 +269,24 @@ pub enum Table {
     ///           last_success_at_ms, last_state_change_at_ms)`.
     ProviderCircuitState,
 
+    // ── v3: Per-session VM environment snapshot ─────────────────────────
+    /// **Per-session guest environment snapshot.** Captured after
+    /// session-spawn stamps credential-proxy loopback URLs, admission
+    /// ports, and planner control env into `VmSpec.env`, then stored
+    /// as one row per key for dashboard debugging.
+    ///
+    /// The table is a debugging surface, not an authority store:
+    /// sensitive values are redacted before they reach SQLite
+    /// (`RAXIS_SESSION_TOKEN`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`,
+    /// private keys, credential-bearing URLs, etc.). Safe RAXIS
+    /// loopback values such as `DATABASE_URL=postgresql://raxis@127...`
+    /// remain visible so operators can prove the VM saw the expected
+    /// mediated service address without exposing upstream credentials.
+    ///
+    /// Schema: `(session_id FK, env_key, env_value, redacted, source,
+    ///           captured_at)` with primary key `(session_id, env_key)`.
+    SessionVmEnv,
+
     // ── v3: Worktree snapshot store
     //        (specs/v3/worktree-snapshots.md, INV-WORKTREE-SNAPSHOT-*) ─
     /// **Content-addressed worktree snapshot index.** One row per
@@ -346,6 +364,7 @@ impl Table {
             Self::StructuredOutputs => "structured_outputs",
             Self::Notifications => "notifications",
             Self::ProviderCircuitState => "provider_circuit_state",
+            Self::SessionVmEnv => "session_vm_env",
             Self::WorktreeSnapshots => "worktree_snapshots",
         }
     }
@@ -394,6 +413,7 @@ mod tests {
             Table::StructuredOutputs,
             Table::Notifications,
             Table::ProviderCircuitState,
+            Table::SessionVmEnv,
             Table::WorktreeSnapshots,
         ];
         for t in all {
@@ -489,6 +509,15 @@ mod tests {
             Table::ProviderCircuitState.as_str(),
             "provider_circuit_state",
         );
+    }
+
+    /// Session VM env snapshots are dashboard-visible forensic
+    /// artifacts. The table name is pinned because both the store
+    /// write path and dashboard read path use it as their stable
+    /// join point for per-session debugging.
+    #[test]
+    fn session_vm_env_table_name_is_pinned() {
+        assert_eq!(Table::SessionVmEnv.as_str(), "session_vm_env");
     }
 
     #[test]

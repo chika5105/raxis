@@ -255,9 +255,7 @@ fn full_session_lifecycle() {
     // ── §7.3c — Now bring up the daemon kernel. It re-reads the
     //    (mutated) policy.toml at boot, so `[gateway]` and
     //    `[[providers]]` go live on this spawn.
-    let install_dir = PathBuf::from(
-        std::env::var("RAXIS_INSTALL_DIR").expect("preflight verified RAXIS_INSTALL_DIR"),
-    );
+    let install_dir = extended_e2e_support::kernel_driver::resolved_install_dir();
     let mut kernel = spawn_kernel_normal(&kernel_bin, data_dir.clone(), &install_dir);
     kernel.wait_until_ready_or_panic(READY_DEADLINE);
     eprintln!("[e2e] kernel daemon up, accepting operator IPC");
@@ -460,16 +458,9 @@ fn require_gateway_binary() -> PathBuf {
 ///     trust anchor (`raxis_canonical_images::EXPECTED_KERNEL_SIGNING_
 /// KEY_BYTES`).
 fn require_canonical_images() {
-    let install_dir_raw = std::env::var("RAXIS_INSTALL_DIR").unwrap_or_else(|_| {
-        panic!(
-            "RAXIS_INSTALL_DIR env var is required; point it at the install \
-             root that contains `images/raxis-{{orchestrator,executor-starter,\
-             reviewer}}-core-<version>.img` and matching `.manifest.toml` \
-             files. See `raxis_canonical_images::*_image_path`.",
-        );
-    });
-    let install_dir = PathBuf::from(&install_dir_raw);
+    let install_dir = extended_e2e_support::kernel_driver::resolved_install_dir();
     let kernel_version = env!("CARGO_PKG_VERSION");
+    eprintln!("[e2e] resolved RAXIS_INSTALL_DIR={}", install_dir.display());
     for role in &["orchestrator-core", "executor-starter", "reviewer-core"] {
         let img = install_dir
             .join("images")

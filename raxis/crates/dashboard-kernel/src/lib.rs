@@ -55,10 +55,10 @@ use raxis_dashboard::data::{
     EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry, InitiativePlanView,
     InitiativeView, NotificationView, OperatorAuthResolution, OrchestratorGapsResponse,
     PolicyAdvancement, PolicyOperatorView, PolicySnapshotView, RecentSessionEntry,
-    ReviewerPanelEntry, ReviewerVerdictView, SessionView, StructuredOutputView, SubsystemDetailRow,
-    SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail, WorktreeDiff,
-    WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry,
-    SUBSYSTEM_CATALOG,
+    ReviewerPanelEntry, ReviewerVerdictView, SessionView, SessionVmEnvView, StructuredOutputView,
+    SubsystemDetailRow, SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail,
+    WorktreeDiff, WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree,
+    WorktreeTreeEntry, SUBSYSTEM_CATALOG,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -1709,6 +1709,7 @@ impl DashboardData for KernelDashboardData {
                     failure: None,
                     annotations: Vec::new(),
                     latest_annotation: None,
+                    env: Vec::new(),
                 };
                 // List view stays cheap on both fallback channels:
                 // the model fallback reads ONE turn per row and the
@@ -1800,6 +1801,7 @@ impl DashboardData for KernelDashboardData {
         );
         let initiative_display_name =
             initiative_name_for_id_opt(&conn, owning.initiative_id.as_deref())?;
+        let env = session_vm_env_view_for_session(&conn, s.session_id.as_str())?;
         let view = SessionView {
             session_id: s.session_id,
             role,
@@ -1824,6 +1826,7 @@ impl DashboardData for KernelDashboardData {
             failure: None,
             annotations: Vec::new(),
             latest_annotation: None,
+            env,
         };
         let view = enrich_session_view_with_owning_task(
             view,
@@ -4281,6 +4284,27 @@ fn initiative_name_for_id_opt(
         .unwrap_or(Ok(None))
 }
 
+fn session_vm_env_view_for_session(
+    conn: &raxis_store::ro::RoConn,
+    session_id: &str,
+) -> Result<Vec<SessionVmEnvView>, ApiError> {
+    raxis_store::views::sessions::vm_env_for_session(conn, session_id)
+        .map(|rows| {
+            rows.into_iter()
+                .map(|r| SessionVmEnvView {
+                    key: r.key,
+                    value: r.value,
+                    redacted: r.redacted,
+                    source: r.source,
+                    captured_at: r.captured_at,
+                })
+                .collect()
+        })
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("sessions::vm_env_for_session({session_id}): {e}"),
+        })
+}
+
 fn semantic_agent_type_for_task(
     conn: &raxis_store::ro::RoConn,
     task_id: &str,
@@ -6438,6 +6462,7 @@ task_id = "t-state"
             failure: None,
             annotations: Vec::new(),
             latest_annotation: None,
+            env: Vec::new(),
         };
         let owning = SessionOwningTask {
             initiative_id: Some("init-a".into()),
@@ -6484,6 +6509,7 @@ task_id = "t-state"
             failure: None,
             annotations: Vec::new(),
             latest_annotation: None,
+            env: Vec::new(),
         };
         let owning = SessionOwningTask {
             initiative_id: Some("init-other".into()),
@@ -6804,6 +6830,7 @@ task_id = "t-state"
             failure: None,
             annotations: Vec::new(),
             latest_annotation: None,
+            env: Vec::new(),
         };
         let owning = SessionOwningTask {
             initiative_id: Some("init-a".into()),
@@ -6840,6 +6867,7 @@ task_id = "t-state"
             failure: None,
             annotations: Vec::new(),
             latest_annotation: None,
+            env: Vec::new(),
         };
         let owning = SessionOwningTask {
             initiative_id: Some("init-a".into()),

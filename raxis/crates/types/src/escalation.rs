@@ -248,17 +248,10 @@ impl RequestedEscalationScope {
 /// Wire: bincode 2.0.1 standard() + 4-byte LE length prefix.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EscalationRequest {
-    /// Kernel-issued session credential for the planner submitting the
-    /// escalation. Same `session_token` shape as `IntentRequest` — the
-    /// kernel resolves it via `authority::session::get_session_by_token`
-    /// to recover the originating session_id, lineage_id, and (via
-    /// task_id) initiative_id, all of which are needed to populate the
-    /// `escalations` row.
-    ///
-    /// Phase B.5 added this field. Earlier wire versions omitted it
-    /// because the spec assumed an out-of-band session-context binding;
-    /// in practice the planner socket has no per-connection auth state,
-    /// so the credential MUST be on every frame.
+    /// Kernel-issued session credential. Session-bound VM planners
+    /// send this empty; the host dispatcher stamps the canonical DB
+    /// token before the request reaches admission so the handler can
+    /// recover session_id, lineage_id, and initiative_id.
     pub session_token: String,
 
     /// The task the escalation is for.

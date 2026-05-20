@@ -254,9 +254,7 @@ fn extended_session_lifecycle() {
     write_credentials(&data_dir);
     write_provider_credentials(&data_dir);
 
-    let install_dir = PathBuf::from(
-        std::env::var("RAXIS_INSTALL_DIR").expect("preflight verified RAXIS_INSTALL_DIR"),
-    );
+    let install_dir = extended_e2e_support::kernel_driver::resolved_install_dir();
     let mut kernel = spawn_kernel_normal(&kernel_bin, data_dir.clone(), &install_dir);
     kernel.wait_until_ready_or_panic(READY_DEADLINE);
     eprintln!("[ext-e2e] kernel daemon up, accepting operator IPC");

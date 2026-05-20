@@ -123,8 +123,8 @@
 //!     `INV-EXEC-DISCOVERY-01` (`canonical-images.md §6` /
 //!     `planner-harness.md §10.6`): the in-guest probe returns a
 //!     populated manifest, kernel-private env vars
-//!     (`RAXIS_VSOCK_LOOPBACK_PLAN`, `RAXIS_SESSION_TOKEN`,
-//!     sidecar HMAC secret, `*SECRET*` / `*API_KEY*` / `*_TOKEN`)
+//!     (`RAXIS_VSOCK_LOOPBACK_PLAN`, sidecar HMAC secret,
+//!     `*SECRET*` / `*API_KEY*` / `*_TOKEN`)
 //!     are redacted (sentinel value MUST NOT appear in the
 //!     serialised manifest), credential-proxy URLs surface
 //!     verbatim, and the system-prompt hint carries the env-var
@@ -331,8 +331,8 @@ enum Slice {
     /// invariants pinned by `INV-EXEC-DISCOVERY-01`: the in-guest
     /// PATH walk + `--version` probes return a populated
     /// manifest; kernel-private env vars
-    /// (`RAXIS_VSOCK_LOOPBACK_PLAN`, `RAXIS_SESSION_TOKEN`,
-    /// sidecar HMAC secret, anything matching `*SECRET*` /
+    /// (`RAXIS_VSOCK_LOOPBACK_PLAN`, sidecar HMAC secret,
+    /// anything matching `*SECRET*` /
     /// `*API_KEY*` / `*_TOKEN`) are redacted (sentinel value
     /// MUST NOT appear anywhere in the serialised manifest);
     /// credential-proxy URLs (`DATABASE_URL`, `MONGO_URL`,

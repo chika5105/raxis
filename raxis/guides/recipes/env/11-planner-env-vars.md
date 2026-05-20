@@ -9,6 +9,11 @@ configure the LLM provider, the per-session token caps, the kernel
 IPC transport, and the seed prompt for "live mode". This recipe is
 the reference.
 
+The guest environment does **not** contain `RAXIS_SESSION_TOKEN`.
+`RAXIS_SESSION_ID` is safe correlation metadata; the bearer session
+token stays host-side and is attached by the kernel dispatcher after
+the VM stream is already bound to a session.
+
 ---
 
 ## Read by
@@ -31,6 +36,7 @@ These tell the planner how to reach the kernel from inside its VM.
 | `RAXIS_KERNEL_PLANNER_SOCKET` | yes (UDS path) | Unix-domain socket for planner ↔ kernel IPC. The kernel stamps this when the VM uses a UDS-mounted transport. |
 | `RAXIS_KERNEL_VSOCK_CID` | yes (number) | When using virtio-vsock transport (KVM), the host CID the planner should connect to. |
 | `RAXIS_KERNEL_VSOCK_PORT` | yes (port) | The vsock port the kernel listens on. |
+| `RAXIS_SESSION_ID` | yes | Safe session correlator. Not a credential. |
 | `RAXIS_PLANNER_KSB` | yes (JSON object) | "Kernel session bootstrap" — a JSON blob containing the session_id, task_id, agent_type, allowlist, etc. The planner reads this on startup. Constant: `raxis_ksb::PLANNER_KSB_ENV`. |
 
 The planner picks transport at runtime:

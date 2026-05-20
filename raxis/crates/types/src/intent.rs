@@ -264,7 +264,9 @@ pub struct ApprovalToken {
 /// frame produced by `raxis-ipc::frame`. The JSON in the spec is illustrative.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntentRequest {
-    /// Kernel-issued session credential. Validated by ipc/auth.rs on every frame.
+    /// Kernel-issued session credential. Session-bound VM planners
+    /// send this empty; the host dispatcher stamps the canonical
+    /// DB token before the request reaches admission.
     pub session_token: String,
 
     /// Must be exactly `prev_accepted_sequence + 1`.

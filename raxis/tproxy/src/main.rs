@@ -7,8 +7,9 @@
 //! The standalone binary's role under Mediated egress is the
 //! credential-loopback forwarder. The egress-admission accept
 //! loop (Path A3 / `accept_loop_a3`) is driven by the
-//! `planner-executor` binary instead, where the per-session
-//! token + vsock CID/ports are already in scope.
+//! `planner-executor` binary instead, where the session id plus
+//! vsock CID/ports are already in scope. The bearer session token
+//! stays host-side in the kernel store.
 //!
 //! Environment variables consumed:
 //!   * `RAXIS_VSOCK_LOOPBACK_PLAN` — comma-separated

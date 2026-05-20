@@ -129,11 +129,11 @@ async fn run() -> Result<(), PlannerError> {
     eprintln!("{}", render_boot_log(&ctx));
 
     // `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` — scrub the
-    // session token and sister sensitive env vars from the
-    // process environment now that `BootContext::from_process`
-    // has captured the session token into `ctx.env`. The scrubber
-    // also keeps an in-process snapshot for the driver; `run_role_session`
-    // reduces that snapshot to a fixed runtime allowlist. The reviewer image
+    // sensitive env vars from the process environment after
+    // `BootContext::from_process` has captured the safe session id.
+    // The scrubber also keeps an in-process snapshot for the driver;
+    // `run_role_session` reduces that snapshot to a fixed runtime allowlist.
+    // The reviewer image
     // (`raxis-reviewer-core`) explicitly excludes the `bash`,
     // `git_commit`, `git_push`, and `network_*` tools by linkage,
     // but the reviewer still ships ripgrep / read_file which

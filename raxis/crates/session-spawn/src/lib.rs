@@ -105,7 +105,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod perf_telemetry;
 
@@ -149,6 +149,7 @@ const A3_DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 const A3_DNS_DEFAULT_TTL_SECS: u32 = 60;
 const A3_DNS_NEGATIVE_TTL_SECS: u32 = 5;
 const A3_MAX_HOSTNAME_LEN: usize = 255;
+const AVF_PLANNER_LISTEN_PORT_ENV_VALUE: &str = "1024";
 
 // ---------------------------------------------------------------------------
 // V3 perf-telemetry helpers
@@ -166,6 +167,107 @@ fn failure_class_for(err: &IsolationError) -> &'static str {
         IsolationError::SignatureMismatch => "signature_mismatch",
         IsolationError::ResourceLimit(_) => "resource_limit",
         IsolationError::BackendInternal(_) => "backend_internal",
+    }
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn build_vm_env_snapshot(
+    spec: &VmSpec,
+    mounts: &[WorkspaceMount],
+    backend_id: &str,
+) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+
+    if backend_id.starts_with("apple-vz") {
+        env.insert(
+            "RAXIS_KERNEL_VSOCK_LISTEN_PORT".to_owned(),
+            AVF_PLANNER_LISTEN_PORT_ENV_VALUE.to_owned(),
+        );
+    }
+
+    for (k, v) in &spec.env {
+        if k.is_empty() {
+            continue;
+        }
+        if k == "RAXIS_SESSION_TOKEN" {
+            continue;
+        }
+        // AVF strips these host-only transport hints and replaces
+        // them with `RAXIS_KERNEL_VSOCK_LISTEN_PORT`; mirror that
+        // effective VM view so the dashboard does not imply the
+        // guest saw a UDS path it cannot use.
+        if backend_id.starts_with("apple-vz")
+            && matches!(
+                k.as_str(),
+                "RAXIS_KERNEL_PLANNER_SOCKET"
+                    | "RAXIS_KERNEL_VSOCK_CID"
+                    | "RAXIS_KERNEL_VSOCK_PORT"
+            )
+        {
+            continue;
+        }
+        env.insert(k.clone(), v.clone());
+    }
+
+    let mount_entries = mounts
+        .iter()
+        .filter(|m| !m.guest_path.is_empty())
+        .map(|m| {
+            let tag = m.guest_path.trim_start_matches('/').replace('/', "_");
+            let mode = if matches!(m.mode, raxis_isolation::MountMode::ReadOnly) {
+                "ro"
+            } else {
+                "rw"
+            };
+            format!("{tag}:{}:{mode}", m.guest_path)
+        })
+        .collect::<Vec<_>>();
+    if !mount_entries.is_empty() {
+        env.insert("RAXIS_VIRTIOFS_MOUNTS".to_owned(), mount_entries.join(","));
+    }
+
+    env
+}
+
+async fn persist_vm_env_snapshot(
+    store: Option<&Arc<raxis_store::Store>>,
+    session_id: String,
+    env: BTreeMap<String, String>,
+) {
+    let Some(store) = store.cloned() else {
+        return;
+    };
+    let join = tokio::task::spawn_blocking(move || {
+        let conn = store.lock_sync();
+        raxis_store::views::sessions::replace_session_vm_env_snapshot(
+            &conn,
+            &session_id,
+            &env,
+            unix_now_secs(),
+            "session-spawn",
+        )
+    })
+    .await;
+    match join {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(
+                error = %e,
+                "session-spawn: failed to persist VM env snapshot"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "session-spawn: VM env snapshot writer join failed"
+            );
+        }
     }
 }
 
@@ -707,8 +809,6 @@ impl SessionSpawnService {
                 A3_DEFAULT_TUNNEL_PORT.to_string(),
             );
         }
-        let session_token_for_a3 = req.vm_spec.session_token.0.clone();
-
         // ── Step 3a: build the credential-proxy vsock-loopback plan.
         //           For each bound credential proxy at host
         //           `127.0.0.1:<host_loopback_port>` we:
@@ -760,6 +860,13 @@ impl SessionSpawnService {
                  (INV-CRED-PROXY-VM-REACHABILITY-01)",
             );
         }
+
+        let vm_env_snapshot = build_vm_env_snapshot(
+            &req.vm_spec,
+            &req.workspace_mounts,
+            self.isolation.backend_id(),
+        );
+        persist_vm_env_snapshot(self.store.as_ref(), session_id.clone(), vm_env_snapshot).await;
 
         // ── Step 4: boot the VM. ─────────────────────────────────────
         //
@@ -985,13 +1092,11 @@ impl SessionSpawnService {
                 let store = self.store.clone();
                 let session_id = session_id.clone();
                 let initiative_id = req.initiative_id.clone();
-                let session_token = session_token_for_a3.clone();
                 tokio::spawn(async move {
                     run_a3_control_loop(
                         control_listener,
                         session_id,
                         initiative_id,
-                        session_token,
                         svc,
                         audit,
                         registry,
@@ -1345,7 +1450,6 @@ async fn run_a3_control_loop(
     listener: TcpListener,
     session_id: String,
     initiative_id: String,
-    session_token: String,
     admission_service: Arc<dyn AdmissionService>,
     audit: Arc<dyn AuditSink>,
     registry: Arc<A3TunnelRegistry>,
@@ -1374,13 +1478,11 @@ async fn run_a3_control_loop(
         let store = store.clone();
         let session_id = session_id.clone();
         let initiative_id = initiative_id.clone();
-        let session_token = session_token.clone();
         tokio::spawn(async move {
             handle_a3_control_connection(
                 sock,
                 session_id,
                 initiative_id,
-                session_token,
                 svc,
                 audit,
                 registry,
@@ -1395,7 +1497,6 @@ async fn handle_a3_control_connection(
     mut sock: tokio::net::TcpStream,
     session_id: String,
     initiative_id: String,
-    session_token: String,
     admission_service: Arc<dyn AdmissionService>,
     audit: Arc<dyn AuditSink>,
     registry: Arc<A3TunnelRegistry>,
@@ -1429,22 +1530,13 @@ async fn handle_a3_control_connection(
 
     let response = match envelope {
         IpcMessage::DnsResolveRequest(req) => IpcMessage::KernelDnsResolveResponse(
-            handle_a3_dns_request(
-                req,
-                &session_id,
-                &initiative_id,
-                &session_token,
-                &audit,
-                store.as_ref(),
-            )
-            .await,
+            handle_a3_dns_request(req, &session_id, &initiative_id, &audit, store.as_ref()).await,
         ),
         IpcMessage::TproxyAdmissionRequest(req) => IpcMessage::KernelTproxyAdmissionResponse(
             handle_a3_tproxy_request(
                 req,
                 &session_id,
                 &initiative_id,
-                &session_token,
                 admission_service.as_ref(),
                 audit.as_ref(),
                 &registry,
@@ -1485,12 +1577,10 @@ async fn handle_a3_dns_request(
     req: DnsResolveRequest,
     session_id: &str,
     initiative_id: &str,
-    session_token: &str,
     audit: &Arc<dyn AuditSink>,
     store: Option<&Arc<raxis_store::Store>>,
 ) -> DnsResolveResponse {
-    let authenticated = req.session_token == session_token
-        && a3_session_is_active(session_id, session_token, store).await;
+    let authenticated = a3_session_is_active(session_id, store).await;
     let audit_session = if authenticated { session_id } else { "" };
     if !authenticated || req.hostname.is_empty() || req.hostname.len() > A3_MAX_HOSTNAME_LEN {
         return a3_dns_audit_and_response(
@@ -1596,18 +1686,15 @@ async fn handle_a3_tproxy_request(
     req: TproxyAdmissionRequest,
     session_id: &str,
     initiative_id: &str,
-    session_token: &str,
     admission_service: &dyn AdmissionService,
     audit: &dyn AuditSink,
     registry: &Arc<A3TunnelRegistry>,
     store: Option<&Arc<raxis_store::Store>>,
 ) -> TproxyAdmissionResponse {
     let request_id = req.request_id;
-    if req.session_token != session_token
-        || !a3_session_is_active(session_id, session_token, store).await
-    {
-        let _ = a3_emit_denied_audit(audit, "", None, &req, "FAIL_SESSION_TOKEN_MISMATCH");
-        return a3_deny(request_id, "FAIL_SESSION_TOKEN_MISMATCH", None);
+    if !a3_session_is_active(session_id, store).await {
+        let _ = a3_emit_denied_audit(audit, "", None, &req, "FAIL_SESSION_INACTIVE");
+        return a3_deny(request_id, "FAIL_SESSION_INACTIVE", None);
     }
 
     let proxy_req = ProxyAdmissionRequest {
@@ -1676,19 +1763,14 @@ async fn handle_a3_tproxy_request(
     }
 }
 
-async fn a3_session_is_active(
-    session_id: &str,
-    session_token: &str,
-    store: Option<&Arc<raxis_store::Store>>,
-) -> bool {
+async fn a3_session_is_active(session_id: &str, store: Option<&Arc<raxis_store::Store>>) -> bool {
     let Some(store) = store else {
-        // Legacy tests construct SessionSpawnService without a Store;
-        // production always wires one via `with_store`.
+        // Unit fixtures can construct SessionSpawnService without a
+        // Store; production always wires one via `with_store`.
         return true;
     };
     let store = Arc::clone(store);
     let session_id = session_id.to_owned();
-    let session_token = session_token.to_owned();
     tokio::task::spawn_blocking(move || {
         let conn = store.lock_sync();
         let table = raxis_store::Table::Sessions.as_str();
@@ -1697,11 +1779,10 @@ async fn a3_session_is_active(
             &format!(
                 "SELECT COUNT(*) FROM {table}
                  WHERE session_id = ?1
-                   AND session_token = ?2
                    AND revoked = 0
-                   AND expires_at > ?3"
+                   AND expires_at > ?2"
             ),
-            rusqlite::params![session_id, session_token, now],
+            rusqlite::params![session_id, now],
             |row| row.get::<_, i64>(0),
         )
         .map(|count| count == 1)
@@ -2080,7 +2161,7 @@ mod a3_tests {
         let destination = "127.0.0.1:443".parse().unwrap();
         let req = TproxyAdmissionRequest {
             request_id: Uuid::new_v4(),
-            session_token: "session-token".to_owned(),
+            session_token: String::new(),
             sni: Some("api.anthropic.com".to_owned()),
             host_header: None,
             destination,
@@ -2091,7 +2172,6 @@ mod a3_tests {
             req,
             "sess-a3",
             "init-a3",
-            "session-token",
             &AlwaysAdmit,
             audit.as_ref(),
             &registry,

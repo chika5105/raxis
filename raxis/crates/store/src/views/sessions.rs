@@ -14,6 +14,7 @@
 //! published from the kernel's in-memory IPC accept loops; the SQL
 //! view here only knows "active vs not".
 
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -51,6 +52,20 @@ pub struct SessionRow {
     /// has a read-side capture fallback so older rows can surface a
     /// model badge once they emit a turn. See migration 25.
     pub model: Option<String>,
+}
+
+/// One environment variable captured for a spawned VM session.
+///
+/// Values marked `redacted` have already been replaced before the
+/// row reaches SQLite. The original secret/authority value is never
+/// persisted in `kernel.db`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionVmEnvRow {
+    pub key: String,
+    pub value: String,
+    pub redacted: bool,
+    pub source: String,
+    pub captured_at: u64,
 }
 
 /// Three-bucket projection of all session rows.
@@ -382,6 +397,147 @@ pub fn set_session_provider_model_if_unset(
     )
 }
 
+/// Replace the session's VM environment snapshot.
+///
+/// Called by `raxis-session-spawn` after it has stamped credential
+/// proxy loopback URLs and kernel control env into `VmSpec.env`.
+/// Sensitive values are redacted before insertion so the dashboard
+/// can answer "was this key present?" without turning `kernel.db`
+/// into an authority-bearing secret store.
+pub fn replace_session_vm_env_snapshot(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    env: &BTreeMap<String, String>,
+    captured_at: u64,
+    source: &str,
+) -> Result<(), rusqlite::Error> {
+    let table = Table::SessionVmEnv.as_str();
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        &format!("DELETE FROM {table} WHERE session_id = ?1"),
+        rusqlite::params![session_id],
+    )?;
+    {
+        let mut stmt = tx.prepare(&format!(
+            "INSERT INTO {table} \
+                (session_id, env_key, env_value, redacted, source, captured_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+        ))?;
+        for (key, value) in env {
+            let (stored_value, redacted) = redact_env_value_for_store(key, value);
+            stmt.execute(rusqlite::params![
+                session_id,
+                key,
+                stored_value,
+                if redacted { 1_i64 } else { 0_i64 },
+                source,
+                captured_at.min(i64::MAX as u64) as i64,
+            ])?;
+        }
+    }
+    tx.commit()
+}
+
+/// List VM environment entries captured for `session_id`, sorted by key.
+pub fn vm_env_for_session(
+    conn: &RoConn,
+    session_id: &str,
+) -> Result<Vec<SessionVmEnvRow>, SessionViewError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT env_key, env_value, redacted, source, captured_at \
+           FROM {} \
+          WHERE session_id = ?1 \
+          ORDER BY env_key ASC",
+        Table::SessionVmEnv.as_str(),
+    ))?;
+    let rows = stmt
+        .query_map(rusqlite::params![session_id], |r| {
+            Ok(SessionVmEnvRow {
+                key: r.get(0)?,
+                value: r.get(1)?,
+                redacted: r.get::<_, i64>(2)? != 0,
+                source: r.get(3)?,
+                captured_at: r.get::<_, i64>(4)?.max(0) as u64,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn redact_env_value_for_store(key: &str, value: &str) -> (String, bool) {
+    if env_key_is_sensitive(key) || env_value_is_sensitive(value) {
+        ("<redacted>".to_owned(), true)
+    } else {
+        (value.to_owned(), false)
+    }
+}
+
+fn env_key_is_sensitive(key: &str) -> bool {
+    if matches!(
+        key,
+        "RAXIS_CREDENTIAL_PROXY_LOOPBACK_PLAN"
+            | "RAXIS_TPROXY_KERNEL_TCP"
+            | "RAXIS_KERNEL_VSOCK_LISTEN_PORT"
+            | "RAXIS_KERNEL_PLANNER_SOCKET"
+            | "RAXIS_KERNEL_VSOCK_CID"
+            | "RAXIS_KERNEL_VSOCK_PORT"
+            | "RAXIS_VIRTIOFS_MOUNTS"
+    ) {
+        return false;
+    }
+    let upper = key.to_ascii_uppercase();
+    if upper == "RAXIS_SESSION_TOKEN" {
+        return true;
+    }
+    let tokens = upper
+        .split(|c: char| !(c.is_ascii_alphanumeric()))
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    tokens.iter().any(|t| {
+        matches!(
+            *t,
+            "TOKEN"
+                | "SECRET"
+                | "PASSWORD"
+                | "PASSWD"
+                | "AUTH"
+                | "AUTHORIZATION"
+                | "BEARER"
+                | "COOKIE"
+                | "CREDENTIAL"
+                | "CREDENTIALS"
+        )
+    }) || upper.contains("PRIVATE_KEY")
+        || upper.ends_with("_API_KEY")
+        || upper.ends_with("_ACCESS_KEY")
+}
+
+fn env_value_is_sensitive(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("-----begin private key-----")
+        || lower.contains("password=")
+        || lower.contains("passwd=")
+        || lower.contains("token=")
+        || lower.contains("access_token=")
+        || lower.contains("secret=")
+        || url_has_password_userinfo(value)
+}
+
+fn url_has_password_userinfo(value: &str) -> bool {
+    let Some(scheme_end) = value.find("://") else {
+        return false;
+    };
+    let rest = &value[scheme_end + 3..];
+    let authority_end = rest
+        .find(|c| matches!(c, '/' | '?' | '#'))
+        .unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let Some(at) = authority.rfind('@') else {
+        return false;
+    };
+    authority[..at].contains(':')
+}
+
 fn unix_now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -550,6 +706,44 @@ mod tests {
         );
         assert!(rows[0].revoked);
         assert_eq!(rows[0].revoked_at, Some(150));
+    }
+
+    #[test]
+    fn vm_env_snapshot_redacts_authority_values_but_keeps_loopback_urls() {
+        let tmp = fresh_store_with_seed_sessions();
+        let db = tmp.path().join("kernel.db");
+        let store = Store::open(&db).unwrap();
+        {
+            let conn = store.lock_sync();
+            let mut env = BTreeMap::new();
+            env.insert(
+                "DATABASE_URL".to_owned(),
+                "postgresql://raxis@127.0.0.1:15432/".to_owned(),
+            );
+            env.insert("RAXIS_SESSION_TOKEN".to_owned(), "super-token".to_owned());
+            env.insert("CUSTOM_API_KEY".to_owned(), "raw-key".to_owned());
+            env.insert("PWD".to_owned(), "/workspace".to_owned());
+            replace_session_vm_env_snapshot(&conn, "s-active", &env, 123, "test").unwrap();
+        }
+
+        let conn = open_ro(tmp.path()).unwrap();
+        let rows = vm_env_for_session(&conn, "s-active").unwrap();
+        let row = |key: &str| {
+            rows.iter()
+                .find(|r| r.key == key)
+                .unwrap_or_else(|| panic!("{key} env row missing"))
+        };
+        assert_eq!(
+            row("DATABASE_URL").value,
+            "postgresql://raxis@127.0.0.1:15432/"
+        );
+        assert!(!row("DATABASE_URL").redacted);
+        assert_eq!(row("RAXIS_SESSION_TOKEN").value, "<redacted>");
+        assert!(row("RAXIS_SESSION_TOKEN").redacted);
+        assert_eq!(row("CUSTOM_API_KEY").value, "<redacted>");
+        assert!(row("CUSTOM_API_KEY").redacted);
+        assert_eq!(row("PWD").value, "/workspace");
+        assert!(!row("PWD").redacted);
     }
 
     // `INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01`: the dashboard

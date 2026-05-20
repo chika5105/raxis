@@ -2682,8 +2682,9 @@ fn handle_complete_task(
     // way regular intents do (§2.5.8 line 1842 — "the intent handler
     // reads `session.worktree_root` from the session row via
     // `authority::get_session(session_id)`"). On `CompleteTask`, the
-    // request must still carry a session token; the planner never
-    // submits a witness-less completion without one.
+    // request must still carry a session token by the time it
+    // reaches this handler; session-bound VM dispatchers stamp the
+    // host-side token before admission.
     let session = crate::authority::session::get_session_by_token(&req.session_token, store)
         .map_err(|_| (PlannerErrorCode::Unauthorized, task_state))?;
     let worktree_root = session.worktree_root.as_deref().unwrap_or("");

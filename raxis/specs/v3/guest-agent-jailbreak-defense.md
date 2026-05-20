@@ -19,8 +19,7 @@ Even after `enforce_pid1_or_abort` (`INV-PLANNER-PID1-ONLY-EXEC-01`)
 closed the most obvious vector — a child `raxis-executor` re-exec
 inheriting the parent's vsock-listener bindings — an in-VM LLM
 agent retains six independent **read** / **escape** vectors that
-let it (a) recover kernel-stamped secrets like
-`RAXIS_SESSION_TOKEN`, (b) read the planner binary out of `/init`
+let it (a) recover kernel-stamped control metadata, (b) read the planner binary out of `/init`
 or `/proc/1/exe`, (c) issue `reboot(2)` to power-off the VM
 out-of-band, (d) transitively escalate via a future setuid
 binary on the rootfs, or (e) inherit secrets via
@@ -118,12 +117,13 @@ tool_result:
   RAXIS_PLANNER_KSB_PATH=/raxis-meta/ksb.json
 ```
 
-Without the `grep -v TOKEN` filter the agent had imposed on itself,
-`RAXIS_SESSION_TOKEN` would have been printed verbatim alongside
-the kernel-side admission port (`RAXIS_AIRGAP_A3_ADMISSION_PORT`).
-This is why `scrub_sensitive_env_for_agent` is the load-bearing
-defense — every subsequent `bash -lc` child inherits this env via
-`Command::spawn`, and the agent's grep filter is voluntary.
+Historical builds would have printed `RAXIS_SESSION_TOKEN` verbatim
+here. Current builds keep that bearer token host-side, but the
+kernel-side admission port (`RAXIS_AIRGAP_A3_ADMISSION_PORT`) and
+other control hints still should not leak into agent child
+processes. This is why `scrub_sensitive_env_for_agent` remains
+load-bearing — every subsequent `bash -lc` child inherits this env
+via `Command::spawn`, and the agent's grep filter is voluntary.
 
 ### Turn 13–14 — `/raxis-meta` surface
 
@@ -240,7 +240,6 @@ stamped:
 
 ```bash
 $ bash -lc 'cat /proc/cmdline | tr " " "\n" | grep ^raxis.envb64= | cut -d= -f2- | base64 -d | tr "\0" "\n"'
-RAXIS_SESSION_TOKEN=eyJhbGciOi…
 RAXIS_KERNEL_VSOCK_LISTEN_PORT=5380
 RAXIS_PLANNER_TASK_PROMPT_PATH=/raxis/prompt.txt
 RAXIS_AIRGAP_A3_HOST_CID=2
@@ -251,13 +250,13 @@ RAXIS_AIRGAP_A3_TUNNEL_PORT=5381
 
 **Why it matters:**
 
-* `RAXIS_SESSION_TOKEN` is the credential the kernel-side IPC
-  handler uses to authorise `IntentRequest`s on the parent's
-  behalf. With the token in hand, an agent process that can
-  open a vsock to `(VMADDR_CID_HOST,
-  RAXIS_KERNEL_VSOCK_LISTEN_PORT)` can submit intents
-  pretending to be the legitimate planner. Replay protection
-  (`accept_envelope_and_advance_sequence`) bounds the damage —
+* Historical builds exposed `RAXIS_SESSION_TOKEN` here. Current
+  builds do not: the session token stays host-side and the kernel
+  dispatcher binds it to the already-accepted VM stream. The
+  remaining risk is still real because `RAXIS_KERNEL_VSOCK_LISTEN_PORT`
+  and task-prompt metadata can let a child process collide with the
+  legitimate planner's transport setup. Replay protection
+  (`accept_envelope_and_advance_sequence`) bounds any malformed frame —
   the agent doesn't know the current `sequence_number` and must
   race the legitimate planner — but the kernel-side
   audit chain still records every attempt, and a tight race
@@ -299,7 +298,7 @@ running `cat /proc/cmdline` observes:
 
 ```bash
 $ bash -lc 'cat /proc/1/environ | tr "\0" "\n" | grep ^RAXIS_'
-RAXIS_SESSION_TOKEN=eyJhbGciOi…
+RAXIS_SESSION_ID=019e…
 RAXIS_KERNEL_VSOCK_LISTEN_PORT=5380
 …
 ```
@@ -542,7 +541,7 @@ sudo: effective uid is not 0, is /etc/sudoers.d or /etc/sudoers misconfigured?
 
 ```bash
 $ bash -lc 'env | grep ^RAXIS_'
-RAXIS_SESSION_TOKEN=eyJhbGciOi…
+RAXIS_SESSION_ID=019e…
 RAXIS_KERNEL_VSOCK_LISTEN_PORT=5380
 …
 ```
@@ -565,7 +564,8 @@ each planner-binary's `run()` async fn AFTER
 loop. The function iterates over `SENSITIVE_ENV_VARS_TO_SCRUB`
 (`CARGO_NET_OFFLINE`, `RAXIS_AIRGAP_A3_*`,
 `RAXIS_KERNEL_VSOCK_LISTEN_PORT`,
-`RAXIS_PLANNER_TASK_PROMPT[_PATH]`, `RAXIS_SESSION_TOKEN`,
+`RAXIS_PLANNER_TASK_PROMPT[_PATH]`, `RAXIS_SESSION_TOKEN` (defense-in-depth
+for stale images),
 `RAXIS_TPROXY_KERNEL_TCP`) and removes each from the process
 environment via `std::env::remove_var`. **Critically**, it ALSO snapshots each
 removed value into a process-local `OnceLock`
@@ -598,12 +598,12 @@ fixes this without weakening V6 — see
 
 Critical ordering invariant: the in-guest tproxy +
 DNS-stub-spawning tasks (`activate_airgap_a3_chokepoint` in
-`crates/planner-executor/src/main.rs`) MUST `.clone()` the
-session token into their `tokio::spawn` task bodies BEFORE the
-scrub fires. They do — the spawn order is fixed at the
-binary-`main()` callsite. The scrub then runs as the next
-statement after the spawn awaits return, so by the time the
-agent's first `BashTool` dispatch fires, the env is clean and
+`crates/planner-executor/src/main.rs`) MUST start before the
+scrub fires so they can read the non-secret transport hints they
+need. They do — the spawn order is fixed at the binary-`main()`
+callsite. The scrub then runs as the next statement after the
+spawn awaits return, so by the time the agent's first `BashTool`
+dispatch fires, the env is clean and
 the in-VM tproxy / DNS-stub still hold their session-token
 references via task-local capture.
 

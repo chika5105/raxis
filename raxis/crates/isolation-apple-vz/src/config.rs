@@ -306,8 +306,9 @@ pub fn translate(
     };
 
     // Fold `VmSpec.env` into the cmdline so the in-guest /init can
-    // recover the kernel-stamped session token, planner task prompt,
-    // KSB snapshot, etc. without needing a side channel.
+    // recover safe kernel-stamped metadata (session id, planner
+    // task prompt, KSB snapshot, etc.) without needing a side
+    // channel.
     //
     // We compose the payload from three sources, in precedence
     // order (low → high), so that an explicit operator override on
@@ -316,12 +317,6 @@ pub fn translate(
     //   1. **Substrate-default keys** the AVF guest needs in order
     //      to talk to the kernel:
     //
-    //      * `RAXIS_SESSION_TOKEN`            — mirrored from
-    //        `spec.session_token`. SubprocessIsolation auto-injects
-    //        this via `Command::env` (see
-    //        `test-support/subprocess_isolation.rs`); AVF must
-    //        mirror the contract since there is no `Command::env`
-    //        analogue at this surface.
     //      * `RAXIS_KERNEL_VSOCK_LISTEN_PORT` — pinned to the AVF
     //        planner port (`1024`, matching `AvfVsock::planner_port`)
     //        so `KernelTransportConfig::from_env_fn` resolves the
@@ -354,7 +349,7 @@ pub fn translate(
     // to 2048 bytes by default (CONFIG_CMDLINE_LENGTH). Base64
     // overhead is 4/3 + delimiter, so the env payload limit is
     // ~1.5 KiB pre-encoding. The kernel-stamped envelope today
-    // is well below 1 KiB (session token, task prompt summary,
+    // is well below 1 KiB (safe session id, task prompt summary,
     // KSB ≤ 4 KiB which we DON'T pass via cmdline — see KSB env
     // var note in `planner-harness.md §14.5`). If a future role
     // exceeds the budget the substrate will refuse the spawn at
@@ -364,10 +359,6 @@ pub fn translate(
         let mut effective: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
         // (1) substrate-default keys.
-        effective.insert(
-            "RAXIS_SESSION_TOKEN".to_owned(),
-            spec.session_token.0.clone(),
-        );
         effective.insert(
             "RAXIS_KERNEL_VSOCK_LISTEN_PORT".to_owned(),
             AVF_PLANNER_PORT.to_string(),
@@ -399,6 +390,7 @@ pub fn translate(
         //     stripped for the same reason — the AVF substrate is
         //     a vsock-listen substrate, not a vsock-dial substrate.
         const STRIPPED: &[&str] = &[
+            "RAXIS_SESSION_TOKEN",
             "RAXIS_KERNEL_PLANNER_SOCKET",
             "RAXIS_KERNEL_VSOCK_CID",
             "RAXIS_KERNEL_VSOCK_PORT",
@@ -681,10 +673,9 @@ mod tests {
             PathBuf::from("/var/raxis/test/vmlinux.bin")
         );
         // EROFS rootfs adds `root=/dev/vda ro` so the guest kernel
-        // mounts the virtio-blk drive as `/`. Substrate-default env
-        // keys (`RAXIS_SESSION_TOKEN`, `RAXIS_KERNEL_VSOCK_LISTEN_PORT`)
-        // are folded into a `raxis.envb64=…` cmdline token even when
-        // `spec.env` is empty — see
+        // mounts the virtio-blk drive as `/`. The substrate-default
+        // vsock listen port is folded into a `raxis.envb64=…`
+        // cmdline token even when `spec.env` is empty — see
         // `translate_always_appends_substrate_default_env_keys`.
         assert!(
             cfg.boot_loader.command_line.starts_with(
@@ -808,26 +799,21 @@ mod tests {
             .decode(b64.as_bytes())
             .expect("envb64 must decode as standard base64");
         let payload = std::str::from_utf8(&decoded).expect("payload must be utf-8");
-        assert!(payload.contains("RAXIS_SESSION_TOKEN=tok-123\n"));
+        assert!(!payload.contains("RAXIS_SESSION_TOKEN"));
         assert!(payload.contains("RAXIS_KERNEL_VSOCK_LISTEN_PORT=1024\n"));
         assert!(payload.contains("RAXIS_PLANNER_TASK_PROMPT=do thing X = Y, please\n"));
     }
 
-    /// Substrate-default env keys (`RAXIS_SESSION_TOKEN`,
-    /// `RAXIS_KERNEL_VSOCK_LISTEN_PORT`) MUST always be folded into
-    /// the cmdline, even when `spec.env` is empty — they are the
-    /// AVF substrate's contract with the in-guest planner. The
-    /// session token is mirrored verbatim from
-    /// `VmSpec.session_token` (mirroring `SubprocessIsolation`'s
-    /// `Command::env`-injection behaviour), and the listen port is
-    /// the AVF-pinned `AVF_PLANNER_PORT`.
+    /// The substrate-default listen port MUST always be folded into
+    /// the cmdline, even when `spec.env` is empty. The bearer
+    /// session token MUST NOT be propagated into the guest.
     #[test]
     fn translate_always_appends_substrate_default_env_keys() {
         use base64::Engine as _;
 
         // `fixture_spec()` returns an empty `spec.env`. Translation
         // MUST still produce a `raxis.envb64=` token containing the
-        // two substrate-default keys.
+        // substrate-default listen port.
         let cfg = translate(&fixture_image(), &[], &fixture_spec()).unwrap();
         let token = cfg
             .boot_loader
@@ -840,10 +826,7 @@ mod tests {
             .decode(b64.as_bytes())
             .expect("envb64 must decode as standard base64");
         let payload = std::str::from_utf8(&bytes).unwrap();
-        assert!(
-            payload.contains("RAXIS_SESSION_TOKEN=avf-test-token\n"),
-            "session token must be propagated; got payload {payload:?}",
-        );
+        assert!(!payload.contains("RAXIS_SESSION_TOKEN"));
         assert!(
             payload.contains(&format!(
                 "RAXIS_KERNEL_VSOCK_LISTEN_PORT={AVF_PLANNER_PORT}\n",
@@ -852,7 +835,9 @@ mod tests {
         );
     }
 
-    /// Per-spawn `spec.env` overrides the substrate-default keys.
+    /// Per-spawn `spec.env` overrides the substrate-default listen
+    /// port. Bearer token keys are stripped even when a caller tries
+    /// to set them explicitly.
     /// This is the operator-escape-hatch contract — a deployment
     /// may pin a different planner port (e.g. to multiplex two
     /// guests on the same CID range) by setting it explicitly in
@@ -882,10 +867,7 @@ mod tests {
             .decode(token.strip_prefix("raxis.envb64=").unwrap().as_bytes())
             .unwrap();
         let payload = std::str::from_utf8(&bytes).unwrap();
-        assert!(
-            payload.contains("RAXIS_SESSION_TOKEN=operator-supplied-token\n"),
-            "spec.env override must win for session token; got {payload:?}",
-        );
+        assert!(!payload.contains("RAXIS_SESSION_TOKEN"));
         assert!(
             payload.contains("RAXIS_KERNEL_VSOCK_LISTEN_PORT=9999\n"),
             "spec.env override must win for vsock port; got {payload:?}",

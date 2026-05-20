@@ -48,7 +48,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 25;
+pub const SCHEMA_VERSION: u32 = 26;
 
 /// Apply all pending migrations to `conn`.
 /// Safe to call on every startup — skips already-applied migrations. Returns
@@ -136,6 +136,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 25 {
         apply_migration_25(conn)?;
+    }
+    if current_version < 26 {
+        apply_migration_26(conn)?;
     }
 
     Ok(())
@@ -2869,6 +2872,79 @@ ALTER TABLE {sessions} ADD COLUMN model TEXT;
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (25, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 26 — per-session VM environment snapshots (iter env-debug)
+//
+// Operators need to answer "what environment did this guest actually
+// receive?" without scraping console logs or reconstructing the spawn
+// path from several audit events. This table stores one row per env
+// key after the kernel has stamped credential-proxy loopback URLs,
+// admission ports, planner control env, and substrate-known defaults.
+//
+// Security contract
+//   The table NEVER stores raw authority-bearing values. The write
+//   helper in `views::sessions::replace_session_vm_env_snapshot`
+//   redacts session tokens, API keys, passwords, private-key-looking
+//   values, and credential-bearing URLs before insertion. The row
+//   still records the key and `redacted = 1`, so operators can see
+//   that the VM had the variable without leaking usable secrets into
+//   `kernel.db` or the dashboard.
+//
+// Shape
+//   * `(session_id, env_key)` primary key — one current snapshot per
+//     session. Re-spawn under the same session id replaces the row
+//     set atomically.
+//   * `source` is a small free-form label (`session-spawn` today)
+//     so a future substrate-side guest-reported snapshot can coexist
+//     without a schema break.
+//   * `captured_at` is unix seconds from the kernel host clock.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_26(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_26_ddl();
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 26 failed: {e}")))
+}
+
+/// The complete migration-26 DDL.
+pub fn render_migration_26_ddl() -> String {
+    let session_vm_env = Table::SessionVmEnv.as_str();
+    let sessions = Table::Sessions.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- iter env-debug -- per-session VM env snapshot for dashboard debugging.
+-- Values are redacted before insertion when the key/value shape is
+-- authority-bearing. The table records key presence even when value
+-- redaction is required.
+CREATE TABLE IF NOT EXISTS {session_vm_env} (
+    session_id  TEXT    NOT NULL
+        REFERENCES {sessions}(session_id)
+        ON DELETE CASCADE,
+    env_key     TEXT    NOT NULL,
+    env_value   TEXT    NOT NULL,
+    redacted    INTEGER NOT NULL DEFAULT 0
+        CHECK (redacted IN (0, 1)),
+    source      TEXT    NOT NULL DEFAULT 'session-spawn',
+    captured_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, env_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_vm_env_session
+    ON {session_vm_env} (session_id, env_key);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (26, strftime('%s', 'now'));
 
 COMMIT;
 "
@@ -6520,5 +6596,67 @@ mod tests {
             )
             .unwrap();
         assert_eq!(post, 2);
+    }
+
+    /// Migration 26 adds `session_vm_env`, the per-session VM env
+    /// snapshot table backing the dashboard's Session Detail
+    /// Environment tab.
+    #[test]
+    fn migration_26_adds_session_vm_env_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+                [Table::SessionVmEnv.as_str()],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "session_vm_env table must exist");
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "PRAGMA table_info({})",
+                Table::SessionVmEnv.as_str()
+            ))
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for expected in [
+            "session_id",
+            "env_key",
+            "env_value",
+            "redacted",
+            "source",
+            "captured_at",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "{expected} column missing from session_vm_env"
+            );
+        }
+    }
+
+    /// Migration 26 is idempotent under `apply_pending`.
+    #[test]
+    fn migration_26_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+                [Table::SessionVmEnv.as_str()],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1);
     }
 }

@@ -33,9 +33,8 @@
 //!   (`--initiative-id <ID>` for orchestrator;
 //!   `--task-id <ID> --initiative-id <ID>` for executor / reviewer).
 //! * [`BootEnv`] — environment-variable contract
-//!   (`RAXIS_SESSION_TOKEN` is mandatory; presence of the var is the
-//!   guest's "I was actually launched by the kernel" check —
-//!   `planner-harness.md §14.5`).
+//!   (`RAXIS_SESSION_ID` is mandatory; the bearer session token is
+//!   deliberately kept host-side and never exposed to the guest).
 //! * [`PlannerError`] — the full error taxonomy a binary's `main` may
 //!   convert to a structured exit code.
 //!
@@ -347,15 +346,11 @@ impl BootArgs {
 /// Pinned by `planner-harness.md §14.5`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootEnv {
-    /// Per-session opaque token. The guest copies this verbatim
-    /// into the eventual VSock `Hello` frame; the kernel matches it
-    /// against `sessions.session_token` to prove the connecting VM
-    /// is the one it just spawned (and not an out-of-band reconnect
-    /// attempt against a recycled CID).
-    ///
-    /// The substrate stamps this from `SpawnRequest.vm_spec.session_token`
-    /// (`raxis-kernel::session_spawn_orchestrator` Step 3).
-    pub session_token: String,
+    /// Stable session id. This is safe guest-visible correlation
+    /// metadata; it is not bearer authority. The kernel binds the
+    /// real `sessions.session_token` to the host-owned IPC stream
+    /// before dispatching session-scoped requests.
+    pub session_id: String,
 }
 
 impl BootEnv {
@@ -371,12 +366,12 @@ impl BootEnv {
     where
         F: Fn(&str) -> Option<String>,
     {
-        let session_token =
-            f("RAXIS_SESSION_TOKEN").ok_or(PlannerError::MissingEnv("RAXIS_SESSION_TOKEN"))?;
-        if session_token.is_empty() {
-            return Err(PlannerError::EmptyEnv("RAXIS_SESSION_TOKEN"));
+        let session_id =
+            f("RAXIS_SESSION_ID").ok_or(PlannerError::MissingEnv("RAXIS_SESSION_ID"))?;
+        if session_id.is_empty() {
+            return Err(PlannerError::EmptyEnv("RAXIS_SESSION_ID"));
         }
-        Ok(Self { session_token })
+        Ok(Self { session_id })
     }
 }
 
@@ -410,9 +405,9 @@ impl BootContext {
 ///
 /// Returns the rendered line **without** a trailing newline.
 ///
-/// The session token is **redacted** (replaced with the literal
-/// `"<redacted>"`); leaking it into stderr would let any host-side
-/// scrape break the kernel's authentication of the guest.
+/// The guest-visible session id is logged for correlation. The
+/// session token is not present in the guest process at all, so
+/// there is no bearer material to redact here.
 pub fn render_boot_log(ctx: &BootContext) -> String {
     // Both `initiative_id` and `task_id` are opaque non-validated
     // strings at this layer (per the `BootArgs` doc above — the
@@ -435,10 +430,11 @@ pub fn render_boot_log(ctx: &BootContext) -> String {
     format!(
         "{{\"level\":\"info\",\"step\":\"planner-boot\",\
          \"role\":\"{role}\",\"initiative_id\":{init},\
-         \"task_id\":{task},\"session_token\":\"<redacted>\"}}",
+         \"task_id\":{task},\"session_id\":{session}}}",
         role = ctx.role.shortname(),
         init = init_repr,
         task = task_repr,
+        session = serde_json::Value::String(ctx.env.session_id.clone()).to_string(),
     )
 }
 
@@ -612,36 +608,33 @@ mod tests {
     }
 
     #[test]
-    fn boot_env_reads_session_token() {
+    fn boot_env_reads_session_id() {
         let env = BootEnv::from_env_fn(|k| match k {
-            "RAXIS_SESSION_TOKEN" => Some("opaque-1234".to_owned()),
+            "RAXIS_SESSION_ID" => Some("session-1234".to_owned()),
             _ => None,
         })
         .unwrap();
-        assert_eq!(env.session_token, "opaque-1234");
+        assert_eq!(env.session_id, "session-1234");
     }
 
     #[test]
-    fn boot_env_rejects_missing_session_token() {
+    fn boot_env_rejects_missing_session_id() {
         let err = BootEnv::from_env_fn(|_| None).unwrap_err();
-        assert!(matches!(
-            err,
-            PlannerError::MissingEnv("RAXIS_SESSION_TOKEN")
-        ));
+        assert!(matches!(err, PlannerError::MissingEnv("RAXIS_SESSION_ID")));
     }
 
     #[test]
-    fn boot_env_rejects_empty_session_token() {
+    fn boot_env_rejects_empty_session_id() {
         let err = BootEnv::from_env_fn(|k| match k {
-            "RAXIS_SESSION_TOKEN" => Some(String::new()),
+            "RAXIS_SESSION_ID" => Some(String::new()),
             _ => None,
         })
         .unwrap_err();
-        assert!(matches!(err, PlannerError::EmptyEnv("RAXIS_SESSION_TOKEN")));
+        assert!(matches!(err, PlannerError::EmptyEnv("RAXIS_SESSION_ID")));
     }
 
     #[test]
-    fn render_boot_log_redacts_session_token_and_includes_role_and_ids() {
+    fn render_boot_log_includes_session_id_and_no_token_field() {
         let ctx = BootContext {
             role: Role::Executor,
             args: BootArgs {
@@ -649,19 +642,15 @@ mod tests {
                 task_id: Some("task-42".to_owned()),
             },
             env: BootEnv {
-                session_token: "S3CRET-TOKEN".to_owned(),
+                session_id: "session-7".to_owned(),
             },
         };
         let line = render_boot_log(&ctx);
         assert!(line.contains("\"role\":\"executor\""));
         assert!(line.contains("\"initiative_id\":\"init-7\""));
         assert!(line.contains("\"task_id\":\"task-42\""));
-        assert!(line.contains("\"session_token\":\"<redacted>\""));
-        // Must NOT leak the actual token bytes:
-        assert!(
-            !line.contains("S3CRET-TOKEN"),
-            "session_token was leaked into the boot log: {line}"
-        );
+        assert!(line.contains("\"session_id\":\"session-7\""));
+        assert!(!line.contains("session_token"));
     }
 
     #[test]
@@ -673,7 +662,7 @@ mod tests {
                 task_id: None,
             },
             env: BootEnv {
-                session_token: "tok".to_owned(),
+                session_id: "session-7".to_owned(),
             },
         };
         let line = render_boot_log(&ctx);

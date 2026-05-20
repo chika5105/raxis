@@ -138,11 +138,12 @@ Even if the process writes files directly to VirtioFS (bypassing the git/intent 
 the Kernel's `SingleCommit` diff catches any path outside the allowlist at intent
 admission — the commit is rejected before it propagates anywhere.
 
-**Layer 3 — Session token isolation:**
-Each VM holds only its own Kernel-issued session token, set in `.raxis/session.env` before
-boot. A compromised process cannot steal another session's token (it has no path to other
-VMs' filesystems) and cannot forge a token (signed by the Kernel's internal HMAC key).
-Submitting on a stolen or forged token results in `FAIL_AUTH` and `SecurityViolation` audit.
+**Layer 3 — Host-side session binding:**
+Each VM receives only safe session metadata (`RAXIS_SESSION_ID`). The Kernel-issued
+session token stays host-side and is bound to the already-accepted VM IPC stream by the
+dispatcher. A compromised process cannot steal another session's token and cannot mint a
+new binding; forged or inactive sessions fail at session lookup and produce auth/audit
+signals.
 
 **Layer 4 — VSock CID binding:**
 At session creation, the Kernel records the VSock CID of the specific VM in

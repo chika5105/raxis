@@ -349,7 +349,7 @@ Both surfaces read from the same per-process cache, so the
 hint and the tool's output are byte-coherent for a given
 `(image digest, session env)` pair (which is what makes the
 LLM provider's prompt cache hit across turns). Kernel-private
-env vars (session token, vsock loopback plan, sidecar HMAC
+env vars (safe session id, vsock loopback plan, sidecar HMAC
 secrets, anything matching `*SECRET*` / `*API_KEY*` /
 `*_TOKEN`) are redacted automatically — the LLM only sees the
 variables it can safely use.

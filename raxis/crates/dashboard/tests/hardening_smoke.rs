@@ -435,6 +435,7 @@ async fn sessions_list_with_initiative_id_filter_narrows_results() {
         failure: None,
         annotations: vec![],
         latest_annotation: None,
+        env: Vec::new(),
     };
     let sess_beta = SessionView {
         session_id: "sess-beta".into(),
@@ -452,6 +453,7 @@ async fn sessions_list_with_initiative_id_filter_narrows_results() {
         failure: None,
         annotations: vec![],
         latest_annotation: None,
+        env: Vec::new(),
     };
     data.push_session(sess_alpha).push_session(sess_beta);
 

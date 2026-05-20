@@ -2244,7 +2244,7 @@ Both surfaces read from a per-process
 `OnceLock<Arc<CapabilityManifest>>`, so for a given `(image
 digest, session env)` pair the manifest is byte-deterministic
 (prompt-cacheable). Kernel-private env vars
-(`RAXIS_VSOCK_LOOPBACK_PLAN`, `RAXIS_SESSION_TOKEN`, sidecar
+(`RAXIS_VSOCK_LOOPBACK_PLAN`, `RAXIS_SESSION_ID`, sidecar
 HMAC secrets, anything matching `*SECRET*` / `*PASSWORD*` /
 `*API_KEY*` / `*_TOKEN`) are redacted; credential-proxy URLs
 (`DATABASE_URL` / `MONGO_URL` / `REDIS_URL` / `SMTP_URL`)

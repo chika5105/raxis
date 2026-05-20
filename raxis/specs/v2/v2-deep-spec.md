@@ -826,7 +826,7 @@ uses the virtio protocol over the hypervisor's shared memory channel, but it is
 unidirectionally scoped: the Kernel controls which host directories are mounted and with what
 permissions. The `.raxis/` subdirectory within each worktree is the Kernel's staging area:
 - `.raxis/system_prompt.txt` — non-negotiable prompt prefix, written before VM boot
-- `.raxis/session.env` — session token and VSock connection parameters
+- `.raxis/session.env` — safe session metadata and VSock connection parameters
 - `.raxis/bundles/` — Executor bundle files, written by the Kernel between turns
 
 **Decision (control — Step 10):** VSock (`AF_VSOCK`) for all intent and push traffic.
@@ -847,7 +847,7 @@ socket. The framing protocol is length-prefixed bincode (unchanged from V1 UDS f
   `HandlerContext`.
 * `kernel/Cargo.toml` pulls in `raxis-worktree-staging` as a regular dep. The kernel's
   session-admission handler (forthcoming) calls `stage(&inputs)` after sealing the
-  session token + minting the VSock CID, then hands `staged.mount` to
+  host-side session token + minting the VSock CID, then hands `staged.mount` to
   `ctx.isolation.spawn(...)`.
 * `crates/isolation-firecracker/src/vsock.rs::HostVsockChannel` already implements
   the length-prefixed VSock framing (16 MiB cap, big-endian u32 prefix). Tests:
@@ -2016,7 +2016,7 @@ The Orchestrator VM, on boot at initiative admission, finds:
       <task_b>.bundle
       ...
 /raxis/                              # read-only; kernel-staged session boot artifacts
-  session.env                        # session token + VSock parameters
+  session.env                        # safe session metadata + VSock parameters
   system_prompt.txt                  # NNSP per kernel-mechanics-prompt.md §3.2 (kernel-pinned bytes)
 ```
 
@@ -2886,7 +2886,7 @@ specification.
 | Module | Path | Reason for Exclusion |
 |---|---|---|
 | All MCP modules | `runtime/src/mcp*.rs` (6 files) | MCP rejected as an authority bypass in `design-decisions.md`. MCP servers are external processes — connecting to them from inside the VM would create out-of-band communication channels invisible to the Kernel. |
-| `oauth` module | `runtime/src/oauth.rs` | Planner VMs hold no credentials (INV-02A). The session token is the only auth material in the VM, issued by the Kernel. No OAuth flow runs inside the VM. |
+| `oauth` module | `runtime/src/oauth.rs` | Planner VMs hold no credentials or bearer session tokens (INV-02A). No OAuth flow runs inside the VM. |
 | `remote` module | `runtime/src/remote.rs` | Air-gapped VM (INV-NETISO-01). No network egress exists — this module has nothing to connect to. |
 | `trust_resolver` | `runtime/src/trust_resolver.rs` | Trust decisions are Kernel-mediated. The planner has no authority to resolve trust — any such decision must go through a signed policy artifact. |
 | `AnthropicClient` | `crates/api/` (entire crate) | **Not linked in `raxis-planner`**. `AnthropicClient` makes direct HTTPS calls to Anthropic. This is: (a) a network violation (INV-NETISO-01), (b) a credential violation (INV-02A), (c) provider-coupling violation. The `api` crate is used only in `raxis-gateway`, which runs on the host. |
@@ -3251,7 +3251,7 @@ deterministic rule, without needing to understand evaluation order or priority s
 **Concrete example** — given the plan fragment above, the `auth_implementer` task's
 `/raxis/session.env` would contain:
 ```bash
-RAXIS_SESSION_TOKEN=<kernel-issued>
+RAXIS_SESSION_ID=<kernel-issued-session-id>
 RAXIS_TASK_ID=auth_implementer
 RAXIS_INITIATIVE_ID=<kernel-issued>
 RUST_LOG=debug        # tasks.env override wins
@@ -3275,7 +3275,7 @@ insensitive) is rejected at `approve_plan` time with:
 { rule: "reserved_env_key", key: "RAXIS_MY_KEY",
   suggestion: "The RAXIS_ prefix is reserved for Kernel-issued values. Rename the key." }
 ```
-This prevents plan authors from shadowing `RAXIS_SESSION_TOKEN`, `RAXIS_TASK_ID`, or
+This prevents plan authors from shadowing `RAXIS_SESSION_ID`, `RAXIS_TASK_ID`, or
 `RAXIS_INITIATIVE_ID` with operator-supplied values.
 
 **Secrets via this mechanism:** The same operator-responsibility principle applies —
@@ -3352,7 +3352,7 @@ be extended without a code change and a new binary deployment.
 
 | File | Contents | Written by |
 |---|---|---|
-| `session.env` | `RAXIS_SESSION_TOKEN`, `RAXIS_TASK_ID`, `RAXIS_INITIATIVE_ID`; followed by operator-declared `[env]` vars from `plan.toml` | Kernel token issuance + plan env merge |
+| `session.env` | `RAXIS_SESSION_ID`, `RAXIS_TASK_ID`, `RAXIS_INITIATIVE_ID`; followed by operator-declared `[env]` vars from `plan.toml` | Kernel session metadata + plan env merge |
 | `system_prompt.txt` | Role-specific non-negotiable prefix + operator context | Kernel Prompt Assembler |
 | `bundles/<task_id>.bundle` | Executor git bundles (Orchestrator sessions only) | Kernel on `KernelPush::SubTaskCompleted` |
 

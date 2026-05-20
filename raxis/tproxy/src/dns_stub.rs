@@ -143,7 +143,6 @@ pub async fn serve_dns_stub(
     listeners: BoundDnsStub,
     host_cid: u32,
     admission_port: u32,
-    session_token: String,
 ) -> Result<(), DnsStubError> {
     let BoundDnsStub { udp, tcp } = listeners;
     eprintln!(
@@ -152,13 +151,11 @@ pub async fn serve_dns_stub(
     );
 
     let udp = Arc::new(udp);
-    let token = Arc::new(session_token);
 
     // UDP path — one packet at a time. RFC1035 §4.2.1 allows a
     // single-flight server here; libc resolvers reuse a single
     // socket but fan out at the syscall layer, which keeps the
     // contention low for the in-VM use case.
-    let token_udp = Arc::clone(&token);
     let udp_socket = Arc::clone(&udp);
     let udp_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 1500];
@@ -171,18 +168,15 @@ pub async fn serve_dns_stub(
                 }
             };
             let pkt = buf[..n].to_vec();
-            let token = Arc::clone(&token_udp);
             let socket = Arc::clone(&udp_socket);
             tokio::spawn(async move {
-                let _ =
-                    handle_udp_query(&pkt, peer, &socket, host_cid, admission_port, &token).await;
+                let _ = handle_udp_query(&pkt, peer, &socket, host_cid, admission_port).await;
             });
         }
     });
 
     // TCP path — one connection at a time per RFC1035 §4.2.2 (the
     // length-prefix shape).
-    let token_tcp = Arc::clone(&token);
     let tcp_task = tokio::spawn(async move {
         loop {
             let (mut sock, _peer) = match tcp.accept().await {
@@ -192,9 +186,8 @@ pub async fn serve_dns_stub(
                     return;
                 }
             };
-            let token = Arc::clone(&token_tcp);
             tokio::spawn(async move {
-                let _ = handle_tcp_connection(&mut sock, host_cid, admission_port, &token).await;
+                let _ = handle_tcp_connection(&mut sock, host_cid, admission_port).await;
             });
         }
     });
@@ -209,7 +202,6 @@ async fn handle_udp_query(
     socket: &UdpSocket,
     host_cid: u32,
     admission_port: u32,
-    session_token: &str,
 ) -> Result<(), DnsStubError> {
     // Per iter72 forensics: when `build_response_for_query`
     // returned `Err` (e.g. kernel-vsock connect timeout, kernel
@@ -227,23 +219,22 @@ async fn handle_udp_query(
     // into a wire SERVFAIL (RCODE=2) response so libc returns
     // EAI_FAIL (-4) deterministically and the agent's tool gets
     // a fast, structured error to react to.
-    let response =
-        match build_response_for_query(pkt, host_cid, admission_port, session_token).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("raxis-tproxy(A3 dns): udp query failed, emitting SERVFAIL: {e}");
-                match build_servfail_from_query(pkt) {
-                    Some(r) => r,
-                    // Question section was unparseable — even
-                    // SERVFAIL needs the qname echoed, so fall back
-                    // to dropping the packet. libc will time out
-                    // but this branch only fires on truly malformed
-                    // wire input, which a libc resolver should never
-                    // produce.
-                    None => return Err(e),
-                }
+    let response = match build_response_for_query(pkt, host_cid, admission_port).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("raxis-tproxy(A3 dns): udp query failed, emitting SERVFAIL: {e}");
+            match build_servfail_from_query(pkt) {
+                Some(r) => r,
+                // Question section was unparseable — even
+                // SERVFAIL needs the qname echoed, so fall back
+                // to dropping the packet. libc will time out
+                // but this branch only fires on truly malformed
+                // wire input, which a libc resolver should never
+                // produce.
+                None => return Err(e),
             }
-        };
+        }
+    };
     // Truncate per RFC1035 if the response exceeds the UDP cap.
     let to_send = if response.len() > MAX_UDP_PAYLOAD {
         truncate_response(&response)
@@ -258,7 +249,6 @@ async fn handle_tcp_connection(
     sock: &mut tokio::net::TcpStream,
     host_cid: u32,
     admission_port: u32,
-    session_token: &str,
 ) -> Result<(), DnsStubError> {
     // RFC1035 §4.2.2: 2-byte length prefix, big-endian.
     let mut len_buf = [0u8; 2];
@@ -273,17 +263,16 @@ async fn handle_tcp_connection(
     sock.read_exact(&mut pkt).await?;
     // Same SERVFAIL fallback as the UDP path — never silently
     // drop a query that the libc resolver is waiting on.
-    let response =
-        match build_response_for_query(&pkt, host_cid, admission_port, session_token).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("raxis-tproxy(A3 dns): tcp query failed, emitting SERVFAIL: {e}");
-                match build_servfail_from_query(&pkt) {
-                    Some(r) => r,
-                    None => return Err(e),
-                }
+    let response = match build_response_for_query(&pkt, host_cid, admission_port).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("raxis-tproxy(A3 dns): tcp query failed, emitting SERVFAIL: {e}");
+            match build_servfail_from_query(&pkt) {
+                Some(r) => r,
+                None => return Err(e),
             }
-        };
+        }
+    };
     let resp_len = (response.len() as u16).to_be_bytes();
     sock.write_all(&resp_len).await?;
     sock.write_all(&response).await?;
@@ -330,7 +319,6 @@ async fn build_response_for_query(
     pkt: &[u8],
     host_cid: u32,
     admission_port: u32,
-    session_token: &str,
 ) -> Result<Vec<u8>, DnsStubError> {
     let parsed = parse_query(pkt)?;
     // Set a short connect timeout on the vsock dial so a hung
@@ -343,7 +331,7 @@ async fn build_response_for_query(
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "vsock connect timeout"))??;
     let req = DnsResolveRequest {
         request_id: Uuid::new_v4(),
-        session_token: session_token.to_owned(),
+        session_token: String::new(),
         hostname: parsed.qname.clone(),
         query_type: match parsed.qtype {
             QTYPE_A => DnsQueryType::A,

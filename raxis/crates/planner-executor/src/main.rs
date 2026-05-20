@@ -30,7 +30,7 @@ fn main() -> ! {
     // already-running microVM. The contract is "PID 1 of a
     // microVM"; any other invocation is a jailbreak vector (a
     // curious or adversarial in-VM agent re-execing the
-    // executor binary to inherit the parent's session token and
+    // executor binary to inherit the parent's kernel transport and
     // port bindings). See the helper docstring + the
     // `iter72-dep-fetch-jailbreak` postmortem for context.
     enforce_pid1_or_abort();
@@ -113,10 +113,10 @@ async fn async_main() -> u8 {
     }
     // Note: `scrub_sensitive_env_for_agent` is invoked INSIDE
     // `run()` immediately after `BootContext::from_process` has
-    // pulled `RAXIS_SESSION_TOKEN` etc. into `ctx.env`. Scrubbing
-    // here (before `run()` runs `from_process`) would starve the
-    // BootContext constructor of the env vars it needs to
-    // initialise the per-task kernel transport handshake.
+    // captured the safe session id. Scrubbing here (before `run()`
+    // runs `from_process`) would starve the BootContext constructor
+    // of the env vars it needs to initialise the per-task kernel
+    // transport handshake.
     match run().await {
         Ok(()) => 0,
         Err(e) => {
@@ -154,17 +154,6 @@ const DEFAULT_HOST_CID: u32 = 2;
 /// as the executor dispatcher so a single failure mode (process
 /// exit) cleanly tears both halves down.
 async fn activate_airgap_a3_chokepoint() -> Result<(), u8> {
-    let session_token = match std::env::var("RAXIS_SESSION_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => {
-            eprintln!(
-                "{{\"level\":\"error\",\"step\":\"airgap-a3-chokepoint\",\
-                  \"role\":\"executor\",\"outcome\":\"missing-session-token\",\
-                  \"reason\":\"RAXIS_SESSION_TOKEN required for A3 admission auth\"}}"
-            );
-            return Err(64);
-        }
-    };
     let host_cid = env_u32_or(A3_HOST_CID_ENV, DEFAULT_HOST_CID);
     let admission_port = env_u32_or(A3_ADMISSION_PORT_ENV, DEFAULT_ADMISSION_PORT);
     let tunnel_port = env_u32_or(A3_TUNNEL_PORT_ENV, DEFAULT_TUNNEL_PORT);
@@ -211,16 +200,8 @@ async fn activate_airgap_a3_chokepoint() -> Result<(), u8> {
             }
         };
         let (dns_udp_addr, dns_tcp_addr) = dns_listeners.bound_addrs();
-        let token_for_loop = session_token.clone();
         tokio::spawn(async move {
-            let res = accept_loop_a3(
-                listener,
-                host_cid,
-                admission_port,
-                tunnel_port,
-                token_for_loop,
-            )
-            .await;
+            let res = accept_loop_a3(listener, host_cid, admission_port, tunnel_port).await;
             if let Err(e) = res {
                 eprintln!(
                     "{{\"level\":\"error\",\"step\":\"airgap-a3-chokepoint\",\
@@ -230,15 +211,10 @@ async fn activate_airgap_a3_chokepoint() -> Result<(), u8> {
                 );
             }
         });
-        let token_for_dns = session_token.clone();
         tokio::spawn(async move {
-            let res = raxis_tproxy::dns_stub::serve_dns_stub(
-                dns_listeners,
-                host_cid,
-                admission_port,
-                token_for_dns,
-            )
-            .await;
+            let res =
+                raxis_tproxy::dns_stub::serve_dns_stub(dns_listeners, host_cid, admission_port)
+                    .await;
             if let Err(e) = res {
                 eprintln!(
                     "{{\"level\":\"error\",\"step\":\"airgap-a3-chokepoint\",\
@@ -259,7 +235,7 @@ async fn activate_airgap_a3_chokepoint() -> Result<(), u8> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (host_cid, admission_port, tunnel_port, session_token);
+        let _ = (host_cid, admission_port, tunnel_port);
         eprintln!(
             "{{\"level\":\"warn\",\"step\":\"airgap-a3-chokepoint\",\
               \"role\":\"executor\",\"outcome\":\"skipped-non-linux\",\
@@ -377,13 +353,13 @@ async fn run() -> Result<(), PlannerError> {
     eprintln!("{}", render_boot_log(&ctx));
 
     // `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` — scrub the
-    // session token and sister sensitive env vars from the
-    // process environment now that the listener tasks have cloned
-    // their A3 credentials and `BootContext::from_process` has
-    // captured the session token into `ctx.env`. The scrubber also
-    // keeps an in-process snapshot for the driver; `run_role_session`
-    // reduces that snapshot to a fixed runtime allowlist, while the
-    // first `BashTool` / `SubprocessTool` child process inherits the
+    // sensitive env vars from the process environment after
+    // `BootContext::from_process` has captured the safe session id.
+    // The A3 tasks authenticate by host-owned session binding, not
+    // guest bearer material. The scrubber also keeps an in-process
+    // snapshot for the driver; `run_role_session` reduces that
+    // snapshot to a fixed runtime allowlist, while the first
+    // `BashTool` / `SubprocessTool` child process inherits the
     // scrubbed env via `Command::spawn`.
     scrub_sensitive_env_for_agent();
 

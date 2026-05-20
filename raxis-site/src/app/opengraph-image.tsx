@@ -1,6 +1,7 @@
 import { ImageResponse } from "next/og";
 
-export const alt = "RAXIS — AI agents: authorized actions only, fully audited";
+export const alt =
+  "RAXIS — Runtime Attestation eXchange for Intelligent Systems";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -75,11 +76,11 @@ export default function OpengraphImage() {
               gap: 4,
             }}
           >
-            <span>AI agents:</span>
+            <span>Let agents work.</span>
             <span>
-              <span style={{ color: "#ececee" }}>authorized actions only,</span>
+              <span style={{ color: "#ececee" }}>Do not give them</span>
             </span>
-            <span style={{ color: "#0BCCE7" }}>fully audited.</span>
+            <span style={{ color: "#0BCCE7" }}>the keys.</span>
           </div>
         </div>
         <div
@@ -96,11 +97,11 @@ export default function OpengraphImage() {
           <div style={{ display: "flex", gap: 28 }}>
             <span>12 paradigm invariants</span>
             <span>·</span>
-            <span>Cryptographic admission</span>
+            <span>Kernel enforcement</span>
             <span>·</span>
             <span>Tamper-evident audit</span>
           </div>
-          <div style={{ color: "#ececee" }}>raxis.dev</div>
+          <div style={{ color: "#ececee" }}>raxis.io</div>
         </div>
       </div>
     ),

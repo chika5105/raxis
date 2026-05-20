@@ -215,10 +215,10 @@ pub struct DispatchConfig {
     /// not stamp it. The driver populates this field from
     /// [`crate::BootArgs::task_id`].
     pub task_id_for_logs: String,
-    /// `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — session token
-    /// stamped onto every `planner_turn_usage` line. Same fallback
-    /// rules as `task_id_for_logs`. Driver populates from
-    /// [`crate::BootEnv::session_token`].
+    /// `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — safe session
+    /// id stamped onto every `planner_turn_usage` line. Same
+    /// fallback rules as `task_id_for_logs`. Driver populates from
+    /// [`crate::BootEnv::session_id`].
     pub session_id_for_logs: String,
     /// `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — role shortname
     /// (`"executor"` / `"reviewer"` / `"orchestrator"`) stamped

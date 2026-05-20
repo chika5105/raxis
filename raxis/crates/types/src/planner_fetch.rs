@@ -75,10 +75,9 @@ pub struct PlannerFetchRequest {
     /// in-flight requests when concurrent fetches are added (V2.5+).
     pub request_id: Uuid,
 
-    /// The session token the kernel stamped at spawn time. The
-    /// kernel re-validates against `sessions.session_token` for the
-    /// authenticated connection — a mismatch is
-    /// `FAIL_SESSION_TOKEN_MISMATCH`.
+    /// Host-side session token. Session-bound VM planners send this
+    /// empty; the kernel dispatcher stamps the canonical DB token
+    /// onto the request after accepting the per-session stream.
     pub session_token: String,
 
     /// Inference vs DataFetch — gates timeout + size caps.

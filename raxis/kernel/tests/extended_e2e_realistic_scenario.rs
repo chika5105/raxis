@@ -86,9 +86,9 @@ use extended_e2e_support::{
         poll_for_dual_lifecycle_completion, realism_workspace_root, realistic_lifecycle_deadline,
         reap_avf_orphan_vms, require_anthropic_dev_key, require_canonical_images,
         require_disk_hygiene, require_gateway_binary, require_gcp_adc, require_tcp_reachable,
-        seed_realistic_main_repository, spawn_kernel_normal, walk_chain_or_panic,
-        write_credentials, write_provider_credentials, ExampleRefreshInputs, OperatorIpc,
-        LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED, SHUTDOWN_DEADLINE,
+        resolved_install_dir, seed_realistic_main_repository, spawn_kernel_normal,
+        walk_chain_or_panic, write_credentials, write_provider_credentials, ExampleRefreshInputs,
+        OperatorIpc, LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED, SHUTDOWN_DEADLINE,
     },
     multi_initiative::{
         sibling_plan_toml, MultiInitiativeIsolationWitness, SIBLING_LANE_ID,
@@ -149,7 +149,8 @@ fn realistic_session_lifecycle() {
              2. ensure raxis/.env carries ANTHROPIC-API-DEV-KEY=sk-ant-...\n  \
              3. ensure ~/.config/gcloud/application_default_credentials.json \
              exists\n  \
-             4. RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 cargo test -p \
+             4. export RAXIS_INSTALL_DIR=\"${{RAXIS_INSTALL_DIR:-/usr/local/lib/raxis}}\"\n  \
+             5. RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 cargo test -p \
              raxis-kernel --test extended_e2e_realistic_scenario -- --nocapture",
         );
         wiring_smoke_test();
@@ -274,9 +275,7 @@ fn realistic_session_lifecycle() {
         );
     }
 
-    let install_dir = PathBuf::from(
-        std::env::var("RAXIS_INSTALL_DIR").expect("preflight verified RAXIS_INSTALL_DIR"),
-    );
+    let install_dir = resolved_install_dir();
 
     // Tier-3 reporter: created BEFORE the kernel spawn so an early
     // failure still emits the artifact block on Drop. `mark_success()`

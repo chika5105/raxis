@@ -631,17 +631,12 @@ async fn spawn_orchestrator_for_initiative(
     //
     // The session token is the CSPRNG-generated 64-char hex value
     // emitted by `raxis_crypto::token::generate_session_token` and
-    // persisted to `sessions.session_token`. It is the SAME value
-    // the kernel-mediated egress handler validates on every
-    // `IpcMessage::PlannerFetchRequest` via
-    // `authority::session::get_session_by_token`. Minting a
-    // synthetic token at the spawn boundary (the V0 placeholder
-    // shape `format!("orch-{session_id}")`) would put the planner
-    // and the kernel out of sync — every egress fetch would fail
-    // closed with `FAIL_SESSION_TOKEN_MISMATCH` and the planner
-    // would never reach the LLM. The audit chain would log a
-    // SessionVmSpawned event followed by an unbounded fetch-retry
-    // storm, which is exactly the regression mode this read closes.
+    // persisted to `sessions.session_token`. It stays host-side:
+    // session-bound planner streams send empty token fields, and
+    // the kernel dispatcher stamps this canonical DB token onto
+    // the legacy handler structs immediately before admission.
+    // Minting a synthetic token at the spawn boundary would put
+    // those host-side checks out of sync and fail closed.
     //
     // The credential decls list is empty for the canonical
     // orchestrator session (no `[[tasks]]` row), but we still go
@@ -1006,12 +1001,9 @@ async fn spawn_orchestrator_for_initiative(
             "--initiative-id".to_owned(),
             initiative_id.to_owned(),
         ],
-        // Per-session token; the substrate stamps it into the
-        // guest env under `RAXIS_SESSION_TOKEN`. Sourced from the
-        // canonical `sessions.session_token` column inserted by
-        // `lifecycle::approve_plan` (see Step 2 above) — same
-        // 64-char hex value the kernel-mediated egress handler
-        // re-validates on every `IpcMessage::PlannerFetchRequest`.
+        // Host-side per-session token. Substrates MUST NOT expose
+        // it to the guest environment; the kernel dispatcher binds
+        // it to the already-authenticated session stream.
         session_token: SessionToken(session_token_db.clone()),
         vsock_cid: None,
         virtio_fs_mounts: Vec::new(),
@@ -5232,12 +5224,9 @@ pub async fn spawn_executor_for_task(
         cgroup_quota: None,
         boot_args: Vec::new(),
         entrypoint_argv,
-        // Per-session token; the substrate stamps it into the
-        // guest env under `RAXIS_SESSION_TOKEN`. Sourced from the
-        // canonical `sessions.session_token` column inserted by the
-        // activation handler — same 64-char hex value the kernel-
-        // mediated egress handler revalidates on every
-        // `IpcMessage::PlannerFetchRequest`. INV-IPC-AUTH-01.
+        // Host-side per-session token. Substrates MUST NOT expose
+        // it to the guest environment; the kernel dispatcher binds
+        // it to the already-authenticated session stream.
         session_token: SessionToken(session_token_db.clone()),
         vsock_cid: None,
         virtio_fs_mounts: Vec::new(),
@@ -5452,11 +5441,10 @@ mod tests {
     ///
     /// `spawn_orchestrator_for_initiative` (the production spawn
     /// path covered by these round-trip tests) reads the session row
-    /// via `SELECT session_token … WHERE session_id = ?1` so it can
-    /// stamp the **real** kernel-issued token into the spawned VM's
-    /// env (`RAXIS_SESSION_TOKEN`) — INV-IPC-AUTH-01: the VM and the
-    /// kernel must share the SAME token, never a synthetic spawn-
-    /// boundary placeholder. The caller responsible for inserting
+    /// via `SELECT session_token … WHERE session_id = ?1` so the
+    /// host dispatcher can bind the **real** kernel-issued token to
+    /// the spawned session stream — INV-IPC-AUTH-01 without exposing
+    /// bearer material to the guest. The caller responsible for inserting
     /// the row is `auto_spawn_orchestrator_session_in_tx` in the
     /// production approve_plan / re-spawn paths; the test fixture
     /// reproduces that contract here so the spawn helper can find
@@ -5653,8 +5641,8 @@ mod tests {
 
         // V2 INV-IPC-AUTH-01: the spawn path reads
         // `sessions.session_token` for `session_id` so the spawned
-        // VM gets the SAME CSPRNG token the kernel will validate
-        // against subsequent IPC. Production
+        // host dispatcher binds the same CSPRNG token the kernel
+        // will validate against subsequent IPC. Production
         // (`auto_spawn_orchestrator_session_in_tx`) inserts this row
         // BEFORE calling `spawn_for_initiative`; the test reproduces
         // that ordering.

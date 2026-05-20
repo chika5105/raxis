@@ -114,8 +114,8 @@ impl SubprocessIsolation {
     }
 
     /// Builder: add an environment variable passed to every spawned
-    /// child. Used by tests that want to thread a session token /
-    /// VSock CID into the child process via env.
+    /// child. Used by tests that want to thread safe fixture
+    /// metadata into the child process via env.
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra_env.insert(key.into(), value.into());
         self
@@ -163,12 +163,10 @@ impl Backend for SubprocessIsolation {
             cmd.env(k, v);
         }
         for (k, v) in &spec.env {
-            cmd.env(k, v);
+            if k != "RAXIS_SESSION_TOKEN" {
+                cmd.env(k, v);
+            }
         }
-        // Test fixtures usually want the session token reachable in
-        // the child env so the helper can read it without negotiating
-        // through the (pipe-based) IPC channel during boot.
-        cmd.env("RAXIS_SESSION_TOKEN", &spec.session_token.0);
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::null());

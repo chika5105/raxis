@@ -18,7 +18,7 @@
 //! propagate the kernel-stamped env (`raxis.envb64=…`) — see
 //! `crate::cmdline_env`. Skip the mount and you ship the planner
 //! into the dispatch loop with no `RAXIS_KERNEL_VSOCK_LISTEN_PORT`,
-//! no `RAXIS_SESSION_TOKEN`, and no `RAXIS_PLANNER_TASK_PROMPT`,
+//! no `RAXIS_SESSION_ID`, and no `RAXIS_PLANNER_TASK_PROMPT`,
 //! which surfaces from the host as the AVF vsock CONNECT failing
 //! with `Connection reset by peer` (the planner panics and PID 1
 //! exits, which makes the kernel reboot per `panic=1`).
@@ -462,10 +462,10 @@ pub const PID1_ENFORCEMENT_EXIT_CODE: u8 = 126;
 /// its own VM IS a jailbreak vector:
 ///
 /// 1. The child process inherits the parent's environment,
-///    including `RAXIS_SESSION_TOKEN`, `RAXIS_PLANNER_TASK_PROMPT_PATH`,
-///    and `RAXIS_KERNEL_VSOCK_LISTEN_PORT`. It can dial the
-///    kernel-side planner IPC socket and submit intents using the
-///    parent's session token until the parent's session is revoked.
+///    including `RAXIS_PLANNER_TASK_PROMPT_PATH` and
+///    `RAXIS_KERNEL_VSOCK_LISTEN_PORT`. It can confuse the
+///    kernel-side planner IPC flow by reusing the parent's
+///    transport hints until the parent's session is revoked.
 /// 2. The child can read the parent's `/proc/<parent_pid>/cmdline`
 ///    to learn the parent's per-task arguments (initiative id,
 ///    task id) and impersonate the parent's identity at the
@@ -734,14 +734,13 @@ pub const PLANNER_BINARY_PATHS_TO_MASK: &[&str] = &[
 /// child. Most are secrets or kernel transport handles; a few
 /// are runtime-control knobs whose presence would mislead the
 /// model about the VM's actual task-level capabilities. Each
-/// in-guest listener that needs one of these has
-/// already cloned the value into its task locals by the time
-/// [`harden_guest_for_agent`] runs (see
-/// `crates/planner-executor/src/main.rs::activate_airgap_a3_chokepoint`
-/// — it `.clone()`s `RAXIS_SESSION_TOKEN` into the spawned
-/// `accept_loop_a3` and `run_dns_stub` tasks), so removing them
-/// here cannot break the legitimate egress path; it only strips
-/// `Command::spawn` inheritance for the agent's child processes.
+/// in-guest listener that needs one of these has already read its
+/// non-secret transport hints by the time [`harden_guest_for_agent`]
+/// runs, so removing them here cannot break the legitimate egress
+/// path; it only strips `Command::spawn` inheritance for the agent's
+/// child processes. `RAXIS_SESSION_TOKEN` remains in this list as a
+/// defense-in-depth guard for stale or third-party images, but the
+/// supported kernel spawn path no longer exposes it to the guest.
 ///
 /// Pinned alphabetically so a future addition does not silently
 /// reorder the audit-replay scrub log.
@@ -770,16 +769,10 @@ pub const SENSITIVE_ENV_VARS_TO_SCRUB: &[&str] = &[
 /// surface is wider:
 ///
 ///   1. **`/proc/cmdline` exposes the kernel-stamped
-///      `raxis.envb64=<base64>` token.** `cat /proc/cmdline` is
+///      `raxis.envb64=<base64>` envelope.** `cat /proc/cmdline` is
 ///      not gated by uid; the agent can decode the base64 to
-///      recover `RAXIS_SESSION_TOKEN`,
-///      `RAXIS_KERNEL_VSOCK_LISTEN_PORT`,
-///      `RAXIS_PLANNER_TASK_PROMPT`, etc. With the token in hand
-///      it can dial the kernel's vsock IPC channel directly and
-///      attempt to submit `IntentRequest`s on the parent's behalf
-///      (replay protection + the in-process sequence cursor
-///      bound the damage, but the kernel-side ratelimit + audit
-///      surface still records the attempt). Mitigation: bind-mount
+///      recover transport hints, task prompt paths, and other
+///      kernel-controlled metadata. Mitigation: bind-mount
 ///      `/dev/null` over `/proc/cmdline` so reads return EOF
 ///      regardless of uid. PID 1 has already hydrated its env
 ///      from the cmdline before this function runs, so masking is
@@ -872,8 +865,8 @@ pub fn harden_guest_for_agent() {
 }
 
 /// `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` — second-stage
-/// scrub that runs AFTER each in-guest listener has cloned its
-/// secrets into task-local state. Removes
+/// scrub that runs AFTER each in-guest listener has read its
+/// transport hints. Removes
 /// [`SENSITIVE_ENV_VARS_TO_SCRUB`] from the process environment
 /// so subsequent agent-tool subprocess spawns
 /// (`BashTool::execute` → `tokio::process::Command::new("bash")`
@@ -883,9 +876,9 @@ pub fn harden_guest_for_agent() {
 /// MUST run AFTER:
 ///   * `hydrate_from_proc_cmdline` (which writes the env from the
 ///     cmdline token into the process env), AND
-///   * the in-guest tproxy / DNS stub spawn (each clones
-///     `RAXIS_SESSION_TOKEN` into its `tokio::spawn` body so the
-///     removal here cannot starve the legitimate path).
+///   * the in-guest tproxy / DNS stub spawn (they authenticate via
+///     host-owned session binding, so no guest bearer token is
+///     needed).
 ///
 /// Idempotent: removing an already-unset variable is a no-op at
 /// the libc layer. Logged via one structured stderr line per
@@ -915,7 +908,7 @@ pub fn scrub_sensitive_env_for_agent() {
                 // (specifically `driver::run_role_session`, which
                 // reads `RAXIS_KERNEL_VSOCK_LISTEN_PORT`,
                 // `RAXIS_PLANNER_TASK_PROMPT[_PATH]`, and
-                // `RAXIS_SESSION_TOKEN` after this scrub fires)
+                // safe transport/task env after this scrub fires)
                 // can still resolve the value via
                 // `read_scrubbed_env_snapshot`. The snapshot is
                 // process-local memory — an agent's `bash`
@@ -983,7 +976,7 @@ static SCRUBBED_ENV_SNAPSHOT: std::sync::OnceLock<
 /// before `run_role_session` in the planner-role `main`s under the
 /// belief that `BootContext::from_process` had already consumed
 /// every env var the planner needed. That belief was wrong —
-/// `BootContext::env` only captures `RAXIS_SESSION_TOKEN`, while
+/// `BootContext::env` only captures `RAXIS_SESSION_ID`, while
 /// `run_role_session_with_env_fn` reads
 /// `RAXIS_KERNEL_VSOCK_LISTEN_PORT`,
 /// `RAXIS_PLANNER_TASK_PROMPT[_PATH]`, and several other vars from
@@ -996,8 +989,8 @@ static SCRUBBED_ENV_SNAPSHOT: std::sync::OnceLock<
 /// The fix preserves the security property — `std::env` is still
 /// scrubbed, so the agent's `bash` subprocess (spawned via
 /// `tokio::process::Command::spawn`, which inherits from
-/// `std::env`) STILL cannot see `RAXIS_SESSION_TOKEN` or its
-/// sister vars — while restoring in-process readability for
+/// `std::env`) STILL cannot see sensitive transport/control vars
+/// while restoring in-process readability for
 /// post-scrub planner-driver code that legitimately needs the
 /// values. The snapshot lives in Rust-process memory and is not
 /// reachable from a spawned child.

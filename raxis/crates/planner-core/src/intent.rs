@@ -40,12 +40,16 @@ use crate::transport::{KernelTransport, TransportError};
 // IntentSubmitter
 // ---------------------------------------------------------------------------
 
-/// One per-session intent submitter. Holds the session token, the
-/// task id, the per-session sequence + nonce counters, and the
-/// rolling [`TokensReport`] last reported by the dispatch loop.
+/// One per-session intent submitter. Holds the task id, the
+/// per-session sequence + nonce counters, and the rolling
+/// [`TokensReport`] last reported by the dispatch loop.
+///
+/// The planner deliberately does **not** hold the bearer session
+/// token. On session-bound VM streams, the kernel stamps the
+/// host-side token onto requests before they enter the existing
+/// admission handlers.
 pub struct IntentSubmitter {
     transport: Arc<dyn KernelTransport>,
-    session_token: String,
     task_id: TaskId,
     next_seq: std::sync::atomic::AtomicU64,
     nonce_seed: std::sync::atomic::AtomicU64,
@@ -63,20 +67,12 @@ pub struct IntentSubmitter {
 
 impl IntentSubmitter {
     /// Construct a new submitter.
-    /// `session_token` is the value the kernel stamped into the
-    /// guest env at spawn time (`RAXIS_SESSION_TOKEN`); the
-    /// [`crate::BootEnv`] reads it.
     /// `task_id` is the planner-role binary's task id (the same
     /// value the orchestrator/executor/reviewer received via
     /// `--task-id` argv).
-    pub fn new(
-        transport: Arc<dyn KernelTransport>,
-        session_token: String,
-        task_id: TaskId,
-    ) -> Self {
+    pub fn new(transport: Arc<dyn KernelTransport>, task_id: TaskId) -> Self {
         Self {
             transport,
-            session_token,
             task_id,
             next_seq: std::sync::atomic::AtomicU64::new(1),
             // High 64 bits of a fresh UUID v4 as the nonce seed —
@@ -139,7 +135,7 @@ impl IntentSubmitter {
     /// truthful "zero token cost" report rather than a `None`.
     fn skeleton(&self, kind: IntentKind) -> IntentRequest {
         IntentRequest {
-            session_token: self.session_token.clone(),
+            session_token: String::new(),
             sequence_number: self.next_seq(),
             envelope_nonce: self.next_nonce(),
             intent_kind: kind,
@@ -333,7 +329,7 @@ impl IntentSubmitter {
         justification: String,
     ) -> Result<IntentResponse, SubmitError> {
         let req = EscalationRequest {
-            session_token: self.session_token.clone(),
+            session_token: String::new(),
             task_id: self.task_id.clone(),
             class,
             requested_scope,
@@ -519,7 +515,7 @@ mod tests {
                         r.head_sha.as_ref().map(|s| s.as_str()),
                         Some("0123456789abcdef0123456789abcdef01234567"),
                     );
-                    assert_eq!(r.session_token, "session-tok");
+                    assert_eq!(r.session_token, "");
                     // Nonce shape: 32 hex chars.
                     assert_eq!(r.envelope_nonce.len(), 32);
                     assert!(r.envelope_nonce.bytes().all(|b| b.is_ascii_hexdigit()));
@@ -531,11 +527,7 @@ mod tests {
                 .unwrap();
         });
 
-        let submitter = IntentSubmitter::new(
-            transport,
-            "session-tok".to_owned(),
-            TaskId::parse("task-fixture").unwrap(),
-        );
+        let submitter = IntentSubmitter::new(transport, TaskId::parse("task-fixture").unwrap());
         let _resp = submitter
             .submit_complete_task("0123456789abcdef0123456789abcdef01234567")
             .await
@@ -579,11 +571,7 @@ mod tests {
                 .unwrap();
         });
 
-        let submitter = IntentSubmitter::new(
-            transport,
-            "session-tok".to_owned(),
-            TaskId::parse("exec-task").unwrap(),
-        );
+        let submitter = IntentSubmitter::new(transport, TaskId::parse("exec-task").unwrap());
         let _ = submitter
             .submit_structured_output(StructuredOutputKind::DiagnosticFlag {
                 severity: DiagnosticSeverity::Critical,
@@ -615,11 +603,7 @@ mod tests {
                 .unwrap();
         });
 
-        let submitter = IntentSubmitter::new(
-            transport,
-            "session-tok".to_owned(),
-            TaskId::parse("review-task").unwrap(),
-        );
+        let submitter = IntentSubmitter::new(transport, TaskId::parse("review-task").unwrap());
         let _resp = submitter
             .submit_review(false, Some("not enough tests".to_owned()))
             .await
@@ -650,11 +634,7 @@ mod tests {
                 }
             });
 
-        let submitter = IntentSubmitter::new(
-            transport,
-            "session-tok".to_owned(),
-            TaskId::parse("task-x").unwrap(),
-        );
+        let submitter = IntentSubmitter::new(transport, TaskId::parse("task-x").unwrap());
         let _ = submitter
             .submit_report_failure("a".to_owned())
             .await

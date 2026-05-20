@@ -258,36 +258,26 @@ impl HttpFetch for DirectHttpFetch {
 /// dispatches to the gateway subprocess and routes the response
 /// back as `KernelPlannerFetchResponse`.
 ///
-/// One instance owns the per-spawn [`KernelTransport`] (whose mutex
-/// serialises concurrent fetches on the wire — matching the
-/// kernel's per-connection sequential dispatch contract) and the
-/// per-spawn `session_token` the kernel re-validates on every
-/// frame.
+/// One instance owns the per-spawn [`KernelTransport`] whose mutex
+/// serialises concurrent fetches on the wire, matching the kernel's
+/// per-connection sequential dispatch contract. The planner does
+/// not hold a bearer session token; the kernel binds identity to
+/// the host-owned session stream before dispatch.
 #[derive(Clone)]
 pub struct KernelMediatedHttpFetch {
     transport: Arc<dyn KernelTransport>,
-    session_token: Arc<str>,
 }
 
 impl std::fmt::Debug for KernelMediatedHttpFetch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never log the session token: it is per-spawn key
-        // material that authenticates the planner to the kernel.
-        f.debug_struct("KernelMediatedHttpFetch")
-            .field("session_token_len", &self.session_token.len())
-            .finish()
+        f.debug_struct("KernelMediatedHttpFetch").finish()
     }
 }
 
 impl KernelMediatedHttpFetch {
-    /// Construct a new kernel-mediated fetcher. `session_token` is
-    /// the per-spawn 64-char hex token the kernel stamped into the
-    /// planner's environment as `RAXIS_SESSION_TOKEN`.
-    pub fn new(transport: Arc<dyn KernelTransport>, session_token: impl Into<Arc<str>>) -> Self {
-        Self {
-            transport,
-            session_token: session_token.into(),
-        }
+    /// Construct a new kernel-mediated fetcher.
+    pub fn new(transport: Arc<dyn KernelTransport>) -> Self {
+        Self { transport }
     }
 }
 
@@ -307,7 +297,7 @@ impl HttpFetch for KernelMediatedHttpFetch {
 
         let payload = PlannerFetchRequest {
             request_id: Uuid::new_v4(),
-            session_token: self.session_token.to_string(),
+            session_token: String::new(),
             fetch_kind: PlannerFetchKind::Inference,
             url: req.url.to_owned(),
             method: req.method.to_owned(),
@@ -405,6 +395,7 @@ mod tests {
         last_url: Mutex<Option<String>>,
         last_method: Mutex<Option<String>>,
         last_body: Mutex<Option<Vec<u8>>>,
+        last_session_token: Mutex<Option<String>>,
     }
 
     impl StubTransport {
@@ -414,6 +405,7 @@ mod tests {
                 last_url: Mutex::new(None),
                 last_method: Mutex::new(None),
                 last_body: Mutex::new(None),
+                last_session_token: Mutex::new(None),
             }
         }
     }
@@ -425,6 +417,7 @@ mod tests {
                 *self.last_url.lock().await = Some(req.url.clone());
                 *self.last_method.lock().await = Some(req.method.clone());
                 *self.last_body.lock().await = Some(req.body_bytes.clone());
+                *self.last_session_token.lock().await = Some(req.session_token.clone());
             }
             let resp = self
                 .response
@@ -447,8 +440,7 @@ mod tests {
             error: None,
         };
         let stub = Arc::new(StubTransport::new(response));
-        let fetcher =
-            KernelMediatedHttpFetch::new(stub.clone() as Arc<dyn KernelTransport>, "tok-fixture");
+        let fetcher = KernelMediatedHttpFetch::new(stub.clone() as Arc<dyn KernelTransport>);
         let resp = fetcher
             .fetch(HttpFetchRequest {
                 url: "https://example.test/api",
@@ -470,6 +462,7 @@ mod tests {
             stub.last_body.lock().await.as_deref(),
             Some(b"{\"hi\":1}".as_ref()),
         );
+        assert_eq!(stub.last_session_token.lock().await.as_deref(), Some(""));
     }
 
     #[tokio::test]
@@ -483,7 +476,7 @@ mod tests {
             error: Some("TimeoutExceeded".to_owned()),
         };
         let stub = Arc::new(StubTransport::new(response));
-        let fetcher = KernelMediatedHttpFetch::new(stub as Arc<dyn KernelTransport>, "tok");
+        let fetcher = KernelMediatedHttpFetch::new(stub as Arc<dyn KernelTransport>);
         let err = fetcher
             .fetch(HttpFetchRequest {
                 url: "https://example.test/api",
@@ -508,7 +501,7 @@ mod tests {
             error: Some("GatewayUnavailable".to_owned()),
         };
         let stub = Arc::new(StubTransport::new(response));
-        let fetcher = KernelMediatedHttpFetch::new(stub as Arc<dyn KernelTransport>, "tok");
+        let fetcher = KernelMediatedHttpFetch::new(stub as Arc<dyn KernelTransport>);
         let err = fetcher
             .fetch(HttpFetchRequest {
                 url: "https://example.test/api",
@@ -526,7 +519,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn debug_does_not_print_session_token() {
+    async fn debug_has_no_session_token_material() {
         let stub = Arc::new(StubTransport::new(PlannerFetchResponse {
             request_id: Uuid::nil(),
             status_code: Some(200),
@@ -535,12 +528,8 @@ mod tests {
             latency_ms: 0,
             error: None,
         }));
-        let fetcher =
-            KernelMediatedHttpFetch::new(stub as Arc<dyn KernelTransport>, "supersecrettoken");
+        let fetcher = KernelMediatedHttpFetch::new(stub as Arc<dyn KernelTransport>);
         let dbg = format!("{fetcher:?}");
-        assert!(
-            !dbg.contains("supersecrettoken"),
-            "session token leaked into Debug output"
-        );
+        assert!(!dbg.contains("session_token"));
     }
 }

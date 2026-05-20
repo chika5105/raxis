@@ -455,7 +455,7 @@ mod tests {
     fn planner_api_body_contains_required_anchor_text() {
         // Catch silent edits to the embedded contract.
         assert!(PLANNER_API_BODY.contains("RAXIS Planner API"));
-        assert!(PLANNER_API_BODY.contains("session_token"));
+        assert!(PLANNER_API_BODY.contains("kernel-bound session"));
         assert!(PLANNER_API_BODY.contains("FAIL_PATH_POLICY_VIOLATION"));
     }
 

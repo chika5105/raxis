@@ -37,24 +37,24 @@ const mono = IBM_Plex_Mono({
 export const metadata: Metadata = {
   metadataBase: new URL("https://raxis.io"),
   title: {
-    default: "Raxis: AI agents, authorized actions only, fully audited",
+    default: "RAXIS: Runtime Attestation eXchange for Intelligent Systems",
     template: "%s · Raxis",
   },
   description:
-    "Raxis (Runtime Attestation eXchange for Intelligent Systems) is a structural enforcement layer between AI agents and the systems they act on. Twelve invariants extending Lampson's 1974 protection model, with a working reference implementation in autonomous software engineering.",
+    "RAXIS, the Runtime Attestation eXchange for Intelligent Systems, is a governed runtime for autonomous AI agents: user-signed authority, host-side enforcement, credential mediation, isolated execution, and tamper-evident audit for every privileged action.",
   openGraph: {
-    title: "Raxis: AI agents, authorized actions only, fully audited",
+    title: "RAXIS: Runtime Attestation eXchange for Intelligent Systems",
     description:
-      "Twelve invariants. Cryptographic admission on every action. Tamper-evident audit on every decision.",
+      "Let agents work without giving them the keys. Users authorize the boundary, the kernel enforces it, and every decision lands in a tamper-evident audit chain.",
     type: "website",
     url: "/",
     siteName: "Raxis",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Raxis: AI agents, authorized actions only, fully audited",
+    title: "RAXIS: Runtime Attestation eXchange for Intelligent Systems",
     description:
-      "Twelve invariants. Cryptographic admission on every action. Tamper-evident audit on every decision.",
+      "Let agents work without giving them the keys. Users authorize the boundary, the kernel enforces it, and every decision lands in a tamper-evident audit chain.",
   },
   robots: { index: true, follow: true },
 };

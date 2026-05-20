@@ -266,9 +266,10 @@ pub struct CgroupQuota {
     pub memory_max_bytes: Option<u64>,
 }
 
-/// Opaque session token minted by the kernel and injected into the
-/// guest at spawn time. Every intent the guest submits is authenticated
-/// by this token; rotated per session, never re-used.
+/// Opaque session token minted by the kernel and kept host-side.
+/// Session-bound IPC dispatchers stamp it onto legacy request
+/// structs before handler admission; guests never receive it in
+/// their environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionToken(pub String);
 
@@ -294,8 +295,9 @@ pub struct VmSpec {
     pub boot_args: Vec<String>,
     /// Argv passed to PID 1 inside the guest.
     pub entrypoint_argv: Vec<String>,
-    /// Per-session secret used by the guest to authenticate every
-    /// intent frame.
+    /// Per-session secret used host-side to authenticate every
+    /// intent frame after the substrate has bound a VM stream to a
+    /// session.
     pub session_token: SessionToken,
     /// VSock CID assigned to this guest. `None` for non-VSock
     /// substrates (Wasm, mock).
@@ -354,9 +356,11 @@ pub struct VmSpec {
     ///   `RAXIS_TPROXY_KERNEL_TCP` so the in-guest tproxy
     ///   substrate can find it. Replaced by a vsock CID at V2 GA.
     ///
-    /// * **Session token** — `RAXIS_SESSION_TOKEN` mirrors the
-    ///   value of `session_token` for guests that consume it via
-    ///   env rather than via the framed handshake.
+    /// * **Session identity** — `RAXIS_SESSION_ID` is safe
+    ///   guest-visible correlation metadata. The bearer
+    ///   `session_token` stays host-side; session-bound IPC streams
+    ///   are stamped with it by the kernel dispatcher after the VM
+    ///   connection is accepted.
     ///
     /// Substrates MUST honour this map in spawn order; the
     /// reference subprocess substrate forwards the map to

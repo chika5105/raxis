@@ -5,7 +5,7 @@
 //
 // Three sockets are bound at startup:
 //   operator.sock  — operator CLI connections (challenge-response auth)
-//   planner.sock   — planner subprocess connections (session token auth)
+//   planner.sock   — planner/verifier connections (session-bound or token auth)
 //   gateway.sock   — gateway connections (v1 stub — accepts but drops)
 //
 // Each accepted connection gets its own Tokio task. The connection task
@@ -460,6 +460,17 @@ where
 {
     use raxis_ipc::{read_frame, IpcMessage};
 
+    // Session-bound VM streams are authenticated by the host-side
+    // spawn path, not by a bearer token in the guest environment.
+    // Resolve the canonical DB token once and stamp it onto the
+    // legacy handler wire structs immediately before dispatch so
+    // the existing admission handlers keep their fail-closed token
+    // checks without exposing the token to the planner process.
+    let bound_session_token = match session_id_for_activity.as_deref() {
+        Some(session_id) => Some(resolve_bound_session_token(&ctx, session_id).await?),
+        None => None,
+    };
+
     // `INV-FAILURE-REASON-CONCRETE-01` — capture the last-seen
     // planner exit notice across every frame the loop reads. The
     // planner emits at most one notice per session (immediately
@@ -539,7 +550,10 @@ where
         // discipline the invariant pins.
         match msg {
             // ── IntentRequest ────────────────────────────────────────────
-            IpcMessage::IntentRequest(req) => {
+            IpcMessage::IntentRequest(mut req) => {
+                if let Some(token) = bound_session_token.as_ref() {
+                    req.session_token = token.clone();
+                }
                 let _ipc_metric = crate::observability::KernelSubstrateIpcRoundtrip::start(
                     ctx.observability.as_ref(),
                     crate::observability::IPC_ROLE_PLANNER,
@@ -723,7 +737,10 @@ where
             // The handler returns an EscalationResponse for every input —
             // including malformed ones — so the connection stays open and
             // the planner gets a typed reply it can match on.
-            IpcMessage::EscalationRequest(req) => {
+            IpcMessage::EscalationRequest(mut req) => {
+                if let Some(token) = bound_session_token.as_ref() {
+                    req.session_token = token.clone();
+                }
                 let _ipc_metric = crate::observability::KernelSubstrateIpcRoundtrip::start(
                     ctx.observability.as_ref(),
                     crate::observability::IPC_ROLE_PLANNER,
@@ -751,7 +768,10 @@ where
             // typed PlannerFetchResponse. See
             // `provider-failure-handling.md §2.1` for the architecture
             // and `handlers/planner_fetch.rs` for the admission rules.
-            IpcMessage::PlannerFetchRequest(req) => {
+            IpcMessage::PlannerFetchRequest(mut req) => {
+                if let Some(token) = bound_session_token.as_ref() {
+                    req.session_token = token.clone();
+                }
                 let _ipc_metric = crate::observability::KernelSubstrateIpcRoundtrip::start(
                     ctx.observability.as_ref(),
                     crate::observability::IPC_ROLE_PLANNER,
@@ -823,6 +843,36 @@ where
         idle_watchdog_fired,
         idle_watchdog_threshold_secs: idle_threshold_secs,
     })
+}
+
+async fn resolve_bound_session_token(
+    ctx: &Arc<HandlerContext>,
+    session_id: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let sid = raxis_types::SessionId::parse(session_id).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("session-bound planner stream carried invalid session id {session_id:?}: {e}"),
+        )
+    })?;
+    let store = Arc::clone(&ctx.store);
+    let row = tokio::task::spawn_blocking(move || {
+        crate::authority::session::get_session_raw(&sid, &store)
+    })
+    .await
+    .map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("session token lookup task failed: {e}"),
+        )
+    })?
+    .map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("session token lookup failed for {session_id}: {e}"),
+        )
+    })?;
+    Ok(row.session_token)
 }
 
 async fn write_planner_frame<S>(

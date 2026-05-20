@@ -93,7 +93,6 @@ fn step10_full_pipeline_stage_spawn_push_recv_destroy() {
         data_dir: tmp.path().to_path_buf(),
         session_uuid: "step10-uuid-1".to_owned(),
         system_prompt: "You are an Executor.".to_owned(),
-        session_token: "tok-step10".to_owned(),
         vsock_cid: 0xC1D_5070,
         vsock_port: 1024,
         mount_mode: MountMode::ReadWrite,
@@ -157,7 +156,6 @@ fn step10_mount_carries_content_hash_through_substrate_boundary() {
         data_dir: tmp.path().to_path_buf(),
         session_uuid: "step10-uuid-hash".to_owned(),
         system_prompt: "Reviewer system prompt".to_owned(),
-        session_token: "tok-rev".to_owned(),
         vsock_cid: 0xC1D_5071,
         vsock_port: 1024,
         // Reviewer mount per Step 24.
@@ -207,14 +205,12 @@ fn step10_distinct_sessions_stage_independent_worktrees() {
         data_dir: tmp.path().to_path_buf(),
         session_uuid: "step10-multi-A".to_owned(),
         system_prompt: "Executor A".to_owned(),
-        session_token: "tok-A".to_owned(),
         vsock_cid: 0xC1D_AA01,
         vsock_port: 1024,
         mount_mode: MountMode::ReadWrite,
     };
     let mut b = a.clone();
     b.session_uuid = "step10-multi-B".to_owned();
-    b.session_token = "tok-B".to_owned();
     b.vsock_cid = 0xC1D_BB02;
     a.system_prompt.push_str("\nbranch-A rules");
     b.system_prompt.push_str("\nbranch-B rules");
