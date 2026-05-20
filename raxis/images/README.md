@@ -26,6 +26,7 @@ Common variants:
 cargo xtask images bake --role reviewer
 cargo xtask images bake --no-cache
 cargo xtask images bake --builder podman
+cargo xtask images bake --target x86_64-unknown-linux-musl
 ```
 
 `bake` does the full flow: host preflight, guest-kernel staging and
@@ -46,6 +47,11 @@ flowchart TD
     images --> manifest["raxis-<role>-<kver>.manifest.toml"]
     images --> bake["raxis-<role>-<kver>.bake.json"]
 ```
+
+For release bundles, bake once per guest architecture. Apple Silicon
+macOS and arm64 Linux consume the `aarch64-unknown-linux-musl` guest
+bundle; Intel macOS and x86_64 Linux consume the
+`x86_64-unknown-linux-musl` bundle.
 
 ## Cache Safety
 

@@ -9,19 +9,19 @@
 #
 # Pipeline shape (pinned by the spec):
 #
-#   build-images   →   build-darwin   →   notarize   →   publish
-#                ↘     build-linux                      ↗
+#   fallback-digests → build-darwin → notarize → publish → tap
+#                 ↘    build-linux                 ↗
 #
-# `build-images` runs first because the kernel binary build needs
-# the per-role image-digest job outputs to bake them into the
-# kernel via RAXIS_EXPECTED_*_IMAGE_DIGEST_HEX. The kernel binary
-# therefore always carries the digest of the exact image bytes
-# shipped in the same release — they cannot drift.
+# Guest runtime bundles are staged from repository-variable URLs and
+# verified by SHA-256 before any release tarball is created. The
+# `fallback-digests` job remains only for the legacy V1 digest constants;
+# V2 image integrity comes from signed manifests verified by the kernel's
+# compiled-in Ed25519 trust anchor.
 #
 # Release-secret layout (release-and-distribution.md §5.3):
 #
 #   RAXIS_KERNEL_SIGNING_KEY_HEX                   (kernel build)
-#   RAXIS_KERNEL_SIGNING_KEY_PRIV_HEX              (image-builder)
+#   RAXIS_KERNEL_SIGNING_KEY_PRIV_HEX              (guest-bundle builder)
 #   APPLE_DEVELOPER_ID_APPLICATION_P12             (notarize.sh)
 #   APPLE_DEVELOPER_ID_APPLICATION_PASSWORD        (notarize.sh)
 #   APPLE_NOTARIZATION_API_KEY_ID                  (notarize.sh)
@@ -29,10 +29,17 @@
 #   APPLE_NOTARIZATION_API_KEY_P8                  (notarize.sh)
 #   HOMEBREW_TAP_DEPLOY_KEY                        (publish)
 #
-# Note: the kernel signing keypair is split across two secrets —
-# the public half (HEX) reaches the kernel build, the private half
-# (PRIV_HEX) reaches the image-builder. Neither secret is exposed
-# to both jobs simultaneously.
+# Required repository variables (not secrets):
+#
+#   RAXIS_GUEST_BUNDLE_ARM64_URL
+#   RAXIS_GUEST_BUNDLE_ARM64_SHA256
+#   RAXIS_GUEST_BUNDLE_X86_64_URL
+#   RAXIS_GUEST_BUNDLE_X86_64_SHA256
+#   HOMEBREW_TAP_REPOSITORY                        (default: chika5105/homebrew-raxis)
+#
+# Note: the kernel signing keypair is split. The public half (HEX)
+# reaches the host-kernel build. The private half signs guest image
+# manifests before they are packed into the guest runtime bundles.
 
 name: release
 
@@ -55,21 +62,20 @@ concurrency:
 
 env:
   RAXIS_VERSION: ${{ github.ref_name }}
+  HOMEBREW_TAP_REPOSITORY: ${{ vars.HOMEBREW_TAP_REPOSITORY || 'chika5105/homebrew-raxis' }}
 
 jobs:
   # ────────────────────────────────────────────────────────────
-  # Stage 1: build the three canonical-image archives.
+  # Stage 1: legacy fallback image digest placeholders.
   #
-  # Currently this job runs in skeleton mode — the mkfs.erofs side
-  # is not yet wired (see release-and-distribution.md §11 OPEN
-  # row). The job IS wired to: build the workspace, run the image-
-  # builder against a fixture rootfs, sign the resulting manifest
-  # with RAXIS_KERNEL_SIGNING_KEY_PRIV_HEX, and export the per-role
-  # digests as job outputs. The fixture-rootfs portion is replaced
-  # with the real rootfs producer in a follow-up.
+  # V2 releases ship complete guest runtime bundles (`images/` plus
+  # `kernel/`) as part of each platform tarball. Those bundles are
+  # staged from repository-variable URLs and verified by SHA-256 in the
+  # host build jobs below. This job only feeds the legacy digest env vars
+  # consumed by `raxis-canonical-images/build.rs`.
   # ────────────────────────────────────────────────────────────
   build-images:
-    name:    build canonical images
+    name:    compute legacy fallback digests
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -126,8 +132,10 @@ jobs:
         include:
           - arch:   x86_64
             target: x86_64-unknown-linux-gnu
+            guest_key: X86_64
           - arch:   arm64
             target: aarch64-unknown-linux-gnu
+            guest_key: ARM64
     defaults:
       run:
         working-directory: raxis
@@ -166,23 +174,42 @@ jobs:
       - name: stage bin layout
         run: |
           set -euo pipefail
-          mkdir -p out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}/bin
-          for b in raxis-kernel raxis-cli raxis-planner-orchestrator \
-                   raxis-planner-executor raxis-planner-reviewer raxis-tproxy; do
-            cp target/${{ matrix.target }}/release/${b} \
-               out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}/bin/${b}
-          done
-          # CLI is named `raxis-cli` from the formula's POV but the
-          # binary's CARGO [[bin]] name is `raxis`. Rename so the
-          # bin/ layout matches the formula's `bin.install` entries.
-          mv out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}/bin/raxis \
-             out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}/bin/raxis-cli || true
-          mv out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}/bin/raxis-planner-orchestrator \
-             out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}/bin/raxis-orchestrator
-          mv out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}/bin/raxis-planner-executor \
-             out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}/bin/raxis-executor
-          mv out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}/bin/raxis-planner-reviewer \
-             out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}/bin/raxis-reviewer
+          outdir="out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}"
+          mkdir -p "${outdir}/bin" "${outdir}/share/raxis"
+          cp target/${{ matrix.target }}/release/raxis "${outdir}/bin/raxis-cli"
+          cp target/${{ matrix.target }}/release/raxis "${outdir}/bin/raxis"
+          cp target/${{ matrix.target }}/release/raxis-kernel "${outdir}/bin/raxis-kernel"
+          cp target/${{ matrix.target }}/release/raxis-orchestrator "${outdir}/bin/raxis-orchestrator"
+          cp target/${{ matrix.target }}/release/raxis-executor "${outdir}/bin/raxis-executor"
+          cp target/${{ matrix.target }}/release/raxis-reviewer "${outdir}/bin/raxis-reviewer"
+          cp target/${{ matrix.target }}/release/raxis-tproxy "${outdir}/bin/raxis-tproxy"
+          cat > "${outdir}/share/raxis/policy.toml.example" <<'EOF'
+          # RAXIS operator policy example.
+          # Copy this file to policy.toml and run `raxis genesis`.
+          EOF
+
+      - name: stage guest runtime bundle
+        env:
+          GUEST_BUNDLE_URL: ${{ vars[format('RAXIS_GUEST_BUNDLE_{0}_URL', matrix.guest_key)] }}
+          GUEST_BUNDLE_SHA256: ${{ vars[format('RAXIS_GUEST_BUNDLE_{0}_SHA256', matrix.guest_key)] }}
+        run: |
+          set -euo pipefail
+          outdir="out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}"
+          if [[ -z "${GUEST_BUNDLE_URL:-}" || -z "${GUEST_BUNDLE_SHA256:-}" ]]; then
+            echo "::error::missing RAXIS_GUEST_BUNDLE_${{ matrix.guest_key }}_{URL,SHA256} repository variables"
+            exit 78
+          fi
+          curl -fsSL "${GUEST_BUNDLE_URL}" -o /tmp/raxis-guest-runtime.tar.gz
+          actual="$(shasum -a 256 /tmp/raxis-guest-runtime.tar.gz | awk '{print $1}')"
+          if [[ "${actual}" != "${GUEST_BUNDLE_SHA256}" ]]; then
+            echo "::error::guest runtime bundle SHA mismatch: expected ${GUEST_BUNDLE_SHA256}, got ${actual}"
+            exit 65
+          fi
+          tar -xzf /tmp/raxis-guest-runtime.tar.gz -C "${outdir}"
+          test -f "${outdir}/kernel/vmlinux"
+          test -f "${outdir}/kernel/vmlinux.config"
+          test -d "${outdir}/images"
+          test -n "$(find "${outdir}/images" -maxdepth 1 -name 'raxis-*.img' -print -quit)"
 
       - name: tarball
         run: |
@@ -207,8 +234,10 @@ jobs:
         include:
           - arch:   arm64
             target: aarch64-apple-darwin
+            guest_key: ARM64
           - arch:   x86_64
             target: x86_64-apple-darwin
+            guest_key: X86_64
     defaults:
       run:
         working-directory: raxis
@@ -243,29 +272,48 @@ jobs:
       - name: stage bin layout
         run: |
           set -euo pipefail
-          mkdir -p out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}/bin
-          for b in raxis-kernel raxis-planner-orchestrator \
-                   raxis-planner-executor raxis-planner-reviewer; do
-            cp target/${{ matrix.target }}/release/${b} \
-               out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}/bin/${b}
-          done
-          # Rename to formula-friendly names.
-          cp target/${{ matrix.target }}/release/raxis \
-             out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}/bin/raxis-cli
-          mv out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}/bin/raxis-planner-orchestrator \
-             out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}/bin/raxis-orchestrator
-          mv out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}/bin/raxis-planner-executor \
-             out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}/bin/raxis-executor
-          mv out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}/bin/raxis-planner-reviewer \
-             out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}/bin/raxis-reviewer
+          outdir="out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}"
+          mkdir -p "${outdir}/bin" "${outdir}/share/raxis"
+          cp target/${{ matrix.target }}/release/raxis "${outdir}/bin/raxis-cli"
+          cp target/${{ matrix.target }}/release/raxis "${outdir}/bin/raxis"
+          cp target/${{ matrix.target }}/release/raxis-kernel "${outdir}/bin/raxis-kernel"
+          cp target/${{ matrix.target }}/release/raxis-orchestrator "${outdir}/bin/raxis-orchestrator"
+          cp target/${{ matrix.target }}/release/raxis-executor "${outdir}/bin/raxis-executor"
+          cp target/${{ matrix.target }}/release/raxis-reviewer "${outdir}/bin/raxis-reviewer"
+          cat > "${outdir}/share/raxis/policy.toml.example" <<'EOF'
+          # RAXIS operator policy example.
+          # Copy this file to policy.toml and run `raxis genesis`.
+          EOF
 
           # tproxy stub for macOS (release-and-distribution.md §6.3).
-          cat > out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}/bin/raxis-tproxy <<'EOF'
-          #!/bin/sh
-          echo "raxis-tproxy: linux-only; the macOS kernel uses host-routed egress" >&2
-          exit 70
-          EOF
-          chmod +x out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}/bin/raxis-tproxy
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'echo "raxis-tproxy: linux-only; the macOS kernel uses host-routed egress" >&2' \
+            'exit 70' > "${outdir}/bin/raxis-tproxy"
+          chmod +x "${outdir}/bin/raxis-tproxy"
+
+      - name: stage guest runtime bundle
+        env:
+          GUEST_BUNDLE_URL: ${{ vars[format('RAXIS_GUEST_BUNDLE_{0}_URL', matrix.guest_key)] }}
+          GUEST_BUNDLE_SHA256: ${{ vars[format('RAXIS_GUEST_BUNDLE_{0}_SHA256', matrix.guest_key)] }}
+        run: |
+          set -euo pipefail
+          outdir="out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}"
+          if [[ -z "${GUEST_BUNDLE_URL:-}" || -z "${GUEST_BUNDLE_SHA256:-}" ]]; then
+            echo "::error::missing RAXIS_GUEST_BUNDLE_${{ matrix.guest_key }}_{URL,SHA256} repository variables"
+            exit 78
+          fi
+          curl -fsSL "${GUEST_BUNDLE_URL}" -o /tmp/raxis-guest-runtime.tar.gz
+          actual="$(shasum -a 256 /tmp/raxis-guest-runtime.tar.gz | awk '{print $1}')"
+          if [[ "${actual}" != "${GUEST_BUNDLE_SHA256}" ]]; then
+            echo "::error::guest runtime bundle SHA mismatch: expected ${GUEST_BUNDLE_SHA256}, got ${actual}"
+            exit 65
+          fi
+          tar -xzf /tmp/raxis-guest-runtime.tar.gz -C "${outdir}"
+          test -f "${outdir}/kernel/vmlinux"
+          test -f "${outdir}/kernel/vmlinux.config"
+          test -d "${outdir}/images"
+          test -n "$(find "${outdir}/images" -maxdepth 1 -name 'raxis-*.img' -print -quit)"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -336,15 +384,44 @@ jobs:
             artifacts/raxis-${{ env.RAXIS_VERSION }}-darwin-arm64/raxis-${{ env.RAXIS_VERSION }}-darwin-arm64.tar.gz
             artifacts/raxis-${{ env.RAXIS_VERSION }}-darwin-x86_64/raxis-${{ env.RAXIS_VERSION }}-darwin-x86_64.tar.gz
 
-      # Tap update lives in a follow-up iteration once the canonical-
-      # image archives are wired and the URL/sha256 substitution
-      # surface is finalised. Until then publishing a release is
-      # itself sufficient — operators can `curl` the tarballs
-      # directly from the release page.
-      #
-      # TODO(release-and-distribution.md §5.5):
-      #   1. compute sha256 of every uploaded tarball
-      #   2. set RAXIS_*_URL + RAXIS_*_SHA256 env vars
-      #   3. invoke raxis/release/scripts/render-formula.sh per formula
-      #   4. checkout chika5105/homebrew-tap via HOMEBREW_TAP_DEPLOY_KEY
-      #   5. force-push the rendered Formula/raxis-*.rb files
+      - name: render Homebrew formula
+        run: |
+          set -euo pipefail
+          base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RAXIS_VERSION}"
+          export RAXIS_DARWIN_ARM64_URL="${base_url}/raxis-${RAXIS_VERSION}-darwin-arm64.tar.gz"
+          export RAXIS_DARWIN_X86_64_URL="${base_url}/raxis-${RAXIS_VERSION}-darwin-x86_64.tar.gz"
+          export RAXIS_LINUX_ARM64_URL="${base_url}/raxis-${RAXIS_VERSION}-linux-arm64.tar.gz"
+          export RAXIS_LINUX_X86_64_URL="${base_url}/raxis-${RAXIS_VERSION}-linux-x86_64.tar.gz"
+          export RAXIS_DARWIN_ARM64_SHA256="$(shasum -a 256 artifacts/raxis-${RAXIS_VERSION}-darwin-arm64/raxis-${RAXIS_VERSION}-darwin-arm64.tar.gz | awk '{print $1}')"
+          export RAXIS_DARWIN_X86_64_SHA256="$(shasum -a 256 artifacts/raxis-${RAXIS_VERSION}-darwin-x86_64/raxis-${RAXIS_VERSION}-darwin-x86_64.tar.gz | awk '{print $1}')"
+          export RAXIS_LINUX_ARM64_SHA256="$(shasum -a 256 artifacts/raxis-${RAXIS_VERSION}-linux-arm64/raxis-${RAXIS_VERSION}-linux-arm64.tar.gz | awk '{print $1}')"
+          export RAXIS_LINUX_X86_64_SHA256="$(shasum -a 256 artifacts/raxis-${RAXIS_VERSION}-linux-x86_64/raxis-${RAXIS_VERSION}-linux-x86_64.tar.gz | awk '{print $1}')"
+          export RAXIS_VERSION="${RAXIS_VERSION#v}"
+          mkdir -p rendered/Formula
+          raxis/release/scripts/render-formula.sh raxis > rendered/Formula/raxis.rb
+
+      - name: push Homebrew tap
+        run: |
+          set -euo pipefail
+          if [[ -z "${HOMEBREW_TAP_DEPLOY_KEY:-}" ]]; then
+            echo "::error::HOMEBREW_TAP_DEPLOY_KEY is required to update the Homebrew tap"
+            exit 78
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${HOMEBREW_TAP_DEPLOY_KEY}" > ~/.ssh/raxis-homebrew-tap
+          chmod 600 ~/.ssh/raxis-homebrew-tap
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/raxis-homebrew-tap -o IdentitiesOnly=yes" \
+            git clone "git@github.com:${HOMEBREW_TAP_REPOSITORY}.git" tap
+          mkdir -p tap/Formula
+          cp rendered/Formula/raxis.rb tap/Formula/raxis.rb
+          git -C tap config user.name "raxis-release-bot"
+          git -C tap config user.email "release-bot@raxis.io"
+          git -C tap add Formula/raxis.rb
+          if git -C tap diff --cached --quiet; then
+            echo "Homebrew tap already up to date"
+            exit 0
+          fi
+          git -C tap commit -m "Update raxis ${RAXIS_VERSION}"
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/raxis-homebrew-tap -o IdentitiesOnly=yes" \
+            git -C tap push origin HEAD

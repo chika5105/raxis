@@ -2710,6 +2710,7 @@ fn preflight_bake_inputs(
     explicit_builder: Option<Builder>,
     explicit_kernel: Option<&Path>,
     explicit_kernel_config: Option<&Path>,
+    explicit_target: Option<&str>,
     force_overwrite: bool,
 ) -> Result<PreflightOutcome> {
     // 1. Containerfile graph acyclicity — runs first because it's
@@ -2782,7 +2783,10 @@ fn preflight_bake_inputs(
     //    `rustup target add` remediation) but we DO assert the
     //    matching musl linker exists when on macOS — that's the
     //    `brew install musl-cross` hint operators hit most often.
-    let target_triple = default_target_triple().to_owned();
+    let target_triple = explicit_target
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default_target_triple().to_owned());
+    let _ = oci_platform_for_target_triple(&target_triple)?;
     #[cfg(target_os = "macos")]
     {
         if target_triple.contains("musl") {
@@ -2901,6 +2905,11 @@ struct BakeArgs {
     explicit_builder: Option<Builder>,
     explicit_kernel: Option<PathBuf>,
     explicit_kernel_config: Option<PathBuf>,
+    /// Cross-compile target triple for guest PID-1 binaries. Defaults
+    /// to the host-arch-derived Linux musl triple; release pipelines
+    /// pass this explicitly so arm64/x86_64 guest bundles cannot drift
+    /// with the runner architecture.
+    target: Option<String>,
     /// When true, overwrite an existing
     /// `<install_dir>/kernel/vmlinux` with the explicit-source
     /// kernel even if the staged copy already exists. The bake
@@ -2922,6 +2931,7 @@ impl BakeArgs {
         let mut explicit_builder: Option<Builder> = None;
         let mut explicit_kernel: Option<PathBuf> = None;
         let mut explicit_kernel_config: Option<PathBuf> = None;
+        let mut target: Option<String> = None;
         let mut force: bool = false;
         let mut no_cache: bool = false;
 
@@ -2965,6 +2975,17 @@ impl BakeArgs {
                         argv.get(i).context("--kernel-config requires a path")?,
                     ));
                 }
+                "--target" => {
+                    i += 1;
+                    let value = argv.get(i).context("--target requires a triple")?;
+                    if value.trim().is_empty() {
+                        bail!("--target requires a non-empty triple");
+                    }
+                    // Validate early so a typo does not surface ten
+                    // minutes later from Docker's platform resolver.
+                    let _ = oci_platform_for_target_triple(value)?;
+                    target = Some(value.clone());
+                }
                 "--force" => force = true,
                 "--no-cache" => no_cache = true,
                 "-h" | "--help" => {
@@ -3006,6 +3027,7 @@ impl BakeArgs {
             explicit_builder,
             explicit_kernel,
             explicit_kernel_config,
+            target,
             force,
             no_cache,
         })
@@ -3016,7 +3038,8 @@ fn print_bake_help() {
     eprintln!(
         "usage: cargo xtask images bake [--role <ROLE>]... \n         \
          [--install-dir <PATH>] [--signing-key <PATH>] \n         \
-         [--builder docker|podman|buildah] [--kernel-from-file <PATH>] \n         \
+         [--builder docker|podman|buildah] [--target <TRIPLE>] \n         \
+         [--kernel-from-file <PATH>] \n         \
          [--kernel-config <PATH>] \n         \
          [--force] [--no-cache]\n\
          \n\
@@ -3038,6 +3061,7 @@ fn print_bake_help() {
                             (autogen on first run; per-clone, untracked.\n                     \
                             INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01)\n  \
          --builder          auto-detect (docker → podman → buildah)\n  \
+         --target           guest Rust target triple; default {default_target}\n  \
          --kernel-from-file resolution order: --kernel-from-file → \n                     \
                             $RAXIS_DEV_KERNEL_SOURCE → \n                     \
                             <install_dir>/kernel/vmlinux (already-staged) → \n                     \
@@ -3076,6 +3100,7 @@ fn print_bake_help() {
          trust anchor after rebuilding `raxis-kernel`, run:\n  \
          cargo xtask images verify-trust-anchor --kernel <path-to-raxis-kernel>\n",
         default_install = DEFAULT_DEV_INSTALL_DIR,
+        default_target = default_target_triple(),
     );
 }
 
@@ -3171,6 +3196,7 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
         args.explicit_builder,
         args.explicit_kernel.as_deref(),
         args.explicit_kernel_config.as_deref(),
+        args.target.as_deref(),
         args.force,
     )?;
 
@@ -3760,6 +3786,26 @@ mod tests {
             "linux/arm64"
         );
         assert!(oci_platform_for_target_triple("riscv64-unknown-linux-musl").is_err());
+    }
+
+    #[test]
+    fn bake_args_parse_accepts_explicit_release_target() {
+        let argv = vec![
+            "--target".to_owned(),
+            "x86_64-unknown-linux-musl".to_owned(),
+        ];
+        let args = BakeArgs::parse(&argv).unwrap();
+        assert_eq!(args.target.as_deref(), Some("x86_64-unknown-linux-musl"));
+    }
+
+    #[test]
+    fn bake_args_parse_rejects_unknown_release_target() {
+        let argv = vec![
+            "--target".to_owned(),
+            "riscv64-unknown-linux-musl".to_owned(),
+        ];
+        let err = BakeArgs::parse(&argv).unwrap_err().to_string();
+        assert!(err.contains("no OCI platform mapping"), "got: {err}");
     }
 
     // `bake_rootfs_args_*` tests pinned the retired `bake-rootfs`
@@ -4819,6 +4865,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
         )
         .unwrap_err()
@@ -4850,6 +4897,7 @@ mod tests {
             &install,
             &key_hex,
             &[Role::Reviewer],
+            None,
             None,
             None,
             None,
@@ -4901,6 +4949,7 @@ mod tests {
             &install,
             &key_hex,
             &[Role::Reviewer, Role::Orchestrator],
+            None,
             None,
             None,
             None,

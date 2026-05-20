@@ -19,6 +19,7 @@
 #   RAXIS_EXECUTOR_STARTER_IMG_URL  RAXIS_EXECUTOR_STARTER_IMG_SHA256
 #
 # Argument: formula name without `.rb.tmpl` extension. Either:
+#   raxis
 #   raxis-kernel
 #   raxis-cli
 #
@@ -31,7 +32,7 @@ set -euo pipefail
 if [[ $# -ne 1 ]]; then
     cat >&2 <<EOF
 usage: $0 <formula-name>
-  formula-name: raxis-kernel | raxis-cli
+  formula-name: raxis | raxis-kernel | raxis-cli
 EOF
     exit 64
 fi
@@ -56,6 +57,9 @@ required_vars=(
 
 # raxis-kernel additionally needs the three image-archive variables.
 case "${formula_name}" in
+    raxis)
+        : # single complete bundle: binaries + canonical images + guest kernel
+        ;;
     raxis-kernel)
         required_vars+=(
             RAXIS_REVIEWER_IMG_URL              RAXIS_REVIEWER_IMG_SHA256

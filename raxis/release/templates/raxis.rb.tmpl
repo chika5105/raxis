@@ -1,0 +1,91 @@
+# Auto-generated from raxis/release/templates/raxis.rb.tmpl
+# by .github/workflows/release.yml. Do NOT hand-edit the rendered
+# formula in the tap repository; the next release overwrites it.
+
+class Raxis < Formula
+  desc     "Runtime Attestation eXchange for Intelligent Systems"
+  homepage "https://raxis.io"
+  version  "@@RAXIS_VERSION@@"
+  license  "SSPL-1.0"
+
+  on_macos do
+    on_arm do
+      url "@@RAXIS_DARWIN_ARM64_URL@@"
+      sha256 "@@RAXIS_DARWIN_ARM64_SHA256@@"
+    end
+    on_intel do
+      url "@@RAXIS_DARWIN_X86_64_URL@@"
+      sha256 "@@RAXIS_DARWIN_X86_64_SHA256@@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "@@RAXIS_LINUX_ARM64_URL@@"
+      sha256 "@@RAXIS_LINUX_ARM64_SHA256@@"
+    end
+    on_intel do
+      url "@@RAXIS_LINUX_X86_64_URL@@"
+      sha256 "@@RAXIS_LINUX_X86_64_SHA256@@"
+    end
+  end
+
+  def install
+    bin.install "bin/raxis-kernel"
+    bin.install "bin/raxis-cli"
+    bin.install "bin/raxis"
+    bin.install "bin/raxis-orchestrator"
+    bin.install "bin/raxis-executor"
+    bin.install "bin/raxis-reviewer"
+    bin.install "bin/raxis-tproxy"
+
+    pkgshare.install "images" if File.directory?("images")
+    pkgshare.install "kernel" if File.directory?("kernel")
+
+    (etc/"raxis").mkpath
+    if File.exist?("share/raxis/policy.toml.example") &&
+       !(etc/"raxis/policy.toml.example").exist?
+      (etc/"raxis").install "share/raxis/policy.toml.example"
+    end
+  end
+
+  service do
+    run [opt_bin/"raxis-kernel"]
+    keep_alive true
+    environment_variables RAXIS_INSTALL_DIR: opt_pkgshare.to_s,
+                          RAXIS_DATA_DIR: (var/"lib/raxis").to_s
+    log_path var/"log/raxis/kernel.log"
+    error_log_path var/"log/raxis/kernel.err.log"
+  end
+
+  def post_install
+    (var/"lib/raxis").mkpath
+    (var/"log/raxis").mkpath
+
+    system bin/"raxis", "doctor", "canonical-images",
+                         "--install-dir", pkgshare.to_s
+    system bin/"raxis", "doctor", "signing-key-fp"
+  end
+
+  def caveats
+    <<~EOS
+      RAXIS installed its immutable runtime bundle under:
+        #{pkgshare}
+
+      The Homebrew service runs with:
+        RAXIS_INSTALL_DIR=#{opt_pkgshare}
+        RAXIS_DATA_DIR=#{var}/lib/raxis
+
+      Start the kernel with:
+        brew services start raxis
+
+      Operator policy example:
+        #{etc}/raxis/policy.toml.example
+    EOS
+  end
+
+  test do
+    assert_match "signing key fingerprint",
+      shell_output("#{bin}/raxis doctor signing-key-fp")
+  end
+end
