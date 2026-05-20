@@ -34,13 +34,13 @@
 //!
 //! ## Caching
 //!
-//! Every probe is bounded to sub-second on a warm VM: we do NOT
-//! recursively walk the filesystem (workspace-language detection
-//! peeks at the workspace's *top-level entries* only) and we do not
-//! shell out for binaries we did not specifically need a version
-//! string for. The result is cached for the lifetime of the
-//! planner-harness process via [`cached_capabilities`] —
-//! the planner-executor is one-shot per session, so per-process
+//! Every warm lookup is O(1): the cold probe is bounded per
+//! subprocess and avoids recursive filesystem walks, then the result
+//! is cached for the lifetime of the planner-harness process via
+//! [`cached_capabilities`]. Hosted CI and BYO images can cold-start
+//! language package probes slowly, so callers should rely on the
+//! cache invariant rather than a universal cold wall-clock ceiling.
+//! The planner-executor is one-shot per session, so per-process
 //! caching == per-session caching.
 //!
 //! ## Determinism

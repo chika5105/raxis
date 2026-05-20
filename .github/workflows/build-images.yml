@@ -56,6 +56,8 @@ jobs:
     defaults:
       run:
         working-directory: raxis
+    env:
+      FIRECRACKER_VERSION: v1.15.1
     steps:
       - uses: actions/checkout@v4
 
@@ -84,13 +86,64 @@ jobs:
       - name: cargo build raxis-verifier-no-secrets (live-e2e prerequisite)
         run: cargo build -p raxis-verifier-no-secrets --release
 
-      # GitHub Actions Ubuntu runners ship /dev/kvm but the runner
-      # user lacks permission. Open it so the kernel's Firecracker
-      # substrate probe succeeds and e2e tests run against real
-      # hardware-isolated VMs rather than the fallback shim.
-      - name: enable KVM (Linux)
+      # GitHub Actions Ubuntu runners can expose KVM, but the runner
+      # user and modules are not consistently prepared. Make the
+      # Firecracker substrate prerequisites explicit before the
+      # workspace test pass so a future live-gated test fails with a
+      # clear host-preflight diagnostic instead of a late spawn error.
+      - name: prepare Firecracker substrate (Linux)
         if:   runner.os == 'Linux'
-        run:  sudo chmod 666 /dev/kvm
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y e2fsprogs curl ca-certificates
+          sudo modprobe kvm || true
+          sudo modprobe vhost_vsock || true
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+          fi
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64) fc_arch="x86_64" ;;
+            aarch64|arm64) fc_arch="aarch64" ;;
+            *) echo "::error::unsupported Firecracker CI architecture: $arch" >&2; exit 1 ;;
+          esac
+          curl -fsSL \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${fc_arch}.tgz" \
+            -o /tmp/firecracker.tgz
+          tar -xzf /tmp/firecracker.tgz -C /tmp
+          fc_bin="$(find /tmp -type f -name "firecracker-${FIRECRACKER_VERSION}-${fc_arch}" -print -quit)"
+          if [ -z "$fc_bin" ]; then
+            echo "::error::firecracker binary not found in release archive" >&2
+            find /tmp -maxdepth 4 -type f -name 'firecracker*' -print >&2
+            exit 1
+          fi
+          sudo install -m 0755 "$fc_bin" /usr/local/bin/firecracker
+          firecracker --version
+
+      - name: Firecracker substrate preflight (Linux)
+        if:   runner.os == 'Linux'
+        run: |
+          set +e
+          cargo xtask linux-prereqs --json
+          status=$?
+          set -e
+          if [ "$status" -eq 2 ]; then
+            echo "::error::Linux Firecracker substrate prereq failure" >&2
+            exit 2
+          fi
+          exit 0
+
+      - name: AVF entitlement preflight (macOS)
+        if:   runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          cargo xtask dev-codesign --profile debug
+          /usr/bin/codesign --verify --verbose=2 target/debug/raxis-kernel
+          /usr/bin/codesign -d --entitlements :- target/debug/raxis-kernel \
+            >/tmp/raxis-kernel.entitlements.plist \
+            2>/tmp/raxis-kernel.codesign.log
+          grep -q 'com.apple.security.virtualization' /tmp/raxis-kernel.entitlements.plist
 
       - name: cargo test (workspace)
         run: cargo test  --workspace --all-targets
