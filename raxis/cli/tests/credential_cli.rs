@@ -415,7 +415,7 @@ fn add_emits_a_credential_registered_record_in_the_local_trail() {
 fn add_refuses_when_credential_already_exists() {
     let tmp = make_data_dir();
     write_cred_file(tmp.path(), "credentials", "dup.env", b"existing");
-    let out = run_raxis_with_stdin(
+    let out = run_raxis_with_stdin_allow_early_close(
         &["credential", "add", "dup", "--stdin"],
         tmp.path(),
         b"replacement",
@@ -448,7 +448,7 @@ fn add_rejects_value_argv_flag() {
 #[test]
 fn add_refuses_path_traversal_in_name() {
     let tmp = make_data_dir();
-    let out = run_raxis_with_stdin(
+    let out = run_raxis_with_stdin_allow_early_close(
         &["credential", "add", "../escape", "--stdin"],
         tmp.path(),
         b"data",
