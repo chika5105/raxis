@@ -60,8 +60,10 @@ That tap command maps to the GitHub repository
 tap repository by setting the `HOMEBREW_TAP_REPOSITORY` repository
 variable, but the default must remain compatible with the command above.
 
-Each published Homebrew tarball is a **complete runtime bundle** for one
-host `(os, arch)`:
+Each published runtime archive is a **complete runtime bundle** for one
+host `(os, arch)`. The Homebrew bottles are generated from these same
+complete runtime archives and re-laid into Homebrew's
+`raxis/<version>/...` cellar shape:
 
 ```text
 raxis-<version>-<os>-<arch>.tar.gz
@@ -99,9 +101,10 @@ In scope:
 - Apple notarization of the macOS Mach-O binaries, including the
   Virtualization.framework entitlement requirement.
 - Homebrew tap layout and formula structure (single `raxis` formula).
-- Trust-anchor population — the build.rs path from
-  `RAXIS_KERNEL_SIGNING_KEY_HEX` (and per-role image-digest
-  variants) into the shipped kernel binary.
+- Trust-anchor population — the release workflow generates an
+  Ed25519 image-signing keypair, signs manifests with the private
+  half, and passes the public half through `RAXIS_KERNEL_SIGNING_KEY_HEX`
+  into the shipped kernel binary.
 - Local-build signing flow — how a developer who is NOT the RAXIS
   release authority runs a self-trusted kernel + image stack on
   their own laptop.
@@ -113,8 +116,8 @@ Out of scope:
 - Distro-native Linux packaging (apt / dnf / nix / Snap). Linux
   Homebrew is in scope and uses the same `raxis` formula as macOS.
 - Auto-update behaviour beyond what `brew upgrade` already provides.
-- `raxis-egress` and `raxis-gateway` packaging — covered in a
-  separate distribution annex once their boundaries solidify.
+- `raxis-egress` packaging — covered in a separate distribution
+  annex once its boundaries solidify.
 - Codesigning of operator-published images (the operator owns that
   signing key, not the RAXIS project; this spec only covers the
   RAXIS-canonical images).
@@ -125,15 +128,15 @@ Out of scope:
 
 | Channel                 | Audience                          | Trust anchor                                    | Status     |
 | ----------------------- | --------------------------------- | ----------------------------------------------- | ---------- |
-| `chika5105/homebrew-raxis` | macOS / Linux operators         | Production kernel signing key                   | LIVE TARGET |
-| GitHub Releases         | Operators wanting raw archives    | Production kernel signing key (same artefacts)  | LIVE TARGET |
+| `chika5105/homebrew-raxis` | macOS / Linux operators         | Per-release generated image-signing key         | LIVE TARGET |
+| GitHub Releases         | Operators wanting raw archives    | Per-release generated image-signing key         | LIVE TARGET |
 | `cargo build` (source)  | Developers, CI matrix runs        | Operator-supplied or all-zero placeholder       | LIVE       |
 | Local-build self-trust  | Single-laptop hobbyist, CI fixtures| Developer-held keypair                          | DOCUMENTED |
 
-The Homebrew tap and GitHub Releases ship the same byte-identical
-artefacts; the tap is just a thin formula that points at release
-URLs and pins their `sha256`. A lost or corrupted tap can be
-reconstructed from the release pages alone.
+The Homebrew tap is a thin formula that points at GitHub Release URLs
+and pins their `sha256`. Raw runtime archives and Homebrew bottle
+archives are both uploaded to the release page, so a lost or corrupted
+tap can be reconstructed from release assets alone.
 
 ---
 
@@ -156,12 +159,16 @@ raxis-<version>-<os>-<arch>.tar.gz
   bin/raxis
   bin/raxis-kernel
   bin/raxis-cli
+  bin/raxis-gateway
+  bin/raxis-otel-pusher
+  bin/raxis-supervisor
   bin/raxis-orchestrator
   bin/raxis-executor
   bin/raxis-reviewer
   bin/raxis-tproxy        (linux-only — macOS uses a stub)
   images/
   kernel/
+  share/raxis/dashboard/
   share/raxis/policy.toml.example
   share/raxis/SBOM.spdx.json
 ```
@@ -172,22 +179,23 @@ raxis-<version>-<os>-<arch>.tar.gz
   the Homebrew formula plus the manifest signatures inside `images/`.
   Detached Linux GPG signatures are a future additive channel, not a
   current release prerequisite.
-* The kernel binary inside the tarball was built with
-  `RAXIS_KERNEL_SIGNING_KEY_HEX`, `RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX`,
-  and `RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX` populated from
-  GitHub Secrets (§5.3, §7.1).
-* The four `bin/raxis-{orchestrator,executor,reviewer,tproxy}`
-  binaries are duplicated into each tarball rather than relegated
-  to a separate dependency. This is a deliberate trade-off: it
-  makes a single tarball self-installable (no second download
-  needed) at the cost of ~4× the binary bytes when an operator
+* The kernel binary inside the tarball was built with the release
+  job's generated public image-signing key in
+  `RAXIS_KERNEL_SIGNING_KEY_HEX`, plus per-role image digest env vars
+  computed from the exact guest images shipped in that tarball (§5.3,
+  §7.1).
+* The gateway, telemetry pusher, supervisor, role binaries, and
+  `raxis-tproxy` are duplicated into each tarball rather than
+  relegated to separate dependencies. This is a deliberate trade-off:
+  it makes a single tarball self-installable (no second download
+  needed) at the cost of some duplicated binary bytes when an operator
   installs both kernel and CLI on the same machine. Homebrew's
   `link_overwrite` keyword reconciles the duplicate `bin/`
   entries; raw-tarball users overwrite once and move on.
 
-### §4.2 Guest runtime bundle inputs
+### §4.2 Guest runtime bundles
 
-The release workflow consumes two guest runtime bundles, one per guest
+The release workflow builds two guest runtime bundles, one per guest
 architecture:
 
 ```text
@@ -203,11 +211,12 @@ raxis-guest-x86_64.tar.gz
 Each guest runtime bundle is built with `cargo xtask images bake
 --target <linux-musl-triple>` and contains every canonical role image,
 its signed `.manifest.toml`, `kernel/vmlinux`, and
-`kernel/vmlinux.config`. The tagged workflow downloads the bundle from
-repository-variable URLs, verifies the SHA-256, and embeds the files
-into every matching host tarball. The shipped kernel binary's
-`EXPECTED_KERNEL_SIGNING_KEY_BYTES` verifies the image manifests at boot
-(per `canonical-images/src/lib.rs`).
+`kernel/vmlinux.config`. The tagged workflow generates a release-local
+Ed25519 keypair during this build. The private half signs the manifests
+and never leaves the guest-runtime job; the public half is exposed as a
+job output and baked into matching host kernels as
+`EXPECTED_KERNEL_SIGNING_KEY_BYTES` (per
+`canonical-images/src/lib.rs`).
 
 ### §4.3 Per-artefact integrity commitments
 
@@ -215,13 +224,16 @@ Every artefact in §4.1 / §4.2 is uploaded to the GitHub Release
 together with:
 
 * A `sha256` sum (printed on the release page; embedded into the
-  Homebrew formula).
-* macOS notarization stapled into the binary's load commands.
+  Homebrew formula for bottle and source-fallback URLs).
+* macOS notarization accepted by Apple and verified by Gatekeeper
+  assessment for each signed Mach-O binary.
 
-The Homebrew formula consumes the `sha256` sum, not the signature
-— Homebrew's own verification is `sha256` over the downloaded
-tarball. The signature is for raw-archive users and for
-`raxis doctor` post-install audits (§9.3).
+The Homebrew formula consumes the `sha256` sum, not the signature.
+Homebrew's preferred path is a bottle archive tagged for the operator's
+OS/arch, for example `arm64_tahoe`, `arm64_sequoia`, `arm64_sonoma`,
+or `x86_64_linux`. Source-fallback URLs point at the complete runtime
+archives. The signature is for raw-archive users and for `raxis doctor`
+post-install audits (§9.3).
 
 ---
 
@@ -234,22 +246,34 @@ Two workflows live under `.github/workflows/`:
 | Workflow                     | Trigger                                      | Effect                                                 |
 | ---------------------------- | -------------------------------------------- | ------------------------------------------------------ |
 | `build-images.yml`           | every PR + push to `main`                    | Reproducibility check; **no signing**, **no upload**.  |
-| `release.yml`                | tag push matching `v[0-9]+.[0-9]+.[0-9]+*`   | Full signed build, notarize, upload, tap-update.       |
+| `release.yml`                | tag push matching `v[0-9]+.[0-9]+.[0-9]+*`   | Full signed build, notarize, upload, tap-update when `RAXIS_RELEASE_ENABLED` is enabled. |
 
 The strict trigger separation means a contributor sending a PR
 cannot cause anything signed-by-RAXIS to be produced. The release
 secrets are not made available to workflows triggered by
 `pull_request`.
 
+`release.yml` also has a repository-variable safety gate:
+`RAXIS_RELEASE_ENABLED` must be `1` or `true` before any build,
+signing, notarization, upload, or Homebrew tap update job runs. This
+lets the complete workflow live on `main` while first-run Apple
+notarization is still unresolved.
+
 ### §5.2 Build matrix
 
 | Job              | Runner          | Outputs                                         |
 | ---------------- | --------------- | ----------------------------------------------- |
-| `build-darwin`   | `macos-14`      | `darwin-arm64` + `darwin-x86_64` (cross via target) |
+| `build-dashboard` | `ubuntu-22.04` | Vite-built dashboard frontend bundle            |
+| `build-darwin`   | `macos-26`, `macos-15`, `macos-14` | Tahoe, Sequoia, and Sonoma bottles for arm64 + x86_64 |
 | `build-linux`    | `ubuntu-22.04`  | `linux-x86_64` + `linux-arm64` (cross via target)   |
 | `build-images`   | `ubuntu-22.04`  | The three canonical-image tarballs (deterministic)  |
-| `notarize`       | `macos-14`      | Notarized + stapled darwin tarballs                 |
-| `publish`        | `ubuntu-22.04`  | Upload to GitHub Releases + tap PR                  |
+| `notarize`       | matching macOS runner | Notarized darwin bottles and Tahoe raw tarballs |
+| `publish`        | `ubuntu-22.04`  | Upload raw archives + bottles to GitHub Releases; push tap |
+
+The `build-dashboard` job is OS-agnostic: it runs `npm ci` and the
+Vite production build once, packages `dashboard-fe/dist/` as the
+`raxis-dashboard-fe` artifact, and fans that artifact into every
+`build-linux` / `build-darwin` matrix row.
 
 The `build-images` job is OS-agnostic — `mkfs.erofs`,
 `SOURCE_DATE_EPOCH`, and the kernel signing key are the only
@@ -262,8 +286,6 @@ GitHub secrets the release system consumes:
 
 | Secret                                              | Format                                         | Source                            |
 | --------------------------------------------------- | ---------------------------------------------- | --------------------------------- |
-| `RAXIS_KERNEL_SIGNING_KEY_HEX`                      | 64 lowercase hex chars (PUBLIC half)           | Production HSM (release lead)     |
-| `RAXIS_KERNEL_SIGNING_KEY_PRIV_HEX`                 | 64 lowercase hex chars (PRIVATE half)          | Guest runtime bundle signing      |
 | `APPLE_DEVELOPER_ID_APPLICATION_P12`                | base64 of a `.p12` codesigning bundle          | Apple Developer account           |
 | `APPLE_DEVELOPER_ID_APPLICATION_PASSWORD`           | password for the `.p12`                        | Apple Developer account           |
 | `APPLE_NOTARIZATION_API_KEY_ID`, `_ISSUER_ID`, `_KEY_P8` | App Store Connect API credentials         | Apple Developer account           |
@@ -273,31 +295,27 @@ Repository variables the release workflow consumes:
 
 | Variable | Format | Purpose |
 | --- | --- | --- |
-| `RAXIS_GUEST_BUNDLE_ARM64_URL` | URL | Guest runtime bundle containing `images/` + `kernel/` for arm64. |
-| `RAXIS_GUEST_BUNDLE_ARM64_SHA256` | 64 lowercase hex chars | Integrity pin for the arm64 guest runtime bundle. |
-| `RAXIS_GUEST_BUNDLE_X86_64_URL` | URL | Guest runtime bundle containing `images/` + `kernel/` for x86_64. |
-| `RAXIS_GUEST_BUNDLE_X86_64_SHA256` | 64 lowercase hex chars | Integrity pin for the x86_64 guest runtime bundle. |
+| `RAXIS_RELEASE_ENABLED` | `0` / `1` or `false` / `true` | Safety gate; defaults disabled. |
 | `HOMEBREW_TAP_REPOSITORY` | `owner/repo` | Optional; defaults to `chika5105/homebrew-raxis`. |
+| `APPLE_NOTARIZATION_TIMEOUT` | notarytool duration, e.g. `30m` or `90m` | Optional; defaults to `30m`. |
 
 Three principles govern this list:
 
-1. **The kernel signing keypair is split.** The public half lives
-   in `RAXIS_KERNEL_SIGNING_KEY_HEX` and is read by `build.rs` to
-   bake `EXPECTED_KERNEL_SIGNING_KEY_BYTES` into the kernel binary.
-   The private half lives in `RAXIS_KERNEL_SIGNING_KEY_PRIV_HEX` for
-   the guest-runtime-bundle build that signs `.manifest.toml` files.
-   **The private half NEVER reaches the kernel build job** — the
-   kernel job only gets the public hex; the manifest-signing path only
-   gets the private hex. Both halves are 64-char lowercase-hex strings
-   (matching the format `cargo xtask dev-keys init` emits, see §8.1).
+1. **The kernel signing keypair is release-local.** The
+   guest-runtime job generates an Ed25519 keypair with
+   `cargo xtask images bake`. The private half signs
+   `.manifest.toml` files and never leaves that job. The public half
+   is emitted as `RAXIS_KERNEL_SIGNING_KEY_HEX` for host kernel builds,
+   where `build.rs` bakes it into `EXPECTED_KERNEL_SIGNING_KEY_BYTES`.
 2. **No long-lived secret is persisted.** Apple signing material is
    imported into a transient keychain that is deleted at job end. The
    Homebrew deploy key is written to `~/.ssh` only for the tap push. No
-   secret is uploaded as a release artifact.
-3. **Guest bundles are pinned before packaging.** The tag workflow
-   downloads the architecture-specific guest runtime bundle, verifies
-   its SHA-256 against repository variables, and refuses to package
-   host binaries unless `images/` and `kernel/vmlinux` are present.
+   secret or release image-signing private key is uploaded as a release
+   artifact.
+3. **Guest bundles are built before packaging.** The tag workflow
+   refuses to package host binaries unless the architecture-specific
+   guest runtime bundle exists and contains `images/` and
+   `kernel/vmlinux`.
 
 ### §5.4 Notarization gate
 
@@ -308,10 +326,15 @@ The `notarize` job:
 2. Runs `codesign --force --options runtime --sign "Developer ID
    Application: …" --entitlements raxis.entitlements
    bin/raxis-kernel` (and similarly for every Mach-O binary).
-3. Submits the signed binaries to Apple via `xcrun notarytool
-   submit --wait`.
-4. Staples the notarization ticket via `xcrun stapler staple`.
-5. Re-tarballs the stapled binaries and exports the
+3. Submits a `.zip` containing the signed binaries to Apple via
+   `xcrun notarytool submit --wait`. The wait timeout defaults to
+   30 minutes and can be overridden with `APPLE_NOTARIZATION_TIMEOUT`.
+4. Skips stapling for raw command-line Mach-O files: Apple's
+   `stapler` supports UDIF disk images, signed executable bundles,
+   and flat installer packages, not individual CLI binaries. The
+   self-test verifies a strict Developer ID signature and checks the
+   notarization ticket with Gatekeeper's install assessment path.
+5. Re-tarballs the notarized binaries and exports the
    `darwin-{arm64,x86_64}.tar.gz` artefacts.
 
 The entitlements file `release/raxis.entitlements` declares:
@@ -333,10 +356,11 @@ kernel cannot spawn an AVF guest at all — the call returns
 
 After all artefacts upload, the `publish` job:
 
-1. Computes `sha256` of every uploaded tarball.
+1. Computes `sha256` of every raw runtime archive and Homebrew bottle.
 2. Renders `Formula/raxis.rb` from
    `release/templates/raxis.rb.tmpl` substituting in the release
-   version, the four `(os, arch)` URLs, and the four `sha256` values.
+   version, the four source-fallback `(os, arch)` URLs, the bottle
+   root URL, and every bottle `sha256`.
 3. Pushes the regenerated formula to the configured tap repository
    (default `chika5105/homebrew-raxis`) via `HOMEBREW_TAP_DEPLOY_KEY`.
 
@@ -389,7 +413,11 @@ The RAXIS project holds:
 The release pipeline notarises every Mach-O on the macOS rows:
 
 * `bin/raxis-kernel`
+* `bin/raxis`
 * `bin/raxis-cli`
+* `bin/raxis-gateway`
+* `bin/raxis-otel-pusher`
+* `bin/raxis-supervisor`
 * `bin/raxis-orchestrator`
 * `bin/raxis-executor`
 * `bin/raxis-reviewer`
@@ -409,29 +437,32 @@ The `notarize` job fails the entire release if:
 | ------------------------------------------- | ---------------------------------------------------------------- |
 | Codesigning rejected (cert expired)         | `release.yml` red, no upload                                     |
 | Notarization submission rejected (entitlement violation) | `release.yml` red, no upload                          |
-| Staple step fails (Apple servers down)      | `release.yml` red, retry once after 5 min, then fail             |
+| Notarization remains `In Progress` past timeout | `release.yml` red with submission id + `notarytool info/log` output |
 | Notarized binary fails self-test            | `release.yml` red — see §6.5                                     |
 
 ### §6.5 Self-test
 
-After notarization, the macOS runner executes the notarized binary
-under Gatekeeper-strict (`spctl -a -t exec -vv bin/raxis-kernel`)
-and asserts the output contains `accepted` and `Developer ID
-Application: …`. This catches a notarisation that succeeded against
-Apple's servers but does not actually pass the Gatekeeper that
-operator laptops run.
+After notarization, the macOS runner verifies each Mach-O with
+`codesign --verify --strict`, checks the signature authority and
+hardened-runtime flag, then runs
+`spctl --assess --type install -vv bin/raxis-kernel` and asserts the
+output contains `accepted` and `Notarized Developer ID`. The install
+assessment is intentional: `spctl --type exec` rejects raw command-line
+Mach-O files as "not an app" even when Apple has accepted their
+notarization.
 
 ---
 
 ## §7 — Trust-anchor pipeline
 
-### §7.1 Production: GitHub Secret → build.rs → kernel binary
+### §7.1 Production: release job output → build.rs → kernel binary
 
 The trust anchor (the public half of the kernel signing keypair) is
-fed into the build via `RAXIS_KERNEL_SIGNING_KEY_HEX`. Sequence:
+generated by the guest-runtime build job and fed into host builds via
+`RAXIS_KERNEL_SIGNING_KEY_HEX`. Sequence:
 
 ```text
-GitHub Secret (32-byte hex)
+guest-runtime job generated public key (32-byte hex)
    │
    ▼  (workflow `env:`)
 RAXIS_KERNEL_SIGNING_KEY_HEX=…
@@ -453,28 +484,28 @@ shipped Mach-O / ELF
 ```
 
 The `build.rs` rejects malformed input loudly (length mismatch,
-non-hex chars) so a typo in the secret cannot silently degrade the
-shipped kernel to "no trust anchor". A developer who sets the
-variable wrong sees `cargo build` fail; an operator never sees
-the placeholder branch in production.
+non-hex chars) so a bad workflow output cannot silently degrade the
+shipped kernel to "no trust anchor". A developer who sets the variable
+wrong sees `cargo build` fail; an operator never sees the placeholder
+branch in production.
 
 ### §7.2 Per-role image digests
 
 `build.rs` reads `RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX` and
-`RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX` the same way and
-emits `GENERATED_REVIEWER_IMAGE_DIGEST` / `GENERATED_ORCHESTRATOR_IMAGE_DIGEST`,
-which `lib.rs` aliases to the public V1-fallback constants
-(`EXPECTED_REVIEWER_IMAGE_DIGEST` / `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST`).
-The V2 boot path uses the manifest signature (which carries the
-canonical `image_artefact_sha256`) and does NOT consult these
-constants; they exist for `verify_canonical_image_pinned`, for
-`raxis doctor` diagnostics, and as stable kind-tagged identifiers
-in audit-event payloads.
+`RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX` the same way. The
+verifier starter and verifier symbol-index digests follow the matching
+`RAXIS_EXPECTED_VERIFIER_*` env vars. `lib.rs` aliases these generated
+values to public V1-fallback constants. The V2 boot path uses the
+manifest signature (which carries the canonical
+`image_artefact_sha256`) and does NOT consult these constants; they
+exist for `verify_canonical_image_pinned`, for `raxis doctor`
+diagnostics, and as stable kind-tagged identifiers in audit-event
+payloads.
 
-The release pipeline computes both image digests in the
-`build-images` job and exports them as job outputs the kernel
-build job consumes — the kernel binary therefore always carries
-the digest of the exact image bytes shipped in the same release.
+The release pipeline computes image digests in the `build-images` job
+and exports them as job outputs the kernel build jobs consume. The
+kernel binary therefore always carries digest constants for the exact
+image bytes shipped in the same release.
 
 ### §7.3 Why we never check in private keys
 
@@ -483,28 +514,22 @@ The `build.rs` only reads PUBLIC inputs:
 * The kernel signing key public half (32 bytes).
 * The image SHA-256 digests.
 
-The corresponding **secret half** of the signing keypair never
-enters any kernel build. It is materialised only in the manifest-
-signing step and only on the `build-images` job, which:
-
-1. Reads `RAXIS_KERNEL_SIGNING_KEY_PRIV_HEX` from the workflow
-   environment.
-2. Writes it to a `0600` tmpfile under `$RUNNER_TEMP/` and exports
-   `RAXIS_IMAGE_SIGNING_KEY=$tmpfile`.
-3. Invokes `raxis-image-builder build <role> ...` which reads the
-   key via the env var (matching the local-development flow from
-   §8.2).
-4. Removes the tmpfile at job end.
+The corresponding **secret half** of the signing keypair never enters
+any kernel build. It is generated by `cargo xtask images bake` under
+`.git/info/raxis-signing-key/sk.hex` on the `build-images` runner,
+used to sign manifests in that same job, and then discarded with the
+runner workspace. The only value crossing into host build jobs is the
+public `pk.hex` string.
 
 The image-builder process is the ONLY place in the pipeline where
 the secret material lives in process memory, and it lives there
-for the duration of three `Ed25519::sign` calls (one per role
+for the duration of the `Ed25519::sign` calls (one per role
 manifest) before the process exits.
 
 This separation is what lets the trust anchor be a public-input
-build-time bake while the actual signing remains a release-lead
-operation. A compromised `cargo build` on a release runner cannot
-exfiltrate the signing key — the build doesn't have it.
+build-time bake while the actual signing remains isolated to the
+guest-runtime job. A compromised host `cargo build` on a release runner
+cannot exfiltrate the signing key — the build doesn't have it.
 
 ---
 
@@ -648,13 +673,16 @@ brew services start raxis
 ```
 
 The tap install pulls the formula repository; the formula install
-downloads the platform-appropriate complete runtime archive, verifies
-its `sha256`, and lays out:
+downloads the platform-appropriate Homebrew bottle, verifies its
+`sha256`, pours the complete runtime bundle, and lays out:
 
 ```text
 $HOMEBREW_PREFIX/bin/raxis
 $HOMEBREW_PREFIX/bin/raxis-kernel
 $HOMEBREW_PREFIX/bin/raxis-cli
+$HOMEBREW_PREFIX/bin/raxis-gateway
+$HOMEBREW_PREFIX/bin/raxis-otel-pusher
+$HOMEBREW_PREFIX/bin/raxis-supervisor
 $HOMEBREW_PREFIX/bin/raxis-orchestrator
 $HOMEBREW_PREFIX/bin/raxis-executor
 $HOMEBREW_PREFIX/bin/raxis-reviewer
@@ -662,12 +690,20 @@ $HOMEBREW_PREFIX/bin/raxis-tproxy            (macOS uses a stub)
 $HOMEBREW_PREFIX/share/raxis/images/
 $HOMEBREW_PREFIX/share/raxis/kernel/vmlinux
 $HOMEBREW_PREFIX/share/raxis/kernel/vmlinux.config
+$HOMEBREW_PREFIX/share/raxis/dashboard/
 $HOMEBREW_PREFIX/etc/raxis/policy.toml.example
 ```
 
-The formula's service block sets `RAXIS_INSTALL_DIR` to
-`$HOMEBREW_PREFIX/share/raxis` and `RAXIS_DATA_DIR` to Homebrew's
-persistent `var/lib/raxis`.
+The formula's service block launches `raxis-supervisor start`, sets
+`RAXIS_INSTALL_DIR` to `$HOMEBREW_PREFIX/share/raxis`,
+`RAXIS_DATA_DIR` to Homebrew's persistent `var/lib/raxis`, and
+sets `RAXIS_SUPERVISOR_AUTO_RESTART=1` with
+`RAXIS_SUPERVISOR_KERNEL_BINARY` pointing at the installed
+`raxis-kernel`.
+
+When serving the operator dashboard frontend, the operator policy's
+`[dashboard].static_dir` points at
+`$HOMEBREW_PREFIX/share/raxis/dashboard`.
 
 ### §9.2 Post-install verification
 
@@ -742,7 +778,7 @@ machine after RAXIS is removed.
 | `release/raxis.entitlements`                            | NEW        | macOS Virtualization.framework entitlements (§6.3)       |
 | `release/templates/raxis.rb.tmpl`                       | NEW        | Homebrew formula template for `raxis`                    |
 | `release/scripts/render-formula.sh`                     | NEW        | Template renderer used by the `publish` job              |
-| `release/scripts/notarize.sh`                           | NEW        | codesign + notarytool + staple wrapper                   |
+| `release/scripts/notarize.sh`                           | NEW        | codesign + notarytool + Gatekeeper wrapper               |
 | `xtask/src/release.rs`                                  | NEW        | Local helper: `cargo xtask release dry-run`              |
 | `xtask/src/dev_keys.rs`                                 | NEW        | Local helper: `cargo xtask dev-keys init` (§8.1–§8.2)    |
 | `cli/src/commands/doctor.rs`                            | MODIFY     | Add `signing-key-fp` subcommand (§9.2)                   |

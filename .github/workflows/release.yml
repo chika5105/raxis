@@ -7,21 +7,31 @@
 # contributor sending a PR cannot reach this workflow. The release
 # secrets listed below are exposed exclusively to this workflow.
 #
+# Temporary safety gate: the release jobs do not run unless the
+# repository variable RAXIS_RELEASE_ENABLED is set to 1/true. Keep it
+# disabled while release wiring is being edited or audited; flip the
+# variable only when a tag should publish real artifacts.
+#
 # Pipeline shape (pinned by the spec):
 #
-#   fallback-digests → build-darwin → notarize → publish → tap
-#                 ↘    build-linux                 ↗
+#   guest-runtime  ┐
+#                  ├→ build-darwin → notarize ┐
+#   build-dashboard┤
+#                  └→ build-linux ───────────────→ publish → tap
 #
-# Guest runtime bundles are staged from repository-variable URLs and
-# verified by SHA-256 before any release tarball is created. The
-# `fallback-digests` job remains only for the legacy V1 digest constants;
-# V2 image integrity comes from signed manifests verified by the kernel's
-# compiled-in Ed25519 trust anchor.
+# Guest runtime bundles are built inside the release workflow. The
+# image-signing private key is generated inside that job and never
+# leaves it; only the public half is exposed to downstream host builds
+# as the kernel trust anchor. V2 image integrity comes from signed
+# manifests verified by that compiled-in Ed25519 trust anchor.
+# The dashboard frontend is built once as a platform-independent artifact
+# and fanned out to every platform package.
+# Homebrew receives bottle-shaped archives derived from the same complete
+# runtime archives, so user installs pour prebuilt bytes instead of
+# tripping local source-build Xcode/CLT gates.
 #
 # Release-secret layout (release-and-distribution.md §5.3):
 #
-#   RAXIS_KERNEL_SIGNING_KEY_HEX                   (kernel build)
-#   RAXIS_KERNEL_SIGNING_KEY_PRIV_HEX              (guest-bundle builder)
 #   APPLE_DEVELOPER_ID_APPLICATION_P12             (notarize.sh)
 #   APPLE_DEVELOPER_ID_APPLICATION_PASSWORD        (notarize.sh)
 #   APPLE_NOTARIZATION_API_KEY_ID                  (notarize.sh)
@@ -29,17 +39,11 @@
 #   APPLE_NOTARIZATION_API_KEY_P8                  (notarize.sh)
 #   HOMEBREW_TAP_DEPLOY_KEY                        (publish)
 #
-# Required repository variables (not secrets):
+# Repository variables (not secrets):
 #
-#   RAXIS_GUEST_BUNDLE_ARM64_URL
-#   RAXIS_GUEST_BUNDLE_ARM64_SHA256
-#   RAXIS_GUEST_BUNDLE_X86_64_URL
-#   RAXIS_GUEST_BUNDLE_X86_64_SHA256
+#   RAXIS_RELEASE_ENABLED                           (set to 1/true to publish)
 #   HOMEBREW_TAP_REPOSITORY                        (default: chika5105/homebrew-raxis)
-#
-# Note: the kernel signing keypair is split. The public half (HEX)
-# reaches the host-kernel build. The private half signs guest image
-# manifests before they are packed into the guest runtime bundles.
+#   APPLE_NOTARIZATION_TIMEOUT                     (optional; default: 30m)
 
 name: release
 
@@ -63,68 +67,236 @@ concurrency:
 env:
   RAXIS_VERSION: ${{ github.ref_name }}
   HOMEBREW_TAP_REPOSITORY: ${{ vars.HOMEBREW_TAP_REPOSITORY || 'chika5105/homebrew-raxis' }}
+  RAXIS_RELEASE_ENABLED: ${{ vars.RAXIS_RELEASE_ENABLED || '0' }}
+  APPLE_NOTARIZATION_TIMEOUT: ${{ vars.APPLE_NOTARIZATION_TIMEOUT || '30m' }}
 
 jobs:
   # ────────────────────────────────────────────────────────────
-  # Stage 1: legacy fallback image digest placeholders.
+  # Temporary publish safety switch. A tag push still creates a
+  # visible workflow run, but no build/sign/notarize/upload/tap step
+  # executes until RAXIS_RELEASE_ENABLED is flipped on.
+  # ────────────────────────────────────────────────────────────
+  release-gate:
+    name: release gate
+    runs-on: ubuntu-22.04
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+    steps:
+      - id: gate
+        run: |
+          set -euo pipefail
+          case "${RAXIS_RELEASE_ENABLED}" in
+            1|true|TRUE|yes|YES)
+              echo "enabled=true" >> "${GITHUB_OUTPUT}"
+              echo "release gate: enabled"
+              ;;
+            *)
+              echo "enabled=false" >> "${GITHUB_OUTPUT}"
+              echo "::notice::Release workflow is disabled. Set repository variable RAXIS_RELEASE_ENABLED=1 when this tag should publish artifacts."
+              ;;
+          esac
+
+  # ────────────────────────────────────────────────────────────
+  # Stage 1: build signed guest runtime bundles once per guest arch.
   #
-  # V2 releases ship complete guest runtime bundles (`images/` plus
-  # `kernel/`) as part of each platform tarball. Those bundles are
-  # staged from repository-variable URLs and verified by SHA-256 in the
-  # host build jobs below. This job only feeds the legacy digest env vars
-  # consumed by `raxis-canonical-images/build.rs`.
+  # The image-signing private key is release-scoped and remains local to
+  # this job. Downstream host builds receive only the public key and
+  # digest outputs, then compile those into raxis-kernel.
   # ────────────────────────────────────────────────────────────
   build-images:
-    name:    compute legacy fallback digests
+    name:    build guest runtime bundles
+    needs:   [release-gate]
+    if:      needs.release-gate.outputs.enabled == 'true'
     runs-on: ubuntu-22.04
     defaults:
       run:
         working-directory: raxis
     outputs:
-      reviewer_digest_hex:     ${{ steps.compute.outputs.reviewer_digest_hex }}
-      orchestrator_digest_hex: ${{ steps.compute.outputs.orchestrator_digest_hex }}
+      kernel_signing_key_hex:              ${{ steps.release_key.outputs.kernel_signing_key_hex }}
+      reviewer_digest_arm64:               ${{ steps.digests.outputs.reviewer_digest_arm64 }}
+      orchestrator_digest_arm64:           ${{ steps.digests.outputs.orchestrator_digest_arm64 }}
+      verifier_starter_digest_arm64:       ${{ steps.digests.outputs.verifier_starter_digest_arm64 }}
+      verifier_symbol_index_digest_arm64:  ${{ steps.digests.outputs.verifier_symbol_index_digest_arm64 }}
+      reviewer_digest_x86_64:              ${{ steps.digests.outputs.reviewer_digest_x86_64 }}
+      orchestrator_digest_x86_64:          ${{ steps.digests.outputs.orchestrator_digest_x86_64 }}
+      verifier_starter_digest_x86_64:      ${{ steps.digests.outputs.verifier_starter_digest_x86_64 }}
+      verifier_symbol_index_digest_x86_64: ${{ steps.digests.outputs.verifier_symbol_index_digest_x86_64 }}
     steps:
       - uses: actions/checkout@v4
 
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl,x86_64-unknown-linux-musl
+
+      - uses: goto-bus-stop/setup-zig@v2
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: raxis -> target
 
-      # Build raxis-image-builder. Using --release gives the same
-      # compiler optimisation level the production binary will see;
-      # determinism is unaffected.
-      - name: build raxis-image-builder
-        run:  cargo build --release -p raxis-image-builder
-
-      # Compute the per-role image digests. Today this is a SHA-256
-      # over the placeholder image bytes that ship with the
-      # repository's own canonical-images fixtures; in the
-      # follow-up it will be a SHA-256 over the real
-      # mkfs.erofs-built rootfs.img. Either way the wire shape
-      # (job-output hex strings) is the contract the kernel build
-      # downstream consumes.
-      - name: compute role image digests
-        id:   compute
+      - name: install image build prerequisites
         run: |
           set -euo pipefail
-          # TODO(release-and-distribution.md §11): replace with the
-          # real mkfs.erofs build of crates/canonical-images/{reviewer,
-          # orchestrator}-core-rootfs.toml when the producer side
-          # lands. Until then we surface the placeholder digests
-          # explicitly so the kernel-binary downstream contract
-          # remains honest.
-          REVIEWER_DIGEST=$(printf '%64s' 0 | tr ' ' '0')
-          ORCH_DIGEST=$(printf    '%64s' 0 | tr ' ' '0')
-          echo "reviewer_digest_hex=${REVIEWER_DIGEST}"     | tee -a "$GITHUB_OUTPUT"
-          echo "orchestrator_digest_hex=${ORCH_DIGEST}"     | tee -a "$GITHUB_OUTPUT"
+          sudo apt-get update
+          sudo apt-get install -y cpio curl tar xz-utils zstd
+          mkdir -p "${HOME}/.local/bin"
+          cat > "${HOME}/.local/bin/aarch64-linux-musl-gcc" <<'EOF'
+          #!/usr/bin/env bash
+          exec zig cc -target aarch64-linux-musl "$@"
+          EOF
+          cat > "${HOME}/.local/bin/x86_64-linux-musl-gcc" <<'EOF'
+          #!/usr/bin/env bash
+          exec zig cc -target x86_64-linux-musl "$@"
+          EOF
+          chmod +x "${HOME}/.local/bin/"*-linux-musl-gcc
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: bake guest runtime bundles
+        id:   digests
+        env:
+          # Firecracker CI reference kernels, pinned by SHA-256.
+          FC_AARCH64_KERNEL_URL: https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/aarch64/vmlinux-5.10.223
+          FC_AARCH64_KERNEL_SHA256: eb5d95ac8a67f7a86acf0cb35625633713ad5170b56de8617808d0e18bb832ec
+          FC_AARCH64_CONFIG_URL: https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/aarch64/vmlinux-5.10.223.config
+          FC_AARCH64_CONFIG_SHA256: ef02570c59d2e6422b539905e15ef02c451ebdb094df0cd7c22e2de1d865dbcb
+          FC_X86_64_KERNEL_URL: https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223
+          FC_X86_64_KERNEL_SHA256: 22847375721aceea63d934c28f2dfce4670b6f52ec904fae19f5145a970c1e65
+          FC_X86_64_CONFIG_URL: https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223.config
+          FC_X86_64_CONFIG_SHA256: 839af14504d927095a073c4cd6f6d267f65cb904e085d2552486f3618b31c371
+        run: |
+          set -euo pipefail
+
+          fetch() {
+            local url="$1"
+            local sha="$2"
+            local out="$3"
+            curl -fsSL "${url}" -o "${out}"
+            printf '%s  %s\n' "${sha}" "${out}" | shasum -a 256 -c -
+          }
+
+          digest_one() {
+            local dir="$1"
+            local role_stem="$2"
+            local image
+            image="$(find "${dir}/images" -maxdepth 1 -name "raxis-${role_stem}-*.img" -print -quit)"
+            test -n "${image}"
+            shasum -a 256 "${image}" | awk '{print $1}'
+          }
+
+          bake_one() {
+            local arch="$1"
+            local triple="$2"
+            local kernel_url_var="$3"
+            local kernel_sha_var="$4"
+            local config_url_var="$5"
+            local config_sha_var="$6"
+
+            local kernel_url="${!kernel_url_var}"
+            local kernel_sha="${!kernel_sha_var}"
+            local config_url="${!config_url_var}"
+            local config_sha="${!config_sha_var}"
+            local kernel="/tmp/raxis-${arch}-vmlinux"
+            local config="/tmp/raxis-${arch}-vmlinux.config"
+            local install_dir="${PWD}/out/guest-${arch}"
+
+            fetch "${kernel_url}" "${kernel_sha}" "${kernel}"
+            fetch "${config_url}" "${config_sha}" "${config}"
+            cargo xtask images bake \
+              --install-dir "${install_dir}" \
+              --target "${triple}" \
+              --kernel-from-file "${kernel}" \
+              --kernel-config "${config}" \
+              --no-cache
+            tar -C "${install_dir}" -czf "out/raxis-guest-runtime-${arch}.tar.gz" images kernel
+
+            local reviewer_digest
+            local orchestrator_digest
+            local verifier_starter_digest
+            local verifier_symbol_index_digest
+            reviewer_digest="$(digest_one "${install_dir}" reviewer-core)"
+            orchestrator_digest="$(digest_one "${install_dir}" orchestrator-core)"
+            verifier_starter_digest="$(digest_one "${install_dir}" verifier-starter)"
+            verifier_symbol_index_digest="$(digest_one "${install_dir}" verifier-symbol-index)"
+            {
+              echo "reviewer_digest_${arch}=${reviewer_digest}"
+              echo "orchestrator_digest_${arch}=${orchestrator_digest}"
+              echo "verifier_starter_digest_${arch}=${verifier_starter_digest}"
+              echo "verifier_symbol_index_digest_${arch}=${verifier_symbol_index_digest}"
+            } >> "${GITHUB_OUTPUT}"
+          }
+
+          mkdir -p out
+          bake_one arm64 aarch64-unknown-linux-musl \
+            FC_AARCH64_KERNEL_URL FC_AARCH64_KERNEL_SHA256 \
+            FC_AARCH64_CONFIG_URL FC_AARCH64_CONFIG_SHA256
+          bake_one x86_64 x86_64-unknown-linux-musl \
+            FC_X86_64_KERNEL_URL FC_X86_64_KERNEL_SHA256 \
+            FC_X86_64_CONFIG_URL FC_X86_64_CONFIG_SHA256
+
+      - name: expose public release trust anchor
+        id:   release_key
+        run: |
+          set -euo pipefail
+          key=".git/info/raxis-signing-key/pk.hex"
+          test -f "${key}"
+          echo "kernel_signing_key_hex=$(tr -d '\n' < "${key}")" >> "${GITHUB_OUTPUT}"
+
+      - name: upload guest runtime bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: raxis-guest-runtime
+          path: raxis/out/raxis-guest-runtime-*.tar.gz
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────
+  # Stage 1b — platform-independent dashboard frontend bundle.
+  # ────────────────────────────────────────────────────────────
+  build-dashboard:
+    name:    build dashboard frontend
+    needs:   [release-gate]
+    if:      needs.release-gate.outputs.enabled == 'true'
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: raxis
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: raxis/dashboard-fe/package-lock.json
+
+      - name: dashboard frontend build
+        run: |
+          npm ci --prefix dashboard-fe
+          npm run --prefix dashboard-fe build
+
+      - name: package dashboard frontend
+        run: |
+          set -euo pipefail
+          test -f dashboard-fe/dist/index.html
+          mkdir -p out
+          tar -C dashboard-fe -czf out/raxis-dashboard-fe.tar.gz dist
+
+      - name: upload dashboard frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: raxis-dashboard-fe
+          path: raxis/out/raxis-dashboard-fe.tar.gz
+          if-no-files-found: error
 
   # ────────────────────────────────────────────────────────────
   # Stage 2 — Linux binaries.
   # ────────────────────────────────────────────────────────────
   build-linux:
     name:    build linux-${{ matrix.arch }}
-    needs:   [build-images]
+    needs:   [build-images, build-dashboard]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -132,17 +304,19 @@ jobs:
         include:
           - arch:   x86_64
             target: x86_64-unknown-linux-gnu
-            guest_key: X86_64
+            digest_key: x86_64
           - arch:   arm64
             target: aarch64-unknown-linux-gnu
-            guest_key: ARM64
+            digest_key: arm64
     defaults:
       run:
         working-directory: raxis
     env:
-      RAXIS_KERNEL_SIGNING_KEY_HEX:               ${{ secrets.RAXIS_KERNEL_SIGNING_KEY_HEX }}
-      RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX:    ${{ needs.build-images.outputs.reviewer_digest_hex }}
-      RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX: ${{ needs.build-images.outputs.orchestrator_digest_hex }}
+      RAXIS_KERNEL_SIGNING_KEY_HEX:                         ${{ needs.build-images.outputs.kernel_signing_key_hex }}
+      RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX:              ${{ needs.build-images.outputs[format('reviewer_digest_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX:          ${{ needs.build-images.outputs[format('orchestrator_digest_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST_HEX:      ${{ needs.build-images.outputs[format('verifier_starter_digest_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST_HEX: ${{ needs.build-images.outputs[format('verifier_symbol_index_digest_{0}', matrix.digest_key)] }}
     steps:
       - uses: actions/checkout@v4
 
@@ -163,12 +337,31 @@ jobs:
         run: |
           cargo build --release \
             --target ${{ matrix.target }} \
-            -p raxis-kernel \
             -p raxis-cli \
+            -p raxis-gateway \
+            -p raxis-otel-pusher \
+            -p raxis-supervisor \
             -p raxis-planner-orchestrator \
             -p raxis-planner-executor \
             -p raxis-planner-reviewer \
             -p raxis-tproxy
+          RAXIS_GATEWAY_BINARY="$PWD/target/${{ matrix.target }}/release/raxis-gateway" \
+            cargo build --release \
+              --target ${{ matrix.target }} \
+              --no-default-features \
+              --features embedded-gateway \
+              -p raxis-kernel
+
+      - name: verify kernel trust anchor
+        run: |
+          cargo xtask images verify-trust-anchor \
+            --kernel "target/${{ matrix.target }}/release/raxis-kernel"
+
+      - name: download dashboard frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: raxis-dashboard-fe
+          path: raxis/out/dashboard-fe
 
       # Stage the bin/ layout.
       - name: stage bin layout
@@ -176,9 +369,14 @@ jobs:
           set -euo pipefail
           outdir="out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}"
           mkdir -p "${outdir}/bin" "${outdir}/share/raxis"
+          rm -rf dashboard-fe/dist
+          tar -xzf out/dashboard-fe/raxis-dashboard-fe.tar.gz -C dashboard-fe
           cp target/${{ matrix.target }}/release/raxis "${outdir}/bin/raxis-cli"
           cp target/${{ matrix.target }}/release/raxis "${outdir}/bin/raxis"
           cp target/${{ matrix.target }}/release/raxis-kernel "${outdir}/bin/raxis-kernel"
+          cp target/${{ matrix.target }}/release/raxis-gateway "${outdir}/bin/raxis-gateway"
+          cp target/${{ matrix.target }}/release/raxis-otel-pusher "${outdir}/bin/raxis-otel-pusher"
+          cp target/${{ matrix.target }}/release/raxis-supervisor "${outdir}/bin/raxis-supervisor"
           cp target/${{ matrix.target }}/release/raxis-orchestrator "${outdir}/bin/raxis-orchestrator"
           cp target/${{ matrix.target }}/release/raxis-executor "${outdir}/bin/raxis-executor"
           cp target/${{ matrix.target }}/release/raxis-reviewer "${outdir}/bin/raxis-reviewer"
@@ -187,25 +385,20 @@ jobs:
           # RAXIS operator policy example.
           # Copy this file to policy.toml and run `raxis genesis`.
           EOF
+          test -f dashboard-fe/dist/index.html
+          cp -R dashboard-fe/dist "${outdir}/share/raxis/dashboard"
+
+      - name: download guest runtime bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: raxis-guest-runtime
+          path: raxis/out/guest-runtime
 
       - name: stage guest runtime bundle
-        env:
-          GUEST_BUNDLE_URL: ${{ vars[format('RAXIS_GUEST_BUNDLE_{0}_URL', matrix.guest_key)] }}
-          GUEST_BUNDLE_SHA256: ${{ vars[format('RAXIS_GUEST_BUNDLE_{0}_SHA256', matrix.guest_key)] }}
         run: |
           set -euo pipefail
           outdir="out/raxis-${{ env.RAXIS_VERSION }}-linux-${{ matrix.arch }}"
-          if [[ -z "${GUEST_BUNDLE_URL:-}" || -z "${GUEST_BUNDLE_SHA256:-}" ]]; then
-            echo "::error::missing RAXIS_GUEST_BUNDLE_${{ matrix.guest_key }}_{URL,SHA256} repository variables"
-            exit 78
-          fi
-          curl -fsSL "${GUEST_BUNDLE_URL}" -o /tmp/raxis-guest-runtime.tar.gz
-          actual="$(shasum -a 256 /tmp/raxis-guest-runtime.tar.gz | awk '{print $1}')"
-          if [[ "${actual}" != "${GUEST_BUNDLE_SHA256}" ]]; then
-            echo "::error::guest runtime bundle SHA mismatch: expected ${GUEST_BUNDLE_SHA256}, got ${actual}"
-            exit 65
-          fi
-          tar -xzf /tmp/raxis-guest-runtime.tar.gz -C "${outdir}"
+          tar -xzf "out/guest-runtime/raxis-guest-runtime-${{ matrix.digest_key }}.tar.gz" -C "${outdir}"
           test -f "${outdir}/kernel/vmlinux"
           test -f "${outdir}/kernel/vmlinux.config"
           test -d "${outdir}/images"
@@ -225,26 +418,52 @@ jobs:
   # Stage 2 — macOS binaries.
   # ────────────────────────────────────────────────────────────
   build-darwin:
-    name:    build darwin-${{ matrix.arch }}
-    needs:   [build-images]
-    runs-on: macos-14
+    name:    build darwin-${{ matrix.bottle_tag }}
+    needs:   [build-images, build-dashboard]
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch:   arm64
             target: aarch64-apple-darwin
-            guest_key: ARM64
+            digest_key: arm64
+            bottle_tag: arm64_tahoe
+            runner: macos-26
           - arch:   x86_64
             target: x86_64-apple-darwin
-            guest_key: X86_64
+            digest_key: x86_64
+            bottle_tag: tahoe
+            runner: macos-26-intel
+          - arch:   arm64
+            target: aarch64-apple-darwin
+            digest_key: arm64
+            bottle_tag: arm64_sequoia
+            runner: macos-15
+          - arch:   x86_64
+            target: x86_64-apple-darwin
+            digest_key: x86_64
+            bottle_tag: sequoia
+            runner: macos-15-intel
+          - arch:   arm64
+            target: aarch64-apple-darwin
+            digest_key: arm64
+            bottle_tag: arm64_sonoma
+            runner: macos-14
+          - arch:   x86_64
+            target: x86_64-apple-darwin
+            digest_key: x86_64
+            bottle_tag: sonoma
+            runner: macos-14
     defaults:
       run:
         working-directory: raxis
     env:
-      RAXIS_KERNEL_SIGNING_KEY_HEX:                 ${{ secrets.RAXIS_KERNEL_SIGNING_KEY_HEX }}
-      RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX:     ${{ needs.build-images.outputs.reviewer_digest_hex }}
-      RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX: ${{ needs.build-images.outputs.orchestrator_digest_hex }}
+      RAXIS_KERNEL_SIGNING_KEY_HEX:                         ${{ needs.build-images.outputs.kernel_signing_key_hex }}
+      RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX:              ${{ needs.build-images.outputs[format('reviewer_digest_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX:          ${{ needs.build-images.outputs[format('orchestrator_digest_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST_HEX:      ${{ needs.build-images.outputs[format('verifier_starter_digest_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST_HEX: ${{ needs.build-images.outputs[format('verifier_symbol_index_digest_{0}', matrix.digest_key)] }}
     steps:
       - uses: actions/checkout@v4
 
@@ -259,11 +478,30 @@ jobs:
         run: |
           cargo build --release \
             --target ${{ matrix.target }} \
-            -p raxis-kernel \
             -p raxis-cli \
+            -p raxis-gateway \
+            -p raxis-otel-pusher \
+            -p raxis-supervisor \
             -p raxis-planner-orchestrator \
             -p raxis-planner-executor \
             -p raxis-planner-reviewer
+          RAXIS_GATEWAY_BINARY="$PWD/target/${{ matrix.target }}/release/raxis-gateway" \
+            cargo build --release \
+              --target ${{ matrix.target }} \
+              --no-default-features \
+              --features embedded-gateway \
+              -p raxis-kernel
+
+      - name: verify kernel trust anchor
+        run: |
+          cargo xtask images verify-trust-anchor \
+            --kernel "target/${{ matrix.target }}/release/raxis-kernel"
+
+      - name: download dashboard frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: raxis-dashboard-fe
+          path: raxis/out/dashboard-fe
 
       # macOS does not ship raxis-tproxy as a real binary (Linux
       # nfqueue is required). The formula expects bin/raxis-tproxy
@@ -274,9 +512,14 @@ jobs:
           set -euo pipefail
           outdir="out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}"
           mkdir -p "${outdir}/bin" "${outdir}/share/raxis"
+          rm -rf dashboard-fe/dist
+          tar -xzf out/dashboard-fe/raxis-dashboard-fe.tar.gz -C dashboard-fe
           cp target/${{ matrix.target }}/release/raxis "${outdir}/bin/raxis-cli"
           cp target/${{ matrix.target }}/release/raxis "${outdir}/bin/raxis"
           cp target/${{ matrix.target }}/release/raxis-kernel "${outdir}/bin/raxis-kernel"
+          cp target/${{ matrix.target }}/release/raxis-gateway "${outdir}/bin/raxis-gateway"
+          cp target/${{ matrix.target }}/release/raxis-otel-pusher "${outdir}/bin/raxis-otel-pusher"
+          cp target/${{ matrix.target }}/release/raxis-supervisor "${outdir}/bin/raxis-supervisor"
           cp target/${{ matrix.target }}/release/raxis-orchestrator "${outdir}/bin/raxis-orchestrator"
           cp target/${{ matrix.target }}/release/raxis-executor "${outdir}/bin/raxis-executor"
           cp target/${{ matrix.target }}/release/raxis-reviewer "${outdir}/bin/raxis-reviewer"
@@ -284,6 +527,8 @@ jobs:
           # RAXIS operator policy example.
           # Copy this file to policy.toml and run `raxis genesis`.
           EOF
+          test -f dashboard-fe/dist/index.html
+          cp -R dashboard-fe/dist "${outdir}/share/raxis/dashboard"
 
           # tproxy stub for macOS (release-and-distribution.md §6.3).
           printf '%s\n' \
@@ -292,24 +537,17 @@ jobs:
             'exit 70' > "${outdir}/bin/raxis-tproxy"
           chmod +x "${outdir}/bin/raxis-tproxy"
 
+      - name: download guest runtime bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: raxis-guest-runtime
+          path: raxis/out/guest-runtime
+
       - name: stage guest runtime bundle
-        env:
-          GUEST_BUNDLE_URL: ${{ vars[format('RAXIS_GUEST_BUNDLE_{0}_URL', matrix.guest_key)] }}
-          GUEST_BUNDLE_SHA256: ${{ vars[format('RAXIS_GUEST_BUNDLE_{0}_SHA256', matrix.guest_key)] }}
         run: |
           set -euo pipefail
           outdir="out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}"
-          if [[ -z "${GUEST_BUNDLE_URL:-}" || -z "${GUEST_BUNDLE_SHA256:-}" ]]; then
-            echo "::error::missing RAXIS_GUEST_BUNDLE_${{ matrix.guest_key }}_{URL,SHA256} repository variables"
-            exit 78
-          fi
-          curl -fsSL "${GUEST_BUNDLE_URL}" -o /tmp/raxis-guest-runtime.tar.gz
-          actual="$(shasum -a 256 /tmp/raxis-guest-runtime.tar.gz | awk '{print $1}')"
-          if [[ "${actual}" != "${GUEST_BUNDLE_SHA256}" ]]; then
-            echo "::error::guest runtime bundle SHA mismatch: expected ${GUEST_BUNDLE_SHA256}, got ${actual}"
-            exit 65
-          fi
-          tar -xzf /tmp/raxis-guest-runtime.tar.gz -C "${outdir}"
+          tar -xzf "out/guest-runtime/raxis-guest-runtime-${{ matrix.digest_key }}.tar.gz" -C "${outdir}"
           test -f "${outdir}/kernel/vmlinux"
           test -f "${outdir}/kernel/vmlinux.config"
           test -d "${outdir}/images"
@@ -317,20 +555,38 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}-unsigned
+          name: raxis-${{ env.RAXIS_VERSION }}-${{ matrix.bottle_tag }}-unsigned
           path: raxis/out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}/
 
   # ────────────────────────────────────────────────────────────
   # Stage 3 — codesign + notarize the macOS binaries.
   # ────────────────────────────────────────────────────────────
   notarize:
-    name:    notarize darwin-${{ matrix.arch }}
+    name:    notarize darwin-${{ matrix.bottle_tag }}
     needs:   [build-darwin]
-    runs-on: macos-14
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [arm64, x86_64]
+        include:
+          - arch: arm64
+            bottle_tag: arm64_tahoe
+            runner: macos-26
+          - arch: x86_64
+            bottle_tag: tahoe
+            runner: macos-26-intel
+          - arch: arm64
+            bottle_tag: arm64_sequoia
+            runner: macos-15
+          - arch: x86_64
+            bottle_tag: sequoia
+            runner: macos-15-intel
+          - arch: arm64
+            bottle_tag: arm64_sonoma
+            runner: macos-14
+          - arch: x86_64
+            bottle_tag: sonoma
+            runner: macos-14
     env:
       APPLE_DEVELOPER_ID_APPLICATION_P12:        ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12 }}
       APPLE_DEVELOPER_ID_APPLICATION_PASSWORD:   ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_PASSWORD }}
@@ -342,7 +598,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}-unsigned
+          name: raxis-${{ env.RAXIS_VERSION }}-${{ matrix.bottle_tag }}-unsigned
           path: out/raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}/
 
       - name: notarize
@@ -353,10 +609,26 @@ jobs:
           tar -C out -czf raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}.tar.gz \
               raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}
 
+      - name: package Homebrew bottle
+        run: |
+          set -euo pipefail
+          mkdir -p out/bottles
+          raxis/release/scripts/package-homebrew-bottle.sh \
+            "raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}.tar.gz" \
+            "${RAXIS_VERSION#v}" \
+            "${{ matrix.bottle_tag }}" \
+            out/bottles
+
       - uses: actions/upload-artifact@v4
+        if: matrix.bottle_tag == 'arm64_tahoe' || matrix.bottle_tag == 'tahoe'
         with:
           name: raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}
           path: raxis-${{ env.RAXIS_VERSION }}-darwin-${{ matrix.arch }}.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raxis-${{ env.RAXIS_VERSION }}-${{ matrix.bottle_tag }}-bottle
+          path: out/bottles/*.bottle.tar.gz
 
   # ────────────────────────────────────────────────────────────
   # Stage 4 — collect every artefact, compute sha256s, render
@@ -375,6 +647,25 @@ jobs:
         with:
           path: artifacts
 
+      - name: package Homebrew bottles
+        run: |
+          set -euo pipefail
+          formula_version="${RAXIS_VERSION#v}"
+          mkdir -p rendered/bottles
+          find artifacts -path '*-bottle/*.bottle.tar.gz' -exec cp {} rendered/bottles/ \;
+          raxis/release/scripts/package-homebrew-bottle.sh \
+            "artifacts/raxis-${RAXIS_VERSION}-darwin-arm64/raxis-${RAXIS_VERSION}-darwin-arm64.tar.gz" \
+            "${formula_version}" arm64_tahoe rendered/bottles
+          raxis/release/scripts/package-homebrew-bottle.sh \
+            "artifacts/raxis-${RAXIS_VERSION}-darwin-x86_64/raxis-${RAXIS_VERSION}-darwin-x86_64.tar.gz" \
+            "${formula_version}" tahoe rendered/bottles
+          raxis/release/scripts/package-homebrew-bottle.sh \
+            "artifacts/raxis-${RAXIS_VERSION}-linux-arm64/raxis-${RAXIS_VERSION}-linux-arm64.tar.gz" \
+            "${formula_version}" arm64_linux rendered/bottles
+          raxis/release/scripts/package-homebrew-bottle.sh \
+            "artifacts/raxis-${RAXIS_VERSION}-linux-x86_64/raxis-${RAXIS_VERSION}-linux-x86_64.tar.gz" \
+            "${formula_version}" x86_64_linux rendered/bottles
+
       - name: upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -383,20 +674,45 @@ jobs:
             artifacts/raxis-${{ env.RAXIS_VERSION }}-linux-arm64/raxis-${{ env.RAXIS_VERSION }}-linux-arm64.tar.gz
             artifacts/raxis-${{ env.RAXIS_VERSION }}-darwin-arm64/raxis-${{ env.RAXIS_VERSION }}-darwin-arm64.tar.gz
             artifacts/raxis-${{ env.RAXIS_VERSION }}-darwin-x86_64/raxis-${{ env.RAXIS_VERSION }}-darwin-x86_64.tar.gz
+            rendered/bottles/*.bottle.tar.gz
 
       - name: render Homebrew formula
         run: |
           set -euo pipefail
+          sha256_file() {
+            shasum -a 256 "$1" | awk '{print $1}'
+          }
+
           base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RAXIS_VERSION}"
-          export RAXIS_DARWIN_ARM64_URL="${base_url}/raxis-${RAXIS_VERSION}-darwin-arm64.tar.gz"
-          export RAXIS_DARWIN_X86_64_URL="${base_url}/raxis-${RAXIS_VERSION}-darwin-x86_64.tar.gz"
-          export RAXIS_LINUX_ARM64_URL="${base_url}/raxis-${RAXIS_VERSION}-linux-arm64.tar.gz"
-          export RAXIS_LINUX_X86_64_URL="${base_url}/raxis-${RAXIS_VERSION}-linux-x86_64.tar.gz"
-          export RAXIS_DARWIN_ARM64_SHA256="$(shasum -a 256 artifacts/raxis-${RAXIS_VERSION}-darwin-arm64/raxis-${RAXIS_VERSION}-darwin-arm64.tar.gz | awk '{print $1}')"
-          export RAXIS_DARWIN_X86_64_SHA256="$(shasum -a 256 artifacts/raxis-${RAXIS_VERSION}-darwin-x86_64/raxis-${RAXIS_VERSION}-darwin-x86_64.tar.gz | awk '{print $1}')"
-          export RAXIS_LINUX_ARM64_SHA256="$(shasum -a 256 artifacts/raxis-${RAXIS_VERSION}-linux-arm64/raxis-${RAXIS_VERSION}-linux-arm64.tar.gz | awk '{print $1}')"
-          export RAXIS_LINUX_X86_64_SHA256="$(shasum -a 256 artifacts/raxis-${RAXIS_VERSION}-linux-x86_64/raxis-${RAXIS_VERSION}-linux-x86_64.tar.gz | awk '{print $1}')"
-          export RAXIS_VERSION="${RAXIS_VERSION#v}"
+          formula_version="${RAXIS_VERSION#v}"
+          RAXIS_DARWIN_ARM64_URL="${base_url}/raxis-${RAXIS_VERSION}-darwin-arm64.tar.gz"
+          RAXIS_DARWIN_X86_64_URL="${base_url}/raxis-${RAXIS_VERSION}-darwin-x86_64.tar.gz"
+          RAXIS_LINUX_ARM64_URL="${base_url}/raxis-${RAXIS_VERSION}-linux-arm64.tar.gz"
+          RAXIS_LINUX_X86_64_URL="${base_url}/raxis-${RAXIS_VERSION}-linux-x86_64.tar.gz"
+          RAXIS_DARWIN_ARM64_SHA256="$(sha256_file "artifacts/raxis-${RAXIS_VERSION}-darwin-arm64/raxis-${RAXIS_VERSION}-darwin-arm64.tar.gz")"
+          RAXIS_DARWIN_X86_64_SHA256="$(sha256_file "artifacts/raxis-${RAXIS_VERSION}-darwin-x86_64/raxis-${RAXIS_VERSION}-darwin-x86_64.tar.gz")"
+          RAXIS_LINUX_ARM64_SHA256="$(sha256_file "artifacts/raxis-${RAXIS_VERSION}-linux-arm64/raxis-${RAXIS_VERSION}-linux-arm64.tar.gz")"
+          RAXIS_LINUX_X86_64_SHA256="$(sha256_file "artifacts/raxis-${RAXIS_VERSION}-linux-x86_64/raxis-${RAXIS_VERSION}-linux-x86_64.tar.gz")"
+          RAXIS_BOTTLE_ROOT_URL="${base_url}"
+          RAXIS_BOTTLE_DARWIN_ARM64_TAHOE_SHA256="$(sha256_file "rendered/bottles/raxis-${formula_version}.arm64_tahoe.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_X86_64_TAHOE_SHA256="$(sha256_file "rendered/bottles/raxis-${formula_version}.tahoe.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_ARM64_SEQUOIA_SHA256="$(sha256_file "rendered/bottles/raxis-${formula_version}.arm64_sequoia.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_X86_64_SEQUOIA_SHA256="$(sha256_file "rendered/bottles/raxis-${formula_version}.sequoia.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_ARM64_SONOMA_SHA256="$(sha256_file "rendered/bottles/raxis-${formula_version}.arm64_sonoma.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_X86_64_SONOMA_SHA256="$(sha256_file "rendered/bottles/raxis-${formula_version}.sonoma.bottle.tar.gz")"
+          RAXIS_BOTTLE_LINUX_ARM64_SHA256="$(sha256_file "rendered/bottles/raxis-${formula_version}.arm64_linux.bottle.tar.gz")"
+          RAXIS_BOTTLE_LINUX_X86_64_SHA256="$(sha256_file "rendered/bottles/raxis-${formula_version}.x86_64_linux.bottle.tar.gz")"
+          RAXIS_VERSION="${formula_version}"
+          export RAXIS_DARWIN_ARM64_URL RAXIS_DARWIN_X86_64_URL
+          export RAXIS_LINUX_ARM64_URL RAXIS_LINUX_X86_64_URL
+          export RAXIS_DARWIN_ARM64_SHA256 RAXIS_DARWIN_X86_64_SHA256
+          export RAXIS_LINUX_ARM64_SHA256 RAXIS_LINUX_X86_64_SHA256
+          export RAXIS_BOTTLE_ROOT_URL
+          export RAXIS_BOTTLE_DARWIN_ARM64_TAHOE_SHA256 RAXIS_BOTTLE_DARWIN_X86_64_TAHOE_SHA256
+          export RAXIS_BOTTLE_DARWIN_ARM64_SEQUOIA_SHA256 RAXIS_BOTTLE_DARWIN_X86_64_SEQUOIA_SHA256
+          export RAXIS_BOTTLE_DARWIN_ARM64_SONOMA_SHA256 RAXIS_BOTTLE_DARWIN_X86_64_SONOMA_SHA256
+          export RAXIS_BOTTLE_LINUX_ARM64_SHA256 RAXIS_BOTTLE_LINUX_X86_64_SHA256
+          export RAXIS_VERSION
           mkdir -p rendered/Formula
           raxis/release/scripts/render-formula.sh raxis > rendered/Formula/raxis.rb
 

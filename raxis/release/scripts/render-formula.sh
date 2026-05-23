@@ -13,6 +13,17 @@
 #   RAXIS_LINUX_ARM64_URL           RAXIS_LINUX_ARM64_SHA256
 #   RAXIS_LINUX_X86_64_URL          RAXIS_LINUX_X86_64_SHA256
 #
+# Inputs only required when rendering raxis:
+#   RAXIS_BOTTLE_ROOT_URL
+#   RAXIS_BOTTLE_DARWIN_ARM64_TAHOE_SHA256
+#   RAXIS_BOTTLE_DARWIN_X86_64_TAHOE_SHA256
+#   RAXIS_BOTTLE_DARWIN_ARM64_SEQUOIA_SHA256
+#   RAXIS_BOTTLE_DARWIN_X86_64_SEQUOIA_SHA256
+#   RAXIS_BOTTLE_DARWIN_ARM64_SONOMA_SHA256
+#   RAXIS_BOTTLE_DARWIN_X86_64_SONOMA_SHA256
+#   RAXIS_BOTTLE_LINUX_ARM64_SHA256
+#   RAXIS_BOTTLE_LINUX_X86_64_SHA256
+#
 # Inputs only required when rendering raxis-kernel:
 #   RAXIS_REVIEWER_IMG_URL          RAXIS_REVIEWER_IMG_SHA256
 #   RAXIS_ORCHESTRATOR_IMG_URL      RAXIS_ORCHESTRATOR_IMG_SHA256
@@ -58,7 +69,17 @@ required_vars=(
 # raxis-kernel additionally needs the three image-archive variables.
 case "${formula_name}" in
     raxis)
-        : # single complete bundle: binaries + canonical images + guest kernel
+        required_vars+=(
+            RAXIS_BOTTLE_ROOT_URL
+            RAXIS_BOTTLE_DARWIN_ARM64_TAHOE_SHA256
+            RAXIS_BOTTLE_DARWIN_X86_64_TAHOE_SHA256
+            RAXIS_BOTTLE_DARWIN_ARM64_SEQUOIA_SHA256
+            RAXIS_BOTTLE_DARWIN_X86_64_SEQUOIA_SHA256
+            RAXIS_BOTTLE_DARWIN_ARM64_SONOMA_SHA256
+            RAXIS_BOTTLE_DARWIN_X86_64_SONOMA_SHA256
+            RAXIS_BOTTLE_LINUX_ARM64_SHA256
+            RAXIS_BOTTLE_LINUX_X86_64_SHA256
+        )
         ;;
     raxis-kernel)
         required_vars+=(

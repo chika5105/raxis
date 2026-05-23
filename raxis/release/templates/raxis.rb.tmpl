@@ -8,6 +8,18 @@ class Raxis < Formula
   version  "@@RAXIS_VERSION@@"
   license  "SSPL-1.0"
 
+  bottle do
+    root_url "@@RAXIS_BOTTLE_ROOT_URL@@"
+    sha256 cellar: :any_skip_relocation, arm64_tahoe:    "@@RAXIS_BOTTLE_DARWIN_ARM64_TAHOE_SHA256@@"
+    sha256 cellar: :any_skip_relocation, tahoe:          "@@RAXIS_BOTTLE_DARWIN_X86_64_TAHOE_SHA256@@"
+    sha256 cellar: :any_skip_relocation, arm64_sequoia:  "@@RAXIS_BOTTLE_DARWIN_ARM64_SEQUOIA_SHA256@@"
+    sha256 cellar: :any_skip_relocation, sequoia:        "@@RAXIS_BOTTLE_DARWIN_X86_64_SEQUOIA_SHA256@@"
+    sha256 cellar: :any_skip_relocation, arm64_sonoma:   "@@RAXIS_BOTTLE_DARWIN_ARM64_SONOMA_SHA256@@"
+    sha256 cellar: :any_skip_relocation, sonoma:         "@@RAXIS_BOTTLE_DARWIN_X86_64_SONOMA_SHA256@@"
+    sha256 cellar: :any_skip_relocation, arm64_linux:    "@@RAXIS_BOTTLE_LINUX_ARM64_SHA256@@"
+    sha256 cellar: :any_skip_relocation, x86_64_linux:   "@@RAXIS_BOTTLE_LINUX_X86_64_SHA256@@"
+  end
+
   on_macos do
     on_arm do
       url "@@RAXIS_DARWIN_ARM64_URL@@"
@@ -34,6 +46,9 @@ class Raxis < Formula
     bin.install "bin/raxis-kernel"
     bin.install "bin/raxis-cli"
     bin.install "bin/raxis"
+    bin.install "bin/raxis-gateway"
+    bin.install "bin/raxis-otel-pusher"
+    bin.install "bin/raxis-supervisor"
     bin.install "bin/raxis-orchestrator"
     bin.install "bin/raxis-executor"
     bin.install "bin/raxis-reviewer"
@@ -41,19 +56,28 @@ class Raxis < Formula
 
     pkgshare.install "images" if File.directory?("images")
     pkgshare.install "kernel" if File.directory?("kernel")
+    pkgshare.install "share/raxis/dashboard" if File.directory?("share/raxis/dashboard")
+    pkgshare.install "share/raxis/policy.toml.example" if File.exist?("share/raxis/policy.toml.example")
+
+    install_policy_example
+  end
+
+  def install_policy_example
+    policy_example = pkgshare/"policy.toml.example"
+    return unless policy_example.exist?
+    return if (etc/"raxis/policy.toml.example").exist?
 
     (etc/"raxis").mkpath
-    if File.exist?("share/raxis/policy.toml.example") &&
-       !(etc/"raxis/policy.toml.example").exist?
-      (etc/"raxis").install "share/raxis/policy.toml.example"
-    end
+    (etc/"raxis").install policy_example
   end
 
   service do
-    run [opt_bin/"raxis-kernel"]
+    run [opt_bin/"raxis-supervisor", "start"]
     keep_alive true
     environment_variables RAXIS_INSTALL_DIR: opt_pkgshare.to_s,
-                          RAXIS_DATA_DIR: (var/"lib/raxis").to_s
+                          RAXIS_DATA_DIR: (var/"lib/raxis").to_s,
+                          RAXIS_SUPERVISOR_AUTO_RESTART: "1",
+                          RAXIS_SUPERVISOR_KERNEL_BINARY: (opt_bin/"raxis-kernel").to_s
     log_path var/"log/raxis/kernel.log"
     error_log_path var/"log/raxis/kernel.err.log"
   end
@@ -61,6 +85,7 @@ class Raxis < Formula
   def post_install
     (var/"lib/raxis").mkpath
     (var/"log/raxis").mkpath
+    install_policy_example
 
     system bin/"raxis", "doctor", "canonical-images",
                          "--install-dir", pkgshare.to_s
@@ -75,6 +100,16 @@ class Raxis < Formula
       The Homebrew service runs with:
         RAXIS_INSTALL_DIR=#{opt_pkgshare}
         RAXIS_DATA_DIR=#{var}/lib/raxis
+        RAXIS_SUPERVISOR_AUTO_RESTART=1
+
+      The service launches raxis-supervisor, which launches and
+      supervises raxis-kernel.
+
+      Dashboard static bundle:
+        #{opt_pkgshare}/dashboard
+      To serve it, configure policy.toml with:
+        [dashboard]
+        static_dir = "#{opt_pkgshare}/dashboard"
 
       Start the kernel with:
         brew services start raxis
@@ -85,6 +120,18 @@ class Raxis < Formula
   end
 
   test do
+    %w[
+      raxis-gateway
+      raxis-otel-pusher
+      raxis-supervisor
+      raxis-orchestrator
+      raxis-executor
+      raxis-reviewer
+      raxis-tproxy
+    ].each do |cmd|
+      assert_predicate bin/cmd, :executable?
+    end
+
     assert_match "signing key fingerprint",
       shell_output("#{bin}/raxis doctor signing-key-fp")
   end

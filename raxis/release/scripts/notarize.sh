@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# notarize.sh — codesign + notarytool + staple wrapper.
+# notarize.sh — codesign + notarytool + Gatekeeper wrapper.
 #
 # Normative reference: raxis/specs/v2/release-and-distribution.md
 # §6 ("Apple notarization").
@@ -72,6 +72,12 @@ chmod 0600 "${p12}" "${api_key}"
 # deleted unconditionally to avoid carrying leaked state forward.
 keychain="${work}/build.keychain"
 keychain_pw="$(openssl rand -hex 16)"
+cleanup() {
+    security delete-keychain "${keychain}" >/dev/null 2>&1 || true
+    rm -rf "${work}"
+}
+trap cleanup EXIT
+
 security create-keychain  -p "${keychain_pw}" "${keychain}"
 security set-keychain-settings -lut 21600     "${keychain}"
 security unlock-keychain  -p "${keychain_pw}" "${keychain}"
@@ -119,42 +125,81 @@ zip="${work}/raxis-bin.zip"
 ( cd "${bin_dir}/.." && zip -r "${zip}" "$(basename "${bin_dir}")" >/dev/null )
 
 echo "notarize.sh: submitting to Apple notarization servers"
+submit_log="${work}/notary-submit.log"
+set +e
 xcrun notarytool submit "${zip}" \
     --key       "${api_key}" \
     --key-id    "${APPLE_NOTARIZATION_API_KEY_ID}" \
     --issuer    "${APPLE_NOTARIZATION_API_KEY_ISSUER_ID}" \
     --wait      \
-    --timeout   30m
+    --timeout   "${APPLE_NOTARIZATION_TIMEOUT:-30m}" \
+    2>&1 | tee "${submit_log}"
+submit_status=${PIPESTATUS[0]}
+set -e
+if [[ ${submit_status} -ne 0 ]]; then
+    submission_id="$(grep -E '^[[:space:]]*id: ' "${submit_log}" | tail -1 | awk '{print $2}' || true)"
+    if [[ -n "${submission_id}" ]]; then
+        echo "notarize.sh: Apple submission did not finish successfully; submission id: ${submission_id}" >&2
+        xcrun notarytool info "${submission_id}" \
+            --key       "${api_key}" \
+            --key-id    "${APPLE_NOTARIZATION_API_KEY_ID}" \
+            --issuer    "${APPLE_NOTARIZATION_API_KEY_ISSUER_ID}" >&2 || true
+        xcrun notarytool log "${submission_id}" \
+            --key       "${api_key}" \
+            --key-id    "${APPLE_NOTARIZATION_API_KEY_ID}" \
+            --issuer    "${APPLE_NOTARIZATION_API_KEY_ISSUER_ID}" >&2 || true
+    fi
+    exit "${submit_status}"
+fi
 
-# Staple the notarization ticket onto each binary so Gatekeeper
-# can verify offline (per release-and-distribution.md §6.5).
-for binary in "${bin_dir}"/*; do
-    if [[ ! -f "${binary}" ]]; then continue; fi
-    if ! file "${binary}" | grep -q "Mach-O"; then continue; fi
-    echo "notarize.sh: stapling ${binary}"
-    xcrun stapler staple "${binary}" || {
-        echo "notarize.sh: WARN: stapling failed for ${binary}" >&2
-        # `stapler staple` fails for binaries that the notarization
-        # ticket was never embedded in (it's a known-quirk for
-        # individual binaries vs. .app bundles). The Gatekeeper
-        # self-test below still runs, and the production
-        # `release.yml` consumes its result as the final gate.
-    }
-done
+echo "notarize.sh: raw Mach-O command-line tools cannot be stapled; Gatekeeper will validate the notarization ticket by cdhash"
 
-# Self-test: every binary must pass `spctl -a -t exec -vv`.
+# Self-test: every binary must have a strict valid Developer ID
+# signature and a notarization ticket visible to Gatekeeper. On modern
+# macOS, `spctl --type exec` treats a bare Mach-O as "not an app" even
+# when notarization succeeded; `--type install` is the stable way to
+# check the online notarization ticket for raw command-line tools.
 echo "notarize.sh: running Gatekeeper self-test"
 for binary in "${bin_dir}"/*; do
     if [[ ! -f "${binary}" ]]; then continue; fi
     if ! file "${binary}" | grep -q "Mach-O"; then continue; fi
-    if ! spctl -a -t exec -vv "${binary}" 2>&1 | grep -q "accepted"; then
-        echo "notarize.sh: FAIL: ${binary} did not pass Gatekeeper" >&2
+
+    codesign --verify --strict --verbose=4 "${binary}"
+    signature_details="$(codesign -dvvv "${binary}" 2>&1)"
+    if ! grep -q "Authority=Developer ID Application" <<<"${signature_details}"; then
+        echo "notarize.sh: FAIL: ${binary} is not signed by a Developer ID Application identity" >&2
+        printf '%s\n' "${signature_details}" >&2
+        exit 75
+    fi
+    if ! grep -q "flags=.*runtime" <<<"${signature_details}"; then
+        echo "notarize.sh: FAIL: ${binary} is not signed with hardened runtime" >&2
+        printf '%s\n' "${signature_details}" >&2
+        exit 75
+    fi
+
+    accepted=0
+    last_assessment=""
+    for attempt in {1..18}; do
+        set +e
+        last_assessment="$(spctl --assess --type install -vv "${binary}" 2>&1)"
+        assess_status=$?
+        set -e
+        if [[ ${assess_status} -eq 0 ]] &&
+           grep -q "accepted" <<<"${last_assessment}" &&
+           grep -q "Notarized Developer ID" <<<"${last_assessment}"; then
+            accepted=1
+            break
+        fi
+        if [[ ${attempt} -lt 18 ]]; then
+            echo "notarize.sh: Gatekeeper has not observed notarization for ${binary}; retry ${attempt}/17"
+            sleep 10
+        fi
+    done
+    if [[ ${accepted} -ne 1 ]]; then
+        echo "notarize.sh: FAIL: ${binary} did not pass notarized Gatekeeper assessment" >&2
+        printf '%s\n' "${last_assessment}" >&2
         exit 75
     fi
 done
-
-# Discard the keychain explicitly. The trap cleanup handles the
-# work dir; the keychain is a separate macOS-system entry.
-security delete-keychain "${keychain}"
 
 echo "notarize.sh: success"
