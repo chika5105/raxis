@@ -695,6 +695,7 @@ jobs:
       - name: upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          overwrite_files: true
           files: |
             artifacts/raxis-${{ env.RAXIS_VERSION }}-linux-x86_64/raxis-${{ env.RAXIS_VERSION }}-linux-x86_64.tar.gz
             artifacts/raxis-${{ env.RAXIS_VERSION }}-linux-arm64/raxis-${{ env.RAXIS_VERSION }}-linux-arm64.tar.gz
