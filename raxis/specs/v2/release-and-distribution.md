@@ -179,8 +179,8 @@ raxis-<version>-<os>-<arch>.tar.gz
   the Homebrew formula plus the manifest signatures inside `images/`.
   Detached Linux GPG signatures are a future additive channel, not a
   current release prerequisite.
-* The kernel binary inside the tarball was built with the release
-  job's generated public image-signing key in
+* The kernel binary inside the tarball was built with the matching
+  guest architecture's generated public image-signing key in
   `RAXIS_KERNEL_SIGNING_KEY_HEX`, plus per-role image digest env vars
   computed from the exact guest images shipped in that tarball (§5.3,
   §7.1).
@@ -212,10 +212,10 @@ Each guest runtime bundle is built with `cargo xtask images bake
 --target <linux-musl-triple>` and contains every canonical role image,
 its signed `.manifest.toml`, `kernel/vmlinux`, and
 `kernel/vmlinux.config`. The tagged workflow generates a release-local
-Ed25519 keypair during this build. The private half signs the manifests
-and never leaves the guest-runtime job; the public half is exposed as a
-job output and baked into matching host kernels as
-`EXPECTED_KERNEL_SIGNING_KEY_BYTES` (per
+Ed25519 keypair during each architecture's build. The private half signs
+that architecture's manifests and never leaves the guest-runtime job;
+the public half is exposed through metadata outputs and baked into
+matching host kernels as `EXPECTED_KERNEL_SIGNING_KEY_BYTES` (per
 `canonical-images/src/lib.rs`).
 
 ### §4.3 Per-artefact integrity commitments
@@ -266,7 +266,8 @@ notarization is still unresolved.
 | `build-dashboard` | `ubuntu-22.04` | Vite-built dashboard frontend bundle            |
 | `build-darwin`   | `macos-26`, `macos-15`, `macos-14` | Tahoe, Sequoia, and Sonoma bottles for arm64 + x86_64 |
 | `build-linux`    | `ubuntu-22.04`  | `linux-x86_64` + `linux-arm64` (cross via target)   |
-| `build-images`   | `ubuntu-22.04`  | Guest runtime bundles for `arm64` and `x86_64`: Raxis-built Linux guest kernel, signed canonical images, and digest outputs |
+| `build-images`   | `ubuntu-22.04`  | Fan-out guest runtime bundles for `arm64` and `x86_64`: Raxis-built Linux guest kernel, signed canonical images, and metadata artifacts |
+| `collect-image-metadata` | `ubuntu-22.04` | Public trust anchors and per-role digest outputs for host builds |
 | `notarize`       | matching macOS runner | Notarized darwin bottles and Tahoe raw tarballs |
 | `publish`        | `ubuntu-22.04`  | Upload raw archives + bottles to GitHub Releases; push tap |
 
@@ -275,13 +276,14 @@ Vite production build once, packages `dashboard-fe/dist/` as the
 `raxis-dashboard-fe` artifact, and fans that artifact into every
 `build-linux` / `build-darwin` matrix row.
 
-The `build-images` job is OS-agnostic. It builds a pinned Cloud
-Hypervisor Linux guest kernel per guest architecture, merges
-`images/kernel/raxis-guest-a3-netfilter.config`, bakes the signed
-canonical initramfs images, and emits both per-role digests and the
-release-local public trust anchor for the host build jobs. We pin it to
-Ubuntu so the kernel/image toolchain and resulting bytes are stable
-across release cuts.
+The `build-images` job is OS-agnostic and fans out by guest
+architecture. Each matrix row builds a pinned Cloud Hypervisor Linux
+guest kernel, merges `images/kernel/raxis-guest-a3-netfilter.config`,
+bakes the signed canonical initramfs images, and uploads both the
+runtime bundle and a small metadata artifact. `collect-image-metadata`
+turns those metadata artifacts into stable job outputs for host builds.
+We pin both jobs to Ubuntu so the kernel/image toolchain and resulting
+bytes are stable across release cuts.
 
 ### §5.3 Signing inputs
 
@@ -304,12 +306,13 @@ Repository variables the release workflow consumes:
 
 Three principles govern this list:
 
-1. **The kernel signing keypair is release-local.** The
-   guest-runtime job generates an Ed25519 keypair with
-   `cargo xtask images bake`. The private half signs
-   `.manifest.toml` files and never leaves that job. The public half
-   is emitted as `RAXIS_KERNEL_SIGNING_KEY_HEX` for host kernel builds,
-   where `build.rs` bakes it into `EXPECTED_KERNEL_SIGNING_KEY_BYTES`.
+1. **The kernel signing keypairs are release-local.** Each
+   architecture's guest-runtime job generates an Ed25519 keypair with
+   `cargo xtask images bake`. The private half signs that
+   architecture's `.manifest.toml` files and never leaves that job. The
+   public half is emitted as `RAXIS_KERNEL_SIGNING_KEY_HEX` for host
+   kernel builds of the same architecture, where `build.rs` bakes it
+   into `EXPECTED_KERNEL_SIGNING_KEY_BYTES`.
 2. **No long-lived secret is persisted.** Apple signing material is
    imported into a transient keychain that is deleted at job end. The
    Homebrew deploy key is written to `~/.ssh` only for the tap push. No
@@ -461,11 +464,11 @@ notarization.
 ### §7.1 Production: release job output → build.rs → kernel binary
 
 The trust anchor (the public half of the kernel signing keypair) is
-generated by the guest-runtime build job and fed into host builds via
-`RAXIS_KERNEL_SIGNING_KEY_HEX`. Sequence:
+generated by the matching guest-runtime build job and fed into same-arch
+host builds via `RAXIS_KERNEL_SIGNING_KEY_HEX`. Sequence:
 
 ```text
-guest-runtime job generated public key (32-byte hex)
+guest-runtime arch job generated public key (32-byte hex)
    │
    ▼  (workflow `env:`)
 RAXIS_KERNEL_SIGNING_KEY_HEX=…
@@ -505,10 +508,10 @@ exist for `verify_canonical_image_pinned`, for `raxis doctor`
 diagnostics, and as stable kind-tagged identifiers in audit-event
 payloads.
 
-The release pipeline computes image digests in the `build-images` job
-and exports them as job outputs the kernel build jobs consume. The
-kernel binary therefore always carries digest constants for the exact
-image bytes shipped in the same release.
+The release pipeline computes image digests in the `build-images` arch
+jobs and exports them via `collect-image-metadata` outputs consumed by
+the kernel build jobs. The kernel binary therefore always carries digest
+constants for the exact image bytes shipped in the same release.
 
 ### §7.3 Why we never check in private keys
 
@@ -517,12 +520,12 @@ The `build.rs` only reads PUBLIC inputs:
 * The kernel signing key public half (32 bytes).
 * The image SHA-256 digests.
 
-The corresponding **secret half** of the signing keypair never enters
+The corresponding **secret half** of each signing keypair never enters
 any kernel build. It is generated by `cargo xtask images bake` under
-`.git/info/raxis-signing-key/sk.hex` on the `build-images` runner,
-used to sign manifests in that same job, and then discarded with the
-runner workspace. The only value crossing into host build jobs is the
-public `pk.hex` string.
+`.git/info/raxis-signing-key/sk.hex` on that architecture's
+`build-images` runner, used to sign manifests in that same job, and then
+discarded with the runner workspace. The only value crossing into host
+build jobs is the public `pk.hex` string.
 
 The image-builder process is the ONLY place in the pipeline where
 the secret material lives in process memory, and it lives there
@@ -531,8 +534,8 @@ manifest) before the process exits.
 
 This separation is what lets the trust anchor be a public-input
 build-time bake while the actual signing remains isolated to the
-guest-runtime job. A compromised host `cargo build` on a release runner
-cannot exfiltrate the signing key — the build doesn't have it.
+guest-runtime arch job. A compromised host `cargo build` on a release
+runner cannot exfiltrate the signing key — the build doesn't have it.
 
 ---
 

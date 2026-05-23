@@ -14,18 +14,18 @@
 #
 # Pipeline shape (pinned by the spec):
 #
-#   guest-runtime  ┐
-#                  ├→ build-darwin → notarize ┐
-#   build-dashboard┤
-#                  └→ build-linux ───────────────→ publish → tap
+#   guest-runtime-arm64 ┐
+#   guest-runtime-x86_64├→ collect-image-metadata ┐
+#   build-dashboard    ─┘                         ├→ build-darwin → notarize ┐
+#                                                 └→ build-linux ───────────────→ publish → tap
 #
 # Guest runtime bundles are built inside the release workflow, including
 # a pinned Cloud-Hypervisor-derived Linux guest kernel with Raxis' A3
 # nftables fragment merged in. The image-signing private key is
-# generated inside that job and never leaves it; only the public half is
-# exposed to downstream host builds as the kernel trust anchor. V2 image
-# integrity comes from signed manifests verified by that compiled-in
-# Ed25519 trust anchor.
+# generated inside the corresponding architecture job and never leaves
+# it; only the public half is exposed to downstream host builds as the
+# architecture's kernel trust anchor. V2 image integrity comes from
+# signed manifests verified by that compiled-in Ed25519 trust anchor.
 # The dashboard frontend is built once as a platform-independent artifact
 # and fanned out to every platform package.
 # Homebrew receives bottle-shaped archives derived from the same complete
@@ -99,40 +99,40 @@ jobs:
           esac
 
   # ────────────────────────────────────────────────────────────
-  # Stage 1: build signed guest runtime bundles once per guest arch.
+  # Stage 1a: build signed guest runtime bundles in parallel, one
+  # GitHub-hosted Linux runner per guest architecture.
   #
-  # The image-signing private key is release-scoped and remains local to
-  # this job. Downstream host builds receive only the public key and
-  # digest outputs, then compile those into raxis-kernel.
+  # Each architecture mints its own release-scoped image-signing key.
+  # The private half remains local to that arch job; downstream host
+  # builds receive only public trust anchors and digest metadata.
   # ────────────────────────────────────────────────────────────
   build-images:
-    name:    build guest runtime bundles
+    name:    build guest runtime bundle-${{ matrix.arch }}
     needs:   [release-gate]
     if:      needs.release-gate.outputs.enabled == 'true'
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch:   arm64
+            target: aarch64-unknown-linux-musl
+          - arch:   x86_64
+            target: x86_64-unknown-linux-musl
     defaults:
       run:
         working-directory: raxis
-    outputs:
-      kernel_signing_key_hex:              ${{ steps.release_key.outputs.kernel_signing_key_hex }}
-      reviewer_digest_arm64:               ${{ steps.digests.outputs.reviewer_digest_arm64 }}
-      orchestrator_digest_arm64:           ${{ steps.digests.outputs.orchestrator_digest_arm64 }}
-      verifier_starter_digest_arm64:       ${{ steps.digests.outputs.verifier_starter_digest_arm64 }}
-      verifier_symbol_index_digest_arm64:  ${{ steps.digests.outputs.verifier_symbol_index_digest_arm64 }}
-      reviewer_digest_x86_64:              ${{ steps.digests.outputs.reviewer_digest_x86_64 }}
-      orchestrator_digest_x86_64:          ${{ steps.digests.outputs.orchestrator_digest_x86_64 }}
-      verifier_starter_digest_x86_64:      ${{ steps.digests.outputs.verifier_starter_digest_x86_64 }}
-      verifier_symbol_index_digest_x86_64: ${{ steps.digests.outputs.verifier_symbol_index_digest_x86_64 }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-qemu-action@v3
+        if: matrix.arch == 'arm64'
         with:
           platforms: arm64
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-musl,x86_64-unknown-linux-musl
+          targets: ${{ matrix.target }}
 
       - uses: goto-bus-stop/setup-zig@v2
 
@@ -173,8 +173,7 @@ jobs:
           chmod +x "${HOME}/.local/bin/"*-linux-musl-gcc
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
 
-      - name: bake guest runtime bundles
-        id:   digests
+      - name: bake guest runtime bundle
         run: |
           set -euo pipefail
 
@@ -187,62 +186,99 @@ jobs:
             shasum -a 256 "${image}" | awk '{print $1}'
           }
 
-          bake_one() {
-            local arch="$1"
-            local triple="$2"
-            local kernel="/tmp/raxis-${arch}-vmlinux"
-            local config="/tmp/raxis-${arch}-vmlinux.config"
-            local install_dir="${PWD}/out/guest-${arch}"
+          arch="${{ matrix.arch }}"
+          target="${{ matrix.target }}"
+          kernel="/tmp/raxis-${arch}-vmlinux"
+          config="/tmp/raxis-${arch}-vmlinux.config"
+          install_dir="${PWD}/out/guest-${arch}"
 
-            ./release/scripts/build-guest-kernel.sh \
-              --arch "${arch}" \
-              --kernel-out "${kernel}" \
-              --config-out "${config}"
-            cargo xtask images bake \
-              --install-dir "${install_dir}" \
-              --target "${triple}" \
-              --kernel-from-file "${kernel}" \
-              --kernel-config "${config}" \
-              --no-cache
-            tar -C "${install_dir}" -czf "out/raxis-guest-runtime-${arch}.tar.gz" images kernel
+          mkdir -p out out/meta
+          ./release/scripts/build-guest-kernel.sh \
+            --arch "${arch}" \
+            --kernel-out "${kernel}" \
+            --config-out "${config}"
+          cargo xtask images bake \
+            --install-dir "${install_dir}" \
+            --target "${target}" \
+            --kernel-from-file "${kernel}" \
+            --kernel-config "${config}" \
+            --no-cache
+          tar -C "${install_dir}" -czf "out/raxis-guest-runtime-${arch}.tar.gz" images kernel
 
-            local reviewer_digest
-            local orchestrator_digest
-            local verifier_starter_digest
-            local verifier_symbol_index_digest
-            reviewer_digest="$(digest_one "${install_dir}" reviewer-core)"
-            orchestrator_digest="$(digest_one "${install_dir}" orchestrator-core)"
-            verifier_starter_digest="$(digest_one "${install_dir}" verifier-starter)"
-            verifier_symbol_index_digest="$(digest_one "${install_dir}" verifier-symbol-index)"
-            {
-              echo "reviewer_digest_${arch}=${reviewer_digest}"
-              echo "orchestrator_digest_${arch}=${orchestrator_digest}"
-              echo "verifier_starter_digest_${arch}=${verifier_starter_digest}"
-              echo "verifier_symbol_index_digest_${arch}=${verifier_symbol_index_digest}"
-            } >> "${GITHUB_OUTPUT}"
-          }
-
-          mkdir -p out
-          bake_one arm64 aarch64-unknown-linux-musl
-          bake_one x86_64 x86_64-unknown-linux-musl
-
-      - name: expose public release trust anchor
-        id:   release_key
-        run: |
-          set -euo pipefail
           key=".git/info/raxis-signing-key/pk.hex"
           test -f "${key}"
-          echo "kernel_signing_key_hex=$(tr -d '\n' < "${key}")" >> "${GITHUB_OUTPUT}"
+          {
+            echo "kernel_signing_key_hex_${arch}=$(tr -d '\n' < "${key}")"
+            echo "reviewer_digest_${arch}=$(digest_one "${install_dir}" reviewer-core)"
+            echo "orchestrator_digest_${arch}=$(digest_one "${install_dir}" orchestrator-core)"
+            echo "verifier_starter_digest_${arch}=$(digest_one "${install_dir}" verifier-starter)"
+            echo "verifier_symbol_index_digest_${arch}=$(digest_one "${install_dir}" verifier-symbol-index)"
+          } > "out/meta/raxis-guest-runtime-${arch}.env"
 
-      - name: upload guest runtime bundles
+      - name: upload guest runtime bundle
         uses: actions/upload-artifact@v4
         with:
-          name: raxis-guest-runtime
-          path: raxis/out/raxis-guest-runtime-*.tar.gz
+          name: raxis-guest-runtime-${{ matrix.arch }}
+          path: raxis/out/raxis-guest-runtime-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+      - name: upload guest runtime metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: raxis-guest-runtime-meta-${{ matrix.arch }}
+          path: raxis/out/meta/raxis-guest-runtime-${{ matrix.arch }}.env
           if-no-files-found: error
 
   # ────────────────────────────────────────────────────────────
-  # Stage 1b — platform-independent dashboard frontend bundle.
+  # Stage 1b: turn per-architecture metadata artifacts into stable
+  # job outputs for host build expressions.
+  # ────────────────────────────────────────────────────────────
+  collect-image-metadata:
+    name:    collect guest runtime metadata
+    needs:   [build-images]
+    runs-on: ubuntu-22.04
+    outputs:
+      kernel_signing_key_hex_arm64:              ${{ steps.meta.outputs.kernel_signing_key_hex_arm64 }}
+      reviewer_digest_arm64:                     ${{ steps.meta.outputs.reviewer_digest_arm64 }}
+      orchestrator_digest_arm64:                 ${{ steps.meta.outputs.orchestrator_digest_arm64 }}
+      verifier_starter_digest_arm64:             ${{ steps.meta.outputs.verifier_starter_digest_arm64 }}
+      verifier_symbol_index_digest_arm64:        ${{ steps.meta.outputs.verifier_symbol_index_digest_arm64 }}
+      kernel_signing_key_hex_x86_64:             ${{ steps.meta.outputs.kernel_signing_key_hex_x86_64 }}
+      reviewer_digest_x86_64:                    ${{ steps.meta.outputs.reviewer_digest_x86_64 }}
+      orchestrator_digest_x86_64:                ${{ steps.meta.outputs.orchestrator_digest_x86_64 }}
+      verifier_starter_digest_x86_64:            ${{ steps.meta.outputs.verifier_starter_digest_x86_64 }}
+      verifier_symbol_index_digest_x86_64:       ${{ steps.meta.outputs.verifier_symbol_index_digest_x86_64 }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: raxis-guest-runtime-meta-*
+          path: metadata
+          merge-multiple: true
+
+      - name: expose guest runtime metadata
+        id:   meta
+        run: |
+          set -euo pipefail
+          for arch in arm64 x86_64; do
+            file="metadata/raxis-guest-runtime-${arch}.env"
+            test -f "${file}"
+            while IFS='=' read -r key value; do
+              test -n "${key}"
+              test -n "${value}"
+              case "${key}" in
+                "kernel_signing_key_hex_${arch}"|"reviewer_digest_${arch}"|"orchestrator_digest_${arch}"|"verifier_starter_digest_${arch}"|"verifier_symbol_index_digest_${arch}")
+                  printf '%s=%s\n' "${key}" "${value}" >> "${GITHUB_OUTPUT}"
+                  ;;
+                *)
+                  echo "::error::Unexpected guest metadata key ${key} in ${file}"
+                  exit 1
+                  ;;
+              esac
+            done < "${file}"
+          done
+
+  # ────────────────────────────────────────────────────────────
+  # Stage 1c — platform-independent dashboard frontend bundle.
   # ────────────────────────────────────────────────────────────
   build-dashboard:
     name:    build dashboard frontend
@@ -285,7 +321,7 @@ jobs:
   # ────────────────────────────────────────────────────────────
   build-linux:
     name:    build linux-${{ matrix.arch }}
-    needs:   [build-images, build-dashboard]
+    needs:   [collect-image-metadata, build-dashboard]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -301,11 +337,11 @@ jobs:
       run:
         working-directory: raxis
     env:
-      RAXIS_KERNEL_SIGNING_KEY_HEX:                         ${{ needs.build-images.outputs.kernel_signing_key_hex }}
-      RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX:              ${{ needs.build-images.outputs[format('reviewer_digest_{0}', matrix.digest_key)] }}
-      RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX:          ${{ needs.build-images.outputs[format('orchestrator_digest_{0}', matrix.digest_key)] }}
-      RAXIS_EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST_HEX:      ${{ needs.build-images.outputs[format('verifier_starter_digest_{0}', matrix.digest_key)] }}
-      RAXIS_EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST_HEX: ${{ needs.build-images.outputs[format('verifier_symbol_index_digest_{0}', matrix.digest_key)] }}
+      RAXIS_KERNEL_SIGNING_KEY_HEX:                         ${{ needs.collect-image-metadata.outputs[format('kernel_signing_key_hex_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX:              ${{ needs.collect-image-metadata.outputs[format('reviewer_digest_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX:          ${{ needs.collect-image-metadata.outputs[format('orchestrator_digest_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST_HEX:      ${{ needs.collect-image-metadata.outputs[format('verifier_starter_digest_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST_HEX: ${{ needs.collect-image-metadata.outputs[format('verifier_symbol_index_digest_{0}', matrix.digest_key)] }}
     steps:
       - uses: actions/checkout@v4
 
@@ -380,7 +416,7 @@ jobs:
       - name: download guest runtime bundle
         uses: actions/download-artifact@v4
         with:
-          name: raxis-guest-runtime
+          name: raxis-guest-runtime-${{ matrix.digest_key }}
           path: raxis/out/guest-runtime
 
       - name: stage guest runtime bundle
@@ -408,7 +444,7 @@ jobs:
   # ────────────────────────────────────────────────────────────
   build-darwin:
     name:    build darwin-${{ matrix.bottle_tag }}
-    needs:   [build-images, build-dashboard]
+    needs:   [collect-image-metadata, build-dashboard]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -448,11 +484,11 @@ jobs:
       run:
         working-directory: raxis
     env:
-      RAXIS_KERNEL_SIGNING_KEY_HEX:                         ${{ needs.build-images.outputs.kernel_signing_key_hex }}
-      RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX:              ${{ needs.build-images.outputs[format('reviewer_digest_{0}', matrix.digest_key)] }}
-      RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX:          ${{ needs.build-images.outputs[format('orchestrator_digest_{0}', matrix.digest_key)] }}
-      RAXIS_EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST_HEX:      ${{ needs.build-images.outputs[format('verifier_starter_digest_{0}', matrix.digest_key)] }}
-      RAXIS_EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST_HEX: ${{ needs.build-images.outputs[format('verifier_symbol_index_digest_{0}', matrix.digest_key)] }}
+      RAXIS_KERNEL_SIGNING_KEY_HEX:                         ${{ needs.collect-image-metadata.outputs[format('kernel_signing_key_hex_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX:              ${{ needs.collect-image-metadata.outputs[format('reviewer_digest_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX:          ${{ needs.collect-image-metadata.outputs[format('orchestrator_digest_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST_HEX:      ${{ needs.collect-image-metadata.outputs[format('verifier_starter_digest_{0}', matrix.digest_key)] }}
+      RAXIS_EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST_HEX: ${{ needs.collect-image-metadata.outputs[format('verifier_symbol_index_digest_{0}', matrix.digest_key)] }}
     steps:
       - uses: actions/checkout@v4
 
@@ -529,7 +565,7 @@ jobs:
       - name: download guest runtime bundle
         uses: actions/download-artifact@v4
         with:
-          name: raxis-guest-runtime
+          name: raxis-guest-runtime-${{ matrix.digest_key }}
           path: raxis/out/guest-runtime
 
       - name: stage guest runtime bundle

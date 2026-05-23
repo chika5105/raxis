@@ -87,13 +87,15 @@ Repository variables:
 | `HOMEBREW_TAP_REPOSITORY` | Optional; defaults to `chika5105/homebrew-raxis`. |
 | `APPLE_NOTARIZATION_TIMEOUT` | Optional; defaults to `30m`. Increase if Apple is slow to finish a submission. |
 
-The release workflow generates the image-signing keypair inside the
-guest-runtime build job. The private half signs image manifests and
-never leaves that job. The public half is passed as a job output into
-the host build jobs and compiled into `raxis-kernel`.
+The release workflow generates one image-signing keypair per guest
+architecture inside that architecture's guest-runtime build job. The
+private half signs image manifests and never leaves that job. A metadata
+collector exposes only the public halves and per-role digests to the
+host build jobs, which compile the matching architecture's public key
+into `raxis-kernel`.
 
-The same job also builds the Linux guest kernel that ships with the
-runtime bundle. It fetches the pinned Cloud Hypervisor Linux commit,
+Each guest-runtime job also builds the Linux guest kernel that ships
+with its runtime bundle. It fetches the pinned Cloud Hypervisor Linux commit,
 starts from `ch_defconfig`, merges
 `images/kernel/raxis-guest-a3-netfilter.config`, and passes the
 resulting kernel plus its exact `.config` through `cargo xtask images
@@ -173,7 +175,9 @@ release/scripts/render-formula.sh raxis
 flowchart TD
     tag["push tag vX.Y.Z"]
     gate{"RAXIS_RELEASE_ENABLED?"}
-    images["build signed guest runtime bundles<br/>generate release trust key"]
+    images_arm["build arm64 guest runtime bundle<br/>generate arm64 trust key"]
+    images_x86["build x86_64 guest runtime bundle<br/>generate x86_64 trust key"]
+    meta["collect image metadata"]
     dashboard["build dashboard-fe once<br/>upload dist artifact"]
     linux["build linux host binaries"]
     mac["build macOS host binaries"]
@@ -185,10 +189,13 @@ flowchart TD
     user["brew install raxis"]
 
     tag --> gate
-    gate --> images
+    gate --> images_arm
+    gate --> images_x86
     gate --> dashboard
-    images --> linux
-    images --> mac
+    images_arm --> meta
+    images_x86 --> meta
+    meta --> linux
+    meta --> mac
     dashboard --> linux
     dashboard --> mac
     mac --> notarize

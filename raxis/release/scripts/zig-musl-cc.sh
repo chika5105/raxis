@@ -31,7 +31,7 @@ for arg in "$@"; do
       # of truth by letting Zig provide them and dropping Rust's copies.
       continue
       ;;
-    */lib/rustlib/*/lib/self-contained/crt*.o|*/lib/self-contained/crt*.o)
+    */lib/rustlib/*/lib/self-contained/[rS]crt*.o|*/lib/rustlib/*/lib/self-contained/crt*.o|*/lib/self-contained/[rS]crt*.o|*/lib/self-contained/crt*.o)
       continue
       ;;
   esac
