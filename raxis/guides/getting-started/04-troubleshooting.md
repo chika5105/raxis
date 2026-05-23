@@ -76,6 +76,34 @@ Reference: [`recipes/setup/11-macos-firewall-popup.md`](../recipes/setup/11-maco
 
 ---
 
+## 1c · `permission denied: raxis` after Homebrew install
+
+**When.** You run `raxis` and the shell prints `permission denied:
+raxis`.
+
+**Why.** Usually the shell is resolving `raxis` to the local source
+directory named `./raxis`, not to the Homebrew binary. This happens
+most often when you are standing in a cloned repo root and `.` is on
+your `$PATH`.
+
+**Fix.**
+
+```bash
+command -v raxis
+ls -l "$(brew --prefix raxis)/bin/raxis"
+hash -r
+```
+
+`command -v raxis` should point at Homebrew, for example
+`/opt/homebrew/bin/raxis` on Apple Silicon. If the Homebrew binary is
+not executable, reinstall the corrected bottle:
+
+```bash
+brew reinstall raxis
+```
+
+---
+
 ## 2 · `genesis: refusing to overwrite existing data dir`
 
 **When.** Re-running `raxis genesis` against a `RAXIS_DATA_DIR` that

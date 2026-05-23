@@ -39,6 +39,12 @@ if [[ ! -f "${entitlements}" ]]; then
     exit 66
 fi
 
+# GitHub upload/download-artifact intentionally normalizes file modes.
+# Restore executable bits before signing and before the final tarball is
+# assembled, otherwise poured Homebrew bottles can link non-runnable
+# 0644 command-line tools.
+find "${bin_dir}" -maxdepth 1 -type f -exec chmod 0755 {} +
+
 required=(
     APPLE_DEVELOPER_ID_APPLICATION_P12
     APPLE_DEVELOPER_ID_APPLICATION_PASSWORD
@@ -152,6 +158,7 @@ for binary in "${bin_dir}"/*; do
              --keychain "${keychain}" \
              "${binary}"
 done
+find "${bin_dir}" -maxdepth 1 -type f -exec chmod 0755 {} +
 
 # Bundle the signed bin/ for notarytool submission. notarytool
 # accepts .zip archives.

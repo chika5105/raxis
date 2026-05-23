@@ -406,6 +406,7 @@ jobs:
           cp target/${{ matrix.target }}/release/raxis-executor "${outdir}/bin/raxis-executor"
           cp target/${{ matrix.target }}/release/raxis-reviewer "${outdir}/bin/raxis-reviewer"
           cp target/${{ matrix.target }}/release/raxis-tproxy "${outdir}/bin/raxis-tproxy"
+          chmod 0755 "${outdir}/bin/"*
           cat > "${outdir}/share/raxis/policy.toml.example" <<'EOF'
           # RAXIS operator policy example.
           # Copy this file to policy.toml and run `raxis genesis`.
@@ -560,7 +561,7 @@ jobs:
             '#!/bin/sh' \
             'echo "raxis-tproxy: linux-only; the macOS kernel uses host-routed egress" >&2' \
             'exit 70' > "${outdir}/bin/raxis-tproxy"
-          chmod +x "${outdir}/bin/raxis-tproxy"
+          chmod 0755 "${outdir}/bin/"*
 
       - name: download guest runtime bundle
         uses: actions/download-artifact@v4

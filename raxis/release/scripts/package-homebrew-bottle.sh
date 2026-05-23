@@ -51,6 +51,7 @@ cellar="${bottle_root}/raxis/${formula_version}"
 mkdir -p "${cellar}/bin" "${cellar}/share/raxis" "${cellar}/.brew"
 
 cp -p "${pkg_dir}/bin/"* "${cellar}/bin/"
+chmod 0755 "${cellar}/bin/"*
 cp -R "${pkg_dir}/images" "${cellar}/share/raxis/images"
 cp -R "${pkg_dir}/kernel" "${cellar}/share/raxis/kernel"
 

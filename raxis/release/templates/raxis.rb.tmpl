@@ -43,16 +43,21 @@ class Raxis < Formula
   end
 
   def install
-    bin.install "bin/raxis-kernel"
-    bin.install "bin/raxis-cli"
-    bin.install "bin/raxis"
-    bin.install "bin/raxis-gateway"
-    bin.install "bin/raxis-otel-pusher"
-    bin.install "bin/raxis-supervisor"
-    bin.install "bin/raxis-orchestrator"
-    bin.install "bin/raxis-executor"
-    bin.install "bin/raxis-reviewer"
-    bin.install "bin/raxis-tproxy"
+    %w[
+      raxis-kernel
+      raxis-cli
+      raxis
+      raxis-gateway
+      raxis-otel-pusher
+      raxis-supervisor
+      raxis-orchestrator
+      raxis-executor
+      raxis-reviewer
+      raxis-tproxy
+    ].each do |cmd|
+      bin.install "bin/#{cmd}"
+      chmod 0755, bin/cmd
+    end
 
     pkgshare.install "images" if File.directory?("images")
     pkgshare.install "kernel" if File.directory?("kernel")

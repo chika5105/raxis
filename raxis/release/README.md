@@ -209,3 +209,6 @@ The release workflow fails before publishing if a guest runtime bundle
 cannot be built or if it does not contain both `images/` and
 `kernel/vmlinux`. That failure mode is deliberate: it is better to stop
 a release than publish a Homebrew formula that cannot boot planner VMs.
+The packaging steps also force every `bin/raxis*` file to mode `0755`
+after artifact download and again while laying out bottles; GitHub's
+artifact service may otherwise restore executable binaries as `0644`.

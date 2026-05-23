@@ -14,20 +14,20 @@ holds only the secret bytes.
 
 ## Field reference
 
-Each `[[providers]]` (canonically `[[providers.entries]]` in the
-serialised TOML) block declares one provider.
+Each `[[providers]]` block declares one provider.
 
 | Field | Type | Required | Default | Effect |
 |---|---|---|---|---|
-| `id` | `String` | yes | — | Stable provider identifier, referenced by `[[providers]] id` and by `[default_model]` lookups inside the gateway. Must be unique. |
+| `provider_id` | `String` | yes | — | Stable provider identifier. Must be unique. |
 | `kind` | `String` | yes | — | Provider family. Canonical V2 values: `Anthropic`, `OpenAI`, `Bedrock`, `Vertex`, `Ollama`. Unknown kinds fail policy load. |
-| `credentials` | `String` | yes | — | Filename **relative to `<data-dir>/providers/`**. The file must exist, be `0600`, and be a TOML map of provider-specific keys (`api_key = "…"`, etc.). |
-| `default_model` | `String` | yes | — | The model the gateway uses when an inference request doesn't pin one. Must be a model the provider supports; the gateway calls `provider.list_models()` at boot and rejects unrecognised defaults. |
+| `credentials_file` | `String` | yes | — | Filename **relative to `<data-dir>/providers/`**. The file must exist, be `0600`, and be a TOML map of provider-specific keys (`api_key = "…"`, etc.). |
+| `inference_timeout_ms` | `u32` | no | `30000` | Per-inference request deadline. |
+| `data_fetch_timeout_ms` | `u32` | no | `10000` | Per-data-fetch request deadline. |
+| `max_response_bytes` | `u64` | no | `16777216` | Maximum gateway response body size. |
 | `pricing.input_tokens_per_dollar` | `u64` | yes | — | How many input tokens equal one dollar. Used by the budget heuristic to project token spend into admission units. |
 | `pricing.output_tokens_per_dollar` | `u64` | yes | — | Same for output tokens. |
-| `pricing.usage_units` | `String` | optional | "tokens" | Reserved; future support for non-token usage measurement. |
-| `circuit_breaker.consecutive_failures` | `u32` | optional | 5 | After this many consecutive failed requests, the gateway opens the breaker for this (provider, model). Subsequent requests fail fast with `CircuitOpen`. |
-| `circuit_breaker.cooldown_secs` | `u64` | optional | 60 | Seconds the breaker stays open before transitioning to half-open. |
+| `pricing.cache_read_tokens_per_dollar` | `u64` | no | input rate | Optional prompt-cache read rate. |
+| `pricing.cache_creation_tokens_per_dollar` | `u64` | no | input rate | Optional prompt-cache creation rate. |
 
 `pricing.*` is **mandatory** for any LLM-bearing provider entry —
 `PolicyBundle::validate` rejects entries without it.
@@ -37,14 +37,16 @@ serialised TOML) block declares one provider.
 ## Example — Anthropic
 
 ```toml
-[[providers.entries]]
-id            = "anthropic-prod"
-kind          = "Anthropic"
-credentials   = "anthropic-prod.toml"
-default_model = "claude-haiku-4-5"
+[[providers]]
+provider_id           = "anthropic-prod"
+kind                  = "Anthropic"
+credentials_file      = "anthropic-prod.toml"
+inference_timeout_ms  = 30000
+data_fetch_timeout_ms = 10000
+max_response_bytes    = 16777216
 
-  pricing.input_tokens_per_dollar  = 200000     # $5 per 1M tokens
-  pricing.output_tokens_per_dollar = 50000      # $20 per 1M tokens
+pricing.input_tokens_per_dollar  = 200000     # $5 per 1M tokens
+pricing.output_tokens_per_dollar = 50000      # $20 per 1M tokens
 ```
 
 The matching credential file:
@@ -59,21 +61,19 @@ chmod 600 "$RAXIS_DATA_DIR/providers/anthropic-prod.toml"
 ## Example — OpenAI + fallback
 
 ```toml
-[[providers.entries]]
-id            = "openai-primary"
-kind          = "OpenAI"
-credentials   = "openai-primary.toml"
-default_model = "gpt-4-turbo"
-  pricing.input_tokens_per_dollar  = 100000
-  pricing.output_tokens_per_dollar = 33333
+[[providers]]
+provider_id      = "openai-primary"
+kind             = "OpenAI"
+credentials_file = "openai-primary.toml"
+pricing.input_tokens_per_dollar  = 100000
+pricing.output_tokens_per_dollar = 33333
 
-[[providers.entries]]
-id            = "anthropic-fallback"
-kind          = "Anthropic"
-credentials   = "anthropic-fallback.toml"
-default_model = "claude-haiku-4-5"
-  pricing.input_tokens_per_dollar  = 200000
-  pricing.output_tokens_per_dollar = 50000
+[[providers]]
+provider_id      = "anthropic-fallback"
+kind             = "Anthropic"
+credentials_file = "anthropic-fallback.toml"
+pricing.input_tokens_per_dollar  = 200000
+pricing.output_tokens_per_dollar = 50000
 ```
 
 Plans target a provider via `[[providers]] id` in the system prompt
@@ -84,13 +84,12 @@ secondary.
 ## Example — local Ollama (no auth)
 
 ```toml
-[[providers.entries]]
-id            = "local-ollama"
-kind          = "Ollama"
-credentials   = "ollama.toml"     # contains base_url = "http://127.0.0.1:11434"
-default_model = "llama3:70b"
-  pricing.input_tokens_per_dollar  = 1000000   # effectively free
-  pricing.output_tokens_per_dollar = 1000000
+[[providers]]
+provider_id      = "local-ollama"
+kind             = "Ollama"
+credentials_file = "ollama.toml"     # contains base_url = "http://127.0.0.1:11434"
+pricing.input_tokens_per_dollar  = 1000000   # effectively free
+pricing.output_tokens_per_dollar = 1000000
 ```
 
 Even local providers need pricing values — the budget heuristic
@@ -108,7 +107,7 @@ api_key = "REPLACE_ME"
 EOF
 chmod 600 "$RAXIS_DATA_DIR/providers/new-provider.toml"
 
-# 2. Add [[providers.entries]] to policy.toml.
+# 2. Add [[providers]] to policy.toml.
 $EDITOR "$RAXIS_DATA_DIR/policy/policy.toml"
 
 # 3. Re-sign.
@@ -130,7 +129,6 @@ raxis providers status
 | `BOOT_ERR_CREDENTIAL_MODE` | The `<id>.toml` file under `providers/` is not `0600`. `chmod 600 …`. |
 | `Validation: pricing.input_tokens_per_dollar required` | Add the pricing block. Even a placeholder is better than an unset value. |
 | `Validation: provider id already declared` | Two entries share an `id`. Pick a unique one. |
-| `default_model not in provider.list_models()` | Typo, or the provider rotated model names. `raxis providers status` shows the live model list once the gateway boots. |
 | `CircuitOpen` on every request to one provider | The breaker is open after consecutive failures. Run `raxis providers reset <id>` to force-close it. |
 
 ---
@@ -148,7 +146,7 @@ raxis providers status
 
 ## Variations
 
-- **Single-provider tight install.** One `[[providers.entries]]`,
+- **Single-provider tight install.** One `[[providers]]`,
   one credential. Most demos use exactly this shape.
 - **Tiered fallback.** Three providers in order — primary,
   secondary, tertiary. The gateway's circuit-breaker layout makes

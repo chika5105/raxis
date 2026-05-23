@@ -13,6 +13,8 @@ through the kernel until it's fixed.
 ## Prerequisites
 
 - The `raxis` CLI on your `$PATH` (run `which raxis` to confirm).
+- If installed with Homebrew, export
+  `RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"`.
 - A `RAXIS_DATA_DIR` you believe was previously initialised. The
   default is `~/.raxis`; demos typically use `~/.raxis-demo`.
 - The kernel does NOT need to be running for the first three checks;
@@ -24,6 +26,12 @@ through the kernel until it's fixed.
 
 ```bash
 export RAXIS_DATA_DIR="$HOME/.raxis-demo"   # use whatever path was used at genesis
+
+# 0. Homebrew installs: the immutable runtime bundle verifies.
+if [ -n "${RAXIS_INSTALL_DIR:-}" ]; then
+  raxis doctor signing-key-fp
+  raxis doctor canonical-images --install-dir "$RAXIS_INSTALL_DIR"
+fi
 
 # 1. The genesis ceremony's two anchor files exist.
 test -f "$RAXIS_DATA_DIR/policy/policy.toml"        && echo "policy:       present"

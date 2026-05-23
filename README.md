@@ -31,13 +31,27 @@ self-contained Next.js project that mirrors `raxis/specs/` /
 
 | Need | Start here |
 |---|---|
-| Build and run a local kernel | [`raxis/guides/SETUP.md`](raxis/guides/SETUP.md) |
-| Learn by running one initiative | [`raxis/guides/getting-started/`](raxis/guides/getting-started/) |
+| Install from Homebrew and run the first initiative | [`raxis/guides/getting-started/`](raxis/guides/getting-started/) |
+| Build and run a local kernel from source | [`raxis/guides/SETUP.md`](raxis/guides/SETUP.md) |
+| Maintain the release / Homebrew pipeline | [`raxis/release/README.md`](raxis/release/README.md) |
 | Find a focused operator recipe | [`raxis/guides/recipes/`](raxis/guides/recipes/) |
 | Understand the security model | [`raxis/guides/security/raxis-security-model.md`](raxis/guides/security/raxis-security-model.md) |
 | Check invariants and specs | [`raxis/specs/README.md`](raxis/specs/README.md) and [`raxis/specs/invariants.md`](raxis/specs/invariants.md) |
 
-## Building
+## Install
+
+```sh
+brew tap chika5105/raxis
+brew install raxis
+export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
+
+raxis doctor signing-key-fp
+raxis doctor canonical-images --install-dir "$RAXIS_INSTALL_DIR"
+```
+
+Then follow [`raxis/guides/getting-started/02-first-initiative.md`](raxis/guides/getting-started/02-first-initiative.md).
+
+## Building From Source
 
 ```sh
 # Rust workspace

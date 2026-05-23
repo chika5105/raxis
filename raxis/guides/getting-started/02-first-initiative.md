@@ -9,18 +9,23 @@ repo, commits it, and lets the kernel fast-forward `main`.
 
 ---
 
-## 0 · Pick a data directory
+## 0 · Export the two runtime paths
 
 The kernel keeps every byte of live state — SQLite store, sockets,
 audit segments, witness blobs — under `$RAXIS_DATA_DIR` (defaults to
-`~/.raxis`). For your first run, use a throwaway path:
+`~/.raxis`). The Homebrew bottle keeps the immutable runtime bundle
+under `$(brew --prefix raxis)/share/raxis`.
+
+For your first run, use a throwaway data dir:
 
 ```bash
+export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
 export RAXIS_DATA_DIR="$HOME/.raxis-demo"
 ```
 
-Use the **same** value in every terminal that runs `raxis*` binaries
-below.
+Use the **same** values in every terminal that runs `raxis*` binaries
+below. Source-build operators should set `RAXIS_INSTALL_DIR` to the
+install dir produced by `cargo xtask source-setup`.
 
 ---
 
@@ -86,33 +91,56 @@ agents can call a model. Anthropic is the most-tested provider in V2.
 
 ```bash
 mkdir -p "$RAXIS_DATA_DIR/providers"
-cat > "$RAXIS_DATA_DIR/providers/anthropic-prod.toml" <<'EOF'
-api_key = "sk-ant-REPLACE_ME"
-EOF
+
+read -rsp "Anthropic API key: " RAXIS_ANTHROPIC_API_KEY
+printf '\n'
+printf 'api_key = "%s"\n' "$RAXIS_ANTHROPIC_API_KEY" \
+  > "$RAXIS_DATA_DIR/providers/anthropic-prod.toml"
+unset RAXIS_ANTHROPIC_API_KEY
 chmod 600 "$RAXIS_DATA_DIR/providers/anthropic-prod.toml"
 ```
 
 The kernel's `FileCredentialBackend` enforces mode `0600` on every
 provider credential file; any other mode is a boot-time refusal.
 
-Edit `$RAXIS_DATA_DIR/policy/policy.toml` and append the provider
-block plus the worktree allowlist (the parent directory the demo
-will create its scratch repos under):
+Now make three policy edits:
 
-```toml
-[[providers.entries]]
-id            = "anthropic-prod"
-kind          = "Anthropic"
-credentials   = "anthropic-prod.toml"
-default_model = "claude-haiku-4-5"
+1. Allow the scratch repo root used below.
+2. Point the dashboard at the Homebrew-shipped static bundle.
+3. Add the gateway/provider block.
 
-[sessions]
-allowed_worktree_roots = ["/tmp"]
+```bash
+perl -0pi -e 's|allowed_worktree_roots = \[[^\]]*\]|allowed_worktree_roots = ["/tmp"]|' \
+  "$RAXIS_DATA_DIR/policy/policy.toml"
+
+perl -0pi -e 's|(jwt_ttl_secs = [0-9]+\n)|${1}static_dir   = "$ENV{RAXIS_INSTALL_DIR}/dashboard"\n|' \
+  "$RAXIS_DATA_DIR/policy/policy.toml"
+
+cat >> "$RAXIS_DATA_DIR/policy/policy.toml" <<EOF
+
+[gateway]
+binary_path              = "$(brew --prefix raxis)/bin/raxis-gateway"
+spawn_timeout_secs       = 5
+respawn_backoff_ms       = 1000
+max_consecutive_respawns = 5
+
+[[providers]]
+provider_id              = "anthropic-prod"
+kind                     = "Anthropic"
+credentials_file         = "anthropic-prod.toml"
+inference_timeout_ms     = 30000
+data_fetch_timeout_ms    = 10000
+max_response_bytes       = 16777216
+pricing.input_tokens_per_dollar  = 200000
+pricing.output_tokens_per_dollar = 50000
+EOF
 ```
 
-> Use whichever model alias your account has access to. Other
-> providers (OpenAI, Gemini, …) follow the same pattern; see
-> [`recipes/policy/10-providers-section.md`](../recipes/policy/10-providers-section.md).
+The pricing values are conservative tokens-per-dollar estimates used
+for budget admission. Tune them to your provider contract later; they
+do not expose your API key and do not change which model the planner
+requests. Other providers follow the same pattern; see
+[`recipes/policy/10-providers-section.md`](../recipes/policy/10-providers-section.md).
 
 Re-sign the policy:
 
@@ -129,6 +157,7 @@ raxis policy sign \
 In a dedicated terminal:
 
 ```bash
+export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
 export RAXIS_DATA_DIR="$HOME/.raxis-demo"
 raxis-kernel
 ```
@@ -148,8 +177,8 @@ The kernel auto-spawns the gateway subprocess; do not run
 clickable — bookmark it for page 03.
 
 Leave this terminal running. Switch to a second terminal for
-everything below; export `RAXIS_DATA_DIR` and `RAXIS_OPERATOR_KEY` there
-too.
+everything below; export `RAXIS_INSTALL_DIR`, `RAXIS_DATA_DIR`, and
+`RAXIS_OPERATOR_KEY` there too.
 
 ---
 
@@ -170,9 +199,8 @@ git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
 
 ## 6 · Write the plan
 
-Save this as `$DEMO_ROOT/plan.toml`:
-
-```toml
+```bash
+cat > "$DEMO_ROOT/plan.toml" <<'EOF'
 [plan.initiative]
 description = "Create a HELLO.md file with a one-line greeting and commit it."
 
@@ -183,6 +211,7 @@ lane_id  = "default"
 
 [[tasks]]
 task_id            = "greeter"
+description        = "Create HELLO.md and commit it."
 session_agent_type = "Executor"
 clone_strategy    = "blobless"
 path_allowlist     = ["HELLO.md"]
@@ -192,6 +221,7 @@ Write a single Markdown file `HELLO.md` whose only contents are the
 line `Hello, RAXIS.` (followed by a trailing newline). Stage and
 commit the file as a single commit with the message `add HELLO.md`.
 """
+EOF
 ```
 
 Field-by-field references:

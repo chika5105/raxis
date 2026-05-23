@@ -1,311 +1,147 @@
-# 01 · Prerequisites
+# 01 · Install and Verify
 
-> **Goal.** End this page with `raxis doctor` printing all-green.
+> **Goal.** End this page with the Homebrew-installed RAXIS runtime
+> verified and ready for genesis.
 
-RAXIS needs a Rust toolchain, an Ed25519-capable OpenSSL, and a
-hypervisor backend. The workspace ships a one-shot `cargo xtask`
-command that installs (or verifies) everything else.
-
----
-
-## OS matrix
-
-| Platform                               | Substrate                            | Hypervisor                      | Required kernel             |
-| -------------------------------------- | ------------------------------------ | ------------------------------- | --------------------------- |
-| **macOS 13+** (Apple Silicon or Intel) | Apple Virtualization framework (AVF) | built-in                        | n/a                         |
-| **Linux 5.10+** with KVM               | Firecracker microVMs                 | `/dev/kvm`, user in `kvm` group | guest kernel ≥ 5.14 (in-VM) |
-| Windows / WSL                          | —                                    | —                               | not supported in V2         |
-
-The substrate is auto-detected at kernel startup. If neither AVF nor
-KVM is available the kernel refuses to boot with
-`BOOT_ERR_ISOLATION_UNAVAILABLE`. The
-`RAXIS_UNSAFE_FALLBACK_ISOLATION` env var unlocks a subprocess fallback
-for tests only — never set it on a host that runs untrusted agents.
+This page is for an **operator or evaluator**. It assumes you want to
+run RAXIS, not build it. If you are changing RAXIS source code, skip to
+[`../SETUP.md`](../SETUP.md). If you are changing release packaging,
+use [`../../release/README.md`](../../release/README.md).
 
 ---
 
-## What you need, regardless of OS
+## Fast Path: Homebrew
 
-| Tool          | Purpose                           | Verify                                                     |
-| ------------- | --------------------------------- | ---------------------------------------------------------- |
-| Rust stable   | Build the workspace               | `cargo --version`                                          |
-| `openssl` 3.x | Mint the operator Ed25519 keypair | `openssl version` (must say `OpenSSL 3.x`, not `LibreSSL`) |
-| `git` ≥ 2.30  | Repo operations and worktrees     | `git --version`                                            |
-| `uuidgen`     | Lineage IDs in some scripts       | `uuidgen`                                                  |
-| `jq`          | Parse `--json` output in examples | `jq --version`                                             |
+```bash
+brew update
+brew tap chika5105/raxis
+brew install raxis
+```
 
-Source builds have a few additional surfaces:
+Homebrew installs:
 
-| Tool | Required For | Notes |
+| Piece | Location |
+|---|---|
+| Operator CLI | `$(brew --prefix raxis)/bin/raxis` |
+| Kernel daemon | `$(brew --prefix raxis)/bin/raxis-kernel` |
+| Gateway and supervisor | `$(brew --prefix raxis)/bin/raxis-gateway`, `raxis-supervisor` |
+| Dashboard static bundle | `$(brew --prefix raxis)/share/raxis/dashboard` |
+| Canonical VM images | `$(brew --prefix raxis)/share/raxis/images` |
+| Guest kernel | `$(brew --prefix raxis)/share/raxis/kernel/vmlinux` |
+
+Set the runtime bundle path in every shell that starts the kernel:
+
+```bash
+export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
+```
+
+Pick a throwaway data dir for the first run:
+
+```bash
+export RAXIS_DATA_DIR="$HOME/.raxis-demo"
+```
+
+Verify the installed bundle:
+
+```bash
+command -v raxis
+command -v raxis-kernel
+raxis --help | head -20
+raxis doctor signing-key-fp
+raxis doctor canonical-images --install-dir "$RAXIS_INSTALL_DIR"
+```
+
+Expected: `command -v` points under your Homebrew prefix, the help
+prints the CLI usage, `signing-key-fp` says `trust anchor: populated`,
+and `canonical-images` reports `worst: OK`.
+
+> If you run commands from inside a cloned source repo and see
+> `permission denied: raxis`, your shell is trying to execute the local
+> `./raxis` directory. Run `command -v raxis`; it should point at
+> Homebrew, usually `/opt/homebrew/bin/raxis` on Apple Silicon.
+
+---
+
+## Host Requirements
+
+| Platform | Supported substrate | Notes |
 |---|---|---|
-| C/C++ toolchain, `make`, `pkg-config` | Rust crates with native build steps | Xcode CLT on macOS; distro build tools on Linux. |
-| Docker, Podman, or Buildah | Guest image bake roles that assemble a rootfs | `cargo xtask images bake` auto-detects the builder. |
-| Node.js 20+ and npm | `dashboard-fe/` | Only needed when building the dashboard UI. |
-| Docker Compose | Local observability/live-e2e/perf stacks | Used by `cargo xtask observability up`. |
+| **macOS 13+** on Apple Silicon or Intel | Apple Virtualization framework | Built into macOS. The Homebrew bottle ships notarized binaries. |
+| **Linux 5.10+** with KVM | Firecracker microVMs | `/dev/kvm`, `vhost_vsock`, cgroup v2, and Firecracker must be available before first kernel boot. |
+| Windows / WSL | Not supported in V2 | Use macOS or Linux for the reference implementation. |
 
-On macOS the default `/usr/bin/openssl` is LibreSSL, which cannot
-generate Ed25519 keys. Install Homebrew `openssl@3` and put its `bin/`
-on `$PATH`:
+Tools needed for the Homebrew first initiative:
+
+| Tool | Purpose | Verify |
+|---|---|---|
+| Homebrew | Install RAXIS | `brew --version` |
+| OpenSSL 3 | Mint your Ed25519 operator key | `openssl version` |
+| Git | Scratch repo and worktrees | `git --version` |
+| `jq` | Parse JSON examples | `jq --version` |
+
+On macOS, `/usr/bin/openssl` is usually LibreSSL and cannot mint
+Ed25519 keys. Use Homebrew OpenSSL 3:
 
 ```bash
-brew install openssl@3
-# Apple Silicon:
-export PATH="/opt/homebrew/opt/openssl@3/bin:$PATH"
-# Intel macOS:
-export PATH="/usr/local/opt/openssl@3/bin:$PATH"
+brew install openssl@3 jq
+export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+openssl version
 ```
+
+Expected: `OpenSSL 3.x`.
+
+Linux operators should install OpenSSL 3, Git, and `jq` through their
+distribution package manager.
 
 ---
 
-## macOS — one command for everything else
+## Optional: Service Mode
 
-The AVF substrate needs a musl cross-compiler, the
-`<arch>-unknown-linux-musl` Rust target, the Xcode CLT `codesign`, and
-a `[target...] linker` pin in your Cargo config. The workspace ships
-this as a single subcommand that is idempotent on every re-run.
-
-```bash
-cd /path/to/raxis     # workspace root
-
-# Verify-only — exits non-zero on the first missing piece.
-cargo xtask dev-prereqs
-
-# Verify + install missing brew packages and rustup targets.
-cargo xtask dev-prereqs --install
-```
-
-What `dev-prereqs --install` does (in order):
-
-1. **Homebrew probe** — refuses to continue if `brew` is not on `$PATH`.
-2. **Brew packages** — installs `filosottile/musl-cross/musl-cross` and
-   `openssl@3` if missing.
-3. **Rustup target** — adds `<host-arch>-unknown-linux-musl`.
-4. **Cargo linker config** — patches `~/.cargo/config.toml` (or the
-   workspace `.cargo/config.toml` with `--scope workspace`) with the
-   `[target.<arch>-unknown-linux-musl] linker = "..."` pin. Existing
-   values are preserved verbatim.
-5. **`codesign` probe** — required for ad-hoc-signing the kernel
-   binary against the AVF entitlements (`release/raxis.entitlements`).
-6. **Cargo probe** — verifies the toolchain.
-7. **macOS Application Firewall allowlist** — allowlists the raxis
-   host binaries (`raxis-kernel`, `raxis-otel-pusher`,
-   `raxis-live-e2e`) via `sudo socketfilterfw --add` so the recurring
-   "allow `raxis-kernel` to accept incoming network connections"
-   popup does not re-appear on every fresh `cargo build`. Prompts
-   for `sudo` exactly once; auto-skipped when the firewall is
-   disabled. Pass `--skip-firewall` on managed devices that disallow
-   `sudo`. See
-   [`recipes/setup/11-macos-firewall-popup.md`](../recipes/setup/11-macos-firewall-popup.md)
-   for the full recipe and
-   [`xtask/src/macos_firewall.rs`](../../xtask/src/macos_firewall.rs)
-   for the inventory of managed binaries.
-
-Each step emits one JSON line so you can grep for the first failure.
-
-Reference: [`xtask/src/dev_prereqs.rs`](../../xtask/src/dev_prereqs.rs)
-and [`demo-e2e-sample/AVF_DEMO.md §0`](../../demo-e2e-sample/AVF_DEMO.md).
-
-### macOS — code-sign the kernel against AVF entitlements
-
-`raxis-kernel` needs Apple's
-`com.apple.developer.virtualization`-family entitlements to use AVF.
-The workspace provides:
+For the first initiative, run `raxis-kernel` in a foreground terminal
+so you can see the logs. After you have a real data dir and policy,
+Homebrew can supervise the kernel:
 
 ```bash
-cargo build --release --locked \
-  -p raxis-kernel \
-  -p raxis-cli \
-  -p raxis-gateway \
-  -p raxis-otel-pusher \
-  -p raxis-supervisor
-cargo xtask dev-codesign --profile release
+brew services start raxis
+brew services stop raxis
 ```
 
-`dev-codesign` ad-hoc-signs `target/release/raxis-kernel` against
-[`release/raxis.entitlements`](../../release/raxis.entitlements). On
-Linux it is a no-op. Reference:
-[`specs/v2/system-requirements.md §5.2`](../../specs/v2/system-requirements.md)
-and [`specs/v2/release-and-distribution.md §6.3`](../../specs/v2/release-and-distribution.md).
+The service uses:
+
+```bash
+RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
+RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
+```
+
+The getting-started guide uses `RAXIS_DATA_DIR="$HOME/.raxis-demo"`
+instead, because it is easy to delete and repeat.
 
 ---
 
-## Linux — one command for the host substrate
+## Source Builders
 
-The Firecracker substrate needs `/dev/kvm` reachable as your user,
-`vhost_vsock` loaded, cgroup v2 mounted, the `firecracker(1)` binary on
-`$PATH`, and `e2fsprogs` for Firecracker workspace images. The workspace
-ships a host preflight as an `xtask`:
-
-```bash
-cd /path/to/raxis
-
-cargo xtask linux-prereqs              # human-readable report
-cargo xtask linux-prereqs --json       # machine-readable, same checks
-```
-
-What it verifies:
-
-| Check                                                          | Outcome on miss                                       |
-| -------------------------------------------------------------- | ----------------------------------------------------- |
-| `linux.kernel_version` ≥ 5.10                                  | **Fail** — upgrade kernel                             |
-| `/dev/kvm` exists and is openable                              | **Fail** — install KVM, add user to `kvm` group       |
-| User's groups include `kvm`                                    | **Fail** — `sudo usermod -aG kvm $USER && newgrp kvm` |
-| `vhost_vsock` module loaded                                    | **Fail** — `sudo modprobe vhost_vsock`                |
-| cgroup v2 mounted (`/sys/fs/cgroup/cgroup.controllers` exists) | **Fail** — Linux ≥ 5.14 systemd defaults              |
-| `firecracker(1)` on `$PATH`                                    | **Warn** — install before first kernel boot           |
-| `mkfs.ext4`, `debugfs`, `e2fsck` on `$PATH`                    | **Fail** — install `e2fsprogs`                        |
-| `virtiofsd(1)` on `$PATH`                                      | **Warn** — future lower-copy workspace transport      |
-
-Exit codes mirror `raxis doctor`: `0` = all OK, `1` = any warn, `2` =
-any fail. Reference: [`xtask/src/linux_prereqs.rs`](../../xtask/src/linux_prereqs.rs)
-and [`specs/v2/isolation-linux-microvm.md §9`](../../specs/v2/isolation-linux-microvm.md).
-
-### Linux — one-shot Firecracker image bundle
-
-After the prereqs are green you can stage a reference guest kernel and
-the canonical role initramfs blobs with a single command. Pin a SHA so
-the kernel binary cannot drift on you mid-demo.
-
-```bash
-cargo xtask linux-microvm bundle \
-  --install-dir ~/.local/share/raxis \
-  --kernel-url https://example.com/vmlinux-aarch64 \
-  --kernel-sha256 <hex-digest>
-```
-
-Reference:
-[`xtask/src/linux_microvm.rs`](../../xtask/src/linux_microvm.rs).
-
----
-
-## Build from source
-
-For a fresh local build, the canonical path is the one-shot setup
-wrapper:
+Do this only if you are developing RAXIS or validating a source
+checkout. Source builds need Rust, native toolchains, Node.js, Docker
+or Podman/Buildah for image baking, and platform-specific prereqs:
 
 ```bash
 cd /path/to/raxis/raxis
-export RAXIS_INSTALL_DIR="$HOME/.raxis-install"
 
-cargo xtask source-setup \
-  --install-dir "$RAXIS_INSTALL_DIR" \
-  --kernel-from-file /path/to/vmlinux \
-  --kernel-config /path/to/vmlinux.config
+# macOS source host
+cargo xtask dev-prereqs --install
+
+# Linux source host
+cargo xtask linux-prereqs
 ```
 
-If the guest kernel is distributed as a prebuilt artifact, pin the
-download instead:
-
-```bash
-cargo xtask source-setup \
-  --install-dir "$RAXIS_INSTALL_DIR" \
-  --kernel-url https://example.com/vmlinux-aarch64 \
-  --kernel-sha256 <64-hex-digest> \
-  --kernel-config /path/to/vmlinux.config
-```
-
-Use `--no-cache` after changing guest binaries, verifier binaries, or
-rootfs inputs and you want to force every role through the full bake.
-Use `--dry-run` to see the exact phase plan first.
-
-| Phase | First-run expectation |
-|---|---:|
-| Host prereqs | 2-20 min |
-| Release host tools | 3-15 min |
-| Dashboard frontend | 1-6 min |
-| Prebuilt guest kernel stage | 1-10 min when `--kernel-url` is used |
-| Guest image bake | 10-45 min with `--no-cache` |
-| Trust-anchored host kernel rebuild | 2-10 min |
-| Verify/codesign | under 1 min |
-
-That command wraps the manual sequence below and handles the setup
-details that caused previous drift: guest `vmlinux` is staged and
-checked against the nftables config, the image-signing key under
-`.git/info/raxis-signing-key/` is kept in sync with the host kernel
-build, macOS AVF codesign is applied, and the bake prints progress
-before long quiet Docker/Cargo/cpio phases.
-
-The workspace is tuned for faster local Rust loops without changing
-release semantics. Dev/test builds keep line-table debuginfo for useful
-backtraces, skip debuginfo for build scripts and proc-macros, and keep
-incremental compilation enabled. For even faster repeated clean builds,
-install `sccache` locally and opt in with:
-
-```bash
-export RUSTC_WRAPPER=sccache
-```
-
-The wrapper is not committed into Cargo config because a missing
-machine-local binary would break fresh clones. Use `cargo check` for
-edit feedback, but run the real `cargo test`, image bake, and live-e2e
-commands before treating a change as release-ready.
-
-Once `cargo xtask dev-prereqs` (macOS) or `cargo xtask linux-prereqs`
-(Linux) is green, the workspace should build with the checked-in lock:
-
-```bash
-cd /path/to/raxis        # workspace root
-cargo build --workspace --locked
-```
-
-Build the host binaries operators normally run:
-
-```bash
-cargo build --release --locked \
-  -p raxis-cli \
-  -p raxis-kernel \
-  -p raxis-gateway \
-  -p raxis-otel-pusher \
-  -p raxis-supervisor
-```
-
-If you want them installed into `~/.cargo/bin`, install the non-kernel
-tools first and build the kernel after the guest-image bake so its
-canonical-image trust anchor matches the images you staged:
-
-```bash
-cargo install --path cli --locked --force
-cargo install --path gateway --locked --force
-cargo install --path pusher --locked --force
-cargo install --path crates/supervisor --bin raxis-supervisor --locked --force
-```
-
-Dashboard frontend build:
-
-```bash
-cd dashboard-fe
-npm ci
-npm run build
-```
-
-Guest-image bake and the final trust-anchored kernel build are in
-[`SETUP.md §3`](../SETUP.md#3-bake-guest-images). That step is
-intentionally later because the kernel binary embeds the public half
-of the image manifest-signing key.
-
-Confirm:
-
-```bash
-which raxis raxis-gateway raxis-otel-pusher raxis-supervisor
-raxis --help | head -20
-```
-
-Now flip to [`02-first-initiative.md`](02-first-initiative.md) and run
-your first plan. (`raxis doctor` ties the host check together but is
-most useful once a `RAXIS_DATA_DIR` exists — you'll run it again at the
-end of page 02.)
+Then follow [`../SETUP.md`](../SETUP.md), which covers host binary
+builds, dashboard builds, guest image baking, trust-anchor embedding,
+and macOS development codesigning.
 
 ---
 
-## Cross-references
+## Next
 
-- [`xtask/src/dev_prereqs.rs`](../../xtask/src/dev_prereqs.rs) — the
-  authoritative list of what `dev-prereqs` installs and probes.
-- [`xtask/src/linux_prereqs.rs`](../../xtask/src/linux_prereqs.rs) — the
-  authoritative list of Linux KVM / vsock / cgroup checks.
-- [`specs/v2/system-requirements.md`](../../specs/v2/system-requirements.md) —
-  full host + VM kernel requirements matrix.
-- [`specs/v2/isolation-platform-parity.md`](../../specs/v2/isolation-platform-parity.md) —
-  side-by-side Apple-VZ vs Firecracker behaviour.
-- [`SETUP.md`](../SETUP.md) — the manual long-form variant of this page,
-  retained for operators who want to inspect every step by hand.
+Continue to [`02-first-initiative.md`](02-first-initiative.md). Keep
+`RAXIS_INSTALL_DIR` and `RAXIS_DATA_DIR` exported in every terminal you
+use for the run.
