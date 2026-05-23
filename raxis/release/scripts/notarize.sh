@@ -57,8 +57,12 @@ done
 # the runner. We materialise them under $RUNNER_TEMP (auto-deleted
 # at job end) and `chmod 0600` everything.
 work="$(mktemp -d)"
-trap 'rm -rf "${work}"' EXIT
 chmod 0700 "${work}"
+previous_keychains="${work}/previous-keychains.txt"
+previous_default_keychain="${work}/previous-default-keychain.txt"
+security list-keychains -d user | sed -E 's/^[[:space:]]*"//; s/"$//' > "${previous_keychains}" || true
+security default-keychain -d user | sed -E 's/^[[:space:]]*"//; s/"$//' > "${previous_default_keychain}" || true
+trap 'rm -rf "${work}"' EXIT
 
 p12="${work}/cert.p12"
 api_key="${work}/notarytool.p8"
@@ -73,6 +77,21 @@ chmod 0600 "${p12}" "${api_key}"
 keychain="${work}/build.keychain"
 keychain_pw="$(openssl rand -hex 16)"
 cleanup() {
+    if [[ -s "${previous_keychains}" ]]; then
+        old_keychains=()
+        while IFS= read -r old_keychain; do
+            [[ -n "${old_keychain}" ]] && old_keychains+=("${old_keychain}")
+        done < "${previous_keychains}"
+        if [[ ${#old_keychains[@]} -gt 0 ]]; then
+            security list-keychains -d user -s "${old_keychains[@]}" >/dev/null 2>&1 || true
+        fi
+    fi
+    if [[ -s "${previous_default_keychain}" ]]; then
+        old_default="$(head -1 "${previous_default_keychain}")"
+        if [[ -n "${old_default}" ]]; then
+            security default-keychain -d user -s "${old_default}" >/dev/null 2>&1 || true
+        fi
+    fi
     security delete-keychain "${keychain}" >/dev/null 2>&1 || true
     rm -rf "${work}"
 }
@@ -81,6 +100,14 @@ trap cleanup EXIT
 security create-keychain  -p "${keychain_pw}" "${keychain}"
 security set-keychain-settings -lut 21600     "${keychain}"
 security unlock-keychain  -p "${keychain_pw}" "${keychain}"
+search_keychains=("${keychain}")
+while IFS= read -r existing_keychain; do
+    [[ -n "${existing_keychain}" ]] || continue
+    [[ "${existing_keychain}" == "${keychain}" ]] && continue
+    search_keychains+=("${existing_keychain}")
+done < "${previous_keychains}"
+security list-keychains -d user -s "${search_keychains[@]}"
+security default-keychain -d user -s "${keychain}"
 security import "${p12}" \
     -k "${keychain}" \
     -P "${APPLE_DEVELOPER_ID_APPLICATION_PASSWORD}" \
@@ -97,9 +124,16 @@ if [[ -z "${identity_line}" ]]; then
     echo "notarize.sh: no Developer ID Application identity in keychain" >&2
     exit 75
 fi
-# Extract the certificate's CN (the substring inside the double quotes).
-identity="$(printf '%s' "${identity_line}" | sed -E 's/^.*"([^"]+)".*$/\1/')"
-echo "notarize.sh: signing as: ${identity}"
+# Extract both the SHA-1 fingerprint and the certificate CN. codesign is
+# more reliable with the fingerprint because imported .p12 bundles may
+# carry a friendly name that differs from the certificate's display CN.
+identity_sha="$(printf '%s' "${identity_line}" | awk '{print $2}')"
+identity_name="$(printf '%s' "${identity_line}" | sed -E 's/^.*"([^"]+)".*$/\1/')"
+if [[ ! "${identity_sha}" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+    echo "notarize.sh: could not parse Developer ID identity SHA-1 from: ${identity_line}" >&2
+    exit 75
+fi
+echo "notarize.sh: signing as: ${identity_name} (${identity_sha})"
 
 # Codesign every Mach-O in $bin_dir.
 shopt -s nullglob
@@ -113,7 +147,7 @@ for binary in "${bin_dir}"/*; do
     fi
     echo "notarize.sh: codesigning ${binary}"
     codesign --force --options runtime --timestamp \
-             --sign "${identity}" \
+             --sign "${identity_sha}" \
              --entitlements "${entitlements}" \
              --keychain "${keychain}" \
              "${binary}"
