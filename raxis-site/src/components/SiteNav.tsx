@@ -10,19 +10,19 @@ type NavLink = {
 
 const NAV_LINKS: NavLink[] = [
   { href: "/", label: "Home" },
-  { href: "/docs", label: "Docs" },
+  { href: "/investors", label: "Investors" },
   { href: "/#demo", label: "Demo" },
+  { href: "/docs", label: "Docs" },
+  { href: "/paradigm", label: "Paradigm" },
+  { href: "/reference", label: "Reference" },
+  { href: "/threat-model", label: "Threat model" },
+  { href: "/conformance", label: "Conformance" },
+  { href: "/about", label: "About" },
   {
     href: "https://paypal.me/chikajinanwa",
     label: "Buy me a coffee",
     external: true,
   },
-  { href: "/paradigm", label: "Paradigm" },
-  { href: "/threat-model", label: "Threat model" },
-  { href: "/reference", label: "Reference" },
-  { href: "/conformance", label: "Conformance" },
-  { href: "/about", label: "About" },
-  { href: "/investors", label: "Investors" },
 ];
 
 function NavItem({ link, className }: { link: NavLink; className: string }) {
