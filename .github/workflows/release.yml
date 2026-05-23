@@ -159,49 +159,16 @@ jobs:
             xz-utils \
             zstd
           mkdir -p "${HOME}/.local/bin"
-          cat > "${HOME}/.local/bin/aarch64-linux-musl-gcc" <<'EOF'
+          zig_musl_wrapper="${PWD}/release/scripts/zig-musl-cc.sh"
+          cat > "${HOME}/.local/bin/aarch64-linux-musl-gcc" <<EOF
           #!/usr/bin/env bash
-          args=()
-          skip_next=0
-          for arg in "$@"; do
-            if [ "$skip_next" -eq 1 ]; then
-              skip_next=0
-              continue
-            fi
-            case "$arg" in
-              --target=*|-target=*)
-                continue
-                ;;
-              --target|-target)
-                skip_next=1
-                continue
-                ;;
-            esac
-            args+=("$arg")
-          done
-          exec zig cc -target aarch64-linux-musl "${args[@]}"
+          export RAXIS_ZIG_MUSL_TARGET=aarch64-linux-musl
+          exec "${zig_musl_wrapper}" "\$@"
           EOF
-          cat > "${HOME}/.local/bin/x86_64-linux-musl-gcc" <<'EOF'
+          cat > "${HOME}/.local/bin/x86_64-linux-musl-gcc" <<EOF
           #!/usr/bin/env bash
-          args=()
-          skip_next=0
-          for arg in "$@"; do
-            if [ "$skip_next" -eq 1 ]; then
-              skip_next=0
-              continue
-            fi
-            case "$arg" in
-              --target=*|-target=*)
-                continue
-                ;;
-              --target|-target)
-                skip_next=1
-                continue
-                ;;
-            esac
-            args+=("$arg")
-          done
-          exec zig cc -target x86_64-linux-musl "${args[@]}"
+          export RAXIS_ZIG_MUSL_TARGET=x86_64-linux-musl
+          exec "${zig_musl_wrapper}" "\$@"
           EOF
           chmod +x "${HOME}/.local/bin/"*-linux-musl-gcc
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
