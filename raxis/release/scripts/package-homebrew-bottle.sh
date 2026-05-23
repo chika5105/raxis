@@ -64,14 +64,56 @@ if [[ -f "${pkg_dir}/share/raxis/policy.toml.example" ]]; then
        "${cellar}/share/raxis/policy.toml.example"
 fi
 
-cat > "${cellar}/.brew/raxis.rb" <<EOF
-class Raxis < Formula
-  desc     "Runtime Attestation eXchange for Intelligent Systems"
-  homepage "https://raxis.io"
-  version  "${formula_version}"
-  license  "SSPL-1.0"
-end
-EOF
+release_tag="v${formula_version}"
+release_base_url="${RAXIS_RELEASE_BASE_URL:-https://github.com/chika5105/raxis/releases/download/${release_tag}}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+template="${script_dir}/../templates/raxis.rb.tmpl"
+runtime_sha="$(shasum -a 256 "${runtime_archive}" | awk '{print $1}')"
+placeholder_sha="0000000000000000000000000000000000000000000000000000000000000000"
+darwin_arm64_sha="${placeholder_sha}"
+darwin_x86_64_sha="${placeholder_sha}"
+linux_arm64_sha="${placeholder_sha}"
+linux_x86_64_sha="${placeholder_sha}"
+
+case "${bottle_tag}" in
+    arm64_tahoe|arm64_sequoia|arm64_sonoma)
+        darwin_arm64_sha="${runtime_sha}"
+        ;;
+    tahoe|sequoia|sonoma)
+        darwin_x86_64_sha="${runtime_sha}"
+        ;;
+    arm64_linux)
+        linux_arm64_sha="${runtime_sha}"
+        ;;
+    x86_64_linux)
+        linux_x86_64_sha="${runtime_sha}"
+        ;;
+esac
+
+# Homebrew reloads the installed Cellar formula when running
+# `brew postinstall` and `brew services`. A five-line metadata stub is
+# not enough: the loader requires an active URL, and services/postinstall
+# need the formula methods. The bottle copy omits the bottle block itself
+# to avoid circular sha256s; only the active platform URL needs a real sha.
+render_installed_formula() {
+    awk '
+      /^[[:space:]]*bottle do$/ { in_bottle = 1; next }
+      in_bottle && /^[[:space:]]*end$/ { in_bottle = 0; next }
+      !in_bottle { print }
+    ' "${template}" |
+        sed \
+            -e "s|@@RAXIS_VERSION@@|${formula_version}|g" \
+            -e "s|@@RAXIS_DARWIN_ARM64_URL@@|${release_base_url}/raxis-${release_tag}-darwin-arm64.tar.gz|g" \
+            -e "s|@@RAXIS_DARWIN_X86_64_URL@@|${release_base_url}/raxis-${release_tag}-darwin-x86_64.tar.gz|g" \
+            -e "s|@@RAXIS_LINUX_ARM64_URL@@|${release_base_url}/raxis-${release_tag}-linux-arm64.tar.gz|g" \
+            -e "s|@@RAXIS_LINUX_X86_64_URL@@|${release_base_url}/raxis-${release_tag}-linux-x86_64.tar.gz|g" \
+            -e "s|@@RAXIS_DARWIN_ARM64_SHA256@@|${darwin_arm64_sha}|g" \
+            -e "s|@@RAXIS_DARWIN_X86_64_SHA256@@|${darwin_x86_64_sha}|g" \
+            -e "s|@@RAXIS_LINUX_ARM64_SHA256@@|${linux_arm64_sha}|g" \
+            -e "s|@@RAXIS_LINUX_X86_64_SHA256@@|${linux_x86_64_sha}|g"
+}
+
+render_installed_formula > "${cellar}/.brew/raxis.rb"
 
 out="${out_dir}/raxis-${formula_version}.${bottle_tag}.bottle.tar.gz"
 tar -C "${bottle_root}" -czf "${out}" raxis
