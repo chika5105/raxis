@@ -92,6 +92,15 @@ guest-runtime build job. The private half signs image manifests and
 never leaves that job. The public half is passed as a job output into
 the host build jobs and compiled into `raxis-kernel`.
 
+The same job also builds the Linux guest kernel that ships with the
+runtime bundle. It fetches the pinned Cloud Hypervisor Linux commit,
+starts from `ch_defconfig`, merges
+`images/kernel/raxis-guest-a3-netfilter.config`, and passes the
+resulting kernel plus its exact `.config` through `cargo xtask images
+bake`. Do not swap this for a stock Firecracker reference kernel: those
+configs do not satisfy the Path A3 nftables requirement and do not match
+the AVF virtio device shape.
+
 Guest runtime bundle shape, produced once per guest architecture:
 
 ```text
@@ -114,11 +123,16 @@ kernel/
 Build one locally with:
 
 ```bash
+./release/scripts/build-guest-kernel.sh \
+  --arch arm64 \
+  --kernel-out /tmp/raxis-vmlinux-arm64 \
+  --config-out /tmp/raxis-vmlinux-arm64.config
+
 RAXIS_INSTALL_DIR=/tmp/raxis-guest-arm64 \
 cargo xtask images bake \
   --target aarch64-unknown-linux-musl \
-  --kernel-from-file /path/to/vmlinux-aarch64 \
-  --kernel-config /path/to/vmlinux-aarch64.config \
+  --kernel-from-file /tmp/raxis-vmlinux-arm64 \
+  --kernel-config /tmp/raxis-vmlinux-arm64.config \
   --no-cache
 
 tar -C /tmp/raxis-guest-arm64 -czf raxis-guest-arm64.tar.gz images kernel

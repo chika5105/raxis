@@ -19,11 +19,13 @@
 #   build-dashboard┤
 #                  └→ build-linux ───────────────→ publish → tap
 #
-# Guest runtime bundles are built inside the release workflow. The
-# image-signing private key is generated inside that job and never
-# leaves it; only the public half is exposed to downstream host builds
-# as the kernel trust anchor. V2 image integrity comes from signed
-# manifests verified by that compiled-in Ed25519 trust anchor.
+# Guest runtime bundles are built inside the release workflow, including
+# a pinned Cloud-Hypervisor-derived Linux guest kernel with Raxis' A3
+# nftables fragment merged in. The image-signing private key is
+# generated inside that job and never leaves it; only the public half is
+# exposed to downstream host builds as the kernel trust anchor. V2 image
+# integrity comes from signed manifests verified by that compiled-in
+# Ed25519 trust anchor.
 # The dashboard frontend is built once as a platform-independent artifact
 # and fanned out to every platform package.
 # Homebrew receives bottle-shaped archives derived from the same complete
@@ -142,7 +144,20 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y cpio curl tar xz-utils zstd
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            cpio \
+            curl \
+            flex \
+            gcc-aarch64-linux-gnu \
+            git \
+            libelf-dev \
+            libssl-dev \
+            tar \
+            xz-utils \
+            zstd
           mkdir -p "${HOME}/.local/bin"
           cat > "${HOME}/.local/bin/aarch64-linux-musl-gcc" <<'EOF'
           #!/usr/bin/env bash
@@ -157,26 +172,8 @@ jobs:
 
       - name: bake guest runtime bundles
         id:   digests
-        env:
-          # Firecracker CI reference kernels, pinned by SHA-256.
-          FC_AARCH64_KERNEL_URL: https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/aarch64/vmlinux-5.10.223
-          FC_AARCH64_KERNEL_SHA256: eb5d95ac8a67f7a86acf0cb35625633713ad5170b56de8617808d0e18bb832ec
-          FC_AARCH64_CONFIG_URL: https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/aarch64/vmlinux-5.10.223.config
-          FC_AARCH64_CONFIG_SHA256: ef02570c59d2e6422b539905e15ef02c451ebdb094df0cd7c22e2de1d865dbcb
-          FC_X86_64_KERNEL_URL: https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223
-          FC_X86_64_KERNEL_SHA256: 22847375721aceea63d934c28f2dfce4670b6f52ec904fae19f5145a970c1e65
-          FC_X86_64_CONFIG_URL: https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223.config
-          FC_X86_64_CONFIG_SHA256: 839af14504d927095a073c4cd6f6d267f65cb904e085d2552486f3618b31c371
         run: |
           set -euo pipefail
-
-          fetch() {
-            local url="$1"
-            local sha="$2"
-            local out="$3"
-            curl -fsSL "${url}" -o "${out}"
-            printf '%s  %s\n' "${sha}" "${out}" | shasum -a 256 -c -
-          }
 
           digest_one() {
             local dir="$1"
@@ -190,21 +187,14 @@ jobs:
           bake_one() {
             local arch="$1"
             local triple="$2"
-            local kernel_url_var="$3"
-            local kernel_sha_var="$4"
-            local config_url_var="$5"
-            local config_sha_var="$6"
-
-            local kernel_url="${!kernel_url_var}"
-            local kernel_sha="${!kernel_sha_var}"
-            local config_url="${!config_url_var}"
-            local config_sha="${!config_sha_var}"
             local kernel="/tmp/raxis-${arch}-vmlinux"
             local config="/tmp/raxis-${arch}-vmlinux.config"
             local install_dir="${PWD}/out/guest-${arch}"
 
-            fetch "${kernel_url}" "${kernel_sha}" "${kernel}"
-            fetch "${config_url}" "${config_sha}" "${config}"
+            ./release/scripts/build-guest-kernel.sh \
+              --arch "${arch}" \
+              --kernel-out "${kernel}" \
+              --config-out "${config}"
             cargo xtask images bake \
               --install-dir "${install_dir}" \
               --target "${triple}" \
@@ -230,12 +220,8 @@ jobs:
           }
 
           mkdir -p out
-          bake_one arm64 aarch64-unknown-linux-musl \
-            FC_AARCH64_KERNEL_URL FC_AARCH64_KERNEL_SHA256 \
-            FC_AARCH64_CONFIG_URL FC_AARCH64_CONFIG_SHA256
-          bake_one x86_64 x86_64-unknown-linux-musl \
-            FC_X86_64_KERNEL_URL FC_X86_64_KERNEL_SHA256 \
-            FC_X86_64_CONFIG_URL FC_X86_64_CONFIG_SHA256
+          bake_one arm64 aarch64-unknown-linux-musl
+          bake_one x86_64 x86_64-unknown-linux-musl
 
       - name: expose public release trust anchor
         id:   release_key

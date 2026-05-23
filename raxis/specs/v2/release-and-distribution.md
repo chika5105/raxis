@@ -266,7 +266,7 @@ notarization is still unresolved.
 | `build-dashboard` | `ubuntu-22.04` | Vite-built dashboard frontend bundle            |
 | `build-darwin`   | `macos-26`, `macos-15`, `macos-14` | Tahoe, Sequoia, and Sonoma bottles for arm64 + x86_64 |
 | `build-linux`    | `ubuntu-22.04`  | `linux-x86_64` + `linux-arm64` (cross via target)   |
-| `build-images`   | `ubuntu-22.04`  | The three canonical-image tarballs (deterministic)  |
+| `build-images`   | `ubuntu-22.04`  | Guest runtime bundles for `arm64` and `x86_64`: Raxis-built Linux guest kernel, signed canonical images, and digest outputs |
 | `notarize`       | matching macOS runner | Notarized darwin bottles and Tahoe raw tarballs |
 | `publish`        | `ubuntu-22.04`  | Upload raw archives + bottles to GitHub Releases; push tap |
 
@@ -275,10 +275,13 @@ Vite production build once, packages `dashboard-fe/dist/` as the
 `raxis-dashboard-fe` artifact, and fans that artifact into every
 `build-linux` / `build-darwin` matrix row.
 
-The `build-images` job is OS-agnostic — `mkfs.erofs`,
-`SOURCE_DATE_EPOCH`, and the kernel signing key are the only
-inputs. We pin it to Ubuntu so the EROFS bytes are stable across
-release cuts.
+The `build-images` job is OS-agnostic. It builds a pinned Cloud
+Hypervisor Linux guest kernel per guest architecture, merges
+`images/kernel/raxis-guest-a3-netfilter.config`, bakes the signed
+canonical initramfs images, and emits both per-role digests and the
+release-local public trust anchor for the host build jobs. We pin it to
+Ubuntu so the kernel/image toolchain and resulting bytes are stable
+across release cuts.
 
 ### §5.3 Signing inputs
 
