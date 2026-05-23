@@ -3,6 +3,12 @@
   "framework": "nextjs",
   "buildCommand": "npm run build",
   "installCommand": "npm install",
+  "crons": [
+    {
+      "path": "/api/docs/refresh",
+      "schedule": "0 0 * * *"
+    }
+  ],
   "headers": [
     {
       "source": "/search-index.json",

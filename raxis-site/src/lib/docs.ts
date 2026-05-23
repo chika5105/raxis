@@ -7,13 +7,16 @@
 //     before every dev start or Vercel build.
 //
 //   ANONYMOUS GITHUB API (production, when RAXIS_GITHUB_REPO is set)
-//     Fetches the file tree + raw content from the public repo without any
-//     token or auth header. Next.js caches each fetch() call for REVALIDATE
-//     seconds (default 3600 = 1 hour).
+//     Builds a cached manifest from the public repo without any token or auth
+//     header. Raw files are cached as separate entries so Vercel's cache item
+//     size limit is not hit. The GitHub data revalidates hourly; the refresh
+//     route can also be called by a scheduler to warm the bundle. If GitHub is
+//     unavailable, the filesystem mirror remains the static fallback.
 
 import fs from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
+import { revalidateTag, unstable_cache } from "next/cache";
 
 export type DocCategory =
   | "Overview"
@@ -49,15 +52,24 @@ export interface TomlFile {
 
 const DOCS_DIR = path.join(process.cwd(), "vendor", "raxis-docs");
 const IS_DEV = process.env.NODE_ENV === "development";
+const IS_SITE_BUILD = process.env.RAXIS_SITE_BUILD === "1";
 const GITHUB_REPO = process.env.RAXIS_GITHUB_REPO; // "owner/repo"
 const GITHUB_BRANCH = process.env.RAXIS_GITHUB_BRANCH ?? "main";
 const GITHUB_PREFIX = normalizeGithubPrefix(process.env.RAXIS_GITHUB_PREFIX);
 const REVALIDATE = 3600; // 1 hour
 const FORCE_GITHUB = process.env.RAXIS_FORCE_GITHUB === "true";
+const GITHUB_FETCH_TIMEOUT_MS = 15_000;
+const GITHUB_DOCS_CACHE_TAG = "raxis-github-docs-bundle";
+const GITHUB_RAW_CONCURRENCY = boundedInt(
+  process.env.RAXIS_GITHUB_RAW_CONCURRENCY,
+  1,
+  12,
+  6
+);
 
 // Use anonymous GitHub API when configured in production. In dev, prefer the
 // filesystem mirror unless explicitly forced for debugging.
-const USE_GITHUB = !!GITHUB_REPO && (!IS_DEV || FORCE_GITHUB);
+const USE_GITHUB = !!GITHUB_REPO && !IS_SITE_BUILD && (!IS_DEV || FORCE_GITHUB);
 
 // ─── Exclusion rules ─────────────────────────────────────────────────────────
 
@@ -272,6 +284,17 @@ function getScenarioTomlFilesFromFS(meta: DocMeta): TomlFile[] {
 
 // ─── Anonymous GitHub API backend ────────────────────────────────────────────
 
+function boundedInt(
+  value: string | undefined,
+  min: number,
+  max: number,
+  fallback: number
+): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
 function normalizeGithubPrefix(prefix: string | undefined): string {
   return (prefix ?? "").trim().replace(/^\/+|\/+$/g, "");
 }
@@ -293,21 +316,73 @@ function encodeGithubPath(repoPath: string): string {
 }
 
 async function ghFetch(url: string): Promise<Response> {
-  return fetch(url, {
+  return fetchWithRetry(url, {
     headers: { Accept: "application/vnd.github.v3+json" },
-    next: { revalidate: REVALIDATE },
+    next: { revalidate: REVALIDATE, tags: [GITHUB_DOCS_CACHE_TAG] },
   });
 }
 
 async function fetchRaw(filePath: string): Promise<string> {
   const repoPath = encodeGithubPath(withGithubPrefix(filePath));
   const url = `https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/${repoPath}`;
-  const res = await fetch(url, { next: { revalidate: REVALIDATE } });
+  const res = await fetchWithRetry(url, {
+    next: { revalidate: REVALIDATE, tags: [GITHUB_DOCS_CACHE_TAG] },
+  });
   if (!res.ok) throw new Error(`GitHub raw ${res.status}: ${filePath}`);
   return res.text();
 }
 
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit & { next?: { revalidate?: number; tags?: string[] } },
+  attempts = 3
+): Promise<Response> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), GITHUB_FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok || res.status < 500 || attempt === attempts - 1) return res;
+      lastErr = new Error(`GitHub fetch ${res.status}: ${url}`);
+    } catch (err) {
+      clearTimeout(timeout);
+      lastErr = err;
+      if (attempt === attempts - 1) break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(`GitHub fetch failed: ${url}`);
+}
+
+async function mapWithConcurrency<T, U>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<U>
+): Promise<U[]> {
+  const out = new Array<U>(items.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (next < items.length) {
+        const index = next;
+        next += 1;
+        out[index] = await fn(items[index], index);
+      }
+    }
+  );
+  await Promise.all(workers);
+  return out;
+}
+
 interface GithubTreeItem { path: string; type: string; }
+
+interface GithubDocsManifest {
+  fetchedAt: string;
+  docs: DocMeta[];
+}
 
 async function fetchGithubTree(): Promise<GithubTreeItem[]> {
   const res = await ghFetch(
@@ -318,7 +393,7 @@ async function fetchGithubTree(): Promise<GithubTreeItem[]> {
   return (data.tree ?? []) as GithubTreeItem[];
 }
 
-async function getAllDocsFromGitHub(): Promise<DocMeta[]> {
+async function fetchGitHubDocsManifestUncached(): Promise<GithubDocsManifest> {
   const tree = await fetchGithubTree();
   const mdPaths = tree
     .filter((item) => item.type === "blob")
@@ -326,26 +401,61 @@ async function getAllDocsFromGitHub(): Promise<DocMeta[]> {
     .filter((relPath): relPath is string => !!relPath)
     .filter((relPath) => relPath.endsWith(".md") && !isExcluded(relPath));
 
-  const results = await Promise.allSettled(
-    mdPaths.map(async (filePath) => {
+  const docs = await mapWithConcurrency(
+    mdPaths,
+    GITHUB_RAW_CONCURRENCY,
+    async (filePath) => {
       const raw = await fetchRaw(filePath);
       return parseDoc(filePath, raw);
-    })
+    }
   );
 
-  const docs: DocMeta[] = [];
-  for (const r of results) {
-    if (r.status === "fulfilled") docs.push(r.value);
+  return {
+    fetchedAt: new Date().toISOString(),
+    docs: sortDocs(docs),
+  };
+}
+
+const getCachedGitHubDocsManifest = unstable_cache(
+  fetchGitHubDocsManifestUncached,
+  ["raxis-github-docs-manifest", GITHUB_REPO ?? "", GITHUB_BRANCH, GITHUB_PREFIX],
+  {
+    revalidate: REVALIDATE,
+    tags: [GITHUB_DOCS_CACHE_TAG],
   }
-  return sortDocs(docs);
+);
+
+async function getGitHubDocsManifest(): Promise<GithubDocsManifest> {
+  return getCachedGitHubDocsManifest();
+}
+
+async function getGitHubTomlPaths(): Promise<string[]> {
+  const tree = await fetchGithubTree();
+  return tree
+    .filter((item) => item.type === "blob")
+    .map((item) => stripGithubPrefix(item.path))
+    .filter((relPath): relPath is string => !!relPath)
+    .filter((relPath) => relPath.endsWith(".toml") && !isExcluded(relPath));
+}
+
+export async function refreshGitHubDocsBundle(): Promise<GithubDocsManifest> {
+  revalidateTag(GITHUB_DOCS_CACHE_TAG);
+  const manifest = await getGitHubDocsManifest();
+  const tomlPaths = await getGitHubTomlPaths();
+  await mapWithConcurrency(tomlPaths, GITHUB_RAW_CONCURRENCY, fetchRaw);
+  return manifest;
+}
+
+async function getAllDocsFromGitHub(): Promise<DocMeta[]> {
+  return (await getGitHubDocsManifest()).docs;
 }
 
 async function getDocBySlugFromGitHub(
   slug: string[]
 ): Promise<{ meta: DocMeta; raw: string } | null> {
-  const all = await getAllDocsFromGitHub();
+  const manifest = await getGitHubDocsManifest();
   const slugPath = slug.join("/").toLowerCase();
-  const meta = all.find((d) => d.slugPath === slugPath);
+  const meta = manifest.docs.find((d) => d.slugPath === slugPath);
   if (!meta) return null;
   try {
     const raw = await fetchRaw(meta.relativePath);
@@ -358,28 +468,19 @@ async function getDocBySlugFromGitHub(
 async function getScenarioTomlFilesFromGitHub(meta: DocMeta): Promise<TomlFile[]> {
   if (meta.category !== "Scenarios") return [];
   const dir = meta.relativePath.split("/").slice(0, -1).join("/");
-  const tree = await fetchGithubTree();
-  const tomlPaths = tree
-    .filter((item) => item.type === "blob")
-    .map((item) => stripGithubPrefix(item.path))
-    .filter((relPath): relPath is string => !!relPath)
+  const tomlPaths = (await getGitHubTomlPaths())
     .filter(
-      (relPath) =>
-        relPath.endsWith(".toml") &&
-        relPath.startsWith(dir + "/")
+      (relPath) => relPath.startsWith(dir + "/")
     );
 
-  const results = await Promise.allSettled(
-    tomlPaths.map(async (p) => ({
-      filename: p.split("/").pop()!,
-      content: await fetchRaw(p),
-    }))
+  const files = await mapWithConcurrency(
+    tomlPaths,
+    GITHUB_RAW_CONCURRENCY,
+    async (relPath) => ({
+      filename: relPath.split("/").pop()!,
+      content: await fetchRaw(relPath),
+    })
   );
-
-  const files: TomlFile[] = [];
-  for (const r of results) {
-    if (r.status === "fulfilled") files.push(r.value);
-  }
   const ORDER = ["plan.toml", "policy.toml", "credential.toml"];
   return files.sort((a, b) => {
     const ai = ORDER.indexOf(a.filename), bi = ORDER.indexOf(b.filename);
