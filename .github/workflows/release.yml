@@ -53,6 +53,12 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version to publish, for example v0.1.0'
+        required: true
+        type: string
 
 # Release token must be able to upload assets to GitHub Releases.
 # Everything else stays read-only.
@@ -67,7 +73,7 @@ concurrency:
   cancel-in-progress:  false
 
 env:
-  RAXIS_VERSION: ${{ github.ref_name }}
+  RAXIS_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
   HOMEBREW_TAP_REPOSITORY: ${{ vars.HOMEBREW_TAP_REPOSITORY || 'chika5105/homebrew-raxis' }}
   RAXIS_RELEASE_ENABLED: ${{ vars.RAXIS_RELEASE_ENABLED || '0' }}
   APPLE_NOTARIZATION_TIMEOUT: ${{ vars.APPLE_NOTARIZATION_TIMEOUT || '30m' }}
@@ -695,6 +701,7 @@ jobs:
       - name: upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RAXIS_VERSION }}
           overwrite_files: true
           files: |
             artifacts/raxis-${{ env.RAXIS_VERSION }}-linux-x86_64/raxis-${{ env.RAXIS_VERSION }}-linux-x86_64.tar.gz
