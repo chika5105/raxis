@@ -58,6 +58,8 @@ export function SiteFooter() {
         <div>
           <h4 className="text-sm font-semibold text-[var(--fg)]">Implementation</h4>
           <ul className="mt-3 space-y-2 text-sm">
+            <li><Link href="/get-started" className="text-[var(--muted)] hover:text-[var(--fg)]">Get started</Link></li>
+            <li><Link href="/docs/guides/getting-started/02-first-initiative" className="text-[var(--muted)] hover:text-[var(--fg)]">First initiative</Link></li>
             <li><Link href="/reference" className="text-[var(--muted)] hover:text-[var(--fg)]">Reference</Link></li>
             <li><Link href="/docs" className="text-[var(--muted)] hover:text-[var(--fg)]">Documentation</Link></li>
             <li><Link href="/docs/search" className="text-[var(--muted)] hover:text-[var(--fg)]">Search</Link></li>

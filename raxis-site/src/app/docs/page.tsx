@@ -39,6 +39,28 @@ export default async function DocsIndexPage() {
             Pulled from the source repository, refreshed hourly.
             {totalCount > 0 && <> {totalCount} documents indexed.</>}
           </p>
+          <div className="mt-8 grid gap-4 rounded-lg border border-[var(--rule)] bg-[var(--surface)] p-5 md:grid-cols-[1fr_auto] md:items-center">
+            <div>
+              <h2 className="text-base font-semibold text-[var(--fg)]">
+                First time here?
+              </h2>
+              <p className="mt-2 text-sm leading-relaxed text-[var(--muted)]">
+                Start with the Homebrew-to-first-initiative path, then come
+                back to the full reference once you have a running kernel.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <Link href="/get-started" className="btn btn-primary">
+                Get started
+              </Link>
+              <Link
+                href="/docs/guides/getting-started/02-first-initiative"
+                className="btn btn-ghost"
+              >
+                First initiative
+              </Link>
+            </div>
+          </div>
           <div className="mt-7">
             <Link
               href="/docs/search"

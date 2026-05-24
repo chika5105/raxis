@@ -124,6 +124,7 @@ function categorize(rel: string): { category: DocCategory; subgroup?: string } {
   if (norm.startsWith("specs/v3/")) return { category: "Specs", subgroup: "v3" };
   if (norm.startsWith("specs/")) return { category: "Specs", subgroup: "Foundations" };
   if (norm.startsWith("guides/scenarios/")) return { category: "Scenarios" };
+  if (norm.startsWith("guides/getting-started/")) return { category: "Guides", subgroup: "Getting started" };
   if (norm.startsWith("guides/patterns/")) return { category: "Guides", subgroup: "Patterns" };
   if (norm.startsWith("guides/security/")) return { category: "Guides", subgroup: "Security" };
   if (norm.startsWith("guides/")) return { category: "Guides", subgroup: "Setup" };
@@ -169,6 +170,11 @@ function extractHeadings(body: string): Array<{ depth: 2 | 3; text: string; id: 
 
 function orderFor(category: DocCategory, slugPath: string, title: string): number {
   if (category === "Concepts" || category === "Scenarios") {
+    const m = /\/(\d+)-/.exec(slugPath);
+    if (m) return parseInt(m[1], 10);
+  }
+  if (category === "Guides" && slugPath.startsWith("guides/getting-started/")) {
+    if (/\/?readme$/i.test(slugPath)) return 0;
     const m = /\/(\d+)-/.exec(slugPath);
     if (m) return parseInt(m[1], 10);
   }
@@ -557,12 +563,16 @@ export async function getDocsByCategory(): Promise<DocsByCategory[]> {
     const m = grouped[cat];
     if (m.size === 0) continue;
     const groups = Array.from(m.entries()).map(([subgroup, docs]) => ({ subgroup, docs }));
-    if (cat === "Specs") {
-      const want = ["Foundations", "v1", "v2", "v3"];
+    if (cat === "Specs" || cat === "Guides") {
+      const want =
+        cat === "Specs"
+          ? ["Foundations", "v1", "v2", "v3"]
+          : ["Getting started", "Setup", "Patterns", "Security"];
       groups.sort((a, b) => {
         const ai = a.subgroup ? want.indexOf(a.subgroup) : -1;
         const bi = b.subgroup ? want.indexOf(b.subgroup) : -1;
-        return ai - bi;
+        if (ai !== bi) return ai - bi;
+        return (a.subgroup ?? "").localeCompare(b.subgroup ?? "");
       });
     } else {
       groups.sort((a, b) => (a.subgroup ?? "").localeCompare(b.subgroup ?? ""));
@@ -581,7 +591,7 @@ export function categoryDescription(c: DocCategory): string {
     case "Specs":
       return "The normative spec tree. v1 (the local, single-operator MVP), v2 (multi-agent coordination, microVM isolation), v3 (design intent, gated behind dedicated gap specs).";
     case "Guides":
-      return "Operator workflows: setup, security threat models, multi-environment deployment, integration patterns (single executor + reviewer, panel review, structured debate).";
+      return "Start here for Homebrew install, genesis, first initiative, dashboard tour, operator workflows, security setup, and integration patterns.";
     case "Scenarios":
       return "Reproducible end-to-end recipes — from a one-file hello world to a full feature shipment with parallel decomposition, panel review, mechanical witnesses, and operator-approved integration merge.";
     case "Perspectives":

@@ -1,7 +1,7 @@
 import type { MetadataRoute } from "next";
 import { getAllDocs } from "@/lib/docs";
 
-const BASE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "https://raxis.dev";
+const BASE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "https://www.raxis.io";
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const now = new Date();
@@ -12,6 +12,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     "/reference",
     "/conformance",
     "/about",
+    "/get-started",
     "/docs",
     "/docs/search",
   ].map((p) => ({

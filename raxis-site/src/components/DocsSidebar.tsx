@@ -45,7 +45,11 @@ export async function DocsSidebar({ active }: Props) {
             category={section.category}
             groups={section.groups}
             active={active}
-            defaultOpen={containsActive || section.category === "Overview"}
+            defaultOpen={
+              containsActive ||
+              section.category === "Overview" ||
+              section.category === "Guides"
+            }
           />
         );
       })}

@@ -8,6 +8,7 @@ export default function HomePage() {
   return (
     <>
       <Hero />
+      <FastStart />
       <TrustBar />
       <DemoVideo />
       <EnterpriseBlocker />
@@ -36,7 +37,9 @@ function Hero() {
           </p>
           <h1 className="h-hero mt-6 max-w-4xl break-words">
             Let agents work.{" "}
-            <span className="text-accent">Do not give them the keys.</span>
+            <span className="block text-accent sm:inline">
+              Do not give them the keys.
+            </span>
           </h1>
           <p className="lead mt-8 max-w-3xl break-words">
             RAXIS is the Runtime Attestation eXchange for Intelligent Systems:
@@ -58,7 +61,10 @@ function Hero() {
             </span>
           </div>
           <div className="mt-10 grid gap-3 sm:flex sm:flex-wrap sm:items-center sm:gap-4">
-            <Link href="/#demo" className="btn btn-primary w-full sm:w-auto">
+            <Link href="/get-started" className="btn btn-primary w-full sm:w-auto">
+              Get started
+            </Link>
+            <Link href="/#demo" className="btn btn-ghost w-full sm:w-auto">
               Watch the demo
             </Link>
             <a
@@ -73,14 +79,90 @@ function Hero() {
               Read the paradigm
             </Link>
             <Link
-              href="/docs"
+              href="/docs/guides/getting-started/02-first-initiative"
               className="justify-self-center text-base text-[var(--muted)] underline decoration-[var(--rule)] underline-offset-4 transition hover:text-[var(--fg)] hover:decoration-[var(--rule-strong)] sm:justify-self-auto"
             >
-              Browse docs
+              First initiative
+            </Link>
+          </div>
+          <p className="mt-4 text-sm font-medium text-[var(--muted)]">
+            Fast path: Homebrew install -&gt; genesis -&gt; first initiative.
+          </p>
+        </div>
+        <RuntimeDiagram />
+      </div>
+    </section>
+  );
+}
+
+function FastStart() {
+  const steps = [
+    {
+      title: "Install",
+      body: "Use the Homebrew bottle and verify the CLI can see the runtime bundle.",
+      href: "/docs/guides/getting-started/01-prereqs",
+    },
+    {
+      title: "Bootstrap",
+      body: "Create your operator key, run genesis, and keep the operator key path in your shell.",
+      href: "/docs/guides/getting-started/02-first-initiative",
+    },
+    {
+      title: "Run",
+      body: "Start the kernel, open the dashboard, and submit the first hello-world initiative.",
+      href: "/docs/guides/scenarios/01-hello-world",
+    },
+  ];
+
+  return (
+    <section id="get-started" className="border-b border-[var(--rule)] bg-[var(--surface)]">
+      <div className="mx-auto grid max-w-5xl gap-8 px-4 py-10 sm:px-6 lg:grid-cols-[0.95fr_1.05fr] lg:items-start">
+        <div>
+          <p className="eyebrow">Start here</p>
+          <h2 className="h-section mt-4">From Homebrew to first initiative.</h2>
+          <p className="mt-5 max-w-2xl leading-relaxed text-[var(--muted)]">
+            New users should not start in the spec tree. Install the bottle,
+            bootstrap one operator, start the kernel, then run the smallest
+            governed workflow.
+          </p>
+          <div className="mt-7 flex flex-wrap gap-3">
+            <Link href="/get-started" className="btn btn-primary">
+              Open the guided path
+            </Link>
+            <Link href="/docs/guides/getting-started/02-first-initiative" className="btn btn-ghost">
+              Jump to first initiative
             </Link>
           </div>
         </div>
-        <RuntimeDiagram />
+
+        <div className="grid min-w-0 gap-4">
+          <pre className="min-w-0 overflow-x-auto rounded-lg border border-[var(--rule)] bg-[var(--code-bg)] p-4 text-sm leading-relaxed">
+            <code>{`brew tap chika5105/raxis
+brew install raxis
+
+export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
+export RAXIS_DATA_DIR="$HOME/.raxis"`}</code>
+          </pre>
+          <div className="grid gap-3 sm:grid-cols-3">
+            {steps.map((step, index) => (
+              <Link
+                key={step.title}
+                href={step.href}
+                className="rounded-lg border border-[var(--rule)] bg-[var(--bg)] p-4 transition hover:border-[var(--rule-strong)] hover:shadow-[var(--shadow-soft)]"
+              >
+                <span className="font-mono text-xs text-[var(--accent)]">
+                  0{index + 1}
+                </span>
+                <h3 className="mt-2 text-base font-semibold leading-tight text-[var(--fg)]">
+                  {step.title}
+                </h3>
+                <p className="mt-2 text-sm leading-relaxed text-[var(--muted)]">
+                  {step.body}
+                </p>
+              </Link>
+            ))}
+          </div>
+        </div>
       </div>
     </section>
   );

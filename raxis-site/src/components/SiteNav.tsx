@@ -6,13 +6,17 @@ type NavLink = {
   href: string;
   label: string;
   external?: boolean;
+  emphasis?: boolean;
 };
+
+const GET_STARTED_HREF = "/get-started";
 
 const NAV_LINKS: NavLink[] = [
   { href: "/", label: "Home" },
+  { href: GET_STARTED_HREF, label: "Get started", emphasis: true },
+  { href: "/docs", label: "Docs" },
   { href: "/investors", label: "Investors" },
   { href: "/#demo", label: "Demo" },
-  { href: "/docs", label: "Docs" },
   { href: "/paradigm", label: "Paradigm" },
   { href: "/reference", label: "Reference" },
   { href: "/threat-model", label: "Threat model" },
@@ -59,13 +63,23 @@ export function SiteNav() {
               <li key={l.href}>
                 <NavItem
                   link={l}
-                  className="text-sm text-[var(--muted)] hover:text-[var(--fg)] transition"
+                  className={
+                    l.emphasis
+                      ? "text-sm font-semibold text-accent transition hover:text-[var(--accent-strong)]"
+                      : "text-sm text-[var(--muted)] transition hover:text-[var(--fg)]"
+                  }
                 />
               </li>
             ))}
           </ul>
         </nav>
         <div className="flex items-center gap-4">
+          <Link
+            href={GET_STARTED_HREF}
+            className="hidden md:inline-flex items-center rounded-[var(--radius-md)] bg-[var(--accent)] px-4 py-2 text-sm font-semibold leading-none text-white transition hover:bg-[var(--accent-strong)] dark:text-[#06141a]"
+          >
+            Get started
+          </Link>
           <a
             href="https://docs.google.com/forms/d/e/1FAIpQLScnVmQUI-PEX-eykhXFdmcLPgxjfqGsKai4N6BRmSnozr--Vw/viewform?usp=publish-editor"
             target="_blank"
@@ -112,7 +126,11 @@ export function SiteNav() {
             <li key={l.href} className="shrink-0">
               <NavItem
                 link={l}
-                className="text-[var(--muted)] hover:text-[var(--fg)]"
+                className={
+                  l.emphasis
+                    ? "font-semibold text-accent hover:text-[var(--accent-strong)]"
+                    : "text-[var(--muted)] hover:text-[var(--fg)]"
+                }
               />
             </li>
           ))}
