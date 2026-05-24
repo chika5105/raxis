@@ -23,7 +23,10 @@ on the final accepting Reviewer verdict.
 
 ## Prerequisites
 
-- **One-time setup complete.** See [`../../SETUP.md`](../../SETUP.md).
+- **One-time setup complete.** See
+  [`../../getting-started/README.md`](../../getting-started/README.md)
+  for Homebrew, or [`../../SETUP.md`](../../SETUP.md) for source
+  builds.
 - **Kernel running.**
 - **`RAXIS_DATA_DIR` and `RAXIS_OPERATOR_KEY` exported.**
 - **Anthropic credentials** at
@@ -52,9 +55,9 @@ on the final accepting Reviewer verdict.
 ## Repository setup
 
 ```bash
-export DEMO_ROOT="/tmp/raxis-scenario-22"
-rm -rf "$DEMO_ROOT" && mkdir -p "$DEMO_ROOT/src"
-cd "$DEMO_ROOT"
+export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
+rm -rf "$RAXIS_MAIN_REPO" && mkdir -p "$RAXIS_MAIN_REPO/src"
+cd "$RAXIS_MAIN_REPO"
 
 git init -q
 echo 'fn main() { println!("hi"); }' > src/main.rs
@@ -62,10 +65,10 @@ git -c user.email=demo@raxis.local -c user.name=Demo add . > /dev/null
 git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
 ```
 
-Copy the plan into the scratch directory:
+Copy the plan into the scenario plan location:
 
 ```bash
-cp /path/to/raxis/guides/scenarios/22-reviewer-rejection-then-pass/plan.toml "$DEMO_ROOT/plan.toml"
+cp /path/to/raxis/guides/scenarios/22-reviewer-rejection-then-pass/plan.toml "$RAXIS_MAIN_REPO/plan.toml"
 ```
 
 ---
@@ -89,9 +92,8 @@ cp /path/to/raxis/guides/scenarios/22-reviewer-rejection-then-pass/plan.toml "$D
 ## Run it
 
 ```bash
-raxis plan validate "$DEMO_ROOT/plan.toml"
-raxis submit plan   "$DEMO_ROOT/plan.toml" --no-dry-run
-INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+raxis plan validate "$RAXIS_MAIN_REPO/plan.toml"
+INIT_ID="$(raxis submit plan   "$RAXIS_MAIN_REPO/plan.toml" --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT_ID"
 
 # Follow live — there will be two ReviewSubmitted events.
@@ -123,7 +125,7 @@ raxis log "$INIT_ID" --kind IntentAccepted --json \
 
 # 4. `main` carries the second commit only — the first was
 #    discarded with the rejected worktree.
-git -C "$DEMO_ROOT" log --oneline -3 main
+git -C "$RAXIS_MAIN_REPO" log --oneline -3 main
 
 # 5. Chain still verifies.
 raxis verify-chain
@@ -152,7 +154,7 @@ raxis verify-chain
 
 ```bash
 raxis initiative abort "$INIT_ID" 2>/dev/null || true
-rm -rf "$DEMO_ROOT"
+rm -rf "$RAXIS_MAIN_REPO"
 ```
 
 ---

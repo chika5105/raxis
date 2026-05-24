@@ -1,7 +1,7 @@
 # 04 · Troubleshooting
 
-> **Scope.** The ten failure modes a brand-new operator hits in the
-> first hour, ranked by frequency. Each entry: symptom → why → fix.
+> **Scope.** The failure modes a brand-new Homebrew operator hits in
+> the first hour, ranked by frequency. Each entry: symptom → why → fix.
 
 Before scrolling further, run the one command that diagnoses 80% of
 issues:
@@ -120,6 +120,13 @@ rm -rf "$RAXIS_DATA_DIR"
 raxis genesis --operator-key "$RAXIS_OPERATOR_KEY" --operator-name "$USER"
 ```
 
+If the operator also needs admin/trust-root authority after genesis,
+do not re-run genesis just to widen permissions. Mint a replacement
+cert for the same operator key that includes `OperatorCertInstall`,
+install it with `raxis cert install --replace-for ...`, re-sign
+`policy.toml`, then run `raxis epoch advance`. Use genesis `--admin`
+only during the initial bootstrap ceremony.
+
 Or pass `--force` to make the destructive reset explicit:
 
 ```bash
@@ -173,26 +180,85 @@ Then re-start the kernel.
 
 ---
 
+## 4b · Anthropic returns `401` from the gateway
+
+**When.** The kernel starts, but the first Executor fails during the
+model call and the gateway log mentions Anthropic authentication.
+
+**Why.** Anthropic does not use the default `Authorization: Bearer`
+header. Its credential file must tell the gateway to send the key as
+`x-api-key` with no prefix.
+
+**Fix.**
+
+```bash
+read -rsp "Anthropic API key: " RAXIS_ANTHROPIC_API_KEY
+printf '\n'
+{
+  printf 'api_key = "%s"\n' "$RAXIS_ANTHROPIC_API_KEY"
+  printf 'auth_header = "x-api-key"\n'
+  printf 'auth_prefix = ""\n'
+} > "$RAXIS_DATA_DIR/providers/anthropic-prod.toml"
+unset RAXIS_ANTHROPIC_API_KEY
+chmod 600 "$RAXIS_DATA_DIR/providers/anthropic-prod.toml"
+```
+
+Restart the kernel after replacing the credential file.
+
+---
+
+## 4c · `timeout 120000 ms exceeds provider cap 30000 ms`
+
+**When.** `raxis plan approve` succeeds, the Orchestrator starts, and
+the first model request is rejected before it reaches the provider.
+
+**Why.** The starter agent runtime can request a 120-second inference
+budget. If `policy.toml` caps the provider at 30 seconds, the gateway
+rejects the call locally.
+
+**Fix.** Raise the provider timeout, re-sign, and advance the epoch or
+restart the kernel:
+
+```toml
+[[providers]]
+provider_id          = "anthropic-prod"
+inference_timeout_ms = 120000
+data_fetch_timeout_ms = 30000
+```
+
+```bash
+raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem"
+raxis epoch advance \
+  --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --sig    "$RAXIS_DATA_DIR/policy/policy.sig"
+```
+
+---
+
 ## 5 · `FAIL_WORKTREE_OUTSIDE_ALLOWED_ROOTS` on `session create` / plan approval
 
-**When.** A scenario picks a scratch worktree path the policy
-hasn't allowlisted.
+**When.** A plan approves, but session creation fails because the
+worktree path is outside policy.
 
 **Why.** `[sessions].allowed_worktree_roots` must contain a prefix that
 covers your worktree. The kernel does a canonical-path check — symlinks
 and `..` segments do not satisfy the check.
 
-**Fix.** Add the parent directory and re-sign:
+**Fix.** For the Homebrew production flow, allow the kernel-managed
+worktree root under your data dir and re-sign:
 
 ```toml
 [sessions]
-allowed_worktree_roots = ["/tmp", "/var/folders"]
+allowed_worktree_roots = ["/Users/you/.raxis/worktrees"]
 ```
 
 ```bash
+perl -0pi -e 's|allowed_worktree_roots = \[[^\]]*\]|allowed_worktree_roots = ["'"$RAXIS_DATA_DIR"'/worktrees"]|' \
+  "$RAXIS_DATA_DIR/policy/policy.toml"
 raxis policy sign \
   "$RAXIS_DATA_DIR/policy/policy.toml" \
-  --key "$RAXIS_OPERATOR_KEY"
+  --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem"
 raxis epoch advance \
   --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
   --sig    "$RAXIS_DATA_DIR/policy/policy.sig"
@@ -249,6 +315,57 @@ raxis budget top
 ```
 
 Reference: [`recipes/ops/05-investigate-stuck-task.md`](../recipes/ops/05-investigate-stuck-task.md).
+
+---
+
+## 7b · Only the Orchestrator appears; no Executor task runs
+
+**When.** `raxis initiative show <id> --with-tasks` shows the
+auto-generated Orchestrator row, but your declared Executor never
+appears or never admits.
+
+**Why.** The most common cause in repeated local demos is a reused
+`task_id`. Task IDs are globally indexed in `kernel.db`; reusing
+`task_id = "greeter"` in the same data dir can collide with an older
+demo run.
+
+**Fix.** Use a fresh data dir or generate unique task IDs for reruns:
+
+```bash
+export RAXIS_TASK_ID="greeter-$(date +%Y%m%d%H%M%S)"
+```
+
+Then put `task_id = "$RAXIS_TASK_ID"` in the plan you submit. For the
+checked-in scenario plans, the simplest repeatable path is a fresh
+`RAXIS_DATA_DIR` per scenario suite.
+
+---
+
+## 7c · `repositories/main` cannot be opened
+
+**When.** A task starts and then fails before editing because the
+kernel cannot find or clone the source repo.
+
+**Why.** Homebrew production runs use the canonical operator repo at
+`$RAXIS_DATA_DIR/repositories/main`. A `/tmp/raxis-*` directory is only
+a staging convenience for humans; the kernel does not infer it from
+your current working directory.
+
+**Fix.** Seed the canonical repo before submitting:
+
+```bash
+export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
+rm -rf "$RAXIS_MAIN_REPO"
+install -d "$(dirname "$RAXIS_MAIN_REPO")"
+git init -q "$RAXIS_MAIN_REPO"
+git -C "$RAXIS_MAIN_REPO" symbolic-ref HEAD refs/heads/main
+printf '# demo\n' > "$RAXIS_MAIN_REPO/README.md"
+git -C "$RAXIS_MAIN_REPO" -c user.email=demo@raxis.local -c user.name=Demo add README.md
+git -C "$RAXIS_MAIN_REPO" -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
+```
+
+After the initiative completes, inspect results with
+`git -C "$RAXIS_MAIN_REPO" ...`, not with `git -C /tmp/...`.
 
 ---
 
@@ -455,6 +572,25 @@ ls "$RAXIS_DATA_DIR/worktrees/"
 
 Reference: [`recipes/ops/13-handle-reconciliation-gap.md`](../recipes/ops/13-handle-reconciliation-gap.md),
 [`specs/v2/kernel-lifecycle.md`](../../specs/v2/kernel-lifecycle.md) (recovery).
+
+---
+
+## 10b · `gateway_embedded_materialize_failed` / permission denied
+
+**When.** Restarting `raxis-kernel` fails while materialising the
+embedded gateway under `$RAXIS_DATA_DIR/runtime/embedded-gateway`.
+
+**Why.** An older kernel run may have left the materialised
+`raxis-gateway` file owner-executable only. The next run then tries to
+replace the file and hits a host permission error.
+
+**Fix.** Stop the kernel, clear the materialised copy, and restart.
+The immutable Homebrew binary remains under the brew prefix.
+
+```bash
+rm -rf "$RAXIS_DATA_DIR/runtime/embedded-gateway"
+raxis-kernel
+```
 
 ---
 

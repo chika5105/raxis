@@ -24,14 +24,20 @@ Same as scenario 04.
 ## Repository setup
 
 ```bash
-export DEMO_ROOT="/tmp/raxis-scenario-25"
-rm -rf "$DEMO_ROOT" && mkdir -p "$DEMO_ROOT/src"
-cd "$DEMO_ROOT"
+export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
+rm -rf "$RAXIS_MAIN_REPO" && mkdir -p "$RAXIS_MAIN_REPO/src"
+cd "$RAXIS_MAIN_REPO"
 
 git init -q
 echo "fn main() {}" > src/main.rs
 git -c user.email=demo@raxis.local -c user.name=Demo add . > /dev/null
 git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
+```
+
+Copy this scenario's plan into the canonical repo so the run commands below can execute from the seeded repo:
+
+```bash
+cp /path/to/raxis/guides/scenarios/25-wall-clock-limit/plan.toml "$RAXIS_MAIN_REPO/plan.toml"
 ```
 
 ---
@@ -40,7 +46,6 @@ git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
 
 ```bash
 raxis plan validate ./plan.toml
-raxis submit plan ./plan.toml --no-dry-run
-INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+INIT_ID="$(raxis submit plan ./plan.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT_ID"
 ```

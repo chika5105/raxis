@@ -24,7 +24,10 @@ were not bound to the revoked session.
 
 ## Prerequisites
 
-- **One-time setup complete.** See [`../../SETUP.md`](../../SETUP.md).
+- **One-time setup complete.** See
+  [`../../getting-started/README.md`](../../getting-started/README.md)
+  for Homebrew, or [`../../SETUP.md`](../../SETUP.md) for source
+  builds.
 - **Kernel running.**
 - **`RAXIS_DATA_DIR` and `RAXIS_OPERATOR_KEY` exported.**
 - **An initiative with at least one task active.** The simplest way

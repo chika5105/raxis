@@ -37,12 +37,12 @@ raxis initiative list [--state active|completed|quarantined|all]
 raxis initiative list
 
 # Filter by state.
-raxis initiative list --state Draft
+raxis initiative list --state active
 raxis initiative list --state completed --limit 100
 raxis initiative list --state quarantined
 
 # JSON for tooling.
-raxis initiative list --state all --json | jq '.[] | {initiative_id, state}'
+raxis initiative list --state all --json | jq '.rows[] | {initiative_id, state}'
 ```
 
 Sample table output:
@@ -89,4 +89,4 @@ quarantined initiative.
   `raxis initiative list --state quarantined --json | jq length`
   and pages on non-zero output.
 - **CI smoke check.** Confirm an expected initiative completed:
-  `raxis initiative list --state completed --json | jq -e '.[] | select(.initiative_id == "$INIT_ID")'`.
+  `raxis initiative list --state completed --json | jq -e '.rows[] | select(.initiative_id == "$INIT_ID")'`.

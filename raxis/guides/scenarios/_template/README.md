@@ -10,15 +10,18 @@ later in the README.
 
 ## Prerequisites
 
-- **One-time setup complete.** See [`../../SETUP.md`](../../SETUP.md).
+- **One-time setup complete.** See
+  [`../../getting-started/README.md`](../../getting-started/README.md)
+  for Homebrew, or [`../../SETUP.md`](../../SETUP.md) for source
+  builds.
 - **Kernel running** (`raxis-kernel` in another terminal).
 - **`RAXIS_DATA_DIR` and `RAXIS_OPERATOR_KEY` exported** in this shell.
+- **Canonical repo ready** at `$RAXIS_DATA_DIR/repositories/main`.
 - **Provider credentials** configured for the providers this scenario
   uses; see the scenario's `credential.toml` for the list.
 
-If your install pre-dates this scenario, run the three-line
-"Confirming an existing install" check at the bottom of `SETUP.md`
-before continuing.
+Use [`../README.md`](../README.md) as the shared Homebrew runner for
+all numbered scenarios.
 
 ---
 
@@ -38,18 +41,20 @@ spend time here.
 
 If this scenario uses a real upstream repo, name it here with a
 specific commit SHA and the rationale for choosing it. If it
-materializes its own scratch repo, drop the materialization commands
-in this section verbatim.
+materializes its own seed repo, put it in the canonical repo path the
+kernel clones from.
 
 ```bash
-export DEMO_ROOT="/tmp/raxis-scenario-XX"
-rm -rf "$DEMO_ROOT" && mkdir -p "$DEMO_ROOT"
-cd "$DEMO_ROOT"
+export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
+rm -rf "$RAXIS_MAIN_REPO"
+install -d "$(dirname "$RAXIS_MAIN_REPO")"
+git init -q "$RAXIS_MAIN_REPO"
+git -C "$RAXIS_MAIN_REPO" symbolic-ref HEAD refs/heads/main
 
-# Materialize the scratch repo
-git init -q
-echo "# Demo" > README.md
-git add . && git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
+# Materialize the seed repo.
+echo "# Demo" > "$RAXIS_MAIN_REPO/README.md"
+git -C "$RAXIS_MAIN_REPO" -c user.email=demo@raxis.local -c user.name=Demo add .
+git -C "$RAXIS_MAIN_REPO" -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
 ```
 
 ---
@@ -77,8 +82,8 @@ raxis plan validate "$PWD/plan.toml"
 #    See "Policy delta" below.
 
 # 3. Submit + approve.
-raxis submit plan "$PWD/plan.toml" --no-dry-run
-INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+INIT_ID="$(raxis submit plan "$PWD/plan.toml" --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
+echo "INIT_ID=$INIT_ID"
 raxis plan approve "$INIT_ID"
 
 # 4. Watch.
@@ -131,8 +136,8 @@ Reviewer, increase the retry budget, scope the path allowlist tighter.
 # Abort the initiative if it's still running.
 raxis initiative abort "$INIT_ID" 2>/dev/null || true
 
-# Remove the scratch repo.
-rm -rf "$DEMO_ROOT"
+# Optional: reset the canonical scenario repo.
+# rm -rf "$RAXIS_DATA_DIR/repositories/main"
 ```
 
 ---

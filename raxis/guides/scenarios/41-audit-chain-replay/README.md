@@ -24,7 +24,10 @@ each event kind seen.
 
 ## Prerequisites
 
-- **One-time setup complete.** See [`../../SETUP.md`](../../SETUP.md).
+- **One-time setup complete.** See
+  [`../../getting-started/README.md`](../../getting-started/README.md)
+  for Homebrew, or [`../../SETUP.md`](../../SETUP.md) for source
+  builds.
 - **At least one completed initiative.** Any of
   [scenarios 01–40](../) will do. The walk works on aborted /
   failed initiatives too — they just produce different event
@@ -69,8 +72,8 @@ state.)
 
 ```bash
 # 1. Pick a completed initiative.
-COMPLETED_INIT="$(raxis initiative list --state Completed --json \
-  | jq -r '.[0].initiative_id')"
+COMPLETED_INIT="$(raxis initiative list --state completed --json \
+  | jq -r '.rows[0].initiative_id // .[0].initiative_id // empty')"
 echo "Walking initiative $COMPLETED_INIT"
 
 # 2. Replay the per-initiative projection — human-readable.

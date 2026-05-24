@@ -23,7 +23,10 @@ session is created, and the audit chain records the refusal.
 
 ## Prerequisites
 
-- **One-time setup complete.** See [`../../SETUP.md`](../../SETUP.md).
+- **One-time setup complete.** See
+  [`../../getting-started/README.md`](../../getting-started/README.md)
+  for Homebrew, or [`../../SETUP.md`](../../SETUP.md) for source
+  builds.
 - **Kernel running** (`raxis-kernel` in another terminal).
 - **`RAXIS_DATA_DIR` and `RAXIS_OPERATOR_KEY` exported** in this shell.
 - No provider credentials needed — the plan never reaches inference.
@@ -73,7 +76,8 @@ A successful run **does not** create an initiative. Concretely:
 
 ```bash
 # No new initiative on the registry.
-raxis initiative list --state Draft --json | jq 'length'
+raxis initiative list --state all --json \
+  | jq '[.rows[]? | select(.state == "Draft")] | length'
 # 0 (or unchanged from your starting count).
 
 # The audit chain has a PlanRejected event — and only that.

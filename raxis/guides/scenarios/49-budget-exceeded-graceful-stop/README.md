@@ -22,7 +22,10 @@ file, no truncated commit, no admin-required cleanup.
 
 ## Prerequisites
 
-- **One-time setup complete.** See [`../../SETUP.md`](../../SETUP.md).
+- **One-time setup complete.** See
+  [`../../getting-started/README.md`](../../getting-started/README.md)
+  for Homebrew, or [`../../SETUP.md`](../../SETUP.md) for source
+  builds.
 - **Kernel running.**
 - **`RAXIS_DATA_DIR` and `RAXIS_OPERATOR_KEY` exported.**
 - **Anthropic credentials** at
@@ -72,19 +75,18 @@ raxis epoch advance \
   --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
   --sig    "$RAXIS_DATA_DIR/policy/policy.sig"
 
-# 2. Materialise a scratch repo.
-export DEMO_ROOT="/tmp/raxis-scenario-49"
-rm -rf "$DEMO_ROOT" && mkdir -p "$DEMO_ROOT"
-( cd "$DEMO_ROOT" && git init -q \
+# 2. Materialise a canonical repo.
+export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
+rm -rf "$RAXIS_MAIN_REPO" && mkdir -p "$RAXIS_MAIN_REPO"
+( cd "$RAXIS_MAIN_REPO" && git init -q \
   && echo "# essay" > README.md \
   && git -c user.email=demo@raxis.local -c user.name=Demo add . > /dev/null \
   && git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init" )
 
 # 3. Validate + submit + approve.
-cp ./plan.toml "$DEMO_ROOT/plan.toml"
-raxis plan validate "$DEMO_ROOT/plan.toml"
-raxis submit plan  "$DEMO_ROOT/plan.toml" --no-dry-run
-INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+cp ./plan.toml "$RAXIS_MAIN_REPO/plan.toml"
+raxis plan validate "$RAXIS_MAIN_REPO/plan.toml"
+INIT_ID="$(raxis submit plan  "$RAXIS_MAIN_REPO/plan.toml" --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT_ID"
 
 # 4. Watch.
@@ -138,7 +140,7 @@ raxis verify-chain
 
 ```bash
 raxis initiative abort "$INIT_ID" 2>/dev/null || true
-rm -rf "$DEMO_ROOT"
+rm -rf "$RAXIS_MAIN_REPO"
 
 # Roll back the tiny-budget-lane policy if you don't want it active.
 # Edit policy.toml to remove the [[lanes]] entry, re-sign, advance.

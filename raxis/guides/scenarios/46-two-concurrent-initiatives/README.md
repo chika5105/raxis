@@ -22,7 +22,10 @@ blocking across initiatives.
 
 ## Prerequisites
 
-- **One-time setup complete.** See [`../../SETUP.md`](../../SETUP.md).
+- **One-time setup complete.** See
+  [`../../getting-started/README.md`](../../getting-started/README.md)
+  for Homebrew, or [`../../SETUP.md`](../../SETUP.md) for source
+  builds.
 - **Kernel running.**
 - **`RAXIS_DATA_DIR` and `RAXIS_OPERATOR_KEY` exported.**
 - **Anthropic credentials** at
@@ -46,54 +49,49 @@ blocking across initiatives.
 
 ## Repository setup
 
-Reuse the scratch repos from earlier scenarios (the file paths inside
-each plan are disjoint, so they will not collide on `main`):
+Use one canonical repo and seed two disjoint paths. RAXIS V2 does not
+infer separate source repos from your shell's current directory; both
+initiatives clone from `$RAXIS_DATA_DIR/repositories/main`.
 
 ```bash
-# Scratch repo A — borrowed from scenario 04.
-export DEMO_ROOT_A="/tmp/raxis-scenario-46a"
-rm -rf "$DEMO_ROOT_A" && mkdir -p "$DEMO_ROOT_A"
-( cd "$DEMO_ROOT_A" \
-  && git init -q \
-  && echo "# A" > README.md \
-  && git -c user.email=demo@raxis.local -c user.name=Demo add . > /dev/null \
-  && git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init" )
-
-# Scratch repo B — borrowed from scenario 05.
-export DEMO_ROOT_B="/tmp/raxis-scenario-46b"
-rm -rf "$DEMO_ROOT_B" && mkdir -p "$DEMO_ROOT_B"
-( cd "$DEMO_ROOT_B" \
-  && git init -q \
-  && echo "# B" > README.md \
-  && git -c user.email=demo@raxis.local -c user.name=Demo add . > /dev/null \
-  && git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init" )
+export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
+rm -rf "$RAXIS_MAIN_REPO"
+install -d "$RAXIS_MAIN_REPO/a" "$RAXIS_MAIN_REPO/b"
+git init -q "$RAXIS_MAIN_REPO"
+git -C "$RAXIS_MAIN_REPO" symbolic-ref HEAD refs/heads/main
+printf '# A\n' > "$RAXIS_MAIN_REPO/a/README.md"
+printf '# B\n' > "$RAXIS_MAIN_REPO/b/README.md"
+git -C "$RAXIS_MAIN_REPO" -c user.email=demo@raxis.local -c user.name=Demo add .
+git -C "$RAXIS_MAIN_REPO" -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
 ```
 
-Copy the plans from scenarios 04 and 05 into the scratch directories,
-or write any two single-task plans with **different `lane_id` values**.
+Write any two single-task plans with **different `lane_id` values** and
+disjoint `path_allowlist` entries, for example `["a/"]` and `["b/"]`.
+Keep the plans outside the canonical repo, such as `/tmp/raxis-46-a.toml`
+and `/tmp/raxis-46-b.toml`.
 
 ---
 
 ## Run it
 
 ```bash
+PLAN_A="/tmp/raxis-46-a.toml"
+PLAN_B="/tmp/raxis-46-b.toml"
+
 # 1. Validate both.
-raxis plan validate "$DEMO_ROOT_A/plan.toml"
-raxis plan validate "$DEMO_ROOT_B/plan.toml"
+raxis plan validate "$PLAN_A"
+raxis plan validate "$PLAN_B"
 
 # 2. Submit + approve back-to-back. Order doesn't matter.
-raxis submit plan "$DEMO_ROOT_A/plan.toml" --no-dry-run
-raxis submit plan "$DEMO_ROOT_B/plan.toml" --no-dry-run
-
-INIT_A="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
-INIT_B="$(raxis initiative list --state Draft --json | jq -r '.[1].initiative_id')"
+INIT_A="$(raxis submit plan "$PLAN_A" --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
+INIT_B="$(raxis submit plan "$PLAN_B" --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 echo "A=$INIT_A  B=$INIT_B"
 
 raxis plan approve "$INIT_A"
 raxis plan approve "$INIT_B"
 
 # 3. Watch both progress.
-watch -n 2 'raxis initiative list --state Active'
+watch -n 2 'raxis initiative list --state active'
 ```
 
 ---
@@ -138,7 +136,9 @@ raxis verify-chain
 ```bash
 raxis initiative abort "$INIT_A" 2>/dev/null || true
 raxis initiative abort "$INIT_B" 2>/dev/null || true
-rm -rf "$DEMO_ROOT_A" "$DEMO_ROOT_B"
+rm -f "$PLAN_A" "$PLAN_B"
+# Optional: reset the canonical scenario repo.
+# rm -rf "$RAXIS_MAIN_REPO"
 ```
 
 ---

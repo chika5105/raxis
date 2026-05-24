@@ -9,8 +9,8 @@
 #   raxis plan validate ./plan.toml
 #
 # Then:
-#   raxis submit plan ./plan.toml --no-dry-run
-#   raxis plan approve <init-id>
+#   INIT_ID="$(raxis submit plan ./plan.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
+#   raxis plan approve "$INIT_ID"
 
 [plan.initiative]
 description = """

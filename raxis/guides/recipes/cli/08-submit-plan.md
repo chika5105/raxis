@@ -38,14 +38,13 @@ raxis submit plan <plan.toml> [--initiative-id <id>]
 ### Standard submission
 
 ```bash
-raxis submit plan ./plan.toml --no-dry-run
+INIT_ID="$(raxis submit plan ./plan.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 # Output:
 # initiative_id: 1f3c8a4b...
 # bundle_sha:    ab12cd34...
 # epoch:         7
 # Status:        Draft  (waiting for `raxis plan approve`)
 
-INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
 raxis plan approve "$INIT_ID"
 ```
 
@@ -138,7 +137,7 @@ admit-tasks-and-spawn.
 | Command | Purpose |
 |---|---|
 | `raxis plan validate <plan.toml>` | Local pre-flight; cheaper than a `--dry-run` round-trip. |
-| `raxis initiative list --state Draft` | List initiatives waiting for approval. |
+| `raxis initiative list --state active` | List initiatives that are not terminal. |
 | `raxis plan approve <initiative_id>` | Approve and admit the tasks. |
 | `raxis plan reject <initiative_id>` | Reject without spawning. |
 | `raxis initiative show <id> --bundle` | Inspect what was admitted. |

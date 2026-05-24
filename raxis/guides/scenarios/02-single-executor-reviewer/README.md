@@ -30,9 +30,9 @@ exported; Anthropic credentials present).
 ## Repository setup
 
 ```bash
-export DEMO_ROOT="/tmp/raxis-scenario-02"
-rm -rf "$DEMO_ROOT" && mkdir -p "$DEMO_ROOT"
-cd "$DEMO_ROOT"
+export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
+rm -rf "$RAXIS_MAIN_REPO" && mkdir -p "$RAXIS_MAIN_REPO"
+cd "$RAXIS_MAIN_REPO"
 
 git init -q
 mkdir src
@@ -44,7 +44,7 @@ git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
 ```
 
 ```bash
-cp /path/to/raxis/guides/scenarios/02-single-executor-reviewer/plan.toml "$DEMO_ROOT/plan.toml"
+cp /path/to/raxis/guides/scenarios/02-single-executor-reviewer/plan.toml "$RAXIS_MAIN_REPO/plan.toml"
 ```
 
 ---
@@ -52,9 +52,8 @@ cp /path/to/raxis/guides/scenarios/02-single-executor-reviewer/plan.toml "$DEMO_
 ## Run it
 
 ```bash
-raxis plan validate "$DEMO_ROOT/plan.toml"
-raxis submit plan   "$DEMO_ROOT/plan.toml" --no-dry-run
-INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+raxis plan validate "$RAXIS_MAIN_REPO/plan.toml"
+INIT_ID="$(raxis submit plan   "$RAXIS_MAIN_REPO/plan.toml" --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT_ID"
 
 raxis initiative show "$INIT_ID" --with-tasks
@@ -74,7 +73,7 @@ Expected progression:
 ## What "success" looks like
 
 ```yaml
-greeter:    Completed
+adder:      Completed
 reviewer:   Completed
 ```
 
@@ -105,7 +104,7 @@ Initiative `Status: Completed`. The audit chain shows
 
 ```bash
 raxis initiative abort "$INIT_ID" 2>/dev/null || true
-rm -rf "$DEMO_ROOT"
+rm -rf "$RAXIS_MAIN_REPO"
 ```
 
 ---

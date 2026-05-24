@@ -129,7 +129,7 @@ raxis --version
 raxis doctor                          # expect 0 errors
 raxis verify-chain                    # expect verdict OK
 raxis policy show | grep epoch        # epoch unchanged unless migration bumped it
-raxis initiative list --state Active  # confirm initiatives are still Active
+raxis initiative list --state active  # confirm initiatives are still active
 raxis sessions                        # confirm sessions are still alive
 ```
 

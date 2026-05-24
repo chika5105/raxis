@@ -277,8 +277,12 @@ Fill in the provider, VM image aliases/digests, allowed worktree roots,
 and egress allowlist for your environment. Then sign:
 
 ```bash
-raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" --key "$RAXIS_OPERATOR_KEY"
+raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem"
 ```
+
+Use `RAXIS_OPERATOR_KEY` for operator requests; policy artifacts are
+signed by the authority key generated during genesis.
 
 ## 8. Add Provider Credential
 

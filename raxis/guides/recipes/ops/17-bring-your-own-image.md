@@ -232,8 +232,7 @@ description        = """
 """
 EOF
 
-raxis submit plan /tmp/byo-smoke.toml --no-dry-run
-INIT=$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')
+INIT="$(raxis submit plan /tmp/byo-smoke.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT"
 ```
 
@@ -302,8 +301,7 @@ printf '\x00' | dd of="$DEST" bs=1 count=1 \
 # diverge from the policy-declared sha256: digest.)
 
 # Submit the same plan again.
-raxis submit plan /tmp/byo-smoke.toml --no-dry-run
-INIT2=$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')
+INIT2="$(raxis submit plan /tmp/byo-smoke.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT2"
 
 # Watch the audit trail. Activation MUST refuse.

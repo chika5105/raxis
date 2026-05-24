@@ -54,7 +54,7 @@ If verification fails, re-mint the cert before editing policy.
 raxis cert install /tmp/alice-new.cert.toml \
   --policy "$RAXIS_DATA_DIR/policy/policy.toml"
 raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" \
-  --key /tmp/genesis.key
+  --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem"
 ```
 
 The edited policy is now signed; advance the epoch or restart the

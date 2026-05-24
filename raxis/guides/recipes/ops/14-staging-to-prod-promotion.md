@@ -111,7 +111,7 @@ file in between, you want the staging-canonical version.
 After admission:
 
 ```bash
-RAXIS_DATA_DIR=/var/raxis-prod raxis initiative list --state Draft --json | jq '.[]'
+RAXIS_DATA_DIR=/var/raxis-prod raxis initiative list --state active --json | jq '.rows[]'
 # Approve.
 RAXIS_DATA_DIR=/var/raxis-prod raxis plan approve <prod_init_id>
 ```

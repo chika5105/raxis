@@ -164,8 +164,7 @@ admission.
 ### 6. Test
 
 ```bash
-raxis submit plan ./test-plan.toml --no-dry-run
-INIT=$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')
+INIT="$(raxis submit plan ./test-plan.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT"
 raxis sessions show <executor_session_id>
 # vm_image_alias should be executor-rust-v1.

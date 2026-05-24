@@ -12,14 +12,17 @@ exactly one task to completion.
 
 ## Prerequisites
 
-- **One-time setup complete.** See [`../../SETUP.md`](../../SETUP.md).
+- **One-time setup complete.** See
+  [`../../getting-started/README.md`](../../getting-started/README.md)
+  for Homebrew, or [`../../SETUP.md`](../../SETUP.md) for source
+  builds.
 - **Kernel running** (`raxis-kernel` in another terminal).
 - **`RAXIS_DATA_DIR` and `RAXIS_OPERATOR_KEY` exported** in this shell.
 - **Anthropic credentials** at
   `$RAXIS_DATA_DIR/providers/anthropic-prod.toml` (mode 0600).
 
-If your install pre-dates this scenario, run the three-line "Confirming
-an existing install" check at the bottom of `SETUP.md`.
+Use [`../README.md`](../README.md) as the shared Homebrew runner for
+all numbered scenarios.
 
 ---
 
@@ -35,20 +38,16 @@ an existing install" check at the bottom of `SETUP.md`.
 ## Repository setup
 
 ```bash
-export DEMO_ROOT="/tmp/raxis-scenario-01"
-rm -rf "$DEMO_ROOT" && mkdir -p "$DEMO_ROOT"
-cd "$DEMO_ROOT"
+export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
 
-git init -q
-echo "# Demo repo for scenario 01" > README.md
-git -c user.email=demo@raxis.local -c user.name=Demo add . > /dev/null
-git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
-```
+rm -rf "$RAXIS_MAIN_REPO"
+install -d "$(dirname "$RAXIS_MAIN_REPO")"
+git init -q "$RAXIS_MAIN_REPO"
+git -C "$RAXIS_MAIN_REPO" symbolic-ref HEAD refs/heads/main
 
-Copy this scenario's plan into the scratch directory:
-
-```bash
-cp /path/to/raxis/guides/scenarios/01-hello-world/plan.toml "$DEMO_ROOT/plan.toml"
+printf '# Demo repo for scenario 01\n' > "$RAXIS_MAIN_REPO/README.md"
+git -C "$RAXIS_MAIN_REPO" -c user.email=demo@raxis.local -c user.name=Demo add .
+git -C "$RAXIS_MAIN_REPO" -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
 ```
 
 ---
@@ -57,11 +56,11 @@ cp /path/to/raxis/guides/scenarios/01-hello-world/plan.toml "$DEMO_ROOT/plan.tom
 
 ```bash
 # 1. Local pre-flight: catch obvious mistakes before round-trip.
-raxis plan validate "$DEMO_ROOT/plan.toml"
+PLAN_PATH="$PWD/plan.toml"
+raxis plan validate "$PLAN_PATH"
 
 # 2. Submit + approve.
-raxis submit plan "$DEMO_ROOT/plan.toml" --no-dry-run
-INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+INIT_ID="$(raxis submit plan "$PLAN_PATH" --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 echo "INIT_ID=$INIT_ID"
 raxis plan approve "$INIT_ID"
 
@@ -95,6 +94,9 @@ raxis log "$INIT_ID" | head -20
 
 # The chain still verifies.
 raxis verify-chain
+
+# The result landed on the canonical repo.
+git -C "$RAXIS_MAIN_REPO" show main:HELLO.md
 ```
 
 ---
@@ -114,7 +116,8 @@ raxis verify-chain
 
 ```bash
 raxis initiative abort "$INIT_ID" 2>/dev/null || true
-rm -rf "$DEMO_ROOT"
+# Optional: reset the canonical scenario repo.
+# rm -rf "$RAXIS_MAIN_REPO"
 ```
 
 ---

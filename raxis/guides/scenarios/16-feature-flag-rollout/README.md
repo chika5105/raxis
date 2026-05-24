@@ -24,9 +24,9 @@ Same as scenario 04.
 ## Repository setup
 
 ```bash
-export DEMO_ROOT="/tmp/raxis-scenario-16"
-rm -rf "$DEMO_ROOT" && mkdir -p "$DEMO_ROOT/config" "$DEMO_ROOT/src"
-cd "$DEMO_ROOT"
+export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
+rm -rf "$RAXIS_MAIN_REPO" && mkdir -p "$RAXIS_MAIN_REPO/config" "$RAXIS_MAIN_REPO/src"
+cd "$RAXIS_MAIN_REPO"
 
 git init -q
 echo '{"new_pricing": false}' > config/flags.json
@@ -41,13 +41,11 @@ git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
 
 ```bash
 raxis plan validate ./plan-step1.toml
-raxis submit plan ./plan-step1.toml --no-dry-run
-INIT1="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+INIT1="$(raxis submit plan ./plan-step1.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT1"
 
 # Later, after canary period:
 raxis plan validate ./plan-step2.toml
-raxis submit plan ./plan-step2.toml --no-dry-run
-INIT2="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+INIT2="$(raxis submit plan ./plan-step2.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT2"
 ```

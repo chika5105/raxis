@@ -35,11 +35,16 @@ Set the runtime bundle path in every shell that starts the kernel:
 export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
 ```
 
-Pick a throwaway data dir for the first run:
+Use the default per-user data dir for the first run:
 
 ```bash
-export RAXIS_DATA_DIR="$HOME/.raxis-demo"
+export RAXIS_DATA_DIR="$HOME/.raxis"
 ```
+
+That is the path Homebrew prepares and the path the rest of this
+getting-started guide uses. If you want a disposable rehearsal later,
+set `RAXIS_DATA_DIR` to another empty directory before running
+`raxis genesis`.
 
 Verify the installed bundle:
 
@@ -76,7 +81,7 @@ Tools needed for the Homebrew first initiative:
 |---|---|---|
 | Homebrew | Install RAXIS | `brew --version` |
 | OpenSSL 3 | Mint your Ed25519 operator key | `openssl version` |
-| Git | Scratch repo and worktrees | `git --version` |
+| Git | Canonical repo and worktrees | `git --version` |
 | `jq` | Parse JSON examples | `jq --version` |
 
 On macOS, `/usr/bin/openssl` is usually LibreSSL and cannot mint
@@ -113,8 +118,8 @@ RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
 RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
 ```
 
-The getting-started guide uses `RAXIS_DATA_DIR="$HOME/.raxis-demo"`
-instead, because it is easy to delete and repeat.
+The getting-started guide uses `RAXIS_DATA_DIR="$HOME/.raxis"` instead,
+because that matches the Homebrew post-install layout an end user sees.
 
 ---
 

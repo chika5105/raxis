@@ -4,8 +4,8 @@
 > committed to `main` → audit chain verifies. ~10 minutes.
 
 This page is the runnable end-to-end "hello world" for RAXIS. The
-plan creates one file (`HELLO.md`) inside a freshly initialised git
-repo, commits it, and lets the kernel fast-forward `main`.
+plan creates one file (`HELLO.md`) inside the kernel's canonical
+operator repo, commits it, and lets the kernel fast-forward `main`.
 
 ---
 
@@ -16,11 +16,11 @@ audit segments, witness blobs — under `$RAXIS_DATA_DIR` (defaults to
 `~/.raxis`). The Homebrew bottle keeps the immutable runtime bundle
 under `$(brew --prefix raxis)/share/raxis`.
 
-For your first run, use a throwaway data dir:
+For your first run, use the default Homebrew data dir:
 
 ```bash
 export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
-export RAXIS_DATA_DIR="$HOME/.raxis-demo"
+export RAXIS_DATA_DIR="$HOME/.raxis"
 ```
 
 Use the **same** values in every terminal that runs `raxis*` binaries
@@ -32,15 +32,22 @@ install dir produced by `cargo xtask source-setup`.
 ## 1 · Mint an operator keypair
 
 ```bash
-mkdir -p "$HOME/raxis-keys"
-cd "$HOME/raxis-keys"
+install -d -m 700 "$HOME/raxis-keys"
 
-openssl genpkey -algorithm ED25519 -out operator_private.pem
-openssl pkey    -in operator_private.pem -pubout -out operator_public.pem
-chmod 600 operator_private.pem
+openssl genpkey -algorithm ED25519 -out "$HOME/raxis-keys/operator_private.pem"
+openssl pkey \
+  -in "$HOME/raxis-keys/operator_private.pem" \
+  -pubout \
+  -out "$HOME/raxis-keys/operator_public.pem"
+chmod 600 "$HOME/raxis-keys/operator_private.pem"
 
 export RAXIS_OPERATOR_KEY="$HOME/raxis-keys/operator_private.pem"
 ```
+
+`RAXIS_OPERATOR_KEY` is a convenience variable. Without it, every
+signed request below needs `--key "$HOME/raxis-keys/operator_private.pem"`
+or `--operator-key "$HOME/raxis-keys/operator_private.pem"` spelled
+out.
 
 If `openssl genpkey` fails with `Algorithm ed25519 not found`, the
 default `openssl` is LibreSSL. See
@@ -66,6 +73,13 @@ raxis genesis \
   --operator-name "$USER"
 ```
 
+This creates a non-admin operator by default. Add `--admin` only
+for the initial bootstrap operator that should hold
+`OperatorCertInstall` authority. After genesis, grant that authority
+through the normal signed policy path: mint a replacement cert with
+`OperatorCertInstall`, run `raxis cert install --replace-for ...`,
+re-sign the policy, then `raxis epoch advance`.
+
 Air-gapped variant (mint the cert offline with `raxis cert mint` on
 the machine that holds the private key, then pass `--operator-cert
 <path>`): see [`recipes/cli/01-genesis.md`](../recipes/cli/01-genesis.md).
@@ -90,31 +104,39 @@ Genesis does **not** wire in an LLM provider. Add one now so the
 agents can call a model. Anthropic is the most-tested provider in V2.
 
 ```bash
-mkdir -p "$RAXIS_DATA_DIR/providers"
+install -d -m 700 "$RAXIS_DATA_DIR/providers"
 
 read -rsp "Anthropic API key: " RAXIS_ANTHROPIC_API_KEY
 printf '\n'
-printf 'api_key = "%s"\n' "$RAXIS_ANTHROPIC_API_KEY" \
-  > "$RAXIS_DATA_DIR/providers/anthropic-prod.toml"
+{
+  printf 'api_key = "%s"\n' "$RAXIS_ANTHROPIC_API_KEY"
+  printf 'auth_header = "x-api-key"\n'
+  printf 'auth_prefix = ""\n'
+} > "$RAXIS_DATA_DIR/providers/anthropic-prod.toml"
 unset RAXIS_ANTHROPIC_API_KEY
 chmod 600 "$RAXIS_DATA_DIR/providers/anthropic-prod.toml"
 ```
 
 The kernel's `FileCredentialBackend` enforces mode `0600` on every
 provider credential file; any other mode is a boot-time refusal.
+Anthropic also requires `x-api-key` rather than the gateway's default
+`Authorization: Bearer` header, so keep the `auth_header` and
+empty `auth_prefix` lines.
 
 Now make three policy edits:
 
-1. Allow the scratch repo root used below.
+1. Ensure kernel-managed worktrees live under the data dir.
 2. Point the dashboard at the Homebrew-shipped static bundle.
 3. Add the gateway/provider block.
 
 ```bash
-perl -0pi -e 's|allowed_worktree_roots = \[[^\]]*\]|allowed_worktree_roots = ["/tmp"]|' \
+perl -0pi -e 's|allowed_worktree_roots = \[[^\]]*\]|allowed_worktree_roots = ["'"$RAXIS_DATA_DIR"'/worktrees"]|' \
   "$RAXIS_DATA_DIR/policy/policy.toml"
 
-perl -0pi -e 's|(jwt_ttl_secs = [0-9]+\n)|${1}static_dir   = "$ENV{RAXIS_INSTALL_DIR}/dashboard"\n|' \
-  "$RAXIS_DATA_DIR/policy/policy.toml"
+if ! rg -q '^static_dir[[:space:]]*=' "$RAXIS_DATA_DIR/policy/policy.toml"; then
+  perl -0pi -e 's|(jwt_ttl_secs = [0-9]+\n)|${1}static_dir   = "$ENV{RAXIS_INSTALL_DIR}/dashboard"\n|' \
+    "$RAXIS_DATA_DIR/policy/policy.toml"
+fi
 
 cat >> "$RAXIS_DATA_DIR/policy/policy.toml" <<EOF
 
@@ -128,8 +150,8 @@ max_consecutive_respawns = 5
 provider_id              = "anthropic-prod"
 kind                     = "Anthropic"
 credentials_file         = "anthropic-prod.toml"
-inference_timeout_ms     = 30000
-data_fetch_timeout_ms    = 10000
+inference_timeout_ms     = 120000
+data_fetch_timeout_ms    = 30000
 max_response_bytes       = 16777216
 pricing.input_tokens_per_dollar  = 200000
 pricing.output_tokens_per_dollar = 50000
@@ -139,7 +161,10 @@ EOF
 The pricing values are conservative tokens-per-dollar estimates used
 for budget admission. Tune them to your provider contract later; they
 do not expose your API key and do not change which model the planner
-requests. Other providers follow the same pattern; see
+requests. The `120000` ms inference timeout matches the live agent
+runtime budget used by the starter images; smaller provider caps can
+reject normal tasks before the model call is attempted. Other
+providers follow the same pattern; see
 [`recipes/policy/10-providers-section.md`](../recipes/policy/10-providers-section.md).
 
 Re-sign the policy:
@@ -147,8 +172,13 @@ Re-sign the policy:
 ```bash
 raxis policy sign \
   "$RAXIS_DATA_DIR/policy/policy.toml" \
-  --key "$RAXIS_OPERATOR_KEY"
+  --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem"
 ```
+
+Policy artifacts are signed by the local authority key. Keep using
+`RAXIS_OPERATOR_KEY` for operator requests such as `submit plan`,
+`plan approve`, `session create`, and future `epoch advance`
+commands.
 
 ---
 
@@ -158,7 +188,7 @@ In a dedicated terminal:
 
 ```bash
 export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
-export RAXIS_DATA_DIR="$HOME/.raxis-demo"
+export RAXIS_DATA_DIR="$HOME/.raxis"
 raxis-kernel
 ```
 
@@ -182,47 +212,66 @@ everything below; export `RAXIS_INSTALL_DIR`, `RAXIS_DATA_DIR`, and
 
 ---
 
-## 5 · Materialise a scratch repo
+## 5 · Seed the canonical repo
 
 ```bash
-export DEMO_ROOT="/tmp/raxis-hello"
-rm -rf "$DEMO_ROOT" && mkdir -p "$DEMO_ROOT"
-cd "$DEMO_ROOT"
+export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
 
-git init -q
-echo "# hello world demo" > README.md
-git -c user.email=demo@raxis.local -c user.name=Demo add . >/dev/null
-git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
+rm -rf "$RAXIS_MAIN_REPO"
+install -d "$(dirname "$RAXIS_MAIN_REPO")"
+git init -q "$RAXIS_MAIN_REPO"
+git -C "$RAXIS_MAIN_REPO" symbolic-ref HEAD refs/heads/main
+
+printf '# hello world demo\n' > "$RAXIS_MAIN_REPO/README.md"
+git -C "$RAXIS_MAIN_REPO" \
+  -c user.email=demo@raxis.local \
+  -c user.name=Demo \
+  add README.md
+git -C "$RAXIS_MAIN_REPO" \
+  -c user.email=demo@raxis.local \
+  -c user.name=Demo \
+  commit -qm "init"
 ```
+
+RAXIS does not run against the directory you happen to be standing in.
+The production kernel clones from `$RAXIS_DATA_DIR/repositories/main`
+into kernel-managed worktrees under `$RAXIS_DATA_DIR/worktrees`.
 
 ---
 
 ## 6 · Write the plan
 
 ```bash
-cat > "$DEMO_ROOT/plan.toml" <<'EOF'
+export PLAN_PATH="/tmp/raxis-hello-plan.toml"
+export RAXIS_TASK_ID="greeter-$(date +%Y%m%d%H%M%S)"
+
+cat > "$PLAN_PATH" <<EOF
 [plan.initiative]
-description = "Create a HELLO.md file with a one-line greeting and commit it."
+description = "Create a HELLO.md greeting file and commit it."
 
 [workspace]
-name     = "Hello world"
-base_ref = "refs/heads/main"
-lane_id  = "default"
+name       = "Hello world"
+lane_id    = "default"
+target_ref = "refs/heads/main"
 
 [[tasks]]
-task_id            = "greeter"
+task_id            = "$RAXIS_TASK_ID"
 description        = "Create HELLO.md and commit it."
 session_agent_type = "Executor"
 clone_strategy    = "blobless"
 path_allowlist     = ["HELLO.md"]
 predecessors       = []
 context            = """
-Write a single Markdown file `HELLO.md` whose only contents are the
-line `Hello, RAXIS.` (followed by a trailing newline). Stage and
-commit the file as a single commit with the message `add HELLO.md`.
+Write a small Markdown greeting file named `HELLO.md` at the repository
+root. Stage and commit it as a single commit with the message
+`add HELLO.md`. Do not modify any other file.
 """
 EOF
 ```
+
+Task IDs are globally indexed in the kernel store. The timestamp keeps
+this quickstart easy to rerun without colliding with an older
+`greeter` task in the same data dir.
 
 Field-by-field references:
 [`plan.initiative`](../recipes/plan/01-plan-initiative-block.md),
@@ -243,16 +292,14 @@ Orchestrator task is rejected at admission as
 
 ```bash
 # Local pre-flight — catches obvious mistakes before any IPC.
-raxis plan validate "$DEMO_ROOT/plan.toml"
+raxis plan validate "$PLAN_PATH"
 # expected: a list of [OK] lines and exit 0.
 
 # Sign + submit atomically. The CLI builds the canonical byte array,
 # signs it with your operator key, and ships (bundle, signature) to
 # the kernel over IPC. No `plan.sig` file is produced (V2 sealed-bundle
 # admission per specs/v2/plan-bundle-sealing.md §4).
-raxis submit plan "$DEMO_ROOT/plan.toml" --no-dry-run
-
-INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+INIT_ID="$(raxis submit plan "$PLAN_PATH" --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 echo "INIT_ID=$INIT_ID"
 
 raxis plan approve "$INIT_ID"
@@ -267,8 +314,8 @@ raxis plan approve "$INIT_ID"
 raxis initiative show "$INIT_ID" --with-tasks
 ```
 
-The Orchestrator boots first, picks up the `greeter` task, and spawns
-the Executor VM. The Executor edits `HELLO.md`, commits, and submits
+The Orchestrator boots first, picks up the `$RAXIS_TASK_ID` task, and
+spawns the Executor VM. The Executor edits `HELLO.md`, commits, and submits
 `CompleteTask`. The kernel verifies the touched-paths union, evaluates
 gates, and (since there are no review tasks and no merge verifiers in
 this plan) fast-forwards `main` to the Executor's commit SHA.
@@ -290,7 +337,7 @@ command:
 # 1. Initiative is Completed; the task is Completed.
 raxis initiative show "$INIT_ID" --with-tasks
 # State: Completed
-# greeter: Completed
+# $RAXIS_TASK_ID: Completed
 
 # 2. The audit chain has the lifecycle events.
 raxis log "$INIT_ID" --kind InitiativeCreated --limit 1
@@ -303,8 +350,8 @@ raxis verify-chain
 # expected: non-zero record count, zero gaps, ok
 
 # 4. `main` advanced to the Executor's commit and the file is there.
-git -C "$DEMO_ROOT" log --oneline -5
-git -C "$DEMO_ROOT" show main:HELLO.md
+git -C "$RAXIS_MAIN_REPO" log --oneline -5
+git -C "$RAXIS_MAIN_REPO" show main:HELLO.md
 
 # 5. Full preflight comes back green.
 raxis doctor
@@ -320,7 +367,9 @@ modes are catalogued there with exact fixes.
 
 ```bash
 raxis initiative abort "$INIT_ID" 2>/dev/null || true
-rm -rf "$DEMO_ROOT"
+rm -f "$PLAN_PATH"
+# Optional — reset the demo repo for another scenario:
+# rm -rf "$RAXIS_MAIN_REPO"
 # Optional — wipe the whole install and start over:
 # rm -rf "$RAXIS_DATA_DIR"
 ```
@@ -408,5 +457,5 @@ the invariant that pins the contract is `INV-EXEC-DISCOVERY-01`
   — the canonical bytes / signing contract behind `submit plan`.
 - [`specs/v2/integration-merge.md`](../../specs/v2/integration-merge.md)
   — the admission checks that gate the final `main` fast-forward.
-- what is
-  shipped on the V2 surface today.
+- [`specs/v2/release-and-distribution.md`](../../specs/v2/release-and-distribution.md)
+  — what the Homebrew release ships on the V2 surface today.

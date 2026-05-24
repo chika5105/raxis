@@ -22,7 +22,10 @@ audit chain records the failover.
 
 ## Prerequisites
 
-- **One-time setup complete.** See [`../../SETUP.md`](../../SETUP.md).
+- **One-time setup complete.** See
+  [`../../getting-started/README.md`](../../getting-started/README.md)
+  for Homebrew, or [`../../SETUP.md`](../../SETUP.md) for source
+  builds.
 - **Kernel running.**
 - **`RAXIS_DATA_DIR` and `RAXIS_OPERATOR_KEY` exported.**
 - **Two provider credential files** in `$RAXIS_DATA_DIR/providers/`,
@@ -73,8 +76,7 @@ raxis epoch advance \
 
 # 2. Run a tiny initiative to establish the baseline.
 cp /path/to/raxis/guides/scenarios/01-hello-world/plan.toml /tmp/plan-baseline.toml
-raxis submit plan /tmp/plan-baseline.toml --no-dry-run
-INIT_BASE="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+INIT_BASE="$(raxis submit plan /tmp/plan-baseline.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT_BASE"
 # Confirm Completed.
 raxis initiative show "$INIT_BASE" --with-tasks
@@ -90,8 +92,7 @@ mv "$RAXIS_DATA_DIR/providers/anthropic-prod.toml" \
 #  gateway's first call to the primary fails.)
 
 # 4. Re-run.
-raxis submit plan /tmp/plan-baseline.toml --no-dry-run
-INIT_FAILOVER="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+INIT_FAILOVER="$(raxis submit plan /tmp/plan-baseline.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT_FAILOVER"
 
 # 5. Restore the primary (and clean up).
@@ -160,7 +161,8 @@ raxis log "$INIT_FAILOVER" --kind InferenceFailed --limit 1 --json \
 raxis initiative abort "$INIT_FAILOVER" 2>/dev/null || true
 # Roll back the fallback config if you don't want it active:
 $EDITOR "$RAXIS_DATA_DIR/policy/policy.toml"   # remove [[providers.entries]] blocks
-raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" --key "$RAXIS_OPERATOR_KEY"
+raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem"
 raxis epoch advance \
   --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
   --sig    "$RAXIS_DATA_DIR/policy/policy.sig"

@@ -7,7 +7,7 @@ The proxy serves an IMDS-shaped JSON envelope at
 `AWS_CONTAINER_CREDENTIALS_FULL_URI` (the URL is what the kernel
 sets in the agent VM's env). The agent never sees the access key
 or the secret access key — they live on disk under
-`~/.raxis/credentials/<name>.env` (mode 0600), behind the
+`$RAXIS_DATA_DIR/credentials/<name>.env` (mode 0600), behind the
 `CredentialBackend` trait, and the proxy looks them up per-
 request so a rotation lands at the next SDK refresh window.
 
@@ -26,13 +26,13 @@ Same as scenario 04. An AWS access-key pair seeded under the
 operator's data dir:
 
 ```bash
-mkdir -p ~/.raxis/credentials
-cat > ~/.raxis/credentials/aws_main.env <<'EOF'
+install -d -m 700 "$RAXIS_DATA_DIR/credentials"
+cat > "$RAXIS_DATA_DIR/credentials/aws_main.env" <<'EOF'
 AWS_ACCESS_KEY_ID=AKIA...
 AWS_SECRET_ACCESS_KEY=...
 AWS_SESSION_TOKEN=                 # optional, for STS keys
 EOF
-chmod 600 ~/.raxis/credentials/aws_main.env
+chmod 600 "$RAXIS_DATA_DIR/credentials/aws_main.env"
 ```
 
 The proxy parses both env-style (this file) and JSON
@@ -65,7 +65,8 @@ emits.
 
 ```bash
 raxis plan validate ./plan.toml
-raxis submit plan ./plan.toml --no-dry-run
+INIT_ID="$(raxis submit plan ./plan.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
+raxis plan approve "$INIT_ID"
 ```
 
 The agent's `boto3` (or `aws s3 cp`) call inside the Executor's

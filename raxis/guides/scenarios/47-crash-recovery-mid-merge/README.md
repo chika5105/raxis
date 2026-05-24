@@ -24,9 +24,9 @@ INIT_ID=$(... see scenario 13 ...)
 # kill the kernel hard:
 killall -9 raxis-kernel
 
-# Restart it (or it will be relaunched by systemd/launchd if you
-# installed via `raxis kernel install`):
-raxis-kernel --data-dir ~/.raxis &
+# Restart it with the same environment (or let your service manager
+# relaunch it if you use `brew services start raxis`):
+RAXIS_DATA_DIR="${RAXIS_DATA_DIR:-$HOME/.raxis}" raxis-kernel &
 
 # Verify the initiative finishes successfully despite the crash:
 raxis initiative show "$INIT_ID"

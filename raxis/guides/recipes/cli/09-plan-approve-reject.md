@@ -25,7 +25,7 @@ stored, but no Executor / Reviewer sessions exist yet. `approve`
 mints those sessions and starts the work.
 
 ```bash
-INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+INIT_ID="$(raxis submit plan ./plan.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT_ID"
 # Output:
 # initiative_id:   1f3c8a...
@@ -86,7 +86,7 @@ audit chain (`InitiativeRejected` event).
 
 | Surface | Purpose |
 |---|---|
-| `raxis initiative list [--state Draft \| Active \| Completed \| Rejected \| all]` | Find initiatives by state. |
+| `raxis initiative list [--state active \| completed \| quarantined \| all]` | Find initiatives by bucket. |
 | `raxis initiative show <id> [--with-tasks]` | Drill into the initiative's per-task state. |
 | `raxis initiative abort <id>` | Stop a running initiative. |
 | `raxis log <initiative_id>` | Stream the audit events for one initiative. |

@@ -124,8 +124,7 @@ predecessors       = []
 description        = """Print the provider id you're using and exit."""
 EOF
 
-raxis submit plan /tmp/probe-plan.toml --no-dry-run
-INIT=$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')
+INIT="$(raxis submit plan /tmp/probe-plan.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT"
 # Wait...
 raxis explain probe

@@ -23,7 +23,10 @@ into `data/ping.json`. Any other host the agent tries to reach
 
 ## Prerequisites
 
-- **One-time setup complete.** See [`../../SETUP.md`](../../SETUP.md).
+- **One-time setup complete.** See
+  [`../../getting-started/README.md`](../../getting-started/README.md)
+  for Homebrew, or [`../../SETUP.md`](../../SETUP.md) for source
+  builds.
 - **Kernel running.**
 - **`RAXIS_DATA_DIR` and `RAXIS_OPERATOR_KEY` exported.**
 - **Anthropic credentials** at
@@ -64,23 +67,22 @@ into `data/ping.json`. Any other host the agent tries to reach
 ## Run it
 
 ```bash
-# 1. Materialise a scratch repo with a writable data/ directory.
-export DEMO_ROOT="/tmp/raxis-scenario-39"
-rm -rf "$DEMO_ROOT" && mkdir -p "$DEMO_ROOT/data"
-( cd "$DEMO_ROOT" \
+# 1. Materialise a canonical repo with a writable data/ directory.
+export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
+rm -rf "$RAXIS_MAIN_REPO" && mkdir -p "$RAXIS_MAIN_REPO/data"
+( cd "$RAXIS_MAIN_REPO" \
   && git init -q \
   && echo "# grpc demo" > README.md \
   && git -c user.email=demo@raxis.local -c user.name=Demo add . > /dev/null \
   && git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init" )
 
 # 2. Edit plan.toml to point at *your* internal host before submitting.
-cp ./plan.toml "$DEMO_ROOT/plan.toml"
-$EDITOR "$DEMO_ROOT/plan.toml"   # change internal.example.com:443 to your host
+cp ./plan.toml "$RAXIS_MAIN_REPO/plan.toml"
+$EDITOR "$RAXIS_MAIN_REPO/plan.toml"   # change internal.example.com:443 to your host
 
 # 3. Validate + submit + approve.
-raxis plan validate "$DEMO_ROOT/plan.toml"
-raxis submit plan   "$DEMO_ROOT/plan.toml" --no-dry-run
-INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+raxis plan validate "$RAXIS_MAIN_REPO/plan.toml"
+INIT_ID="$(raxis submit plan   "$RAXIS_MAIN_REPO/plan.toml" --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT_ID"
 
 # 4. Follow.
@@ -98,7 +100,7 @@ raxis initiative show "$INIT_ID" --with-tasks
 # ping: Completed
 
 # 2. The Executor's commit shows a non-empty data/ping.json.
-git -C "$DEMO_ROOT" show main:data/ping.json | jq .
+git -C "$RAXIS_MAIN_REPO" show main:data/ping.json | jq .
 
 # 3. The egress event was admitted.
 raxis log "$INIT_ID" --kind EgressAdmitted --limit 5 --json \
@@ -134,7 +136,7 @@ raxis verify-chain
 
 ```bash
 raxis initiative abort "$INIT_ID" 2>/dev/null || true
-rm -rf "$DEMO_ROOT"
+rm -rf "$RAXIS_MAIN_REPO"
 ```
 
 ---

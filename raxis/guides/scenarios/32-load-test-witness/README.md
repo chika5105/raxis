@@ -31,7 +31,6 @@ Same as scenario 15.
 
 ```bash
 raxis plan validate ./plan.toml
-raxis submit plan ./plan.toml --no-dry-run
-INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+INIT_ID="$(raxis submit plan ./plan.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT_ID"
 ```

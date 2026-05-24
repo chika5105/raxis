@@ -165,7 +165,7 @@ The restore captures the kernel's last consistent state. Tasks
 that were in `Active` at backup time may need a manual decision:
 
 ```bash
-raxis initiative list --state Active
+raxis initiative list --state active
 # For each: decide whether to abort and resubmit, or resume.
 # If resume: raxis task resume <task_id> (only works for paused).
 # If abort:  raxis initiative abort <id>

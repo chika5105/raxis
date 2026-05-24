@@ -30,9 +30,9 @@ the kernel, and how a red build blocks the merge.
 ## Repository setup
 
 ```bash
-export DEMO_ROOT="/tmp/raxis-scenario-04"
-rm -rf "$DEMO_ROOT" && mkdir -p "$DEMO_ROOT"
-cd "$DEMO_ROOT"
+export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
+rm -rf "$RAXIS_MAIN_REPO" && mkdir -p "$RAXIS_MAIN_REPO"
+cd "$RAXIS_MAIN_REPO"
 
 cargo init --lib --name demo04 -q
 sed -i.bak 's/^pub fn add(left:/pub fn ad(left:/' src/lib.rs && rm src/lib.rs.bak
@@ -52,8 +52,7 @@ to fix it.
 
 ```bash
 raxis plan validate ./plan.toml
-raxis submit plan   ./plan.toml --no-dry-run
-INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+INIT_ID="$(raxis submit plan   ./plan.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 raxis plan approve "$INIT_ID"
 
 raxis initiative show "$INIT_ID" --with-tasks
@@ -84,7 +83,7 @@ raxis witnesses "$(raxis initiative show "$INIT_ID" --with-tasks --json | jq -r 
 
 ```bash
 raxis initiative abort "$INIT_ID" 2>/dev/null || true
-rm -rf "$DEMO_ROOT"
+rm -rf "$RAXIS_MAIN_REPO"
 ```
 
 ---

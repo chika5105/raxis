@@ -15,11 +15,11 @@ gated by both `allowed_egress` and a credential.
 Stripe test secret key seeded:
 
 ```bash
-mkdir -p ~/.raxis/credentials
-cat > ~/.raxis/credentials/stripe_test.env <<'EOF'
+install -d -m 700 "$RAXIS_DATA_DIR/credentials"
+cat > "$RAXIS_DATA_DIR/credentials/stripe_test.env" <<'EOF'
 STRIPE_SECRET_KEY=sk_test_...
 EOF
-chmod 600 ~/.raxis/credentials/stripe_test.env
+chmod 600 "$RAXIS_DATA_DIR/credentials/stripe_test.env"
 ```
 
 ---
@@ -28,5 +28,6 @@ chmod 600 ~/.raxis/credentials/stripe_test.env
 
 ```bash
 raxis plan validate ./plan.toml
-raxis submit plan ./plan.toml --no-dry-run
+INIT_ID="$(raxis submit plan ./plan.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
+raxis plan approve "$INIT_ID"
 ```

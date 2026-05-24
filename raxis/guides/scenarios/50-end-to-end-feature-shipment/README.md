@@ -22,7 +22,7 @@ This is the *demo-day* scenario: showcase the system end to end.
 
 ## What this scenario demonstrates
 
-1. **Genesis check** — confirm the kernel is alive.
+1. **Kernel check** — confirm genesis has run and the kernel is alive.
 2. **Plan validate** — structural pre-flight.
 3. **Plan submit + approve** — operator-gated lifecycle.
 4. **Parallel decomposition** — backend Executor + frontend Executor
@@ -42,9 +42,9 @@ This is the *demo-day* scenario: showcase the system end to end.
 ## Repository setup
 
 ```bash
-export DEMO_ROOT="/tmp/raxis-scenario-50"
-rm -rf "$DEMO_ROOT" && mkdir -p "$DEMO_ROOT"
-cd "$DEMO_ROOT"
+export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
+rm -rf "$RAXIS_MAIN_REPO" && mkdir -p "$RAXIS_MAIN_REPO"
+cd "$RAXIS_MAIN_REPO"
 
 cargo new --bin --name demo50 -q
 cargo add tiny_http -q
@@ -60,11 +60,20 @@ git -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
 
 ---
 
-## Genesis check
+## Kernel check
 
 ```bash
-raxis kernel status || (echo "Kernel not running"; exit 1)
-raxis genesis status || raxis genesis run --no-dry-run
+raxis doctor
+raxis initiative list --state active >/dev/null || {
+  echo "Start raxis-kernel in another terminal, then retry."
+  exit 1
+}
+```
+
+Copy this scenario's plan into the canonical repo so the run commands below can execute from the seeded repo:
+
+```bash
+cp /path/to/raxis/guides/scenarios/50-end-to-end-feature-shipment/plan.toml "$RAXIS_MAIN_REPO/plan.toml"
 ```
 
 ---
@@ -73,10 +82,7 @@ raxis genesis status || raxis genesis run --no-dry-run
 
 ```bash
 raxis plan validate ./plan.toml
-raxis submit plan ./plan.toml --no-dry-run
-
-# Capture INIT_ID:
-INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
+INIT_ID="$(raxis submit plan ./plan.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"
 echo "INIT_ID=$INIT_ID"
 
 # Approve the plan:
@@ -102,7 +108,7 @@ watch -n 2 "raxis initiative show $INIT_ID --with-tasks"
 
 ```bash
 raxis initiative abort "$INIT_ID" 2>/dev/null || true
-rm -rf "$DEMO_ROOT"
+rm -rf "$RAXIS_MAIN_REPO"
 ```
 
 ---
