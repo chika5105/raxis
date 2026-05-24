@@ -67,6 +67,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let mut operator_key_path: Option<PathBuf> = None;
     let mut operator_name: Option<String> = None;
     let mut cert_validity_days: u32 = crate::commands::cert::DEFAULT_VALIDITY_DAYS;
+    let mut grant_operator_cert_install = false;
     let mut force_misconfig = false;
     let mut rotate_family: Option<String> = None;
     let mut i = 0;
@@ -118,6 +119,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
                     ))
                 })?;
             }
+            "--admin" => grant_operator_cert_install = true,
             "--operator-pubkey" => {
                 return Err(CliError::Usage(
                     "--operator-pubkey was removed in the cert-mandatory release \
@@ -175,6 +177,15 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
                 .to_owned(),
         ));
     }
+    if grant_operator_cert_install && operator_key_path.is_none() {
+        return Err(CliError::Usage(
+            "--admin only applies to the --operator-key convenience path, \
+             where genesis mints the operator cert in-process. For --operator-cert \
+             or stdin cert workflows, mint the cert explicitly with an \
+             OperatorCertInstall entry in --ops."
+                .to_owned(),
+        ));
+    }
 
     // --operator-name and --cert-validity-days only apply when we are
     // minting the cert in-process. With --operator-cert the values come
@@ -204,6 +215,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         operator_key_path,
         operator_name,
         cert_validity_days,
+        grant_operator_cert_install,
         force_misconfig,
     )
 }
@@ -219,6 +231,7 @@ fn run_genesis(
     operator_key_path: Option<PathBuf>,
     operator_name: Option<String>,
     cert_validity_days: u32,
+    grant_operator_cert_install: bool,
     force_misconfig: bool,
 ) -> Result<(), CliError> {
     let data_dir = flags.data_dir();
@@ -351,6 +364,7 @@ fn run_genesis(
                     key_path,
                     &display_name,
                     cert_validity_days,
+                    grant_operator_cert_install,
                     force_misconfig,
                 )?
             }
@@ -502,10 +516,19 @@ fn run_genesis(
 
     // Step 8: Remind operator to sign the policy.
     println!("\n=== CEREMONY NEXT STEPS ===");
-    println!("Sign policy.toml with your private key:");
+    println!("Sign policy.toml with the authority key:");
     println!(
-        "  raxis policy sign {} --key <your_private_key>",
-        policy_path.display()
+        "  raxis policy sign {} --key {}",
+        policy_path.display(),
+        authority_key_path.display()
+    );
+    println!("Use your operator key for signed operator requests, for example:");
+    println!("  export RAXIS_OPERATOR_KEY=<your_operator_private_key>");
+    println!("  # for future policy changes after the kernel is running:");
+    println!(
+        "  raxis --operator-key \"$RAXIS_OPERATOR_KEY\" epoch advance --policy {} --sig {}",
+        policy_path.display(),
+        policy_path.with_extension("sig").display()
     );
     println!("Then start the kernel:");
     println!("  RAXIS_DATA_DIR={} raxis-kernel", data_dir.display());
@@ -579,6 +602,7 @@ fn mint_genesis_operator_cert(
     key_path: &Path,
     display_name: &str,
     cert_validity_days: u32,
+    grant_operator_cert_install: bool,
     force_misconfig: bool,
 ) -> Result<OperatorCert, CliError> {
     println!(
@@ -600,6 +624,15 @@ fn mint_genesis_operator_cert(
     let not_after =
         now_unix_secs + (cert_validity_days as i64) * crate::commands::cert::SECS_PER_DAY;
 
+    let permitted_ops = if grant_operator_cert_install {
+        raxis_genesis_tools::permitted_ops_with_operator_cert_install()
+    } else {
+        raxis_genesis_tools::PERMITTED_OPS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect()
+    };
+
     let mut cert = OperatorCert {
         kind: CertKind::Standard,
         display_name: display_name.to_owned(),
@@ -608,16 +641,14 @@ fn mint_genesis_operator_cert(
         not_after,
         warn_before_expiry_days: crate::commands::cert::DEFAULT_WARN_DAYS,
         grace_period_days: crate::commands::cert::DEFAULT_GRACE_DAYS,
-        // The genesis cert grants the canonical full v1 op set so the
+        // The genesis cert grants the canonical v1 op set so the
         // operator can immediately drive the kernel through any
         // operator op without having to mint a wider cert first. This
-        // is consistent with the policy.toml emitter's
-        // `permitted_ops` list (the entry-level `permitted_ops`
-        // is overwritten from the cert's at load time anyway).
-        permitted_ops: raxis_genesis_tools::PERMITTED_OPS
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect(),
+        // does NOT include OperatorCertInstall by default; operator
+        // admin is a deliberate --admin opt-in because certificate
+        // installation/rotation controls the trust root. The
+        // dashboard also maps that authority to its local admin role.
+        permitted_ops,
         contact_info: None,
         self_sig_hex: String::new(),
     };
@@ -1185,6 +1216,7 @@ mod run_genesis_e2e {
             /*operator_key_path=*/ None,
             /*operator_name=*/ None,
             /*cert_validity_days=*/ crate::commands::cert::DEFAULT_VALIDITY_DAYS,
+            false,
             /*force_misconfig=*/ false,
         )
         .expect("run_genesis must succeed");
@@ -1252,6 +1284,7 @@ mod run_genesis_e2e {
             None,
             crate::commands::cert::DEFAULT_VALIDITY_DAYS,
             false,
+            false,
         )
         .expect("run_genesis");
 
@@ -1272,6 +1305,7 @@ mod run_genesis_e2e {
             None,
             None,
             crate::commands::cert::DEFAULT_VALIDITY_DAYS,
+            false,
             false,
         )
         .expect("run_genesis");
@@ -1303,6 +1337,7 @@ mod run_genesis_e2e {
             None,
             None,
             crate::commands::cert::DEFAULT_VALIDITY_DAYS,
+            false,
             false,
         )
         .expect("run_genesis");
@@ -1347,6 +1382,7 @@ mod run_genesis_e2e {
             None,
             crate::commands::cert::DEFAULT_VALIDITY_DAYS,
             false,
+            false,
         )
         .expect("run_genesis");
 
@@ -1382,6 +1418,7 @@ mod run_genesis_e2e {
             None,
             None,
             crate::commands::cert::DEFAULT_VALIDITY_DAYS,
+            false,
             false,
         )
         .expect("run_genesis");
@@ -1446,6 +1483,7 @@ mod run_genesis_e2e {
             None,
             crate::commands::cert::DEFAULT_VALIDITY_DAYS,
             false,
+            false,
         )
         .expect("first run");
         // A second run without --force MUST be rejected — operators must
@@ -1457,6 +1495,7 @@ mod run_genesis_e2e {
             None,
             None,
             crate::commands::cert::DEFAULT_VALIDITY_DAYS,
+            false,
             false,
         )
         .expect_err("second run without --force must fail");
@@ -1474,6 +1513,7 @@ mod run_genesis_e2e {
             None,
             None,
             crate::commands::cert::DEFAULT_VALIDITY_DAYS,
+            false,
             false,
         )
         .expect("--force re-run");
@@ -1508,6 +1548,7 @@ mod run_genesis_e2e {
             None,
             None,
             crate::commands::cert::DEFAULT_VALIDITY_DAYS,
+            false,
             false,
         )
         .expect("genesis with --operator-cert must succeed");
@@ -1553,6 +1594,7 @@ mod run_genesis_e2e {
             None,
             crate::commands::cert::DEFAULT_VALIDITY_DAYS,
             false,
+            false,
         )
         .expect_err("tampered self-sig must fail");
         let msg = err.to_string();
@@ -1595,6 +1637,7 @@ mod run_genesis_e2e {
             Some("Chika".to_owned()),
             crate::commands::cert::DEFAULT_VALIDITY_DAYS,
             false,
+            false,
         )
         .expect("genesis with --operator-key must succeed");
 
@@ -1615,6 +1658,19 @@ mod run_genesis_e2e {
         let policy = std::fs::read_to_string(tmp.path().join("policy/policy.toml")).unwrap();
         assert!(policy.contains("[operators.entries.cert]"));
         assert!(policy.contains("display_name = \"Chika\""));
+        assert!(
+            !policy.contains(raxis_genesis_tools::OPERATOR_CERT_INSTALL_PERMITTED_OP),
+            "genesis --operator-key must not grant OperatorCertInstall/admin by default"
+        );
+        let minted_cert: OperatorCert =
+            toml::from_str(&std::fs::read_to_string(&cert_on_disk).unwrap()).unwrap();
+        assert!(
+            !minted_cert
+                .permitted_ops
+                .iter()
+                .any(|op| op == raxis_genesis_tools::OPERATOR_CERT_INSTALL_PERMITTED_OP),
+            "minted cert must not include OperatorCertInstall unless --admin is passed"
+        );
 
         // (2) The CRITICAL invariant: the seed_hex string from the
         //     operator's key file must NOT appear anywhere under
@@ -1650,6 +1706,63 @@ mod run_genesis_e2e {
                 }
             }
         }
+    }
+
+    #[test]
+    fn run_with_operator_key_admin_opt_in_grants_operator_cert_install() {
+        let (tmp, flags) = fresh_flags();
+        let (sk, _pk_hex) = fixed_operator();
+        let key_path = tmp.path().join("operator.key");
+        std::fs::write(&key_path, hex::encode(sk.to_bytes())).unwrap();
+
+        run(
+            &flags,
+            &[
+                "--operator-key".to_owned(),
+                key_path.display().to_string(),
+                "--operator-name".to_owned(),
+                "Chika".to_owned(),
+                "--admin".to_owned(),
+            ],
+        )
+        .expect("--admin should mint an operator-admin cert on the convenience path");
+
+        let pk_hex = hex::encode(sk.verifying_key().to_bytes());
+        let fp = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&pk_hex).unwrap());
+        let cert_on_disk = tmp.path().join(format!("keys/operator_{fp}.cert.toml"));
+        let minted_cert: OperatorCert =
+            toml::from_str(&std::fs::read_to_string(&cert_on_disk).unwrap()).unwrap();
+        assert!(
+            minted_cert
+                .permitted_ops
+                .iter()
+                .any(|op| op == raxis_genesis_tools::OPERATOR_CERT_INSTALL_PERMITTED_OP),
+            "--admin must add OperatorCertInstall to the minted cert"
+        );
+        let policy = std::fs::read_to_string(tmp.path().join("policy/policy.toml")).unwrap();
+        assert!(
+            policy.contains(raxis_genesis_tools::OPERATOR_CERT_INSTALL_PERMITTED_OP),
+            "policy entry must mirror the admin-capable cert"
+        );
+    }
+
+    #[test]
+    fn run_rejects_admin_opt_in_for_supplied_operator_cert() {
+        let (tmp, flags, cert_path, _pk_hex) = stage_default_op();
+        let err = run(
+            &flags,
+            &[
+                "--operator-cert".to_owned(),
+                cert_path.display().to_string(),
+                "--admin".to_owned(),
+            ],
+        )
+        .expect_err("--admin cannot mutate a supplied self-signed cert");
+        assert!(
+            err.to_string().contains("--admin only applies"),
+            "expected --admin supplied-cert error, got: {err}"
+        );
+        let _ = tmp;
     }
 
     #[test]
@@ -1695,6 +1808,7 @@ mod run_genesis_e2e {
             Some(key_path),
             None,
             crate::commands::cert::DEFAULT_VALIDITY_DAYS,
+            false,
             false,
         )
         .expect_err("missing --operator-name must fail");

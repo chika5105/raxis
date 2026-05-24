@@ -52,6 +52,7 @@ raxis genesis --operator-cert operator.cert.toml
 | `--operator-key <path>` | Mint the cert in-process from this private key. |
 | `--operator-name <name>` | Required with `--operator-key`; stored as the operator display name. |
 | `--cert-validity-days <N>` | Validity window for the in-process cert. |
+| `--admin` | Add `OperatorCertInstall` to the in-process cert. Use only for the initial bootstrap operator that should hold dashboard `admin` and trust-root rotation authority. |
 | `--force` | Recreate genesis artifacts in an existing data dir. Destructive. |
 | `--force-misconfig` | Allow structurally unusual certs and record the bypass in policy. |
 
@@ -78,8 +79,13 @@ flowchart TD
 After genesis, sign the policy before first boot:
 
 ```bash
-raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" --key "$RAXIS_OPERATOR_KEY"
+raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem"
 ```
+
+`RAXIS_OPERATOR_KEY` is still the key you use for signed operator
+requests. The policy artifact itself is signed by the authority key
+generated under the data dir.
 
 ## Common Errors
 

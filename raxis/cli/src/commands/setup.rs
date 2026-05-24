@@ -363,6 +363,8 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
                 "       raxis genesis --operator-key \"$RAXIS_OPERATOR_KEY\" --operator-name {operator_name:?} --data-dir {}",
                 data_dir.display()
             );
+            println!("       Add `--admin` only for initial bootstrap operators that should hold OperatorCertInstall authority.");
+            println!("       After genesis, grant that authority with cert install --replace-for + policy sign + epoch advance.");
             println!("       Air-gapped: mint a cert offline with `raxis cert mint --key ... --display-name ... --ops ... --out operator.cert.toml`, then run `raxis genesis --operator-cert operator.cert.toml`.");
         }
     }
@@ -463,9 +465,12 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         "  2. raxis genesis --operator-key \"$RAXIS_OPERATOR_KEY\" --operator-name {operator_name:?} --data-dir {}",
         data_dir.display()
     );
+    println!("     Add `--admin` only for initial bootstrap operators that should hold OperatorCertInstall authority.");
+    println!("     After genesis, grant that authority with cert install --replace-for + policy sign + epoch advance.");
     println!("  3. Edit {}/policy/policy.toml — fill in [[vm_images]] OCI digests + [[tproxy_allowlist]]", data_dir.display());
     println!(
-        "  4. raxis policy sign {}/policy/policy.toml --key \"$RAXIS_OPERATOR_KEY\"",
+        "  4. raxis policy sign {}/policy/policy.toml --key {}/keys/authority_keypair.pem",
+        data_dir.display(),
         data_dir.display()
     );
     println!("  5. raxis credential add {provider}-api-key --file ./{provider}-key.txt");

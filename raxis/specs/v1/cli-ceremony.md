@@ -126,6 +126,7 @@ raxis-cli genesis [--force]
                   | --operator-key <path>
                        --operator-name <display>
                        [--cert-validity-days <n>]                                    # convenience path
+                       [--admin]                                                     # opt into OperatorCertInstall
                   )
                   [--force-misconfig]
 ```
@@ -154,9 +155,27 @@ raxis-cli genesis [--force]
    persisted under `<data_dir>`** (the CLI tests assert this with a
    recursive seed-leakage scan). Optional `--cert-validity-days <n>`
    sets the cert's `not_after = now + n*86400`; default is the
-   `cert::DEFAULT_VALIDITY_DAYS` constant (one year). Use this path
-   for development / single-machine setups; use `--operator-cert`
-   for tighter security.
+   `cert::DEFAULT_VALIDITY_DAYS` constant (one year). Optional
+   `--admin` adds `OperatorCertInstall` to the minted cert. That is
+   an operator trust-root capability, not a dashboard-specific flag;
+   the dashboard maps it, together with `RotateEpoch`, to its local
+   `admin` role for sensitive surfaces such as credential reveal. Use
+   this path for development / single-machine setups; use
+   `--operator-cert` for tighter security.
+
+For the air-gapped path, admin is decided when the cert is minted:
+include `OperatorCertInstall` in `raxis cert mint --ops ...` only for
+operators that should be able to install/rotate operator certs. Genesis
+does not mutate a supplied cert because doing so would invalidate its
+self-signature.
+
+After genesis, widening an operator to include `OperatorCertInstall`
+MUST use the signed epoch path: mint a replacement cert for the same
+operator key, install it with
+`raxis cert install --replace-for <old-fp> --new-cert <cert> --policy <policy.toml>`,
+re-sign the policy, then run `raxis epoch advance --policy <path> --sig <sig>`.
+This preserves the `OperatorCertInstalled.previous_fingerprint` audit
+link and avoids treating genesis as an authority-upgrade command.
 
 If neither flag is supplied AND the CLI is attached to a TTY, it
 prompts the operator to paste a cert TOML body on stdin (Ctrl-D to
@@ -192,13 +211,13 @@ checks the operator overrode and why.
 6. Writes initial `policy.toml` to `<data_dir>/policy/policy.toml` via the SHARED canonical emitter `raxis_genesis_tools::render_genesis_policy_toml` (the same function the kernel's `RAXIS_BOOTSTRAP=1` self-bootstrap path calls — see [`philosophy.md`](philosophy.md) §1.6 `crates/genesis-tools/` for the convergence rationale and drift history). The CLI is responsible only for plumbing the inputs to the emitter; the spec invariants are all enforced inside the shared crate. The emitted artifact contains:
    - `authority_pubkey` = public key extracted from `authority_keypair.pem`
    - `quality_pubkey` = public key extracted from `quality_keypair.pem`
-   - `[[operators.entries]]` = the registered operator entry with `permitted_ops = ["CreateInitiative", "ApprovePlan", "RejectPlan", "CreateSession", "RevokeSession", "GrantDelegation", "RetryTask", "ResumeTask", "AbortTask", "AbortInitiative", "ApproveEscalation", "DenyEscalation", "RotateEpoch", "QuarantineInitiative", "QuarantinePlansBy"]` (the canonical 15-operation v1 set per [`kernel-store.md`](kernel-store.md) §2.5.5 IPC discriminant table — the last two are the step-10 quarantine primitives; omit keys only if you intentionally deny that capability)
+   - `[[operators.entries]]` = the registered operator entry. By default, `permitted_ops = ["CreateInitiative", "ApprovePlan", "RejectPlan", "CreateSession", "RevokeSession", "GrantDelegation", "RetryTask", "ResumeTask", "AbortTask", "AbortInitiative", "ApproveEscalation", "DenyEscalation", "RotateEpoch", "QuarantineInitiative", "QuarantinePlansBy"]` (the canonical 15-operation v1 IPC set per [`kernel-store.md`](kernel-store.md) §2.5.5 IPC discriminant table). `OperatorCertInstall` is appended only when the operator explicitly opts into admin/trust-root authority; the entry mirrors the embedded cert's `permitted_ops`.
    - `[operators.entries.cert]` = the self-signed `OperatorCert` (mandatory by INV-CERT-01). The emitter ALWAYS writes this sub-table — there is no cert-less branch. Loading a `policy.toml` without this sub-table fails serde deserialisation with a clear `missing field "cert"` error.
    - `[budget.base_cost_per_intent_kind]` = an entry for EACH of the four canonical `IntentKind` variants (`SingleCommit`, `IntegrationMerge`, `CompleteTask`, `ReportFailure`). Omitting any of these is a latent bug: any task whose intent-kind has no cost entry would fail admission with `BudgetError::UnknownIntentKindCost`. The shared emitter ships fixed defaults (10/50/5/1) that the operator may re-tune via `raxis epoch advance`.
    - `[[lanes]]` = a `default` lane entry. Without at least one lane entry, `scheduler::admit::admit_task` cannot resolve `lane_id = "default"` (the lane every plan defaults to) and admission fails with `SchedulerError::UnknownLane`.
    - `[sessions] allowed_worktree_roots` = a NON-EMPTY placeholder list (`<data_dir>/worktrees`), with a TOML comment directing the operator to replace it before creating sessions. **Writing an empty list at this step is a contract violation:** `raxis_policy::PolicyBundle::validate` rejects an empty `allowed_worktree_roots` as `MalformedArtifact`, so the kernel would refuse to load its own genesis-emitted artifact (regression-pinned by `bootstrap::integration::policy_toml_round_trips_through_raxis_policy_load_policy` AND by `cli/tests/genesis_emitter_round_trip.rs`). The placeholder is scoped under `<data_dir>` so it cannot grant access to anything the operator did not opt into; the operator is expected to advance the epoch with their real allowlist before creating sessions.
    - Empty `[[tasks]]`, `[[gates]]`, and `[[tools]]` sections
-7. Prompts the operator to sign `policy.toml` with their private key using `raxis-cli policy sign` and store `policy.sig` alongside it. The ceremony is not complete until `policy.sig` exists.
+7. Prompts the operator to sign `policy.toml` with the generated authority key using `raxis-cli policy sign` and store the raw `policy.sig` alongside it. The ceremony is not complete until `policy.sig` exists.
 8. Prints a summary of generated files and next steps.
 
 **Migration note (legacy `--operator-pubkey`):** Operators who hit
@@ -261,9 +280,9 @@ Re-run genesis with one of:
 
 ### `policy sign`
 
-**Purpose:** Sign a policy or plan artifact with the operator's private key.
+**Purpose:** Sign a policy artifact with the authority key, or another non-plan artifact with the operator's private key.
 
-**Usage:** `raxis-cli policy sign <artifact.toml> --key <operator_private_key_path> [--force-misconfig]`
+**Usage:** `raxis-cli policy sign <artifact.toml> --key <signing_key_path> [--force-misconfig]`
 
 **Behaviour:**
 1. Reads `<artifact.toml>` bytes verbatim.
@@ -274,12 +293,11 @@ Re-run genesis with one of:
    policy that has structural overrides baked in.
 3. With `--force-misconfig` present, emits a structured stderr warning
    (`policy_sign_misconfig_bypass`) per offending entry and proceeds.
-4. Computes `SHA-256(file_bytes)`.
-5. Signs the SHA-256 digest with the operator's Ed25519 private key.
-6. Writes `<artifact>.sig` (same directory as `<artifact.toml>`) in the TOML format defined in §2.5.3.
-7. Prints the fingerprint and plan_sha256 for verification.
+4. If the artifact contains `[authority].authority_pubkey`, treats it as a policy artifact: verifies that `--key` is the matching authority key, signs the exact raw policy bytes, and writes `<artifact>.sig` as 64 raw Ed25519 signature bytes. This is the format `raxis epoch advance` verifies.
+5. For non-policy artifacts, computes `SHA-256(file_bytes)`, signs the canonical non-plan artifact domain with the operator Ed25519 private key, and writes the TOML sidecar form.
+6. Prints the signer fingerprint and artifact hash for verification.
 
-**Note:** The operator's private key is read locally and is never sent to the kernel. `raxis-cli policy sign` does not open the operator socket. The `--force-misconfig` flag is the operator-explicit acknowledgement that the policy contains a cert with a structural validation override; the matching kernel-side audit event is `OperatorCertMisconfigBypassed`.
+**Note:** Private keys are read locally and are never sent to the kernel. `raxis-cli policy sign` does not open the operator socket. The operator key signs IPC requests and non-policy operator artifacts; `policy.toml` itself is signed by `<data_dir>/keys/authority_keypair.pem`. The `--force-misconfig` flag is the operator-explicit acknowledgement that the policy contains a cert with a structural validation override; the matching kernel-side audit event is `OperatorCertMisconfigBypassed`.
 
 ---
 
@@ -557,7 +575,7 @@ Defaults (Standard kind): `not_after = now + 365d`, `warn = 30d`, `grace = 7d`.
 | `cert verify <cert.toml> [--at <unix_ts>]` | Verify structure + self-signature; report current zone (`active`, `expiring`, `grace`, `expired`, `not_yet_valid`, `always_active_emergency`). Returns `Ok` even on `expired` — expiry is informational. |
 | `cert list [--json]` | Read `operator_certificates` from `kernel.db` and print one row per installed cert with current zone. |
 | `cert install <cert.toml> --policy <policy.toml>` | **First install / refresh** mode. Splice a cert into the `[[operators.entries]]` entry whose `pubkey_hex` matches the cert's pubkey. Asserts pubkey-hex match before mutating the file. The policy MUST then be re-signed with `policy sign` before the next epoch advance picks it up. |
-| `cert install --replace-for <old-fp> --new-cert <path> --policy <policy.toml>` | **Rotation primitive (typed; INV-CERT-04).** Locate the entry by `<old-fp>` and rewrite its embedded cert sub-table with the contents of `<path>`. The new cert's `pubkey_hex` MUST equal the existing entry's (rotation never changes the underlying pubkey — that is `genesis` in a fresh data dir, not `cert install`). On the next epoch advance the kernel's cert mirror emits `OperatorCertInstalled.previous_fingerprint = Some(<old-fp>)` so the audit chain captures the rotation event with continuity back to the prior cert. The two install forms are mutually exclusive at the CLI parse layer; mixing them or omitting one half of the rotation pair fails loud. |
+| `cert install --replace-for <old-fp> --new-cert <path> --policy <policy.toml>` | **Rotation / authority-widening primitive (typed; INV-CERT-04).** Locate the entry by `<old-fp>` and rewrite its embedded cert sub-table with the contents of `<path>`. The new cert's `pubkey_hex` MUST equal the existing entry's (rotation never changes the underlying pubkey — that is `genesis` in a fresh data dir, not `cert install`). The command also mirrors the cert's `permitted_ops` onto the entry-level field so policy reviewers see exactly what will become active. On the next epoch advance the kernel's cert mirror emits `OperatorCertInstalled.previous_fingerprint = Some(<old-fp>)` so the audit chain captures the rotation event with continuity back to the prior cert. The two install forms are mutually exclusive at the CLI parse layer; mixing them or omitting one half of the rotation pair fails loud. |
 
 **`cert install --force-misconfig`** (applies to either form): the new
 cert's structural validation can be bypassed with `--force-misconfig`;
@@ -951,7 +969,7 @@ Do not modify `authority_pubkey` or `quality_pubkey` — these were written by g
 ### Step 3 — Sign the policy
 
 ```bash
-raxis-cli policy sign ~/.raxis/policy/policy.toml --key ~/my-operator-key
+raxis-cli policy sign ~/.raxis/policy/policy.toml --key ~/.raxis/keys/authority_keypair.pem
 ```
 
 This writes `~/.raxis/policy/policy.sig`. The kernel verifies this signature at boot. If `policy.sig` is absent or invalid, the kernel will not start.

@@ -475,10 +475,36 @@ describe("<CredentialsView> — reveal flow", () => {
     const err = await screen.findByTestId("credential-reveal-error");
     expect(err).toHaveTextContent(/rate limit/i);
     expect(screen.queryByTestId("credential-revealed-banner")).toBeNull();
-    fireEvent.click(screen.getByText("Dismiss"));
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss reveal error" }));
     await waitFor(() => {
       expect(screen.queryByTestId("credential-reveal-error")).toBeNull();
     });
+  });
+
+  it("does not concatenate a forbidden reveal role with the dismiss action", async () => {
+    vi.spyOn(dashboardApi.initiatives, "credentials").mockResolvedValue(
+      listOf(meta()),
+    );
+    vi.spyOn(dashboardApi.initiatives, "revealCredential").mockRejectedValue(
+      new ApiError(403, "FORBIDDEN", "operator lacks role: admin"),
+    );
+
+    renderWithProviders(
+      <CredentialsView
+        scope={{ kind: "initiative", initiativeId: "init-1" }}
+        operatorRoles={["read"]}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByTestId("credential-reveal-test-pg-dev"),
+    );
+
+    const err = await screen.findByTestId("credential-reveal-error");
+    expect(err).toHaveTextContent("operator lacks role: admin");
+    expect(err).not.toHaveTextContent("adminDismiss");
+    expect(
+      screen.getByRole("button", { name: "Dismiss reveal error" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps the modal in the DOM and avoids POSTing when the operator cancels", async () => {

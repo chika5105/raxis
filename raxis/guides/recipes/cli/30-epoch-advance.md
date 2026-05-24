@@ -34,6 +34,9 @@ The policy epoch is a monotonic counter. Advance it when:
 ## Example
 
 ```bash
+raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem"
+
 raxis epoch advance \
   --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
   --sig    "$RAXIS_DATA_DIR/policy/policy.sig"
@@ -50,7 +53,9 @@ raxis epoch advance \
 What happens during advance:
 
 1. The kernel verifies the detached signature and checks that
-   `[meta].epoch` is greater than the current epoch.
+   `[meta].epoch` is greater than the current epoch. The signature
+   must be a raw 64-byte Ed25519 signature over the exact policy
+   bytes, created with the authority key.
 2. The epoch row and audit pointer land in one store transaction
    with the delegation sweep and prompt invalidation.
 3. Active delegations whose policy epoch is `< to_epoch`

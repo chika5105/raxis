@@ -31,7 +31,7 @@ policy by itself.
 raxis cert install /tmp/alice.cert \
   --policy "$RAXIS_DATA_DIR/policy/policy.toml"
 raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" \
-  --key /tmp/genesis.key
+  --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem"
 # Output:
 # cert subject:    ops-alice
 # reminder: re-sign the policy
@@ -40,6 +40,48 @@ raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" \
 If you are rotating an existing cert for the same operator key, use
 `--replace-for <old_fp> --new-cert <path>`. The kernel records the
 rotation on the next epoch advance.
+
+The same path is how you widen an operator after genesis. For example,
+to grant `OperatorCertInstall`, mint a replacement cert for the same
+operator key with that op included, install it with `--replace-for`,
+re-sign the policy, and advance the epoch. `cert install` mirrors the
+new cert's `permitted_ops` into the policy entry so reviewers can see
+the authority change in the diff before it becomes active.
+
+Dashboard plaintext reveal requires the local `admin` role. RAXIS
+derives that role from cert authority: `RotateEpoch` plus
+`OperatorCertInstall` in the operator's `permitted_ops`. A typical
+same-key widening ceremony is:
+
+```bash
+export OPS="CreateInitiative,ApprovePlan,RejectPlan,CreateSession,RevokeSession,GrantDelegation,RetryTask,ResumeTask,AbortTask,AbortInitiative,ApproveEscalation,DenyEscalation,RotateEpoch,QuarantineInitiative,QuarantinePlansBy,OperatorCertInstall"
+
+OLD_FP="$(raxis policy show --json | jq -r '.operators[0].pubkey_fingerprint')"
+
+raxis cert mint \
+  --display-name "$USER" \
+  --key "$RAXIS_OPERATOR_KEY" \
+  --ops "$OPS" \
+  --out "$RAXIS_DATA_DIR/policy/operator-admin.cert.toml"
+
+raxis cert install \
+  --replace-for "$OLD_FP" \
+  --new-cert "$RAXIS_DATA_DIR/policy/operator-admin.cert.toml" \
+  --policy "$RAXIS_DATA_DIR/policy/policy.toml"
+
+# Set [meta].epoch to the next integer before signing.
+$EDITOR "$RAXIS_DATA_DIR/policy/policy.toml"
+
+raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem"
+
+raxis --operator-key "$RAXIS_OPERATOR_KEY" epoch advance \
+  --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
+  --sig "$RAXIS_DATA_DIR/policy/policy.sig"
+```
+
+After the advance, sign out and back into the dashboard. Existing
+JWTs keep the roles they were minted with.
 
 ---
 

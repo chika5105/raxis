@@ -770,6 +770,16 @@ mod install {
             let cert_value = toml::Value::try_from(&cert)
                 .map_err(|e| CliError::Key(format!("serialise cert: {e}")))?;
             table.insert("cert".to_owned(), cert_value);
+            table.insert(
+                "permitted_ops".to_owned(),
+                toml::Value::Array(
+                    cert.permitted_ops
+                        .iter()
+                        .cloned()
+                        .map(toml::Value::String)
+                        .collect(),
+                ),
+            );
             if force_misconfig {
                 table.insert(
                     "force_misconfig_bypass".to_owned(),
@@ -1134,7 +1144,7 @@ mod tests {
                 "--out",
                 cert_path.to_str().unwrap(),
                 "--ops",
-                "AbortTask",
+                "ApprovePlan",
             ]),
         )
         .unwrap();
@@ -1172,6 +1182,14 @@ permitted_ops      = ["AbortTask"]
             "expected [operators.entries.cert] sub-table; got:\n{after}"
         );
         assert!(after.contains("kind = \"Standard\""));
+        assert!(
+            after.contains("permitted_ops = [\"ApprovePlan\"]"),
+            "entry-level permitted_ops must mirror the installed cert, not stale policy text:\n{after}"
+        );
+        assert!(
+            !after.contains("permitted_ops = [\"AbortTask\"]"),
+            "stale entry-level permitted_ops must be replaced by cert authority:\n{after}"
+        );
     }
 
     #[test]
@@ -1308,6 +1326,10 @@ permitted_ops      = ["AbortTask"]
         assert!(
             after.contains("display_name = \"Chika (renewed)\""),
             "expected rotated display_name in policy; got:\n{after}"
+        );
+        assert!(
+            after.contains("permitted_ops = [\"ApprovePlan\"]"),
+            "rotation must mirror new cert permitted_ops onto entry-level policy text:\n{after}"
         );
     }
 

@@ -59,7 +59,10 @@ pub mod audit_record;
 pub mod policy_toml;
 
 pub use audit_record::{render_genesis_audit_record, GenesisAuditInputs, GENESIS_PREV_SHA256};
-pub use policy_toml::{render_genesis_policy_toml, GenesisPolicyInputs, PERMITTED_OPS};
+pub use policy_toml::{
+    permitted_ops_with_operator_cert_install, render_genesis_policy_toml, GenesisPolicyInputs,
+    OPERATOR_CERT_INSTALL_PERMITTED_OP, PERMITTED_OPS,
+};
 
 // ---------------------------------------------------------------------------
 // Crate-level fingerprint helper

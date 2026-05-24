@@ -123,6 +123,10 @@ emergency cert is deliberately limited to `RotateEpoch`.
 - **CI bot cert with narrow permitted_ops.** `--ops CreateInitiative,CreateSession`
   for a CI bot that should only submit plans, not approve them.
 - **Reviewer-only cert.** `--ops ApprovePlan,ApproveEscalation,DenyEscalation`
+- **Operator-admin cert.** Include `OperatorCertInstall` only when
+  the operator should be able to install/rotate operator certs. After
+  genesis, apply that widened cert with `cert install --replace-for`,
+  then re-sign and advance the policy epoch.
   for an operator who reviews but doesn't initiate.
 - **Short-lived TTLs.** Set `--validity-days 1` for daily rotation
   of automated bots; pair with a refresh script.

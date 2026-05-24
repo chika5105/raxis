@@ -525,18 +525,24 @@ SUBCOMMANDS:
     genesis [--force]
             (--operator-cert <path> | --operator-key <path> --operator-name <name>
                                                             [--cert-validity-days <days>])
+            [--admin]
             [--force-misconfig]
         Run the initial key generation ceremony. Operator identity is
         cert-mandatory (INV-CERT-01); supply EITHER a pre-minted
         `*.cert.toml` (air-gapped: produced by `raxis cert mint` on a
         separate machine) OR a private-key PEM (the CLI mints the cert
-        in-process; private bytes are never persisted).
+        in-process; private bytes are never persisted). `--admin` is
+        opt-in and adds OperatorCertInstall to the minted cert; for
+        --operator-cert, include that op when minting the cert instead.
 
     policy sign <artifact.toml> --key <path>
-        Sign a policy.toml or other non-plan artifact with the operator's
-        private key. Plans are signed and submitted atomically through
-        `submit plan <plan.toml>`; this command intentionally rejects
-        `plan.toml` artifacts (plan-bundle-sealing.md §4).
+        Sign a policy.toml or other non-plan artifact. Policy artifacts
+        must be signed with <data-dir>/keys/authority_keypair.pem and
+        produce a raw 64-byte policy.sig for epoch advance. Other
+        non-plan artifacts use the operator key sidecar format. Plans
+        are signed and submitted atomically through `submit plan
+        <plan.toml>`; this command intentionally rejects `plan.toml`
+        artifacts (plan-bundle-sealing.md §4).
 
     submit plan <plan.toml> [--initiative-id <id>] [--dry-run | --no-dry-run]
         V2.1 atomic plan-bundle submission — the ONLY way to admit a

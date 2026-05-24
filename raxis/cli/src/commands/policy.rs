@@ -3,22 +3,21 @@
 // Normative reference: cli-ceremony.md §4.1 `policy sign` and kernel-store.md
 // §2.5.3 "Plan artifact signing contract".
 //
-// Signs a TOML artifact (policy.toml or plan.toml) with the operator's
-// private key and writes <artifact>.sig. No kernel connection required.
+// Signs TOML artifacts and writes <artifact>.sig. No kernel connection
+// required.
 //
-// Canonical signing scheme (the ONLY scheme accepted by the kernel):
+// Policy artifacts have their own kernel-verified contract:
+//
+//   sig = Ed25519Sign(authority_sk, raw_policy_toml_bytes)
+//
+// The detached signature file is exactly 64 raw bytes because
+// `policy_manager::load_and_verify` reads it directly before epoch
+// monotonicity checks.
+//
+// Non-policy artifacts retain the V1 artifact-sidecar shape:
 //
 //   signing_input = SHA-256("RAXIS-V1-PLAN" || 0x00 || artifact_bytes)
 //   sig           = Ed25519Sign(operator_sk, signing_input)
-//
-// This routes through `raxis_crypto::plan::plan_signing_input` so that the
-// CLI signer and the kernel verifier (`raxis_crypto::plan::verify_plan_signature`,
-// called from `lifecycle::approve_plan`) agree on the byte-exact input. The
-// previous implementation signed `sha256_hex(bytes).as_bytes()` (the UTF-8
-// hex *string* of the digest) — review §2.2 catastrophic finding "plan
-// signing semantic mismatch". No legacy operator key in the wild has yet
-// signed real bundles under that scheme; we switch outright rather than
-// carrying a compatibility branch.
 
 use std::fs;
 use std::path::PathBuf;
@@ -178,7 +177,9 @@ pub fn run_sign(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         .or_else(|| flags.operator_key_path.clone())
         .ok_or_else(|| {
             CliError::Usage(
-                "policy sign requires --key <path> or --operator-key global flag".to_owned(),
+                "policy sign requires --key <path> (policy.toml uses the authority key; \
+                 other non-plan artifacts may use the --operator-key global flag)"
+                    .to_owned(),
             )
         })?;
 
@@ -248,6 +249,15 @@ pub fn run_sign(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         );
     }
 
+    if let Some(authority_pubkey_hex) = policy_authority_pubkey_hex(&artifact_bytes)? {
+        return sign_policy_artifact(
+            &artifact_path,
+            &artifact_bytes,
+            &key_path,
+            &authority_pubkey_hex,
+        );
+    }
+
     // Plain SHA-256 of the bytes (for `plan_sha256` field — surfaces in the
     // kernel's `signed_plan_artifacts.plan_bytes` and audit records).
     let sha256 = plan_artifact_sha256(&artifact_bytes);
@@ -291,6 +301,80 @@ signed_at      = {signed_at}
     println!("  plan_sha256:  {sha256}");
 
     Ok(())
+}
+
+fn sign_policy_artifact(
+    artifact_path: &std::path::Path,
+    artifact_bytes: &[u8],
+    key_path: &std::path::Path,
+    authority_pubkey_hex: &str,
+) -> Result<(), CliError> {
+    let signing_key = crate::signing::load_operator_key(key_path)?;
+    let pubkey_bytes = signing_key.verifying_key().to_bytes();
+    let signer_pubkey_hex = hex::encode(pubkey_bytes);
+    if signer_pubkey_hex != authority_pubkey_hex {
+        return Err(CliError::Usage(format!(
+            "policy artifact {} must be signed with the authority key whose public key is \
+             declared in [authority].authority_pubkey. The key at {} has public key {}, \
+             but policy.toml declares {}. Operator keys sign IPC requests; policy epoch \
+             artifacts must be signed with <data-dir>/keys/authority_keypair.pem.",
+            artifact_path.display(),
+            key_path.display(),
+            signer_pubkey_hex,
+            authority_pubkey_hex,
+        )));
+    }
+
+    let sig_path = artifact_path.with_extension("sig");
+    let sig_bytes = crate::signing::sign_bytes_raw(&signing_key, artifact_bytes);
+    fs::write(&sig_path, sig_bytes).map_err(|e| CliError::Io {
+        path: sig_path.display().to_string(),
+        source: e,
+    })?;
+
+    let sha256 = plan_artifact_sha256(artifact_bytes);
+    let fingerprint = crate::conn::pubkey_fingerprint(&pubkey_bytes);
+    println!(
+        "✓ Signed policy artifact {} → {}",
+        artifact_path.display(),
+        sig_path.display()
+    );
+    println!("  authority_fingerprint: {fingerprint}");
+    println!("  policy_sha256:         {sha256}");
+    println!("  signature_format:      raw-ed25519-64");
+
+    Ok(())
+}
+
+fn policy_authority_pubkey_hex(artifact_bytes: &[u8]) -> Result<Option<String>, CliError> {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        authority: Option<AuthorityBlock>,
+    }
+    #[derive(serde::Deserialize)]
+    struct AuthorityBlock {
+        authority_pubkey: String,
+    }
+
+    let s = match std::str::from_utf8(artifact_bytes) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let parsed: Probe = match toml::from_str(s) {
+        Ok(p) => p,
+        Err(_) => return Ok(None),
+    };
+    let Some(authority) = parsed.authority else {
+        return Ok(None);
+    };
+    let pubkey = authority.authority_pubkey.trim().to_ascii_lowercase();
+    if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(CliError::Usage(
+            "policy artifact [authority].authority_pubkey must be a 64-character hex Ed25519 public key"
+                .to_owned(),
+        ));
+    }
+    Ok(Some(pubkey))
 }
 
 // ---------------------------------------------------------------------------

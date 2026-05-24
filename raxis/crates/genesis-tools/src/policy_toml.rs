@@ -62,9 +62,16 @@ pub struct GenesisPolicyInputs<'a> {
 // this crate; if a spec amendment changes them it changes here, once.
 // ---------------------------------------------------------------------------
 
-/// The 13-operation v1 permitted-ops set, per `cli-ceremony.md` §4.2 step 6
-/// and `kernel-store.md` §2.5.5 IPC discriminant table. Order matters for
-/// byte-identical reproducibility of the genesis artifact across hosts.
+/// The default genesis operator authority set, per
+/// `cli-ceremony.md` §4.2 step 6. These are the v1 operator IPC
+/// discriminants a normal bootstrap operator needs to run the
+/// kernel. `OperatorCertInstall` is intentionally NOT included here;
+/// callers must opt in by adding [`OPERATOR_CERT_INSTALL_PERMITTED_OP`]
+/// to the cert they pass to the emitter. The dashboard maps that
+/// operator authority, paired with `RotateEpoch`, to its `admin` role.
+///
+/// Order matters for byte-identical reproducibility of the genesis
+/// artifact across hosts.
 pub const PERMITTED_OPS: &[&str] = &[
     "CreateInitiative",
     "ApprovePlan",
@@ -82,6 +89,22 @@ pub const PERMITTED_OPS: &[&str] = &[
     "QuarantineInitiative",
     "QuarantinePlansBy",
 ];
+
+/// Operator authority to install/rotate operator certificates. The
+/// dashboard also treats this authority, paired with `RotateEpoch`, as
+/// the `admin` role because an operator that can rotate the trust root
+/// can administer sensitive local-control-plane surfaces.
+pub const OPERATOR_CERT_INSTALL_PERMITTED_OP: &str = "OperatorCertInstall";
+
+/// Convenience for the explicit operator-admin bootstrap path.
+pub fn permitted_ops_with_operator_cert_install() -> Vec<String> {
+    let mut ops = PERMITTED_OPS
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect::<Vec<_>>();
+    ops.push(OPERATOR_CERT_INSTALL_PERMITTED_OP.to_owned());
+    ops
+}
 
 /// The four canonical `IntentKind` variants, matching `raxis_types::IntentKind`.
 /// Each entry is `(toml_key, base_cost)`. The previous kernel-side emitter
@@ -295,14 +318,15 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
         display_name = escape_toml_basic_string(&inputs.operator_cert.display_name),
     )
     .expect("String write_fmt is infallible");
-    for (i, op) in PERMITTED_OPS.iter().enumerate() {
+    for (i, op) in inputs.operator_cert.permitted_ops.iter().enumerate() {
         // Trailing comma after every op including the last is legal TOML
         // and means inserting a new op is a one-line diff that doesn't
         // touch the previous line — much friendlier in code review.
         if i > 0 {
             out.push_str(",\n");
         }
-        write!(out, "  \"{op}\"").expect("String write_fmt is infallible");
+        write!(out, "  \"{}\"", escape_toml_basic_string(op))
+            .expect("String write_fmt is infallible");
     }
     out.push_str(",\n]\n\n");
 
@@ -614,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn all_thirteen_v1_permitted_ops_appear_in_operator_entry() {
+    fn all_genesis_permitted_ops_appear_in_operator_entry() {
         let (op_pk, op_fp, cert) = fixture_operator_identity();
         let roots = ["/tmp/raxis-test-worktrees"];
         let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
@@ -624,12 +648,32 @@ mod tests {
                 "permitted op {op:?} missing from output"
             );
         }
-        // Confirm exactly 15 (the original 13 v1 ops plus the two
-        // quarantine ops added in step 10 — kernel-store.md §2.5.8).
+        // Confirm exactly 15: the default operator IPC ops.
+        // OperatorCertInstall/admin is an explicit opt-in via
+        // OPERATOR_CERT_INSTALL_PERMITTED_OP.
         assert_eq!(
             PERMITTED_OPS.len(),
             15,
-            "v1+quarantine permitted_ops set is fixed at 15 (cli-ceremony.md §4.2 + §2.5.8)"
+            "default genesis permitted_ops set is fixed at 15 operator IPC ops"
+        );
+    }
+
+    #[test]
+    fn operator_entry_permitted_ops_mirror_embedded_cert() {
+        let (op_pk, op_fp, mut cert) = fixture_operator_identity();
+        cert.permitted_ops = permitted_ops_with_operator_cert_install();
+        let roots = ["/tmp/raxis-test-worktrees"];
+        let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
+        let (entry_block, cert_block) = toml_str
+            .split_once("[operators.entries.cert]")
+            .expect("rendered policy must include embedded cert block");
+        assert!(
+            entry_block.contains("\"OperatorCertInstall\""),
+            "entry-level permitted_ops must mirror an admin-capable cert:\n{toml_str}"
+        );
+        assert!(
+            cert_block.contains("\"OperatorCertInstall\""),
+            "embedded cert must also carry the admin-capable op list:\n{toml_str}"
         );
     }
 

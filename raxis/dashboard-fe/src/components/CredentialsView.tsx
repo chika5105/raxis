@@ -92,6 +92,12 @@ interface CredentialsViewProps {
 export const AUTO_HIDE_INITIATIVE_SECS = 30;
 export const AUTO_HIDE_SYSTEM_SECS = 15;
 
+// TODO(authority): Split credential reveal from broad dashboard admin.
+// Today `admin` is derived from `OperatorCertInstall` because reveal is a
+// sensitive trust-root-adjacent surface. Long term this should become a
+// narrower operator permission such as `CredentialReveal` or
+// `CredentialReadSensitive`, then map to a dashboard reveal role without
+// requiring cert-install authority.
 const REQUIRED_REVEAL_ROLE = "admin";
 
 /// `provider`-typed credentials are gateway-bound system
@@ -459,15 +465,19 @@ function CredentialRow({
 
       {state.kind === "error" && (
         <div
-          className="mt-3 card p-3 border-bad/40 bg-bad/10 text-xs text-bad"
+          className="mt-3 card p-3 border-bad/40 bg-bad/10 text-xs text-bad flex items-start gap-3"
           role="alert"
           data-testid="credential-reveal-error"
         >
-          Reveal failed: {state.error.detail}
+          <div className="flex-1 min-w-0">
+            <p className="font-medium">Reveal failed</p>
+            <p className="mt-1 break-words">{state.error.detail} </p>
+          </div>
           <button
             type="button"
-            className="btn ml-3"
+            className="btn"
             onClick={() => setState({ kind: "masked" })}
+            aria-label="Dismiss reveal error"
           >
             Dismiss
           </button>

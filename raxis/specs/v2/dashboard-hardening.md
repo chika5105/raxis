@@ -553,6 +553,14 @@ operator fingerprint and the row count (no plaintext).
 
 ### 2.7.2 Reveal surfaces
 
+> **TODO(authority split):** Reveal currently uses the dashboard
+> `admin` role, which is derived from broad operator authority
+> (`OperatorCertInstall`). Keep this fail-closed behavior for the
+> present release, but introduce a narrower operator permission such
+> as `CredentialReveal` or `CredentialReadSensitive` before expanding
+> multi-operator deployments. Credential reveal should not permanently
+> require certificate-install authority.
+
   * `POST /api/initiatives/:id/credentials/:name/reveal` —
     `admin` role. Returns `CredentialReveal { name, plaintext,
     encoding, byte_size, expires_at_unix, sha256_prefix }`.

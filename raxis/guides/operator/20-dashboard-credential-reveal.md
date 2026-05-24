@@ -16,9 +16,15 @@ You will need:
      `admin`-role tokens can reveal plaintext. `read` and
      `write_policy` tokens get an explicit `403 Forbidden` —
      not a confusing 500 — and the rejection is itself audited.
-     If you don't have an admin token, request one from the
-     operator who holds the authority key (`raxis policy
-     authority …` flow); do NOT attempt a workaround.
+     If you don't have an admin token, request a policy epoch
+     advance from the operator who holds the authority key; do NOT
+     attempt a workaround. Dashboard `admin` is derived from the
+     operator cert's `permitted_ops`: the operator must have both
+     `RotateEpoch` and `OperatorCertInstall`.
+     **Follow-up:** split this into a narrower
+     `CredentialReveal` or `CredentialReadSensitive` permission so
+     operators can inspect credentials without also holding
+     certificate-install authority.
   2. **A reason to look at the bytes.** Every reveal is a
      forensic event in the audit chain. For initiative-bound
      credentials (database URLs, SMTP passwords, etc.) the
@@ -125,6 +131,14 @@ within seconds of the reveal.
     the click is NEVER a silent no-op — every reveal click
     either returns plaintext or denies cleanly with a
     visible message AND a paired audit row.
+    If the operator should be admin, mint a replacement cert for the
+    same operator key that includes both `RotateEpoch` and
+    `OperatorCertInstall`, install it with `raxis cert install
+    --replace-for <old_fp> --new-cert <cert.toml> --policy
+    "$RAXIS_DATA_DIR/policy/policy.toml"`, bump `[meta].epoch`,
+    sign with `"$RAXIS_DATA_DIR/keys/authority_keypair.pem"`, then
+    run `raxis epoch advance`. Sign out and back into the dashboard
+    afterward so the JWT is re-minted with the new `admin` role.
   * **404 Not Found** — the credential name does not match any
     declaration in the initiative's plan, or the on-disk file is
     missing. Audit emission carries `outcome =
