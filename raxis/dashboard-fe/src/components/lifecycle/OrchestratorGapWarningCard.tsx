@@ -20,9 +20,10 @@ type OrchestratorGap = Extract<
 
 interface Props {
   a: OrchestratorGap;
+  onDismiss?: () => void;
 }
 
-export function OrchestratorGapWarningCard({ a }: Props) {
+export function OrchestratorGapWarningCard({ a, onDismiss }: Props) {
   // Threshold the unit choice on the raw seconds so a 45s gap
   // never rounds up to "1min" — the operator needs the precise
   // sub-minute reading to discriminate "just stalled" from
@@ -48,6 +49,16 @@ export function OrchestratorGapWarningCard({ a }: Props) {
             stalled {waitLabel}
           </span>
         </div>
+        {onDismiss && (
+          <button
+            type="button"
+            className="text-[11px] text-ink-muted hover:text-accent"
+            onClick={onDismiss}
+            aria-label={`Dismiss orchestrator gap for ${a.task_id} on ${a.activation_id}`}
+          >
+            Dismiss
+          </button>
+        )}
       </div>
 
       <div className="mt-2 text-xs text-ink-muted">

@@ -39,7 +39,7 @@ export const INVARIANTS: Invariant[] = [
     name: "Mediated I/O",
     group: "Structural separation",
     oneLiner:
-      "All credential, network, storage, and peer-agent access is mediated by authority through typed intents.",
+      "All credential use, network access, storage access, and peer-agent access are mediated by authority through typed intents.",
     rationale:
       "I/O is how intelligence affects the world. If any I/O class is direct, every other guarantee — credential isolation, audit, budget enforcement — silently degrades for that class.",
     example:

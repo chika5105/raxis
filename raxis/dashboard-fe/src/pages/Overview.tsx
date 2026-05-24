@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -9,6 +10,7 @@ import { StateBadge } from "@/components/StateBadge";
 import { Mono } from "@/components/Mono";
 import { auditBadgeClasses } from "@/lib/audit-tone";
 import { fmtRelative, fmtTokens, plural } from "@/lib/format";
+import type { LifecycleAnnotation } from "@/types/api";
 
 // How many operator-relevant rows the "Recent activity" widget
 // surfaces. The backend's curated `/api/audit/recent` endpoint
@@ -16,6 +18,44 @@ import { fmtRelative, fmtTokens, plural } from "@/lib/format";
 // (see `crates/dashboard/src/data.rs::recent_activity_filter`),
 // so we ask for exactly the count we want to render.
 const RECENT_ACTIVITY_DISPLAY_LIMIT = 10;
+const DISMISSED_ORCHESTRATOR_GAPS_KEY =
+  "raxis.overview.dismissedOrchestratorGaps.v1";
+
+type OrchestratorGap = Extract<
+  LifecycleAnnotation,
+  { kind: "orchestrator_gap" }
+>;
+
+function orchestratorGapDismissKey(g: OrchestratorGap): string {
+  return `${g.kind}:${g.task_id}:${g.activation_id}`;
+}
+
+function readDismissedOrchestratorGapKeys(): Set<string> {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return new Set();
+  }
+  try {
+    const raw = window.localStorage.getItem(DISMISSED_ORCHESTRATOR_GAPS_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((v): v is string => typeof v === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeDismissedOrchestratorGapKeys(keys: Set<string>): void {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  if (keys.size === 0) {
+    window.localStorage.removeItem(DISMISSED_ORCHESTRATOR_GAPS_KEY);
+    return;
+  }
+  window.localStorage.setItem(
+    DISMISSED_ORCHESTRATOR_GAPS_KEY,
+    JSON.stringify([...keys].sort()),
+  );
+}
 
 /// Operator landing page. Shows kernel health, top-level
 /// counters, and a recent-activity feed (newest 10 audit
@@ -72,11 +112,9 @@ export function OverviewPage() {
     queryFn: ({ signal }) => dashboardApi.orchestratorGaps(signal),
     refetchInterval: 10_000,
   });
-  const orchestratorGaps =
-    (gaps.data?.gaps ?? []).filter(
-      (g): g is Extract<typeof g, { kind: "orchestrator_gap" }> =>
-        g.kind === "orchestrator_gap",
-    );
+  const orchestratorGaps = (gaps.data?.gaps ?? []).filter(
+    (g): g is OrchestratorGap => g.kind === "orchestrator_gap",
+  );
 
   if (health.isPending) return <PageSpinner />;
   if (health.error)
@@ -99,27 +137,7 @@ export function OverviewPage() {
         </div>
       </header>
 
-      {orchestratorGaps.length > 0 && (
-        <section
-          data-testid="overview-warnings"
-          className="space-y-3"
-          aria-label="Orchestrator gaps"
-        >
-          <header className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-warn">
-              Warnings ({orchestratorGaps.length})
-            </h2>
-            <span className="text-[11px] text-ink-subtle">
-              Auto-refresh 10s
-            </span>
-          </header>
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            {orchestratorGaps.map((g, i) => (
-              <OrchestratorGapWarningCard key={`${g.task_id}-${i}`} a={g} />
-            ))}
-          </div>
-        </section>
-      )}
+      <OverviewWarnings gaps={orchestratorGaps} />
 
       {/* KPI tiles. Each tile is a navigation target — the
           number is the operator's most common drill-in question
@@ -479,6 +497,117 @@ export function OverviewPage() {
         )}
       </section>
     </div>
+  );
+}
+
+interface OverviewWarningsProps {
+  gaps: OrchestratorGap[];
+}
+
+export function OverviewWarnings({ gaps }: OverviewWarningsProps) {
+  const [dismissedKeys, setDismissedKeys] = useState<Set<string>>(() =>
+    readDismissedOrchestratorGapKeys(),
+  );
+  const liveKeys = useMemo(
+    () => new Set(gaps.map(orchestratorGapDismissKey)),
+    [gaps],
+  );
+
+  useEffect(() => {
+    setDismissedKeys((prev) => {
+      const pruned = new Set([...prev].filter((key) => liveKeys.has(key)));
+      if (pruned.size === prev.size) return prev;
+      writeDismissedOrchestratorGapKeys(pruned);
+      return pruned;
+    });
+  }, [liveKeys]);
+
+  if (gaps.length === 0) return null;
+
+  const visibleGaps = gaps.filter(
+    (gap) => !dismissedKeys.has(orchestratorGapDismissKey(gap)),
+  );
+  const dismissedCount = gaps.length - visibleGaps.length;
+
+  const dismissGap = (gap: OrchestratorGap) => {
+    setDismissedKeys((prev) => {
+      const next = new Set(prev);
+      next.add(orchestratorGapDismissKey(gap));
+      writeDismissedOrchestratorGapKeys(next);
+      return next;
+    });
+  };
+  const dismissAll = () => {
+    setDismissedKeys((prev) => {
+      const next = new Set(prev);
+      for (const gap of gaps) next.add(orchestratorGapDismissKey(gap));
+      writeDismissedOrchestratorGapKeys(next);
+      return next;
+    });
+  };
+  const restoreDismissed = () => {
+    setDismissedKeys((prev) => {
+      const next = new Set([...prev].filter((key) => !liveKeys.has(key)));
+      writeDismissedOrchestratorGapKeys(next);
+      return next;
+    });
+  };
+
+  return (
+    <section
+      data-testid="overview-warnings"
+      className="space-y-3"
+      aria-label="Orchestrator gaps"
+    >
+      <header className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold text-warn">
+            Warnings ({visibleGaps.length})
+          </h2>
+          <p className="text-[11px] text-ink-subtle">
+            Auto-refresh 10s
+            {dismissedCount > 0 ? ` · ${dismissedCount} dismissed` : ""}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {dismissedCount > 0 && (
+            <button
+              type="button"
+              className="btn text-xs px-2 py-1"
+              onClick={restoreDismissed}
+            >
+              Restore dismissed
+            </button>
+          )}
+          {visibleGaps.length > 1 && (
+            <button
+              type="button"
+              className="btn text-xs px-2 py-1"
+              onClick={dismissAll}
+            >
+              Dismiss all
+            </button>
+          )}
+        </div>
+      </header>
+
+      {visibleGaps.length > 0 ? (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+          {visibleGaps.map((g) => (
+            <OrchestratorGapWarningCard
+              key={orchestratorGapDismissKey(g)}
+              a={g}
+              onDismiss={() => dismissGap(g)}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="card border-warn/30 bg-warn/5 p-3 text-sm text-ink-muted">
+          All current warnings dismissed. The kernel signal is still preserved
+          on task and session timelines.
+        </div>
+      )}
+    </section>
   );
 }
 

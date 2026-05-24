@@ -225,7 +225,7 @@ These invariants govern how intelligence interacts with peers and how authority 
 | ID | Name | Group | One-line statement |
 |---|---|---|---|
 | **R-1** | Domain Separation | Structural | Intelligence and authority in distinct execution domains; no shared mutable state |
-| **R-2** | Mediated I/O | Structural | All credential, network, storage, peer-intelligence access mediated by authority |
+| **R-2** | Mediated I/O | Structural | Credential use, network access, storage access, and peer-intelligence access are mediated by authority |
 | **R-3** | Signed Capability Declaration | Authority | Every capability declared in a cryptographically signed policy artifact |
 | **R-4** | Authority Derivation Hierarchy | Authority | Sub-artifacts may only narrow parent authority; no expansion |
 | **R-5** | Bounded Capabilities | Authority | Every capability carries explicit numerical bounds |
