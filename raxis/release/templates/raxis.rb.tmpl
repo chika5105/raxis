@@ -77,9 +77,10 @@ class Raxis < Formula
   end
 
   service do
-    run [opt_bin/"raxis-supervisor", "start"]
+    run ["/bin/sh", "-c", "ulimit -n 4096 && exec #{opt_bin}/raxis-supervisor start"]
     keep_alive true
-    environment_variables RAXIS_INSTALL_DIR: opt_pkgshare.to_s,
+    environment_variables PATH: std_service_path_env,
+                          RAXIS_INSTALL_DIR: opt_pkgshare.to_s,
                           RAXIS_DATA_DIR: (var/"lib/raxis").to_s,
                           RAXIS_SUPERVISOR_AUTO_RESTART: "1",
                           RAXIS_SUPERVISOR_KERNEL_BINARY: (opt_bin/"raxis-kernel").to_s
@@ -109,6 +110,8 @@ class Raxis < Formula
 
       The service launches raxis-supervisor, which launches and
       supervises raxis-kernel.
+      It raises the launchd file-descriptor soft limit to 4096 before
+      starting the kernel.
 
       Dashboard static bundle:
         #{opt_pkgshare}/dashboard
@@ -118,6 +121,14 @@ class Raxis < Formula
 
       Start the kernel with:
         brew services start raxis
+
+      Check daemon health with:
+        RAXIS_DATA_DIR=#{var}/lib/raxis raxis-supervisor status
+        RAXIS_DATA_DIR=#{var}/lib/raxis raxis doctor
+
+      Logs:
+        #{var}/log/raxis/kernel.log
+        #{var}/log/raxis/kernel.err.log
 
       Operator policy example:
         #{etc}/raxis/policy.toml.example

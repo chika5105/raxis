@@ -460,6 +460,10 @@ fn run() -> Result<(), CliError> {
             print_help();
             Ok(())
         }
+        other if is_version_flag(other) => {
+            print_version();
+            Ok(())
+        }
         other => Err(CliError::Usage(unknown_with_suggestion(
             "subcommand",
             other,
@@ -504,12 +508,29 @@ fn resolve_operator_key_path(
     flag_value.or_else(|| env_lookup("RAXIS_OPERATOR_KEY"))
 }
 
+fn is_version_flag(arg: &str) -> bool {
+    matches!(arg, "--version" | "-V")
+}
+
+fn display_version(raw: &'static str) -> &'static str {
+    raw.strip_prefix('v').unwrap_or(raw)
+}
+
+fn raxis_version() -> &'static str {
+    display_version(option_env!("RAXIS_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))
+}
+
+fn print_version() {
+    println!("raxis {}", raxis_version());
+}
+
 fn print_help() {
     println!(
         r#"raxis — RAXIS kernel operator CLI
 
 USAGE:
     raxis [--data-dir <path>] [--socket <path>] [--operator-key <path>] <subcommand>
+    raxis --version
 
 GLOBAL FLAGS:
     --data-dir <path>       Kernel data directory
@@ -520,6 +541,7 @@ GLOBAL FLAGS:
                             Falls back to $RAXIS_OPERATOR_KEY when not passed.
                             Stores a path only; the env var must NEVER hold
                             key bytes. See specs/v1/env-vars.md.
+    --version, -V           Print the installed RAXIS version and exit.
 
 SUBCOMMANDS:
     genesis [--force]
@@ -906,6 +928,25 @@ mod operator_key_resolution_tests {
             Some("RAXIS_OPERATOR_KEY"),
             "env var name drifted; specs/v1/env-vars.md and the demo README pin RAXIS_OPERATOR_KEY",
         );
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn version_flags_are_top_level_only() {
+        assert!(is_version_flag("--version"));
+        assert!(is_version_flag("-V"));
+        assert!(!is_version_flag("version"));
+        assert!(!is_version_flag("--data-dir"));
+    }
+
+    #[test]
+    fn display_version_strips_release_tag_prefix() {
+        assert_eq!(display_version("v0.1.3"), "0.1.3");
+        assert_eq!(display_version("0.1.3"), "0.1.3");
     }
 }
 

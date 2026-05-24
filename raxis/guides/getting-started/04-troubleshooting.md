@@ -162,6 +162,40 @@ Reference: [`specs/v2/system-requirements.md`](../../specs/v2/system-requirement
 
 ---
 
+## 3b · `FAIL_INSUFFICIENT_FD_LIMIT` from `brew services`
+
+**When.** `brew services list` shows `raxis error 75` and
+`$(brew --prefix)/var/log/raxis/kernel.err.log` contains:
+
+```text
+RLIMIT_NOFILE soft limit 256 is below floor 4096
+```
+
+**Why.** macOS launchd starts user LaunchAgents with a low default file
+descriptor limit unless the service raises it before launching the
+kernel. RAXIS needs at least `4096` because the kernel owns IPC sockets,
+audit files, dashboard connections, gateway pipes, and VM/session
+handles.
+
+**Fix.** Upgrade to a Homebrew formula that starts the supervisor
+through `ulimit -n 4096`. Then reset the supervisor circuit breaker and
+restart the service:
+
+```bash
+brew update
+brew upgrade raxis
+
+export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
+raxis-supervisor reset-circuit-breaker --yes
+brew services restart raxis
+brew services list | awk 'NR==1 || $1=="raxis"'
+raxis-supervisor status
+```
+
+Expected: service status `started` and supervisor status `Healthy`.
+
+---
+
 ## 4 · `BOOT_ERR_CREDENTIAL_MODE`
 
 **When.** Kernel boot fails after you added a provider credential.

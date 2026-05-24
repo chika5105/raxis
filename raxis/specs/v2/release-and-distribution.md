@@ -700,12 +700,23 @@ $HOMEBREW_PREFIX/share/raxis/dashboard/
 $HOMEBREW_PREFIX/etc/raxis/policy.toml.example
 ```
 
-The formula's service block launches `raxis-supervisor start`, sets
-`RAXIS_INSTALL_DIR` to `$HOMEBREW_PREFIX/share/raxis`,
-`RAXIS_DATA_DIR` to Homebrew's persistent `var/lib/raxis`, and
-sets `RAXIS_SUPERVISOR_AUTO_RESTART=1` with
+The formula's service block launches
+`/bin/sh -c "ulimit -n 4096 && exec raxis-supervisor start"`, sets
+`PATH` to Homebrew's standard service path, sets `RAXIS_INSTALL_DIR`
+to `$HOMEBREW_PREFIX/share/raxis`, sets `RAXIS_DATA_DIR` to
+Homebrew's persistent `var/lib/raxis`, and sets
+`RAXIS_SUPERVISOR_AUTO_RESTART=1` with
 `RAXIS_SUPERVISOR_KERNEL_BINARY` pointing at the installed
-`raxis-kernel`.
+`raxis-kernel`. The `ulimit` wrapper is required on macOS because
+launchd user services otherwise start with a low file-descriptor soft
+limit that is below the kernel's production floor.
+
+The active tap formula and bottled Cellar formula must both contain this
+full service block. Homebrew writes the installed plist or service unit
+from the active formula during install, and later `brew services` runs
+the generated keg service file when present. A tap-only formula edit
+does not repair an already-poured keg service file. The release renderer
+and bottle packager validate this service block before publishing.
 
 When serving the operator dashboard frontend, the operator policy's
 `[dashboard].static_dir` points at

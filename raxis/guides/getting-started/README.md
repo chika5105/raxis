@@ -10,7 +10,7 @@ Start with the lane that matches you:
 
 | You are... | Use this path |
 |---|---|
-| **An operator / evaluator** who installed RAXIS from Homebrew | Read pages 00-02 and run the first initiative. This is the fastest path. |
+| **An operator / evaluator** who installed RAXIS from Homebrew | Start at the [website get-started flow](https://www.raxis.io/get-started), then use pages 01-02 for details. |
 | **A source builder** who wants to compile RAXIS locally | Use [`../SETUP.md`](../SETUP.md), then return to page 02. |
 | **A maintainer** changing release artifacts, bottles, or notarization | Use [`../../release/README.md`](../../release/README.md) and [`../../specs/v2/release-and-distribution.md`](../../specs/v2/release-and-distribution.md). |
 

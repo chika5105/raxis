@@ -12,15 +12,17 @@ operator repo, commits it, and lets the kernel fast-forward `main`.
 ## 0 · Export the two runtime paths
 
 The kernel keeps every byte of live state — SQLite store, sockets,
-audit segments, witness blobs — under `$RAXIS_DATA_DIR` (defaults to
-`~/.raxis`). The Homebrew bottle keeps the immutable runtime bundle
-under `$(brew --prefix raxis)/share/raxis`.
+audit segments, witness blobs — under `$RAXIS_DATA_DIR`. The Homebrew
+bottle keeps the immutable runtime bundle under
+`$(brew --prefix raxis)/share/raxis`.
 
-For your first run, use the default Homebrew data dir:
+For your first run, use the Homebrew service data dir. This keeps the
+CLI, daemon, dashboard, and later `brew services` restarts on one
+state root:
 
 ```bash
 export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
-export RAXIS_DATA_DIR="$HOME/.raxis"
+export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
 ```
 
 Use the **same** values in every terminal that runs `raxis*` binaries
@@ -182,17 +184,55 @@ commands.
 
 ---
 
-## 4 · Start the kernel
+## 4 · Start the kernel daemon
 
-In a dedicated terminal:
+For the Homebrew path, run RAXIS as a user launchd daemon:
 
 ```bash
 export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
-export RAXIS_DATA_DIR="$HOME/.raxis"
+export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
+
+brew services start raxis
+brew services list | awk 'NR==1 || $1=="raxis"'
+raxis-supervisor status
+raxis doctor
+```
+
+Expected: `brew services list` shows `raxis started`,
+`raxis-supervisor status` reports `Healthy`, and `raxis doctor` reports
+`worst: OK`.
+
+The kernel auto-spawns the gateway subprocess; do not run
+`raxis-gateway` by hand. The dashboard listens on:
+
+```text
+http://127.0.0.1:9820
+```
+
+Logs:
+
+```bash
+tail -f "$(brew --prefix)/var/log/raxis/kernel.log"
+tail -f "$(brew --prefix)/var/log/raxis/kernel.err.log"
+```
+
+To stop the daemon:
+
+```bash
+brew services stop raxis
+```
+
+If you are debugging startup, stop the Homebrew service and run the
+kernel in a foreground terminal instead:
+
+```bash
+brew services stop raxis
+export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
+export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
 raxis-kernel
 ```
 
-Healthy startup prints (among other lines):
+Healthy foreground startup prints (among other lines):
 
 ```text
 {"level":"info","event":"PolicyLoaded","epoch_id":1}
@@ -202,13 +242,10 @@ Healthy startup prints (among other lines):
 {"level":"info","event":"DashboardListening","url":"http://127.0.0.1:9820"}
 ```
 
-The kernel auto-spawns the gateway subprocess; do not run
-`raxis-gateway` by hand. The dashboard URL on the last line is
-clickable — bookmark it for page 03.
-
-Leave this terminal running. Switch to a second terminal for
-everything below; export `RAXIS_INSTALL_DIR`, `RAXIS_DATA_DIR`, and
-`RAXIS_OPERATOR_KEY` there too.
+Use one start mode at a time. If you use foreground mode, leave that
+terminal running and switch to a second terminal for everything below;
+export `RAXIS_INSTALL_DIR`, `RAXIS_DATA_DIR`, and `RAXIS_OPERATOR_KEY`
+there too.
 
 ---
 

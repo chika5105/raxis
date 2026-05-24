@@ -40,14 +40,26 @@ The rendered `raxis` formula installs a complete runtime bundle:
 - signed canonical guest images under `#{pkgshare}/images`
 - guest Linux kernel and validated config under `#{pkgshare}/kernel`
 - Vite-built operator dashboard frontend under `#{pkgshare}/dashboard`
-- a Homebrew service that runs `raxis-supervisor start` with
-  `RAXIS_INSTALL_DIR=#{opt_pkgshare}`, `RAXIS_DATA_DIR`, and
-  `RAXIS_SUPERVISOR_AUTO_RESTART=1`
+- a Homebrew service that launches
+  `/bin/sh -c "ulimit -n 4096 && exec #{opt_bin}/raxis-supervisor start"`
+  with `PATH=std_service_path_env`,
+  `RAXIS_INSTALL_DIR=#{opt_pkgshare}`, `RAXIS_DATA_DIR`,
+  `RAXIS_SUPERVISOR_AUTO_RESTART=1`, and
+  `RAXIS_SUPERVISOR_KERNEL_BINARY=#{opt_bin}/raxis-kernel`
 
 To serve the browser UI from a Homebrew install, set
 `[dashboard].static_dir` in policy to `#{opt_pkgshare}/dashboard`.
 The release workflow builds that dashboard bundle once and fans it into
 each platform archive.
+
+The service source of truth is `release/templates/raxis.rb.tmpl`, not
+an already-poured Cellar plist. Homebrew uses the active tap formula to
+generate the installed service file during install, and the bottle also
+carries a `.brew/raxis.rb` rendered from the same template so later keg
+formula reloads see the same service definition. For that reason, a
+broken installed version must be replaced by a new release or reinstall
+from a corrected formula/bottle; editing the tap alone does not rewrite
+an existing generated service file.
 
 The tap formula uses Homebrew bottles for the clean user path. The
 workflow still publishes raw complete runtime archives, then publishes
@@ -212,3 +224,7 @@ a release than publish a Homebrew formula that cannot boot planner VMs.
 The packaging steps also force every `bin/raxis*` file to mode `0755`
 after artifact download and again while laying out bottles; GitHub's
 artifact service may otherwise restore executable binaries as `0644`.
+The formula renderer and bottle packager also fail the release if the
+tap formula or bottled `.brew/raxis.rb` is missing the daemon `ulimit`
+wrapper, `std_service_path_env`, service data dir, or explicit
+`raxis-kernel` supervisor override.

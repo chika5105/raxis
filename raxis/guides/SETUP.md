@@ -3,14 +3,19 @@
 Use this page when you are **building RAXIS from source**.
 
 If you are an operator or evaluator who installed RAXIS with Homebrew,
-do not start here. Use the fast getting-started path instead:
+do not start here. Use the website fast path or the install-verify
+page instead:
 
 ```bash
 brew tap chika5105/raxis
 brew install raxis
 ```
 
-Then continue at [`getting-started/01-prereqs.md`](getting-started/01-prereqs.md).
+| Need | Start here |
+|---|---|
+| Fastest Homebrew-to-first-initiative path | [Website get-started flow](https://www.raxis.io/get-started) |
+| Detailed Homebrew install and host verification | [`getting-started/01-prereqs.md`](getting-started/01-prereqs.md) |
+| Source checkout, local builds, image baking, dashboard builds | This page |
 
 This page is for developers and maintainers who need a clean checkout
 to produce a bootable local install.

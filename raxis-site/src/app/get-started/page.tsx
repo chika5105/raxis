@@ -9,6 +9,8 @@ export const metadata: Metadata = {
 };
 
 const firstInitiativeHref = "/docs/guides/getting-started/02-first-initiative";
+const installVerifyHref = "/docs/guides/getting-started/01-prereqs";
+const sourceSetupHref = "/docs/guides/setup";
 
 export default function GetStartedPage() {
   return (
@@ -28,6 +30,9 @@ export default function GetStartedPage() {
             <a href="#fast-path" className="btn btn-primary">
               Start the terminal flow
             </a>
+            <Link href={installVerifyHref} className="btn btn-ghost">
+              Install and verify details
+            </Link>
             <Link href={firstInitiativeHref} className="btn btn-ghost">
               Open full first initiative guide
             </Link>
@@ -52,6 +57,30 @@ export default function GetStartedPage() {
         </div>
       </section>
 
+      <section className="border-b border-[var(--rule)]">
+        <div className="mx-auto max-w-5xl px-4 py-12 sm:px-6">
+          <p className="eyebrow">Related setup pages</p>
+          <h2 className="h-section mt-4">Use the right entry point.</h2>
+          <div className="mt-8 grid gap-4 md:grid-cols-3">
+            <RelatedDoc
+              href="/get-started"
+              title="Get started"
+              body="The shortest guided path for Homebrew users. Start here when you want to run Raxis now."
+            />
+            <RelatedDoc
+              href={installVerifyHref}
+              title="01 · Install and Verify"
+              body="The detailed Homebrew install, host requirements, and verification checklist behind this page."
+            />
+            <RelatedDoc
+              href={sourceSetupHref}
+              title="Source setup"
+              body="Developer and maintainer setup for local builds, dashboard builds, image baking, and codesigning."
+            />
+          </div>
+        </div>
+      </section>
+
       <section id="fast-path" className="py-16 sm:py-20">
         <div className="mx-auto grid max-w-5xl gap-10 px-4 sm:px-6 lg:grid-cols-[0.8fr_1.2fr]">
           <div>
@@ -67,11 +96,20 @@ export default function GetStartedPage() {
 
           <div className="min-w-0 space-y-6">
             <Step number="01" title="Install the bottle">
-              <CommandBlock>{`brew tap chika5105/raxis
+              <CommandBlock>{`brew update
+brew tap chika5105/raxis
 brew install raxis
+raxis --version
 
 export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
-export RAXIS_DATA_DIR="$HOME/.raxis"`}</CommandBlock>
+export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"`}</CommandBlock>
+              <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
+                Need host requirements or verification commands? Use{" "}
+                <Link href={installVerifyHref} className="font-semibold text-accent underline-offset-4 hover:underline">
+                  01 · Install and Verify
+                </Link>
+                .
+              </p>
             </Step>
 
             <Step number="02" title="Create an operator key">
@@ -91,6 +129,25 @@ export RAXIS_OPERATOR_KEY="$HOME/raxis-keys/operator_private.pem"`}</CommandBloc
               <CommandBlock>{`raxis genesis \\
   --operator-key "$RAXIS_OPERATOR_KEY" \\
   --operator-name "$USER"`}</CommandBlock>
+              <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
+                This uses the same data dir that{" "}
+                <code className="rounded bg-[var(--code-bg)] px-1 font-mono">brew services start raxis</code>{" "}
+                will use later. After the first initiative guide adds your
+                provider and signs policy, start Raxis as a daemon with
+                Homebrew.
+              </p>
+            </Step>
+
+            <Step number="04" title="Start the Homebrew daemon">
+              <CommandBlock>{`brew services start raxis
+brew services list | awk 'NR==1 || $1=="raxis"'
+raxis-supervisor status
+raxis doctor`}</CommandBlock>
+              <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
+                Run this when the first initiative guide reaches kernel
+                startup. It starts a user LaunchAgent, not a privileged system
+                daemon.
+              </p>
             </Step>
 
             <div className="rounded-lg border border-[var(--rule)] bg-[var(--accent-soft)] p-5">
@@ -114,13 +171,35 @@ export RAXIS_OPERATOR_KEY="$HOME/raxis-keys/operator_private.pem"`}</CommandBloc
         <div className="mx-auto max-w-5xl px-4 sm:px-6">
           <h2 className="h-section">Next useful stops</h2>
           <div className="mt-8 grid gap-4 md:grid-cols-3">
+            <NextLink href={installVerifyHref} title="Install and verify" />
             <NextLink href="/docs/guides/getting-started/03-dashboard-tour" title="Dashboard tour" />
-            <NextLink href="/docs/guides/getting-started/04-troubleshooting" title="Troubleshooting" />
-            <NextLink href="/threat-model" title="Threat model" />
+            <NextLink href={sourceSetupHref} title="Source setup" />
           </div>
         </div>
       </section>
     </>
+  );
+}
+
+function RelatedDoc({
+  href,
+  title,
+  body,
+}: {
+  href: string;
+  title: string;
+  body: string;
+}) {
+  return (
+    <Link
+      href={href}
+      className="rounded-lg border border-[var(--rule)] bg-[var(--surface)] p-5 transition hover:border-[var(--rule-strong)] hover:shadow-[var(--shadow-soft)]"
+    >
+      <h3 className="text-base font-semibold leading-tight text-[var(--fg)]">
+        {title}
+      </h3>
+      <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">{body}</p>
+    </Link>
   );
 }
 

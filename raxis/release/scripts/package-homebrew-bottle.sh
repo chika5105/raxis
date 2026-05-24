@@ -113,7 +113,28 @@ render_installed_formula() {
             -e "s|@@RAXIS_LINUX_X86_64_SHA256@@|${linux_x86_64_sha}|g"
 }
 
-render_installed_formula > "${cellar}/.brew/raxis.rb"
+installed_formula="${cellar}/.brew/raxis.rb"
+render_installed_formula > "${installed_formula}"
+
+if grep -Eq '@@[A-Z_]+@@' "${installed_formula}"; then
+    echo "package-homebrew-bottle.sh: installed formula still contains template tokens" >&2
+    grep -Eo '@@[A-Z_]+@@' "${installed_formula}" | sort -u >&2
+    exit 70
+fi
+
+required_service_snippets=(
+    'run ["/bin/sh", "-c", "ulimit -n 4096 && exec #{opt_bin}/raxis-supervisor start"]'
+    'environment_variables PATH: std_service_path_env,'
+    'RAXIS_DATA_DIR: (var/"lib/raxis").to_s,'
+    'RAXIS_SUPERVISOR_KERNEL_BINARY: (opt_bin/"raxis-kernel").to_s'
+)
+
+for snippet in "${required_service_snippets[@]}"; do
+    if ! grep -Fq "${snippet}" "${installed_formula}"; then
+        echo "package-homebrew-bottle.sh: installed formula missing required service snippet: ${snippet}" >&2
+        exit 70
+    fi
+done
 
 out="${out_dir}/raxis-${formula_version}.${bottle_tag}.bottle.tar.gz"
 tar -C "${bottle_root}" -czf "${out}" raxis

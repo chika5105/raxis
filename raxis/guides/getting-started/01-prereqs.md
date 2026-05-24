@@ -8,6 +8,14 @@ run RAXIS, not build it. If you are changing RAXIS source code, skip to
 [`../SETUP.md`](../SETUP.md). If you are changing release packaging,
 use [`../../release/README.md`](../../release/README.md).
 
+Related setup entry points:
+
+| Need | Start here |
+|---|---|
+| Fastest website-guided path from Homebrew to first initiative | [Website get-started flow](https://www.raxis.io/get-started) |
+| Detailed Homebrew install and verification | This page |
+| Source checkout, local builds, image baking, dashboard builds | [`../SETUP.md`](../SETUP.md) |
+
 ---
 
 ## Fast Path: Homebrew
@@ -35,30 +43,34 @@ Set the runtime bundle path in every shell that starts the kernel:
 export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
 ```
 
-Use the default per-user data dir for the first run:
+Use the Homebrew service data dir for the first run:
 
 ```bash
-export RAXIS_DATA_DIR="$HOME/.raxis"
+export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
 ```
 
-That is the path Homebrew prepares and the path the rest of this
-getting-started guide uses. If you want a disposable rehearsal later,
-set `RAXIS_DATA_DIR` to another empty directory before running
-`raxis genesis`.
+That is the path `brew services start raxis` uses. Set it before
+genesis and keep the same value in every shell so foreground commands,
+the dashboard, and the daemon all point at the same SQLite store,
+policy, audit chain, sockets, and witness data. If you want a
+disposable rehearsal later, set `RAXIS_DATA_DIR` to another empty
+directory before running `raxis genesis`.
 
 Verify the installed bundle:
 
 ```bash
 command -v raxis
 command -v raxis-kernel
+raxis --version
 raxis --help | head -20
 raxis doctor signing-key-fp
 raxis doctor canonical-images --install-dir "$RAXIS_INSTALL_DIR"
 ```
 
-Expected: `command -v` points under your Homebrew prefix, the help
-prints the CLI usage, `signing-key-fp` says `trust anchor: populated`,
-and `canonical-images` reports `worst: OK`.
+Expected: `command -v` points under your Homebrew prefix,
+`raxis --version` prints the installed release, the help prints the CLI
+usage, `signing-key-fp` says `trust anchor: populated`, and
+`canonical-images` reports `worst: OK`.
 
 > If you run commands from inside a cloned source repo and see
 > `permission denied: raxis`, your shell is trying to execute the local
@@ -100,15 +112,16 @@ distribution package manager.
 
 ---
 
-## Optional: Service Mode
+## Homebrew Service Mode
 
-For the first initiative, run `raxis-kernel` in a foreground terminal
-so you can see the logs. After you have a real data dir and policy,
-Homebrew can supervise the kernel:
+Homebrew does not start RAXIS during install. After genesis and policy
+signing, start it as a per-user launchd daemon:
 
 ```bash
 brew services start raxis
-brew services stop raxis
+brew services list | awk 'NR==1 || $1=="raxis"'
+raxis-supervisor status
+raxis doctor
 ```
 
 The service uses:
@@ -118,8 +131,26 @@ RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
 RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
 ```
 
-The getting-started guide uses `RAXIS_DATA_DIR="$HOME/.raxis"` instead,
-because that matches the Homebrew post-install layout an end user sees.
+Expected: `brew services list` shows `raxis started`,
+`raxis-supervisor status` reports `Healthy`, and `raxis doctor` reports
+`worst: OK` after the kernel writes its first heartbeat.
+
+Logs live at:
+
+```bash
+tail -f "$(brew --prefix)/var/log/raxis/kernel.log"
+tail -f "$(brew --prefix)/var/log/raxis/kernel.err.log"
+```
+
+Stop the daemon with:
+
+```bash
+brew services stop raxis
+```
+
+By default this is a user LaunchAgent, not a privileged system daemon.
+Do not also run `raxis-kernel` in a foreground terminal against the
+same `RAXIS_DATA_DIR`; use one start mode at a time.
 
 ---
 

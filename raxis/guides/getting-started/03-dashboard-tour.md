@@ -3,13 +3,24 @@
 > **Goal.** Open the operator dashboard, sign in once, and learn the
 > five views you will use every day.
 
-When `raxis-kernel` boots it prints a clickable line:
+When `raxis-kernel` boots in foreground mode it prints a clickable
+line:
 
 ```text
 {"level":"info","event":"DashboardListening","url":"http://127.0.0.1:9820"}
 ```
 
-That URL is your dashboard. The default bind is `127.0.0.1:9820`
+That same URL is your dashboard when you start RAXIS with
+`brew services start raxis`. If you used the Homebrew daemon, verify it
+before opening the browser:
+
+```bash
+brew services list | awk 'NR==1 || $1=="raxis"'
+raxis-supervisor status
+raxis doctor
+```
+
+The default bind is `127.0.0.1:9820`
 (loopback only); change it via the `[dashboard]` block in
 `policy.toml`. Reference:
 [`raxis/crates/dashboard/src/lib.rs`](../../crates/dashboard/src/lib.rs).
