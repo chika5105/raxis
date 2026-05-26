@@ -59,7 +59,7 @@ role_restriction = ["Reviewer"]      # FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED
 ```
 
 The Reviewer image is fixed by the kernel; you cannot publish a
-custom one. Use `context = "..."` in the Reviewer task block to
+custom one. Use `prompt = "..."` in the Reviewer task block to
 shape its review behaviour instead.
 
 ---

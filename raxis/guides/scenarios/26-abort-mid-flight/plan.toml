@@ -14,7 +14,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 wall_clock_seconds = 600
-description = """
+description        = "Long Running"
+prompt             = """
   Add a 5,000-line auto-generated module to src/main.rs, with each
   line incrementing a counter. Take your time.
 """

@@ -21,7 +21,8 @@ task_id            = "backend-version-endpoint"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-description = """
+description        = "Backend Version Endpoint"
+prompt             = """
   In src/main.rs, build a tiny_http server on 127.0.0.1:7878 with
   a GET /version handler returning the crate version as JSON.
   Run cargo build to verify; commit.
@@ -37,7 +38,8 @@ task_id            = "frontend-status-badge"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["frontend/"]
-description = """
+description        = "Frontend Status Badge"
+prompt             = """
   In frontend/src/index.js, add a fetchStatus() function that GETs
   /version and console.logs "version: <v>". Plain JavaScript, no
   bundler. Commit.
@@ -51,7 +53,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["tests/"]
 predecessors       = ["backend-version-endpoint", "frontend-status-badge"]
-description = """
+description        = "Integration Test"
+prompt             = """
   Add tests/integration.rs that boots the backend, hits /version
   with reqwest, and asserts the body contains "version".
 """
@@ -69,7 +72,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
 predecessors       = ["integration-test"]
-description = """
+description        = "Docs"
+prompt             = """
   Document the new /version endpoint and the frontend integration
   in docs/api.md and docs/frontend.md.
 """
@@ -81,7 +85,8 @@ task_id            = "review-security"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["docs"]
-description = """
+description        = "Review Security"
+prompt             = """
   Review the merged tree for security issues: hard-coded secrets,
   unauthenticated endpoints, etc. Submit Approve or Reject.
 """
@@ -91,7 +96,8 @@ task_id            = "review-style"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["docs"]
-description = """
+description        = "Review Style"
+prompt             = """
   Review for code style: clippy-clean Rust, JS semicolons, doc
   punctuation, etc. Submit Approve or Reject.
 """
@@ -101,7 +107,8 @@ task_id            = "review-correctness"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["docs"]
-description = """
+description        = "Review Correctness"
+prompt             = """
   Review for functional correctness: does /version actually return
   the crate version? Does the test exercise it? Does the doc match
   reality?

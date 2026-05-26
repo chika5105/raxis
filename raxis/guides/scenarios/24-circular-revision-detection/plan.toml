@@ -19,7 +19,8 @@ path_allowlist     = ["src/"]
 # documents is itself a V3 feature; until then the only "loop
 # breaker" is the orchestrator harness giving up after N rounds
 # in user space.
-description = """
+description        = "Implement the oscillating code change"
+prompt             = """
   When the reviewer rejects with "make x mutable", flip `let x` to
   `let mut x`. If they reject with "make x immutable", flip back.
   Keep oscillating; this is intentional for testing the loop
@@ -31,7 +32,8 @@ task_id            = "oscillate-rev"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["ping-pong"]
-description = """
+description        = "Reviewer that forces oscillating revisions"
+prompt             = """
   If round is odd, reject with "make x mutable"; if round is even,
   reject with "make x immutable". Always reject.
 """

@@ -13,8 +13,10 @@ task_id            = "edit"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-description = "Add `pub fn nop() {}` to src/lib.rs."
-
+description = "symbol-index"
+prompt             = """
+Add `pub fn nop() {}` to src/lib.rs.
+"""
 [[plan.verifiers.pre_merge]]
 name             = "symbol-index"
 on_failure       = "block"

@@ -14,4 +14,7 @@ task_id            = "escapes-the-jail"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["../etc/passwd"]
-description = "Will be rejected by validate."
+description        = "Escapes The Jail"
+prompt             = """
+Will be rejected by validate.
+"""

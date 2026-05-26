@@ -23,7 +23,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = []
-description = """
+description        = "Adder"
+prompt             = """
   Add a public function `pub fn add(a: i32, b: i32) -> i32` to
   `src/lib.rs` that returns the sum. Add a `#[cfg(test)] mod tests`
   block in the same file with at least one #[test] that exercises
@@ -44,7 +45,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = ["adder"]
-description = """
+description        = "Reviewer"
+prompt             = """
   Evaluate the commit produced by `adder`. Approve only if:
     1. The function signature matches `pub fn add(a: i32, b: i32) -> i32` exactly.
     2. The implementation is straightforward (a + b is fine; no creative interpretations).

@@ -19,7 +19,8 @@ path_allowlist     = ["src/"]
 # orchestrator harness deciding to issue `RaiseEscalation` after
 # one rejected review round of its own accord, NOT by a kernel-
 # enforced ceiling.
-description = """
+description        = "Impossible"
+prompt             = """
   Modify src/main.rs to satisfy a deliberately self-contradictory
   request: print BOTH "hi" and "bye" but use only one println!()
   call AND the output must contain a literal newline character but
@@ -31,6 +32,7 @@ task_id            = "block"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["impossible"]
-description = """
+description        = "Reviewer that blocks the impossible change"
+prompt             = """
   Always reject: ask for "satisfy contradictory constraints fully".
 """

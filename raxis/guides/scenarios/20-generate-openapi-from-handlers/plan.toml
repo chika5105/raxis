@@ -13,7 +13,8 @@ task_id            = "generate"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
-description = """
+description        = "Generate"
+prompt             = """
   Read src/handlers.py (read-only). Extract the route comments and
   produce docs/openapi.yaml as OpenAPI 3.1 with a path entry per
   handler. Use the function name (snake_case) as operationId.

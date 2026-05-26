@@ -16,7 +16,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = []
-description = """
+description = "cargo_build"
+prompt             = """
   src/lib.rs has a typo: `pub fn ad(...)` should be `pub fn add(...)`.
   Restore the correct function name. Do not change the signature, the
   body, or the test. Commit with the message "scenario 04: fix typo"

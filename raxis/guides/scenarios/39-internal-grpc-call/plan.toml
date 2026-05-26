@@ -14,7 +14,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["data/"]
 allowed_egress     = ["internal.example.com:443"]
-description = """
+description        = "Ping"
+prompt             = """
   Invoke internal.example.com:443/myservice.PingService/Ping using
   grpcurl. Save the response to data/ping.json.
 """

@@ -17,7 +17,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = []
-description = """
+description = "cargo_build"
+prompt             = """
   Add a #[cfg(test)] mod tests block to src/lib.rs (or a new file
   under src/) with one #[test] named `safe_div_returns_err_on_zero`
   that calls safe_div(1, 0) and asserts the result is Err.
@@ -42,7 +43,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = ["regression_test"]
-description = """
+description = "cargo_test"
+prompt             = """
   src/lib.rs contains `pub fn safe_div(a: i64, b: i64) -> Result<i64, &'static str>`
   which currently panics on b == 0. Change it to return
   `Err("division by zero")` when b == 0; otherwise return `Ok(a / b)`.

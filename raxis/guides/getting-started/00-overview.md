@@ -17,6 +17,30 @@ The contract:
   agent widen scope beyond what you signed.
 - **The audit chain** records every decision, accepted or rejected.
 
+## First-run glossary
+
+Read these names before running commands. They are the minimum mental
+model for the getting-started flow.
+
+| Term | Meaning |
+|---|---|
+| **Install dir** | Immutable runtime bundle installed by Homebrew at `$(brew --prefix raxis)/share/raxis`: dashboard assets, VM images, guest kernel, examples. Export as `RAXIS_INSTALL_DIR`. |
+| **Data dir** | Mutable runtime state used by one kernel: keys, policy, provider credentials, audit log, SQLite store, sockets, managed repos, worktrees. Homebrew service default: `$(brew --prefix)/var/lib/raxis`. Export as `RAXIS_DATA_DIR`. |
+| **Operator key** | Your Ed25519 private key for signed operator requests. Export as `RAXIS_OPERATOR_KEY` for convenience; otherwise pass `--operator-key` on every signed request. |
+| **Genesis** | One-time ceremony that creates the data dir, authority/quality keys, initial policy, operator certificate, `kernel.db`, and genesis audit segment. |
+| **Policy** | Signed `policy.toml` that defines what the kernel may admit: operators, lanes, providers, dashboard, gateway, isolation, budgets, and gates. |
+| **Provider** | LLM/data provider declaration plus a credential file under `$RAXIS_DATA_DIR/providers/`. Agents never read these files directly. |
+| **Kernel** | `raxis-kernel`, the authority core that admits plans, spawns VMs, enforces policy, records audit events, and fast-forwards the managed repo. |
+| **Supervisor** | `raxis-supervisor`, the service wrapper that starts/restarts the kernel, writes lifecycle state, and avoids pre-genesis crash loops. |
+| **Dashboard** | Local web UI served by the kernel, default `http://127.0.0.1:9820`, authenticated with the same operator key model as the CLI. |
+| **Managed repo** | A Git repository inside the data dir that RAXIS clones from and merges back into. 0.2.0 adds first-class multiple managed repositories. |
+| **Plan** | Signed `plan.toml` describing one initiative: workspace, tasks, dependencies, scope, prompts, reviewers, and gates. |
+| **Initiative** | One admitted unit of work from a plan. The dashboard and audit log organize activity around initiative IDs. |
+| **Task** | One executor or reviewer work item in the plan DAG. `description` is the short summary; `prompt` is the main instruction. |
+| **Orchestrator** | Kernel-created agent that reads the plan DAG, activates ready tasks, handles retries, and performs integration merge. You do not declare it as a task. |
+| **Executor** | Agent that edits code inside an isolated VM and completes a task with a commit SHA. |
+| **Reviewer** | Agent that reviews an executor commit and emits an approve/reject verdict before merge. |
+
 ## What you get
 
 | Capability                                                                                                                                                                                                                     | How it shows up                                                                                                      |

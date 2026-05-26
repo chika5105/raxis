@@ -13,7 +13,8 @@ task_id            = "speed-it-up"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/", "benches/"]
-description = """
+description        = "Speed It Up"
+prompt             = """
   Replace naive_sum in src/lib.rs with a SIMD-friendly loop. The
   bench `naive_sum_1k` must complete; cargo bench must succeed.
 """

@@ -99,17 +99,17 @@ function FastStart() {
   const steps = [
     {
       title: "Install",
-      body: "Use the Homebrew bottle and verify the CLI can see the runtime bundle.",
+      body: "Install the Homebrew bottle and run the guided setup script.",
       href: "/docs/guides/getting-started/01-prereqs",
     },
     {
       title: "Bootstrap",
-      body: "Create your operator key, run genesis, and keep the operator key path in your shell.",
+      body: "Let the script create genesis state, provider config, and the daemon.",
       href: "/docs/guides/getting-started/02-first-initiative",
     },
     {
       title: "Run",
-      body: "Start the kernel, open the dashboard, and submit the first hello-world initiative.",
+      body: "Adopt or seed a managed repo and submit the first hello-world initiative.",
       href: "/docs/guides/scenarios/01-hello-world",
     },
   ];
@@ -122,12 +122,15 @@ function FastStart() {
           <h2 className="h-section mt-4">From Homebrew to first initiative.</h2>
           <p className="mt-5 max-w-2xl leading-relaxed text-[var(--muted)]">
             New users should not start in the spec tree. Install the bottle,
-            bootstrap one operator, start the kernel, then run the smallest
-            governed workflow.
+            run the guided setup once, then run the smallest governed
+            workflow.
           </p>
           <div className="mt-7 flex flex-wrap gap-3">
             <Link href="/get-started" className="btn btn-primary">
               Open the guided path
+            </Link>
+            <Link href="/plan-builder" className="btn btn-ghost">
+              Open the plan builder
             </Link>
             <Link href="/docs/guides/getting-started/02-first-initiative" className="btn btn-ghost">
               Jump to first initiative
@@ -137,11 +140,15 @@ function FastStart() {
 
         <div className="grid min-w-0 gap-4">
           <pre className="min-w-0 overflow-x-auto rounded-lg border border-[var(--rule)] bg-[var(--code-bg)] p-4 text-sm leading-relaxed">
-            <code>{`brew tap chika5105/raxis
+            <code>{`brew update
+brew tap chika5105/raxis
 brew install raxis
 
+"$(brew --prefix raxis)/share/raxis/install.sh"
+
 export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
-export RAXIS_DATA_DIR="$HOME/.raxis"`}</code>
+export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
+export RAXIS_OPERATOR_KEY="$HOME/raxis-keys/operator_private.pem"`}</code>
           </pre>
           <div className="grid gap-3 sm:grid-cols-3">
             {steps.map((step, index) => (

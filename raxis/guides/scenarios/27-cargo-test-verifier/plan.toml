@@ -13,7 +13,8 @@ task_id            = "extend"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-description = """
+description        = "Extend"
+prompt             = """
   Extend src/lib.rs: add `pub fn fib(n: u32) -> u64` (iterative,
   no overflow on small n). Add tests for fib(0)=0, fib(1)=1,
   fib(10)=55. Run `cargo test`. Commit on green.

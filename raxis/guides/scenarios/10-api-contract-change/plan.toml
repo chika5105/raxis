@@ -15,7 +15,8 @@ task_id            = "handler"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-description = """
+description        = "Handler"
+prompt             = """
   In src/lib.rs add `pub fn parse_version(s: &str) -> Result<(u32,
   u32, u32), ParseError>`. Define `pub struct ParseError` with a
   Display impl. Run `cargo build` to verify, then commit.
@@ -27,7 +28,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["tests/"]
 predecessors       = ["handler"]
-description = """
+description        = "Add version parser tests"
+prompt             = """
   Add tests/version_test.rs covering: valid "1.2.3", missing field,
   non-numeric. Run `cargo test --tests`. Commit on green.
 """
@@ -38,7 +40,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
 predecessors       = ["handler"]
-description = """
+description        = "Docs"
+prompt             = """
   Add docs/version.md describing the format and listing the error
   cases.
 """

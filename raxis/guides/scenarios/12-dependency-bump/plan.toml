@@ -13,7 +13,8 @@ task_id            = "bump"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["Cargo.toml"]
-description = """
+description        = "Bump serde and verify the build"
+prompt             = """
   Edit Cargo.toml so the serde dependency is "~1.0.200". Run
   `cargo update -p serde` to refresh Cargo.lock. Run `cargo build`
   to ensure the project still compiles. Commit both files.

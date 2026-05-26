@@ -19,7 +19,8 @@ target_ref = "refs/heads/main"
 [[tasks]]
 task_id            = "reproduce"
 name               = "Reproduce bug with a failing test"
-description        = """
+description        = "Reproduce bug with a failing test"
+prompt             = """
 Reproduce @@INITIATIVE_NAME@@ as a failing automated test. Locate the test
 module that owns the affected behaviour, add a focused failing test that
 demonstrates the bug, and stop as soon as the test fails for the expected
@@ -31,7 +32,8 @@ clone_strategy     = "blobless"
 [[tasks]]
 task_id            = "fix"
 name               = "Apply the fix"
-description        = """
+description        = "Apply the fix"
+prompt             = """
 Make the failing test from `reproduce` pass without weakening it or any
 neighbouring assertions. Keep the change scoped to the smallest set of files
 that resolves the regression; refactors stay out of this task.
@@ -42,7 +44,8 @@ predecessors       = ["reproduce"]
 [[tasks]]
 task_id            = "regression_test"
 name               = "Run the regression test suite"
-description        = """
+description        = "Run the regression test suite"
+prompt             = """
 Confirm the fix did not break adjacent behaviour: run the full test suite
 for the affected crate, surface any new failures, and verify that the
 reproduction test from `reproduce` now passes alongside the existing suite.

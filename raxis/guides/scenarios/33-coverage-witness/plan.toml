@@ -13,7 +13,8 @@ task_id            = "extend-with-coverage"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-description = """
+description        = "Extend With Coverage"
+prompt             = """
   Add `pub fn sub(a, b)` and matching tests. Coverage must stay
   above 80%.
 """

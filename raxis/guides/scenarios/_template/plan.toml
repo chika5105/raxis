@@ -28,7 +28,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = []
-description = """
+description        = "Implementer"
+prompt             = """
   Concrete, two-to-five-sentence task brief the agent will execute.
   Be specific about file names, function signatures, and acceptance
   criteria — agents do better with sharp prompts than soft ones.

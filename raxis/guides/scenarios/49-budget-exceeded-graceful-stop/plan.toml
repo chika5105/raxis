@@ -17,4 +17,7 @@ task_id            = "verbose-task"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
-description = "Write a 5,000-word essay on monad transformers in docs/essay.md."
+description        = "Verbose Task"
+prompt             = """
+Write a 5,000-word essay on monad transformers in docs/essay.md.
+"""

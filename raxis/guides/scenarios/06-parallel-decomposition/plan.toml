@@ -17,7 +17,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]
 predecessors       = []
-description = """
+description        = "Auth Module"
+prompt             = """
   Implement a simple auth module: add `src/auth/session.rs` with a
   `pub struct Session { id: String, user: String }` and `pub fn
   new_session(user: &str) -> Session` that constructs a Session with
@@ -32,7 +33,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/billing/"]
 predecessors       = []
-description = """
+description        = "Billing Module"
+prompt             = """
   Implement a simple billing module: add `src/billing/invoice.rs` with a
   `pub struct Invoice { id: u64, amount_cents: u64 }` and `pub fn
   new_invoice(amount_cents: u64) -> Invoice` that constructs an

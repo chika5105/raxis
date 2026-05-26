@@ -7,8 +7,10 @@ do not start here. Use the website fast path or the install-verify
 page instead:
 
 ```bash
+brew update
 brew tap chika5105/raxis
 brew install raxis
+"$(brew --prefix raxis)/share/raxis/install.sh"
 ```
 
 | Need | Start here |

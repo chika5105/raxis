@@ -103,7 +103,7 @@ git -C "$RAXIS_MAIN_REPO" show main:HELLO.md
 
 ## Variations
 
-- **Add a system prompt nudge.** Edit `[[tasks]] context` to ask the
+- **Add a system prompt nudge.** Edit `[[tasks]] prompt` to ask the
   Executor to write a haiku instead of a greeting.
 - **Tighten the allowlist.** Change `path_allowlist = ["./"]` to
   `path_allowlist = ["HELLO.md"]` to demonstrate exact-filename mode.

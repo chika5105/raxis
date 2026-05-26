@@ -13,7 +13,8 @@ task_id            = "backend"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["backend/"]
-description = """
+description        = "Backend"
+prompt             = """
   In backend/src/main.rs, add a stub `health()` function that
   returns the static string "ok". Commit with a clear message.
 """
@@ -23,7 +24,8 @@ task_id            = "frontend"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["frontend/"]
-description = """
+description        = "Frontend"
+prompt             = """
   In frontend/src/index.js, add a function showHealthBadge() that
   console.logs "🟢 healthy" (use only ASCII characters in the
   source). Commit.

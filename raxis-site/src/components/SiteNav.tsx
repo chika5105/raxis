@@ -19,6 +19,7 @@ const COMMUNITY_HREF = "https://www.reddit.com/r/raxis/";
 const PRIMARY_LINKS: NavLink[] = [
   { href: "/", label: "Home" },
   { href: GET_STARTED_HREF, label: "Get started", emphasis: true },
+  { href: "/plan-builder", label: "Plan builder" },
   { href: "/docs", label: "Docs" },
   { href: "/investors", label: "Investors" },
   { href: "/#demo", label: "Demo" },

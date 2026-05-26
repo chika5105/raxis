@@ -26,7 +26,9 @@ killall -9 raxis-kernel
 
 # Restart it with the same environment (or let your service manager
 # relaunch it if you use `brew services start raxis`):
-RAXIS_DATA_DIR="${RAXIS_DATA_DIR:-$HOME/.raxis}" raxis-kernel &
+export RAXIS_INSTALL_DIR="${RAXIS_INSTALL_DIR:-$(brew --prefix raxis)/share/raxis}"
+export RAXIS_DATA_DIR="${RAXIS_DATA_DIR:-$(brew --prefix)/var/lib/raxis}"
+raxis-kernel &
 
 # Verify the initiative finishes successfully despite the crash:
 raxis initiative show "$INIT_ID"

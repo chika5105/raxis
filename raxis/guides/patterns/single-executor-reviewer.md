@@ -61,7 +61,7 @@ path_allowlist      = ["src/auth/"]
 predecessors        = []                     # starts immediately
 max_crash_retries   = 2                      # VM crash budget (OOM, panic, etc.)
 max_review_rejections = 2                    # quality rejection budget
-context             = """
+prompt             = """
   Implement IP-based rate limiting on POST /auth/login.
   - 10 requests per minute per IP using a sliding window
   - Return 429 with Retry-After header when exceeded
@@ -79,7 +79,7 @@ session_agent_type  = "Reviewer"
 clone_strategy      = "blobless"             # needs to read the full src/auth/ tree
 path_allowlist      = ["src/auth/"]          # must match (or be subset of) the Executor's
 predecessors        = ["rate_limit_implementer"]
-context             = """
+prompt             = """
   Review the rate limiting implementation for:
   1. Correctness: does the sliding window logic match the spec?
   2. Security: could an attacker bypass the limit (X-Forwarded-For spoofing, etc.)?

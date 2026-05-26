@@ -18,7 +18,8 @@ target_ref = "refs/heads/main"
 [[tasks]]
 task_id            = "upgrade"
 name               = "Bump dependency version"
-description        = """
+description        = "Bump dependency version"
+prompt             = """
 Bump the dependency named in @@INITIATIVE_NAME@@ to the new version: edit
 the manifest, refresh the lockfile, and surface every breaking-change call
 site that needs adjustment. Apply the call-site adjustments in-place; do
@@ -30,7 +31,8 @@ clone_strategy     = "blobless"
 [[tasks]]
 task_id            = "test"
 name               = "Run regression suite against the upgrade"
-description        = """
+description        = "Run regression suite against the upgrade"
+prompt             = """
 Run the full test suite against the upgraded dependency. For every test
 that fails, decide whether it is a real regression introduced by the
 upgrade or an out-of-scope flake; mark each accordingly in the review. Do

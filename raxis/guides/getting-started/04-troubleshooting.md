@@ -122,10 +122,11 @@ raxis genesis --operator-key "$RAXIS_OPERATOR_KEY" --operator-name "$USER"
 
 If the operator also needs admin/trust-root authority after genesis,
 do not re-run genesis just to widen permissions. Mint a replacement
-cert for the same operator key that includes `OperatorCertInstall`,
-install it with `raxis cert install --replace-for ...`, re-sign
-`policy.toml`, then run `raxis epoch advance`. Use genesis `--admin`
-only during the initial bootstrap ceremony.
+cert for the same operator key that includes both `RotateEpoch` and
+`OperatorCertInstall`, install it with
+`raxis cert install --replace-for ...`, re-sign `policy.toml`, then run
+`raxis epoch advance`. Use genesis `--admin` only during the initial
+bootstrap ceremony.
 
 Or pass `--force` to make the destructive reset explicit:
 
@@ -226,7 +227,10 @@ header. Its credential file must tell the gateway to send the key as
 **Fix.**
 
 ```bash
-read -rsp "Anthropic API key: " RAXIS_ANTHROPIC_API_KEY
+printf 'Anthropic API key: '
+stty -echo
+IFS= read -r RAXIS_ANTHROPIC_API_KEY
+stty echo
 printf '\n'
 {
   printf 'api_key = "%s"\n' "$RAXIS_ANTHROPIC_API_KEY"

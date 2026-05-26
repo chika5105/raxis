@@ -9,15 +9,18 @@ website. They are written to run against the same Homebrew production
 shape as the getting-started guide:
 
 - Runtime bundle: `RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"`.
-- Data dir: `RAXIS_DATA_DIR="$HOME/.raxis"` unless you intentionally
-  created a disposable data dir.
+- Data dir: `RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"` unless
+  you intentionally created a disposable data dir.
 - Operator key convenience: `RAXIS_OPERATOR_KEY="$HOME/raxis-keys/operator_private.pem"`.
-- Canonical source repo: `$RAXIS_DATA_DIR/repositories/main`.
+- Managed repos: `$RAXIS_DATA_DIR/repositories/<repository_id>`.
+- Default managed repo: `$RAXIS_DATA_DIR/repositories/main`.
 - Kernel worktrees: `$RAXIS_DATA_DIR/worktrees`.
 
 RAXIS does not execute against the directory you happen to be in. The
-kernel clones from `$RAXIS_DATA_DIR/repositories/main` into its own
-managed worktrees, then fast-forwards the admitted `target_ref`.
+kernel clones from the managed repository named by the plan's
+`[workspace] repository` field into its own managed worktrees, then
+fast-forwards the admitted `target_ref`. If the field is omitted,
+0.2.0 uses `main`.
 
 ---
 
@@ -27,17 +30,18 @@ Use this shape for every scenario that has a `plan.toml`:
 
 ```bash
 export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
-export RAXIS_DATA_DIR="${RAXIS_DATA_DIR:-$HOME/.raxis}"
+export RAXIS_DATA_DIR="${RAXIS_DATA_DIR:-$(brew --prefix)/var/lib/raxis}"
 export RAXIS_OPERATOR_KEY="${RAXIS_OPERATOR_KEY:-$HOME/raxis-keys/operator_private.pem}"
 export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
 
-# In another terminal, keep the kernel running with the same env:
-#   raxis-kernel
+# The Homebrew setup helper starts the supervisor/kernel daemon.
+# Check it before submitting work:
+raxis-supervisor status --data-dir "$RAXIS_DATA_DIR"
 
 # In this terminal, stand in the scenario folder.
 cd /path/to/raxis/guides/scenarios/01-hello-world
 
-# Seed the canonical repo for the scenario.
+# Seed the default managed repo for the scenario.
 rm -rf "$RAXIS_MAIN_REPO"
 install -d "$(dirname "$RAXIS_MAIN_REPO")"
 git init -q "$RAXIS_MAIN_REPO"
@@ -77,6 +81,37 @@ or edit the scenario plan to make the task IDs unique.
 
 The getting-started page shows a timestamped task ID pattern for
 repeatable local demos.
+
+---
+
+## Bringing Your Own Repo
+
+For real work, adopt a clone into a named managed repository. Do not
+symlink an arbitrary checkout into the data dir unless you are doing
+low-level debugging and understand the risk to your working tree.
+
+```bash
+raxis repo adopt main /path/to/your/repo
+raxis repo status main
+```
+
+For 0.2.0 multi-repo plans, adopt additional repositories and set the
+plan field:
+
+```toml
+[workspace]
+name       = "API change"
+lane_id    = "default"
+target_ref = "refs/heads/main"
+repository = "api"
+```
+
+Then:
+
+```bash
+raxis repo adopt api /path/to/api-repo
+raxis repo status api
+```
 
 ---
 

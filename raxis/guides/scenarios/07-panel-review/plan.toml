@@ -17,7 +17,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = []
-description = """
+description        = "Implementer"
+prompt             = """
   Add `pub fn parse_host(url: &str) -> Option<&str>` to src/lib.rs
   that returns the host portion of an http:// or https:// URL or None
   if the URL is malformed. Add three unit tests covering: a valid
@@ -32,7 +33,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = ["implementer"]
-description = """
+description        = "Correctness Review"
+prompt             = """
   Evaluate parse_host for correctness. Reject if any of: missing
   scheme handling (http vs https), wrong host extraction for URLs
   with paths or query strings, or missing/wrong tests.
@@ -44,7 +46,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = ["implementer"]
-description = """
+description        = "Style Review"
+prompt             = """
   Evaluate parse_host for style. Reject if: function is longer than
   20 lines, the implementation hand-rolls a parser instead of using
   str::strip_prefix / split_once / find, or the doc comment is
@@ -57,7 +60,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = ["implementer"]
-description = """
+description        = "Security Review"
+prompt             = """
   Evaluate parse_host for security. Reject if the function panics on
   any input, allocates an unbounded String from caller-controlled
   bytes, or uses unsafe code.

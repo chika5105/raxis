@@ -22,9 +22,10 @@ export default function GetStartedPage() {
             Install Raxis, bootstrap one operator, run the first initiative.
           </h1>
           <p className="lead mt-8 max-w-3xl">
-            This is the fastest route for a new Homebrew user. It gets the
-            kernel running with one operator and sends you straight to the
-            hello-world workflow.
+            This is the fastest route for a new Homebrew user. Run the guided
+            setup once; it installs the bottle, creates the operator key,
+            initializes the service data dir, writes the provider credential,
+            signs policy, and starts the daemon.
           </p>
           <div className="mt-9 flex flex-wrap gap-3">
             <a href="#fast-path" className="btn btn-primary">
@@ -36,6 +37,26 @@ export default function GetStartedPage() {
             <Link href={firstInitiativeHref} className="btn btn-ghost">
               Open full first initiative guide
             </Link>
+          </div>
+        </div>
+      </section>
+
+      <section className="border-b border-[var(--rule)] bg-[var(--surface)]">
+        <div className="mx-auto max-w-5xl px-4 py-12 sm:px-6">
+          <p className="eyebrow">First-run glossary</p>
+          <h2 className="h-section mt-4">Know the pieces before you run commands.</h2>
+          <p className="mt-5 max-w-3xl leading-relaxed text-[var(--muted)]">
+            You do not need the full architecture to start. These are the
+            names that appear in the setup flow and dashboard.
+          </p>
+          <div className="mt-8 grid gap-3 md:grid-cols-2">
+            {glossaryTerms.map((term) => (
+              <GlossaryTerm
+                key={term.term}
+                term={term.term}
+                body={term.body}
+              />
+            ))}
           </div>
         </div>
       </section>
@@ -87,24 +108,26 @@ export default function GetStartedPage() {
             <p className="eyebrow">Fast path</p>
             <h2 className="h-section mt-4">Do this first.</h2>
             <p className="mt-5 leading-relaxed text-[var(--muted)]">
-              These commands establish the installed runtime path, create your
-              operator key, and run genesis. After that, continue in the first
-              initiative guide for provider setup, kernel startup, dashboard
-              login, and the hello-world plan.
+              These commands install the bottle, create your operator key, run
+              genesis, write the provider file, sign policy, and start the
+              Homebrew daemon. After that, continue in the first initiative
+              guide with a real managed repository and a hello-world plan.
             </p>
           </div>
 
           <div className="min-w-0 space-y-6">
-            <Step number="01" title="Install the bottle">
+            <Step number="01" title="Run guided setup">
               <CommandBlock>{`brew update
 brew tap chika5105/raxis
 brew install raxis
-raxis --version
 
-export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
-export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"`}</CommandBlock>
+"$(brew --prefix raxis)/share/raxis/install.sh"`}</CommandBlock>
               <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
-                Need host requirements or verification commands? Use{" "}
+                The script uses the same data dir as{" "}
+                <code className="rounded bg-[var(--code-bg)] px-1 font-mono">brew services</code>,
+                prompts for the Anthropic key without echoing it, and creates
+                an admin-capable bootstrap operator by default. Need host
+                requirements or manual verification commands? Use{" "}
                 <Link href={installVerifyHref} className="font-semibold text-accent underline-offset-4 hover:underline">
                   01 · Install and Verify
                 </Link>
@@ -112,42 +135,42 @@ export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"`}</CommandBlock>
               </p>
             </Step>
 
-            <Step number="02" title="Create an operator key">
+            <Step number="02" title="Keep these exports">
               <CommandBlock>{`install -d -m 700 "$HOME/raxis-keys"
 openssl genpkey -algorithm ED25519 -out "$HOME/raxis-keys/operator_private.pem"
 chmod 600 "$HOME/raxis-keys/operator_private.pem"
 
+export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
+export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
 export RAXIS_OPERATOR_KEY="$HOME/raxis-keys/operator_private.pem"`}</CommandBlock>
               <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
-                Keep <code className="rounded bg-[var(--code-bg)] px-1 font-mono">RAXIS_OPERATOR_KEY</code>{" "}
+                The guided setup prints these at the end. Keep{" "}
+                <code className="rounded bg-[var(--code-bg)] px-1 font-mono">RAXIS_OPERATOR_KEY</code>{" "}
                 exported for convenience; otherwise every signed request needs
                 the key path passed explicitly.
               </p>
             </Step>
 
-            <Step number="03" title="Bootstrap Raxis">
-              <CommandBlock>{`raxis genesis \\
-  --operator-key "$RAXIS_OPERATOR_KEY" \\
-  --operator-name "$USER"`}</CommandBlock>
+            <Step number="03" title="Verify the daemon">
+              <CommandBlock>{`raxis --version
+brew services list | awk 'NR==1 || $1=="raxis"'
+raxis-supervisor status --data-dir "$RAXIS_DATA_DIR"
+raxis doctor`}</CommandBlock>
               <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
-                This uses the same data dir that{" "}
-                <code className="rounded bg-[var(--code-bg)] px-1 font-mono">brew services start raxis</code>{" "}
-                will use later. After the first initiative guide adds your
-                provider and signs policy, start Raxis as a daemon with
-                Homebrew.
+                Expected: the service is started, supervisor status is healthy,
+                and <code className="rounded bg-[var(--code-bg)] px-1 font-mono">doctor</code>{" "}
+                has no FAIL rows.
               </p>
             </Step>
 
-            <Step number="04" title="Start the Homebrew daemon">
-              <CommandBlock>{`brew services start raxis
-brew services list | awk 'NR==1 || $1=="raxis"'
-raxis-supervisor status
-raxis doctor`}</CommandBlock>
+            <Step number="04" title="Run hello world">
               <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
-                Run this when the first initiative guide reaches kernel
-                startup. It starts a user LaunchAgent, not a privileged system
-                daemon.
+                Continue to the first initiative guide at the section that
+                seeds the demo repository and submits the hello-world plan.
               </p>
+              <Link href={firstInitiativeHref} className="mt-4 inline-flex font-semibold text-accent underline-offset-4 hover:underline">
+                Open the first initiative guide →
+              </Link>
             </Step>
 
             <div className="rounded-lg border border-[var(--rule)] bg-[var(--accent-soft)] p-5">
@@ -155,9 +178,9 @@ raxis doctor`}</CommandBlock>
                 Continue to the first initiative
               </h3>
               <p className="mt-2 text-sm leading-relaxed text-[var(--muted)]">
-                The full guide finishes provider setup, signs the policy with
-                the authority key, starts the kernel, opens the dashboard, and
-                runs the hello-world workflow.
+                The full guide shows the first repository, the first
+                plan.toml, dashboard inspection, and how to read the committed
+                result.
               </p>
               <Link href={firstInitiativeHref} className="mt-4 inline-flex font-semibold text-accent underline-offset-4 hover:underline">
                 Run the first initiative →
@@ -172,12 +195,92 @@ raxis doctor`}</CommandBlock>
           <h2 className="h-section">Next useful stops</h2>
           <div className="mt-8 grid gap-4 md:grid-cols-3">
             <NextLink href={installVerifyHref} title="Install and verify" />
+            <NextLink href="/plan-builder" title="Plan builder" />
             <NextLink href="/docs/guides/getting-started/03-dashboard-tour" title="Dashboard tour" />
-            <NextLink href={sourceSetupHref} title="Source setup" />
           </div>
         </div>
       </section>
     </>
+  );
+}
+
+const glossaryTerms = [
+  {
+    term: "Data dir",
+    body: "The writable runtime home for state: policy, keys, kernel.db, audit logs, providers, sockets, worktrees, and managed repositories.",
+  },
+  {
+    term: "Install dir",
+    body: "The immutable Homebrew bundle with the shipped binaries, dashboard assets, VM images, and guest kernel.",
+  },
+  {
+    term: "Operator key",
+    body: "Your local Ed25519 signing key. It proves CLI approvals and plan submissions came from you.",
+  },
+  {
+    term: "Genesis",
+    body: "The one-time bootstrap that creates the first policy, kernel keys, operator certificate, database, and audit chain anchor.",
+  },
+  {
+    term: "Policy",
+    body: "The signed rules Raxis enforces: operators, providers, dashboard settings, budgets, repositories, and permissions.",
+  },
+  {
+    term: "Provider",
+    body: "An LLM backend configuration, such as Anthropic. Credentials stay in private files under the data dir.",
+  },
+  {
+    term: "Kernel",
+    body: "The authority process. It admits plans, spawns isolated agents, enforces policy, merges results, and writes the audit log.",
+  },
+  {
+    term: "Supervisor",
+    body: "The Homebrew-run process that starts the kernel, watches its lifecycle, and reports health.",
+  },
+  {
+    term: "Dashboard",
+    body: "The local browser UI for watching initiatives, tasks, logs, diffs, policy state, and approvals.",
+  },
+  {
+    term: "Managed repo",
+    body: "A Git repository Raxis owns for governed work. Use main for the first repo, then add named repos such as api or web.",
+  },
+  {
+    term: "Plan",
+    body: "The signed TOML file that describes one unit of governed work: repository, target ref, tasks, prompts, dependencies, and gates.",
+  },
+  {
+    term: "Initiative",
+    body: "One admitted plan running through the kernel from approval to completion, abort, or quarantine.",
+  },
+  {
+    term: "Task",
+    body: "One executable node inside an initiative. Tasks declare role, write scope, dependencies, and the instruction to run.",
+  },
+  {
+    term: "Orchestrator",
+    body: "The kernel-managed coordinator for an initiative. It activates ready tasks and drives integration; users do not declare it as a task.",
+  },
+  {
+    term: "Executor",
+    body: "The agent role that changes files and commits work inside its allowed paths.",
+  },
+  {
+    term: "Reviewer",
+    body: "The agent role that reviews predecessor work and submits a verdict without writing code.",
+  },
+];
+
+function GlossaryTerm({ term, body }: { term: string; body: string }) {
+  return (
+    <div className="rounded-lg border border-[var(--rule)] bg-[var(--bg)] p-4">
+      <h3 className="text-sm font-semibold leading-tight text-[var(--fg)]">
+        {term}
+      </h3>
+      <p className="mt-2 text-sm leading-relaxed text-[var(--muted)]">
+        {body}
+      </p>
+    </div>
   );
 }
 

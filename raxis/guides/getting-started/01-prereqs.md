@@ -18,12 +18,34 @@ Related setup entry points:
 
 ---
 
+## Terms Before Commands
+
+| Term | What you need to know now |
+|---|---|
+| `RAXIS_INSTALL_DIR` | Homebrew runtime bundle: `$(brew --prefix raxis)/share/raxis`. |
+| `RAXIS_DATA_DIR` | Mutable kernel state. Use the Homebrew service path: `$(brew --prefix)/var/lib/raxis`. |
+| `RAXIS_OPERATOR_KEY` | Your private operator key. Exporting it is a convenience so signed requests do not need `--operator-key` every time. |
+| Genesis | The one-time initialization that creates policy, keys, database, and the first audit record. |
+| Policy | The signed rules the kernel enforces. |
+| Provider | LLM provider config plus a credential file under `$RAXIS_DATA_DIR/providers/`. |
+| Kernel | The authority process that admits plans and runs isolated agents. |
+| Supervisor | The Homebrew service wrapper that keeps the kernel healthy. |
+| Dashboard | Local UI at `http://127.0.0.1:9820`. |
+| Managed repo | The repo RAXIS clones from and merges back into. |
+| Plan / initiative / task | A signed `plan.toml`, one admitted unit of work, and the executor/reviewer nodes inside it. |
+| Orchestrator / executor / reviewer | Kernel-created coordinator, code-editing agent, and review agent. |
+
+The fastest path is to let the Homebrew helper run the safe defaults.
+It uses POSIX `sh`, so the same command works from both zsh and bash.
+
 ## Fast Path: Homebrew
 
 ```bash
 brew update
 brew tap chika5105/raxis
 brew install raxis
+
+"$(brew --prefix raxis)/share/raxis/install.sh"
 ```
 
 Homebrew installs:
@@ -37,24 +59,28 @@ Homebrew installs:
 | Canonical VM images | `$(brew --prefix raxis)/share/raxis/images` |
 | Guest kernel | `$(brew --prefix raxis)/share/raxis/kernel/vmlinux` |
 
-Set the runtime bundle path in every shell that starts the kernel:
+The helper runs genesis, prompts for your Anthropic key, writes the
+provider credential with mode `0600`, signs policy, starts the Homebrew
+service, and prints the exports you should keep for future shells.
+
+Set the runtime bundle path in every shell that talks to this install:
 
 ```bash
 export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
 ```
 
-Use the Homebrew service data dir for the first run:
+Use the Homebrew service data dir:
 
 ```bash
 export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
 ```
 
-That is the path `brew services start raxis` uses. Set it before
-genesis and keep the same value in every shell so foreground commands,
-the dashboard, and the daemon all point at the same SQLite store,
-policy, audit chain, sockets, and witness data. If you want a
-disposable rehearsal later, set `RAXIS_DATA_DIR` to another empty
-directory before running `raxis genesis`.
+That is the path `brew services start raxis` uses. Keep the same value
+in every shell so foreground commands, the dashboard, and the daemon
+all point at the same SQLite store, policy, audit chain, sockets, and
+witness data. If you want a disposable rehearsal later, pass
+`--data-dir <empty-dir>` to `install.sh` or set `RAXIS_DATA_DIR` before
+manual genesis.
 
 Verify the installed bundle:
 
@@ -138,9 +164,14 @@ Expected: `brew services list` shows `raxis started`,
 Logs live at:
 
 ```bash
-tail -f "$(brew --prefix)/var/log/raxis/kernel.log"
-tail -f "$(brew --prefix)/var/log/raxis/kernel.err.log"
+tail -f "$RAXIS_DATA_DIR/supervisor.stderr.log"
+cat "$RAXIS_DATA_DIR/kernel_lifecycle_status.json"
 ```
+
+Homebrew also wires launchd stdout/stderr to
+`$(brew --prefix)/var/log/raxis/kernel.log` and
+`$(brew --prefix)/var/log/raxis/kernel.err.log`, but most supervisor
+decisions are written to `$RAXIS_DATA_DIR/supervisor.stderr.log`.
 
 Stop the daemon with:
 

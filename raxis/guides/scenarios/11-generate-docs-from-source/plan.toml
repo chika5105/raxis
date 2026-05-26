@@ -13,7 +13,8 @@ task_id            = "docgen"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
-description = """
+description        = "Docgen"
+prompt             = """
   Read src/lib.rs (read-only) and write docs/api.md describing each
   public function with a one-line description and a code example.
   Commit and submit CompleteTask. Do not modify any file outside

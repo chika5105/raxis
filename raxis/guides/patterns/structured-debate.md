@@ -83,7 +83,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"              # needs to READ the full repo for context
 path_allowlist     = ["docs/design/proposal-a-r1.md"]   # can only WRITE this file
 predecessors         = []
-context            = """
+prompt             = """
   You are Architect A, advocating for a JWT-based, stateless auth design.
   Read the existing codebase in src/ for context.
   Write a structured design proposal to docs/design/proposal-a-r1.md covering:
@@ -100,7 +100,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/proposal-b-r1.md"]
 predecessors         = ["proposer_a_r1"]       # waits until A's proposal is merged
-context            = """
+prompt             = """
   You are Architect B, advocating for a session-based, stateful auth design.
   Read docs/design/proposal-a-r1.md carefully — understand A's position before responding.
   Write a structured counter-proposal to docs/design/proposal-b-r1.md covering the same
@@ -116,7 +116,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/proposal-a-r2.md"]
 predecessors         = ["proposer_b_r1"]       # waits for B's round-1 counter-proposal
-context            = """
+prompt             = """
   You are Architect A. Read both round-1 proposals:
     - docs/design/proposal-a-r1.md  (your initial position)
     - docs/design/proposal-b-r1.md  (B's counter-proposal)
@@ -132,7 +132,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/proposal-b-r2.md"]
 predecessors         = ["proposer_a_r2"]
-context            = """
+prompt             = """
   You are Architect B. Read all three prior proposals:
     - docs/design/proposal-a-r1.md
     - docs/design/proposal-b-r1.md  (your initial position)
@@ -150,7 +150,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/final-design.md"]
 predecessors         = ["proposer_a_r2", "proposer_b_r2"]   # waits for BOTH round-2 proposals
-context            = """
+prompt             = """
   You are the Design Synthesizer. Read all four debate proposals:
     - docs/design/proposal-a-r1.md
     - docs/design/proposal-b-r1.md
@@ -173,7 +173,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/final-design.md"]
 predecessors         = ["design_synthesizer"]
-context            = """
+prompt             = """
   Review docs/design/final-design.md before implementation begins.
   Check for: logical inconsistencies, missing failure modes, security antipatterns,
   and ambiguities that would block the Implementer.
@@ -191,7 +191,7 @@ predecessors         = ["design_reviewer"]     # depends on Reviewer, not Synthe
                                              # (Reviewer is the last gate before impl)
 max_crash_retries     = 2
 max_review_rejections = 2
-context            = """
+prompt             = """
   Implement the auth module as specified in docs/design/final-design.md.
   You have read access to the full repository. Your write access is scoped to src/auth/.
   Follow the design document exactly. If you find an ambiguity, pick the simpler
@@ -206,7 +206,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]
 predecessors         = ["auth_implementer"]
-context            = """
+prompt             = """
   Review the auth implementation in src/auth/ against the design in
   docs/design/final-design.md. Verify the implementation matches the design decisions.
   Also check: tests present, no obvious security issues in the implementation.

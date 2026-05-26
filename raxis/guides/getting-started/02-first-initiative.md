@@ -4,8 +4,20 @@
 > committed to `main` → audit chain verifies. ~10 minutes.
 
 This page is the runnable end-to-end "hello world" for RAXIS. The
-plan creates one file (`HELLO.md`) inside the kernel's canonical
-operator repo, commits it, and lets the kernel fast-forward `main`.
+plan creates one file (`HELLO.md`) inside the default managed repo,
+commits it, and lets the kernel fast-forward `main`.
+
+If you already ran the Homebrew helper from the website:
+
+```bash
+"$(brew --prefix raxis)/share/raxis/install.sh"
+```
+
+you can skip straight to
+[5 · Seed the default managed repo](#5--seed-the-default-managed-repo).
+The helper already created the operator key, ran genesis with bootstrap
+admin permissions, configured the provider, signed policy, and started
+the daemon.
 
 ---
 
@@ -75,12 +87,12 @@ raxis genesis \
   --operator-name "$USER"
 ```
 
-This creates a non-admin operator by default. Add `--admin` only
-for the initial bootstrap operator that should hold
-`OperatorCertInstall` authority. After genesis, grant that authority
-through the normal signed policy path: mint a replacement cert with
-`OperatorCertInstall`, run `raxis cert install --replace-for ...`,
-re-sign the policy, then `raxis epoch advance`.
+This creates a non-admin operator by default. The Homebrew helper uses
+`--admin` for the initial bootstrap operator so first-run users can
+install replacement operator certs and advance policy epochs without a
+separate recovery ceremony. Admin authority is still explicit policy:
+the bootstrap cert includes privileged operations such as
+`OperatorCertInstall` and `RotateEpoch`.
 
 Air-gapped variant (mint the cert offline with `raxis cert mint` on
 the machine that holds the private key, then pass `--operator-cert
@@ -108,7 +120,10 @@ agents can call a model. Anthropic is the most-tested provider in V2.
 ```bash
 install -d -m 700 "$RAXIS_DATA_DIR/providers"
 
-read -rsp "Anthropic API key: " RAXIS_ANTHROPIC_API_KEY
+printf 'Anthropic API key: '
+stty -echo
+IFS= read -r RAXIS_ANTHROPIC_API_KEY
+stty echo
 printf '\n'
 {
   printf 'api_key = "%s"\n' "$RAXIS_ANTHROPIC_API_KEY"
@@ -214,7 +229,14 @@ Logs:
 ```bash
 tail -f "$(brew --prefix)/var/log/raxis/kernel.log"
 tail -f "$(brew --prefix)/var/log/raxis/kernel.err.log"
+tail -f "$RAXIS_DATA_DIR/supervisor.stderr.log"
+cat "$RAXIS_DATA_DIR/kernel_lifecycle_status.json"
 ```
+
+Homebrew captures launchd stdout/stderr under `$(brew --prefix)/var/log`.
+Supervisor health decisions, circuit-breaker state, and many startup
+errors are also written under `$RAXIS_DATA_DIR`; check those files when
+the Homebrew logs are empty.
 
 To stop the daemon:
 
@@ -249,7 +271,7 @@ there too.
 
 ---
 
-## 5 · Seed the canonical repo
+## 5 · Seed the default managed repo
 
 ```bash
 export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
@@ -271,8 +293,23 @@ git -C "$RAXIS_MAIN_REPO" \
 ```
 
 RAXIS does not run against the directory you happen to be standing in.
-The production kernel clones from `$RAXIS_DATA_DIR/repositories/main`
+The production kernel clones from the managed repository selected by
+`[workspace] repository`. The first guide uses the default repository
+id `main`, stored at `$RAXIS_DATA_DIR/repositories/main`, then clones
 into kernel-managed worktrees under `$RAXIS_DATA_DIR/worktrees`.
+
+For your own project after this demo, use a managed clone:
+
+```bash
+raxis repo adopt main /path/to/your/repo
+raxis repo status main
+```
+
+0.2.0 supports multiple managed repositories. Adopt additional repos
+with names such as `api` or `web`, then set
+`repository = "api"` in the plan's `[workspace]` block. Avoid symlinks
+for normal use; they make it too easy to let a governed run mutate an
+unexpected checkout.
 
 ---
 
@@ -290,6 +327,7 @@ description = "Create a HELLO.md greeting file and commit it."
 name       = "Hello world"
 lane_id    = "default"
 target_ref = "refs/heads/main"
+repository = "main"
 
 [[tasks]]
 task_id            = "$RAXIS_TASK_ID"
@@ -298,13 +336,19 @@ session_agent_type = "Executor"
 clone_strategy    = "blobless"
 path_allowlist     = ["HELLO.md"]
 predecessors       = []
-context            = """
-Write a small Markdown greeting file named `HELLO.md` at the repository
-root. Stage and commit it as a single commit with the message
-`add HELLO.md`. Do not modify any other file.
+prompt             = """
+Write a small Markdown greeting file named HELLO.md at the repository
+root. Put the exact text: hello from alex.
+Stage and commit it as a single commit with the message: add HELLO.md.
+Do not modify any other file.
 """
 EOF
 ```
+
+`description` is the short human summary shown in plan views.
+`prompt` is the main instruction sent to the Executor. Older examples
+used `context`; 0.2.0 rejects that field because it looked meaningful
+but was not used by the agent.
 
 Task IDs are globally indexed in the kernel store. The timestamp keeps
 this quickstart easy to rerun without colliding with an older

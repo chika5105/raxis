@@ -17,7 +17,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
 predecessors       = []
-description = """
+description        = "Designer A"
+prompt             = """
   Write docs/proposal.md proposing one of two approaches to a small
   feature: a function `next_id() -> u64` that produces monotonically
   increasing IDs. Pick a single approach (e.g., AtomicU64 counter)
@@ -30,7 +31,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
 predecessors       = ["designer_a"]
-description = """
+description        = "Designer B"
+prompt             = """
   Read docs/proposal.md. In docs/critique.md, evaluate the approach
   for thread-safety, readability, and testability, and either ratify
   it or propose a different approach. Then write docs/decision.md
@@ -44,7 +46,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/", "docs/"]
 predecessors       = ["designer_b"]
-description = """
+description        = "Implementer"
+prompt             = """
   Read docs/decision.md, then implement the agreed-upon next_id()
   function in src/lib.rs with a unit test. Commit and submit
   CompleteTask.

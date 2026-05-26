@@ -22,7 +22,8 @@ path_allowlist     = ["src/"]
 # (`subtask_activations.review_reject_count`) is now wired by
 # `handle_submit_review` (V2.5+) — the missing piece is the
 # parser + ceiling check in `handle_retry_sub_task`.
-description = """
+description        = "Implement"
+prompt             = """
   Add a function `pub fn greet(name: &str) -> String` to src/main.rs
   returning "Hello, NAME!". On the FIRST commit, intentionally use
   format! without escaping (the reviewer will reject). On the
@@ -35,7 +36,8 @@ task_id            = "review"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["implement"]
-description = """
+description        = "Review"
+prompt             = """
   Inspect implement's commit. If `format!` is used, Reject with
   reason "use bytes-safe concatenation". Otherwise Accept.
 """

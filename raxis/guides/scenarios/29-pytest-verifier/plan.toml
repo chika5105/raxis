@@ -13,7 +13,8 @@ task_id            = "extend"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/", "tests/"]
-description = """
+description        = "Extend"
+prompt             = """
   Add `def sub(a, b)` to src/calc.py and a test for it in
   tests/test_calc.py. Run pytest. Commit on green.
 """

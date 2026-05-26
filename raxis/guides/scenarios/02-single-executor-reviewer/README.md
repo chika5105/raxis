@@ -85,7 +85,7 @@ Initiative `Status: Completed`. The audit chain shows
 
 ## Variations
 
-- **Force a rejection.** Edit `[[tasks.reviewer]] context` to demand
+- **Force a rejection.** Edit `[[tasks.reviewer]] prompt` to demand
   Property-Based-Tests (which the Executor won't have written) so the
   Reviewer rejects the first attempt.
 - **Increase the retry budget.** *(V2.6 — not wired today.)* The

@@ -13,7 +13,8 @@ task_id            = "extend"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["main.go"]
-description = """
+description        = "Extend"
+prompt             = """
   Add a function `Greet(name string) string` to main.go returning
   "Hello, NAME!". Lint must pass.
 """

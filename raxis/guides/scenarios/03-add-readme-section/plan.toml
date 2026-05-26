@@ -16,7 +16,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["README.md"]
 predecessors       = []
-description = """
+description        = "Documenter"## Quickstart\" to README.md, AFTER"
+prompt             = """
   Add a new top-level section titled "## Quickstart" to README.md, AFTER
   any existing top-level sections, with three numbered steps explaining
   how a fresh user clones, builds, and runs this demo repo. Do not

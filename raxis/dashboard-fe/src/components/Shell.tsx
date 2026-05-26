@@ -42,6 +42,7 @@ const NAV: NavSection[] = [
     label: "Work",
     items: [
       { to: "/initiatives", label: "Initiatives", glyph: "•" },
+      { to: "/plan-builder", label: "Plan Builder", glyph: "B" },
       { to: "/sessions", label: "Sessions", glyph: "S" },
       { to: "/escalations", label: "Escalations", glyph: "!" },
     ],
@@ -353,6 +354,7 @@ const SEGMENT_LABELS: Record<string, string> = {
   inbox: "Inbox",
   notifications: "Notifications",
   initiatives: "Initiatives",
+  "plan-builder": "Plan Builder",
   tasks: "Tasks",
   sessions: "Sessions",
   escalations: "Escalations",

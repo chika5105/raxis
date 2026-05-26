@@ -14,7 +14,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["data/"]
 allowed_egress     = ["mybucket.s3.amazonaws.com:443"]
-description = """
+description = "aws_main"
+prompt             = """
   Use the aws_main credential (mounted as
   AWS_CONTAINER_CREDENTIALS_FULL_URI) to GET
   https://mybucket.s3.amazonaws.com/example.txt and write the

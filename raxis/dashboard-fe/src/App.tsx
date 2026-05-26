@@ -16,6 +16,7 @@ import { InitiativesPage } from "@/pages/Initiatives";
 import { LoginPage } from "@/pages/Login";
 import { NotificationsPage } from "@/pages/Notifications";
 import { OverviewPage } from "@/pages/Overview";
+import { PlanBuilderPage } from "@/pages/PlanBuilder";
 import { PolicyPage } from "@/pages/Policy";
 import { SessionDetailPage } from "@/pages/SessionDetail";
 import { SessionsPage } from "@/pages/Sessions";
@@ -67,6 +68,7 @@ export function App() {
                     <Route path="/inbox" element={<InboxPage />} />
                     <Route path="/notifications" element={<NotificationsPage />} />
                     <Route path="/initiatives" element={<InitiativesPage />} />
+                    <Route path="/plan-builder" element={<PlanBuilderPage />} />
                     <Route path="/initiatives/:id" element={<InitiativeDetailPage />} />
                     <Route path="/initiatives/:id/dag" element={<InitiativeDagPage />} />
                     <Route path="/tasks/:id" element={<TaskDetailPage />} />

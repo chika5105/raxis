@@ -18,7 +18,8 @@ target_ref = "refs/heads/main"
 [[tasks]]
 task_id            = "setup"
 name               = "Set up experiment environment"
-description        = """
+description        = "Set up experiment environment"
+prompt             = """
 Prepare the workspace for @@INITIATIVE_NAME@@: stage any input fixtures,
 materialise feature flags, and verify the toolchain version matches what
 the experiment expects. Do not run the experiment yet.
@@ -29,7 +30,8 @@ clone_strategy     = "blobless"
 [[tasks]]
 task_id            = "run"
 name               = "Run the experiment"
-description        = """
+description        = "Run the experiment"
+prompt             = """
 Execute @@INITIATIVE_NAME@@ against the staged environment. Capture
 metrics, observable side-effects, and any anomalies to a structured output
 the operator can review. Do not modify production code paths.
@@ -40,7 +42,8 @@ predecessors       = ["setup"]
 [[tasks]]
 task_id            = "cleanup"
 name               = "Tear down experiment artefacts"
-description        = """
+description        = "Tear down experiment artefacts"
+prompt             = """
 Undo every workspace mutation `setup` and `run` made: revert feature flags,
 delete scratch files, and leave the working tree as you found it. The
 operator should be able to discard the lane after cleanup with no follow-up.

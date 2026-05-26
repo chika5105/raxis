@@ -14,7 +14,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["data/"]
 allowed_egress     = ["api.stripe.com:443"]
-description = """
+description = "stripe_test"
+prompt             = """
   POST to https://api.stripe.com/v1/customers with
   email=test+raxis@example.com. Save the response JSON to
   data/customer.json.

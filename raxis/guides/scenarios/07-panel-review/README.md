@@ -80,7 +80,7 @@ rejection critiques prepended.
 
 ## Variations
 
-- **Make security strict.** Edit the security Reviewer's context to
+- **Make security strict.** Edit the security Reviewer's prompt to
   reject any function that doesn't validate inputs. Watch the
   Executor cycle 1–2 times.
 - **Fan out to 5 Reviewers.** Add cosmetic + comment-quality

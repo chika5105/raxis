@@ -52,7 +52,7 @@ path_allowlist     = ["src/payments/"]
 predecessors         = []
 max_crash_retries     = 2
 max_review_rejections = 1   # low tolerance: payment code quality must be high
-context            = """
+prompt             = """
   Implement the payment processing module in src/payments/.
   Requirements are in docs/specs/payments-spec.md (read-only, already in the repo).
   Include: charge(), refund(), webhook handler, and full test coverage.
@@ -68,7 +68,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/payments/"]
 predecessors         = ["payments_implementer"]    # same dependency → activates in parallel
-context            = """
+prompt             = """
   Review src/payments/ for security issues:
   - Is card data ever logged or written to disk?
   - Are webhook signatures verified before processing?
@@ -83,7 +83,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/payments/"]
 predecessors         = ["payments_implementer"]    # same dependency → also activates in parallel
-context            = """
+prompt             = """
   Review src/payments/ for functional correctness:
   - Does charge() handle declined cards correctly?
   - Does refund() correctly handle partial refunds?
@@ -98,7 +98,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/payments/"]
 predecessors         = ["payments_implementer"]    # all three share the same predecessors
-context            = """
+prompt             = """
   Review src/payments/ for code quality:
   - Are public functions documented with rustdoc?
   - Is error handling using the project's Result<T, PaymentError> conventions?

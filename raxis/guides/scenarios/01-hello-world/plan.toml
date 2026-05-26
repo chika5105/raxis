@@ -34,7 +34,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["./"]
 predecessors       = []
-description = """
+description        = "Greeter"
+prompt             = """
   Create a file called HELLO.md at the repository root containing a
   cheerful one-line greeting. Commit it with the message "scenario 01:
   hello world". Then submit CompleteTask. Do not modify any other

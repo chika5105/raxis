@@ -19,7 +19,8 @@ target_ref = "refs/heads/main"
 [[tasks]]
 task_id            = "plan_migration"
 name               = "Author the migration and its rollback"
-description        = """
+description        = "Author the migration and its rollback"
+prompt             = """
 Author both the forward migration and a rollback for @@INITIATIVE_NAME@@:
 the schema/config diff, the data-backfill script (if any), and the inverse
 operations needed to restore the pre-migration state. Do not apply either;
@@ -31,7 +32,8 @@ clone_strategy     = "blobless"
 [[tasks]]
 task_id            = "migrate"
 name               = "Apply the migration"
-description        = """
+description        = "Apply the migration"
+prompt             = """
 Apply the migration authored in `plan_migration` against the working
 environment. Stop on the first error and surface a structured report; do
 not auto-rollback (the operator decides). Do not touch the rollback script
@@ -43,7 +45,8 @@ predecessors       = ["plan_migration"]
 [[tasks]]
 task_id            = "rollback_test"
 name               = "Verify the rollback plan succeeds"
-description        = """
+description        = "Verify the rollback plan succeeds"
+prompt             = """
 Run the rollback script authored in `plan_migration` against a snapshot of
 the post-migration state. Verify the resulting state matches the
 pre-migration baseline byte-for-byte; report any divergence as a blocking

@@ -15,7 +15,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
 predecessors       = []
-description = """
+description        = "Draft"
+prompt             = """
   Write docs/spec.md as a rough first draft of an API spec for a
   small "key-value cache" library. Cover: get(key), put(key, value,
   ttl), delete(key). 200-300 words. Commit and submit CompleteTask.
@@ -27,7 +28,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
 predecessors       = ["draft"]
-description = """
+description        = "Refine"
+prompt             = """
   Refine docs/spec.md by adding: section headings, a code-example
   block showing each function call, and a separate "Errors" section.
   Preserve the original semantic intent; do not rewrite from scratch.
@@ -39,7 +41,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
 predecessors       = ["refine"]
-description = """
+description        = "Polish"
+prompt             = """
   Polish docs/spec.md: fix grammar, tighten word choice, ensure each
   paragraph has a topic sentence. Do not change the structure or
   examples. Commit and submit CompleteTask.

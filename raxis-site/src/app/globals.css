@@ -220,6 +220,23 @@ section[id] {
   border-color: var(--rule-strong);
 }
 
+.field {
+  width: 100%;
+  min-height: 40px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  color: var(--fg);
+  padding: 10px 12px;
+  font: inherit;
+  line-height: 1.4;
+  outline: none;
+}
+.field:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 /* ──────────────────────────────────────────────────────────
  *  Documentation prose (slightly larger to match body scale)
  * ────────────────────────────────────────────────────────── */

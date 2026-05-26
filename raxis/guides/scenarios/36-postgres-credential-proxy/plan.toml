@@ -13,7 +13,8 @@ task_id            = "query-users"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-description = """
+description = "db_main"
+prompt             = """
   Use psql connecting via the credential proxy to query SELECT 1 +
   1. Print the result. Do NOT log or write the connection string.
 """

@@ -731,69 +731,104 @@ function IntegrationSnapshotSummary({
   snapshot: WorktreeSnapshotView;
 }) {
   const clean = !snapshot.porcelain_blob_sha256;
+  const [activeBlob, setActiveBlob] = useState<
+    "diff" | "log" | "porcelain" | null
+  >(null);
   return (
-    <div className="mt-3 grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3 items-start">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-        <MergeField label="Trigger">
-          <span className="badge bg-accent-muted/40 border-accent text-accent">
-            {snapshot.trigger}
-          </span>
-        </MergeField>
-        <MergeField label="Range">
-          <span className="font-mono text-ink-muted">
-            {shortSha(snapshot.base_sha)} to {shortSha(snapshot.head_sha)}
-          </span>
-        </MergeField>
-        <MergeField label="Commits">{snapshot.commit_count}</MergeField>
-        <MergeField label="Working tree">
-          <span
-            className={clsx(
-              "badge",
-              clean
-                ? "bg-ok-muted/20 border-ok text-ok"
-                : "bg-warn-muted/20 border-warn text-warn",
-            )}
-          >
-            {clean ? "Clean" : "Dirty snapshot"}
-          </span>
-        </MergeField>
+    <div className="mt-3 space-y-3">
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3 items-start">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+          <MergeField label="Trigger">
+            <span className="badge bg-accent-muted/40 border-accent text-accent">
+              {snapshot.trigger}
+            </span>
+          </MergeField>
+          <MergeField label="Range">
+            <span className="font-mono text-ink-muted">
+              {shortSha(snapshot.base_sha)} to {shortSha(snapshot.head_sha)}
+            </span>
+          </MergeField>
+          <MergeField label="Commits">{snapshot.commit_count}</MergeField>
+          <MergeField label="Working tree">
+            <span
+              className={clsx(
+                "badge",
+                clean
+                  ? "bg-ok-muted/20 border-ok text-ok"
+                  : "bg-warn-muted/20 border-warn text-warn",
+              )}
+            >
+              {clean ? "Clean" : "Dirty snapshot"}
+            </span>
+          </MergeField>
+        </div>
+        <div className="flex items-center gap-2 text-xs flex-wrap justify-start lg:justify-end">
+          {snapshot.diff_blob_sha256 && (
+            <button
+              type="button"
+              className={clsx("btn py-1", activeBlob === "diff" && "active")}
+              onClick={() => setActiveBlob(activeBlob === "diff" ? null : "diff")}
+            >
+              Diff
+            </button>
+          )}
+          {snapshot.log_blob_sha256 && (
+            <button
+              type="button"
+              className={clsx("btn py-1", activeBlob === "log" && "active")}
+              onClick={() => setActiveBlob(activeBlob === "log" ? null : "log")}
+            >
+              Log
+            </button>
+          )}
+          {snapshot.porcelain_blob_sha256 && (
+            <button
+              type="button"
+              className={clsx(
+                "btn py-1",
+                activeBlob === "porcelain" && "active",
+              )}
+              onClick={() =>
+                setActiveBlob(activeBlob === "porcelain" ? null : "porcelain")
+              }
+            >
+              Status
+            </button>
+          )}
+        </div>
       </div>
-      <div className="flex items-center gap-2 text-xs flex-wrap justify-start lg:justify-end">
-        {snapshot.diff_blob_sha256 && (
-          <a
-            className="btn py-1"
-            href={dashboardApi.worktreeSnapshots.blobUrl(
-              snapshot.snapshot_id,
-              "diff",
-            )}
-          >
-            Diff
-          </a>
-        )}
-        {snapshot.log_blob_sha256 && (
-          <a
-            className="btn py-1"
-            href={dashboardApi.worktreeSnapshots.blobUrl(
-              snapshot.snapshot_id,
-              "log",
-            )}
-          >
-            Log
-          </a>
-        )}
-        {snapshot.porcelain_blob_sha256 && (
-          <a
-            className="btn py-1"
-            href={dashboardApi.worktreeSnapshots.blobUrl(
-              snapshot.snapshot_id,
-              "porcelain",
-            )}
-          >
-            Status
-          </a>
-        )}
-      </div>
+      {activeBlob && (
+        <SnapshotBlobPanel snapshotId={snapshot.snapshot_id} kind={activeBlob} />
+      )}
     </div>
+  );
+}
+
+function SnapshotBlobPanel({
+  snapshotId,
+  kind,
+}: {
+  snapshotId: string;
+  kind: "diff" | "log" | "tree" | "porcelain";
+}) {
+  const q = useQuery({
+    queryKey: ["integration-snapshot", snapshotId, "blob", kind],
+    queryFn: ({ signal }) =>
+      dashboardApi.worktreeSnapshots.fetchBlob(snapshotId, kind, signal),
+    staleTime: Infinity,
+    gcTime: 5 * 60_000,
+  });
+
+  if (q.isPending) {
+    return <div className="text-xs text-ink-subtle">Loading {kind}…</div>;
+  }
+  if (q.error) {
+    return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
+  }
+  return (
+    <pre className="text-[11px] font-mono text-ink-muted overflow-x-auto scroll-thin max-h-96 bg-panel border border-edge rounded p-2">
+      {q.data}
+    </pre>
   );
 }
 
