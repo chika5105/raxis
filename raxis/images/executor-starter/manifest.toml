@@ -15,7 +15,7 @@
 # operator policy-pins.
 
 role              = "ExecutorStarter"
-kernel_version    = "0.2.0"
+kernel_version    = "0.2.1"
 
 source_date_epoch = 1700000000
 erofs_version     = "1.7.1"

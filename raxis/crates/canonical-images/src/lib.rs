@@ -979,7 +979,7 @@ mod tests {
         }
     }
 
-    /// Manifest declares kernel 0.1.0 but the running kernel is 0.2.0 →
+    /// Manifest declares kernel 0.1.0 but the running kernel is 0.2.1 →
     /// version mismatch. Pins INV-PLANNER-HARNESS-02 / -05's
     /// kernel-version-locking.
     #[test]
@@ -993,7 +993,7 @@ mod tests {
             img_file.path(),
             manifest_file.path(),
             CanonicalImageKind::Reviewer,
-            "0.2.0",
+            "0.2.1",
             &vk,
         )
         .unwrap_err();
@@ -1002,7 +1002,7 @@ mod tests {
                 found, expected, ..
             } => {
                 assert_eq!(found, "0.1.0");
-                assert_eq!(expected, "0.2.0");
+                assert_eq!(expected, "0.2.1");
             }
             other => panic!("expected ManifestKernelVersionMismatch, got {other:?}"),
         }

@@ -1225,7 +1225,7 @@ mode = 493
             let err = CanonicalImageError::ManifestKernelVersionMismatch {
                 path: "/tmp/x.manifest.toml".to_owned(),
                 found: "0.1.0".to_owned(),
-                expected: "0.2.0".to_owned(),
+                expected: "0.2.1".to_owned(),
             };
             let classified = classify_canonical_image_violation(&err, *kind);
             assert_eq!(
