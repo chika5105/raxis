@@ -31,6 +31,7 @@
 
 pub mod circuit_breaker;
 pub mod classify;
+pub mod fd_limit;
 pub mod log;
 pub mod sentinel;
 pub mod signal;
@@ -38,6 +39,7 @@ pub mod supervisor;
 
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerState};
 pub use classify::{classify_exit_status, Outcome};
+pub use fd_limit::{raise_nofile_soft_limit, NofileRaiseOutcome};
 pub use sentinel::{Sentinel, SentinelStatus, SentinelSubState};
 pub use supervisor::{SupervisorConfig, SupervisorRunReport};
 
@@ -77,3 +79,10 @@ pub const ENV_KERNEL_BINARY: &str = "RAXIS_SUPERVISOR_KERNEL_BINARY";
 /// spawning the kernel. This keeps `brew services start raxis` from
 /// turning a pre-genesis data dir into a crash loop.
 pub const ENV_REQUIRE_INITIALIZED_DATA_DIR: &str = "RAXIS_SUPERVISOR_REQUIRE_INITIALIZED_DATA_DIR";
+
+/// Env var operator override for the supervisor's pre-kernel
+/// `RLIMIT_NOFILE` soft-limit raise. Defaults to the kernel's
+/// documented packaged-service floor.
+pub const ENV_MIN_NOFILE: &str = "RAXIS_SUPERVISOR_MIN_NOFILE";
+
+pub const DEFAULT_MIN_NOFILE: u64 = 4096;

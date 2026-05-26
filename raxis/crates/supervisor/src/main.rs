@@ -43,8 +43,9 @@ use raxis_supervisor::sentinel::{
 use raxis_supervisor::signal::{install_handlers, IntentionalShutdownFlag};
 use raxis_supervisor::supervisor::{run_supervisor_loop, FinalOutcome, SupervisorConfig};
 use raxis_supervisor::{
-    DEFAULT_MAX_ATTEMPTS, DEFAULT_RESTART_WINDOW_SECS, DEFAULT_SHUTDOWN_GRACE_SECS,
-    ENV_KERNEL_BINARY, ENV_OPT_IN, ENV_REQUIRE_INITIALIZED_DATA_DIR, ENV_SHUTDOWN_GRACE_SECS,
+    raise_nofile_soft_limit, DEFAULT_MAX_ATTEMPTS, DEFAULT_MIN_NOFILE, DEFAULT_RESTART_WINDOW_SECS,
+    DEFAULT_SHUTDOWN_GRACE_SECS, ENV_KERNEL_BINARY, ENV_MIN_NOFILE, ENV_OPT_IN,
+    ENV_REQUIRE_INITIALIZED_DATA_DIR, ENV_SHUTDOWN_GRACE_SECS,
 };
 
 fn print_usage_and_exit(code: i32) -> ! {
@@ -69,6 +70,7 @@ fn print_usage_and_exit(code: i32) -> ! {
          ENVIRONMENT:\n  \
          RAXIS_SUPERVISOR_AUTO_RESTART=1   Opt-in to auto-restart\n  \
          RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS  Override grace period (default {DEFAULT_SHUTDOWN_GRACE_SECS}s)\n  \
+         RAXIS_SUPERVISOR_MIN_NOFILE       Override pre-kernel FD soft-limit floor (default {DEFAULT_MIN_NOFILE})\n  \
          RAXIS_SUPERVISOR_REQUIRE_INITIALIZED_DATA_DIR=1  Wait for genesis artifacts before spawning\n  \
          RAXIS_SUPERVISOR_KERNEL_BINARY    Override kernel binary path\n\
          "
@@ -191,6 +193,8 @@ async fn cmd_start(
     data_dir: &std::path::Path,
     kernel_binary: &std::path::Path,
 ) -> i32 {
+    prepare_nofile_limit();
+
     // `INV-SUPERVISOR-OPT-IN-01`: when the operator hasn't opted
     // in, the supervisor degenerates to a one-shot wrapper that
     // exec's the kernel and forwards its exit code. This is the
@@ -270,6 +274,52 @@ async fn cmd_start(
                 &serde_json::json!({ "reason": e.to_string() }),
             );
             1
+        }
+    }
+}
+
+fn configured_min_nofile() -> u64 {
+    std::env::var(ENV_MIN_NOFILE)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_MIN_NOFILE)
+}
+
+fn prepare_nofile_limit() {
+    let required = configured_min_nofile();
+    match raise_nofile_soft_limit(required) {
+        Ok(outcome) if outcome.changed() => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "level": "info",
+                    "event": "supervisor_nofile_limit_raised",
+                    "outcome": format!("{outcome:?}"),
+                })
+            );
+        }
+        Ok(outcome) if outcome.still_below_required() => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "level": "warn",
+                    "event": "supervisor_nofile_limit_below_required",
+                    "outcome": format!("{outcome:?}"),
+                })
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "level": "warn",
+                    "event": "supervisor_nofile_limit_raise_failed",
+                    "required": required,
+                    "reason": e.to_string(),
+                })
+            );
         }
     }
 }

@@ -50,7 +50,7 @@ anyhow      = { workspace = true }
 # line which keeps a small feature surface (only `signal` +
 # `process` here).
 [target.'cfg(unix)'.dependencies]
-nix         = { version = "0.27", default-features = false, features = ["signal", "process", "fs"] }
+nix         = { version = "0.27", default-features = false, features = ["signal", "process", "fs", "resource"] }
 libc        = { workspace = true }
 
 [dev-dependencies]

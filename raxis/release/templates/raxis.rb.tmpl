@@ -79,7 +79,7 @@ class Raxis < Formula
   end
 
   service do
-    run ["/bin/sh", "-c", "ulimit -n 4096 && exec #{opt_bin}/raxis-supervisor start"]
+    run [opt_bin/"raxis-supervisor", "start"]
     keep_alive true
     environment_variables PATH: std_service_path_env,
                           RAXIS_INSTALL_DIR: opt_pkgshare.to_s,
@@ -114,8 +114,8 @@ class Raxis < Formula
 
       The service launches raxis-supervisor, which launches and
       supervises raxis-kernel.
-      It raises the launchd file-descriptor soft limit to 4096 before
-      starting the kernel.
+      raxis-supervisor raises its own file-descriptor soft limit before
+      starting raxis-kernel.
 
       Fast setup:
         #{opt_pkgshare}/install.sh

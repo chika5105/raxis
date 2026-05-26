@@ -53,6 +53,16 @@ die() {
     exit 1
 }
 
+service_running() {
+    brew services list | awk '$1=="raxis" && $2=="started" { found=1 } END { exit found ? 0 : 1 }'
+}
+
+kickstart_launchd_service() {
+    [ "$(uname -s)" = "Darwin" ] || return 1
+    command -v launchctl >/dev/null 2>&1 || return 1
+    launchctl kickstart -kp "gui/$(id -u)/homebrew.mxcl.raxis" >/dev/null 2>&1
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --data-dir)
@@ -314,6 +324,11 @@ if [ "$START_SERVICE" -eq 1 ]; then
     raxis-supervisor reset-circuit-breaker --data-dir "$DATA_DIR" --yes >/dev/null 2>&1 || true
     brew services restart raxis || brew services start raxis
     sleep 3
+    if ! service_running; then
+        warn "brew services loaded RAXIS but did not report it running; asking launchd to start it now"
+        kickstart_launchd_service || true
+        sleep 3
+    fi
     brew services list | awk 'NR==1 || $1=="raxis"'
     raxis-supervisor status --data-dir "$DATA_DIR" || true
     raxis doctor || true

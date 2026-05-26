@@ -128,7 +128,7 @@ if grep -Eq '@@[A-Z_]+@@' "${installed_formula}"; then
 fi
 
 required_service_snippets=(
-    'run ["/bin/sh", "-c", "ulimit -n 4096 && exec #{opt_bin}/raxis-supervisor start"]'
+    'run [opt_bin/"raxis-supervisor", "start"]'
     'environment_variables PATH: std_service_path_env,'
     'RAXIS_DATA_DIR: (var/"lib/raxis").to_s,'
     'RAXIS_SUPERVISOR_REQUIRE_INITIALIZED_DATA_DIR: "1",'
