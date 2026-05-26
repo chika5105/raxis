@@ -5,11 +5,11 @@
 [meta]
 epoch         = 1
 signed_by     = "f8dda84490292405b8790e813205320d"
-signed_at     = 1779789339
+signed_at     = 1779809040
 
 [authority]
-authority_pubkey = "e4ce278946f2abe98ededd44f10aa022e04a8407f86f098fb50785199ba07aa9"
-quality_pubkey   = "e9581f7f72ac249fe88561f47e6220f998208e82a05c4245ca05756fa8e9f3a4"
+authority_pubkey = "e78923524f7362dbd9194192253c20630779d9a021e460fd7c7e2c3af3d67003"
+quality_pubkey   = "5cb0ed4460df74835874ff0e58c6b1f9ca84d4e06c95ab9a377ef8abc0377d2b"
 
 [escalation_policy]
 timeout_secs         = 3600
@@ -21,7 +21,7 @@ quarantine_threshold = 3
 default_ttl_secs       = 86400
 max_ttl_secs           = 604800
 # Placeholder — REPLACE before creating sessions. See cli-ceremony.md §4.2.
-allowed_worktree_roots = ["/var/folders/5k/xmsl1wbx4gzgphrgtbqhvgkc0000gn/T/.tmpb0Qxa8/worktrees"]
+allowed_worktree_roots = ["/var/folders/5k/xmsl1wbx4gzgphrgtbqhvgkc0000gn/T/.tmpHz376s/worktrees"]
 
 [delegations]
 max_ttl_secs = 86400
@@ -52,12 +52,12 @@ permitted_ops      = [
 kind = "Standard"
 display_name = "realism-e2e-operator"
 pubkey_hex = "e72c28fe718e3a30afc47438da779d508d2dad5a265fafeb4f377e1d57fb098c"
-not_before = 1779702938
-not_after = 1811325338
+not_before = 1779722640
+not_after = 1811345040
 warn_before_expiry_days = 30
 grace_period_days = 7
 permitted_ops = ["CreateInitiative", "ApprovePlan", "AbortInitiative", "RotateEpoch", "OperatorCertInstall"]
-self_sig_hex = "9ee0e18689e5ef1919e63b2885c9c9f8a715ad8b2eaadf0a925e5a8fdd78525a54929ab5b5e9bd462d1dfb34a9ae0e83a151a2252d78e880c7f4fce433ffa604"
+self_sig_hex = "aca22432c6b8f995448a3788d78b74dad79aa6b86573f456bb0a8b028dd0b4f2f58377af9772f84522dd10994ab2bb74f02c9221ebcd2bc5c60e7741e6c75f05"
 
 [[lanes]]
 lane_id              = "default"
