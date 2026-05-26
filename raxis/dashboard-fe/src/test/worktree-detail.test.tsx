@@ -1,7 +1,8 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { Route, Routes } from "react-router-dom";
+import { TestMemoryRouter } from "@/test/router";
 
 import { dashboardApi } from "@/api/client";
 import { WorktreeDetailPage } from "@/pages/WorktreeDetail";
@@ -20,11 +21,11 @@ function renderWithProviders() {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/git/session-a"]}>
+      <TestMemoryRouter initialEntries={["/git/session-a"]}>
         <Routes>
           <Route path="/git/:name" element={<WorktreeDetailPage />} />
         </Routes>
-      </MemoryRouter>
+      </TestMemoryRouter>
     </QueryClientProvider>,
   );
 }

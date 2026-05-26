@@ -873,6 +873,25 @@ export interface UpdatePolicyResponse {
   advancement: PolicyAdvancement;
 }
 
+export type BuilderValidationSeverity = "error" | "warning" | "info";
+
+export interface BuilderValidationIssue {
+  code: string;
+  severity: BuilderValidationSeverity;
+  message: string;
+  remediation: string;
+}
+
+export interface BuilderValidationResponse {
+  artifact_kind: "plan" | "policy" | string;
+  authority: "kernel" | string;
+  policy_epoch: number;
+  resolved_target_ref?: string | null;
+  ok: boolean;
+  issues: BuilderValidationIssue[];
+  next_steps: string[];
+}
+
 export interface HealthCheck {
   id: string;
   status: string;

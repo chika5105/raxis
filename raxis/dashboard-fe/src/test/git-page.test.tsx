@@ -2,7 +2,7 @@ import React from "react";
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { TestMemoryRouter } from "@/test/router";
 
 import { dashboardApi } from "@/api/client";
 import { GitPage } from "@/pages/Git";
@@ -21,7 +21,7 @@ function renderWithProviders(ui: React.ReactElement) {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>{ui}</MemoryRouter>
+      <TestMemoryRouter>{ui}</TestMemoryRouter>
     </QueryClientProvider>,
   );
 }

@@ -23,7 +23,8 @@ import { describe, expect, it, vi } from "vitest";
 import dagre from "dagre";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { Route, Routes } from "react-router-dom";
+import { TestMemoryRouter } from "@/test/router";
 
 import { dashboardApi } from "@/api/client";
 import { InitiativeDagPage } from "@/pages/InitiativeDag";
@@ -107,14 +108,14 @@ function renderPage(id: string) {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={[`/initiatives/${id}/dag`]}>
+      <TestMemoryRouter initialEntries={[`/initiatives/${id}/dag`]}>
         <Routes>
           <Route
             path="/initiatives/:id/dag"
             element={<InitiativeDagPage />}
           />
         </Routes>
-      </MemoryRouter>
+      </TestMemoryRouter>
     </QueryClientProvider>,
   );
 }

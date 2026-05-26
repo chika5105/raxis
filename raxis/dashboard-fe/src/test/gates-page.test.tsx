@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { render, screen, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { TestMemoryRouter } from "@/test/router";
 
 import {
   GateStatTableRow,
@@ -235,13 +235,13 @@ const SAMPLE_WITNESS: WitnessView = {
 describe("<WitnessTimelineRow>", () => {
   function renderRow(w: WitnessView) {
     return render(
-      <MemoryRouter>
+      <TestMemoryRouter>
         <table>
           <tbody>
             <WitnessTimelineRow w={w} />
           </tbody>
         </table>
-      </MemoryRouter>,
+      </TestMemoryRouter>,
     );
   }
 

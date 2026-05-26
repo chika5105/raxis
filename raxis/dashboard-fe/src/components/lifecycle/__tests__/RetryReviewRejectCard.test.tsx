@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { TestMemoryRouter } from "@/test/router";
 
 import { RetryReviewRejectCard } from "../RetryReviewRejectCard";
 import type { LifecycleAnnotation } from "@/types/api";
@@ -40,9 +40,9 @@ const FIXTURE: Extract<
 describe("<RetryReviewRejectCard>", () => {
   it("renders budget counters", () => {
     render(
-      <MemoryRouter>
+      <TestMemoryRouter>
         <RetryReviewRejectCard a={FIXTURE} />
-      </MemoryRouter>,
+      </TestMemoryRouter>,
     );
     // Reviewer-reject budget visible.
     expect(screen.getByText(/review 2\/3/)).toBeInTheDocument();
@@ -52,9 +52,9 @@ describe("<RetryReviewRejectCard>", () => {
 
   it("links to the triggering reviewer task", () => {
     render(
-      <MemoryRouter>
+      <TestMemoryRouter>
         <RetryReviewRejectCard a={FIXTURE} />
-      </MemoryRouter>,
+      </TestMemoryRouter>,
     );
     const link = screen.getByRole("link", { name: /review-lint-defect-rust/ });
     expect(link.getAttribute("href")).toBe("/tasks/review-lint-defect-rust");
@@ -62,9 +62,9 @@ describe("<RetryReviewRejectCard>", () => {
 
   it("shows the first 3 critique lines by default and expands on click", () => {
     render(
-      <MemoryRouter>
+      <TestMemoryRouter>
         <RetryReviewRejectCard a={FIXTURE} />
-      </MemoryRouter>,
+      </TestMemoryRouter>,
     );
     const critique = screen.getByTestId(
       "lifecycle-retry-review-reject-critique",
@@ -81,9 +81,9 @@ describe("<RetryReviewRejectCard>", () => {
 
   it("renders prior→new sha pairs", () => {
     render(
-      <MemoryRouter>
+      <TestMemoryRouter>
         <RetryReviewRejectCard a={FIXTURE} />
-      </MemoryRouter>,
+      </TestMemoryRouter>,
     );
     // shortSha truncates to 8 chars.
     expect(screen.getByText("deadbeef")).toBeInTheDocument();
@@ -92,9 +92,9 @@ describe("<RetryReviewRejectCard>", () => {
 
   it("renders the activation id pair", () => {
     render(
-      <MemoryRouter>
+      <TestMemoryRouter>
         <RetryReviewRejectCard a={FIXTURE} />
-      </MemoryRouter>,
+      </TestMemoryRouter>,
     );
     expect(screen.getByText("act_001")).toBeInTheDocument();
     expect(screen.getByText("act_002")).toBeInTheDocument();

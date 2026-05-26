@@ -33,6 +33,7 @@ const NAV: NavSection[] = [
     label: "Overview",
     items: [
       { to: "/", label: "Home", glyph: "H" },
+      { to: "/glossary", label: "Glossary", glyph: "?" },
       { to: "/health", label: "Health", glyph: "+" },
       { to: "/inbox", label: "Inbox", glyph: "I" },
       { to: "/notifications", label: "Notifications", glyph: "N" },
@@ -61,7 +62,7 @@ const NAV: NavSection[] = [
   {
     label: "System",
     items: [
-      { to: "/policy", label: "Policy", glyph: "P" },
+      { to: "/policy", label: "Policy Builder", glyph: "P" },
       // Visible to every authenticated operator (read or higher) —
       // `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`
       // requires that the system-credential viewer surfaces every
@@ -322,7 +323,7 @@ export function Shell({ children }: ShellProps) {
           data-testid="dashboard-scroll-viewport"
         >
           <div
-            className="px-5 py-5 min-w-[1600px] max-w-[1600px] mx-auto w-full space-y-3"
+            className="w-full min-w-0 max-w-[1440px] mx-auto px-4 py-4 sm:px-5 sm:py-5 space-y-3"
             data-testid="dashboard-route-frame"
           >
             {/*
@@ -350,6 +351,7 @@ export function Shell({ children }: ShellProps) {
 // Friendly labels for top-level route segments. Anything not
 // in this map is rendered as-is (e.g. raw IDs / hashes).
 const SEGMENT_LABELS: Record<string, string> = {
+  glossary: "Glossary",
   health: "Health",
   inbox: "Inbox",
   notifications: "Notifications",
@@ -361,7 +363,7 @@ const SEGMENT_LABELS: Record<string, string> = {
   audit: "Audit",
   gates: "Gates",
   git: "Git Worktrees",
-  policy: "Policy",
+  policy: "Policy Builder",
   system: "System",
   credentials: "Credentials",
 };

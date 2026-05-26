@@ -8,6 +8,7 @@ import { AuditPage } from "@/pages/Audit";
 import { EscalationsPage } from "@/pages/Escalations";
 import { GatesPage } from "@/pages/Gates";
 import { GitPage } from "@/pages/Git";
+import { GlossaryPage } from "@/pages/Glossary";
 import { HealthPage } from "@/pages/Health";
 import { InboxPage } from "@/pages/Inbox";
 import { InitiativeDagPage } from "@/pages/InitiativeDag";
@@ -64,6 +65,7 @@ export function App() {
                 <Shell>
                   <Routes>
                     <Route path="/" element={<OverviewPage />} />
+                    <Route path="/glossary" element={<GlossaryPage />} />
                     <Route path="/health" element={<HealthPage />} />
                     <Route path="/inbox" element={<InboxPage />} />
                     <Route path="/notifications" element={<NotificationsPage />} />

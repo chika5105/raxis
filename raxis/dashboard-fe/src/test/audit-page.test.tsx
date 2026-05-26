@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { TestMemoryRouter } from "@/test/router";
 
 import { dashboardApi } from "@/api/client";
 import { AuditPage } from "@/pages/Audit";
@@ -19,7 +19,7 @@ function renderAudit(initialEntry: string) {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter
+      <TestMemoryRouter
         initialEntries={[initialEntry]}
         future={{
           v7_startTransition: true,
@@ -27,7 +27,7 @@ function renderAudit(initialEntry: string) {
         }}
       >
         <AuditPage />
-      </MemoryRouter>
+      </TestMemoryRouter>
     </QueryClientProvider>,
   );
 }

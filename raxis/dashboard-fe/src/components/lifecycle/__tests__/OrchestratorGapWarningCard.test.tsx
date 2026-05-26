@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { TestMemoryRouter } from "@/test/router";
 
 import { OrchestratorGapWarningCard } from "../OrchestratorGapWarningCard";
 import type { LifecycleAnnotation } from "@/types/api";
@@ -25,9 +25,9 @@ const GAP: Extract<LifecycleAnnotation, { kind: "orchestrator_gap" }> = {
 describe("<OrchestratorGapWarningCard>", () => {
   it("renders the warning badge with rounded-minute label", () => {
     render(
-      <MemoryRouter>
+      <TestMemoryRouter>
         <OrchestratorGapWarningCard a={GAP} />
-      </MemoryRouter>,
+      </TestMemoryRouter>,
     );
     expect(screen.getByText("Orchestrator gap")).toBeInTheDocument();
     expect(screen.getByText(/stalled 67min/)).toBeInTheDocument();
@@ -35,9 +35,9 @@ describe("<OrchestratorGapWarningCard>", () => {
 
   it("uses warn-tinted styling", () => {
     render(
-      <MemoryRouter>
+      <TestMemoryRouter>
         <OrchestratorGapWarningCard a={GAP} />
-      </MemoryRouter>,
+      </TestMemoryRouter>,
     );
     const card = screen.getByTestId("lifecycle-orchestrator-gap");
     expect(card.className).toMatch(/border-warn/);
@@ -46,9 +46,9 @@ describe("<OrchestratorGapWarningCard>", () => {
 
   it("links the task id and lists every predecessor", () => {
     render(
-      <MemoryRouter>
+      <TestMemoryRouter>
         <OrchestratorGapWarningCard a={GAP} />
-      </MemoryRouter>,
+      </TestMemoryRouter>,
     );
     const link = screen.getByRole("link", {
       name: /review-lint-defect-rust/,
@@ -60,14 +60,14 @@ describe("<OrchestratorGapWarningCard>", () => {
 
   it("falls back to seconds when wait < 1 minute", () => {
     render(
-      <MemoryRouter>
+      <TestMemoryRouter>
         <OrchestratorGapWarningCard
           a={{
             ...GAP,
             wait_seconds: 45,
           }}
         />
-      </MemoryRouter>,
+      </TestMemoryRouter>,
     );
     expect(screen.getByText(/stalled 45s/)).toBeInTheDocument();
   });

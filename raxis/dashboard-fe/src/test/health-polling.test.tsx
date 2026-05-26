@@ -22,9 +22,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { TestMemoryRouter } from "@/test/router";
 
 import { dashboardApi } from "@/api/client";
 import { HealthPage } from "@/pages/Health";
@@ -66,16 +66,32 @@ function renderPage() {
   });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
+      <TestMemoryRouter>
         <HealthPage />
-      </MemoryRouter>
+      </TestMemoryRouter>
     </QueryClientProvider>,
   );
 }
 
+async function flushInitialRender() {
+  for (let i = 0; i < 5; i += 1) {
+    await act(async () => {
+      await Promise.resolve();
+      vi.advanceTimersByTime(0);
+    });
+  }
+}
+
+async function advancePollInterval() {
+  await act(async () => {
+    vi.advanceTimersByTime(5_100);
+    await Promise.resolve();
+  });
+}
+
 describe("<HealthPage> polling (INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01)", () => {
   beforeEach(() => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.useFakeTimers();
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -85,9 +101,10 @@ describe("<HealthPage> polling (INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01)", () =>
   it("renders the freshness pill so the operator can see polling is alive", async () => {
     mockHealthOnce();
     renderPage();
+    await flushInitialRender();
     // Initial fetch + first render — the pill is mounted as
     // soon as the query resolves.
-    const pill = await screen.findByTestId("health-freshness");
+    const pill = screen.getByTestId("health-freshness");
     expect(pill).toBeInTheDocument();
     // Refreshing flash (visible while the initial fetch is
     // still in flight) OR the post-fetch "Updated 0s ago"
@@ -98,34 +115,32 @@ describe("<HealthPage> polling (INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01)", () =>
   it("refetches /api/health on the 5s polling interval", async () => {
     const { healthSpy } = mockHealthOnce();
     renderPage();
+    await flushInitialRender();
     // First fetch.
-    await waitFor(() => expect(healthSpy).toHaveBeenCalledTimes(1));
+    expect(healthSpy).toHaveBeenCalledTimes(1);
     // Advance the fake timers past the 5 s polling cadence.
     // `vi.advanceTimersByTimeAsync` flushes both the
     // setInterval and any pending microtasks the refetch
     // chains.
-    await vi.advanceTimersByTimeAsync(5_100);
-    await waitFor(() => expect(healthSpy).toHaveBeenCalledTimes(2));
+    await advancePollInterval();
+    expect(healthSpy).toHaveBeenCalledTimes(2);
     // Advance another full interval — a third call MUST
     // fire, ruling out a "first refetch only" regression.
-    await vi.advanceTimersByTimeAsync(5_100);
-    await waitFor(() => expect(healthSpy).toHaveBeenCalledTimes(3));
+    await advancePollInterval();
+    expect(healthSpy).toHaveBeenCalledTimes(3);
   });
 
   it("displays incrementing policy_epoch across polls (no stuck-reference bug)", async () => {
     const { healthSpy } = mockHealthOnce();
     renderPage();
+    await flushInitialRender();
     // After first fetch the displayed epoch is `#1`.
-    await waitFor(() => {
-      expect(screen.getByText("#1")).toBeInTheDocument();
-    });
-    await vi.advanceTimersByTimeAsync(5_100);
+    expect(screen.getByText("#1")).toBeInTheDocument();
+    await advancePollInterval();
     // After second fetch the displayed epoch advances to `#2`
     // — this catches a "structural sharing kept the same
     // object reference and React skipped re-render" bug.
-    await waitFor(() => {
-      expect(screen.getByText("#2")).toBeInTheDocument();
-    });
+    expect(screen.getByText("#2")).toBeInTheDocument();
     // The mock was driven by the polling loop, not by an
     // explicit refetch button — assert the recording spy
     // shows ≥2 calls in case the assertion above passes for

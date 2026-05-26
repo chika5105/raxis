@@ -51,14 +51,15 @@ use raxis_audit_tools::reader::ChainReader;
 use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
-    AuditEntryView, ChainStatusView, CredentialMetadata, CredentialReveal, DagEdge, DashboardData,
-    EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry, InitiativePlanView,
-    InitiativeView, NotificationView, OperatorAuthResolution, OrchestratorGapsResponse,
-    PolicyAdvancement, PolicyOperatorView, PolicySnapshotView, RecentSessionEntry,
-    ReviewerPanelEntry, ReviewerVerdictView, SessionView, SessionVmEnvView, StructuredOutputView,
-    SubsystemDetailRow, SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail,
-    WorktreeDiff, WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree,
-    WorktreeTreeEntry, SUBSYSTEM_CATALOG,
+    AuditEntryView, BuilderValidationIssue, BuilderValidationResponse, BuilderValidationSeverity,
+    ChainStatusView, CredentialMetadata, CredentialReveal, DagEdge, DashboardData, EscalationView,
+    HealthCheck, HealthSnapshot, InitiativeListEntry, InitiativePlanView, InitiativeView,
+    NotificationView, OperatorAuthResolution, OrchestratorGapsResponse, PolicyAdvancement,
+    PolicyOperatorView, PolicySnapshotView, RecentSessionEntry, ReviewerPanelEntry,
+    ReviewerVerdictView, SessionView, SessionVmEnvView, StructuredOutputView, SubsystemDetailRow,
+    SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail, WorktreeDiff,
+    WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry,
+    SUBSYSTEM_CATALOG,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -2143,6 +2144,29 @@ impl DashboardData for KernelDashboardData {
         std::fs::read_to_string(&self.policy_path).map_err(|e| ApiError::Internal {
             log_only: format!("policy.toml read: {e}"),
         })
+    }
+
+    fn validate_plan_builder_toml(
+        &self,
+        _operator_fingerprint: &str,
+        toml: &str,
+    ) -> Result<BuilderValidationResponse, ApiError> {
+        Ok(validate_plan_draft_with_policy(
+            toml,
+            &self.policy.load_full(),
+        ))
+    }
+
+    fn validate_policy_builder_toml(
+        &self,
+        operator_fingerprint: &str,
+        toml: &str,
+    ) -> Result<BuilderValidationResponse, ApiError> {
+        Ok(validate_policy_draft_with_loader(
+            toml,
+            &self.policy.load_full(),
+            operator_fingerprint,
+        ))
     }
 
     fn list_worktrees(&self) -> Result<Vec<WorktreeListEntry>, ApiError> {
@@ -5474,6 +5498,610 @@ fn read_predecessors_by_successor(
         }
     }
     out
+}
+
+#[derive(Debug, Clone)]
+struct PlanDraftTask {
+    id: String,
+    agent_type: String,
+    predecessors: Vec<String>,
+}
+
+fn validate_plan_draft_with_policy(
+    toml_text: &str,
+    policy: &PolicyBundle,
+) -> BuilderValidationResponse {
+    let mut issues = Vec::new();
+    let mut resolved_target_ref = None;
+    let parsed = match toml_text.parse::<toml::Value>() {
+        Ok(value) => value,
+        Err(e) => {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_TOML_PARSE",
+                "plan.toml is not valid TOML.",
+                format!("Fix the TOML syntax error before submitting: {e}"),
+            ));
+            return builder_response("plan", policy.epoch(), None, issues, plan_next_steps());
+        }
+    };
+
+    let Some(root) = parsed.as_table() else {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "PLAN_ROOT",
+            "plan.toml must be a TOML table.",
+            "Use [plan.initiative], [workspace], and one or more [[tasks]] blocks.",
+        ));
+        return builder_response("plan", policy.epoch(), None, issues, plan_next_steps());
+    };
+
+    if table_path(root, &["plan", "initiative"])
+        .and_then(|v| v.as_table())
+        .and_then(|t| string_field(t, "description"))
+        .is_none_or(str::is_empty)
+    {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "PLAN_INITIATIVE_DESCRIPTION",
+            "[plan.initiative].description is required.",
+            "Add a short operator-facing summary of the initiative.",
+        ));
+    }
+
+    let workspace = root.get("workspace").and_then(|v| v.as_table());
+    match workspace.and_then(|t| string_field(t, "name")) {
+        Some(name) if !name.is_empty() => {}
+        _ => issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "PLAN_WORKSPACE_NAME",
+            "[workspace].name is required.",
+            "Name the workspace so operators can recognize it in the dashboard.",
+        )),
+    }
+    match workspace.and_then(|t| string_field(t, "lane_id")) {
+        Some(lane) if policy.lane_config(lane).is_some() => {}
+        Some(lane) if !lane.is_empty() => issues.push(builder_issue(
+            BuilderValidationSeverity::Warning,
+            "PLAN_UNKNOWN_LANE",
+            format!("lane_id {lane:?} is not present in the active policy."),
+            "Add the lane in Policy Builder and advance the policy epoch, or choose an existing lane.",
+        )),
+        _ => issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "PLAN_WORKSPACE_LANE",
+            "[workspace].lane_id is required.",
+            "Use a lane_id from the active policy, commonly \"default\".",
+        )),
+    }
+    if let Some(repository) = workspace.and_then(|t| string_field(t, "repository")) {
+        if !is_path_safe_id(repository) {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_REPOSITORY_ID",
+                "repository must be a path-safe id.",
+                "Use names like main, api, frontend, or docs; avoid slashes and spaces.",
+            ));
+        }
+    }
+    let target_ref = workspace
+        .and_then(|t| string_field(t, "target_ref"))
+        .unwrap_or_else(|| policy.git_default_target_ref());
+    if let Err(reason) = raxis_policy::validate_target_ref_format(target_ref) {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "PLAN_TARGET_REF",
+            format!("target_ref {target_ref:?} is invalid."),
+            format!("Use a branch ref such as refs/heads/main. Details: {reason}"),
+        ));
+    } else {
+        resolved_target_ref = Some(target_ref.to_owned());
+    }
+    if policy.git_target_ref_locked() && target_ref != policy.git_default_target_ref() {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "PLAN_TARGET_REF_LOCKED",
+            "The active policy locks target_ref overrides.",
+            format!(
+                "Use {} or advance policy with [git].target_ref_locked = false.",
+                policy.git_default_target_ref()
+            ),
+        ));
+    }
+
+    let tasks = root.get("tasks").and_then(|v| v.as_array());
+    let Some(tasks) = tasks.filter(|arr| !arr.is_empty()) else {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "PLAN_TASKS_REQUIRED",
+            "At least one [[tasks]] block is required.",
+            "Add an Executor task, or an Executor plus Reviewer pair.",
+        ));
+        return builder_response(
+            "plan",
+            policy.epoch(),
+            resolved_target_ref,
+            issues,
+            plan_next_steps(),
+        );
+    };
+
+    let mut task_drafts = Vec::with_capacity(tasks.len());
+    let mut seen = std::collections::HashSet::new();
+    for (idx, task_value) in tasks.iter().enumerate() {
+        let Some(task) = task_value.as_table() else {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_TASK_TABLE",
+                format!("tasks[{idx}] is not a table."),
+                "Use [[tasks]] table blocks for every task.",
+            ));
+            continue;
+        };
+        let id = string_field(task, "task_id").unwrap_or_default().to_owned();
+        if id.is_empty() {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_TASK_ID",
+                format!("tasks[{idx}] is missing task_id."),
+                "Add a stable task_id such as implement-auth or review-auth.",
+            ));
+        } else {
+            if !is_task_id(&id) {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_TASK_ID_FORMAT",
+                    format!("task_id {id:?} has an invalid shape."),
+                    "Start with a letter and use only letters, digits, underscores, and hyphens.",
+                ));
+            }
+            if !seen.insert(id.clone()) {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_TASK_ID_DUPLICATE",
+                    format!("task_id {id:?} appears more than once."),
+                    "Rename one task so every task_id is unique.",
+                ));
+            }
+        }
+        let agent_type = string_field(task, "session_agent_type").unwrap_or_default();
+        match agent_type {
+            "Executor" | "Reviewer" => {}
+            "Orchestrator" => issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_ORCHESTRATOR_DECLARED",
+                "Do not declare Orchestrator tasks.",
+                "The kernel creates the Orchestrator automatically; remove this task or change it to Executor/Reviewer.",
+            )),
+            _ => issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_AGENT_TYPE",
+                format!("task {id:?} must use session_agent_type Executor or Reviewer."),
+                "Choose Executor for file changes or Reviewer for review-only work.",
+            )),
+        }
+        if string_field(task, "description").is_none_or(str::is_empty) {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_TASK_DESCRIPTION",
+                format!("task {id:?} is missing description."),
+                "Add a short dashboard-facing description.",
+            ));
+        }
+        if task.contains_key("context") {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_CONTEXT_DEPRECATED",
+                format!("task {id:?} uses deprecated context."),
+                "Move the main instruction into prompt; keep description as the short summary.",
+            ));
+        }
+        if string_field(task, "prompt").is_none_or(str::is_empty) {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Warning,
+                "PLAN_TASK_PROMPT",
+                format!("task {id:?} has no prompt."),
+                "Add prompt for the executor/reviewer instruction; description should stay brief.",
+            ));
+        }
+        let clone_strategy = string_field(task, "clone_strategy").unwrap_or_default();
+        if !matches!(clone_strategy, "blobless" | "full" | "sparse") {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_CLONE_STRATEGY",
+                format!("task {id:?} has an invalid clone_strategy."),
+                "Use blobless, sparse, or full.",
+            ));
+        }
+        let paths = string_array_field(task, "path_allowlist", &id, &mut issues);
+        let allowed_egress = string_array_field(task, "allowed_egress", &id, &mut issues);
+        if agent_type == "Executor" && paths.is_empty() {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_EXECUTOR_PATHS",
+                format!("Executor task {id:?} needs path_allowlist."),
+                "Keep it narrow: exact files or directory prefixes such as src/api/.",
+            ));
+        }
+        if agent_type == "Reviewer" {
+            if task.contains_key("vm_image") {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_REVIEWER_VM_IMAGE",
+                    format!("Reviewer task {id:?} cannot declare vm_image."),
+                    "Remove vm_image; reviewer images are kernel-canonical.",
+                ));
+            }
+            if !allowed_egress.is_empty() {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Warning,
+                    "PLAN_REVIEWER_EGRESS",
+                    format!("Reviewer task {id:?} declares allowed_egress."),
+                    "Remove reviewer egress; reviewers have no network device.",
+                ));
+            }
+        }
+        for field in [
+            "max_turns",
+            "max_turns_step",
+            "cumulative_max_seconds",
+            "min_vcpus",
+            "max_vcpus",
+            "min_memory_mb",
+            "max_memory_mb",
+        ] {
+            if let Some(value) = task.get(field) {
+                match value.as_integer() {
+                    Some(n) if n > 0 => {}
+                    _ => issues.push(builder_issue(
+                        BuilderValidationSeverity::Error,
+                        "PLAN_POSITIVE_INTEGER",
+                        format!("task {id:?} field {field} must be a positive integer."),
+                        "Use a whole number greater than zero or remove the field.",
+                    )),
+                }
+            }
+        }
+        let predecessors = string_array_field(task, "predecessors", &id, &mut issues);
+        task_drafts.push(PlanDraftTask {
+            id,
+            agent_type: agent_type.to_owned(),
+            predecessors,
+        });
+    }
+
+    validate_task_dag(&task_drafts, &mut issues);
+    if !task_drafts.iter().any(|t| t.agent_type == "Reviewer") {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Info,
+            "PLAN_NO_REVIEWER",
+            "This plan has no Reviewer task.",
+            "That can be fine for trivial work; add a Reviewer for production changes.",
+        ));
+    }
+
+    builder_response(
+        "plan",
+        policy.epoch(),
+        resolved_target_ref,
+        issues,
+        plan_next_steps(),
+    )
+}
+
+fn validate_policy_draft_with_loader(
+    toml_text: &str,
+    active_policy: &PolicyBundle,
+    operator_fingerprint: &str,
+) -> BuilderValidationResponse {
+    let mut issues = Vec::new();
+    if toml_text.trim().is_empty() {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "POLICY_EMPTY",
+            "policy.toml is empty.",
+            "Load the current policy or paste a complete policy.toml before validating.",
+        ));
+        return builder_response(
+            "policy",
+            active_policy.epoch(),
+            None,
+            issues,
+            policy_next_steps(),
+        );
+    }
+    match toml_text.parse::<toml::Value>() {
+        Ok(value) => {
+            let new_epoch = value
+                .as_table()
+                .and_then(|root| table_path(root, &["meta"]))
+                .and_then(|meta| meta.as_table())
+                .and_then(|meta| meta.get("epoch"))
+                .and_then(|epoch| epoch.as_integer())
+                .and_then(|epoch| u64::try_from(epoch).ok());
+            match new_epoch {
+                Some(epoch) if epoch > active_policy.epoch() => {}
+                Some(epoch) => issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "POLICY_EPOCH_NOT_FORWARD",
+                    format!(
+                        "policy epoch {epoch} is not greater than active epoch {}.",
+                        active_policy.epoch()
+                    ),
+                    "Bump [meta].epoch before signing and advancing the policy.",
+                )),
+                None => issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "POLICY_EPOCH_MISSING",
+                    "[meta].epoch is missing or invalid.",
+                    "Set [meta].epoch to a number greater than the active policy epoch.",
+                )),
+            }
+        }
+        Err(e) => issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "POLICY_TOML_PARSE",
+            "policy.toml is not valid TOML.",
+            format!("Fix the TOML syntax error before signing: {e}"),
+        )),
+    }
+
+    let path = std::env::temp_dir().join(format!(
+        "raxis-policy-builder-{}-{}.toml",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    match std::fs::write(&path, toml_text.as_bytes()) {
+        Ok(()) => {
+            match raxis_policy::load_policy(&path) {
+                Ok((_bundle, _raw, _sha)) => {}
+                Err(e) => issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "POLICY_LOAD",
+                    "raxis-policy rejected this policy.toml.",
+                    format!("Fix the loader error before signing: {e}"),
+                )),
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+        Err(e) => issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "POLICY_VALIDATE_IO",
+            "The dashboard could not stage the draft for validation.",
+            format!("Retry validation. If it persists, check host temp-dir permissions: {e}"),
+        )),
+    }
+
+    if let Some(entry) = active_policy.operator_entry(operator_fingerprint) {
+        let has_rotate = entry.permitted_ops.iter().any(|op| op == "RotateEpoch");
+        let has_cert_install = entry
+            .permitted_ops
+            .iter()
+            .any(|op| op == "OperatorCertInstall");
+        if has_rotate && !has_cert_install {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Warning,
+                "POLICY_OPERATOR_NOT_ADMIN",
+                "Your operator can advance policy but is not a dashboard admin.",
+                "Grant both RotateEpoch and OperatorCertInstall for admin-only dashboard actions such as credential reveal.",
+            ));
+        }
+    }
+
+    builder_response(
+        "policy",
+        active_policy.epoch(),
+        None,
+        issues,
+        policy_next_steps(),
+    )
+}
+
+fn builder_response(
+    artifact_kind: &str,
+    policy_epoch: u64,
+    resolved_target_ref: Option<String>,
+    issues: Vec<BuilderValidationIssue>,
+    next_steps: Vec<String>,
+) -> BuilderValidationResponse {
+    let ok = !issues
+        .iter()
+        .any(|i| matches!(i.severity, BuilderValidationSeverity::Error));
+    BuilderValidationResponse {
+        artifact_kind: artifact_kind.to_owned(),
+        authority: "kernel".to_owned(),
+        policy_epoch,
+        resolved_target_ref,
+        ok,
+        issues,
+        next_steps,
+    }
+}
+
+fn builder_issue(
+    severity: BuilderValidationSeverity,
+    code: impl Into<String>,
+    message: impl Into<String>,
+    remediation: impl Into<String>,
+) -> BuilderValidationIssue {
+    BuilderValidationIssue {
+        code: code.into(),
+        severity,
+        message: message.into(),
+        remediation: remediation.into(),
+    }
+}
+
+fn plan_next_steps() -> Vec<String> {
+    vec![
+        "raxis plan validate plan.toml".to_owned(),
+        "raxis submit plan plan.toml --no-dry-run".to_owned(),
+        "raxis plan approve <initiative_id>".to_owned(),
+    ]
+}
+
+fn policy_next_steps() -> Vec<String> {
+    vec![
+        r#"raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem""#.to_owned(),
+        r#"raxis epoch advance --policy "$RAXIS_DATA_DIR/policy/policy.toml" --sig "$RAXIS_DATA_DIR/policy/policy.sig""#.to_owned(),
+    ]
+}
+
+fn table_path<'a>(
+    root: &'a toml::map::Map<String, toml::Value>,
+    path: &[&str],
+) -> Option<&'a toml::Value> {
+    let mut current: Option<&toml::Value> = None;
+    for (idx, part) in path.iter().enumerate() {
+        current = if idx == 0 {
+            root.get(*part)
+        } else {
+            current?.as_table()?.get(*part)
+        };
+    }
+    current
+}
+
+fn string_field<'a>(
+    table: &'a toml::map::Map<String, toml::Value>,
+    field: &str,
+) -> Option<&'a str> {
+    table.get(field).and_then(|v| v.as_str()).map(str::trim)
+}
+
+fn string_array_field(
+    table: &toml::map::Map<String, toml::Value>,
+    field: &str,
+    task_id: &str,
+    issues: &mut Vec<BuilderValidationIssue>,
+) -> Vec<String> {
+    match table.get(field) {
+        None => Vec::new(),
+        Some(value) => match value.as_array() {
+            Some(values) => {
+                let mut out = Vec::new();
+                for value in values {
+                    match value.as_str() {
+                        Some(s) if !s.trim().is_empty() => out.push(s.trim().to_owned()),
+                        _ => issues.push(builder_issue(
+                            BuilderValidationSeverity::Error,
+                            "PLAN_STRING_ARRAY",
+                            format!("task {task_id:?} field {field} must contain only strings."),
+                            "Use a TOML array such as [\"src/\", \"README.md\"].",
+                        )),
+                    }
+                }
+                out
+            }
+            None => {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_STRING_ARRAY",
+                    format!("task {task_id:?} field {field} must be an array of strings."),
+                    "Use a TOML array such as [\"src/\", \"README.md\"].",
+                ));
+                Vec::new()
+            }
+        },
+    }
+}
+
+fn validate_task_dag(tasks: &[PlanDraftTask], issues: &mut Vec<BuilderValidationIssue>) {
+    let ids: std::collections::HashSet<&str> = tasks
+        .iter()
+        .filter_map(|t| (!t.id.is_empty()).then_some(t.id.as_str()))
+        .collect();
+    for task in tasks {
+        for pred in &task.predecessors {
+            if !ids.contains(pred.as_str()) {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_DAG_DANGLING",
+                    format!(
+                        "task {:?} references unknown predecessor {pred:?}.",
+                        task.id
+                    ),
+                    "Rename the predecessor or add the missing task.",
+                ));
+            }
+            if pred == &task.id {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_DAG_SELF_LOOP",
+                    format!("task {:?} depends on itself.", task.id),
+                    "Remove the self-dependency.",
+                ));
+            }
+        }
+        if task.agent_type == "Reviewer" && task.predecessors.is_empty() {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_REVIEWER_PREDECESSOR",
+                format!("Reviewer task {:?} has no predecessor.", task.id),
+                "Make the Reviewer depend on the Executor it reviews.",
+            ));
+        }
+    }
+    let by_id: std::collections::HashMap<&str, &PlanDraftTask> = tasks
+        .iter()
+        .filter_map(|task| (!task.id.is_empty()).then_some((task.id.as_str(), task)))
+        .collect();
+    let mut visiting = std::collections::HashSet::new();
+    let mut visited = std::collections::HashSet::new();
+    for task in tasks {
+        if !task.id.is_empty()
+            && dag_has_cycle(task.id.as_str(), &by_id, &mut visiting, &mut visited)
+        {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_DAG_CYCLE",
+                "Task predecessors contain a cycle.",
+                "Remove one predecessor edge so the graph is acyclic.",
+            ));
+            break;
+        }
+    }
+}
+
+fn dag_has_cycle<'a>(
+    id: &'a str,
+    tasks: &std::collections::HashMap<&'a str, &'a PlanDraftTask>,
+    visiting: &mut std::collections::HashSet<&'a str>,
+    visited: &mut std::collections::HashSet<&'a str>,
+) -> bool {
+    if visited.contains(id) {
+        return false;
+    }
+    if !visiting.insert(id) {
+        return true;
+    }
+    if let Some(task) = tasks.get(id) {
+        for pred in &task.predecessors {
+            if tasks.contains_key(pred.as_str()) && dag_has_cycle(pred, tasks, visiting, visited) {
+                return true;
+            }
+        }
+    }
+    visiting.remove(id);
+    visited.insert(id);
+    false
+}
+
+fn is_task_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && value.len() <= 64
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn is_path_safe_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
+        && value.len() <= 64
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
 
 /// Read every `sessions` row regardless of `revoked` so the

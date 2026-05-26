@@ -1460,6 +1460,52 @@ pub struct PolicyAdvancement {
     pub advanced_at: u64,
 }
 
+/// Severity for a Plan/Policy Builder validation issue.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuilderValidationSeverity {
+    /// The artifact should not be submitted until fixed.
+    Error,
+    /// The artifact can often parse, but the operator should
+    /// review the implication before continuing.
+    Warning,
+    /// Informational next-step or context.
+    Info,
+}
+
+/// One issue returned by the dashboard builder validation API.
+#[derive(Debug, Clone, Serialize)]
+pub struct BuilderValidationIssue {
+    /// Stable-ish issue code for frontend grouping.
+    pub code: String,
+    /// Error / warning / info.
+    pub severity: BuilderValidationSeverity,
+    /// Short operator-facing issue summary.
+    pub message: String,
+    /// Concrete remediation text the UI can surface inline.
+    pub remediation: String,
+}
+
+/// Validation response shared by Plan Builder and Policy Builder.
+#[derive(Debug, Clone, Serialize)]
+pub struct BuilderValidationResponse {
+    /// `"plan"` or `"policy"`.
+    pub artifact_kind: String,
+    /// Always `"kernel"` for production validation. Fixture
+    /// implementations may still use the same shape.
+    pub authority: String,
+    /// Active policy epoch the validation compared against.
+    pub policy_epoch: u64,
+    /// Target ref resolved from plan + policy defaults, if relevant.
+    pub resolved_target_ref: Option<String>,
+    /// `true` iff no `severity=error` issue is present.
+    pub ok: bool,
+    /// Ordered validation issues.
+    pub issues: Vec<BuilderValidationIssue>,
+    /// Copyable CLI commands for the next authoritative step.
+    pub next_steps: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Git worktree views (§4.3 git worktree API)
 // ---------------------------------------------------------------------------
@@ -2358,6 +2404,30 @@ pub trait DashboardData: Send + Sync + 'static {
     /// `write_policy`-role policy editor.
     fn policy_toml_bytes(&self) -> Result<String, ApiError>;
 
+    /// Validate a draft `plan.toml` from the dashboard Plan Builder.
+    ///
+    /// This is intentionally read-only: it must never write the plan
+    /// into the store or create an initiative. Production compares the
+    /// draft against the active policy bundle where possible, then
+    /// returns actionable issues for the operator UI.
+    fn validate_plan_builder_toml(
+        &self,
+        operator_fingerprint: &str,
+        toml: &str,
+    ) -> Result<BuilderValidationResponse, ApiError>;
+
+    /// Validate a draft `policy.toml` from the dashboard Policy Builder.
+    ///
+    /// This is intentionally read-only. Advancing policy still requires
+    /// the signed `PUT /api/policy/toml` or CLI `raxis epoch advance`
+    /// path; validation only helps the operator repair obvious issues
+    /// before signing.
+    fn validate_policy_builder_toml(
+        &self,
+        operator_fingerprint: &str,
+        toml: &str,
+    ) -> Result<BuilderValidationResponse, ApiError>;
+
     /// All worktrees the operator may inspect (main +
     /// per-session). Returned newest-first when a sort order
     /// applies.
@@ -3139,6 +3209,89 @@ impl DashboardData for InMemoryDashboardData {
             });
         }
         Ok(g.policy_toml.clone())
+    }
+
+    fn validate_plan_builder_toml(
+        &self,
+        _operator_fingerprint: &str,
+        toml: &str,
+    ) -> Result<BuilderValidationResponse, ApiError> {
+        let policy_epoch = self
+            .inner
+            .read()
+            .policy
+            .as_ref()
+            .map(|p| p.epoch)
+            .unwrap_or(0);
+        let mut issues = Vec::new();
+        if toml.trim().is_empty() {
+            issues.push(BuilderValidationIssue {
+                code: "PLAN_EMPTY".into(),
+                severity: BuilderValidationSeverity::Error,
+                message: "plan.toml is empty".into(),
+                remediation: "Generate or paste a plan before validating.".into(),
+            });
+        } else if !toml.contains("[workspace]") || !toml.contains("[[tasks]]") {
+            issues.push(BuilderValidationIssue {
+                code: "PLAN_MINIMUM_SHAPE".into(),
+                severity: BuilderValidationSeverity::Error,
+                message: "plan.toml is missing [workspace] or [[tasks]].".into(),
+                remediation: "Add workspace metadata and at least one task.".into(),
+            });
+        }
+        let ok = !issues
+            .iter()
+            .any(|i| matches!(i.severity, BuilderValidationSeverity::Error));
+        Ok(BuilderValidationResponse {
+            artifact_kind: "plan".into(),
+            authority: "kernel".into(),
+            policy_epoch,
+            resolved_target_ref: None,
+            ok,
+            issues,
+            next_steps: vec![
+                "raxis plan validate plan.toml".into(),
+                "raxis submit plan plan.toml --no-dry-run".into(),
+            ],
+        })
+    }
+
+    fn validate_policy_builder_toml(
+        &self,
+        _operator_fingerprint: &str,
+        toml: &str,
+    ) -> Result<BuilderValidationResponse, ApiError> {
+        let policy_epoch = self
+            .inner
+            .read()
+            .policy
+            .as_ref()
+            .map(|p| p.epoch)
+            .unwrap_or(0);
+        let mut issues = Vec::new();
+        if toml.trim().is_empty() {
+            issues.push(BuilderValidationIssue {
+                code: "POLICY_EMPTY".into(),
+                severity: BuilderValidationSeverity::Error,
+                message: "policy.toml is empty".into(),
+                remediation: "Load the active policy or paste a complete replacement.".into(),
+            });
+        }
+        let ok = !issues
+            .iter()
+            .any(|i| matches!(i.severity, BuilderValidationSeverity::Error));
+        Ok(BuilderValidationResponse {
+            artifact_kind: "policy".into(),
+            authority: "kernel".into(),
+            policy_epoch,
+            resolved_target_ref: None,
+            ok,
+            issues,
+            next_steps: vec![
+                r#"raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem""#.into(),
+                r#"raxis epoch advance --policy "$RAXIS_DATA_DIR/policy/policy.toml" --sig "$RAXIS_DATA_DIR/policy/policy.sig""#.into(),
+            ],
+        })
     }
 
     fn list_worktrees(&self) -> Result<Vec<WorktreeListEntry>, ApiError> {

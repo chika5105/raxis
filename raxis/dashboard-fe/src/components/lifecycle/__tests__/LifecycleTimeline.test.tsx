@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { TestMemoryRouter } from "@/test/router";
 
 import { LifecycleTimeline } from "../LifecycleTimeline";
 import type { LifecycleAnnotation } from "@/types/api";
@@ -51,9 +51,9 @@ const GAP: LifecycleAnnotation = {
 describe("<LifecycleTimeline>", () => {
   it("renders annotations in the order it was given", () => {
     render(
-      <MemoryRouter>
+      <TestMemoryRouter>
         <LifecycleTimeline annotations={[REJECT_AT_T1, CRASH_AT_T2, GAP]} />
-      </MemoryRouter>,
+      </TestMemoryRouter>,
     );
     const rows = screen.getAllByTestId("lifecycle-timeline-row");
     expect(rows).toHaveLength(3);
@@ -64,18 +64,18 @@ describe("<LifecycleTimeline>", () => {
 
   it("renders nothing when annotations is empty and showEmpty=false", () => {
     const { container } = render(
-      <MemoryRouter>
+      <TestMemoryRouter>
         <LifecycleTimeline annotations={[]} />
-      </MemoryRouter>,
+      </TestMemoryRouter>,
     );
     expect(container.firstChild).toBeNull();
   });
 
   it("renders an empty-state card when showEmpty=true", () => {
     render(
-      <MemoryRouter>
+      <TestMemoryRouter>
         <LifecycleTimeline annotations={[]} showEmpty heading="Lifecycle" />
-      </MemoryRouter>,
+      </TestMemoryRouter>,
     );
     expect(screen.getByText(/No lifecycle events recorded yet/)).toBeInTheDocument();
   });

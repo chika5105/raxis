@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { TestMemoryRouter } from "@/test/router";
 
 import { OverviewWarnings } from "@/pages/Overview";
 import type { LifecycleAnnotation } from "@/types/api";
@@ -23,9 +23,9 @@ const GAP_B: Extract<LifecycleAnnotation, { kind: "orchestrator_gap" }> = {
 
 function renderWarnings(gaps = [GAP_A, GAP_B]) {
   return render(
-    <MemoryRouter>
+    <TestMemoryRouter>
       <OverviewWarnings gaps={gaps} />
-    </MemoryRouter>,
+    </TestMemoryRouter>,
   );
 }
 

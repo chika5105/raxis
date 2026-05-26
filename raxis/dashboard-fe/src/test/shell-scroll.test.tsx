@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { TestMemoryRouter } from "@/test/router";
 
 import { Shell } from "@/components/Shell";
 import { ThemeProvider } from "@/lib/theme";
@@ -21,11 +21,11 @@ function renderWithProviders() {
   return render(
     <QueryClientProvider client={qc}>
       <ThemeProvider>
-        <MemoryRouter>
+        <TestMemoryRouter>
           <Shell>
             <div>wide route body</div>
           </Shell>
-        </MemoryRouter>
+        </TestMemoryRouter>
       </ThemeProvider>
     </QueryClientProvider>,
   );
@@ -39,7 +39,7 @@ describe("<Shell> scroll frame", () => {
       "overflow-auto",
     );
     expect(screen.getByTestId("dashboard-route-frame")).toHaveClass(
-      "min-w-[1600px]",
+      "min-w-0",
     );
   });
 

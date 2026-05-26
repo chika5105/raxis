@@ -475,6 +475,22 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
                 .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_POLICY))
                 .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_POLICY)),
         )
+        // Dashboard builders. Read-only validation helpers for
+        // generated/pasted plan.toml and policy.toml drafts. The
+        // body cap matches policy editing because policy drafts can
+        // legitimately be large; both routes are still non-mutating.
+        .route(
+            "/api/builders/plan/validate",
+            post(builders::validate_plan::<D>)
+                .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_POLICY))
+                .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_POLICY)),
+        )
+        .route(
+            "/api/builders/policy/validate",
+            post(builders::validate_policy::<D>)
+                .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_POLICY))
+                .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_POLICY)),
+        )
         // Git worktrees.
         .route("/api/git/worktrees", get(git::list::<D>))
         .route("/api/git/worktrees/:name", get(git::detail::<D>))

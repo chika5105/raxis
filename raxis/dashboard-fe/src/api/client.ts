@@ -13,6 +13,7 @@
 
 import type {
   AuditEntryView,
+  BuilderValidationResponse,
   ChainStatusResponse,
   ChallengeResponse,
   CredentialListResponse,
@@ -596,6 +597,19 @@ export const dashboardApi = {
         method: "PUT",
         body,
       }).then((r) => r.advancement),
+  },
+
+  builders: {
+    validatePlan: (toml: string): Promise<BuilderValidationResponse> =>
+      apiFetch<BuilderValidationResponse>("/api/builders/plan/validate", {
+        method: "POST",
+        body: { toml },
+      }),
+    validatePolicy: (toml: string): Promise<BuilderValidationResponse> =>
+      apiFetch<BuilderValidationResponse>("/api/builders/policy/validate", {
+        method: "POST",
+        body: { toml },
+      }),
   },
 
   git: {

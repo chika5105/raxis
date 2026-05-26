@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
 
 import { dashboardApi } from "@/api/client";
+import { CopyButton } from "@/components/CopyButton";
 import { fmtAbsolute } from "@/lib/format";
 import type { KernelLifecycleResponse } from "@/types/api";
 
@@ -87,6 +88,7 @@ export function KernelLifecycleBannerView({
         : tone === "ok"
           ? "✓"
           : "?";
+  const showRecovery = status !== "Healthy" || !snapshot.fresh;
   return (
     <div
       role="status"
@@ -97,7 +99,7 @@ export function KernelLifecycleBannerView({
       data-kernel-fresh={snapshot.fresh ? "true" : "false"}
       data-kernel-tone={tone}
       className={clsx(
-        "rounded-md border px-3 py-2 text-xs flex flex-wrap items-center gap-3 justify-between",
+        "rounded-md border px-3 py-2 text-xs",
         // Light + dark mode tone pairs follow ChainStatusBanner.
         tone === "warn" &&
           "border-amber-700/40 bg-amber-700/10 text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200",
@@ -107,62 +109,65 @@ export function KernelLifecycleBannerView({
           "border-emerald-700/40 bg-emerald-700/10 text-emerald-900 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-200",
       )}
     >
-      <div className="flex items-center gap-2 min-w-0">
-        <span
-          aria-hidden="true"
-          className={clsx(
-            "inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-bold leading-none",
-            tone === "warn"
-              ? "text-amber-700 dark:text-amber-400"
-              : tone === "stop"
-                ? "text-rose-700 dark:text-rose-400"
-                : "text-emerald-700 dark:text-emerald-400",
-          )}
-        >
-          {glyph}
-        </span>
-        <span className="font-medium">{headlineFor(snapshot)}</span>
-        {snapshot.last_restart_reason && (
-          <span className="text-ink-muted truncate max-w-[60ch]">
-            · reason{" "}
-            <span className="font-mono">{snapshot.last_restart_reason}</span>
-          </span>
-        )}
-        {status === "Restarting" && snapshot.max_attempts > 0 && (
-          <span className="text-ink-muted">
-            · attempt{" "}
-            <span className="font-mono">
-              {snapshot.attempt_n}/{snapshot.max_attempts}
-            </span>
-          </span>
-        )}
-        {status === "Halted" &&
-          sub_state === "CircuitOpen" &&
-          snapshot.window_secs > 0 && (
-            <span className="text-ink-muted">
-              · {snapshot.attempts_in_window} attempts in last{" "}
-              {snapshot.window_secs}s window
-            </span>
-          )}
-        {snapshot.auto_resume && (
-          <AutoResumeDetail summary={snapshot.auto_resume} />
-        )}
-      </div>
-      <div className="flex items-center gap-3">
-        {!snapshot.fresh && (
+      <div className="flex flex-wrap items-center gap-3 justify-between">
+        <div className="flex items-center gap-2 min-w-0">
           <span
-            data-testid="kernel-lifecycle-stale"
-            className="text-ink-subtle"
+            aria-hidden="true"
+            className={clsx(
+              "inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-bold leading-none",
+              tone === "warn"
+                ? "text-amber-700 dark:text-amber-400"
+                : tone === "stop"
+                  ? "text-rose-700 dark:text-rose-400"
+                  : "text-emerald-700 dark:text-emerald-400",
+            )}
           >
-            stale (supervisor has not written recently)
+            {glyph}
           </span>
-        )}
-        {snapshot.updated_at_unix_secs > 0 && (
-          <span className="text-ink-subtle">
-            updated {fmtAbsolute(snapshot.updated_at_unix_secs)}
-          </span>
-        )}
+          <span className="font-medium">{headlineFor(snapshot)}</span>
+          {snapshot.last_restart_reason && (
+            <span className="text-ink-muted truncate max-w-[60ch]">
+              · reason{" "}
+              <span className="font-mono">{snapshot.last_restart_reason}</span>
+            </span>
+          )}
+          {status === "Restarting" && snapshot.max_attempts > 0 && (
+            <span className="text-ink-muted">
+              · attempt{" "}
+              <span className="font-mono">
+                {snapshot.attempt_n}/{snapshot.max_attempts}
+              </span>
+            </span>
+          )}
+          {status === "Halted" &&
+            sub_state === "CircuitOpen" &&
+            snapshot.window_secs > 0 && (
+              <span className="text-ink-muted">
+                · {snapshot.attempts_in_window} attempts in last{" "}
+                {snapshot.window_secs}s window
+              </span>
+            )}
+          {snapshot.auto_resume && (
+            <AutoResumeDetail summary={snapshot.auto_resume} />
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          {!snapshot.fresh && (
+            <span
+              data-testid="kernel-lifecycle-stale"
+              className="text-ink-subtle"
+            >
+              stale (supervisor has not written recently)
+            </span>
+          )}
+          {snapshot.updated_at_unix_secs > 0 && (
+            <span className="text-ink-subtle">
+              updated {fmtAbsolute(snapshot.updated_at_unix_secs)}
+            </span>
+          )}
+        </div>
       </div>
+      {showRecovery && <RecoveryCommands tone={tone} />}
     </div>
   );
 }
@@ -228,3 +233,37 @@ function AutoResumeDetail({
   );
 }
 
+function RecoveryCommands({ tone }: { tone: "warn" | "stop" | "ok" }) {
+  const commands = [
+    'raxis doctor',
+    'raxis-supervisor status --data-dir "$RAXIS_DATA_DIR"',
+    'tail -n 80 "$(brew --prefix)/var/log/raxis/kernel.err.log"',
+  ];
+  return (
+    <div
+      className={clsx(
+        "mt-2 border-t pt-2",
+        tone === "stop"
+          ? "border-rose-700/20 dark:border-rose-500/20"
+          : "border-amber-700/20 dark:border-amber-500/20",
+      )}
+    >
+      <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-subtle">
+        Suggested checks
+      </div>
+      <div className="grid gap-1 md:grid-cols-3">
+        {commands.map((cmd) => (
+          <div
+            key={cmd}
+            className="flex min-w-0 items-center gap-1 rounded border border-edge bg-panel px-2 py-1"
+          >
+            <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-muted">
+              {cmd}
+            </code>
+            <CopyButton value={cmd} label={`Copy ${cmd}`} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

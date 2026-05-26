@@ -10,7 +10,7 @@ import React from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { TestMemoryRouter } from "@/test/router";
 
 // Monaco editor mock — jsdom can't load Monaco's bundled CSS / web
 // workers, so we replace the editor with a vanilla textarea that
@@ -57,7 +57,7 @@ function renderWithProviders(ui: React.ReactElement) {
   return render(
     <QueryClientProvider client={qc}>
       <ThemeProvider>
-        <MemoryRouter>{ui}</MemoryRouter>
+        <TestMemoryRouter>{ui}</TestMemoryRouter>
       </ThemeProvider>
     </QueryClientProvider>,
   );
