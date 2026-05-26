@@ -35,6 +35,7 @@ state root:
 ```bash
 export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
 export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
+export RAXIS_ENV="default"
 ```
 
 Use the **same** values in every terminal that runs `raxis*` binaries
@@ -269,6 +270,22 @@ terminal running and switch to a second terminal for everything below;
 export `RAXIS_INSTALL_DIR`, `RAXIS_DATA_DIR`, and `RAXIS_OPERATOR_KEY`
 there too.
 
+### Where Policy Builder fits
+
+Genesis creates the bootstrap policy first because the dashboard needs
+a running kernel and an authenticated operator. After the daemon is
+healthy, open:
+
+```text
+http://127.0.0.1:9820/policy
+```
+
+Use **Policy Builder** to inspect the active policy, discover available
+sections, add environment/provider/gate blocks, and click **Validate
+with kernel** before signing and advancing a later epoch. For this
+first initiative, the Homebrew helper already wrote and signed the
+minimal Anthropic policy, so continue with the managed repo below.
+
 ---
 
 ## 5 · Seed the default managed repo
@@ -314,6 +331,17 @@ unexpected checkout.
 ---
 
 ## 6 · Write the plan
+
+Fastest path: open **Plan Builder** in the dashboard:
+
+```text
+http://127.0.0.1:9820/plan-builder
+```
+
+It lets you add tasks, discover plan features, confirm the DAG,
+validate the draft with the kernel, and copy/download the resulting
+`plan.toml`. The CLI block below is the exact same starter plan for
+operators who want a copy-paste terminal flow.
 
 ```bash
 export PLAN_PATH="/tmp/raxis-hello-plan.toml"

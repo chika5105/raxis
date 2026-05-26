@@ -135,6 +135,9 @@ function FastStart() {
             <Link href="/docs/guides/getting-started/02-first-initiative" className="btn btn-ghost">
               Jump to first initiative
             </Link>
+            <Link href="/docs/guides/getting-started/03-dashboard-tour" className="btn btn-ghost">
+              Dashboard tour
+            </Link>
           </div>
         </div>
 
@@ -148,6 +151,7 @@ brew install raxis
 
 export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
 export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
+export RAXIS_ENV="default"
 export RAXIS_OPERATOR_KEY="$HOME/raxis-keys/operator_private.pem"`}</code>
           </pre>
           <div className="grid gap-3 sm:grid-cols-3">

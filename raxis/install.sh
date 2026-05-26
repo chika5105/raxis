@@ -12,7 +12,9 @@ SKIP_PROVIDER=0
 BREW_UPDATE=1
 ADMIN=1
 DATA_DIR=""
+DATA_DIR_EXPLICIT=0
 INSTALL_DIR=""
+ENVIRONMENT="${RAXIS_ENV:-default}"
 OPERATOR_KEY="${HOME:-}/raxis-keys/operator_private.pem"
 OPERATOR_NAME="${USER:-operator}"
 
@@ -24,6 +26,9 @@ Usage:
   install.sh [options]
 
 Options:
+  --env <name>             Environment label. Default: default
+                           Non-default labels use $(brew --prefix)/var/lib/raxis-<name>
+                           unless --data-dir is also provided.
   --data-dir <path>        Data dir to initialize. Default: $(brew --prefix)/var/lib/raxis
   --install-dir <path>     Runtime bundle. Default: $(brew --prefix raxis)/share/raxis
   --operator-key <path>    Operator Ed25519 private key path. Default: ~/raxis-keys/operator_private.pem
@@ -68,6 +73,12 @@ while [ "$#" -gt 0 ]; do
         --data-dir)
             [ "$#" -ge 2 ] || die "--data-dir requires a value"
             DATA_DIR="$2"
+            DATA_DIR_EXPLICIT=1
+            shift 2
+            ;;
+        --env|--environment)
+            [ "$#" -ge 2 ] || die "--env requires a value"
+            ENVIRONMENT="$2"
             shift 2
             ;;
         --install-dir)
@@ -113,6 +124,12 @@ done
 
 command -v brew >/dev/null 2>&1 || die "Homebrew is required: https://brew.sh"
 
+case "$ENVIRONMENT" in
+    ""|*[!A-Za-z0-9_.-]*)
+        die "environment must contain only letters, digits, dot, underscore, or dash"
+        ;;
+esac
+
 if [ "$BREW_UPDATE" -eq 1 ]; then
     log "Updating Homebrew metadata"
     brew update
@@ -128,17 +145,22 @@ fi
 
 if [ -z "$DATA_DIR" ]; then
     DATA_DIR="$(brew --prefix)/var/lib/raxis"
+    if [ "$ENVIRONMENT" != "default" ] && [ "$DATA_DIR_EXPLICIT" -eq 0 ]; then
+        DATA_DIR="$(brew --prefix)/var/lib/raxis-$ENVIRONMENT"
+    fi
 fi
 if [ -z "$INSTALL_DIR" ]; then
     INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
 fi
 
 export RAXIS_DATA_DIR="$DATA_DIR"
+export RAXIS_ENV="$ENVIRONMENT"
 export RAXIS_INSTALL_DIR="$INSTALL_DIR"
 export RAXIS_OPERATOR_KEY="$OPERATOR_KEY"
 
 log "Using RAXIS_INSTALL_DIR=$RAXIS_INSTALL_DIR"
 log "Using RAXIS_DATA_DIR=$RAXIS_DATA_DIR"
+log "Using RAXIS_ENV=$RAXIS_ENV"
 log "Using RAXIS_OPERATOR_KEY=$RAXIS_OPERATOR_KEY"
 
 find_openssl3() {
@@ -341,6 +363,7 @@ RAXIS bootstrap complete.
 Use these exports in future shells:
   export RAXIS_INSTALL_DIR="$RAXIS_INSTALL_DIR"
   export RAXIS_DATA_DIR="$RAXIS_DATA_DIR"
+  export RAXIS_ENV="$RAXIS_ENV"
   export RAXIS_OPERATOR_KEY="$RAXIS_OPERATOR_KEY"
 
 Dashboard:

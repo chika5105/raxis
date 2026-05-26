@@ -30,6 +30,7 @@ model for the getting-started flow.
 | **Genesis** | One-time ceremony that creates the data dir, authority/quality keys, initial policy, operator certificate, `kernel.db`, and genesis audit segment. |
 | **Policy** | Signed `policy.toml` that defines what the kernel may admit: operators, lanes, providers, dashboard, gateway, isolation, budgets, and gates. |
 | **Provider** | LLM/data provider declaration plus a credential file under `$RAXIS_DATA_DIR/providers/`. Agents never read these files directly. |
+| **Environment** | Policy label for deployment boundaries such as `default`, `staging`, or `prod`. RAXIS can model multiple environments in one kernel, but production operators should prefer separate kernels/data dirs when a mix-up would be costly. |
 | **Kernel** | `raxis-kernel`, the authority core that admits plans, spawns VMs, enforces policy, records audit events, and fast-forwards the managed repo. |
 | **Supervisor** | `raxis-supervisor`, the service wrapper that starts/restarts the kernel, writes lifecycle state, and avoids pre-genesis crash loops. |
 | **Dashboard** | Local web UI served by the kernel, default `http://127.0.0.1:9820`, authenticated with the same operator key model as the CLI. |
@@ -40,6 +41,8 @@ model for the getting-started flow.
 | **Orchestrator** | Kernel-created agent that reads the plan DAG, activates ready tasks, handles retries, and performs integration merge. You do not declare it as a task. |
 | **Executor** | Agent that edits code inside an isolated VM and completes a task with a commit SHA. |
 | **Reviewer** | Agent that reviews an executor commit and emits an approve/reject verdict before merge. |
+| **Plan Builder** | Dashboard helper that makes plan features discoverable, renders the task DAG, validates with the kernel, and copies/downloads `plan.toml`. The signed submit path is still authoritative. |
+| **Policy Builder** | Dashboard helper that makes policy features discoverable, validates a draft with the kernel loader, and shows the exact signing/epoch commands. Signed policy advance is still authoritative. |
 
 ## What you get
 
@@ -87,8 +90,12 @@ flowchart TD
   in-process.
 - **Not a prompt-engineering layer.** Authority is enforced by typed
   IPC and signed policy, not by instructing the model nicely.
-- **Not a multi-tenant cloud service.** V2 is local-first,
-  single-operator, one kernel per environment. See [the `Multi-Environment Deployments` section in the root README](../../README.md#multi-environment-deployments-recommended) for separate-kernel-per-env guidance.
+- **Not a multi-tenant cloud service.** V2 is local-first. RAXIS
+  supports multiple environment labels in policy, but the safer
+  production default is one kernel/data dir per environment. See [the
+  `Multi-Environment Deployments` section in the root
+  README](../../README.md#multi-environment-deployments-recommended)
+  for separate-kernel-per-env guidance.
 - **Not a model trainer or finetuner.** RAXIS is the runtime layer; it
   routes inference requests through `raxis-gateway` to whatever
   provider you configured.

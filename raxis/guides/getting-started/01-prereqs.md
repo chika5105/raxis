@@ -24,6 +24,7 @@ Related setup entry points:
 |---|---|
 | `RAXIS_INSTALL_DIR` | Homebrew runtime bundle: `$(brew --prefix raxis)/share/raxis`. |
 | `RAXIS_DATA_DIR` | Mutable kernel state. Use the Homebrew service path: `$(brew --prefix)/var/lib/raxis`. |
+| `RAXIS_ENV` | Human-readable environment label. The Homebrew service defaults to `default`; non-default bootstrap runs can use `install.sh --env staging` to keep a separate data dir. |
 | `RAXIS_OPERATOR_KEY` | Your private operator key. Exporting it is a convenience so signed requests do not need `--operator-key` every time. |
 | Genesis | The one-time initialization that creates policy, keys, database, and the first audit record. |
 | Policy | The signed rules the kernel enforces. |
@@ -34,6 +35,7 @@ Related setup entry points:
 | Managed repo | The repo RAXIS clones from and merges back into. |
 | Plan / initiative / task | A signed `plan.toml`, one admitted unit of work, and the executor/reviewer nodes inside it. |
 | Orchestrator / executor / reviewer | Kernel-created coordinator, code-editing agent, and review agent. |
+| Plan Builder / Policy Builder | Dashboard helpers for drafting TOML and validating it through the same kernel rules used at admission/epoch advance. |
 
 The fastest path is to let the Homebrew helper run the safe defaults.
 It uses POSIX `sh`, so the same command works from both zsh and bash.
@@ -73,14 +75,22 @@ Use the Homebrew service data dir:
 
 ```bash
 export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
+export RAXIS_ENV="default"
 ```
 
 That is the path `brew services start raxis` uses. Keep the same value
 in every shell so foreground commands, the dashboard, and the daemon
 all point at the same SQLite store, policy, audit chain, sockets, and
 witness data. If you want a disposable rehearsal later, pass
-`--data-dir <empty-dir>` to `install.sh` or set `RAXIS_DATA_DIR` before
-manual genesis.
+`--data-dir <empty-dir>` to `install.sh`. If you want a named
+environment with a separate Homebrew-style data dir, use:
+
+```bash
+"$(brew --prefix raxis)/share/raxis/install.sh" --env staging
+```
+
+That initializes `$(brew --prefix)/var/lib/raxis-staging` unless you
+also pass `--data-dir`.
 
 Verify the installed bundle:
 
@@ -155,6 +165,7 @@ The service uses:
 ```bash
 RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
 RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
+RAXIS_ENV="default"
 ```
 
 Expected: `brew services list` shows `raxis started`,
@@ -164,6 +175,8 @@ Expected: `brew services list` shows `raxis started`,
 Logs live at:
 
 ```bash
+tail -f "$(brew --prefix)/var/log/raxis/kernel.log"
+tail -f "$(brew --prefix)/var/log/raxis/kernel.err.log"
 tail -f "$RAXIS_DATA_DIR/supervisor.stderr.log"
 cat "$RAXIS_DATA_DIR/kernel_lifecycle_status.json"
 ```

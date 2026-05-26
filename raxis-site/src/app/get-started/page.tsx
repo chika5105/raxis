@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import Image from "next/image";
 import Link from "next/link";
 
 export const metadata: Metadata = {
@@ -10,6 +11,7 @@ export const metadata: Metadata = {
 
 const firstInitiativeHref = "/docs/guides/getting-started/02-first-initiative";
 const installVerifyHref = "/docs/guides/getting-started/01-prereqs";
+const dashboardTourHref = "/docs/guides/getting-started/03-dashboard-tour";
 const sourceSetupHref = "/docs/guides/setup";
 
 export default function GetStartedPage() {
@@ -142,6 +144,7 @@ chmod 600 "$HOME/raxis-keys/operator_private.pem"
 
 export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
 export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
+export RAXIS_ENV="default"
 export RAXIS_OPERATOR_KEY="$HOME/raxis-keys/operator_private.pem"`}</CommandBlock>
               <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
                 The guided setup prints these at the end. Keep{" "}
@@ -192,11 +195,69 @@ raxis doctor`}</CommandBlock>
 
       <section className="border-t border-[var(--rule)] bg-[var(--surface)] py-16 sm:py-20">
         <div className="mx-auto max-w-5xl px-4 sm:px-6">
+          <p className="eyebrow">Operator dashboard</p>
+          <h2 className="h-section mt-4">
+            Use the dashboard for the parts that are easier to see than type.
+          </h2>
+          <p className="mt-5 max-w-3xl leading-relaxed text-[var(--muted)]">
+            The terminal flow is the fastest bootstrap. After the daemon is
+            healthy, open <code className="rounded bg-[var(--code-bg)] px-1 font-mono">http://127.0.0.1:9820</code>
+            {" "}to inspect health, draft plans, validate policy changes, and
+            watch the first initiative run.
+          </p>
+          <div className="mt-8 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <DashboardFeature
+              title="Glossary"
+              body="Search the operator vocabulary without leaving the dashboard."
+            />
+            <DashboardFeature
+              title="Plan Builder"
+              body="Add tasks, browse plan features, confirm the DAG, validate with the kernel, then copy or download plan.toml."
+            />
+            <DashboardFeature
+              title="Policy Builder"
+              body="Discover policy features, validate drafts through the kernel loader, and see the exact sign/advance commands."
+            />
+            <DashboardFeature
+              title="Recovery hints"
+              body="When health is degraded, the dashboard points you at raxis doctor, supervisor status, and the right logs."
+            />
+          </div>
+          <div className="mt-8 grid gap-4 lg:grid-cols-3">
+            <DashboardShot
+              src="/images/dashboard-plan-builder.jpg"
+              alt="Raxis dashboard Plan Builder with feature library and DAG preview"
+              title="Plan Builder"
+            />
+            <DashboardShot
+              src="/images/dashboard-policy-builder.jpg"
+              alt="Raxis dashboard Policy Builder with environment recommendation and feature library"
+              title="Policy Builder"
+            />
+            <DashboardShot
+              src="/images/dashboard-glossary.jpg"
+              alt="Raxis dashboard glossary with searchable operator concepts"
+              title="Dashboard glossary"
+            />
+          </div>
+          <div className="mt-7 flex flex-wrap gap-3">
+            <Link href={dashboardTourHref} className="btn btn-primary">
+              Open dashboard tour
+            </Link>
+            <Link href="/plan-builder" className="btn btn-ghost">
+              Try the website plan builder
+            </Link>
+          </div>
+        </div>
+      </section>
+
+      <section className="border-t border-[var(--rule)] bg-[var(--surface)] py-16 sm:py-20">
+        <div className="mx-auto max-w-5xl px-4 sm:px-6">
           <h2 className="h-section">Next useful stops</h2>
           <div className="mt-8 grid gap-4 md:grid-cols-3">
             <NextLink href={installVerifyHref} title="Install and verify" />
             <NextLink href="/plan-builder" title="Plan builder" />
-            <NextLink href="/docs/guides/getting-started/03-dashboard-tour" title="Dashboard tour" />
+            <NextLink href={dashboardTourHref} title="Dashboard tour" />
           </div>
         </div>
       </section>
@@ -228,6 +289,10 @@ const glossaryTerms = [
   {
     term: "Provider",
     body: "An LLM backend configuration, such as Anthropic. Credentials stay in private files under the data dir.",
+  },
+  {
+    term: "Environment",
+    body: "A policy label such as default, staging, or prod. Raxis supports many labels, but separate data dirs/kernels are safer for production boundaries.",
   },
   {
     term: "Kernel",
@@ -268,6 +333,14 @@ const glossaryTerms = [
   {
     term: "Reviewer",
     body: "The agent role that reviews predecessor work and submits a verdict without writing code.",
+  },
+  {
+    term: "Plan Builder",
+    body: "Dashboard helper for drafting plan.toml, rendering the DAG, validating with the kernel, and copying/downloading the result.",
+  },
+  {
+    term: "Policy Builder",
+    body: "Dashboard helper for discovering policy features, validating drafts, and preparing the signed epoch-advance path.",
   },
 ];
 
@@ -314,6 +387,42 @@ function Audience({ title, body }: { title: string; body: string }) {
       </h2>
       <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">{body}</p>
     </div>
+  );
+}
+
+function DashboardFeature({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="rounded-lg border border-[var(--rule)] bg-[var(--bg)] p-5">
+      <h3 className="text-base font-semibold leading-tight text-[var(--fg)]">
+        {title}
+      </h3>
+      <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">{body}</p>
+    </div>
+  );
+}
+
+function DashboardShot({
+  src,
+  alt,
+  title,
+}: {
+  src: string;
+  alt: string;
+  title: string;
+}) {
+  return (
+    <figure className="overflow-hidden rounded-lg border border-[var(--rule)] bg-[var(--bg)] shadow-[var(--shadow-soft)]">
+      <Image
+        src={src}
+        alt={alt}
+        width={1440}
+        height={1000}
+        className="h-auto w-full"
+      />
+      <figcaption className="border-t border-[var(--rule)] px-4 py-3 text-sm font-semibold text-[var(--fg)]">
+        {title}
+      </figcaption>
+    </figure>
   );
 }
 
