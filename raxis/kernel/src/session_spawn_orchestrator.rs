@@ -743,25 +743,32 @@ async fn spawn_orchestrator_for_initiative(
         .ok_or_else(|| {
             OrchestratorSpawnError::StoreRead(
                 "OrchestratorSpawnContext is missing data_dir; \
-             worktree provisioning requires <data_dir>/repositories/main \
+             worktree provisioning requires <data_dir>/repositories/<id> \
              to exist (boot wires data_dir via `with_data_dir`)"
                     .to_owned(),
             )
         })?
         .clone();
-    let target_ref = plan_registry
-        .orchestrator(initiative_id)
-        .map(|o| o.target_ref)
+    let orch_fields = plan_registry.orchestrator(initiative_id);
+    let target_ref = orch_fields
+        .as_ref()
+        .map(|o| o.target_ref.clone())
         .unwrap_or_else(|| {
             crate::initiatives::OrchestratorPlanFields::DEFAULT_TARGET_REF.to_owned()
         });
+    let repository_id = orch_fields
+        .as_ref()
+        .map(|o| o.repository_id.clone())
+        .unwrap_or_else(|| crate::managed_repositories::DEFAULT_REPOSITORY_ID.to_owned());
     let initiative_owned = initiative_id.to_owned();
     let target_ref_owned = target_ref.clone();
+    let repository_id_owned = repository_id.clone();
     let data_dir_for_provision = data_dir.clone();
     let anchor = tokio::task::spawn_blocking(move || {
         crate::worktree_provisioning::provision_orchestrator_worktree(
             &data_dir_for_provision,
             &initiative_owned,
+            &repository_id_owned,
             &target_ref_owned,
         )
     })
@@ -2115,7 +2122,7 @@ pub fn spawn_planner_dispatcher(
                 //      Active, no further post-exit respawn fires
                 //      until one of them terminates and frees a slot.
                 //   2. The orchestrator-no-progress ceiling
-                //      (`MAX_ORCH_NO_PROGRESS_RESPAWNS`, default 3)
+                //      (minimum 3, scaled by initiative shape)
                 //      inside `respawn_orchestrator_for_initiative`,
                 //      which auto-fails the initiative if respawns
                 //      keep firing without ANY task FSM transition.
@@ -2785,7 +2792,7 @@ pub async fn respawn_orchestrator_for_initiative(
     //
     // Increment the per-initiative
     // `orchestrator_no_progress_respawn_count` and compare against
-    // `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3). The counter resets
+    // a plan-shape-scaled ceiling (minimum 3). The counter resets
     // to zero on every legal task FSM transition (see
     // `initiatives::task_transitions::transition_task_in_tx` end-of-
     // function reset hook), so honest DAG progress always clears the
@@ -2855,6 +2862,21 @@ pub async fn respawn_orchestrator_for_initiative(
     // RetrySubTask after the slot frees) walks the counter from its
     // pre-existing value rather than from a polluted starting point.
     let skip_ceiling_check = predecessor_was_capacity_pressure || active_worker_count > 0;
+    let plan_shape = ctx.plan_registry.tasks_in_initiative(initiative_id);
+    let task_count = plan_shape.len();
+    let reviewer_count = plan_shape
+        .iter()
+        .filter(|(_, fields)| matches!(fields.session_agent_type, SessionAgentType::Reviewer))
+        .count();
+    // One integration-merge gate is always synthesized for an approved
+    // initiative. Reviewer tasks above approximate review/gate fan-out until
+    // first-class gate counts are persisted in the registry.
+    let gate_count = usize::from(task_count > 0);
+    let max_no_progress_respawns = crate::orch_respawn_ceiling::scaled_no_progress_respawn_ceiling(
+        task_count,
+        reviewer_count,
+        gate_count,
+    );
     let ceiling_outcome = if skip_ceiling_check {
         Some((
             crate::orch_respawn_ceiling::CeilingOutcome::Permitted {
@@ -2867,14 +2889,17 @@ pub async fn respawn_orchestrator_for_initiative(
         let escalation_timeout_secs = ctx.policy.load_full().escalation_timeout().as_secs() as i64;
         let store_for_ceiling = Arc::clone(&ctx.store);
         let init_for_ceiling = initiative_id.to_owned();
+        let max_for_ceiling = max_no_progress_respawns;
         tokio::task::spawn_blocking(move || -> Result<
         Option<(crate::orch_respawn_ceiling::CeilingOutcome, Option<String>)>,
         rusqlite::Error,
     > {
         let mut conn = store_for_ceiling.lock_sync();
         let tx = conn.transaction()?;
-        let outcome = crate::orch_respawn_ceiling::increment_no_progress_count_in_tx(
-            &tx, &init_for_ceiling,
+        let outcome = crate::orch_respawn_ceiling::increment_no_progress_count_with_ceiling_in_tx(
+            &tx,
+            &init_for_ceiling,
+            max_for_ceiling,
         )?;
         let mut escalation_id: Option<String> = None;
         if let crate::orch_respawn_ceiling::CeilingOutcome::Exceeded {
@@ -3188,8 +3213,10 @@ pub async fn respawn_orchestrator_for_initiative(
                  \"event\":\"orchestrator_no_progress_respawn_count_incremented\",\
                  \"initiative_id\":\"{initiative_id}\",\
                  \"count\":{count_after_increment},\
-                 \"max\":{max}}}",
-                max = crate::orch_respawn_ceiling::MAX_ORCH_NO_PROGRESS_RESPAWNS,
+                 \"max\":{max_no_progress_respawns},\
+                 \"task_count\":{task_count},\
+                 \"reviewer_count\":{reviewer_count},\
+                 \"gate_count\":{gate_count}}}",
             );
         }
     }

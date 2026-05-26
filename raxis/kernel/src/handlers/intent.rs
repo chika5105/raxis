@@ -1974,15 +1974,20 @@ fn run_phase_c(
         };
 
         // ── V2 §1.2 Phase 2 — host-side target-ref advancement ─────
-        let main_repo_root = ctx.data_dir.join("repositories").join("main");
         let orch_worktree_root = pre_state.worktree_path.clone();
-        let initiative_target_ref = ctx
-            .plan_registry
-            .orchestrator(&initiative_id_owned)
-            .map(|o| o.target_ref)
+        let orch_fields = ctx.plan_registry.orchestrator(&initiative_id_owned);
+        let initiative_target_ref = orch_fields
+            .as_ref()
+            .map(|o| o.target_ref.clone())
             .unwrap_or_else(|| {
                 crate::initiatives::OrchestratorPlanFields::DEFAULT_TARGET_REF.to_owned()
             });
+        let repository_id = orch_fields
+            .as_ref()
+            .map(|o| o.repository_id.clone())
+            .unwrap_or_else(|| crate::managed_repositories::DEFAULT_REPOSITORY_ID.to_owned());
+        let main_repo_root =
+            crate::managed_repositories::managed_repository_path(&ctx.data_dir, &repository_id);
         let host_merge_result = raxis_domain_git::commit_merge_to_target_ref(
             &main_repo_root,
             &orch_worktree_root,
@@ -6025,11 +6030,15 @@ async fn handle_activate_sub_task(
         // ref is needed by `provision_orchestrator_worktree`'s
         // first-spawn path; the re-attach path ignores it.
         let policy_for_target = ctx.policy.load_full();
-        let target_ref = ctx
-            .plan_registry
-            .orchestrator(&lookup.initiative_id)
-            .map(|o| o.target_ref)
+        let orch_fields = ctx.plan_registry.orchestrator(&lookup.initiative_id);
+        let target_ref = orch_fields
+            .as_ref()
+            .map(|o| o.target_ref.clone())
             .unwrap_or_else(|| policy_for_target.git_default_target_ref().to_owned());
+        let repository_id = orch_fields
+            .as_ref()
+            .map(|o| o.repository_id.clone())
+            .unwrap_or_else(|| crate::managed_repositories::DEFAULT_REPOSITORY_ID.to_owned());
 
         enum ProvisionTarget {
             Reviewer {
@@ -6228,12 +6237,14 @@ async fn handle_activate_sub_task(
         let initiative_for_provision = lookup.initiative_id.clone();
         let session_for_provision = lookup.new_session_id.clone();
         let target_ref_for_provision = target_ref.clone();
+        let repository_id_for_provision = repository_id.clone();
         let data_dir_for_provision = data_dir.clone();
         let provision_started = std::time::Instant::now();
         let provision_join = tokio::task::spawn_blocking(move || {
             let anchor = crate::worktree_provisioning::provision_orchestrator_worktree(
                 &data_dir_for_provision,
                 &initiative_for_provision,
+                &repository_id_for_provision,
                 &target_ref_for_provision,
             )
             .map_err(|e| format!("orchestrator anchor: {e}"))?;

@@ -57,6 +57,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "kernel",
     "submit",
     "providers",
+    "repo",
     "status",
     "log",
     "verify-chain",
@@ -124,6 +125,8 @@ const CREDENTIAL_SUBCOMMANDS: &[&str] =
 const KERNEL_SUBCOMMANDS: &[&str] = &["install", "uninstall"];
 /// provider-failure-handling.md §6.6 — circuit breaker operator surface.
 const PROVIDERS_SUBCOMMANDS: &[&str] = &["status", "reset"];
+/// Raxis 0.2 — local managed repository ergonomics.
+const REPO_SUBCOMMANDS: &[&str] = &["adopt", "status", "list"];
 /// V2 §4.2 — operator-dashboard auth helper (challenge-response signing).
 const AUTH_SUBCOMMANDS: &[&str] = &["sign"];
 /// V2.5 self-healing-supervisor.md §10 / dashboard-hardening.md
@@ -417,6 +420,19 @@ fn run() -> Result<(), CliError> {
                 ))),
             }
         }
+        "repo" => {
+            let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
+            match sub2 {
+                "adopt" => commands::repo::run_adopt(&flags, &rest[1..]),
+                "status" => commands::repo::run_status(&flags, &rest[1..]),
+                "list" => commands::repo::run_status(&flags, &rest[1..]),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "repo sub-command",
+                    sub2,
+                    REPO_SUBCOMMANDS,
+                ))),
+            }
+        }
         "auth" => {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
@@ -554,8 +570,9 @@ SUBCOMMANDS:
         `*.cert.toml` (air-gapped: produced by `raxis cert mint` on a
         separate machine) OR a private-key PEM (the CLI mints the cert
         in-process; private bytes are never persisted). `--admin` is
-        opt-in and adds OperatorCertInstall to the minted cert; for
-        --operator-cert, include that op when minting the cert instead.
+        opt-in and adds OperatorCertInstall to the minted cert's
+        default authority set, which already includes RotateEpoch; for
+        --operator-cert, include both ops when minting the cert instead.
 
     policy sign <artifact.toml> --key <path>
         Sign a policy.toml or other non-plan artifact. Policy artifacts
@@ -742,6 +759,17 @@ SUBCOMMANDS:
         a specific model). If <model> is omitted, resets ALL models
         for the provider. The kernel reads state lazily, so the reset
         takes effect on the next dispatch.
+
+    repo adopt <repository_id> <path-or-git-url> [--force] [--json]
+        Create a managed clone under
+        <data-dir>/repositories/<repository_id>. Plans select it with
+        `[workspace] repository = "<repository_id>"`; omitting the
+        field uses the default `main` repository.
+
+    repo status [repository_id] [--json]
+        Inspect one managed repository, or list every repository under
+        <data-dir>/repositories. Local-only; does not contact the
+        kernel.
 
     auth sign [--json] <challenge-hex>
         Sign a 32-byte hex challenge issued by the operator dashboard's
@@ -1124,6 +1152,7 @@ mod catalog_consistency_tests {
             ("submit", SUBMIT_SUBCOMMANDS),
             ("auth", AUTH_SUBCOMMANDS),
             ("providers", PROVIDERS_SUBCOMMANDS),
+            ("repo", REPO_SUBCOMMANDS),
             ("task", TASK_SUBCOMMANDS),
             ("dashboard", DASHBOARD_SUBCOMMANDS),
         ] {
@@ -1159,6 +1188,9 @@ mod catalog_consistency_tests {
             ("\"credential\" => {", CREDENTIAL_SUBCOMMANDS),
             ("\"kernel\" => {", KERNEL_SUBCOMMANDS),
             ("\"submit\" => {", SUBMIT_SUBCOMMANDS),
+            ("\"providers\" => {", PROVIDERS_SUBCOMMANDS),
+            ("\"repo\" => {", REPO_SUBCOMMANDS),
+            ("\"auth\" => {", AUTH_SUBCOMMANDS),
             ("\"dashboard\" => {", DASHBOARD_SUBCOMMANDS),
         ];
 

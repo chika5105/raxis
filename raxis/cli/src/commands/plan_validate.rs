@@ -16,10 +16,13 @@
 //   4. `[plan.initiative] description` —
 //      present + non-empty + ≤ 64 KiB
 //   5. `[workspace] lane_id`   — present + non-empty
-//   6. Per-task fields:
+//   6. `[workspace] repository` — optional; defaults to `main`, must
+//      be a single path-safe managed repository id when present
+//   7. Per-task fields:
 //        - `task_id` required
-//        - `description` — present +
-//          non-empty + ≤ 64 KiB
+//        - `description` — present + non-empty + ≤ 64 KiB
+//        - `prompt` — optional, but when present must be non-empty +
+//          ≤ 64 KiB; `context` is rejected as the old ignored field
 //        - no `lane_id` override (single-lane propagation per V2 §28)
 //        - no `session_agent_type = "Orchestrator"` (V2 §27 rule 1)
 //        - valid `clone_strategy` ∈ {`full`, `blobless`, `sparse`}
@@ -268,7 +271,28 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
     };
     r.ok(&format!("[workspace] lane_id = \"{lane_id}\""));
 
-    // ── Step 5: per-task fields ───────────────────────────────────────────
+    // ── Step 6: [workspace] repository ───────────────────────────────────
+    let repository_id = match workspace.get("repository") {
+        None => "main",
+        Some(toml::Value::String(s)) => s.trim(),
+        Some(_) => {
+            r.fail(
+                "[workspace] repository",
+                "must be a TOML string such as `repository = \"main\"`".to_owned(),
+            );
+            return r;
+        }
+    };
+    if let Err(reason) = validate_repository_id(repository_id) {
+        r.fail(
+            "[workspace] repository",
+            format!("{reason}; omit the field to use the default `main` repository"),
+        );
+        return r;
+    }
+    r.ok(&format!("[workspace] repository = \"{repository_id}\""));
+
+    // ── Step 7: per-task fields ───────────────────────────────────────────
     let mut tasks: Vec<ParsedTask> = Vec::new();
     for (i, entry) in tasks_arr.unwrap().iter().enumerate() {
         let task_id = match entry.get("task_id").and_then(|v| v.as_str()) {
@@ -279,10 +303,23 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
             }
         };
 
-        // Every `[[tasks]]` block must
-        // declare a non-empty `description`. Mirrors the kernel
-        // `parse_plan_tasks` validator. Catches operator typos before
-        // the signed-bundle round-trip.
+        if entry.get("context").is_some() {
+            r.fail(
+                "[[tasks]] context",
+                format!(
+                    "task `{task_id}` uses deprecated `context`; use `prompt` \
+                     for executor/reviewer instructions. Keep `description` \
+                     as the short human summary."
+                ),
+            );
+            return r;
+        }
+
+        // Every `[[tasks]]` block must declare a non-empty
+        // `description`. `prompt` is the preferred primary model
+        // instruction in 0.2.0, but old plans that omit it still use
+        // `description` as the instruction. Mirrors the kernel
+        // `parse_plan_tasks` validator.
         match entry.get("description") {
             Some(toml::Value::String(s)) => {
                 let trimmed = s.trim_end();
@@ -291,8 +328,7 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
                         "[[tasks]] description",
                         format!(
                             "task `{task_id}` has empty `description`; \
-                             V2 §1.1 requires a non-empty per-task seed \
-                             prompt — describe what the agent should do"
+                             declare a short human summary for the task"
                         ),
                     );
                     return r;
@@ -322,11 +358,46 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
                     "[[tasks]] description",
                     format!(
                         "task `{task_id}` is missing required `description` \
-                         field — V2 §1.1 requires every task to declare what \
-                         the agent should do"
+                         field — declare a short human summary for the task"
                     ),
                 );
                 return r;
+            }
+        }
+        if let Some(value) = entry.get("prompt") {
+            match value {
+                toml::Value::String(s) => {
+                    let trimmed = s.trim_end();
+                    if trimmed.is_empty() {
+                        r.fail(
+                            "[[tasks]] prompt",
+                            format!(
+                                "task `{task_id}` has empty `prompt`; either omit it \
+                                 to use `description`, or provide the primary \
+                                 executor/reviewer instruction"
+                            ),
+                        );
+                        return r;
+                    }
+                    if trimmed.len() > MAX_DESCRIPTION_BYTES {
+                        r.fail(
+                            "[[tasks]] prompt",
+                            format!(
+                                "task `{task_id}` prompt is {} bytes, exceeds 64 KiB \
+                                 cap; trim to fit execve(2) ARG_MAX",
+                                trimmed.len(),
+                            ),
+                        );
+                        return r;
+                    }
+                }
+                _ => {
+                    r.fail(
+                        "[[tasks]] prompt",
+                        format!("task `{task_id}` `prompt` must be a TOML string"),
+                    );
+                    return r;
+                }
             }
         }
 
@@ -609,6 +680,32 @@ fn check_path_allowlist_entry(entry: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn validate_repository_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("repository id is empty".to_owned());
+    }
+    if id.len() > 64 {
+        return Err(format!(
+            "repository id is {} bytes, exceeds cap 64",
+            id.len()
+        ));
+    }
+    let mut chars = id.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphanumeric() {
+        return Err("repository id must start with an ASCII letter or digit".to_owned());
+    }
+    if id == "." || id == ".." || id.contains('/') || id.contains('\\') {
+        return Err("repository id must be a single path-safe segment".to_owned());
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+        return Err(
+            "repository id may contain only ASCII letters, digits, '.', '-' and '_'".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Smoke checks for the operator-facing message text
 // ---------------------------------------------------------------------------
@@ -729,6 +826,117 @@ clone_strategy = "shallow"
         let err = r.first_error.unwrap();
         assert!(err.contains("clone_strategy"), "err = {err}");
         assert!(err.contains("full, blobless, sparse"), "err = {err}");
+    }
+
+    #[test]
+    fn deprecated_context_is_rejected_with_prompt_hint() {
+        let r = validate_plan_text(
+            r#"
+[plan.initiative]
+description = "fixture"
+
+[workspace]
+name = "fixture"
+lane_id = "default"
+
+[[tasks]]
+task_id     = "a"
+description = "Create a greeting"
+context     = "Write HELLO.md"
+"#,
+        );
+        let err = r.first_error.unwrap();
+        assert!(err.contains("context"), "err = {err}");
+        assert!(err.contains("prompt"), "err = {err}");
+    }
+
+    #[test]
+    fn task_prompt_is_validated_when_present() {
+        let r = validate_plan_text(
+            r#"
+[plan.initiative]
+description = "fixture"
+
+[workspace]
+name = "fixture"
+lane_id = "default"
+
+[[tasks]]
+task_id     = "a"
+description = "Create a greeting"
+prompt      = """
+Write HELLO.md with the exact text: hello from alex.
+"""
+"#,
+        );
+        assert!(r.first_error.is_none(), "report: {:#?}", r.lines);
+    }
+
+    #[test]
+    fn workspace_repository_is_validated_when_present() {
+        let r = validate_plan_text(
+            r#"
+[plan.initiative]
+description = "fixture"
+
+[workspace]
+name = "fixture"
+lane_id = "default"
+repository = "api-service"
+
+[[tasks]]
+task_id     = "a"
+description = "Create a greeting"
+"#,
+        );
+        assert!(r.first_error.is_none(), "report: {:#?}", r.lines);
+        assert!(r
+            .lines
+            .iter()
+            .any(|l| l.contains("[workspace] repository = \"api-service\"")));
+    }
+
+    #[test]
+    fn unsafe_workspace_repository_is_rejected() {
+        let r = validate_plan_text(
+            r#"
+[plan.initiative]
+description = "fixture"
+
+[workspace]
+name = "fixture"
+lane_id = "default"
+repository = "api/foo"
+
+[[tasks]]
+task_id     = "a"
+description = "Create a greeting"
+"#,
+        );
+        let err = r.first_error.unwrap();
+        assert!(err.contains("repository"), "err = {err}");
+        assert!(err.contains("path-safe"), "err = {err}");
+    }
+
+    #[test]
+    fn empty_task_prompt_is_rejected() {
+        let r = validate_plan_text(
+            r#"
+[plan.initiative]
+description = "fixture"
+
+[workspace]
+name = "fixture"
+lane_id = "default"
+
+[[tasks]]
+task_id     = "a"
+description = "Create a greeting"
+prompt      = "   "
+"#,
+        );
+        let err = r.first_error.unwrap();
+        assert!(err.contains("prompt"), "err = {err}");
     }
 
     #[test]

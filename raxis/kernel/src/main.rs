@@ -58,6 +58,7 @@ mod initiative_escalation;
 mod initiatives;
 mod ipc;
 mod isolation_select;
+mod managed_repositories;
 mod notifications;
 mod observability;
 mod observability_boot;

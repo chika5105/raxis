@@ -441,6 +441,14 @@ pub struct OrchestratorPlanFields {
     /// entry can advance to a real ref without a panic.
     pub target_ref: String,
 
+    /// Raxis 0.2 managed repository id selected by
+    /// `[workspace] repository`. The default is `"main"`, which maps
+    /// to the historical `<data_dir>/repositories/main` path. The
+    /// lifecycle parser validates this as a single path-safe segment at
+    /// admission time, so spawn / merge paths can derive the source repo
+    /// without stringly path manipulation.
+    pub repository_id: String,
+
     /// V2 `elastic-vm-scaling.md §2.2` — initiative-level toggle
     /// for upward VM-resource scaling. Sourced from
     /// `[plan.initiative] elastic`. `None` ⇒ field omitted ⇒
@@ -507,6 +515,10 @@ impl OrchestratorPlanFields {
     /// drift to a different default by mistake.
     pub const DEFAULT_TARGET_REF: &'static str = "refs/heads/main";
 
+    /// Raxis 0.2 default managed repository id.
+    pub const DEFAULT_REPOSITORY_ID: &'static str =
+        crate::managed_repositories::DEFAULT_REPOSITORY_ID;
+
     /// V3 iter69 — `INV-ORCH-BOUNDED-CONCURRENCY-01`. Default cap
     /// on simultaneous `Active` sub-task activations per
     /// initiative when the plan does not declare a
@@ -530,6 +542,7 @@ impl Default for OrchestratorPlanFields {
             cross_cutting_artifacts: Vec::new(),
             description: String::new(),
             target_ref: Self::DEFAULT_TARGET_REF.to_owned(),
+            repository_id: Self::DEFAULT_REPOSITORY_ID.to_owned(),
             elastic: None,
             max_concurrent_admissions: Self::DEFAULT_MAX_CONCURRENT_ADMISSIONS,
         }

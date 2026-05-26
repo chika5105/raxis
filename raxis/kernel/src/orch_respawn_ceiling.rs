@@ -95,14 +95,41 @@ use raxis_types::{
 };
 use rusqlite::{Connection, OptionalExtension};
 
-/// The structural backstop ceiling for orchestrator no-progress
+/// The minimum structural backstop ceiling for orchestrator no-progress
 /// respawns per initiative. Chosen at 3 because the legitimate
 /// orchestrator decision-cycle never needs more than two consecutive
 /// rejected intents to resolve into progress (e.g. one
 /// `activate_subtask` race-loser before the active session revokes,
 /// then a second non-racing call). Three or more consecutive
 /// no-progress respawns is structural loop, not honest contention.
+/// Wide initiatives can opt into a higher computed ceiling via
+/// [`scaled_no_progress_respawn_ceiling`].
 pub const MAX_ORCH_NO_PROGRESS_RESPAWNS: u32 = 3;
+
+/// Hard ceiling for scaled no-progress budgets. This keeps a malformed
+/// giant plan from effectively disabling the deadlock backstop while still
+/// giving wide plans enough room for honest reviewer/gate sequencing.
+pub const MAX_SCALED_ORCH_NO_PROGRESS_RESPAWNS: u32 = 40;
+
+/// Compute the initiative-specific no-progress respawn budget from plan
+/// shape. The default remains 3 for small plans, then scales with declared
+/// work:
+///
+/// `max(3, min(40, task_count + reviewer_count + gate_count + 2))`
+pub fn scaled_no_progress_respawn_ceiling(
+    task_count: usize,
+    reviewer_count: usize,
+    gate_count: usize,
+) -> u32 {
+    let shape = task_count
+        .saturating_add(reviewer_count)
+        .saturating_add(gate_count)
+        .saturating_add(2);
+    let capped = u32::try_from(shape).unwrap_or(MAX_SCALED_ORCH_NO_PROGRESS_RESPAWNS);
+    capped
+        .max(MAX_ORCH_NO_PROGRESS_RESPAWNS)
+        .min(MAX_SCALED_ORCH_NO_PROGRESS_RESPAWNS)
+}
 
 /// Outcome of the increment-and-check step. Returned by
 /// [`increment_no_progress_count_in_tx`] so the caller can branch
@@ -149,6 +176,14 @@ pub fn increment_no_progress_count_in_tx(
     tx: &Connection,
     initiative_id: &str,
 ) -> Result<CeilingOutcome, rusqlite::Error> {
+    increment_no_progress_count_with_ceiling_in_tx(tx, initiative_id, MAX_ORCH_NO_PROGRESS_RESPAWNS)
+}
+
+pub fn increment_no_progress_count_with_ceiling_in_tx(
+    tx: &Connection,
+    initiative_id: &str,
+    max_attempts: u32,
+) -> Result<CeilingOutcome, rusqlite::Error> {
     let initiatives = Table::Initiatives.as_str();
 
     let rows = tx.execute(
@@ -176,10 +211,10 @@ pub fn increment_no_progress_count_in_tx(
     )?;
     let count = u32::try_from(count_i64).unwrap_or(u32::MAX);
 
-    Ok(if count > MAX_ORCH_NO_PROGRESS_RESPAWNS {
+    Ok(if count > max_attempts {
         CeilingOutcome::Exceeded {
             count_after_increment: count,
-            max_attempts: MAX_ORCH_NO_PROGRESS_RESPAWNS,
+            max_attempts,
         }
     } else {
         CeilingOutcome::Permitted {
@@ -865,6 +900,46 @@ mod tests {
             "post-ceiling increment MUST report Exceeded",
         );
         tx.commit().unwrap();
+    }
+
+    #[test]
+    fn scaled_ceiling_tracks_plan_shape_with_bounds() {
+        assert_eq!(
+            scaled_no_progress_respawn_ceiling(1, 0, 0),
+            MAX_ORCH_NO_PROGRESS_RESPAWNS,
+        );
+        assert_eq!(scaled_no_progress_respawn_ceiling(5, 2, 1), 10);
+        assert_eq!(
+            scaled_no_progress_respawn_ceiling(10_000, 10_000, 10_000),
+            MAX_SCALED_ORCH_NO_PROGRESS_RESPAWNS,
+        );
+    }
+
+    #[test]
+    fn custom_ceiling_exceeded_after_scaled_max_plus_one() {
+        let mut conn = fresh_conn_with_initiative("init-A");
+        let max = 5;
+        for expected in 1..=max {
+            let tx = conn.transaction().unwrap();
+            let outcome =
+                increment_no_progress_count_with_ceiling_in_tx(&tx, "init-A", max).unwrap();
+            assert_eq!(
+                outcome,
+                CeilingOutcome::Permitted {
+                    count_after_increment: expected
+                },
+            );
+            tx.commit().unwrap();
+        }
+        let tx = conn.transaction().unwrap();
+        let outcome = increment_no_progress_count_with_ceiling_in_tx(&tx, "init-A", max).unwrap();
+        assert_eq!(
+            outcome,
+            CeilingOutcome::Exceeded {
+                count_after_increment: max + 1,
+                max_attempts: max,
+            },
+        );
     }
 
     #[test]

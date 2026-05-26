@@ -6,7 +6,7 @@
 // activation / completion handlers invoke:
 //
 //   * `provision_orchestrator_worktree` — admission-time clone of
-//     `<data_dir>/repositories/main` at the operator-configured
+//     `<data_dir>/repositories/<repository_id>` at the operator-configured
 //     `target_ref`. The destination is keyed by `initiative_id`
 //     (NOT session_id) so a respawned Orchestrator session
 //     re-attaches to the existing worktree without re-cloning.
@@ -123,9 +123,9 @@ pub struct ExecutorWorkspace {
 /// exist, this function:
 ///
 ///   1. Reads the operator-configured `target_ref` from
-///      `<data_dir>/repositories/main` and resolves it to a SHA.
+///      `<data_dir>/repositories/<repository_id>` and resolves it to a SHA.
 ///   2. Calls `raxis_worktree_provision::provision_orchestrator`
-///      to clone `<data_dir>/repositories/main` into the
+///      to clone `<data_dir>/repositories/<repository_id>` into the
 ///      destination at `base_sha`, full worktree (Sparse is
 ///      structurally refused per
 ///      `INV-PLANNER-HARNESS-06`-adjacent §Step 27 backstop).
@@ -134,9 +134,16 @@ pub struct ExecutorWorkspace {
 pub fn provision_orchestrator_worktree(
     data_dir: &Path,
     initiative_id: &str,
+    repository_id: &str,
     target_ref: &str,
 ) -> Result<OrchestratorAnchor, ProvisionError> {
-    let main_repo = data_dir.join("repositories").join("main");
+    if let Err(reason) = crate::managed_repositories::validate_repository_id(repository_id) {
+        return Err(ProvisionError::SourceRepoUnopenable {
+            path: crate::managed_repositories::managed_repository_path(data_dir, repository_id),
+            reason: format!("invalid repository id {repository_id:?}: {reason}"),
+        });
+    }
+    let main_repo = crate::managed_repositories::managed_repository_path(data_dir, repository_id);
     let dest = orchestrator_worktree_path(data_dir, initiative_id);
 
     // Idempotent re-attach: a respawned orchestrator points at
@@ -535,6 +542,7 @@ mod tests {
         let anchor = provision_orchestrator_worktree(
             dd.path(),
             "01900000-0000-7000-8000-000000000001",
+            crate::managed_repositories::DEFAULT_REPOSITORY_ID,
             "refs/heads/main",
         )
         .expect("first-spawn provisioning succeeds");
@@ -554,10 +562,20 @@ mod tests {
         let dd = TempDir::new().unwrap();
         let _ = bootstrap_source(dd.path(), "main");
         let init = "01900000-0000-7000-8000-000000000002";
-        let first = provision_orchestrator_worktree(dd.path(), init, "refs/heads/main")
-            .expect("first-spawn ok");
-        let second = provision_orchestrator_worktree(dd.path(), init, "refs/heads/main")
-            .expect("re-attach ok");
+        let first = provision_orchestrator_worktree(
+            dd.path(),
+            init,
+            crate::managed_repositories::DEFAULT_REPOSITORY_ID,
+            "refs/heads/main",
+        )
+        .expect("first-spawn ok");
+        let second = provision_orchestrator_worktree(
+            dd.path(),
+            init,
+            crate::managed_repositories::DEFAULT_REPOSITORY_ID,
+            "refs/heads/main",
+        )
+        .expect("re-attach ok");
         assert_eq!(first.worktree_root, second.worktree_root);
         assert_eq!(first.base_sha, second.base_sha);
     }
@@ -573,6 +591,7 @@ mod tests {
         let anchor = provision_orchestrator_worktree(
             dd.path(),
             "01900000-0000-7000-8000-000000000003",
+            crate::managed_repositories::DEFAULT_REPOSITORY_ID,
             "refs/heads/main",
         )
         .expect("orch ok");
@@ -598,6 +617,7 @@ mod tests {
         let anchor = provision_orchestrator_worktree(
             dd.path(),
             "01900000-0000-7000-8000-000000000004",
+            crate::managed_repositories::DEFAULT_REPOSITORY_ID,
             "refs/heads/main",
         )
         .expect("orch ok");

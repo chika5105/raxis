@@ -45,6 +45,7 @@ pub mod policy_diff;
 pub mod policy_show;
 pub mod providers;
 pub mod queue;
+pub mod repo;
 pub mod session;
 pub mod sessions;
 pub mod setup;

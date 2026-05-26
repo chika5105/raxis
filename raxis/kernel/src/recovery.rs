@@ -1396,9 +1396,19 @@ pub fn reconcile_git_apply_pending(
         pending_ids.len(),
     );
 
-    let main_repo_root = data_dir.join("repositories").join("main");
-
     for initiative_id in pending_ids {
+        let repository_id =
+            repository_id_for_initiative(store, &initiative_id).unwrap_or_else(|reason| {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"step\":\"git_apply_recovery\",\
+                     \"initiative_id\":\"{initiative_id}\",\
+                     \"action\":\"repository_defaulted\",\
+                     \"reason\":\"{reason}\"}}",
+                );
+                crate::managed_repositories::DEFAULT_REPOSITORY_ID.to_owned()
+            });
+        let main_repo_root =
+            crate::managed_repositories::managed_repository_path(data_dir, &repository_id);
         let outcome =
             recover_one_initiative(store, audit, audit_dir, &main_repo_root, &initiative_id);
         match &outcome {
@@ -1416,6 +1426,52 @@ pub fn reconcile_git_apply_pending(
     );
 
     report
+}
+
+fn repository_id_for_initiative(store: &Store, initiative_id: &str) -> Result<String, String> {
+    const PLAN_BUNDLE_ARTIFACTS: &str = "plan_bundle_artifacts";
+    let conn = store.lock_sync();
+    let plan_bytes: Vec<u8> = match conn.query_row(
+        "SELECT plan_bytes FROM signed_plan_artifacts WHERE initiative_id=?1",
+        rusqlite::params![initiative_id],
+        |r| r.get(0),
+    ) {
+        Ok(bytes) => bytes,
+        Err(rusqlite::Error::QueryReturnedNoRows) => conn
+            .query_row(
+                &format!(
+                    "SELECT pba.artifact_bytes \
+                       FROM initiatives AS i \
+                       JOIN {PLAN_BUNDLE_ARTIFACTS} AS pba \
+                         ON pba.bundle_sha256 = i.plan_bundle_sha256 \
+                      WHERE i.initiative_id = ?1 AND pba.artifact_name = 'plan.toml' \
+                      LIMIT 1"
+                ),
+                rusqlite::params![initiative_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("plan artifact lookup failed: {e}"))?,
+        Err(e) => return Err(format!("plan artifact lookup failed: {e}")),
+    };
+    let text =
+        std::str::from_utf8(&plan_bytes).map_err(|e| format!("plan.toml is not UTF-8: {e}"))?;
+    let doc: toml::Value =
+        toml::from_str(text).map_err(|e| format!("plan.toml parse failed: {e}"))?;
+    let raw = match doc
+        .get("workspace")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("repository"))
+    {
+        None => None,
+        Some(toml::Value::String(s)) => Some(s.as_str()),
+        Some(other) => {
+            return Err(format!(
+                "[workspace] repository must be a string, got {}",
+                other.type_str()
+            ));
+        }
+    };
+    crate::managed_repositories::normalize_repository_id(raw)
 }
 
 /// One-initiative driver shared by the sweep above. Splits the

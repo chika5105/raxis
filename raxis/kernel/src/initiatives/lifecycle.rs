@@ -862,6 +862,10 @@ pub fn approve_plan(
     // Read `[workspace] target_ref` (or `None`
     // for plans that don't override the operator default).
     let plan_target_ref_raw = parse_plan_workspace_target_ref(&plan_toml_str)?;
+    // Raxis 0.2 — read `[workspace] repository` (or default to `main`).
+    // This selects the managed source repository under
+    // `<data_dir>/repositories/<id>` for every spawn / merge path.
+    let plan_repository_id = parse_plan_workspace_repository(&plan_toml_str)?;
     // V2 (`verifier-processes.md §15`) — parse plan-source pre-merge
     // verifiers. Empty `Vec` for plans that don't declare any.
     // Structural per-field rules run inside the validator below.
@@ -991,6 +995,7 @@ pub fn approve_plan(
         policy_target_ref_locked,
     )?;
     orchestrator_fields.target_ref = resolved_target_ref.clone();
+    orchestrator_fields.repository_id = plan_repository_id;
 
     let task_count = plan_tasks.len();
     let now = unix_now_secs();
@@ -1754,6 +1759,17 @@ pub fn repopulate_plan_registry(
                         policy_default_target_ref.to_owned()
                     }
                 };
+                orch.repository_id = match parse_plan_workspace_repository(&plan_str) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"plan_registry_repopulate\",\
+                             \"initiative_id\":\"{init_id}\",\
+                             \"reason\":\"repository_resolution_failed_at_restart: {e}\"}}",
+                        );
+                        crate::managed_repositories::DEFAULT_REPOSITORY_ID.to_owned()
+                    }
+                };
                 registry.insert_orchestrator(&init_id, orch);
             }
             Err(e) => eprintln!(
@@ -2283,14 +2299,16 @@ struct PlanTask {
     ///   with `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`.
     vm_image: String,
 
-    /// **`[[plan.tasks.X]] description`.**
+    /// **`[[plan.tasks.X]] description` + `prompt`.**
     /// Operator-authored seed prompt for the Executor / Reviewer agent.
     /// **REQUIRED** at admission: the parser rejects plans whose
-    /// `[[tasks]]` block omits or empty-strings this field with the
+    /// `[[tasks]]` block omits or empty-strings `description` with the
     /// same `FAIL_PLAN_PARSE_ERROR` class as missing `task_id`.
-    /// Rationale: a plan that reaches activation with no instructions
-    /// would spawn an agent with nothing to do — a silent
-    /// "agent did nothing" failure that no operator can debug.
+    /// Rationale: a plan that reaches activation with no human summary
+    /// would spawn an agent with no operator-visible task purpose.
+    /// `prompt` is preferred for the primary model instruction in
+    /// 0.2.0; legacy plans that omit `prompt` keep using
+    /// `description` as the instruction for compatibility.
     /// Strings beyond 64 KiB are also rejected at validation time to
     /// bound the env-var footprint passed to the substrate
     /// (`execve(2)` `ARG_MAX` ~128 KiB on Linux).
@@ -2467,13 +2485,26 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             .trim()
             .to_owned();
 
-        // `description` is the
-        // operator-authored seed prompt the kernel stamps into the
-        // spawned planner's `RAXIS_PLANNER_TASK_PROMPT` env var.
+        if entry.get("context").is_some() {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task_id}`) uses deprecated `context`; \
+                     use `prompt` for the executor/reviewer instructions. \
+                     `description` should stay as the short human summary."
+                ),
+            });
+        }
+
+        // `description` is the operator-authored human summary for the
+        // task. `prompt` is the primary model instruction. The kernel
+        // stamps a combined, signed prompt into
+        // `RAXIS_PLANNER_TASK_PROMPT` so the agent sees both surfaces
+        // with unambiguous precedence.
         // **REQUIRED**: every `[[tasks]]` block MUST declare a
-        // non-empty string. Same `FAIL_PLAN_PARSE_ERROR` class as a
-        // missing `task_id` — a plan that reaches activation with
-        // nothing to tell the agent is structurally invalid.
+        // non-empty description string. Same `FAIL_PLAN_PARSE_ERROR`
+        // class as a missing `task_id` — a plan that reaches
+        // activation with no human-readable task summary is
+        // structurally invalid.
         // We trim trailing whitespace to keep wire encoding stable
         // (TOML multi-line strings preserve trailing newlines) and
         // detect the all-whitespace case as "missing". Interior
@@ -2525,6 +2556,45 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
                 ),
             });
         }
+        let prompt_raw = match entry.get("prompt") {
+            Some(toml::Value::String(s)) => Some(s.trim_end().to_owned()),
+            Some(_) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) prompt \
+                         must be a TOML string"
+                    ),
+                });
+            }
+            None => None,
+        };
+        if let Some(prompt) = prompt_raw.as_ref() {
+            if prompt.is_empty() {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) `prompt` is empty — \
+                         either omit it to use `description`, or provide \
+                         the executor/reviewer instructions"
+                    ),
+                });
+            }
+            if prompt.len() > MAX_TASK_DESCRIPTION_BYTES {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) prompt \
+                         is {bytes} bytes, exceeds cap {cap}",
+                        bytes = prompt.len(),
+                        cap = MAX_TASK_DESCRIPTION_BYTES,
+                    ),
+                });
+            }
+        }
+        let agent_description = match prompt_raw {
+            Some(prompt) => {
+                format!("Task summary:\n{description_raw}\n\nPrimary instructions:\n{prompt}")
+            }
+            None => description_raw,
+        };
 
         // V2 `v2-deep-spec.md §Step 12` — operator-declared retry
         // ceilings. Both fields are OPTIONAL: omission leaves the
@@ -2666,7 +2736,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             session_agent_type,
             credentials,
             vm_image,
-            description: description_raw,
+            description: agent_description,
             max_crash_retries,
             max_review_rejections,
             max_turns,
@@ -2805,6 +2875,7 @@ fn parse_plan_orchestrator(
         // `parse_plan_orchestrator` directly (without a policy) still
         // produce a well-formed struct.
         target_ref: crate::initiatives::OrchestratorPlanFields::DEFAULT_TARGET_REF.to_owned(),
+        repository_id: crate::initiatives::OrchestratorPlanFields::DEFAULT_REPOSITORY_ID.to_owned(),
         elastic,
         max_concurrent_admissions,
     })
@@ -3028,6 +3099,39 @@ fn parse_plan_workspace_target_ref(plan_toml: &str) -> Result<Option<String>, Li
             Ok(Some(s.to_owned()))
         }
     }
+}
+
+/// Parse and validate `[workspace] repository`, the Raxis 0.2 managed
+/// repository id. Missing field defaults to `"main"` for full
+/// compatibility with every V2.0/V2.1 plan and the historical
+/// `<data_dir>/repositories/main` convention.
+fn parse_plan_workspace_repository(plan_toml: &str) -> Result<String, LifecycleError> {
+    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| LifecycleError::PlanInvalid {
+        reason: format!("TOML parse error: {e}"),
+    })?;
+
+    let workspace = doc.get("workspace").and_then(|v| v.as_table());
+    let raw = match workspace.and_then(|t| t.get("repository")) {
+        None => None,
+        Some(toml::Value::String(s)) => Some(s.as_str()),
+        Some(other) => {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[workspace] repository must be a TOML string, got {:?}",
+                    other.type_str(),
+                ),
+            });
+        }
+    };
+
+    crate::managed_repositories::normalize_repository_id(raw).map_err(|reason| {
+        LifecycleError::PlanInvalid {
+            reason: format!(
+                "[workspace] repository is invalid: {reason}; valid example: \
+                 repository = \"api\". Omit the field to use \"main\"."
+            ),
+        }
+    })
 }
 
 /// V3 iter69 — `INV-ORCH-BOUNDED-CONCURRENCY-01`.
@@ -4861,6 +4965,65 @@ description = "do thing"
         assert!(
             msg.contains("string"),
             "error must mention TOML type; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_plan_tasks_uses_prompt_as_primary_instruction() {
+        let toml = r#"[[tasks]]
+task_id = "t1"
+description = "Create a greeting file."
+prompt = """
+Write HELLO.md with the exact text: hello from alex.
+"""
+"#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert!(
+            tasks[0]
+                .description
+                .contains("Task summary:\nCreate a greeting file."),
+            "combined agent prompt must retain the human description"
+        );
+        assert!(
+            tasks[0]
+                .description
+                .contains("Primary instructions:\nWrite HELLO.md"),
+            "combined agent prompt must include the primary prompt"
+        );
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_deprecated_context_field() {
+        let toml = r#"[[tasks]]
+task_id = "t1"
+description = "Create a greeting file."
+context = "Write HELLO.md."
+"#;
+        let err = parse_plan_tasks(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("context"),
+            "error must name deprecated context: {msg}"
+        );
+        assert!(
+            msg.contains("prompt"),
+            "error must point operators to prompt: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_empty_prompt() {
+        let toml = r#"[[tasks]]
+task_id = "t1"
+description = "Create a greeting file."
+prompt = "   "
+"#;
+        let err = parse_plan_tasks(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("prompt"), "error must name prompt: {msg}");
+        assert!(
+            msg.contains("empty"),
+            "error must call out emptiness: {msg}"
         );
     }
 
@@ -7004,6 +7167,30 @@ target_ref = "refs/heads/raxis/feature"
         let toml = "[workspace]\nlane_id = \"default\"\n";
         let r = parse_plan_workspace_target_ref(toml).unwrap();
         assert_eq!(r, None);
+    }
+
+    #[test]
+    fn parse_plan_workspace_repository_defaults_to_main() {
+        let toml = "[workspace]\nlane_id = \"default\"\n";
+        let r = parse_plan_workspace_repository(toml).unwrap();
+        assert_eq!(r, crate::managed_repositories::DEFAULT_REPOSITORY_ID);
+    }
+
+    #[test]
+    fn parse_plan_workspace_repository_reads_safe_id() {
+        let toml = "[workspace]\nlane_id = \"default\"\nrepository = \"api-service\"\n";
+        let r = parse_plan_workspace_repository(toml).unwrap();
+        assert_eq!(r, "api-service");
+    }
+
+    #[test]
+    fn parse_plan_workspace_repository_rejects_path_escape() {
+        let toml = "[workspace]\nlane_id = \"default\"\nrepository = \"../api\"\n";
+        let err = parse_plan_workspace_repository(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("repository"),
+            "bad repository id must name field, got {err:?}"
+        );
     }
 
     #[test]
@@ -9187,6 +9374,52 @@ name = "fixture"
             vec!["Cargo.lock".to_owned(), "go.sum".to_owned()],
             "repopulate_plan_registry must rebuild cross_cutting_artifacts from \
              the on-disk plan TOML (V2 §Step 11 hot-restart parity)",
+        );
+    }
+
+    #[test]
+    fn approve_and_repopulate_preserve_workspace_repository() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [workspace]
+            name = "api fixture"
+            lane_id = "default"
+            repository = "api"
+
+            [[tasks]]
+            task_id        = "t1"
+            path_allowlist = ["src/"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let live_registry = PlanRegistry::new();
+
+        approve_plan_for_test(
+            &init_id,
+            "op",
+            None,
+            &pk_bytes,
+            1,
+            &store,
+            &audit,
+            &live_registry,
+        )
+        .unwrap();
+
+        assert_eq!(
+            live_registry.orchestrator(&init_id).unwrap().repository_id,
+            "api",
+        );
+
+        let restarted_registry = PlanRegistry::new();
+        repopulate_plan_registry(&store, &restarted_registry, "refs/heads/main", false).unwrap();
+        assert_eq!(
+            restarted_registry
+                .orchestrator(&init_id)
+                .unwrap()
+                .repository_id,
+            "api",
         );
     }
 
