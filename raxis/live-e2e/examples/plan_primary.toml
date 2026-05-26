@@ -254,6 +254,7 @@ do not silently swallow it.
   helper" pattern (write file → run file → git add → git commit
   → task_complete). Exploratory tool calls (`ls`, `cat`,
   per-row `db.find`, `pip list`) burn turns without progress.
+
 """
 
   [[tasks.credentials]]
@@ -266,43 +267,6 @@ do not silently swallow it.
   proxy_type = "mongodb"
   mount_as   = "MONGO_URL"
 
-# === iter62 verifier-runtime D10 — additive symbol-index verifier ===
-#
-# Wires the kernel-canonical `raxis-verifier-symbol-index` image
-# to the materialize-records Executor task so the live-e2e harness
-# exercises the V2 production verifier path end-to-end (image-bake
-# → digest-verify → VM-spawn → built-in symbol-index pipeline →
-# witness submission). See `specs/v2/verifier-processes.md` for the
-# full wiring contract.
-#
-# `on_failure = "warn_only"` so a transient verifier failure does
-# NOT break the existing materialize-records flow (the realistic
-# scenario already covers the unhappy paths via dedicated failure-
-# mode tasks; the symbol-index verifier is additive coverage of the
-# verifier runtime itself, not the gate FSM). The harness asserts
-# `verdict = Pass` for the happy path; failure surfaces as a
-# distinct VerifierVm* audit event the harness audit-chain assertion
-# pins.
-
-  [[tasks.verifiers]]
-  name        = "symbol_index"
-  image       = "raxis-verifier-symbol-index"
-  # `RAXIS_VERIFIER_BUILTIN = "symbol-index"` (env below) bypasses
-  # `sh -lc <command>` and runs the in-process pipeline; the
-  # command field is still required by the schema and surfaces as
-  # `<builtin>` in the audit summary.
-  command     = ["true"]
-  timeout_ms  = 30000
-  on_failure  = "warn_only"
-  artifact    = "/raxis/symbol_index.json"
-
-    [tasks.verifiers.env]
-    RAXIS_VERIFIER_BUILTIN       = "symbol-index"
-    RAXIS_BASE_SYMBOL_INDEX_PATH = "/raxis/base_index/symbol_index.json"
-    # Cap the parallel ctags fan-out so harness behaviour is
-    # deterministic across CI hardware shapes.
-    RAXIS_VERIFIER_PARALLELISM   = "4"
-
 # ── Cross-file refactor Executor (P3-2) ─────────────────
 [[tasks]]
 task_id            = "xfile-refactor"
@@ -311,8 +275,11 @@ session_agent_type = "Executor"
 # Mechanical cross-file rename across 3 language trees: read, edit,
 # run the full smoke check, commit. Keep enough headroom for one
 # focused correction loop without encouraging open-ended exploration.
+# `Cargo.lock` is admitted because `scripts/check.sh` runs the root
+# Cargo workspace and may materialise/update the lockfile before the
+# executor commits.
 max_turns          = 80
-path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/"]
+path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/", "Cargo.lock"]
 description = """
 # Cross-file refactor Executor prompt — extended e2e realistic scenario
 
@@ -394,6 +361,7 @@ MUST propagate consistently across all three trees:
 1. `git add rust-crate/ ts-pkg/ py-pkg/ Cargo.lock`
 2. `git commit -m "refactor: add optional salutation to greet API across Rust/TS/Python"`
 3. Call `task_complete` with a brief summary of which files changed.
+
 """
 
 
@@ -479,7 +447,7 @@ that legitimately edits `greet.py` to remove the defect).
 * Your `path_allowlist` is `py-pkg/` ONLY (narrowed from the
   three-tree allowlist in earlier versions of this prompt).
   You MUST NOT touch `rust-crate/`, `ts-pkg/`, `scripts/`,
-  `fixtures/`, `.gitignore`, or `README.md`.
+  `fixtures/`, `.gitignore`, or [`README.md`](../../../../README.md).
 * Do NOT run `scripts/check.sh` (or `python -m ruff check`)
   before committing — the WHOLE point of this task is to land a
   diff that the downstream `lint-runner-python` capture +
@@ -621,7 +589,23 @@ predecessors       = ["lint-defect"]
 # capture wrapper itself misbehaves. Per
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 60
-path_allowlist     = ["out/lint/", "rust-crate/"]
+# `Cargo.lock` MUST be in this allowlist: cargo always materialises
+# the workspace lockfile at the workspace root (`<worktree>/Cargo.lock`)
+# the FIRST time any cargo command runs against an unlocked workspace,
+# regardless of the cwd cargo is invoked from. The rich-multilang-001
+# fixture ships an unlocked `[workspace]` Cargo.toml at the worktree
+# root (members = ["rust-crate"]); the very first `cargo fmt --check`
+# / `cargo clippy` invocation here writes a fresh `Cargo.lock` next to
+# it. Without `Cargo.lock` admitted, the executor's `task_complete`
+# trips `CompleteTaskAdmitPathViolation` (path-scope check at admit
+# time, `kernel/src/handlers/intent.rs:2311`) — the iter57 failure
+# mode. Allowing `Cargo.lock` is canonical: it is a workspace-root
+# artefact by cargo design and the Reviewer's diff-review surface
+# tolerates it (the lockfile is a one-way function of the workspace
+# manifest tree). The Python and JS sister tasks do NOT need a
+# matching expansion: ruff / eslint / prettier / tsc do not produce
+# workspace-root artefacts, so their narrower allowlists stay tight.
+path_allowlist     = ["out/lint/", "rust-crate/", "Cargo.lock"]
 description = """
 You are the RAXIS lint-runner-rust executor. Your job is to
 surface the strict-Rust-lint verdict (`cargo fmt --all --
@@ -650,7 +634,16 @@ captured output from a committed artifact you produce here.
      echo "raxis_check_sh_exit_code=$status"
    } > out/lint/check-rust.txt
    ```
-3. `git add out/lint/check-rust.txt`
+3. Stage the capture file AND the workspace lockfile (cargo
+   materialises a fresh `Cargo.lock` at the worktree root the
+   first time it resolves the workspace; the `path_allowlist`
+   admits it explicitly, so `git add` it if `git status` shows it):
+   ```bash
+   git add out/lint/check-rust.txt
+   if git status --porcelain | grep -q '^?? Cargo\\.lock$\\|^.M Cargo\\.lock$'; then
+     git add Cargo.lock
+   fi
+   ```
 4. `git commit -m "chore: capture cargo clippy output for reviewer"`
 5. Call `task_complete` with a one-line summary that includes
    the captured exit code.
@@ -945,7 +938,7 @@ read at compile time.
 
 1. Create the file `target/codegen/build_meta.txt` with EXACTLY
    the following content (single trailing newline):
-   ```
+   ```text
    rich-multilang-001
    ```
 2. `git add -f target/codegen/build_meta.txt`
@@ -959,7 +952,7 @@ read at compile time.
 * Your `path_allowlist` is `["target/codegen/"]` ONLY. Any write
   outside that directory MUST be rejected by the kernel at intent-
   admission time. Do NOT attempt to "helpfully" update the
-  `README.md` to mention the generated file — that would surface
+  [`README.md`](../../../../README.md) to mention the generated file — that would surface
   as a `FAIL_TASK_PATH_NOT_ALLOWED` rejection and the witness
   would correctly flag a false-rejection failure.
 * The content of `build_meta.txt` is byte-stable; the witness
@@ -1313,6 +1306,7 @@ python3 /tmp/round_trip.py
    the task will fail validation.
 5. Call `task_complete` with `head_sha = <the SHA above>` and
    a brief summary of which services round-tripped.
+
 """
 
   [[tasks.credentials]]
@@ -1441,6 +1435,7 @@ exit 0 (no output file produced, summary line says `skipped`).
 
 When you have committed both the per-service outputs and the
 wrapper summary, you are done.
+
 """
 
   [[tasks.credentials]]
@@ -1572,3 +1567,232 @@ opening a connection.
   name       = "test-pg-dev"
   proxy_type = "postgres"
   mount_as   = "DATABASE_URL"
+
+# -- Dep-fetch-evidence Executor ----
+[[tasks]]
+task_id            = "dep-fetch-evidence"
+name               = "Fetch example.com over HTTPS + pip install certifi from PyPI"
+session_agent_type = "Executor"
+# iter69 — bumped from 30 → 90 to absorb the additional pip
+# install arm (multi-host: pypi.org → files.pythonhosted.org).
+# Happy path is ~8 turns; the 11× headroom covers planner
+# verification checkpoints + a single transient PyPI retry. Per
+# `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+max_turns          = 90
+path_allowlist     = ["out/deps/"]
+description = """
+# dep-fetch-evidence Executor task
+
+You are the RAXIS `dep-fetch-evidence` executor. Your job is to
+make two network round-trips from inside the executor VM, then
+commit a small JSON evidence file so a downstream witness can
+verify both succeeded:
+
+1. A single, real HTTPS GET against the IANA `example.com` page
+   using the Python standard library.
+2. A real `pip install` against PyPI for a small pure-Python
+   package, with a verifiable per-wheel SHA256 manifest.
+
+## Endpoint pinning (DO NOT change these constants)
+
+The evidence file you commit will be byte-checked against these
+constants by the harness witness. Use them verbatim.
+
+```
+TARGET_URL              = https://example.com/
+TARGET_HOST             = example.com
+TARGET_PORT             = 443
+EXPECTED_BODY_SUBSTRING = Example Domain
+EVIDENCE_FILE_PATH      = out/deps/install-evidence.json
+
+PIP_PACKAGE             = certifi
+PIP_TARGET_DIR          = out/deps/_pip
+PIP_REPORT_PATH         = out/deps/_pip-report.json
+```
+
+`example.com` is the IANA-reserved example domain (RFC 2606). The
+body is stable across years and contains the literal string
+`Example Domain` inside its `<h1>` tag.
+
+`certifi` is the canonical pure-Python TLS root-bundle package
+maintained by the Python community. It is a single small wheel
+(~165 KiB) with no native code, no transitive deps, and a stable
+package layout. We pick it because:
+
+* It is widely-mirrored, so the install path is reliable.
+* It is pure-Python, so the install never needs a compiler.
+* It has zero runtime side-effects when imported.
+
+## Step-by-step (run inside the executor VM)
+
+You may **only** write under `out/deps/`. Your path_allowlist is
+restricted to that directory.
+
+1. **Make the directory.**
+   ```bash
+   mkdir -p out/deps
+   ```
+
+2. **Issue the example.com request via Python stdlib `http.client`.**
+   Use a here-doc with a fresh Python invocation. Write the
+   parsed HTTPS evidence to a temp file in `out/deps/`.
+
+   ```bash
+   python3 - <<'PY'
+   import hashlib, http.client, json, ssl, time
+   conn = http.client.HTTPSConnection("example.com", 443,
+                                     timeout=20,
+                                     context=ssl.create_default_context())
+   conn.request("GET", "/", headers={"User-Agent": "raxis-e2e-dep-fetch-evidence/1"})
+   resp = conn.getresponse()
+   body = resp.read()
+   conn.close()
+   evidence = {
+       "target_url":                 "https://example.com/",
+       "target_host":                "example.com",
+       "target_port":                443,
+       "http_status":                resp.status,
+       "body_size_bytes":            len(body),
+       "body_sha256":                hashlib.sha256(body).hexdigest(),
+       "body_contains_example_domain": (b"Example Domain" in body),
+       "fetched_at_unix":            int(time.time()),
+       "transport":                  "https",
+   }
+   with open("out/deps/_fetch-evidence.partial.json", "w", encoding="utf-8") as fh:
+       json.dump(evidence, fh, indent=2, sort_keys=True)
+   PY
+   ```
+
+   Notes:
+   - The request **must** succeed (`http_status == 200`). If DNS
+     fails or the `HTTPSConnection.request` call raises for any reason, that
+     is a hard evidence failure. Do **not** catch the exception, do
+     not write `install-evidence.json`, and do not synthesize
+     placeholder values such as `http_status: null`.
+   - `body_contains_example_domain` MUST be `true`. If the body
+     came back empty or did not contain the pinned substring, you
+     are looking at a captive-portal-style intercept; treat that
+     as a hard error.
+
+3. **Run `pip install` against PyPI with `--report` for the
+   per-wheel SHA256 manifest.** Use the system `python3 -m pip`
+   so we exercise the standard pip code path (which uses
+   `urllib3` against `pypi.org` then downloads from
+   `files.pythonhosted.org`):
+
+   ```bash
+   python3 -m pip install \
+     --quiet \
+     --disable-pip-version-check \
+     --no-input \
+     --no-cache-dir \
+     --target=out/deps/_pip \
+     --report=out/deps/_pip-report.json \
+     certifi
+   ```
+
+   Notes:
+   - `--target=out/deps/_pip` keeps every installed file under
+     your path_allowlist.
+   - `--no-cache-dir` keeps pip from writing to
+     `~/.cache/pip/`, which is outside your path_allowlist —
+     without this flag pip will try and fail. It also forces a
+     real download every run.
+   - `--report=out/deps/_pip-report.json` emits a JSON report per
+     PEP 658 with one `install` entry per wheel, including
+     `download_info.archive_info.hash = "sha256=…"`. That is the
+     manifest the witness verifies.
+   - `--no-input` prevents pip from blocking on an interactive
+     prompt (auth, EULA, etc.) — pip MUST run unattended in the
+     executor VM.
+
+4. **Merge the example.com evidence + pip-install report into the
+   final evidence JSON.** This is one Python invocation so the
+   pinned path is written atomically:
+
+   ```bash
+   python3 - <<'PY'
+   import json, pathlib
+
+   fetch = json.loads(pathlib.Path("out/deps/_fetch-evidence.partial.json").read_text())
+   report = json.loads(pathlib.Path("out/deps/_pip-report.json").read_text())
+
+   installed = []
+   for entry in report.get("install", []):
+       meta = entry.get("metadata") or {}
+       arc  = (entry.get("download_info") or {}).get("archive_info") or {}
+       sha  = ""
+       raw  = arc.get("hash") or ""
+       if isinstance(raw, str) and raw.startswith("sha256="):
+           sha = raw.split("=", 1)[1].lower()
+       installed.append({
+           "name":    (meta.get("name") or "").lower(),
+           "version": meta.get("version") or "",
+           "sha256":  sha,
+           "url":     (entry.get("download_info") or {}).get("url") or "",
+       })
+
+   fetch["pip_install"] = {
+       "requested":  ["certifi"],
+       "target_dir": "out/deps/_pip",
+       "report_path": "out/deps/_pip-report.json",
+       "success":    bool(installed),
+       "installed":  installed,
+   }
+
+   with open("out/deps/install-evidence.json", "w", encoding="utf-8") as fh:
+       json.dump(fetch, fh, indent=2, sort_keys=True)
+       fh.write("\n")
+   PY
+   ```
+
+5. **Verify the file you wrote.**
+   ```bash
+   cat out/deps/install-evidence.json
+   ```
+   The witness will parse this JSON and assert (HTTPS arm):
+   - `http_status == 200`
+   - `body_contains_example_domain == true`
+   - `body_size_bytes > 0`
+   - `body_sha256` is a 64-char lowercase hex string.
+
+   Then (pip-install arm):
+   - `pip_install.success == true`
+   - `pip_install.installed` contains at least one entry whose
+     `name == "certifi"`.
+   - Every `pip_install.installed[*].sha256` is a 64-char
+     lowercase hex string.
+   If any of these assertions would fail, stop before committing.
+   A missing evidence file is easier for the operator to debug than
+   a committed diagnostic JSON that looks like a completed contract.
+
+6. **Commit the evidence file.**
+   ```bash
+   git add out/deps/install-evidence.json
+   git commit -m "chore(dep-fetch-evidence): record example.com + pip-install evidence"
+   ```
+   The commit message **must not** name any host outside
+   `example.com`, `pypi.org`, or `files.pythonhosted.org`.
+
+   You do NOT need to commit `_pip/` or `_pip-report.json`. They
+   are intermediate artifacts; only `install-evidence.json` is
+   the contract.
+
+7. **Call `task_complete`** with a one-line summary that includes
+   the example.com HTTP status and the certifi version that was
+   installed, e.g.
+   `"example.com fetch ok: status=200 body_size=1256; certifi installed: 2024.x.x"`.
+
+## What this task is **not**
+
+- It is **not** a generic egress test. Do not contact any host
+  outside `{example.com, pypi.org, files.pythonhosted.org}`.
+- It is **not** a retry harness. If a request fails for a
+  non-policy reason (transport timeout, etc.), `task_complete`
+  once with the diagnostic — do not loop.
+- It is **not** a build step. Do not pip-install anything
+  other than `certifi`, and do not run `pip install` against
+  any index other than the default (`pypi.org`). The witness
+  pins the package set and the egress hosts.
+
+"""

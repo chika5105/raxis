@@ -55,18 +55,14 @@ MUST propagate consistently across all three trees:
 
 ## Constraints
 
-* Your `path_allowlist` is `rust-crate/`, `ts-pkg/`, `py-pkg/`
-  ONLY. You MUST NOT modify [`README.md`](../../../../../README.md), `.gitignore`,
+* Your `path_allowlist` is `rust-crate/`, `ts-pkg/`, `py-pkg/`,
+  and root `Cargo.lock` only. `scripts/check.sh` may create or
+  refresh `Cargo.lock`; include it in the commit if it changed.
+  You MUST NOT modify [`README.md`](../../../../README.md), `.gitignore`,
   `scripts/`, or `fixtures/`. The binary fixture under
   `fixtures/logo.bin` is explicitly not yours to touch — any
   modification there is a deliberate breakage and will be
   rejected.
-* Paths are relative to the repository root. Do NOT prefix paths
-  with `workspace/`.
-* The executor image already contains the Rust, TypeScript, and
-  Python lint/test toolchains needed by `scripts/check.sh`. Do NOT
-  run `npm install`, `pip install`, `cargo install`, or similar
-  package-install commands for this task.
 * Run `scripts/check.sh` before calling `task_complete`. The
   reviewer will run it again as part of the review; an executor
   that submits a diff that fails `check.sh` is wasting reviewer
@@ -79,6 +75,6 @@ MUST propagate consistently across all three trees:
 
 ## After every file is written
 
-1. `git add rust-crate/ ts-pkg/ py-pkg/`
+1. `git add rust-crate/ ts-pkg/ py-pkg/ Cargo.lock`
 2. `git commit -m "refactor: add optional salutation to greet API across Rust/TS/Python"`
 3. Call `task_complete` with a brief summary of which files changed.

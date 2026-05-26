@@ -250,6 +250,7 @@ do not silently swallow it.
   helper" pattern (write file → run file → git add → git commit
   → task_complete). Exploratory tool calls (`ls`, `cat`,
   per-row `db.find`, `pip list`) burn turns without progress.
+
 """
 
   [[tasks.credentials]]
