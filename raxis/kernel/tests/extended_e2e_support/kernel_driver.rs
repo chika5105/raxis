@@ -2467,11 +2467,10 @@ fn build_plan_bundle(plan_toml: &str) -> PlanBundle {
 
 #[cfg(target_os = "macos")]
 fn codesign_kernel_for_avf(kernel_bin: &Path) {
-    let mut anchor = kernel_bin
-        .parent()
-        .and_then(|p| p.parent())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    // Prefer CARGO_MANIFEST_DIR because live-e2e often runs with
+    // CARGO_TARGET_DIR=/tmp/..., where walking up from the test-built
+    // kernel binary can never reach the workspace.
+    let mut anchor = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {
         let manifest = anchor.join("Cargo.toml");
         if manifest.exists() {
@@ -2482,11 +2481,29 @@ fn codesign_kernel_for_avf(kernel_bin: &Path) {
             }
         }
         if !anchor.pop() {
-            eprintln!(
-                "[realism-e2e] codesign: workspace root not found from {}",
-                kernel_bin.display()
-            );
-            return;
+            anchor = kernel_bin
+                .parent()
+                .and_then(|p| p.parent())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            loop {
+                let manifest = anchor.join("Cargo.toml");
+                if manifest.exists() {
+                    if let Ok(s) = std::fs::read_to_string(&manifest) {
+                        if s.contains("[workspace]") {
+                            break;
+                        }
+                    }
+                }
+                if !anchor.pop() {
+                    eprintln!(
+                        "[realism-e2e] codesign: workspace root not found from {}",
+                        kernel_bin.display()
+                    );
+                    return;
+                }
+            }
+            break;
         }
     }
     let entitlements = anchor.join("release/raxis.entitlements");

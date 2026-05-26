@@ -1342,16 +1342,11 @@ fn build_plan_bundle(plan_toml: &str) -> PlanBundle {
 /// recipe and the test recipe never drift.
 #[cfg(target_os = "macos")]
 fn codesign_kernel_for_avf(kernel_bin: &Path) {
-    // Walk up from the binary to the workspace root. The kernel
-    // binary lives at `target/<profile>/raxis-kernel-<hash>` (test
-    // profile) or `target/<profile>/raxis-kernel` (release).
-    // Workspace root is the ancestor whose `Cargo.toml` carries a
-    // `[workspace]` table.
-    let mut anchor = kernel_bin
-        .parent()
-        .and_then(|p| p.parent())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    // Prefer CARGO_MANIFEST_DIR because e2e runs often use
+    // CARGO_TARGET_DIR=/tmp/..., where walking up from the test-built
+    // kernel binary can never reach the workspace. The workspace root
+    // is the ancestor whose `Cargo.toml` carries a `[workspace]` table.
+    let mut anchor = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {
         let manifest = anchor.join("Cargo.toml");
         if manifest.exists() {
@@ -1362,13 +1357,31 @@ fn codesign_kernel_for_avf(kernel_bin: &Path) {
             }
         }
         if !anchor.pop() {
-            eprintln!(
-                "[e2e] codesign: could not locate workspace root from {} \
-                 — skipping AVF entitlement signing (orchestrator spawn \
-                 will fail with com.apple.security.virtualization missing)",
-                kernel_bin.display(),
-            );
-            return;
+            anchor = kernel_bin
+                .parent()
+                .and_then(|p| p.parent())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            loop {
+                let manifest = anchor.join("Cargo.toml");
+                if manifest.exists() {
+                    if let Ok(s) = std::fs::read_to_string(&manifest) {
+                        if s.contains("[workspace]") {
+                            break;
+                        }
+                    }
+                }
+                if !anchor.pop() {
+                    eprintln!(
+                        "[e2e] codesign: could not locate workspace root from {} \
+                         — skipping AVF entitlement signing (orchestrator spawn \
+                         will fail with com.apple.security.virtualization missing)",
+                        kernel_bin.display(),
+                    );
+                    return;
+                }
+            }
+            break;
         }
     }
 
