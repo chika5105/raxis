@@ -1134,9 +1134,25 @@ fn walk_chain_or_panic(data_dir: &Path) -> Vec<AuditEvent> {
         .records()
         .map(|r| {
             let row = r.unwrap_or_else(|e| panic!("chain record decode failed: {e:?}"));
-            let value = row
-                .parsed_value
-                .unwrap_or_else(|| panic!("chain row seq={} has no parsed_value", row.seq,));
+            let value = row.parsed_value.unwrap_or_else(|| {
+                panic!(
+                    "chain row seq={} has no parsed_value (raw_line failed JSON parse)",
+                    row.seq,
+                )
+            });
+            if row.event_kind == "GenesisRecord" {
+                return AuditEvent {
+                    seq: row.seq,
+                    event_id: uuid::Uuid::nil(),
+                    event_kind: row.event_kind.clone(),
+                    session_id: None,
+                    task_id: None,
+                    initiative_id: None,
+                    payload: value,
+                    emitted_at: row.emitted_at.unwrap_or(0),
+                    prev_sha256: row.prev_sha256.clone(),
+                };
+            }
             serde_json::from_value::<AuditEvent>(value)
                 .unwrap_or_else(|e| panic!("decode AuditEvent from chain row {}: {e}", row.seq))
         })
