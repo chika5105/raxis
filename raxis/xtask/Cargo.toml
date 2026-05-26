@@ -65,6 +65,7 @@ tokio         = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 chrono        = { version = "0.4", default-features = false, features = ["clock"] }
+filetime      = "0.2"
 raxis-isolation         = { path = "../crates/isolation" }
 raxis-test-support      = { path = "../crates/test-support" }
 raxis-observability     = { path = "../crates/observability" }
@@ -77,12 +78,3 @@ rusqlite     = { workspace = true }
 tempfile     = "3"
 
 [dev-dependencies]
-# `filetime` is used in the `images.rs` stale-cache-guard witnesses
-# (`inv_image_bake_no_stale_cache_01_*`) to set deterministic mtimes
-# on test scaffold files. The witnesses need to inject ordering
-# between source-file and staged-binary mtimes without relying on
-# filesystem timestamp resolution (1 s on macOS HFS+ is too coarse
-# to sleep between writes reliably). Already in Cargo.lock at 0.2.27
-# via a transitive dep, so this declaration just exposes it to the
-# xtask test crate.
-filetime     = "0.2"

@@ -589,6 +589,12 @@ fn dev_stage(args: &DevStageArgs) -> Result<()> {
     }
     fs::copy(&built, &canonical_abs)
         .with_context(|| format!("copy {} -> {}", built.display(), canonical_abs.display()))?;
+    // macOS `std::fs::copy` may preserve the source binary mtime via
+    // `fcopyfile(3)`. The stale-cache guard compares this staged file
+    // against source mtimes, so stamp a successful dev-stage with the
+    // current wall-clock time after copying.
+    filetime::set_file_mtime(&canonical_abs, filetime::FileTime::now())
+        .with_context(|| format!("refresh mtime {}", canonical_abs.display()))?;
     let mut perms = fs::metadata(&canonical_abs)
         .with_context(|| format!("stat {}", canonical_abs.display()))?
         .permissions();

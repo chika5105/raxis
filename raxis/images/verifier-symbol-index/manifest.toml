@@ -23,7 +23,7 @@
 # release pipeline pins it as part of every kernel rebuild.
 
 role              = "VerifierSymbolIndex"
-kernel_version    = "0.1.0"
+kernel_version    = "0.2.0"
 kernel_canonical  = true
 reserved_alias    = "raxis-verifier-symbol-index"
 
