@@ -1056,6 +1056,24 @@ fn checkout_worktree_at(
     let body = format!("{oid}\n");
     std::fs::write(&head_path, body).map_err(|e| ProvisionError::Io(format!("write HEAD: {e}")))?;
 
+    // 5. Keep the persisted index in lockstep with the manually
+    //    materialised tree. `PrepareFetch::main_worktree` writes an
+    //    index for the source HEAD, but this helper may immediately
+    //    re-checkout an older transfer/base commit. If HEAD and the
+    //    worktree move while the index stays behind, the next executor
+    //    `git commit` can accidentally record reversions for paths it
+    //    never touched. That is especially dangerous for sparse DAG
+    //    successors: the kernel correctly rejects the resulting diff as
+    //    a path-policy violation, but the operator sees a confusing
+    //    failure. Rebuilding the index from the target tree makes the
+    //    post-provision checkout clean in Git's own view too.
+    let mut index = repo
+        .index_from_tree(&tree_id)
+        .map_err(|e| ProvisionError::CheckoutFailed(format!("index_from_tree({tree_id}): {e}")))?;
+    index
+        .write(gix::index::write::Options::default())
+        .map_err(|e| ProvisionError::CheckoutFailed(format!("write index for {oid}: {e}")))?;
+
     Ok(())
 }
 
@@ -1555,6 +1573,22 @@ mod tests {
         assert!(
             !dest.join("foo.txt").exists(),
             "files added after base_sha must not appear in the Orchestrator worktree"
+        );
+        let status = Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .current_dir(&dest)
+            .output()
+            .expect("git status invocation");
+        assert!(
+            status.status.success(),
+            "git status failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout).trim(),
+            "",
+            "manual checkout must also reset the Git index; otherwise \
+             executor commits can include unrelated reversions"
         );
     }
 
