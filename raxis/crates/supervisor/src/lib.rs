@@ -71,3 +71,9 @@ pub const ENV_SHUTDOWN_GRACE_SECS: &str = "RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS"
 /// (defaults to a sibling `raxis-kernel` next to the supervisor
 /// binary).
 pub const ENV_KERNEL_BINARY: &str = "RAXIS_SUPERVISOR_KERNEL_BINARY";
+
+/// Env var used by packaged service managers. When set to `1`, the
+/// supervisor waits for `policy/policy.toml` and `kernel.db` before
+/// spawning the kernel. This keeps `brew services start raxis` from
+/// turning a pre-genesis data dir into a crash loop.
+pub const ENV_REQUIRE_INITIALIZED_DATA_DIR: &str = "RAXIS_SUPERVISOR_REQUIRE_INITIALIZED_DATA_DIR";

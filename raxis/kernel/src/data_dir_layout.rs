@@ -37,6 +37,8 @@
 // stay out of this list deliberately; the test that walks
 // `DATA_DIR_SUBDIRS` MUST NOT trip them.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// Canonical list of per-handler subdirectories the kernel daemon
@@ -107,6 +109,12 @@ pub const DATA_DIR_SUBDIRS: &[&str] = &[
     "worktrees",
 ];
 
+/// Canonical sensitive subdirectories that must never inherit a loose
+/// process umask. `raxis doctor` expects these to be `0700` because
+/// they hold private key material and provider credentials.
+#[cfg(unix)]
+pub const SENSITIVE_DATA_DIR_SUBDIRS: &[&str] = &["keys", "providers"];
+
 /// Idempotently create every directory listed in
 /// [`DATA_DIR_SUBDIRS`] under `data_dir`.
 ///
@@ -116,12 +124,21 @@ pub const DATA_DIR_SUBDIRS: &[&str] = &[
 /// outcome) pairs so the caller can log per-dir creation events;
 /// callers that don't need that detail can ignore the return value.
 ///
-/// **What this is NOT.** This helper does not chmod, does not write
-/// any files inside the new directories, and does not compete with
-/// genesis bootstrap for permission-mode authority. genesis is the
-/// owner of mode 0o700 on `keys/` and `providers/` (kernel-store.md
-/// §2.5.1 + peripherals.md §3.2); the per-dir chmods stay there. This
-/// helper is purely an "exists before write" gate.
+/// The helper also tightens `keys/` and `providers/` to `0700` on Unix
+/// hosts. That matters for the Homebrew service path: if an operator
+/// accidentally starts `brew services start raxis` before running
+/// `raxis genesis`, the kernel reaches this helper first, creates the
+/// skeleton data dir, then exits later because `policy.toml` and
+/// `kernel.db` do not exist yet. Without the chmod here, that premature
+/// service start left sensitive directories at the process-umask default
+/// (`0755`) and `raxis doctor` reported `[FAIL] keys.mode` /
+/// `[FAIL] providers.mode` even after the operator recovered.
+///
+/// **What this is NOT.** This helper does not write any files inside
+/// the new directories. Genesis remains the owner of key generation,
+/// policy creation, and chain anchoring. This function only guarantees
+/// that the boot-time directory surface exists and that sensitive
+/// directories have the same mode contract genesis enforces.
 ///
 /// **Order with respect to genesis.** Designed to be safe to call
 /// AFTER genesis has run (the eager-genesis case) AND on a fresh
@@ -133,6 +150,13 @@ pub fn ensure_data_dir_layout(data_dir: &Path) -> std::io::Result<()> {
     for name in DATA_DIR_SUBDIRS {
         let path = data_dir.join(name);
         std::fs::create_dir_all(&path)?;
+    }
+    #[cfg(unix)]
+    {
+        for name in SENSITIVE_DATA_DIR_SUBDIRS {
+            let path = data_dir.join(name);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        }
     }
     Ok(())
 }
@@ -176,6 +200,44 @@ mod tests {
                 "ensure_data_dir_layout did not create {} (path: {})",
                 name,
                 p.display(),
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_sets_sensitive_subdir_modes_on_a_fresh_data_dir() {
+        let tmp = TempDir::new().unwrap();
+        ensure_data_dir_layout(tmp.path()).expect("first run must succeed");
+
+        for name in SENSITIVE_DATA_DIR_SUBDIRS {
+            let p = tmp.path().join(name);
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o700,
+                "sensitive subdir {name} must be 0700 after boot layout ensure"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_repairs_pre_existing_sensitive_subdir_modes() {
+        let tmp = TempDir::new().unwrap();
+        for name in SENSITIVE_DATA_DIR_SUBDIRS {
+            let p = tmp.path().join(name);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        ensure_data_dir_layout(tmp.path()).expect("must repair pre-existing sensitive dirs");
+
+        for name in SENSITIVE_DATA_DIR_SUBDIRS {
+            let p = tmp.path().join(name);
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o700,
+                "sensitive subdir {name} must be repaired to 0700"
             );
         }
     }

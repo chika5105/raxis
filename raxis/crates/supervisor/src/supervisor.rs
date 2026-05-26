@@ -81,6 +81,11 @@ pub struct SupervisorConfig {
     /// unbounded (production). Tests use a small value to bound
     /// the loop.
     pub max_child_runs: Option<u32>,
+    /// Production service managers can start the supervisor before
+    /// `raxis genesis` has initialized the data dir. When set, the
+    /// supervisor waits for the genesis artifacts instead of spawning
+    /// the kernel into a guaranteed policy/db boot failure.
+    pub require_initialized_data_dir: bool,
 }
 
 impl SupervisorConfig {
@@ -95,6 +100,7 @@ impl SupervisorConfig {
             shutdown_grace_secs: DEFAULT_SHUTDOWN_GRACE_SECS,
             restart_backoff_ms: 250,
             max_child_runs: None,
+            require_initialized_data_dir: false,
         }
     }
 }
@@ -132,6 +138,139 @@ fn unix_now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn missing_initialization_paths(data_dir: &std::path::Path) -> Vec<String> {
+    let required = [
+        data_dir.join("policy").join("policy.toml"),
+        data_dir.join("kernel.db"),
+    ];
+    required
+        .into_iter()
+        .filter(|path| !path.is_file())
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+fn data_dir_initialized(data_dir: &std::path::Path) -> bool {
+    missing_initialization_paths(data_dir).is_empty()
+}
+
+fn uninitialized_sentinel(
+    cfg: &SupervisorConfig,
+    breaker: &CircuitBreaker,
+    supervisor_pid: u32,
+) -> Sentinel {
+    let now = unix_now_secs();
+    Sentinel {
+        schema_version: 1,
+        status: "Halted".to_owned(),
+        sub_state: Some("Uninitialized".to_owned()),
+        attempt_n: breaker.state().attempts_in_window(now, cfg.window_secs),
+        max_attempts: cfg.max_attempts,
+        last_restart_unix_ts: breaker
+            .state()
+            .recent_restart_unix_ts
+            .last()
+            .copied()
+            .unwrap_or(0),
+        last_restart_reason: Some("Uninitialized".to_owned()),
+        prev_run_exit_code: None,
+        attempts_in_window: breaker.state().attempts_in_window(now, cfg.window_secs),
+        window_secs: cfg.window_secs,
+        supervisor_pid,
+        kernel_pid: 0,
+        updated_at_unix_secs: now,
+    }
+}
+
+fn operator_stop_sentinel(
+    cfg: &SupervisorConfig,
+    breaker: &CircuitBreaker,
+    supervisor_pid: u32,
+    last_exit_code: i32,
+    sub_state: String,
+    reason: &str,
+) -> Sentinel {
+    let now = unix_now_secs();
+    Sentinel {
+        schema_version: 1,
+        status: "Halted".to_owned(),
+        sub_state: Some(sub_state),
+        attempt_n: breaker.state().attempts_in_window(now, cfg.window_secs),
+        max_attempts: cfg.max_attempts,
+        last_restart_unix_ts: breaker
+            .state()
+            .recent_restart_unix_ts
+            .last()
+            .copied()
+            .unwrap_or(0),
+        last_restart_reason: Some(reason.to_owned()),
+        prev_run_exit_code: Some(last_exit_code),
+        attempts_in_window: breaker.state().attempts_in_window(now, cfg.window_secs),
+        window_secs: cfg.window_secs,
+        supervisor_pid,
+        kernel_pid: 0,
+        updated_at_unix_secs: now,
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_initialized_data_dir(
+    cfg: &SupervisorConfig,
+    breaker: &CircuitBreaker,
+    shutdown_rx: Arc<tokio::sync::Notify>,
+    supervisor_pid: u32,
+    log: &SupervisorLog,
+) -> std::io::Result<bool> {
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        let missing = missing_initialization_paths(&cfg.data_dir);
+        if missing.is_empty() {
+            log.emit(
+                "info",
+                "kernel_start_resuming_after_data_dir_initialized",
+                &json!({ "data_dir": cfg.data_dir.display().to_string() }),
+            );
+            return Ok(true);
+        }
+
+        let s = uninitialized_sentinel(cfg, breaker, supervisor_pid);
+        let _ = write_sentinel(&cfg.data_dir, &s);
+        log.emit(
+            "warn",
+            "kernel_start_deferred_uninitialized_data_dir",
+            &json!({
+                "data_dir": cfg.data_dir.display().to_string(),
+                "missing": missing,
+                "next_step": "run raxis genesis, add provider credentials, sign policy, then keep or restart the service",
+            }),
+        );
+
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.notified() => {
+                let s = operator_stop_sentinel(
+                    cfg,
+                    breaker,
+                    supervisor_pid,
+                    0,
+                    "OperatorStop".to_owned(),
+                    "OperatorStop",
+                );
+                let _ = write_sentinel(&cfg.data_dir, &s);
+                log.emit(
+                    "info",
+                    "supervisor_halting_before_kernel_start",
+                    &json!({ "reason": "OperatorStop" }),
+                );
+                return Ok(false);
+            }
+            _ = interval.tick() => {}
+        }
+    }
 }
 
 fn child_alive_sentinel(
@@ -257,6 +396,45 @@ pub async fn run_supervisor_loop(
     }
     let mut breaker =
         CircuitBreaker::load_or_default(&cfg.data_dir, cfg.max_attempts, cfg.window_secs);
+    if cfg.require_initialized_data_dir && !data_dir_initialized(&cfg.data_dir) {
+        match wait_for_initialized_data_dir(
+            &cfg,
+            &breaker,
+            Arc::clone(&shutdown_rx),
+            supervisor_pid,
+            log.as_ref(),
+        )
+        .await?
+        {
+            true => {
+                if breaker.is_tripped() {
+                    breaker.reset();
+                    if let Err(e) = breaker.save() {
+                        log.emit(
+                            "warn",
+                            "breaker_save_failed_after_data_dir_initialization",
+                            &json!({ "reason": e.to_string() }),
+                        );
+                    } else {
+                        log.emit(
+                            "info",
+                            "circuit_breaker_reset_after_data_dir_initialization",
+                            &json!({
+                                "reason": "prior restarts happened before genesis completed"
+                            }),
+                        );
+                    }
+                }
+            }
+            false => {
+                return Ok(SupervisorRunReport {
+                    child_runs_observed: 0,
+                    final_outcome: FinalOutcome::OperatorStop,
+                    last_exit_code: 0,
+                });
+            }
+        }
+    }
     if breaker.is_tripped() {
         // Cold-start with an open breaker: refuse to spawn and
         // re-write the sentinel so the dashboard reflects the
@@ -430,32 +608,19 @@ pub async fn run_supervisor_loop(
 
         if !outcome.restart_eligible() {
             // Operator intent OR clean exit. Halt.
-            let now = unix_now_secs();
             let sub_state = if force_used {
-                Some("OperatorStopForced".to_owned())
+                "OperatorStopForced".to_owned()
             } else {
-                Some("OperatorStop".to_owned())
+                "OperatorStop".to_owned()
             };
-            let s = Sentinel {
-                schema_version: 1,
-                status: "Halted".to_owned(),
-                sub_state: sub_state.clone(),
-                attempt_n: breaker.state().attempts_in_window(now, cfg.window_secs),
-                max_attempts: cfg.max_attempts,
-                last_restart_unix_ts: breaker
-                    .state()
-                    .recent_restart_unix_ts
-                    .last()
-                    .copied()
-                    .unwrap_or(0),
-                last_restart_reason: Some(outcome.reason_str().to_owned()),
-                prev_run_exit_code: Some(last_exit_code),
-                attempts_in_window: breaker.state().attempts_in_window(now, cfg.window_secs),
-                window_secs: cfg.window_secs,
+            let s = operator_stop_sentinel(
+                &cfg,
+                &breaker,
                 supervisor_pid,
-                kernel_pid: 0,
-                updated_at_unix_secs: now,
-            };
+                last_exit_code,
+                sub_state.clone(),
+                outcome.reason_str(),
+            );
             let _ = write_sentinel(&cfg.data_dir, &s);
             log.emit(
                 "info",

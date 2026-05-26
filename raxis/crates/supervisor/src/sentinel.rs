@@ -139,6 +139,11 @@ pub enum SentinelStatus {
 /// digging into the supervisor's stderr log.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SentinelSubState {
+    /// The supervisor is running but the configured data dir has not
+    /// completed genesis yet (`policy/policy.toml` and `kernel.db`
+    /// are absent). The supervisor waits and retries instead of
+    /// spawning a kernel into a guaranteed boot failure.
+    Uninitialized,
     /// Circuit breaker tripped — too many restarts in the
     /// rolling window. Operator must run
     /// `raxis-supervisor reset-circuit-breaker`.

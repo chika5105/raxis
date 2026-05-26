@@ -1,7 +1,7 @@
 //! Regression net for **`INV-DATA-DIR-WITNESS-SUBDIR-BOOTSTRAPPED-01`** and
 //! **`INV-DATA-DIR-LAYOUT-COMPLETE-ON-BOOT-01`**.
 //!
-//! Three properties pinned here:
+//! Four properties pinned here:
 //!
 //!   1. `<data_dir>/witness/` exists after `ensure_data_dir_layout` —
 //!      the iter66 root cause was that genesis (`bootstrap.rs`) never
@@ -30,6 +30,11 @@
 //!      `No such file or directory` at first write (caught by the
 //!      iter66-style witness-write reproduction).
 //!
+//!   4. `keys/` and `providers/` are repaired to mode `0700` at boot
+//!      even when a service manager created the skeleton data dir
+//!      before genesis. Homebrew users can hit this by starting the
+//!      launchd service before `raxis genesis`.
+//!
 //! ## Why a `#[path]` include rather than a `pub use` import
 //!
 //! The `raxis-kernel` crate has no library target — every other
@@ -49,10 +54,14 @@
 mod data_dir_layout;
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+#[cfg(unix)]
+use data_dir_layout::SENSITIVE_DATA_DIR_SUBDIRS;
 use data_dir_layout::{ensure_data_dir_layout, DATA_DIR_SUBDIRS};
 
 // ────────────────────────────────────────────────────────────────────
@@ -191,7 +200,39 @@ fn ensure_is_idempotent_against_pre_existing_dirs() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Sub-test 5 — escalations/ stays out of the canonical layout.
+// Sub-test 5 — sensitive directory modes are repaired on boot.
+// ────────────────────────────────────────────────────────────────────
+
+/// Starting the Homebrew LaunchAgent before genesis creates the
+/// skeleton data dir first. The boot-time helper MUST not leave
+/// credential-bearing dirs at umask-default `0755`, or `raxis doctor`
+/// reports `[FAIL] keys.mode` / `[FAIL] providers.mode` while the
+/// operator is trying to recover from the premature service start.
+#[cfg(unix)]
+#[test]
+fn sensitive_dirs_are_chmodded_even_when_pre_existing() {
+    let tmp = TempDir::new().expect("tempdir");
+    for name in SENSITIVE_DATA_DIR_SUBDIRS {
+        let p = tmp.path().join(name);
+        fs::create_dir_all(&p).expect("create sensitive dir");
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755))
+            .expect("loosen sensitive dir to reproduce service-created skeleton");
+    }
+
+    ensure_data_dir_layout(tmp.path()).expect("ensure_data_dir_layout");
+
+    for name in SENSITIVE_DATA_DIR_SUBDIRS {
+        let p = tmp.path().join(name);
+        let mode = fs::metadata(&p).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "{name}/ must be repaired to 0700 by boot-time layout ensure"
+        );
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Sub-test 6 — escalations/ stays out of the canonical layout.
 // ────────────────────────────────────────────────────────────────────
 
 /// `escalations/` is intentionally NOT a kernel write surface —

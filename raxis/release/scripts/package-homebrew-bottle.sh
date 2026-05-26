@@ -59,6 +59,11 @@ if [[ -d "${pkg_dir}/share/raxis/dashboard" ]]; then
     cp -R "${pkg_dir}/share/raxis/dashboard" "${cellar}/share/raxis/dashboard"
 fi
 
+if [[ -f "${pkg_dir}/share/raxis/install.sh" ]]; then
+    cp "${pkg_dir}/share/raxis/install.sh" "${cellar}/share/raxis/install.sh"
+    chmod 0755 "${cellar}/share/raxis/install.sh"
+fi
+
 if [[ -f "${pkg_dir}/share/raxis/policy.toml.example" ]]; then
     cp "${pkg_dir}/share/raxis/policy.toml.example" \
        "${cellar}/share/raxis/policy.toml.example"
@@ -126,6 +131,7 @@ required_service_snippets=(
     'run ["/bin/sh", "-c", "ulimit -n 4096 && exec #{opt_bin}/raxis-supervisor start"]'
     'environment_variables PATH: std_service_path_env,'
     'RAXIS_DATA_DIR: (var/"lib/raxis").to_s,'
+    'RAXIS_SUPERVISOR_REQUIRE_INITIALIZED_DATA_DIR: "1",'
     'RAXIS_SUPERVISOR_KERNEL_BINARY: (opt_bin/"raxis-kernel").to_s'
 )
 

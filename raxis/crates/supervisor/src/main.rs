@@ -44,7 +44,7 @@ use raxis_supervisor::signal::{install_handlers, IntentionalShutdownFlag};
 use raxis_supervisor::supervisor::{run_supervisor_loop, FinalOutcome, SupervisorConfig};
 use raxis_supervisor::{
     DEFAULT_MAX_ATTEMPTS, DEFAULT_RESTART_WINDOW_SECS, DEFAULT_SHUTDOWN_GRACE_SECS,
-    ENV_KERNEL_BINARY, ENV_OPT_IN, ENV_SHUTDOWN_GRACE_SECS,
+    ENV_KERNEL_BINARY, ENV_OPT_IN, ENV_REQUIRE_INITIALIZED_DATA_DIR, ENV_SHUTDOWN_GRACE_SECS,
 };
 
 fn print_usage_and_exit(code: i32) -> ! {
@@ -69,6 +69,7 @@ fn print_usage_and_exit(code: i32) -> ! {
          ENVIRONMENT:\n  \
          RAXIS_SUPERVISOR_AUTO_RESTART=1   Opt-in to auto-restart\n  \
          RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS  Override grace period (default {DEFAULT_SHUTDOWN_GRACE_SECS}s)\n  \
+         RAXIS_SUPERVISOR_REQUIRE_INITIALIZED_DATA_DIR=1  Wait for genesis artifacts before spawning\n  \
          RAXIS_SUPERVISOR_KERNEL_BINARY    Override kernel binary path\n\
          "
     );
@@ -215,6 +216,9 @@ async fn cmd_start(
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_SHUTDOWN_GRACE_SECS);
+    let require_initialized_data_dir = std::env::var(ENV_REQUIRE_INITIALIZED_DATA_DIR)
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let cfg = SupervisorConfig {
         data_dir: data_dir.to_path_buf(),
         kernel_binary: kernel_binary.to_path_buf(),
@@ -225,6 +229,7 @@ async fn cmd_start(
         shutdown_grace_secs,
         restart_backoff_ms: 250,
         max_child_runs: None,
+        require_initialized_data_dir,
     };
 
     let intent_flag = IntentionalShutdownFlag::new();

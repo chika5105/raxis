@@ -54,6 +54,7 @@ fn cfg_for(
         shutdown_grace_secs: 1,
         restart_backoff_ms: 10,
         max_child_runs,
+        require_initialized_data_dir: false,
     }
 }
 

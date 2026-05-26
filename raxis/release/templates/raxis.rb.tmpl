@@ -61,6 +61,8 @@ class Raxis < Formula
 
     pkgshare.install "images" if File.directory?("images")
     pkgshare.install "kernel" if File.directory?("kernel")
+    pkgshare.install "share/raxis/install.sh" if File.exist?("share/raxis/install.sh")
+    chmod 0755, pkgshare/"install.sh" if (pkgshare/"install.sh").exist?
     pkgshare.install "share/raxis/dashboard" if File.directory?("share/raxis/dashboard")
     pkgshare.install "share/raxis/policy.toml.example" if File.exist?("share/raxis/policy.toml.example")
 
@@ -83,6 +85,7 @@ class Raxis < Formula
                           RAXIS_INSTALL_DIR: opt_pkgshare.to_s,
                           RAXIS_DATA_DIR: (var/"lib/raxis").to_s,
                           RAXIS_SUPERVISOR_AUTO_RESTART: "1",
+                          RAXIS_SUPERVISOR_REQUIRE_INITIALIZED_DATA_DIR: "1",
                           RAXIS_SUPERVISOR_KERNEL_BINARY: (opt_bin/"raxis-kernel").to_s
     log_path var/"log/raxis/kernel.log"
     error_log_path var/"log/raxis/kernel.err.log"
@@ -107,11 +110,15 @@ class Raxis < Formula
         RAXIS_INSTALL_DIR=#{opt_pkgshare}
         RAXIS_DATA_DIR=#{var}/lib/raxis
         RAXIS_SUPERVISOR_AUTO_RESTART=1
+        RAXIS_SUPERVISOR_REQUIRE_INITIALIZED_DATA_DIR=1
 
       The service launches raxis-supervisor, which launches and
       supervises raxis-kernel.
       It raises the launchd file-descriptor soft limit to 4096 before
       starting the kernel.
+
+      Fast setup:
+        #{opt_pkgshare}/install.sh
 
       Dashboard static bundle:
         #{opt_pkgshare}/dashboard
