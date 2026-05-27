@@ -211,17 +211,17 @@ raxis doctor`}</CommandBlock>
           </div>
           <div className="mt-8 grid gap-4 lg:grid-cols-3">
             <DashboardShot
-              src="/images/dashboard-plan-builder.jpg"
+              src="/images/dashboard-plan-builder.png"
               alt="Raxis dashboard Plan Builder with feature library and DAG preview"
               title="Plan Builder"
             />
             <DashboardShot
-              src="/images/dashboard-policy-builder.jpg"
+              src="/images/dashboard-policy-builder.png"
               alt="Raxis dashboard Policy Builder with environment recommendation and feature library"
               title="Policy Builder"
             />
             <DashboardShot
-              src="/images/dashboard-glossary.jpg"
+              src="/images/dashboard-glossary.png"
               alt="Raxis dashboard glossary with searchable operator concepts"
               title="Dashboard glossary"
             />
@@ -401,8 +401,8 @@ function DashboardShot({
       <Image
         src={src}
         alt={alt}
-        width={1440}
-        height={1000}
+        width={2880}
+        height={2000}
         className="h-auto w-full"
       />
       <figcaption className="border-t border-[var(--rule)] px-4 py-3 text-sm font-semibold text-[var(--fg)]">

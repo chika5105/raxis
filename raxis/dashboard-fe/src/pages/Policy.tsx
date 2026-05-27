@@ -329,11 +329,11 @@ export function PolicyPage() {
   return (
     <div className="space-y-5">
       <header>
-        <h1 className="text-xl font-semibold text-ink">Policy Builder</h1>
+        <h1 className="text-xl font-semibold text-ink">Policy</h1>
         <p className="text-sm text-ink-muted">
-          Inspect the active policy, discover policy features, validate draft
-          policy.toml, then advance through the signed kernel path. Editing
-          requires the <code className="font-mono">write_policy</code> role.
+          Inspect the active policy, use builder tools to draft safe changes,
+          validate policy.toml, then advance through the signed kernel path.
+          Editing requires the <code className="font-mono">write_policy</code> role.
         </p>
       </header>
 

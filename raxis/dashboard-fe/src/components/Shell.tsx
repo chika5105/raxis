@@ -62,7 +62,7 @@ const NAV: NavSection[] = [
   {
     label: "System",
     items: [
-      { to: "/policy", label: "Policy Builder", glyph: "P" },
+      { to: "/policy", label: "Policy", glyph: "P" },
       // Visible to every authenticated operator (read or higher) —
       // `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`
       // requires that the system-credential viewer surfaces every
