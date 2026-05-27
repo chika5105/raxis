@@ -209,7 +209,7 @@ raxis doctor`}</CommandBlock>
               body="When health is degraded, the dashboard points you at raxis doctor, supervisor status, and the right logs."
             />
           </div>
-          <div className="mt-8 grid gap-4 lg:grid-cols-3">
+          <div className="mt-8 space-y-6">
             <DashboardShot
               src="/images/dashboard-plan-builder.png"
               alt="Raxis dashboard Plan Builder with feature library and DAG preview"
@@ -398,15 +398,27 @@ function DashboardShot({
 }) {
   return (
     <figure className="overflow-hidden rounded-lg border border-[var(--rule)] bg-[var(--bg)] shadow-[var(--shadow-soft)]">
-      <Image
-        src={src}
-        alt={alt}
-        width={2880}
-        height={2000}
-        className="h-auto w-full"
-      />
-      <figcaption className="border-t border-[var(--rule)] px-4 py-3 text-sm font-semibold text-[var(--fg)]">
-        {title}
+      <a href={src} target="_blank" rel="noreferrer" className="block">
+        <Image
+          src={src}
+          alt={alt}
+          width={2880}
+          height={2000}
+          sizes="(min-width: 1024px) 960px, calc(100vw - 2rem)"
+          unoptimized
+          className="h-auto w-full"
+        />
+      </a>
+      <figcaption className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--rule)] px-4 py-3 text-sm font-semibold text-[var(--fg)]">
+        <span>{title}</span>
+        <a
+          href={src}
+          target="_blank"
+          rel="noreferrer"
+          className="text-[var(--accent)] hover:text-[var(--fg)]"
+        >
+          Open full-size
+        </a>
       </figcaption>
     </figure>
   );

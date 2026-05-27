@@ -73,7 +73,7 @@ diving deeper. The same data is available headless via
 
 ### 2 · Glossary — the operator vocabulary
 
-![RAXIS dashboard glossary](/images/dashboard-glossary.jpg)
+[![RAXIS dashboard glossary](/images/dashboard-glossary.png)](/images/dashboard-glossary.png)
 
 Searchable definitions for the concepts that show up across the UI:
 data dir, install dir, operator key, genesis, policy, provider, kernel,
@@ -85,7 +85,7 @@ live run.
 
 ### 3 · Plan Builder — create plan.toml
 
-![RAXIS dashboard Plan Builder](/images/dashboard-plan-builder.jpg)
+[![RAXIS dashboard Plan Builder](/images/dashboard-plan-builder.png)](/images/dashboard-plan-builder.png)
 
 Use Plan Builder before submitting a new initiative. It provides:
 
@@ -152,7 +152,7 @@ mid-walk; see [`raxis/crates/dashboard/src/routes/git.rs`](../../crates/dashboar
 
 ### 7 · Policy Builder — edit policy.toml
 
-![RAXIS dashboard Policy Builder](/images/dashboard-policy-builder.jpg)
+[![RAXIS dashboard Policy Builder](/images/dashboard-policy-builder.png)](/images/dashboard-policy-builder.png)
 
 Policy Builder is the post-genesis policy workbench. Use it after the
 kernel is healthy to inspect the active policy, discover the available
