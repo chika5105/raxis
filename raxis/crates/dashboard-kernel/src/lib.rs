@@ -5580,7 +5580,7 @@ fn validate_plan_draft_with_policy(
                 BuilderValidationSeverity::Error,
                 "PLAN_REPOSITORY_ID",
                 "repository must be a path-safe id.",
-                "Use names like main, api, frontend, or docs; avoid slashes and spaces.",
+                "Use the actual repository name, like acme-api, frontend, or docs; avoid slashes and spaces.",
             ));
         }
     }

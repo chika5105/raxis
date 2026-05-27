@@ -308,7 +308,7 @@ const glossaryTerms = [
   },
   {
     term: "Managed repo",
-    body: "A Git repository Raxis owns for governed work. Use main for the first repo, then add named repos such as api or web.",
+    body: "A Git repository Raxis owns for governed work. Name it after the actual repo, such as hello-world, acme-api, api, or web. The branch lives in target_ref.",
   },
   {
     term: "Plan",

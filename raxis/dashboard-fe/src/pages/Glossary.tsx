@@ -103,8 +103,8 @@ const TERMS: GlossaryTerm[] = [
     category: "Work",
     summary: "A repository Raxis owns for governed work.",
     detail:
-      "A managed repository is cloned or adopted into the data dir so the kernel can create task worktrees, perform integration merge, and update the target ref under policy. Raxis 0.2.x supports named repositories.",
-    related: ["repositories/main", "target_ref"],
+      "A managed repository is cloned or adopted into the data dir so the kernel can create task worktrees, perform integration merge, and update the target ref under policy. Name it after the actual repo, such as acme-api or web; target_ref names the branch.",
+    related: ["repositories/<repo-name>", "target_ref"],
   },
   {
     term: "Plan",

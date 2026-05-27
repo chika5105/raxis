@@ -4,8 +4,8 @@
 > committed to `main` → audit chain verifies. ~10 minutes.
 
 This page is the runnable end-to-end "hello world" for RAXIS. The
-plan creates one file (`HELLO.md`) inside the default managed repo,
-commits it, and lets the kernel fast-forward `main`.
+plan creates one file (`HELLO.md`) inside the `hello-world` managed
+repo, commits it, and lets the kernel fast-forward the `main` branch.
 
 If you already ran the Homebrew helper from the website:
 
@@ -14,7 +14,7 @@ If you already ran the Homebrew helper from the website:
 ```
 
 you can skip straight to
-[5 · Seed the default managed repo](#5--seed-the-default-managed-repo).
+[5 · Seed the demo managed repo](#5--seed-the-demo-managed-repo).
 The helper already created the operator key, ran genesis with bootstrap
 admin permissions, configured the provider, signed policy, and started
 the daemon.
@@ -288,22 +288,23 @@ minimal Anthropic policy, so continue with the managed repo below.
 
 ---
 
-## 5 · Seed the default managed repo
+## 5 · Seed the demo managed repo
 
 ```bash
-export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
+export RAXIS_REPO_ID="hello-world"
+export RAXIS_MANAGED_REPO="$RAXIS_DATA_DIR/repositories/$RAXIS_REPO_ID"
 
-rm -rf "$RAXIS_MAIN_REPO"
-install -d "$(dirname "$RAXIS_MAIN_REPO")"
-git init -q "$RAXIS_MAIN_REPO"
-git -C "$RAXIS_MAIN_REPO" symbolic-ref HEAD refs/heads/main
+rm -rf "$RAXIS_MANAGED_REPO"
+install -d "$(dirname "$RAXIS_MANAGED_REPO")"
+git init -q "$RAXIS_MANAGED_REPO"
+git -C "$RAXIS_MANAGED_REPO" symbolic-ref HEAD refs/heads/main
 
-printf '# hello world demo\n' > "$RAXIS_MAIN_REPO/README.md"
-git -C "$RAXIS_MAIN_REPO" \
+printf '# hello world demo\n' > "$RAXIS_MANAGED_REPO/README.md"
+git -C "$RAXIS_MANAGED_REPO" \
   -c user.email=demo@raxis.local \
   -c user.name=Demo \
   add README.md
-git -C "$RAXIS_MAIN_REPO" \
+git -C "$RAXIS_MANAGED_REPO" \
   -c user.email=demo@raxis.local \
   -c user.name=Demo \
   commit -qm "init"
@@ -311,15 +312,19 @@ git -C "$RAXIS_MAIN_REPO" \
 
 RAXIS does not run against the directory you happen to be standing in.
 The production kernel clones from the managed repository selected by
-`[workspace] repository`. The first guide uses the default repository
-id `main`, stored at `$RAXIS_DATA_DIR/repositories/main`, then clones
-into kernel-managed worktrees under `$RAXIS_DATA_DIR/worktrees`.
+`[workspace] repository`. This guide uses repository id
+`hello-world`, stored at `$RAXIS_DATA_DIR/repositories/hello-world`,
+then clones into kernel-managed worktrees under
+`$RAXIS_DATA_DIR/worktrees`. The branch is controlled separately by
+`target_ref`.
 
-For your own project after this demo, use a managed clone:
+For your own project after this demo, name the managed repo after the
+real repository:
 
 ```bash
-raxis repo adopt main /path/to/your/repo
-raxis repo status main
+export RAXIS_REPO_ID="$(basename /path/to/your/repo)"
+raxis repo adopt "$RAXIS_REPO_ID" /path/to/your/repo
+raxis repo status "$RAXIS_REPO_ID"
 ```
 
 0.2.0 supports multiple managed repositories. Adopt additional repos
@@ -355,7 +360,7 @@ description = "Create a HELLO.md greeting file and commit it."
 name       = "Hello world"
 lane_id    = "default"
 target_ref = "refs/heads/main"
-repository = "main"
+repository = "hello-world"
 
 [[tasks]]
 task_id            = "$RAXIS_TASK_ID"

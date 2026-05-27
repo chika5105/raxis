@@ -32,7 +32,7 @@ Related setup entry points:
 | Kernel | The authority process that admits plans and runs isolated agents. |
 | Supervisor | The Homebrew service wrapper that keeps the kernel healthy. |
 | Dashboard | Local UI at `http://127.0.0.1:9820`. |
-| Managed repo | The repo RAXIS clones from and merges back into. |
+| Managed repo | The repo RAXIS clones from and merges back into. Use the actual repo name as its id; keep branch names in `target_ref`. |
 | Plan / initiative / task | A signed `plan.toml`, one admitted unit of work, and the executor/reviewer nodes inside it. |
 | Orchestrator / executor / reviewer | Kernel-created coordinator, code-editing agent, and review agent. |
 | Plan Builder / Policy Builder | Dashboard helpers for drafting TOML and validating it through the same kernel rules used at admission/epoch advance. |

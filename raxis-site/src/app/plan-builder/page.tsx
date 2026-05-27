@@ -31,7 +31,7 @@ export default function PlanBuilderPage() {
   const [workspace, setWorkspace] = useState("Hello world");
   const [lane, setLane] = useState("default");
   const [targetRef, setTargetRef] = useState("refs/heads/main");
-  const [repository, setRepository] = useState("main");
+  const [repository, setRepository] = useState("hello-world");
   const [tasks, setTasks] = useState<TaskDraft[]>(starterTasks);
   const [copied, setCopied] = useState(false);
 
@@ -109,6 +109,9 @@ export default function PlanBuilderPage() {
                   onChange={(e) => setRepository(e.target.value)}
                   className="field"
                 />
+                <span className="mt-1 block text-xs font-normal leading-relaxed text-[var(--muted)]">
+                  Use the actual repository name. Keep branch names in target ref.
+                </span>
               </LabeledInput>
               <LabeledInput label="Lane">
                 <input value={lane} onChange={(e) => setLane(e.target.value)} className="field" />

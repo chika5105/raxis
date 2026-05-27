@@ -34,7 +34,7 @@ model for the getting-started flow.
 | **Kernel** | `raxis-kernel`, the authority core that admits plans, spawns VMs, enforces policy, records audit events, and fast-forwards the managed repo. |
 | **Supervisor** | `raxis-supervisor`, the service wrapper that starts/restarts the kernel, writes lifecycle state, and avoids pre-genesis crash loops. |
 | **Dashboard** | Local web UI served by the kernel, default `http://127.0.0.1:9820`, authenticated with the same operator key model as the CLI. |
-| **Managed repo** | A Git repository inside the data dir that RAXIS clones from and merges back into. 0.2.0 adds first-class multiple managed repositories. |
+| **Managed repo** | A Git repository inside the data dir that RAXIS clones from and merges back into. Name each managed repo after the actual repo, such as `hello-world`, `acme-api`, `api`, or `web`; `target_ref` names the branch. |
 | **Plan** | Signed `plan.toml` describing one initiative: workspace, tasks, dependencies, scope, prompts, reviewers, and gates. |
 | **Initiative** | One admitted unit of work from a plan. The dashboard and audit log organize activity around initiative IDs. |
 | **Task** | One executor or reviewer work item in the plan DAG. `description` is the short summary; `prompt` is the main instruction. |

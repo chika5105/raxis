@@ -214,7 +214,7 @@ export function PlanBuilderPage() {
   const [workspace, setWorkspace] = useState("Hello world");
   const [lane, setLane] = useState("default");
   const [targetRef, setTargetRef] = useState("refs/heads/main");
-  const [repository, setRepository] = useState("main");
+  const [repository, setRepository] = useState("hello-world");
   const [crossCuttingArtifacts, setCrossCuttingArtifacts] = useState("");
   const [tasks, setTasks] = useState<TaskDraft[]>(starterTasks);
   const [dagOpen, setDagOpen] = useState(true);
@@ -441,6 +441,9 @@ export function PlanBuilderPage() {
                   }}
                   className="input w-full font-mono"
                 />
+                <span className="mt-1 block text-[11px] font-normal leading-relaxed text-ink-muted">
+                  Use the actual repo name, for example acme-api. Branches belong in target_ref.
+                </span>
               </Field>
               <Field label="Lane">
                 <input
@@ -1106,7 +1109,7 @@ function validatePlan(input: {
     issues.push("target_ref must start with refs/heads/.");
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(input.repository.trim())) {
-    issues.push("repository must be a path-safe id, for example main, api, or web.");
+    issues.push("repository must be a path-safe id, for example hello-world, acme-api, api, or web.");
   }
   for (const artifact of splitList(input.crossCuttingArtifacts)) {
     if (artifact.startsWith("/") || artifact.includes("..")) {
@@ -1181,7 +1184,7 @@ function renderPlan(input: {
     `name       = ${tomlString(input.workspace.trim())}`,
     `lane_id    = ${tomlString(input.lane.trim())}`,
     `target_ref = ${tomlString(input.targetRef.trim())}`,
-    `repository = ${tomlString(input.repository.trim() || "main")}`,
+    `repository = ${tomlString(input.repository.trim())}`,
     "",
   ];
   const artifacts = splitList(input.crossCuttingArtifacts);

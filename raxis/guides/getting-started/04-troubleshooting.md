@@ -379,31 +379,33 @@ checked-in scenario plans, the simplest repeatable path is a fresh
 
 ---
 
-## 7c · `repositories/main` cannot be opened
+## 7c · The managed repository cannot be opened
 
 **When.** A task starts and then fails before editing because the
 kernel cannot find or clone the source repo.
 
-**Why.** Homebrew production runs use the canonical operator repo at
-`$RAXIS_DATA_DIR/repositories/main`. A `/tmp/raxis-*` directory is only
-a staging convenience for humans; the kernel does not infer it from
-your current working directory.
+**Why.** Homebrew production runs clone from the managed repository
+named by `[workspace] repository`, for example
+`$RAXIS_DATA_DIR/repositories/hello-world`. A `/tmp/raxis-*`
+directory is only a staging convenience for humans; the kernel does
+not infer it from your current working directory.
 
 **Fix.** Seed the canonical repo before submitting:
 
 ```bash
-export RAXIS_MAIN_REPO="$RAXIS_DATA_DIR/repositories/main"
-rm -rf "$RAXIS_MAIN_REPO"
-install -d "$(dirname "$RAXIS_MAIN_REPO")"
-git init -q "$RAXIS_MAIN_REPO"
-git -C "$RAXIS_MAIN_REPO" symbolic-ref HEAD refs/heads/main
-printf '# demo\n' > "$RAXIS_MAIN_REPO/README.md"
-git -C "$RAXIS_MAIN_REPO" -c user.email=demo@raxis.local -c user.name=Demo add README.md
-git -C "$RAXIS_MAIN_REPO" -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
+export RAXIS_REPO_ID="hello-world"
+export RAXIS_MANAGED_REPO="$RAXIS_DATA_DIR/repositories/$RAXIS_REPO_ID"
+rm -rf "$RAXIS_MANAGED_REPO"
+install -d "$(dirname "$RAXIS_MANAGED_REPO")"
+git init -q "$RAXIS_MANAGED_REPO"
+git -C "$RAXIS_MANAGED_REPO" symbolic-ref HEAD refs/heads/main
+printf '# demo\n' > "$RAXIS_MANAGED_REPO/README.md"
+git -C "$RAXIS_MANAGED_REPO" -c user.email=demo@raxis.local -c user.name=Demo add README.md
+git -C "$RAXIS_MANAGED_REPO" -c user.email=demo@raxis.local -c user.name=Demo commit -qm "init"
 ```
 
 After the initiative completes, inspect results with
-`git -C "$RAXIS_MAIN_REPO" ...`, not with `git -C /tmp/...`.
+`git -C "$RAXIS_MANAGED_REPO" ...`, not with `git -C /tmp/...`.
 
 ---
 

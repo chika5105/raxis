@@ -13,14 +13,15 @@ shape as the getting-started guide:
   you intentionally created a disposable data dir.
 - Operator key convenience: `RAXIS_OPERATOR_KEY="$HOME/raxis-keys/operator_private.pem"`.
 - Managed repos: `$RAXIS_DATA_DIR/repositories/<repository_id>`.
-- Default managed repo: `$RAXIS_DATA_DIR/repositories/main`.
+- Prefer repository ids that match the real repo name, such as `api`,
+  `web`, or `hello-world`. Older scenario fixtures may still use
+  `main`; that is a repository id, not a branch name.
 - Kernel worktrees: `$RAXIS_DATA_DIR/worktrees`.
 
 RAXIS does not execute against the directory you happen to be in. The
 kernel clones from the managed repository named by the plan's
 `[workspace] repository` field into its own managed worktrees, then
-fast-forwards the admitted `target_ref`. If the field is omitted,
-0.2.0 uses `main`.
+fast-forwards the admitted `target_ref`.
 
 ---
 
@@ -41,7 +42,7 @@ raxis-supervisor status --data-dir "$RAXIS_DATA_DIR"
 # In this terminal, stand in the scenario folder.
 cd /path/to/raxis/guides/scenarios/01-hello-world
 
-# Seed the default managed repo for the scenario.
+# Seed the managed repo used by this scenario fixture.
 rm -rf "$RAXIS_MAIN_REPO"
 install -d "$(dirname "$RAXIS_MAIN_REPO")"
 git init -q "$RAXIS_MAIN_REPO"
@@ -91,8 +92,9 @@ symlink an arbitrary checkout into the data dir unless you are doing
 low-level debugging and understand the risk to your working tree.
 
 ```bash
-raxis repo adopt main /path/to/your/repo
-raxis repo status main
+export RAXIS_REPO_ID="$(basename /path/to/your/repo)"
+raxis repo adopt "$RAXIS_REPO_ID" /path/to/your/repo
+raxis repo status "$RAXIS_REPO_ID"
 ```
 
 For 0.2.0 multi-repo plans, adopt additional repositories and set the
