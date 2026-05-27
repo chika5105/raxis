@@ -175,20 +175,6 @@ raxis doctor`}</CommandBlock>
                 Open the first initiative guide →
               </Link>
             </Step>
-
-            <div className="rounded-lg border border-[var(--rule)] bg-[var(--accent-soft)] p-5">
-              <h3 className="text-base font-semibold text-[var(--fg)]">
-                Continue to the first initiative
-              </h3>
-              <p className="mt-2 text-sm leading-relaxed text-[var(--muted)]">
-                The full guide shows the first repository, the first
-                plan.toml, dashboard inspection, and how to read the committed
-                result.
-              </p>
-              <Link href={firstInitiativeHref} className="mt-4 inline-flex font-semibold text-accent underline-offset-4 hover:underline">
-                Run the first initiative →
-              </Link>
-            </div>
           </div>
         </div>
       </section>
