@@ -138,7 +138,7 @@ function FastStart() {
   return (
     <section id="get-started" className="border-b border-[var(--rule)] bg-[var(--surface)]">
       <div className="mx-auto max-w-5xl px-4 py-12 sm:px-6 sm:py-14">
-        <div>
+        <div className="min-w-0">
           <p className="eyebrow">Choose your path</p>
           <h2 className="h-section mt-4">Find the fastest route into RAXIS.</h2>
           <p className="mt-5 max-w-2xl leading-relaxed text-[var(--muted)]">
@@ -232,7 +232,9 @@ function DemoVideo() {
             </Link>
           </div>
         </div>
-        <DemoPlayer />
+        <div className="min-w-0">
+          <DemoPlayer />
+        </div>
       </div>
     </section>
   );

@@ -12,7 +12,7 @@ export function DemoPlayer() {
   const [loaded, setLoaded] = useState(false);
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-[var(--rule)] bg-[var(--surface)] shadow-[var(--shadow-soft)]">
+    <div className="min-w-0 max-w-full overflow-hidden rounded-2xl border border-[var(--rule)] bg-[var(--surface)] shadow-[var(--shadow-soft)]">
       <div className="relative aspect-video bg-black">
         {loaded ? (
           <iframe
@@ -28,7 +28,7 @@ export function DemoPlayer() {
             <img
               src={LOOM_POSTER}
               alt="RAXIS demo video preview"
-              className="h-full w-full object-cover"
+              className="block h-full w-full object-cover"
             />
             <div className="absolute inset-0 flex items-center justify-center bg-black/20">
               <button
