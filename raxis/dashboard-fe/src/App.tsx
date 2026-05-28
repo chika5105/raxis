@@ -23,6 +23,7 @@ import { SessionDetailPage } from "@/pages/SessionDetail";
 import { SessionsPage } from "@/pages/Sessions";
 import { SystemCredentialsPage } from "@/pages/SystemCredentials";
 import { TaskDetailPage } from "@/pages/TaskDetail";
+import { ToolBuilderPage } from "@/pages/ToolBuilder";
 import { WorktreeDetailPage } from "@/pages/WorktreeDetail";
 
 const queryClient = new QueryClient({
@@ -71,6 +72,7 @@ export function App() {
                     <Route path="/notifications" element={<NotificationsPage />} />
                     <Route path="/initiatives" element={<InitiativesPage />} />
                     <Route path="/plan-builder" element={<PlanBuilderPage />} />
+                    <Route path="/tool-builder" element={<ToolBuilderPage />} />
                     <Route path="/initiatives/:id" element={<InitiativeDetailPage />} />
                     <Route path="/initiatives/:id/dag" element={<InitiativeDagPage />} />
                     <Route path="/tasks/:id" element={<TaskDetailPage />} />

@@ -95,7 +95,7 @@ const TERMS: GlossaryTerm[] = [
     category: "Runtime",
     summary: "The local operator UI.",
     detail:
-      "The dashboard is served by the kernel on loopback by default. It shows health, initiatives, sessions, diffs, audit events, gates, policy, credentials, Plan Builder, Policy Builder, and recovery guidance.",
+      "The dashboard is served by the kernel on loopback by default. It shows health, initiatives, sessions, diffs, audit events, gates, policy, credentials, Plan Builder, Tool Builder, Policy Builder, and recovery guidance.",
     related: ["http://127.0.0.1:9820"],
   },
   {
@@ -169,6 +169,30 @@ const TERMS: GlossaryTerm[] = [
     detail:
       "Policy Builder exposes policy features, known-good snippets, TOML editing, draft hashing, kernel validation, and next-step commands. Epoch advance still requires signed policy authority.",
     related: ["RotateEpoch", "OperatorCertInstall"],
+  },
+  {
+    term: "Tool Builder",
+    category: "Builders",
+    summary: "A helper for wrapping existing tools.",
+    detail:
+      "Tool Builder drafts Executor profile custom tools for existing scripts, stdio MCP servers, local HTTP services, commercial tool bridges, Unity, Blender, and other local automation. It favors one narrow operation per tool, absolute wrapper commands, explicit schemas, and short timeouts.",
+    related: ["custom tool", "MCP adapter"],
+  },
+  {
+    term: "Custom tool",
+    category: "Work",
+    summary: "An operator-declared Executor-only wrapper.",
+    detail:
+      "A custom tool lives under [[profiles.<name>.custom_tool]] in plan.toml. The kernel validates it, resolves profile inheritance, and stamps only the effective tool bundle into matching Executor sessions. Reviewers and the Orchestrator never receive custom tools.",
+    related: ["Tool Builder", "Executor"],
+  },
+  {
+    term: "MCP adapter",
+    category: "Work",
+    summary: "A bounded wrapper around an existing MCP method.",
+    detail:
+      "Raxis does not use MCP for authority decisions. Operators can bring existing MCP servers by wrapping specific methods as custom tools, such as docs_search, unity_build_player, or blender_export_asset, with schemas and timeouts the kernel can validate.",
+    related: ["custom tool", "Invariant 5"],
   },
   {
     term: "DAG",

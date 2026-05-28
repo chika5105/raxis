@@ -476,9 +476,10 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
                 .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_POLICY)),
         )
         // Dashboard builders. Read-only validation helpers for
-        // generated/pasted plan.toml and policy.toml drafts. The
-        // body cap matches policy editing because policy drafts can
-        // legitimately be large; both routes are still non-mutating.
+        // generated/pasted plan.toml, policy.toml, and custom-tool
+        // profile drafts. The body cap matches policy editing
+        // because drafts can legitimately be large; these routes are
+        // still non-mutating.
         .route(
             "/api/builders/plan/validate",
             post(builders::validate_plan::<D>)
@@ -488,6 +489,12 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route(
             "/api/builders/policy/validate",
             post(builders::validate_policy::<D>)
+                .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_POLICY))
+                .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_POLICY)),
+        )
+        .route(
+            "/api/builders/tools/validate",
+            post(builders::validate_tools::<D>)
                 .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_POLICY))
                 .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_POLICY)),
         )

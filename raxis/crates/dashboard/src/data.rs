@@ -1489,7 +1489,7 @@ pub struct BuilderValidationIssue {
 /// Validation response shared by Plan Builder and Policy Builder.
 #[derive(Debug, Clone, Serialize)]
 pub struct BuilderValidationResponse {
-    /// `"plan"` or `"policy"`.
+    /// `"plan"`, `"policy"`, or `"tools"`.
     pub artifact_kind: String,
     /// Always `"kernel"` for production validation. Fixture
     /// implementations may still use the same shape.
@@ -2428,6 +2428,18 @@ pub trait DashboardData: Send + Sync + 'static {
         toml: &str,
     ) -> Result<BuilderValidationResponse, ApiError>;
 
+    /// Validate a draft custom-tool profile block from the dashboard
+    /// Tool Builder.
+    ///
+    /// This is intentionally read-only. Tool definitions only take
+    /// effect after they are embedded in a signed/admitted plan, and
+    /// the kernel remains the authority for plan admission.
+    fn validate_tool_builder_toml(
+        &self,
+        operator_fingerprint: &str,
+        toml: &str,
+    ) -> Result<BuilderValidationResponse, ApiError>;
+
     /// All worktrees the operator may inspect (main +
     /// per-session). Returned newest-first when a sort order
     /// applies.
@@ -3290,6 +3302,55 @@ impl DashboardData for InMemoryDashboardData {
             next_steps: vec![
                 r#"raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem""#.into(),
                 r#"raxis epoch advance --policy "$RAXIS_DATA_DIR/policy/policy.toml" --sig "$RAXIS_DATA_DIR/policy/policy.sig""#.into(),
+            ],
+        })
+    }
+
+    fn validate_tool_builder_toml(
+        &self,
+        _operator_fingerprint: &str,
+        toml: &str,
+    ) -> Result<BuilderValidationResponse, ApiError> {
+        let policy_epoch = self
+            .inner
+            .read()
+            .policy
+            .as_ref()
+            .map(|p| p.epoch)
+            .unwrap_or(0);
+        let mut issues = Vec::new();
+        if toml.trim().is_empty() {
+            issues.push(BuilderValidationIssue {
+                code: "TOOLS_EMPTY".into(),
+                severity: BuilderValidationSeverity::Error,
+                message: "tool profile TOML is empty".into(),
+                remediation: "Generate or paste a [profiles.<name>] block before validating."
+                    .into(),
+            });
+        } else if !toml.contains("[profiles.") || !toml.contains("custom_tool") {
+            issues.push(BuilderValidationIssue {
+                code: "TOOLS_MINIMUM_SHAPE".into(),
+                severity: BuilderValidationSeverity::Error,
+                message: "tool profile is missing [profiles.<name>] or custom_tool.".into(),
+                remediation:
+                    "Put custom tools under an Executor profile, never directly on a task.".into(),
+            });
+        }
+        let ok = !issues
+            .iter()
+            .any(|i| matches!(i.severity, BuilderValidationSeverity::Error));
+        Ok(BuilderValidationResponse {
+            artifact_kind: "tools".into(),
+            authority: "kernel".into(),
+            policy_epoch,
+            resolved_target_ref: None,
+            ok,
+            issues,
+            next_steps: vec![
+                "Paste this [profiles.<name>] block into plan.toml.".into(),
+                "Set profile = \"<name>\" on each Executor task that should receive the tools."
+                    .into(),
+                "raxis plan validate plan.toml".into(),
             ],
         })
     }

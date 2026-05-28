@@ -610,6 +610,11 @@ export const dashboardApi = {
         method: "POST",
         body: { toml },
       }),
+    validateTools: (toml: string): Promise<BuilderValidationResponse> =>
+      apiFetch<BuilderValidationResponse>("/api/builders/tools/validate", {
+        method: "POST",
+        body: { toml },
+      }),
   },
 
   git: {

@@ -1,4 +1,4 @@
-//! Plan/Policy Builder helper endpoints.
+//! Plan/Policy/Tool Builder helper endpoints.
 //!
 //! These endpoints are deliberately read-only. They exist so the
 //! dashboard can ask the kernel-facing data layer to validate draft
@@ -55,6 +55,22 @@ where
     let response = state
         .data
         .validate_policy_builder_toml(&op.fingerprint, &body.toml)?;
+    Ok(Json(response))
+}
+
+/// `POST /api/builders/tools/validate`.
+pub async fn validate_tools<D>(
+    State(state): State<AppState<D>>,
+    op: AuthorizedOperator,
+    Json(body): Json<ValidateBuilderRequest>,
+) -> ApiResult<Json<BuilderValidationResponse>>
+where
+    D: crate::data::DashboardData,
+{
+    require_read(&op)?;
+    let response = state
+        .data
+        .validate_tool_builder_toml(&op.fingerprint, &body.toml)?;
     Ok(Json(response))
 }
 
@@ -134,6 +150,34 @@ task_id = "t1"
         .await
         .expect("write_policy role can validate policy drafts");
         assert_eq!(write.0.artifact_kind, "policy");
+    }
+
+    #[tokio::test]
+    async fn tool_validation_is_read_only_and_available_to_read_role() {
+        let data = InMemoryDashboardData::new();
+        let resp = validate_tools(
+            State(app_state(&data)),
+            op_with_roles("reader", vec![DashboardRole::Read]),
+            Json(ValidateBuilderRequest {
+                toml: r#"
+[profiles.unity_mobile]
+inherits_from = "Executor"
+
+[[profiles.unity_mobile.custom_tool]]
+name = "unity_build_player"
+description = "Build the local Unity mobile player"
+command = ["/usr/local/bin/raxis-tool-mcp", "unity", "build-player"]
+timeout_seconds = 30
+"#
+                .to_owned(),
+            }),
+        )
+        .await
+        .expect("read role can validate tool drafts");
+
+        assert_eq!(resp.0.artifact_kind, "tools");
+        assert_eq!(resp.0.authority, "kernel");
+        assert!(resp.0.ok, "fixture tool validation should be ok");
     }
 
     fn app_state(data: &Arc<InMemoryDashboardData>) -> AppState<InMemoryDashboardData> {

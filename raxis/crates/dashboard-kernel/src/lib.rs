@@ -2169,6 +2169,17 @@ impl DashboardData for KernelDashboardData {
         ))
     }
 
+    fn validate_tool_builder_toml(
+        &self,
+        _operator_fingerprint: &str,
+        toml: &str,
+    ) -> Result<BuilderValidationResponse, ApiError> {
+        Ok(validate_tool_draft_with_policy(
+            toml,
+            &self.policy.load_full(),
+        ))
+    }
+
     fn list_worktrees(&self) -> Result<Vec<WorktreeListEntry>, ApiError> {
         let worktrees = self.collect_worktrees()?;
         Ok(worktrees.into_iter().map(|w| w.summary).collect())
@@ -5535,6 +5546,13 @@ fn validate_plan_draft_with_policy(
         ));
         return builder_response("plan", policy.epoch(), None, issues, plan_next_steps());
     };
+    if toml_text.contains("custom_tool") {
+        issues.extend(
+            validate_tool_draft_with_policy(toml_text, policy)
+                .issues
+                .into_iter(),
+        );
+    }
 
     if table_path(root, &["plan", "initiative"])
         .and_then(|v| v.as_table())
@@ -5900,6 +5918,312 @@ fn validate_policy_draft_with_loader(
     )
 }
 
+fn validate_tool_draft_with_policy(
+    toml_text: &str,
+    active_policy: &PolicyBundle,
+) -> BuilderValidationResponse {
+    let mut issues = Vec::new();
+    let parsed = match toml_text.parse::<toml::Value>() {
+        Ok(value) => value,
+        Err(e) => {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_TOML_PARSE",
+                "tool profile TOML is not valid TOML.",
+                format!("Fix the TOML syntax error before copying it into plan.toml: {e}"),
+            ));
+            return builder_response(
+                "tools",
+                active_policy.epoch(),
+                None,
+                issues,
+                tool_next_steps(),
+            );
+        }
+    };
+    let Some(root) = parsed.as_table() else {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "TOOLS_ROOT",
+            "tool profile TOML must be a TOML table.",
+            "Use [profiles.<name>] plus one or more [[profiles.<name>.custom_tool]] blocks.",
+        ));
+        return builder_response(
+            "tools",
+            active_policy.epoch(),
+            None,
+            issues,
+            tool_next_steps(),
+        );
+    };
+    let Some(profiles) = root.get("profiles").and_then(|v| v.as_table()) else {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "TOOLS_PROFILES_REQUIRED",
+            "No [profiles.<name>] tables were found.",
+            "Put tool declarations under an Executor-rooted profile, then reference it from an Executor task.",
+        ));
+        return builder_response(
+            "tools",
+            active_policy.epoch(),
+            None,
+            issues,
+            tool_next_steps(),
+        );
+    };
+
+    let mut total_tools = 0usize;
+    let mut seen_names = std::collections::HashSet::new();
+    for (profile_name, value) in profiles {
+        if !is_path_safe_id(profile_name) {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_PROFILE_NAME",
+                format!("profile {profile_name:?} is not path-safe."),
+                "Use a short id such as unity_mobile, blender_render, or acme_api.",
+            ));
+        }
+        let Some(profile) = value.as_table() else {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_PROFILE_TABLE",
+                format!("profile {profile_name:?} must be a table."),
+                "Use [profiles.<name>] before custom_tool blocks.",
+            ));
+            continue;
+        };
+        let role_root = string_field(profile, "inherits_from")
+            .or_else(|| string_field(profile, "role"))
+            .unwrap_or_default();
+        match role_root {
+            "Executor" => {}
+            "Reviewer" => issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_REVIEWER_PROFILE",
+                format!("profile {profile_name:?} is Reviewer-rooted but declares tools."),
+                "Move the custom_tool blocks to an Executor profile; reviewers must remain static/read-only.",
+            )),
+            "Orchestrator" => issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_ORCHESTRATOR_PROFILE",
+                format!("profile {profile_name:?} tries to configure the Orchestrator."),
+                "Remove this profile. The kernel owns Orchestrator capabilities and plan.toml cannot extend them.",
+            )),
+            "" => issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_PROFILE_ROOT",
+                format!("profile {profile_name:?} is not rooted in Executor."),
+                "Add inherits_from = \"Executor\" so the kernel can prove the tools are executor-only.",
+            )),
+            other => issues.push(builder_issue(
+                BuilderValidationSeverity::Warning,
+                "TOOLS_PROFILE_INHERITANCE",
+                format!("profile {profile_name:?} inherits from {other:?}."),
+                "Keep the full inheritance chain in plan.toml and make sure the effective root is Executor.",
+            )),
+        }
+
+        let Some(tools) = profile.get("custom_tool") else {
+            continue;
+        };
+        let Some(tools) = tools.as_array() else {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_ARRAY",
+                format!("profile {profile_name:?} custom_tool must be an array of tables."),
+                "Use [[profiles.<name>.custom_tool]] for each tool.",
+            ));
+            continue;
+        };
+        if tools.len() > 25 {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_COUNT",
+                format!("profile {profile_name:?} declares {} tools.", tools.len()),
+                "Keep the surface small. Split broad integrations into fewer operation-specific tools or separate initiatives.",
+            ));
+        }
+        total_tools += tools.len();
+        for (idx, tool_value) in tools.iter().enumerate() {
+            let Some(tool) = tool_value.as_table() else {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "TOOLS_TABLE",
+                    format!("custom_tool #{idx} on profile {profile_name:?} is not a table."),
+                    "Use key/value fields inside [[profiles.<name>.custom_tool]].",
+                ));
+                continue;
+            };
+            validate_tool_table(profile_name, idx, tool, &mut seen_names, &mut issues);
+        }
+    }
+    if total_tools == 0 {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "TOOLS_NONE",
+            "No custom tools were declared.",
+            "Add at least one [[profiles.<name>.custom_tool]] block.",
+        ));
+    }
+
+    builder_response(
+        "tools",
+        active_policy.epoch(),
+        None,
+        issues,
+        tool_next_steps(),
+    )
+}
+
+fn validate_tool_table(
+    profile_name: &str,
+    idx: usize,
+    tool: &toml::map::Map<String, toml::Value>,
+    seen_names: &mut std::collections::HashSet<String>,
+    issues: &mut Vec<BuilderValidationIssue>,
+) {
+    let name = string_field(tool, "name").unwrap_or_default();
+    if name.is_empty() {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "TOOLS_NAME_REQUIRED",
+            format!("custom_tool #{idx} on profile {profile_name:?} is missing name."),
+            "Use a lowercase id such as unity_build_player.",
+        ));
+    } else {
+        if !is_custom_tool_name(name) {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_NAME_FORMAT",
+                format!("custom tool name {name:?} is invalid."),
+                "Start with a lowercase letter; use lowercase letters, digits, and underscores; keep it <= 48 characters.",
+            ));
+        }
+        if is_reserved_custom_tool_name(name) {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_NAME_RESERVED",
+                format!("custom tool name {name:?} collides with a reserved/built-in tool."),
+                "Rename it to a narrow operation-specific name such as unity_build_player or blender_export_fbx.",
+            ));
+        }
+        if !seen_names.insert(name.to_owned()) {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_NAME_DUPLICATE",
+                format!("custom tool name {name:?} is declared more than once."),
+                "Every tool name in the effective Executor profile must be unique.",
+            ));
+        }
+    }
+
+    let description = string_field(tool, "description").unwrap_or_default();
+    if description.is_empty() {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "TOOLS_DESCRIPTION_REQUIRED",
+            format!("custom tool {name:?} is missing description."),
+            "Tell the executor exactly when this tool should be used.",
+        ));
+    } else if description.len() > 1024 {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "TOOLS_DESCRIPTION_TOO_LONG",
+            format!("custom tool {name:?} description exceeds 1024 bytes."),
+            "Shorten the description and move detailed usage into the task prompt.",
+        ));
+    }
+
+    match tool.get("command").and_then(|v| v.as_array()) {
+        Some(argv) if argv.is_empty() => issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "TOOLS_COMMAND_EMPTY",
+            format!("custom tool {name:?} has an empty command array."),
+            "Set command = [\"/absolute/path/to/wrapper\", \"arg1\", ...].",
+        )),
+        Some(argv) => {
+            for arg in argv {
+                if arg.as_str().is_none() {
+                    issues.push(builder_issue(
+                        BuilderValidationSeverity::Error,
+                        "TOOLS_COMMAND_STRING",
+                        format!("custom tool {name:?} command entries must all be strings."),
+                        "Quote every argv entry in the TOML command array.",
+                    ));
+                    break;
+                }
+            }
+            if let Some(argv0) = argv.first().and_then(|v| v.as_str()) {
+                if !argv0.starts_with('/') {
+                    issues.push(builder_issue(
+                        BuilderValidationSeverity::Error,
+                        "TOOLS_COMMAND_ABSOLUTE",
+                        format!("custom tool {name:?} command must start with an absolute path."),
+                        "Install a wrapper into the executor image and reference its absolute path, for example /usr/local/bin/raxis-tool-mcp.",
+                    ));
+                }
+            }
+        }
+        None => issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "TOOLS_COMMAND_REQUIRED",
+            format!("custom tool {name:?} is missing command."),
+            "Set command = [\"/absolute/path/to/wrapper\", \"arg1\", ...].",
+        )),
+    }
+
+    match tool.get("timeout_seconds") {
+        Some(value) => match value.as_integer() {
+            Some(n) if (1..=300).contains(&n) => {
+                if n > 120 {
+                    issues.push(builder_issue(
+                        BuilderValidationSeverity::Warning,
+                        "TOOLS_TIMEOUT_LARGE",
+                        format!("custom tool {name:?} timeout is {n}s."),
+                        "Prefer short operation-specific tools. Long-running builds should emit artifacts/logs and fail fast when stuck.",
+                    ));
+                }
+            }
+            Some(n) if n > 300 => issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_TIMEOUT_CAP",
+                format!("custom tool {name:?} timeout {n}s exceeds the 300s hard cap."),
+                "Lower timeout_seconds or split the operation into smaller bounded tools.",
+            )),
+            _ => issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_TIMEOUT_FORMAT",
+                format!("custom tool {name:?} timeout_seconds must be a positive integer."),
+                "Use a whole number of seconds, commonly 10, 30, or 60.",
+            )),
+        },
+        None => issues.push(builder_issue(
+            BuilderValidationSeverity::Info,
+            "TOOLS_TIMEOUT_DEFAULT",
+            format!("custom tool {name:?} omits timeout_seconds."),
+            "Raxis defaults to 60s; set an explicit small timeout for operator clarity.",
+        )),
+    }
+
+    if let Some(schema) = tool.get("schema").or_else(|| tool.get("input_schema")) {
+        if !schema.is_table() {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "TOOLS_SCHEMA_SHAPE",
+                format!("custom tool {name:?} schema must be a TOML table."),
+                "Use [profiles.<name>.custom_tool.schema] and describe a small object-shaped input.",
+            ));
+        }
+    } else {
+        issues.push(builder_issue(
+            BuilderValidationSeverity::Warning,
+            "TOOLS_SCHEMA_MISSING",
+            format!("custom tool {name:?} has no schema."),
+            "Add a schema so the model can only submit the small input shape the wrapper expects.",
+        ));
+    }
+}
+
 fn builder_response(
     artifact_kind: &str,
     policy_epoch: u64,
@@ -5947,6 +6271,16 @@ fn policy_next_steps() -> Vec<String> {
     vec![
         r#"raxis policy sign "$RAXIS_DATA_DIR/policy/policy.toml" --key "$RAXIS_DATA_DIR/keys/authority_keypair.pem""#.to_owned(),
         r#"raxis epoch advance --policy "$RAXIS_DATA_DIR/policy/policy.toml" --sig "$RAXIS_DATA_DIR/policy/policy.sig""#.to_owned(),
+    ]
+}
+
+fn tool_next_steps() -> Vec<String> {
+    vec![
+        "Paste this [profiles.<name>] block into plan.toml.".to_owned(),
+        "Set profile = \"<name>\" on each Executor task that should receive these tools."
+            .to_owned(),
+        "raxis plan validate plan.toml".to_owned(),
+        "raxis submit plan plan.toml --no-dry-run".to_owned(),
     ]
 }
 
@@ -6095,6 +6429,36 @@ fn is_task_id(value: &str) -> bool {
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
         && value.len() <= 64
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn is_custom_tool_name(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 48
+        && bytes[0].is_ascii_lowercase()
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+}
+
+fn is_reserved_custom_tool_name(value: &str) -> bool {
+    matches!(
+        value,
+        "bash"
+            | "edit_file"
+            | "git_commit"
+            | "grep_search"
+            | "read_file"
+            | "report_failure"
+            | "single_commit"
+            | "submit_review"
+            | "task_complete"
+            | "vm_capabilities"
+            | "mcp"
+            | "mcp_call"
+            | "mcp_discover"
+            | "call_mcp"
+    )
 }
 
 fn is_path_safe_id(value: &str) -> bool {
