@@ -1,6 +1,6 @@
 {
   "name": "raxis-dashboard-fe",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Raxis operator dashboard React frontend.",
   "private": true,
   "type": "module",

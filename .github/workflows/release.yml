@@ -679,15 +679,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v4
+      - name: download Linux release archives
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: raxis-${{ env.RAXIS_VERSION }}-linux-*
+
+      - name: download Darwin release archives
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: raxis-${{ env.RAXIS_VERSION }}-darwin-*
+
+      - name: download Homebrew bottle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: raxis-${{ env.RAXIS_VERSION }}-*-bottle
 
       - name: package Homebrew bottles
         run: |
           set -euo pipefail
           formula_version="${RAXIS_VERSION#v}"
           mkdir -p rendered/bottles
+          echo "Disk usage before bottle packaging:"
+          df -h .
+          du -sh artifacts/* | sort -h
           find artifacts -path '*-bottle/*.bottle.tar.gz' -exec cp {} rendered/bottles/ \;
           raxis/release/scripts/package-homebrew-bottle.sh \
             "artifacts/raxis-${RAXIS_VERSION}-darwin-arm64/raxis-${RAXIS_VERSION}-darwin-arm64.tar.gz" \
@@ -701,6 +718,9 @@ jobs:
           raxis/release/scripts/package-homebrew-bottle.sh \
             "artifacts/raxis-${RAXIS_VERSION}-linux-x86_64/raxis-${RAXIS_VERSION}-linux-x86_64.tar.gz" \
             "${formula_version}" x86_64_linux rendered/bottles
+          echo "Disk usage after bottle packaging:"
+          df -h .
+          du -sh rendered/bottles/* | sort -h
 
       - name: upload to GitHub Release
         uses: softprops/action-gh-release@v2
