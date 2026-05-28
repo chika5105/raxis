@@ -125,7 +125,7 @@ Even with standalone clones, the kernel maintains a logical `worktree_lock` tabl
 
 ---
 
-## 4. Multi-Provider Routing & Operator Tool Manifests
+## 4. Multi-Provider Routing & Executor Custom Tools
 
 v2 breaks the hardcoded 1:1 relationship between a planner and an LLM provider.
 
@@ -137,11 +137,12 @@ The planner does **not** decide which model or provider to use, nor does it requ
 *   **Strict Fail-Closed Default**: If the `on_unavailable` key is omitted from a route's configuration, its value **defaults to `"fail"`**. If an explicit mapping exists for Kombai but Kombai is offline, the kernel immediately rejects the intent and fails the task *unless* the operator explicitly opted-in to a fallback. The system strictly enforces the operator's routing graph without silent compromises.
 *   This centralizes model spend, API keys, and model selection entirely inside the Kernel/Gateway, stripping the planner of any routing authority.
 
-### 4.2. Operator Tool Manifest (`[[tools]]`)
-In v1, tools are implicit. In v2, tools are rigorously defined in the signed `policy.toml`.
-*   The operator defines schemas for tools (e.g., `execute_bash`, `search_codebase`, `run_linter`).
-*   During prompt assembly, the kernel injects only the tools that this specific `session_agent_type` is authorized to use.
-*   If the LLM hallucinates a tool call that is not in the manifest, the planner fails parsing; if it somehow bypasses parsing, the kernel rejects the `ToolExecutionIntent`.
+### 4.2. Executor Custom Tools (`[[profiles.<name>.custom_tool]]`)
+In v1, tools are implicit. In v2, built-in role tools remain kernel-owned and operator-defined tools are plan-profile scoped.
+*   The operator defines bounded Executor-only custom tools under `[[profiles.<name>.custom_tool]]` in `plan.toml`.
+*   The kernel validates the signed plan, resolves profile inheritance, rejects task-level tools, rejects Reviewer/Orchestrator tool surfaces, and stamps only the effective tool bundle into matching Executor sessions.
+*   Custom tools are absolute wrapper commands with JSON stdin/stdout, explicit schemas, and short `timeout_seconds` values capped by policy.
+*   Existing MCP servers are supported through operation-specific wrappers (for example `unity_build_player`), not through a generic MCP authority or discovery bridge.
 
 ---
 
@@ -166,4 +167,4 @@ The kernel compares the original signed `plan.toml` success criteria against the
 1.  **Refactor `raxis-planner`**: Strip out old prototypes, implement the `claw-code` loop in strict Rust, define the Context Window struct, and build the XML/JSON intent parsers.
 2.  **Implement `SpawnBackend`**: Build the VMM wrapper for Firecracker/Apple Virtualization. Plumb `AF_VSOCK` into the `raxis-ipc` crate.
 3.  **Upgrade `kernel-store`**: Add the `worktree_lock` tables, hierarchical capability tracking, and `MessageIntent` schemas.
-4.  **Extend Policy**: Add `[[tools]]` manifests and provider routing tables to the operator's TOML format.
+4.  **Extend Policy + Plans**: Add provider routing tables to policy and profile-scoped Executor custom tools to plan admission.

@@ -79,7 +79,7 @@ Searchable definitions for the concepts that show up across the UI:
 data dir, install dir, operator key, genesis, policy, provider, kernel,
 supervisor, managed repo, initiative, task, orchestrator, executor,
 reviewer, Plan Builder, Policy Builder, environments, gates, witnesses,
-and the audit chain. This is intentionally available inside the
+Tool Builder, custom tools, MCP adapters, and the audit chain. This is intentionally available inside the
 dashboard so operators do not have to keep the website open during a
 live run.
 
@@ -108,7 +108,39 @@ raxis submit plan plan.toml --no-dry-run
 raxis plan approve <initiative_id>
 ```
 
-### 4 · Initiatives — the running DAG
+### 4 · Tool Builder — wrap existing tools
+
+Use Tool Builder when an Executor needs access to local automation that
+RAXIS does not ship as a built-in tool: an existing script, a stdio MCP
+server, a local HTTP service, a commercial tool bridge, Unity Editor,
+Blender, or a test harness.
+
+The safe pattern is deliberately narrow:
+
+- Pick a feature-library template or start from a blank wrapper.
+- Expose one operation per custom tool, for example `docs_search`,
+  `repo_codegen_check`, or `unity_build_player`, not
+  `mcp_call_anything`.
+- Use an absolute wrapper command installed in the executor image or
+  Homebrew tool path.
+- Keep `timeout_seconds` short. The kernel and planner enforce a hard
+  cap so tools cannot run forever.
+- Copy the generated `[profiles.<name>]` block into `plan.toml`.
+- Set `profile = "<name>"` on each Executor task that should receive
+  those tools.
+
+Validate from the dashboard, then validate the complete plan:
+
+```bash
+raxis plan validate plan.toml
+raxis submit plan plan.toml --no-dry-run
+```
+
+Tool Builder is a helper, not an authority boundary. The kernel still
+rejects malformed bundles, Reviewer/Orchestrator tools, inherited name
+collisions, and task-level custom tools at plan admission.
+
+### 5 · Initiatives — the running DAG
 
 Lists every initiative grouped by state (Draft, Executing, Completed,
 Failed, Quarantined). Clicking an initiative opens its task DAG:
@@ -126,7 +158,7 @@ Reference: [`raxis/dashboard-fe/src/pages/Initiatives.tsx`](../../dashboard-fe/s
 [`InitiativeDetail.tsx`](../../dashboard-fe/src/pages/InitiativeDetail.tsx),
 [`TaskDetail.tsx`](../../dashboard-fe/src/pages/TaskDetail.tsx).
 
-### 5 · Sessions — what the agents are doing live
+### 6 · Sessions — what the agents are doing live
 
 The Sessions page shows every active VM-backed planner session. Each
 session detail page has the **session stream** — the per-session
@@ -139,7 +171,7 @@ Use Sessions when a task is stuck. Live tool calls + intent rejections
 tell you within seconds whether the agent is mis-using its allowlist,
 the model is rate-limited, or a credential proxy is refusing a query.
 
-### 6 · Repo / Git — the worktrees
+### 7 · Repo / Git — the worktrees
 
 Each session binds to a `git worktree` on the host. The Git page
 walks the worktree tree, lets you diff any file against `HEAD`, and
@@ -150,7 +182,7 @@ The hardened endpoints bound the request body, cap the audit-chain
 walk per call, and recover gracefully from worktree mutation
 mid-walk; see [`raxis/crates/dashboard/src/routes/git.rs`](../../crates/dashboard/src/routes/git.rs).
 
-### 7 · Policy Builder — edit policy.toml
+### 8 · Policy Builder — edit policy.toml
 
 [![RAXIS dashboard Policy Builder](/images/dashboard-policy-builder.png)](/images/dashboard-policy-builder.png)
 
@@ -176,7 +208,7 @@ raxis epoch advance \
   --sig "$RAXIS_DATA_DIR/policy/policy.sig"
 ```
 
-### 8 · Audit — the chain itself
+### 9 · Audit — the chain itself
 
 A live tail of the audit chain with kind/initiative/task/session
 filters. The dashboard reads the same JSONL files
@@ -197,6 +229,7 @@ the dashboard exists to make the same records easy to scan visually.
 | **Escalations**   | Pending operator decisions surfaced by agents (`SubmitEscalation` intents).                                                                                                                       | When an Executor or Reviewer can't make progress without a human nudge.    |
 | **Inbox**         | Kernel-pushed notifications + per-operator unread state.                                                                                                                                          | Daily glance — catches policy violations, expiring certs, budget overruns. |
 | **Notifications** | The kernel-owned notifications table; the route surface that backs `[[notifications]]` in policy.                                                                                                 | Configuring email / Slack / webhook fan-out.                               |
+| **Tool Builder** | Draft Executor custom tools for scripts, MCP adapters, local HTTP services, commercial tool bridges, Unity, Blender, and other local automation; validate the profile block with the kernel. | When an Executor needs operator-owned tooling beyond the built-ins. |
 | **Policy Builder** | Read the live `policy.toml`, discover feature snippets, validate with the kernel, and prepare the signed CLI/dashboard epoch-advance path. | When changing operator authority, providers, environments, gates, lanes, or dashboard settings. |
 | **Health**        | The same data as Overview but as a wide raw-fields table — useful when scraping or screenshotting.                                                                                                | Incidents.                                                                 |
 

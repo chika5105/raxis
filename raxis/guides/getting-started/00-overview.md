@@ -42,7 +42,10 @@ model for the getting-started flow.
 | **Executor** | Agent that edits code inside an isolated VM and completes a task with a commit SHA. |
 | **Reviewer** | Agent that reviews an executor commit and emits an approve/reject verdict before merge. |
 | **Plan Builder** | Dashboard helper that makes plan features discoverable, renders the task DAG, validates with the kernel, and copies/downloads `plan.toml`. The signed submit path is still authoritative. |
+| **Tool Builder** | Dashboard helper that drafts Executor custom tools for existing scripts, stdio MCP servers, local HTTP services, commercial tool bridges, Unity, Blender, and other local automation. It favors one bounded operation per tool. |
 | **Policy Builder** | Dashboard helper that makes policy features discoverable, validates a draft with the kernel loader, and shows the exact signing/epoch commands. Signed policy advance is still authoritative. |
+| **Custom tool** | Operator-declared Executor-only wrapper under `[[profiles.<name>.custom_tool]]` in `plan.toml`. The kernel validates it and stamps only the effective bundle into matching Executor sessions. |
+| **MCP adapter** | A bounded wrapper around one existing MCP method. RAXIS does not use MCP for authority decisions; wrap methods such as `docs_search`, `unity_build_player`, or `blender_export_asset` as explicit custom tools. |
 
 ## What you get
 
@@ -55,6 +58,7 @@ model for the getting-started flow.
 | **Witness-gated merges.** A task's `evaluation_sha` is bound to the verifier run that emitted the witness; a witness for SHA `A` cannot satisfy a gate for SHA `B`.                                                            | `[[tasks.verifiers]]` in plan; `[[integration_merge_verifiers]]` in policy                                           |
 | **Hash-chained audit log.** Every kernel decision lands in a tamper-evident JSONL log under `<data_dir>/audit/`. Independent verification with `raxis verify-chain`.                                                           | `raxis verify-chain`, `raxis log <initiative_id>`                                                                    |
 | **Operator dashboard.** Local-only HTTP UI for the DAG, sessions, repo state, audit chain, escalations, policy editing. Same Ed25519 challenge-response auth as the CLI.                                                       | URL printed at kernel startup; default `http://127.0.0.1:9820`                                                       |
+| **BYO local tools.** Existing scripts, MCP servers, local HTTP services, and commercial tool bridges can be exposed as Executor custom tools without making them authority channels. Each wrapper is schema-bound and timeout-bound. | Dashboard Tool Builder; `[[profiles.<name>.custom_tool]]` in `plan.toml`                                            |
 
 ## The mental model in one diagram
 

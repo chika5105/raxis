@@ -999,14 +999,16 @@ truncation state, and the resolved command line.
 
 ## §14 — Implementation Checklist
 
-- [ ] Plan parser accepts `[[profiles.<name>.custom_tool]]` array-of-tables under each profile, with the field schema in §3.2.
-- [ ] Plan parser rejects `[[plan.tasks.<id>.custom_tool]]` with `FAIL_CUSTOM_TOOL_TASK_LEVEL_NOT_ALLOWED` (§3.4).
+- [x] Plan parser accepts `[[profiles.<name>.custom_tool]]` array-of-tables under each profile, with the field schema in §3.2.
+- [x] Plan parser rejects `[[plan.tasks.<id>.custom_tool]]` and `[[tasks]].custom_tool` with `FAIL_CUSTOM_TOOL_TASK_LEVEL_NOT_ALLOWED` (§3.4).
 - [ ] Vendored Draft-07 schema validator implementing the accepted-keyword set in §4.1 and rejecting all keywords in §4.2.
 - [ ] Reserved-name list mirrored from kernel binary; `raxis admin reserved-tool-names` CLI exposes it.
-- [ ] Inheritance walker computes effective custom-tool set; rejects cycles, name collisions, Reviewer-role + non-empty set.
-- [ ] Admission emits all `FAIL_*` and `WARN_*` codes per §3, §4.3, §5, §9.3, §10.1.
+- [x] Inheritance walker computes effective custom-tool set; rejects cycles, name collisions, Reviewer-role + non-empty set, and Orchestrator-rooted profiles.
+- [ ] Admission emits all `FAIL_*` and `WARN_*` codes per §3, §4.3, §5, §9.3, §10.1. Current implementation emits the structural `FAIL_*` family for profile shape, name, command, timeout, inheritance, and role violations; token-budget and schema-budget warnings remain outstanding.
 - [ ] Token-budget projector pulls tokenizer from `raxis-gateway`'s `tokenize(model, text)` admin interface; computes `custom_tool_share` per §9.2.
-- [ ] Harness side: schema-validates LLM input before script invocation; constructs canonical-JSON stdin; forks into per-invocation cgroup; enforces stdin/stdout/stderr caps and timeout via `cgroup.kill`.
+- [x] Harness side: loads kernel-stamped custom-tool bundles only for Executor sessions, rejects malformed bundles fail-closed, and constructs JSON stdin for subprocess wrappers.
+- [x] Harness side: enforces per-tool timeout by killing the subprocess and returning a structured `tool_result.is_error`.
+- [ ] Harness side: schema-validates LLM input before script invocation; forks into per-invocation cgroup; enforces stdin/stdout/stderr caps and timeout via `cgroup.kill`.
 - [ ] Harness side: builds `tool_result` per §6.4 (truncation sentinel) and §6.5 (stderr exposure rules).
 - [ ] Harness side: implements the queue-wait deadline per §7.3 (`max_queue_wait_ms`). Each queued invocation stamps `queued_at_ms`; a `tokio::time::sleep_until` task races the `concurrency_slot_available` notify channel; on timeout, surfaces `CustomToolQueueTimeout` distinct from `Timeout` and `CustomToolConcurrencyExhausted`.
 - [ ] Policy admission validates `max_queue_wait_ms ∈ [1_000, max_custom_tool_timeout_seconds * 1000]`; out-of-range emits `FAIL_POLICY_CUSTOM_TOOL_QUEUE_WAIT_EXCEEDS_TIMEOUT` / `FAIL_POLICY_CUSTOM_TOOL_QUEUE_WAIT_TOO_SMALL`.
@@ -1014,8 +1016,10 @@ truncation state, and the resolved command line.
 - [ ] Optional full-payload archival per §12.2 (gated on `[audit.custom_tools] archive_full_payloads`).
 - [ ] `raxis log` CLI gains the custom-tool view per §12.3.
 - [ ] `raxis-gateway` exposes `tokenize` admin interface (cross-spec dependency).
+- [x] Dashboard Tool Builder validates draft custom-tool profile TOML through a kernel-facing read-only endpoint and surfaces next-step CLI commands.
+- [x] Live e2e includes a Unity-like MCP fixture proving the supported BYO/MCP migration path: one bounded Executor custom tool per MCP method, no generic MCP discovery bridge.
 - [ ] Tests:
-      - Plan with valid custom tool → admitted; LLM sees the tool in `tools` array.
+      - Plan with valid custom tool → admitted; LLM sees the tool in `tools` array. (unit coverage exists for bundle resolution; full admission/runtime e2e added via `tooling-mcp-unity` slice)
       - Plan with reserved-name custom tool → `FAIL_CUSTOM_TOOL_NAME_RESERVED`.
       - Plan with name collision across inherited profile → `FAIL_CUSTOM_TOOL_NAME_COLLISION`.
       - Reviewer profile with custom tool → `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED`.

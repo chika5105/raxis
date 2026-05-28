@@ -201,6 +201,10 @@ raxis doctor`}</CommandBlock>
               body="Add tasks, browse plan features, confirm the DAG, validate with the kernel, then copy or download plan.toml."
             />
             <DashboardFeature
+              title="Tool Builder"
+              body="Wrap existing scripts, MCP servers, local HTTP services, commercial tool bridges, Unity, and Blender as bounded Executor custom tools before copying them into plan.toml."
+            />
+            <DashboardFeature
               title="Policy Builder"
               body="Discover policy features, validate drafts through the kernel loader, and see the exact sign/advance commands."
             />
@@ -325,8 +329,20 @@ const glossaryTerms = [
     body: "Dashboard helper for drafting plan.toml, rendering the DAG, validating with the kernel, and copying/downloading the result.",
   },
   {
+    term: "Tool Builder",
+    body: "Dashboard helper for wrapping existing scripts, stdio MCP servers, local HTTP services, commercial tool bridges, Unity, Blender, and other local automation as bounded Executor custom tools.",
+  },
+  {
     term: "Policy Builder",
     body: "Dashboard helper for discovering policy features, validating drafts, and preparing the signed epoch-advance path.",
+  },
+  {
+    term: "Custom tool",
+    body: "An Executor-only wrapper declared under [[profiles.<name>.custom_tool]] in plan.toml. The kernel validates and stamps only the effective profile tools.",
+  },
+  {
+    term: "MCP adapter",
+    body: "A wrapper around one existing MCP method. Raxis supports MCP-style workflows through narrow custom tools such as docs_search or unity_build_player, not generic authority or discovery bridges.",
   },
 ];
 

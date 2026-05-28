@@ -14,16 +14,13 @@ export default function HomePage() {
     <>
       <Hero />
       <FastStart />
-      <TrustBar />
       <DemoVideo />
       <EnterpriseBlocker />
       <WhatItDoes />
       <Paradigm />
       <AuditTrail />
       <WhoItIsFor />
-      <ReferenceImpl />
-      <ThreatModel />
-      <Conformance />
+      <ExploreMore />
       <FAQ />
       <CreatorSection />
       <CTA />
@@ -34,7 +31,7 @@ export default function HomePage() {
 function Hero() {
   return (
     <section className="border-b border-[var(--rule)]">
-      <div className="mx-auto grid max-w-5xl gap-12 px-4 pb-20 pt-20 sm:px-6 sm:pb-28 sm:pt-28 lg:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)] lg:items-center">
+      <div className="mx-auto grid max-w-5xl gap-12 px-4 pb-16 pt-16 sm:px-6 sm:pb-24 sm:pt-24 lg:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)] lg:items-center">
         <div className="min-w-0">
           <p className="eyebrow">RAXIS</p>
           <p className="mt-3 max-w-full break-words font-mono text-sm leading-relaxed text-[var(--muted)]">
@@ -49,7 +46,7 @@ function Hero() {
           <p className="lead mt-8 max-w-3xl break-words">
             RAXIS is the Runtime Attestation eXchange for Intelligent Systems:
             a governed runtime for autonomous agents. Agents can write code,
-            run commands, query services, and coordinate work, but every
+            run commands, query services, and coordinate work, while every
             privileged action is checked against a user-signed plan, enforced
             by a host-side kernel, and recorded in a tamper-evident audit
             chain.
@@ -72,35 +69,32 @@ function Hero() {
             <Link href="/#demo" className="btn btn-ghost w-full sm:w-auto">
               Watch the demo
             </Link>
-            <a
-              href={RAXIS_SOURCE_HREF}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn btn-ghost w-full sm:w-auto"
-            >
-              View Source Code
-            </a>
-            <Link href="/paradigm" className="btn btn-ghost w-full sm:w-auto">
-              Read the paradigm
-            </Link>
+          </div>
+          <div className="mt-5 flex max-w-2xl flex-wrap items-center gap-x-4 gap-y-2 text-sm font-medium text-[var(--muted)]">
+            <span>Prefer to explore first?</span>
             <a
               href={ASK_GOOGLE_RAXIS_HREF}
               target="_blank"
               rel="noopener noreferrer"
-              className="justify-self-center text-base text-[var(--muted)] underline decoration-[var(--rule)] underline-offset-4 transition hover:text-[var(--fg)] hover:decoration-[var(--rule-strong)] sm:justify-self-auto"
+              className="text-[var(--fg)] underline decoration-[var(--rule)] underline-offset-4 transition hover:text-accent hover:decoration-accent"
             >
               Ask Google about RAXIS
             </a>
             <Link
-              href="/docs/guides/getting-started/02-first-initiative"
-              className="justify-self-center text-base text-[var(--muted)] underline decoration-[var(--rule)] underline-offset-4 transition hover:text-[var(--fg)] hover:decoration-[var(--rule-strong)] sm:justify-self-auto"
+              href="/paradigm"
+              className="text-[var(--fg)] underline decoration-[var(--rule)] underline-offset-4 transition hover:text-accent hover:decoration-accent"
             >
-              First initiative
+              Read the paradigm
             </Link>
+            <a
+              href={RAXIS_SOURCE_HREF}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[var(--fg)] underline decoration-[var(--rule)] underline-offset-4 transition hover:text-accent hover:decoration-accent"
+            >
+              View source
+            </a>
           </div>
-          <p className="mt-4 text-sm font-medium text-[var(--muted)]">
-            Fast path: Homebrew install -&gt; genesis -&gt; first initiative.
-          </p>
         </div>
         <RuntimeDiagram />
       </div>
@@ -109,86 +103,103 @@ function Hero() {
 }
 
 function FastStart() {
-  const steps = [
+  const paths = [
     {
-      title: "Install",
-      body: "Install the Homebrew bottle and run the guided setup script.",
-      href: "/docs/guides/getting-started/01-prereqs",
+      eyebrow: "Ask it",
+      title: "Use Google as a guide",
+      body: "Open a source-grounded Google AI query scoped to raxis.io and the public repo.",
+      href: ASK_GOOGLE_RAXIS_HREF,
+      cta: "Ask Google",
+      external: true,
     },
     {
-      title: "Bootstrap",
-      body: "Let the script create genesis state, provider config, and the daemon.",
-      href: "/docs/guides/getting-started/02-first-initiative",
+      eyebrow: "See it",
+      title: "Watch a live agent run",
+      body: "See isolation, signed authority, mediated access, and the dashboard audit trail in one pass.",
+      href: "/#demo",
+      cta: "Watch demo",
     },
     {
-      title: "Run",
-      body: "Adopt or seed a managed repo and submit the first hello-world initiative.",
-      href: "/docs/guides/scenarios/01-hello-world",
+      eyebrow: "Understand it",
+      title: "Learn the paradigm",
+      body: "Read the twelve invariants behind governed execution for intelligent systems.",
+      href: "/paradigm",
+      cta: "Read invariants",
+    },
+    {
+      eyebrow: "Run it",
+      title: "Start with Homebrew",
+      body: "Install the bottle, run guided setup, and launch the smallest governed initiative.",
+      href: "/get-started",
+      cta: "Open guided path",
     },
   ];
 
   return (
     <section id="get-started" className="border-b border-[var(--rule)] bg-[var(--surface)]">
-      <div className="mx-auto grid max-w-5xl gap-8 px-4 py-10 sm:px-6 lg:grid-cols-[0.95fr_1.05fr] lg:items-start">
+      <div className="mx-auto max-w-5xl px-4 py-12 sm:px-6 sm:py-14">
         <div>
-          <p className="eyebrow">Start here</p>
-          <h2 className="h-section mt-4">From Homebrew to first initiative.</h2>
+          <p className="eyebrow">Choose your path</p>
+          <h2 className="h-section mt-4">Find the fastest route into RAXIS.</h2>
           <p className="mt-5 max-w-2xl leading-relaxed text-[var(--muted)]">
-            New users should not start in the spec tree. Install the bottle,
-            run the guided setup once, then run the smallest governed
-            workflow.
+            New visitors should not have to decode the whole spec tree. Start
+            with the path that matches what you need right now.
           </p>
-          <div className="mt-7 flex flex-wrap gap-3">
-            <Link href="/get-started" className="btn btn-primary">
-              Open the guided path
-            </Link>
-            <Link href="/plan-builder" className="btn btn-ghost">
-              Open the plan builder
-            </Link>
-            <Link href="/docs/guides/getting-started/02-first-initiative" className="btn btn-ghost">
-              Jump to first initiative
-            </Link>
-            <Link href="/docs/guides/getting-started/03-dashboard-tour" className="btn btn-ghost">
-              Dashboard tour
-            </Link>
-          </div>
         </div>
-
-        <div className="grid min-w-0 gap-4">
-          <pre className="min-w-0 overflow-x-auto rounded-lg border border-[var(--rule)] bg-[var(--code-bg)] p-4 text-sm leading-relaxed">
-            <code>{`brew update
-brew tap chika5105/raxis
-brew install raxis
-
-"$(brew --prefix raxis)/share/raxis/install.sh"
-
-export RAXIS_INSTALL_DIR="$(brew --prefix raxis)/share/raxis"
-export RAXIS_DATA_DIR="$(brew --prefix)/var/lib/raxis"
-export RAXIS_ENV="default"
-export RAXIS_OPERATOR_KEY="$HOME/raxis-keys/operator_private.pem"`}</code>
-          </pre>
-          <div className="grid gap-3 sm:grid-cols-3">
-            {steps.map((step, index) => (
-              <Link
-                key={step.title}
-                href={step.href}
-                className="rounded-lg border border-[var(--rule)] bg-[var(--bg)] p-4 transition hover:border-[var(--rule-strong)] hover:shadow-[var(--shadow-soft)]"
-              >
-                <span className="font-mono text-xs text-[var(--accent)]">
-                  0{index + 1}
-                </span>
-                <h3 className="mt-2 text-base font-semibold leading-tight text-[var(--fg)]">
-                  {step.title}
-                </h3>
-                <p className="mt-2 text-sm leading-relaxed text-[var(--muted)]">
-                  {step.body}
-                </p>
-              </Link>
-            ))}
-          </div>
+        <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {paths.map((path) => (
+            <PathCard key={path.title} {...path} />
+          ))}
         </div>
       </div>
     </section>
+  );
+}
+
+function PathCard({
+  eyebrow,
+  title,
+  body,
+  href,
+  cta,
+  external = false,
+}: {
+  eyebrow: string;
+  title: string;
+  body: string;
+  href: string;
+  cta: string;
+  external?: boolean;
+}) {
+  const className =
+    "group flex min-h-56 flex-col rounded-xl border border-[var(--rule)] bg-[var(--bg)] p-5 transition hover:border-[var(--accent)] hover:shadow-[var(--shadow-soft)]";
+  const content = (
+    <>
+      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--accent)]">
+        {eyebrow}
+      </p>
+      <h3 className="mt-4 text-[1.12rem] font-semibold leading-tight tracking-[-0.01em] text-[var(--fg)]">
+        {title}
+      </h3>
+      <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">{body}</p>
+      <span className="mt-auto pt-6 text-sm font-semibold text-[var(--fg)] transition group-hover:text-accent">
+        {cta} →
+      </span>
+    </>
+  );
+
+  if (external) {
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer" className={className}>
+        {content}
+      </a>
+    );
+  }
+
+  return (
+    <Link href={href} className={className}>
+      {content}
+    </Link>
   );
 }
 
@@ -300,26 +311,6 @@ function MiniProof({ label, body }: { label: string; body: string }) {
       <p className="text-sm font-semibold text-[var(--fg)]">{label}</p>
       <p className="mt-1 text-xs leading-snug text-[var(--soft)]">{body}</p>
     </div>
-  );
-}
-
-function TrustBar() {
-  const points = [
-    "Isolated microVMs",
-    "Credential proxies",
-    "Mediated egress",
-    "Signed approvals",
-    "Mechanical witnesses",
-    "Hash-chained audit",
-  ];
-  return (
-    <section className="border-b border-[var(--rule)] bg-[var(--surface)]">
-      <div className="mx-auto flex max-w-5xl flex-wrap gap-x-8 gap-y-3 px-4 py-5 text-sm font-medium text-[var(--muted)] sm:px-6">
-        {points.map((p) => (
-          <span key={p}>{p}</span>
-        ))}
-      </div>
-    </section>
   );
 }
 
@@ -555,185 +546,50 @@ function AudienceCard({
   );
 }
 
-function ReferenceImpl() {
-  return (
-    <Section title="Working reference implementation">
-      <div className="grid gap-12 lg:grid-cols-[1.05fr_0.95fr]">
-        <div className="space-y-5 leading-relaxed text-[var(--fg)]">
-          <p>
-            A paradigm has to run. RAXIS ships a source-available Rust
-            implementation for autonomous software engineering: agents that
-            read code, write code, run tools, call services, pass gates, and
-            integrate changes through a controlled merge path.
-          </p>
-          <p className="text-[var(--muted)]">
-            Software engineering is the first proving ground because it has
-            ground truth. RAXIS can inspect the actual Git diff, run mechanical
-            witnesses, bind verdicts to commit SHAs, and show the operator what
-            happened in the dashboard.
-          </p>
-          <p className="text-[var(--muted)]">
-            Source availability is part of the strategy. Security buyers can
-            inspect the design before they trust it, and the public specs give
-            the industry a shared vocabulary for governed agent execution.
-          </p>
-        </div>
-        <dl className="space-y-5">
-          <Stat
-            label="Runtime"
-            value="Rust"
-            hint="kernel, CLI, gateways, proxies, verifier"
-          />
-          <Stat
-            label="Isolation"
-            value="VMs"
-            hint="Apple Virtualization.framework and Firecracker/KVM"
-          />
-          <Stat
-            label="Credential proxies"
-            value="11"
-            hint="databases, HTTP, SMTP, AWS, GCP, Azure"
-          />
-          <Stat
-            label="Audit"
-            value="SHA-256"
-            hint="hash-chained JSONL with replayable evidence"
-          />
-          <p className="pt-2 text-base">
-            <Link
-              href="/reference"
-              className="text-accent underline-offset-4 hover:underline"
-            >
-              Read the architecture →
-            </Link>
-          </p>
-        </dl>
-      </div>
-    </Section>
-  );
-}
-
-function Stat({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: string;
-  hint: string;
-}) {
-  return (
-    <div className="flex justify-between gap-6 border-b border-[var(--rule)] pb-4">
-      <dt className="text-[var(--muted)]">{label}</dt>
-      <dd className="text-right">
-        <span className="text-[1.25rem] font-semibold tabular-nums tracking-[-0.01em] text-[var(--fg)]">
-          {value}
-        </span>
-        <span className="mt-0.5 block text-sm text-[var(--soft)]">{hint}</span>
-      </dd>
-    </div>
-  );
-}
-
-function ThreatModel() {
-  return (
-    <Section
-      title="Threat model"
-      lead="The architecture starts from uncomfortable assumptions and makes them explicit."
-    >
-      <dl className="grid gap-10 sm:grid-cols-3">
-        <Threat
-          title="Agents are untrusted"
-          body="Not because every model is malicious, but because hallucination, prompt injection, and model changes are normal operating conditions."
-        />
-        <Threat
-          title="Operators make mistakes"
-          body="A bad glob, stale credential, or rushed approval should have a bounded blast radius and a complete audit trail."
-        />
-        <Threat
-          title="The kernel is the root"
-          body="RAXIS is honest about the trust boundary: a small host-side kernel mediates access, records evidence, and fails closed."
-        />
-      </dl>
-      <p className="mt-10 text-base text-[var(--muted)]">
-        <Link
-          href="/threat-model"
-          className="text-accent underline-offset-4 hover:underline"
-        >
-          Read the full threat model →
-        </Link>
-      </p>
-    </Section>
-  );
-}
-
-function Threat({ title, body }: { title: string; body: string }) {
-  return (
-    <div>
-      <dt className="h-sub">{title}</dt>
-      <dd className="mt-3 leading-relaxed text-[var(--muted)]">{body}</dd>
-    </div>
-  );
-}
-
-function Conformance() {
-  const tiers = [
+function ExploreMore() {
+  const items = [
     {
-      tier: "1",
-      name: "Aligned",
-      verification: "Self-attested",
-      use: "Designs, prototypes, and early implementations",
+      title: "Architecture",
+      body: "How the kernel, gateways, VM isolation, credential proxies, witnesses, and dashboard fit together.",
+      href: "/reference",
+      cta: "Read the reference",
     },
     {
-      tier: "2",
-      name: "Tested",
-      verification: "Canonical conformance suite",
-      use: "Production-bound implementations seeking evidence",
+      title: "Threat model",
+      body: "The assumptions RAXIS makes about agents, operators, kernels, credentials, networks, and audit evidence.",
+      href: "/threat-model",
+      cta: "Review the model",
     },
     {
-      tier: "3",
-      name: "Verified",
-      verification: "Independent third-party audit",
-      use: "Regulated deployments and contractual commitments",
+      title: "Conformance",
+      body: "The tiers and evidence used to describe whether an implementation satisfies the RAXIS invariants.",
+      href: "/conformance",
+      cta: "See the tiers",
     },
   ];
+
   return (
     <Section
-      title="Conformance"
-      lead="RAXIS is designed to become a category, not a black box. Conformance gives teams a way to prove which guarantees an implementation actually satisfies."
+      title="Go deeper when you are ready"
+      lead="The homepage gives the shape of the system. These pages carry the detailed proof for operators, security reviewers, and implementation teams."
     >
-      <div className="border-y border-[var(--rule)]">
-        {tiers.map((t, i) => (
-          <div
-            key={t.tier}
-            className={
-              "grid gap-3 py-6 sm:grid-cols-[4rem_minmax(0,1fr)] sm:gap-x-6 sm:gap-y-4 md:grid-cols-[4rem_9rem_minmax(0,1fr)_minmax(0,1fr)] " +
-              (i > 0 ? "border-t border-[var(--rule)]" : "")
-            }
+      <div className="grid gap-5 md:grid-cols-3">
+        {items.map((item) => (
+          <Link
+            key={item.title}
+            href={item.href}
+            className="group rounded-xl border border-[var(--rule)] bg-[var(--surface)] p-5 transition hover:border-[var(--accent)] hover:shadow-[var(--shadow-soft)]"
           >
-            <div className="text-sm tabular-nums text-[var(--soft)]">
-              Tier {t.tier}
-            </div>
-            <div className="text-[1.125rem] font-semibold tracking-[-0.01em] text-[var(--fg)]">
-              {t.name}
-            </div>
-            <div className="leading-snug text-[var(--muted)]">
-              {t.verification}
-            </div>
-            <div className="leading-snug text-[var(--muted)]">{t.use}</div>
-          </div>
+            <h3 className="h-sub">{item.title}</h3>
+            <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
+              {item.body}
+            </p>
+            <span className="mt-6 inline-flex text-sm font-semibold text-[var(--fg)] transition group-hover:text-accent">
+              {item.cta} →
+            </span>
+          </Link>
         ))}
       </div>
-      <p className="mt-8 text-base text-[var(--muted)]">
-        The reference implementation currently claims tier 1 and tier 2. Tier 3
-        requires independent review.{" "}
-        <Link
-          href="/conformance"
-          className="text-accent underline-offset-4 hover:underline"
-        >
-          Read more →
-        </Link>
-      </p>
     </Section>
   );
 }

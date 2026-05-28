@@ -112,6 +112,47 @@ network device** at all (`INV-NETISO-01`). Credentials for
 allowed providers are injected by the credential proxy without
 ever transiting the agent's address space.
 
+## Custom Tools and MCP Adapters
+
+Operators can bring existing local automation into RAXIS without making
+that automation a new authority channel. The supported shape is an
+Executor profile with one bounded wrapper per operation:
+
+```toml
+[profiles.unity_mobile]
+inherits_from = "Executor"
+
+[[profiles.unity_mobile.custom_tool]]
+name = "unity_build_player"
+description = "Build one Unity player target through the local MCP adapter."
+command = ["/usr/local/bin/raxis-tool-mcp", "unity", "build-player"]
+timeout_seconds = 60
+
+[profiles.unity_mobile.custom_tool.schema]
+type = "object"
+required = ["target", "scene"]
+additionalProperties = false
+```
+
+Then assign the profile to an Executor task:
+
+```toml
+[[tasks]]
+task_id = "build-mobile-demo"
+session_agent_type = "Executor"
+profile = "unity_mobile"
+```
+
+The kernel validates the signed plan, resolves profile inheritance, and
+stamps only the effective tool bundle into matching Executor sessions.
+Reviewer and Orchestrator sessions never receive custom tools. Existing
+scripts, stdio MCP servers, local HTTP services, commercial tool
+bridges, Unity, and Blender integrations fit this model by wrapping
+specific operations such as `repo_codegen_check`, `docs_search`,
+`unity_build_player`, or `blender_export_asset`; avoid generic
+`mcp_call_anything` tools because they are broad, hard to audit, and
+violate the bounded-capability intent of the runtime.
+
 ## The Audit Chain
 
 Every kernel decision (boot, admission, FSM transition, merge,

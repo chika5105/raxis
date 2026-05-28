@@ -51,8 +51,8 @@ steers it). The agent has:
   (i.e. PID 1) with full root uid, inheriting the planner's
   environment and filesystem view.
 * Optional `SubprocessTool`s declared via
-  `[[planners.*.custom_tools]]` in `policy.toml` —
-  same spawn semantics.
+  `[[profiles.<name>.custom_tool]]` in the admitted `plan.toml` —
+  same spawn semantics, Executor-only after kernel validation.
 * No direct vsock dialer (the agent has no `socket(AF_VSOCK)`
   binding in the model's tool API), but it does have `bash`,
   which can `socat`, `nc -U`, `python -c "import socket; socket.
