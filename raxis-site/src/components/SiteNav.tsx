@@ -1,6 +1,13 @@
 import Link from "next/link";
 import { ThemeToggle } from "./ThemeToggle";
 import { Wordmark } from "./Wordmark";
+import {
+  ASK_GOOGLE_RAXIS_HREF,
+  RAXIS_COFFEE_HREF,
+  RAXIS_COMMUNITY_HREF,
+  RAXIS_CONTACT_HREF,
+  RAXIS_SOURCE_HREF,
+} from "@/lib/site-links";
 
 type NavLink = {
   href: string;
@@ -10,11 +17,6 @@ type NavLink = {
 };
 
 const GET_STARTED_HREF = "/get-started";
-const SOURCE_HREF = "https://github.com/chika5105/raxis";
-const CONTACT_HREF =
-  "https://docs.google.com/forms/d/e/1FAIpQLScnVmQUI-PEX-eykhXFdmcLPgxjfqGsKai4N6BRmSnozr--Vw/viewform?usp=publish-editor";
-const COFFEE_HREF = "https://paypal.me/chikajinanwa";
-const COMMUNITY_HREF = "https://www.reddit.com/r/raxis/";
 
 const PRIMARY_LINKS: NavLink[] = [
   { href: "/", label: "Home" },
@@ -29,6 +31,7 @@ const NAV_GROUPS: { label: string; links: NavLink[] }[] = [
     label: "Learn",
     links: [
       { href: "/plan-builder", label: "Plan builder" },
+      { href: ASK_GOOGLE_RAXIS_HREF, label: "Ask Google about RAXIS", external: true },
       { href: "/paradigm", label: "Paradigm" },
       { href: "/threat-model", label: "Threat model" },
       { href: "/conformance", label: "Conformance" },
@@ -39,7 +42,7 @@ const NAV_GROUPS: { label: string; links: NavLink[] }[] = [
     label: "Company",
     links: [
       { href: "/about", label: "About" },
-      { href: CONTACT_HREF, label: "Contact", external: true },
+      { href: RAXIS_CONTACT_HREF, label: "Contact", external: true },
     ],
   },
 ];
@@ -125,7 +128,7 @@ export function SiteNav() {
         </nav>
         <div className="flex items-center gap-4">
           <a
-            href={SOURCE_HREF}
+            href={RAXIS_SOURCE_HREF}
             target="_blank"
             rel="noopener noreferrer"
             className="hidden md:inline-flex items-center rounded-[var(--radius-md)] border border-[var(--rule)] px-4 py-2 text-sm font-semibold leading-none text-[var(--fg)] transition hover:border-[var(--accent)] hover:text-accent"
@@ -133,7 +136,7 @@ export function SiteNav() {
             View Source Code
           </a>
           <a
-            href={COFFEE_HREF}
+            href={RAXIS_COFFEE_HREF}
             target="_blank"
             rel="noopener noreferrer"
             className="hidden lg:inline-flex items-center text-sm text-[var(--muted)] hover:text-[var(--fg)] transition"
@@ -141,7 +144,7 @@ export function SiteNav() {
             Buy me a coffee
           </a>
           <a
-            href={COMMUNITY_HREF}
+            href={RAXIS_COMMUNITY_HREF}
             target="_blank"
             rel="noopener noreferrer"
             aria-label="Reddit community"
@@ -172,7 +175,7 @@ export function SiteNav() {
             ))}
             <li className="shrink-0">
               <NavItem
-                link={{ href: SOURCE_HREF, label: "Source", external: true }}
+                link={{ href: RAXIS_SOURCE_HREF, label: "Source", external: true }}
                 className="text-[var(--muted)] hover:text-[var(--fg)]"
               />
             </li>
@@ -206,13 +209,19 @@ export function SiteNav() {
                 <ul className="space-y-2">
                   <li>
                     <NavItem
-                      link={{ href: COMMUNITY_HREF, label: "Reddit community", external: true }}
+                      link={{ href: ASK_GOOGLE_RAXIS_HREF, label: "Ask Google about RAXIS", external: true }}
                       className="text-[var(--fg)] hover:text-accent"
                     />
                   </li>
                   <li>
                     <NavItem
-                      link={{ href: COFFEE_HREF, label: "Buy me a coffee", external: true }}
+                      link={{ href: RAXIS_COMMUNITY_HREF, label: "Reddit community", external: true }}
+                      className="text-[var(--fg)] hover:text-accent"
+                    />
+                  </li>
+                  <li>
+                    <NavItem
+                      link={{ href: RAXIS_COFFEE_HREF, label: "Buy me a coffee", external: true }}
                       className="text-[var(--fg)] hover:text-accent"
                     />
                   </li>

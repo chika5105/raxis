@@ -1,5 +1,10 @@
 import Link from "next/link";
 import { Wordmark } from "./Wordmark";
+import {
+  ASK_GOOGLE_RAXIS_HREF,
+  RAXIS_COMMUNITY_HREF,
+  RAXIS_SOURCE_HREF,
+} from "@/lib/site-links";
 
 export function SiteFooter() {
   return (
@@ -65,7 +70,17 @@ export function SiteFooter() {
             <li><Link href="/docs/search" className="text-[var(--muted)] hover:text-[var(--fg)]">Search</Link></li>
             <li>
               <a
-                href="https://www.reddit.com/r/raxis/"
+                href={ASK_GOOGLE_RAXIS_HREF}
+                className="text-[var(--muted)] hover:text-[var(--fg)]"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Ask Google about RAXIS
+              </a>
+            </li>
+            <li>
+              <a
+                href={RAXIS_COMMUNITY_HREF}
                 className="text-[var(--muted)] hover:text-[var(--fg)]"
                 target="_blank"
                 rel="noopener noreferrer"
@@ -75,7 +90,7 @@ export function SiteFooter() {
             </li>
             <li>
               <a
-                href="https://github.com/chika5105/raxis"
+                href={RAXIS_SOURCE_HREF}
                 className="text-[var(--muted)] hover:text-[var(--fg)]"
                 target="_blank"
                 rel="noopener noreferrer"

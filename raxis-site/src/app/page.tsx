@@ -3,6 +3,11 @@ import Image from "next/image";
 import { DemoPlayer } from "@/components/DemoPlayer";
 import { Section } from "@/components/Section";
 import { LinkedInBadge } from "@/components/LinkedInBadge";
+import {
+  ASK_GOOGLE_RAXIS_HREF,
+  RAXIS_COFFEE_HREF,
+  RAXIS_SOURCE_HREF,
+} from "@/lib/site-links";
 
 export default function HomePage() {
   return (
@@ -68,7 +73,7 @@ function Hero() {
               Watch the demo
             </Link>
             <a
-              href="https://github.com/chika5105/raxis"
+              href={RAXIS_SOURCE_HREF}
               target="_blank"
               rel="noopener noreferrer"
               className="btn btn-ghost w-full sm:w-auto"
@@ -78,6 +83,14 @@ function Hero() {
             <Link href="/paradigm" className="btn btn-ghost w-full sm:w-auto">
               Read the paradigm
             </Link>
+            <a
+              href={ASK_GOOGLE_RAXIS_HREF}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="justify-self-center text-base text-[var(--muted)] underline decoration-[var(--rule)] underline-offset-4 transition hover:text-[var(--fg)] hover:decoration-[var(--rule-strong)] sm:justify-self-auto"
+            >
+              Ask Google about RAXIS
+            </a>
             <Link
               href="/docs/guides/getting-started/02-first-initiative"
               className="justify-self-center text-base text-[var(--muted)] underline decoration-[var(--rule)] underline-offset-4 transition hover:text-[var(--fg)] hover:decoration-[var(--rule-strong)] sm:justify-self-auto"
@@ -823,7 +836,7 @@ function CreatorSection() {
             </div>
             <div className="mt-6 flex flex-wrap items-center gap-6 text-sm">
               <a
-                href="https://paypal.me/chikajinanwa"
+                href={RAXIS_COFFEE_HREF}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-2 font-medium text-[var(--muted)] transition hover:text-accent"
@@ -866,7 +879,7 @@ function CTA() {
         </p>
         <div className="mt-10 flex flex-wrap items-center gap-4">
           <a
-            href="https://github.com/chika5105/raxis"
+            href={RAXIS_SOURCE_HREF}
             target="_blank"
             rel="noopener noreferrer"
             className="btn btn-primary"
@@ -876,6 +889,14 @@ function CTA() {
           <Link href="/paradigm" className="btn btn-ghost">
             Read the paradigm
           </Link>
+          <a
+            href={ASK_GOOGLE_RAXIS_HREF}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn btn-ghost"
+          >
+            Ask Google about RAXIS
+          </a>
         </div>
       </div>
     </section>
