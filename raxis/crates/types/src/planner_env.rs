@@ -51,6 +51,26 @@ pub const PLANNER_TASK_PROMPT_ENV: &str = "RAXIS_PLANNER_TASK_PROMPT";
 /// working.
 pub const PLANNER_TASK_PROMPT_PATH_ENV: &str = "RAXIS_PLANNER_TASK_PROMPT_PATH";
 
+/// JSON-encoded custom-tool bundle for this Executor session.
+/// The kernel stamps this only after plan admission has validated
+/// `[[profiles.<name>.custom_tool]]`, resolved the task's
+/// `profile = "..."`, merged inherited tools, and confirmed the
+/// task is an Executor. Reviewer and Orchestrator sessions must not
+/// receive this var.
+pub const PLANNER_CUSTOM_TOOLS_ENV: &str = "RAXIS_PLANNER_CUSTOM_TOOLS";
+
+/// Guest-visible absolute path of a virtiofs sidecar file containing
+/// the same JSON bundle [`PLANNER_CUSTOM_TOOLS_ENV`] would carry
+/// inline. This mirrors [`PLANNER_TASK_PROMPT_PATH_ENV`]: large tool
+/// schemas and MCP-wrapper command arrays stay out of Apple-VZ's
+/// cmdline-sized env transport.
+pub const PLANNER_CUSTOM_TOOLS_PATH_ENV: &str = "RAXIS_PLANNER_CUSTOM_TOOLS_PATH";
+
+/// Filename the kernel uses inside the per-session `/raxis-meta`
+/// mount when custom tools are delivered via
+/// [`PLANNER_CUSTOM_TOOLS_PATH_ENV`].
+pub const PLANNER_CUSTOM_TOOLS_FILE_NAME: &str = "custom-tools.json";
+
 /// JSON-encoded
 /// `raxis_ksb::KsbSnapshot` carrying the per-turn kernel state
 /// block. Kernel assembles via `crate::initiatives::ksb_assembly`;
@@ -144,6 +164,12 @@ mod tests {
             PLANNER_TASK_PROMPT_PATH_ENV,
             "RAXIS_PLANNER_TASK_PROMPT_PATH"
         );
+        assert_eq!(PLANNER_CUSTOM_TOOLS_ENV, "RAXIS_PLANNER_CUSTOM_TOOLS");
+        assert_eq!(
+            PLANNER_CUSTOM_TOOLS_PATH_ENV,
+            "RAXIS_PLANNER_CUSTOM_TOOLS_PATH"
+        );
+        assert_eq!(PLANNER_CUSTOM_TOOLS_FILE_NAME, "custom-tools.json");
         assert_eq!(PLANNER_KSB_ENV, "RAXIS_PLANNER_KSB");
         assert_eq!(PLANNER_MAX_TURNS_ENV, "RAXIS_PLANNER_MAX_TURNS");
         assert_eq!(

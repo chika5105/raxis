@@ -76,6 +76,9 @@ use thiserror::Error;
 use raxis_types::{IntentOutcome, IntentResponse, PlannerErrorCode, TaskId, TaskState};
 
 use crate::bedrock_client::BedrockClient;
+use crate::custom_tools::{
+    load_custom_tools, read_custom_tool_decls_from_env_fn, CustomToolDecl, CustomToolError,
+};
 use crate::dispatch::{DispatchConfig, DispatchError, DispatchLoop, DispatchOutcome};
 use crate::gemini_client::GeminiClient;
 use crate::intent::{
@@ -197,6 +200,8 @@ const PLANNER_RUNTIME_ENV_KEYS: &[&str] = &[
     PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV,
     PLANNER_MAX_TOKENS_TOTAL_ENV,
     "RAXIS_PLANNER_MAX_TURNS",
+    raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_ENV,
+    raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_PATH_ENV,
     raxis_types::planner_env::PLANNER_MAX_SLEEP_CUMULATIVE_ENV,
     raxis_types::planner_env::PLANNER_MAX_SLEEP_PER_CALL_ENV,
     PLANNER_SIDECAR_ENDPOINT_ENV,
@@ -311,6 +316,23 @@ pub enum DriverError {
     BadBaseUrl {
         /// The raw operator-supplied value that failed to parse.
         got: String,
+    },
+
+    /// The kernel-stamped custom-tool bundle was malformed, or one
+    /// declaration collided with the role's base registry. Failing
+    /// before dispatch keeps a bad operator tool from becoming a
+    /// partial, model-visible surface.
+    #[error("custom tool bundle invalid: {0}")]
+    CustomTools(#[from] CustomToolError),
+
+    /// Defense in depth: custom tools are only legal for Executor
+    /// sessions. A non-empty bundle on Reviewer/Orchestrator means
+    /// the kernel spawn contract regressed and the driver must fail
+    /// closed.
+    #[error("custom tools are not allowed for role {role:?}")]
+    CustomToolsNotAllowed {
+        /// Role that received an illegal custom-tool bundle.
+        role: Role,
     },
 
     /// The dispatch loop returned a terminal error (model or tool).
@@ -587,6 +609,7 @@ where
         total: max_tokens_total,
     };
     let sleep_caps = parse_sleep_caps_env(&f);
+    let custom_tools = read_custom_tool_decls_from_env_fn(&f)?;
     run_role_session_with_connected_transport(
         role,
         args,
@@ -599,6 +622,7 @@ where
         max_tokens,
         token_caps,
         sleep_caps,
+        custom_tools,
         model,
         ksb_snapshot,
     )
@@ -912,6 +936,7 @@ pub async fn run_role_session_with_model(
         max_tokens,
         token_caps,
         sleep_caps,
+        Vec::new(),
         model,
         ksb_snapshot,
     )
@@ -942,6 +967,7 @@ pub async fn run_role_session_with_connected_transport(
     max_tokens: u32,
     token_caps: TokenCaps,
     sleep_caps: Option<(u32, u32)>,
+    custom_tools: Vec<CustomToolDecl>,
     model: Arc<dyn ModelClient>,
     ksb_snapshot: Option<raxis_ksb::KsbSnapshot>,
 ) -> Result<DriverOutcome, DriverError> {
@@ -963,7 +989,13 @@ pub async fn run_role_session_with_connected_transport(
     let submitter = Arc::new(IntentSubmitter::new(Arc::clone(&transport), task_id));
 
     // ── Step 2: build per-role registry + terminal tool list. ───────
-    let (registry, terminal_tools) = build_role(role, Arc::clone(&submitter), sleep_caps);
+    if !custom_tools.is_empty() && !matches!(role, Role::Executor) {
+        return Err(DriverError::CustomToolsNotAllowed { role });
+    }
+    let (mut registry, terminal_tools) = build_role(role, Arc::clone(&submitter), sleep_caps);
+    if matches!(role, Role::Executor) && !custom_tools.is_empty() {
+        load_custom_tools(&mut registry, &custom_tools)?;
+    }
     let registry = Arc::new(registry);
 
     // ── Step 3: configure dispatch loop. ────────────────────────────

@@ -960,6 +960,7 @@ async fn spawn_orchestrator_for_initiative(
         session_id,
         Some(&ksb_json),
         Some(&task_prompt_for_sidecar),
+        None,
     );
     let extra_workspace_mounts: Vec<raxis_isolation::WorkspaceMount> = match &meta_sidecar {
         Some(s) => {
@@ -3438,6 +3439,11 @@ struct MetaSidecar {
     /// the caller asked for one. Stamped into
     /// `RAXIS_PLANNER_TASK_PROMPT_PATH`.
     task_prompt_guest_path: Option<String>,
+
+    /// Guest-visible absolute path of the custom-tools JSON bundle
+    /// when the caller asked for one. Stamped into
+    /// `RAXIS_PLANNER_CUSTOM_TOOLS_PATH`.
+    custom_tools_guest_path: Option<String>,
 }
 
 /// Provision the per-session metadata sidecar — the single virtiofs
@@ -3485,6 +3491,7 @@ fn provision_meta_sidecar(
     session_id: &str,
     ksb_json: Option<&str>,
     task_prompt: Option<&str>,
+    custom_tools_json: Option<&str>,
 ) -> Option<MetaSidecar> {
     let data_dir = data_dir?;
     let meta_dir = data_dir.join("guests").join(session_id).join("meta");
@@ -3533,6 +3540,24 @@ fn provision_meta_sidecar(
         ));
     }
 
+    let mut custom_tools_guest_path = None;
+    if let Some(json) = custom_tools_json {
+        let file_path = meta_dir.join(raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_FILE_NAME);
+        if let Err(e) = std::fs::write(&file_path, json.as_bytes()) {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"planner_custom_tools_sidecar_write_failed\",\
+                 \"session_id\":\"{session_id}\",\"path\":\"{path}\",\"err\":\"{e}\"}}",
+                path = file_path.display(),
+            );
+            return None;
+        }
+        custom_tools_guest_path = Some(format!(
+            "{mount}/{file}",
+            mount = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
+            file = raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_FILE_NAME,
+        ));
+    }
+
     let mount = raxis_isolation::WorkspaceMount {
         host_path: meta_dir,
         guest_path: raxis_ksb::PLANNER_KSB_GUEST_MOUNT.to_owned(),
@@ -3543,6 +3568,7 @@ fn provision_meta_sidecar(
         mount,
         ksb_guest_path,
         task_prompt_guest_path,
+        custom_tools_guest_path,
     })
 }
 
@@ -5216,11 +5242,15 @@ pub async fn spawn_executor_for_task(
     // Falls back to the legacy inline channels when no `data_dir`
     // is available (in-process subprocess-isolation tests).
     let task_prompt_for_sidecar = env.remove(PLANNER_TASK_PROMPT_ENV);
+    let custom_tools_for_sidecar = task_fields_for_max_turns
+        .as_ref()
+        .and_then(|fields| fields.custom_tools_json.clone());
     let meta_sidecar = provision_meta_sidecar(
         spawn_ctx.data_dir.as_deref(),
         session_id,
         Some(&ksb_json),
         task_prompt_for_sidecar.as_deref(),
+        custom_tools_for_sidecar.as_deref(),
     );
     match &meta_sidecar {
         Some(s) => {
@@ -5240,12 +5270,29 @@ pub async fn spawn_executor_for_task(
                 // Keep the inline env so the planner still boots.
                 env.insert(PLANNER_TASK_PROMPT_ENV.to_owned(), prompt.clone());
             }
+            if let Some(p) = &s.custom_tools_guest_path {
+                env.insert(
+                    raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_PATH_ENV.to_owned(),
+                    p.clone(),
+                );
+            } else if let Some(json) = &custom_tools_for_sidecar {
+                env.insert(
+                    raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_ENV.to_owned(),
+                    json.clone(),
+                );
+            }
             workspace_mounts.push(s.mount.clone());
         }
         None => {
             env.insert(raxis_ksb::PLANNER_KSB_ENV.to_owned(), ksb_json);
             if let Some(prompt) = task_prompt_for_sidecar {
                 env.insert(PLANNER_TASK_PROMPT_ENV.to_owned(), prompt);
+            }
+            if let Some(json) = custom_tools_for_sidecar {
+                env.insert(
+                    raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_ENV.to_owned(),
+                    json,
+                );
             }
         }
     }
@@ -5927,6 +5974,7 @@ mod tests {
             session_id,
             Some("{\"version\":1}"),
             Some("operator-prompt-bytes"),
+            Some("{\"tools\":[]}"),
         )
         .expect("sidecar provisioning succeeds against a real tempdir");
         let host_meta = dir.path().join("guests").join(session_id).join("meta");
@@ -5936,6 +5984,7 @@ mod tests {
 
         let ksb_file = host_meta.join(raxis_ksb::PLANNER_KSB_FILE_NAME);
         let prompt_file = host_meta.join(raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME);
+        let tools_file = host_meta.join(raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_FILE_NAME);
         assert_eq!(
             std::fs::read_to_string(&ksb_file).unwrap(),
             "{\"version\":1}"
@@ -5943,6 +5992,10 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&prompt_file).unwrap(),
             "operator-prompt-bytes"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&tools_file).unwrap(),
+            "{\"tools\":[]}"
         );
 
         assert_eq!(
@@ -5967,6 +6020,17 @@ mod tests {
                 .as_str()
             ),
         );
+        assert_eq!(
+            s.custom_tools_guest_path.as_deref(),
+            Some(
+                format!(
+                    "{m}/{f}",
+                    m = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
+                    f = raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_FILE_NAME,
+                )
+                .as_str()
+            ),
+        );
     }
 
     /// Asking for only the task prompt (KSB = None) still produces
@@ -5981,10 +6045,12 @@ mod tests {
             "session-prompt-only",
             None,
             Some("just the prompt"),
+            None,
         )
         .expect("sidecar provisioning succeeds with prompt-only");
         assert!(s.ksb_guest_path.is_none());
         assert!(s.task_prompt_guest_path.is_some());
+        assert!(s.custom_tools_guest_path.is_none());
         let host_meta = dir
             .path()
             .join("guests")
@@ -6002,7 +6068,13 @@ mod tests {
     /// expect the legacy inline env channels to keep working.
     #[test]
     fn provision_meta_sidecar_returns_none_without_data_dir() {
-        let s = provision_meta_sidecar(None, "session-none", Some("ignored"), Some("ignored"));
+        let s = provision_meta_sidecar(
+            None,
+            "session-none",
+            Some("ignored"),
+            Some("ignored"),
+            Some("ignored"),
+        );
         assert!(s.is_none());
     }
 

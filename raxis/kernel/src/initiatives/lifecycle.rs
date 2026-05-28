@@ -1086,6 +1086,7 @@ pub fn approve_plan(
             // `RAXIS_PLANNER_TASK_PROMPT`. Empty (the V1 default)
             // preserves the scaffold/park behaviour of the role binary.
             description: pt.description.clone(),
+            custom_tools_json: pt.custom_tools_json.clone(),
             // V2 `v2-deep-spec.md §Step 12` — retry ceilings.
             // `None` here means the operator omitted the field;
             // the `RetrySubTask` admission path substitutes the
@@ -1685,6 +1686,7 @@ pub fn repopulate_plan_registry(
                     // `description`, so a sealed plan can never carry
                     // a zero-length description through restart.
                     description: pt.description,
+                    custom_tools_json: pt.custom_tools_json,
                     // V2 `v2-deep-spec.md §Step 12` — re-hydrate the
                     // operator-declared retry ceilings. `None`
                     // preserves "operator omitted the field"
@@ -2222,6 +2224,11 @@ struct PlanTask {
     /// `[[tasks]]` block that declares `session_agent_type = "Orchestrator"`
     /// regardless of clone strategy.
     session_agent_type: SessionAgentType,
+    /// Optional plan profile. Executor profiles can carry
+    /// `[[profiles.<name>.custom_tool]]` declarations; the kernel
+    /// resolves the effective profile at approval and stamps only
+    /// the task-local bundle into that Executor VM.
+    profile: Option<String>,
 
     // ── §2.5.8 path-scope fields (in-memory only) ──────────────────────
     /// Glob patterns this task may touch. **Default `[]` (deny everything)**.
@@ -2313,6 +2320,8 @@ struct PlanTask {
     /// bound the env-var footprint passed to the substrate
     /// (`execve(2)` `ARG_MAX` ~128 KiB on Linux).
     description: String,
+    /// JSON bundle of effective custom tools for this task, if any.
+    custom_tools_json: Option<String>,
 
     // ── V2 elastic-vm-scaling.md §2.2 — per-task elastic knobs ─────
     /// **V2 `elastic-vm-scaling.md §2.2`** — operator opt-out from
@@ -2452,6 +2461,17 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
                     })
                 }
             },
+        };
+        let profile = match entry.get("profile") {
+            None => None,
+            Some(toml::Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
+            Some(_) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) profile must be a non-empty TOML string"
+                    ),
+                });
+            }
         };
 
         // V2 `credential-proxy.md §3` — parse the optional
@@ -2595,6 +2615,15 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             }
             None => description_raw,
         };
+        let custom_tools_json =
+            crate::initiatives::custom_tools_validator::custom_tool_bundle_json_for_task(
+                plan_toml,
+                &task_id,
+                session_agent_type.as_sql_str(),
+            )
+            .map_err(|e| LifecycleError::PlanInvalid {
+                reason: e.to_string(),
+            })?;
 
         // V2 `v2-deep-spec.md §Step 12` — operator-declared retry
         // ceilings. Both fields are OPTIONAL: omission leaves the
@@ -2734,9 +2763,11 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             path_scope_override,
             clone_strategy,
             session_agent_type,
+            profile,
             credentials,
             vm_image,
             description: agent_description,
+            custom_tools_json,
             max_crash_retries,
             max_review_rejections,
             max_turns,
@@ -5134,9 +5165,11 @@ prompt = "   "
             path_scope_override: false,
             clone_strategy: CloneStrategy::Blobless,
             session_agent_type: SessionAgentType::Executor,
+            profile: None,
             credentials: vec![],
             vm_image: String::new(),
             description: String::new(),
+            custom_tools_json: None,
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -5322,9 +5355,11 @@ prompt = "   "
             path_scope_override: false,
             clone_strategy: CloneStrategy::Blobless,
             session_agent_type: SessionAgentType::Executor,
+            profile: None,
             credentials: vec![],
             vm_image: String::new(),
             description: String::new(),
+            custom_tools_json: None,
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -5531,9 +5566,11 @@ prompt = "   "
             path_scope_override: false,
             clone_strategy: CloneStrategy::Blobless,
             session_agent_type: SessionAgentType::Executor,
+            profile: None,
             credentials: vec![],
             vm_image: String::new(),
             description: String::new(),
+            custom_tools_json: None,
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -5894,9 +5931,11 @@ session_agent_type = "Coordinator"
             path_scope_override: false,
             clone_strategy: strategy,
             session_agent_type: agent,
+            profile: None,
             credentials: vec![],
             vm_image: String::new(),
             description: String::new(),
+            custom_tools_json: None,
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -6660,9 +6699,11 @@ description = "do thing"
             path_scope_override: false,
             clone_strategy: CloneStrategy::Full,
             session_agent_type: SessionAgentType::Executor,
+            profile: None,
             credentials: Vec::new(),
             vm_image: String::new(),
             description: String::new(),
+            custom_tools_json: None,
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -10236,9 +10277,11 @@ mod env_consistency_tests {
             path_scope_override: false,
             clone_strategy: CloneStrategy::Full,
             session_agent_type: SessionAgentType::Executor,
+            profile: None,
             credentials: creds,
             vm_image: String::new(),
             description: String::new(),
+            custom_tools_json: None,
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -10392,9 +10435,11 @@ mod vm_image_admission_tests {
             path_scope_override: false,
             clone_strategy: CloneStrategy::Blobless,
             session_agent_type: agent,
+            profile: None,
             credentials: Vec::new(),
             vm_image: vm_image.to_owned(),
             description: String::new(),
+            custom_tools_json: None,
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,

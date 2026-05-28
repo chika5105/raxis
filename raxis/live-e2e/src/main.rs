@@ -136,6 +136,15 @@
 //!     `RAXIS_LIVE_CANONICAL_EXECUTOR_IMAGE=1` so it runs only
 //!     where the canonical pip surface is present.
 //!
+//!   * `tooling-mcp-unity` — exercises the BYO-tool migration shape
+//!     with an existing-script wrapper plus an in-process Unity-like
+//!     MCP JSON-RPC server exposed to the Executor as three narrow
+//!     custom tools (`unity_list_scenes`, `unity_run_playmode_tests`,
+//!     `unity_build_player`). Operators wrap existing scripts,
+//!     services, and MCP methods as bounded, explicit Executor
+//!     capabilities; there is no generic MCP discovery/run-anything
+//!     tool, and Reviewer/Orchestrator surfaces stay clean.
+//!
 //!   * `all` — run every slice in order; any slice failure aborts
 //!     with non-zero exit.
 //!
@@ -180,6 +189,7 @@ mod slice_postgres_proxy_table_allowlists;
 mod slice_redis_proxy;
 mod slice_session_spawn;
 mod slice_smtp_proxy;
+mod slice_tooling_mcp_unity;
 mod slice_vm_capabilities;
 
 #[derive(Parser, Debug)]
@@ -347,12 +357,27 @@ enum Slice {
     /// `RAXIS_LIVE_CANONICAL_EXECUTOR_IMAGE=1` so it runs only
     /// where the canonical pip surface is present.
     VmCapabilities,
+    /// BYO tool adapter fixture. Exposes a generic script and a
+    /// Unity-like local JSON-RPC server through bounded, explicit
+    /// Executor custom tools.
+    ToolingMcpUnity,
     /// Run every slice in order.
     All,
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
+    if std::env::args().nth(1).as_deref() == Some("__tooling_mcp_wrapper") {
+        let code = match slice_tooling_mcp_unity::run_wrapper_from_env().await {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("raxis-live-e2e tooling wrapper failed: {e}");
+                70
+            }
+        };
+        std::process::exit(code);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -425,6 +450,7 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
             slice_mongodb_proxy_collection_allowlists::run().await
         }
         Slice::VmCapabilities => slice_vm_capabilities::run().await,
+        Slice::ToolingMcpUnity => slice_tooling_mcp_unity::run().await,
         Slice::All => {
             slice_gateway_anthropic::run(env)
                 .await
@@ -486,6 +512,9 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
             slice_vm_capabilities::run()
                 .await
                 .context("slice vm-capabilities")?;
+            slice_tooling_mcp_unity::run()
+                .await
+                .context("slice tooling-mcp-unity")?;
             Ok(())
         }
     }

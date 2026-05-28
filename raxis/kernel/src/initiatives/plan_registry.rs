@@ -130,6 +130,14 @@ pub struct TaskPlanFields {
     /// is opaque bytes the model receives.
     pub description: String,
 
+    /// JSON-encoded custom-tool bundle resolved from this task's
+    /// `profile = "..."` declaration. `None` means the task has no
+    /// operator tool profile or the profile has no effective tools.
+    /// The session-spawn path stamps this only into Executor
+    /// sessions; Reviewer and Orchestrator sessions never receive
+    /// operator-defined custom tools.
+    pub custom_tools_json: Option<String>,
+
     /// V2 `v2-deep-spec.md §Step 12` — operator-declared ceiling on
     /// **VM-crash retries** for this sub-task. Read by
     /// `handle_retry_sub_task` against `subtask_activations.crash_retry_count`
@@ -323,6 +331,7 @@ impl Default for TaskPlanFields {
             session_agent_type: SessionAgentType::Executor,
             vm_image: String::new(),
             description: String::new(),
+            custom_tools_json: None,
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -1006,6 +1015,7 @@ mod tests {
             session_agent_type: SessionAgentType::Executor,
             vm_image: String::new(),
             description: "Refactor parser to handle UTF-16".to_owned(),
+            custom_tools_json: None,
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,

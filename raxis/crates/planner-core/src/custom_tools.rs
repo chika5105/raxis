@@ -1,12 +1,13 @@
-//! Custom-tool loader — reads operator-declared
-//! `[[tasks.custom_tools]]` blocks (per
-//! `planner-harness.md §INV-PLANNER-HARNESS-04`) and registers them
-//! as subprocess-executor [`crate::tools::Tool`]s in a planner-role
-//! registry.
-//!substep "Custom-tool loader + subprocess
-//! executor". The corresponding policy + plan validation lives in
-//! `kernel/src/initiatives/lifecycle.rs::validate_task_custom_tools`
-//! (gap-b2-custom-tools, follow-up).
+//! Custom-tool loader — reads kernel-approved
+//! `[[profiles.<name>.custom_tool]]` declarations from a
+//! plan-profile bundle and registers them as subprocess-executor
+//! [`crate::tools::Tool`]s in the Executor registry.
+//!
+//! The kernel is the authority: it validates the signed `plan.toml`,
+//! resolves the task's `profile = "..."`, merges inherited profile
+//! tools, and stamps only the effective tool bundle into the spawned
+//! Executor session. Reviewer and Orchestrator sessions never receive
+//! this bundle.
 //! ## Wire shape
 //! Each custom tool decl carries:
 //! * `name` — ASCII identifier matching `[A-Za-z0-9_]{1,64}`.
@@ -14,8 +15,8 @@
 //! * `command` — Absolute path to an executable inside the planner VM
 //!   (typically `/usr/local/bin/<name>`), plus argv[1..]. The executor
 //!   invokes it with the model-supplied JSON input on stdin.
-//! * `input_schema` — JSON Schema for the input.
-//! * `timeout_secs` — Per-invocation deadline. Hard-capped at 300s
+//! * `schema` / `input_schema` — JSON Schema for the input.
+//! * `timeout_seconds` / `timeout_secs` — Per-invocation deadline. Hard-capped at 300s
 //!   (5 minutes) by the loader; values above the cap are rejected at
 //!   registration time.
 //!   The subprocess receives the model's `tool_use.input` as JSON on
@@ -28,16 +29,25 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry};
 
-/// One operator-declared custom tool decl. Matches the
-/// `[[tasks.custom_tools]]` table in `plan.toml`.
-#[derive(Debug, Clone, Deserialize)]
+/// Kernel-stamped custom-tool bundle for one Executor session.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CustomToolBundle {
+    /// Effective tools resolved from the task profile inheritance chain.
+    #[serde(default)]
+    pub tools: Vec<CustomToolDecl>,
+}
+
+/// One operator-declared custom tool decl. Matches one
+/// `[[profiles.<name>.custom_tool]]` table after the kernel has
+/// resolved the task's profile.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CustomToolDecl {
     /// Tool name (registered into the planner registry under this key).
     pub name: String,
@@ -47,18 +57,39 @@ pub struct CustomToolDecl {
     /// entries are static prefix arguments. The model's input
     /// arrives on stdin, NOT in argv.
     pub command: Vec<String>,
-    /// JSON Schema for the input. Forwarded verbatim to the
-    /// Anthropic API as the tool's `input_schema`.
+    /// JSON Schema for the input. Forwarded verbatim to the model
+    /// API as the tool's `input_schema`. The kernel emits the
+    /// canonical plan field name (`schema`); older test fixtures may
+    /// still use `input_schema`.
+    #[serde(
+        default = "default_input_schema",
+        alias = "schema",
+        skip_serializing_if = "serde_json::Value::is_null"
+    )]
     pub input_schema: serde_json::Value,
     /// Per-invocation deadline, in seconds. Capped at 300.
+    #[serde(default = "default_timeout_secs", alias = "timeout_seconds")]
     pub timeout_secs: u32,
+}
+
+fn default_input_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": true
+    })
+}
+
+fn default_timeout_secs() -> u32 {
+    60
 }
 
 /// Errors raised at custom-tool registration time.
 #[derive(Debug, Error)]
 pub enum CustomToolError {
     /// Name failed the ASCII identifier rule.
-    #[error("custom-tool name {0:?} is not a valid identifier (allowed: [A-Za-z0-9_]{{1,64}})")]
+    #[error(
+        "custom-tool name {0:?} is not a valid identifier (allowed: ^[a-z][a-z0-9_]{{0,47}}$)"
+    )]
     InvalidName(String),
     /// Description exceeded the 1 KiB cap.
     #[error("custom-tool {0} description exceeds 1024 bytes")]
@@ -82,16 +113,28 @@ pub enum CustomToolError {
         /// Offending custom-tool name that collided with a built-in.
         tool: String,
     },
+    /// Kernel-stamped JSON bundle was malformed.
+    #[error("custom-tool bundle JSON is invalid: {0}")]
+    BundleJsonInvalid(String),
+    /// Kernel-stamped bundle sidecar path could not be read.
+    #[error("custom-tool bundle sidecar read failed for {path:?}: {error}")]
+    BundleSidecarRead {
+        /// Guest-visible path the driver tried to read.
+        path: String,
+        /// I/O error text.
+        error: String,
+    },
 }
 
 /// Validate one decl. Returns the decl unchanged on success.
 pub fn validate_custom_tool(decl: &CustomToolDecl) -> Result<(), CustomToolError> {
-    let name_ok = !decl.name.is_empty()
-        && decl.name.len() <= 64
-        && decl
-            .name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    let bytes = decl.name.as_bytes();
+    let name_ok = !bytes.is_empty()
+        && bytes.len() <= 48
+        && bytes[0].is_ascii_lowercase()
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_');
     if !name_ok {
         return Err(CustomToolError::InvalidName(decl.name.clone()));
     }
@@ -141,6 +184,50 @@ pub fn load_custom_tools(
         }));
     }
     Ok(())
+}
+
+/// Parse the JSON bundle the kernel stamps into one Executor
+/// session. The stable envelope is:
+///
+/// ```json
+/// { "tools": [ { "name": "...", "description": "...", "command": ["..."] } ] }
+/// ```
+///
+/// A bare array of tool declarations is also accepted for older
+/// fixture files and small local harnesses. The operator-facing plan
+/// schema remains profile-scoped TOML.
+pub fn parse_custom_tool_bundle_json(raw: &str) -> Result<Vec<CustomToolDecl>, CustomToolError> {
+    match serde_json::from_str::<CustomToolBundle>(raw) {
+        Ok(bundle) => return Ok(bundle.tools),
+        Err(bundle_err) => match serde_json::from_str::<Vec<CustomToolDecl>>(raw) {
+            Ok(tools) => Ok(tools),
+            Err(array_err) => Err(CustomToolError::BundleJsonInvalid(format!(
+                "as envelope: {bundle_err}; as array: {array_err}"
+            ))),
+        },
+    }
+}
+
+/// Read custom-tool declarations from the kernel-stamped env
+/// contract. The path channel wins over the inline channel so large
+/// schemas do not pressure AVF's cmdline-sized env transport.
+pub fn read_custom_tool_decls_from_env_fn<F>(f: &F) -> Result<Vec<CustomToolDecl>, CustomToolError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let var = |k: &str| f(k).filter(|v| !v.is_empty());
+    if let Some(path) = var(raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_PATH_ENV) {
+        let raw =
+            std::fs::read_to_string(&path).map_err(|e| CustomToolError::BundleSidecarRead {
+                path: path.clone(),
+                error: e.to_string(),
+            })?;
+        return parse_custom_tool_bundle_json(&raw);
+    }
+    match var(raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_ENV) {
+        Some(raw) => parse_custom_tool_bundle_json(&raw),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Concrete [`Tool`] impl that shells out to a configured argv with
@@ -225,29 +312,73 @@ impl Tool for SubprocessTool {
             drop(stdin);
         }
         let timeout = ctx.deadline.unwrap_or(self.timeout);
-        let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => {
-                return Ok(ToolOutput::err(format!(
-                    "{}: wait_with_output failed: {e}",
-                    self.name,
-                )))
-            }
-            Err(_) => {
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let stdout_task = tokio::spawn(async move { read_pipe(stdout).await });
+        let stderr_task = tokio::spawn(async move { read_pipe(stderr).await });
+
+        let status = tokio::select! {
+            status = child.wait() => match status {
+                Ok(status) => status,
+                Err(e) => {
+                    stdout_task.abort();
+                    stderr_task.abort();
+                    return Ok(ToolOutput::err(format!(
+                        "{}: wait failed: {e}",
+                        self.name,
+                    )));
+                }
+            },
+            _ = tokio::time::sleep(timeout) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                stdout_task.abort();
+                stderr_task.abort();
                 return Ok(ToolOutput::err(format!(
                     "{}: subprocess timed out after {timeout:?}",
                     self.name,
-                )))
+                )));
             }
         };
-        if !out.status.success() {
-            let exit_info = match out.status.code() {
+
+        let stdout = match stdout_task.await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(e)) => {
+                return Ok(ToolOutput::err(format!(
+                    "{}: stdout read failed: {e}",
+                    self.name,
+                )));
+            }
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "{}: stdout task failed: {e}",
+                    self.name,
+                )));
+            }
+        };
+        let stderr = match stderr_task.await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(e)) => {
+                return Ok(ToolOutput::err(format!(
+                    "{}: stderr read failed: {e}",
+                    self.name,
+                )));
+            }
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "{}: stderr task failed: {e}",
+                    self.name,
+                )));
+            }
+        };
+        if !status.success() {
+            let exit_info = match status.code() {
                 Some(code) => format!("exit code {code}"),
                 None => {
                     #[cfg(unix)]
                     {
                         use std::os::unix::process::ExitStatusExt;
-                        match out.status.signal() {
+                        match status.signal() {
                             Some(sig) => format!("killed by signal {sig}"),
                             None => "unknown exit status".to_owned(),
                         }
@@ -261,20 +392,31 @@ impl Tool for SubprocessTool {
             return Ok(ToolOutput::err(format!(
                 "{name}: {exit_info}\nstderr:\n{stderr}",
                 name = self.name,
-                stderr = String::from_utf8_lossy(&out.stderr),
+                stderr = String::from_utf8_lossy(&stderr),
             )));
         }
         // Try to parse stdout as a JSON ToolOutput envelope. Fall
         // back to wrapping the raw stdout as a success body if the
         // tool didn't emit JSON.
-        if let Ok(parsed) = serde_json::from_slice::<ToolOutput>(&out.stdout) {
+        if let Ok(parsed) = serde_json::from_slice::<ToolOutput>(&stdout) {
             Ok(parsed)
         } else {
             Ok(ToolOutput::ok(
-                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&stdout).into_owned(),
             ))
         }
     }
+}
+
+async fn read_pipe<R>(pipe: Option<R>) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let mut bytes = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut bytes).await?;
+    }
+    Ok(bytes)
 }
 
 /// Leak `s` for the `'static` lifetime required by [`Tool::name`] /
@@ -311,6 +453,23 @@ mod tests {
         match validate_custom_tool(&bad).unwrap_err() {
             CustomToolError::InvalidName(n) => assert_eq!(n, "has-dash"),
             other => panic!("expected InvalidName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_uppercase_or_digit_start() {
+        for name in ["Tool".to_owned(), "1tool".to_owned(), "a".repeat(49)] {
+            let bad = CustomToolDecl {
+                name,
+                description: "valid custom tool description".to_owned(),
+                command: vec!["/bin/true".to_owned()],
+                input_schema: serde_json::json!({}),
+                timeout_secs: 10,
+            };
+            assert!(matches!(
+                validate_custom_tool(&bad),
+                Err(CustomToolError::InvalidName(_))
+            ));
         }
     }
 
@@ -375,6 +534,41 @@ mod tests {
         match load_custom_tools(&mut registry, &decls).unwrap_err() {
             CustomToolError::NameCollision { tool } => assert_eq!(tool, "read_file"),
             other => panic!("expected NameCollision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_reader_prefers_sidecar_path_and_accepts_canonical_names() {
+        let dir = fixture_workspace();
+        let path = dir.path().join("tools.json");
+        std::fs::write(
+            &path,
+            r#"{"tools":[{"name":"unity_build_player","description":"Build Unity player through local adapter","command":["/usr/local/bin/raxis-tool-mcp","unity","build-player"],"schema":{"type":"object"},"timeout_seconds":120}]}"#,
+        )
+        .unwrap();
+        let path_str = path.display().to_string();
+        let decls = read_custom_tool_decls_from_env_fn(&|key| match key {
+            raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_PATH_ENV => Some(path_str.clone()),
+            raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_ENV => Some("not json".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].name, "unity_build_player");
+        assert_eq!(decls[0].timeout_secs, 120);
+        validate_custom_tool(&decls[0]).unwrap();
+    }
+
+    #[test]
+    fn env_reader_rejects_malformed_bundle() {
+        match read_custom_tool_decls_from_env_fn(&|key| match key {
+            raxis_types::planner_env::PLANNER_CUSTOM_TOOLS_ENV => Some("{not-json".to_owned()),
+            _ => None,
+        })
+        .unwrap_err()
+        {
+            CustomToolError::BundleJsonInvalid(_) => {}
+            other => panic!("expected BundleJsonInvalid, got {other:?}"),
         }
     }
 
