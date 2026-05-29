@@ -10,7 +10,7 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { fmtBytes } from "@/lib/format";
 import { detectMonacoLanguage } from "@/lib/monaco-language";
-import { ensureTomlLanguage } from "@/lib/monaco-toml";
+import { ensureTomlLanguage, raxisMonacoTheme } from "@/lib/monaco-toml";
 import { useTheme } from "@/lib/theme-context";
 import type { WorktreeTree, WorktreeTreeEntry } from "@/types/api";
 
@@ -311,7 +311,7 @@ const LARGE_TEXT_BYTES = 256 * 1024;
 
 function FileView({ worktreeName, path }: FileViewProps) {
   const { theme } = useTheme();
-  const monacoTheme = theme === "dark" ? "vs-dark" : "vs";
+  const monacoTheme = raxisMonacoTheme(theme);
 
   const file = useQuery({
     queryKey: ["worktree-file", worktreeName, path],

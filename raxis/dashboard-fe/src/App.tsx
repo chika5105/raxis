@@ -18,12 +18,11 @@ import { LoginPage } from "@/pages/Login";
 import { NotificationsPage } from "@/pages/Notifications";
 import { OverviewPage } from "@/pages/Overview";
 import { PlanBuilderPage } from "@/pages/PlanBuilder";
-import { PolicyPage } from "@/pages/Policy";
+import { PolicyBuilderPage, PolicyPage } from "@/pages/Policy";
 import { SessionDetailPage } from "@/pages/SessionDetail";
 import { SessionsPage } from "@/pages/Sessions";
 import { SystemCredentialsPage } from "@/pages/SystemCredentials";
 import { TaskDetailPage } from "@/pages/TaskDetail";
-import { ToolBuilderPage } from "@/pages/ToolBuilder";
 import { WorktreeDetailPage } from "@/pages/WorktreeDetail";
 
 const queryClient = new QueryClient({
@@ -72,7 +71,7 @@ export function App() {
                     <Route path="/notifications" element={<NotificationsPage />} />
                     <Route path="/initiatives" element={<InitiativesPage />} />
                     <Route path="/plan-builder" element={<PlanBuilderPage />} />
-                    <Route path="/tool-builder" element={<ToolBuilderPage />} />
+                    <Route path="/tool-builder" element={<Navigate to="/plan-builder" replace />} />
                     <Route path="/initiatives/:id" element={<InitiativeDetailPage />} />
                     <Route path="/initiatives/:id/dag" element={<InitiativeDagPage />} />
                     <Route path="/tasks/:id" element={<TaskDetailPage />} />
@@ -97,6 +96,7 @@ export function App() {
                     <Route path="/git" element={<GitPage />} />
                     <Route path="/git/:name" element={<WorktreeDetailPage />} />
                     <Route path="/policy" element={<PolicyPage />} />
+                    <Route path="/policy-builder" element={<PolicyBuilderPage />} />
                     <Route
                       path="/system/credentials"
                       element={<SystemCredentialsPage />}

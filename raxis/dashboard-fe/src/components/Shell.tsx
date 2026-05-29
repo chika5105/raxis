@@ -9,7 +9,7 @@ import {
   type PaletteCommand,
 } from "@/components/CommandPalette";
 import { KernelLifecycleBanner } from "@/components/KernelLifecycleBanner";
-import { clearStoredToken, getStoredProfile, getStoredToken } from "@/lib/auth-store";
+import { clearStoredToken, getDashboardProfile, getStoredToken } from "@/lib/auth-store";
 import { shortFingerprint } from "@/lib/format";
 import { ThemeToggle } from "@/components/ThemeToggle";
 
@@ -44,7 +44,7 @@ const NAV: NavSection[] = [
     items: [
       { to: "/initiatives", label: "Initiatives", glyph: "•" },
       { to: "/plan-builder", label: "Plan Builder", glyph: "B" },
-      { to: "/tool-builder", label: "Tool Builder", glyph: "U" },
+      { to: "/policy-builder", label: "Policy Builder", glyph: "Y" },
       { to: "/sessions", label: "Sessions", glyph: "S" },
       { to: "/escalations", label: "Escalations", glyph: "!" },
     ],
@@ -89,14 +89,14 @@ export function Shell({ children }: ShellProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const routeViewportRef = useRef<HTMLDivElement | null>(null);
-  const [profile, setProfile] = useState(() => getStoredProfile());
+  const [profile, setProfile] = useState(() => getDashboardProfile());
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   // Re-read the profile when storage changes (logout in
   // another tab — clear local state to match).
   useEffect(() => {
     function onStorage() {
-      setProfile(getStoredProfile());
+      setProfile(getDashboardProfile());
     }
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
@@ -131,6 +131,13 @@ export function Shell({ children }: ShellProps) {
     el.scrollTop = 0;
     el.scrollLeft = 0;
   }, [location.pathname]);
+
+  // Canvas-mode builder pages fill the viewport completely —
+  // no max-width cap, no padding, no scroll on the outer viewport
+  // (each builder manages its own internal layout + scroll).
+  const isCanvasPage = ["/plan-builder", "/policy-builder"].includes(
+    location.pathname,
+  );
 
   // Lightweight badge counts for the nav. Refresh every 10s
   // so the operator sees inbox / escalation drops without
@@ -320,24 +327,32 @@ export function Shell({ children }: ShellProps) {
         </header>
         <div
           ref={routeViewportRef}
-          className="flex-1 min-h-0 min-w-0 overflow-auto scroll-thin"
+          className={
+            isCanvasPage
+              ? "flex-1 min-h-0 min-w-0 overflow-hidden flex flex-col"
+              : "flex-1 min-h-0 min-w-0 overflow-auto scroll-thin"
+          }
           data-testid="dashboard-scroll-viewport"
         >
-          <div
-            className="w-full min-w-0 max-w-[1440px] mx-auto px-4 py-4 sm:px-5 sm:py-5 space-y-3"
-            data-testid="dashboard-route-frame"
-          >
-            {/*
-              Supervisor lifecycle banner. Mounted globally so an
-              operator-noticed restart-in-flight or halted state
-              follows them across navigation. Renders nothing
-              until the supervisor reports a non-Healthy state OR
-              `supervisor_pid !== 0`. See
-              `INV-DASHBOARD-KERNEL-LIFECYCLE-01`.
-            */}
-            {profile && <KernelLifecycleBanner />}
-            {children}
-          </div>
+          {isCanvasPage ? (
+            // Canvas-mode: builders own their full layout.
+            // The lifecycle banner still floats at the top so
+            // operators see restart-in-flight warnings.
+            <div className="flex flex-col h-full min-h-0">
+              {profile && <KernelLifecycleBanner />}
+              <div className="flex-1 min-h-0" data-testid="dashboard-route-frame">
+                {children}
+              </div>
+            </div>
+          ) : (
+            <div
+              className="w-full min-w-0 max-w-[1440px] mx-auto px-4 py-4 sm:px-5 sm:py-5 space-y-3"
+              data-testid="dashboard-route-frame"
+            >
+              {profile && <KernelLifecycleBanner />}
+              {children}
+            </div>
+          )}
         </div>
       </main>
       <CommandPalette
@@ -358,13 +373,14 @@ const SEGMENT_LABELS: Record<string, string> = {
   notifications: "Notifications",
   initiatives: "Initiatives",
   "plan-builder": "Plan Builder",
+  "policy-builder": "Policy Builder",
   tasks: "Tasks",
   sessions: "Sessions",
   escalations: "Escalations",
   audit: "Audit",
   gates: "Gates",
   git: "Git Worktrees",
-  policy: "Policy Builder",
+  policy: "Policy",
   system: "System",
   credentials: "Credentials",
 };

@@ -49,7 +49,7 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
 import { Spinner } from "@/components/Spinner";
 import { fmtBytes } from "@/lib/format";
-import { ensureTomlLanguage } from "@/lib/monaco-toml";
+import { ensureTomlLanguage, raxisMonacoTheme } from "@/lib/monaco-toml";
 import { useTheme } from "@/lib/theme-context";
 import type {
   CredentialListResponse,
@@ -651,7 +651,7 @@ function RevealedBody({
   onHideNow,
 }: RevealedBodyProps) {
   const { theme } = useTheme();
-  const monacoTheme = theme === "dark" ? "vs-dark" : "vs";
+  const monacoTheme = raxisMonacoTheme(theme);
   const remaining = useCountdown(reveal.expires_at_unix);
 
   const bannerTone = isAnthropic

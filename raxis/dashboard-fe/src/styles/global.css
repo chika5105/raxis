@@ -1,6 +1,144 @@
+@import "@xyflow/react/dist/style.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Plan Canvas: hide RF attribution watermark */
+.react-flow__attribution { display: none !important; }
+
+/* Edge delete button — show on edge hover/select via parent */
+.react-flow__edge:hover .edge-delete-button,
+.react-flow__edge.selected .edge-delete-button {
+  opacity: 1 !important;
+}
+
+/* Connection line colour */
+.react-flow__connection-path {
+  stroke: rgb(var(--c-accent)) !important;
+  stroke-width: 2.25px !important;
+}
+
+/* Plan Builder nodes use the card edge itself as the connection affordance. */
+.plan-builder-canvas .react-flow__edge-path {
+  filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.12));
+}
+
+.plan-builder-canvas .react-flow__connection-path {
+  filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.14));
+}
+
+.plan-builder-node {
+  outline: 1px solid rgb(var(--c-edge-strong) / 0.48);
+  outline-offset: 0;
+}
+
+.plan-builder-canvas .react-flow__pane {
+  cursor: grab;
+}
+
+.plan-builder-canvas .react-flow__pane:active {
+  cursor: grabbing;
+}
+
+.plan-builder-canvas .react-flow__node {
+  cursor: grab;
+}
+
+.plan-builder-canvas .react-flow__node:has(input, textarea, select, button) {
+  cursor: default;
+}
+
+.plan-builder-canvas .task-card-drag-handle,
+.plan-builder-canvas .task-card-drag-handle * {
+  cursor: grab;
+}
+
+.plan-builder-canvas .task-card-drag-handle:active,
+.plan-builder-canvas .task-card-drag-handle:active * {
+  cursor: grabbing;
+}
+
+.task-edge-handle {
+  border: 0 !important;
+  border-radius: 999px !important;
+  background: transparent !important;
+  cursor: crosshair !important;
+  opacity: 0 !important;
+  transition: opacity 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+
+.task-edge-handle-left,
+.task-edge-handle-right {
+  width: 24px !important;
+  height: calc(100% - 24px) !important;
+  min-width: 24px !important;
+  min-height: 44px !important;
+  top: 12px !important;
+  transform: none !important;
+}
+
+.task-edge-handle-left {
+  left: -12px !important;
+}
+
+.task-edge-handle-right {
+  right: -12px !important;
+}
+
+.task-edge-handle-top,
+.task-edge-handle-bottom {
+  left: 12px !important;
+  width: calc(100% - 24px) !important;
+  height: 24px !important;
+  min-width: 44px !important;
+  min-height: 24px !important;
+  transform: none !important;
+}
+
+.task-edge-handle-top {
+  top: -12px !important;
+}
+
+.task-edge-handle-bottom {
+  top: auto !important;
+  bottom: -12px !important;
+}
+
+.react-flow__node:hover .task-edge-handle,
+.task-edge-handle:hover,
+.task-edge-handle.connectingfrom,
+.task-edge-handle.connectingto {
+  opacity: 0.72 !important;
+  background: rgb(var(--c-accent) / 0.18) !important;
+  box-shadow: 0 0 0 1px rgb(var(--c-accent) / 0.12) !important;
+}
+
+.task-edge-handle:hover {
+  opacity: 1 !important;
+  background: rgb(var(--c-accent) / 0.34) !important;
+}
+
+:root.dark .plan-builder-canvas .react-flow__edge-path,
+:root.dark .plan-builder-canvas .react-flow__connection-path {
+  filter: drop-shadow(0 0 4px rgb(var(--c-accent) / 0.34));
+}
+
+:root.dark .plan-builder-node {
+  outline-color: rgb(var(--c-edge-strong) / 0.84);
+}
+
+:root.dark .react-flow__node:hover .task-edge-handle,
+:root.dark .task-edge-handle.connectingfrom,
+:root.dark .task-edge-handle.connectingto {
+  background: rgb(var(--c-accent) / 0.28) !important;
+  box-shadow: 0 0 0 1px rgb(var(--c-accent) / 0.32),
+              0 0 12px rgb(var(--c-accent) / 0.18) !important;
+}
+
+:root.dark .task-edge-handle:hover {
+  background: rgb(var(--c-accent) / 0.44) !important;
+}
 
 /*
  * Operator-tooling base layer: dense, light-first, calm.

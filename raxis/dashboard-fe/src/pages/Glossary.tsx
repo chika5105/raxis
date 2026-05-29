@@ -95,7 +95,7 @@ const TERMS: GlossaryTerm[] = [
     category: "Runtime",
     summary: "The local operator UI.",
     detail:
-      "The dashboard is served by the kernel on loopback by default. It shows health, initiatives, sessions, diffs, audit events, gates, policy, credentials, Plan Builder, Tool Builder, Policy Builder, and recovery guidance.",
+      "The dashboard is served by the kernel on loopback by default. It shows health, initiatives, sessions, diffs, audit events, gates, policy, credentials, Plan Builder, Policy Builder, and recovery guidance.",
     related: ["http://127.0.0.1:9820"],
   },
   {
@@ -159,8 +159,8 @@ const TERMS: GlossaryTerm[] = [
     category: "Builders",
     summary: "A helper for drafting plan.toml.",
     detail:
-      "Plan Builder exposes the feature library, task graph, live DAG preview, TOML output, copy/download actions, and kernel validation. It is a drafting tool; admitted plans still go through kernel validation and signed submission.",
-    related: ["prompt", "DAG"],
+      "Plan Builder is the visual plan.toml editor. The DAG is the primary editing surface, task cards expand inline for prompts, tools, credentials, and verifier gates, and the TOML source stays visible and synchronized beside the canvas.",
+    related: ["prompt", "DAG", "custom tool"],
   },
   {
     term: "Policy Builder",
@@ -171,20 +171,12 @@ const TERMS: GlossaryTerm[] = [
     related: ["RotateEpoch", "OperatorCertInstall"],
   },
   {
-    term: "Tool Builder",
-    category: "Builders",
-    summary: "A helper for wrapping existing tools.",
-    detail:
-      "Tool Builder drafts Executor profile custom tools for existing scripts, stdio MCP servers, local HTTP services, commercial tool bridges, Unity, Blender, and other local automation. It favors one narrow operation per tool, absolute wrapper commands, explicit schemas, and short timeouts.",
-    related: ["custom tool", "MCP adapter"],
-  },
-  {
     term: "Custom tool",
     category: "Work",
     summary: "An operator-declared Executor-only wrapper.",
     detail:
       "A custom tool lives under [[profiles.<name>.custom_tool]] in plan.toml. The kernel validates it, resolves profile inheritance, and stamps only the effective tool bundle into matching Executor sessions. Reviewers and the Orchestrator never receive custom tools.",
-    related: ["Tool Builder", "Executor"],
+    related: ["Plan Builder", "Executor"],
   },
   {
     term: "MCP adapter",

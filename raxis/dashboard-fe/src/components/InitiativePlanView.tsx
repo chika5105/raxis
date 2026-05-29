@@ -15,7 +15,11 @@ import {
   shortFingerprint,
   shortSha,
 } from "@/lib/format";
-import { ensureTomlLanguage } from "@/lib/monaco-toml";
+import {
+  ensureTomlLanguage,
+  raxisMonacoTheme,
+  type RaxisMonacoTheme,
+} from "@/lib/monaco-toml";
 import { useTheme } from "@/lib/theme-context";
 import type { ApprovalStatus, InitiativePlanView as PlanWire } from "@/types/api";
 
@@ -36,12 +40,12 @@ export const PLAN_STALE_MS_APPROVED = 60_000;
 ///
 /// Renders the original submitted `plan.toml` for an initiative
 /// in a read-only Monaco editor. Theme follows the dashboard's
-/// `<ThemeProvider>` (light → `vs`; dark → `vs-dark`); the editor
+/// `<ThemeProvider>` with explicit Raxis light/dark TOML colors; the editor
 /// is bounded to `60vh` so a multi-thousand-line plan does not
 /// blow up the page layout.
 export function InitiativePlanView({ initiativeId }: InitiativePlanViewProps) {
   const { theme } = useTheme();
-  const monacoTheme = theme === "dark" ? "vs-dark" : "vs";
+  const monacoTheme = raxisMonacoTheme(theme);
 
   const q = useQuery({
     queryKey: ["initiative-plan", initiativeId],
@@ -113,7 +117,7 @@ export function InitiativePlanView({ initiativeId }: InitiativePlanViewProps) {
 
 interface PlanLoadedBodyProps {
   plan: PlanWire;
-  monacoTheme: "vs" | "vs-dark";
+  monacoTheme: RaxisMonacoTheme;
 }
 
 export function PlanLoadedBody({ plan, monacoTheme }: PlanLoadedBodyProps) {

@@ -16,6 +16,17 @@ npm run test         # vitest
 npm run build        # tsc -b && vite build
 ```
 
+For quick UI work against the Vite dev server, you can bypass
+the challenge-response screen on loopback only:
+
+```sh
+VITE_RAXIS_DASHBOARD_AUTH_BYPASS=1 npm run dev -- --host 127.0.0.1 --port 5176
+```
+
+The bypass is guarded by `import.meta.env.DEV`, requires the env
+var above, and only activates on `localhost`, `127.0.0.1`, or
+`::1`. Production builds cannot activate it.
+
 Path alias `@/*` resolves to `src/*` (configured in
 `tsconfig.json` and `vite.config.ts`).
 

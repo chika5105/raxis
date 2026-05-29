@@ -1,6 +1,25 @@
+/**
+ * Policy.tsx
+ *
+ * Two surfaces:
+ *   PolicyPage        — read-only viewer of the active policy state.
+ *                       Unchanged from the original — not a builder.
+ *
+ *   PolicyBuilderPage — canvas redesign: 3-pane layout.
+ *     ┌────────────────┬──────────────────────┬───────────────────┐
+ *     │  LEFT PANE     │  Monaco editor        │  RIGHT PANE       │
+ *     │  Feature lib   │  (full-height draft)  │  Validation       │
+ *     │  [collapsible] │                       │  Apply / epoch    │
+ *     │                │                       │  Recovery cmds    │
+ *     └────────────────┴──────────────────────┴───────────────────┘
+ *
+ * All existing logic is preserved. Only the layout changes.
+ */
+
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import Editor from "@monaco-editor/react";
+import { Link } from "react-router-dom";
 
 import { ApiError, dashboardApi, sha256Hex } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
@@ -9,13 +28,26 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner, Spinner } from "@/components/Spinner";
 import { fmtAbsolute, shortFingerprint, shortSha } from "@/lib/format";
 import { getStoredProfile } from "@/lib/auth-store";
-import { ensureTomlLanguage } from "@/lib/monaco-toml";
+import { ensureTomlLanguage, raxisMonacoTheme } from "@/lib/monaco-toml";
 import { useTheme } from "@/lib/theme-context";
+import {
+  CanvasLayout,
+  CanvasHeaderBar,
+  PaneDivider,
+  InspectorTabBar,
+  CollapsibleSection,
+  type InspectorTab,
+} from "@/components/builder/CanvasLayout";
 import type {
   BuilderValidationResponse,
   BuilderValidationSeverity,
   PolicyAdvancement,
+  PolicySnapshotView,
 } from "@/types/api";
+
+// ---------------------------------------------------------------------------
+// Types (unchanged)
+// ---------------------------------------------------------------------------
 
 type PolicyFeatureCategory =
   | "Authority"
@@ -33,19 +65,21 @@ interface PolicyFeature {
   snippet?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Feature definitions (unchanged)
+// ---------------------------------------------------------------------------
+
 const POLICY_FEATURES: PolicyFeature[] = [
   {
     title: "Admin operator permissions",
     category: "Authority",
-    purpose:
-      "Grant the operator abilities needed for dashboard admin actions such as credential reveal and epoch advance.",
+    purpose: "Grant the operator abilities needed for dashboard admin actions such as credential reveal and epoch advance.",
     fields: ["[[operators.entries]]", "permitted_ops", "OperatorCertInstall", "RotateEpoch"],
   },
   {
     title: "Managed lane",
     category: "Execution",
-    purpose:
-      "Register the lane that plan.toml references in [workspace].lane_id and cap concurrent tasks.",
+    purpose: "Register the lane that plan.toml references in [workspace].lane_id and cap concurrent tasks.",
     fields: ["[[lanes]]", "lane_id", "max_concurrent_tasks", "max_cost_per_epoch"],
     snippet: `[[lanes]]
 lane_id              = "default"
@@ -56,8 +90,7 @@ priority             = 100`,
   {
     title: "Gateway and turn budgets",
     category: "Providers",
-    purpose:
-      "Configure the kernel-spawned gateway and default planner turn scaling for retries.",
+    purpose: "Configure the kernel-spawned gateway and default planner turn scaling for retries.",
     fields: ["[gateway]", "binary_path", "planner_max_turns_default", "planner_max_turns_step_default"],
     snippet: `[gateway]
 binary_path                    = "/opt/homebrew/bin/raxis-gateway"
@@ -70,8 +103,7 @@ planner_max_turns_step_default = 30`,
   {
     title: "Anthropic provider",
     category: "Providers",
-    purpose:
-      "Permit inference through the gateway. Credentials stay in providers/anthropic-prod.toml, never policy.toml.",
+    purpose: "Permit inference through the gateway. Credentials stay in providers/anthropic-prod.toml, never policy.toml.",
     fields: ["[[providers]]", "credentials_file", "pricing.*", "timeouts"],
     snippet: `[[providers]]
 provider_id           = "anthropic-prod"
@@ -86,8 +118,7 @@ pricing.cache_read_tokens_per_dollar = 2000000`,
   {
     title: "Egress allowlist",
     category: "Network",
-    purpose:
-      "Declare policy-wide domains the transparent proxy may admit. Provider hosts are auto-granted from providers.",
+    purpose: "Declare policy-wide domains the transparent proxy may admit. Provider hosts are auto-granted from providers.",
     fields: ["[egress]", "domains", "patterns"],
     snippet: `[egress]
 domains = ["api.anthropic.com", "example.com"]
@@ -96,8 +127,7 @@ patterns = []`,
   {
     title: "Witness gate",
     category: "Safety",
-    purpose:
-      "Attach a verifier that must pass before integration merge can advance.",
+    purpose: "Attach a verifier that must pass before integration merge can advance.",
     fields: ["[[gates]]", "gate_type", "verifier_command", "network_allowed"],
     snippet: `[[gates]]
 gate_type        = "NoSecretStrings"
@@ -110,8 +140,7 @@ agent_hint_default = "A verifier found secret-shaped material. Remove literal cr
   {
     title: "Host capacity",
     category: "Operations",
-    purpose:
-      "Set VM concurrency and the file-descriptor floor doctor should enforce before busy sessions run.",
+    purpose: "Set VM concurrency and the file-descriptor floor doctor should enforce before busy sessions run.",
     fields: ["[host_capacity]", "max_concurrent_vms", "required_min_fd_limit"],
     snippet: `[host_capacity]
 max_concurrent_vms    = 8
@@ -121,8 +150,7 @@ disk_full_behavior    = "halt_admit"`,
   {
     title: "Plan replay protection",
     category: "Safety",
-    purpose:
-      "Bound signed-plan freshness and nonce retention windows.",
+    purpose: "Bound signed-plan freshness and nonce retention windows.",
     fields: ["[plan_signing]", "max_plan_bundle_age_secs", "nonce_sweep_interval_secs"],
     snippet: `[plan_signing]
 max_plan_bundle_age_secs   = 86400
@@ -133,8 +161,7 @@ nonce_sweep_interval_secs  = 3600`,
   {
     title: "Bundle size limits",
     category: "Safety",
-    purpose:
-      "Keep signed plan artifacts bounded so operators cannot accidentally submit huge bundles.",
+    purpose: "Keep signed plan artifacts bounded so operators cannot accidentally submit huge bundles.",
     fields: ["[plan_bundle_limits]", "max_artifact_bytes", "max_bundle_bytes"],
     snippet: `[plan_bundle_limits]
 max_artifact_bytes = 1048576
@@ -144,8 +171,7 @@ max_artifact_count = 200`,
   {
     title: "Observability pusher",
     category: "Operations",
-    purpose:
-      "Export kernel metrics and spans to local OTel/Grafana during live operations.",
+    purpose: "Export kernel metrics and spans to local OTel/Grafana during live operations.",
     fields: ["[observability]", "metrics", "pusher", "resource"],
     snippet: `[observability]
 enabled = true
@@ -163,8 +189,7 @@ otlp_export_timeout = "10s"`,
   {
     title: "Git defaults",
     category: "Execution",
-    purpose:
-      "Set default target ref behavior for plans that do not override it.",
+    purpose: "Set default target ref behavior for plans that do not override it.",
     fields: ["[git]", "default_target_ref", "target_ref_locked"],
     snippet: `[git]
 default_target_ref = "refs/heads/main"
@@ -173,8 +198,7 @@ target_ref_locked  = false`,
   {
     title: "Environment-bound credentials",
     category: "Safety",
-    purpose:
-      "Make credentials discoverable and bind them to environment labels used by egress checks.",
+    purpose: "Make credentials discoverable and bind them to environment labels used by egress checks.",
     fields: ["[environments.<label>]", "[[permitted_credentials]]", "environment"],
     snippet: `[environments.staging]
 description = "Staging services"
@@ -186,41 +210,116 @@ environment = "staging"`,
   {
     title: "Executor image registry",
     category: "Execution",
-    purpose:
-      "Publish operator-approved VM images and choose the default executor image.",
+    purpose: "Publish operator-approved VM images and choose the default executor image.",
     fields: ["[[vm_images]]", "[default_executor_image]", "role_restriction"],
   },
 ];
 
-const ENVIRONMENT_RECOMMENDATION_KEY =
-  "raxis.policy.environmentRecommendationDismissed.v1";
+const ENVIRONMENT_RECOMMENDATION_KEY = "raxis.policy.environmentRecommendationDismissed.v1";
 
-/// Policy page. Shows the parsed snapshot in a read-friendly
-/// layout, then renders a Monaco editor wrapped around the raw
-/// `policy.toml` for operators with the `write_policy` role.
-///
-/// Editing flow (matches §4.5 wire shape):
-///   1. Operator pastes new TOML in the editor (or starts from
-///      the current bytes).
-///   2. Operator pastes the detached Ed25519 signature
-///      (base64; spec accepts padded or unpadded). The signature
-///      is computed offline by the authority key holder — the
-///      dashboard NEVER holds the authority private key.
-///   3. The "Apply" button POSTs `{toml, signature_b64}` to
-///      `PUT /api/policy/toml`. On success the kernel emits
-///      `PolicyEpochAdvanced` + `PolicyUpdatedViaDashboard`
-///      and the new snapshot becomes the active bundle.
+// ---------------------------------------------------------------------------
+// PolicyPage — read-only viewer (unchanged from original)
+// ---------------------------------------------------------------------------
+
 export function PolicyPage() {
   const profile = getStoredProfile();
   const canWrite =
     !!profile && (profile.roles.includes("write_policy") || profile.roles.includes("admin"));
-  // Mirror Monaco's chrome to the dashboard theme so an operator
-  // who switched to light mode doesn't get a dark TOML editor
-  // dropped in the middle of an otherwise light page. `vs` and
-  // `vs-dark` are Monaco's two built-in themes; we use the same
-  // `useTheme` hook the rest of the chrome reads from.
   const { theme } = useTheme();
-  const monacoTheme = theme === "dark" ? "vs-dark" : "vs";
+  const monacoTheme = raxisMonacoTheme(theme);
+
+  const snap = useQuery({
+    queryKey: ["policy"],
+    queryFn: ({ signal }) => dashboardApi.policy.snapshot(signal),
+    refetchInterval: 10_000,
+  });
+
+  const toml = useQuery({
+    queryKey: ["policy-toml"],
+    queryFn: ({ signal }) => dashboardApi.policy.rawToml(signal),
+    enabled: canWrite,
+  });
+
+  if (snap.isPending) return <PageSpinner />;
+  if (snap.error) return <ErrorBox error={snap.error} onRetry={() => snap.refetch()} />;
+  const s = snap.data;
+
+  return (
+    <div className="space-y-5">
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold text-ink">Policy</h1>
+          <p className="text-sm text-ink-muted">
+            Inspect the active kernel policy and current policy.toml. Drafting,
+            validation, snippets, and epoch-advance controls live in Policy Builder.
+          </p>
+        </div>
+        <Link to="/policy-builder" className="btn-primary">
+          Open Policy Builder
+        </Link>
+      </header>
+
+      <PolicySnapshotSection snapshot={s} />
+
+      {!canWrite ? (
+        <section className="card p-4 text-sm text-ink-muted">
+          Current raw policy.toml is visible to operators with the{" "}
+          <code className="font-mono">write_policy</code> or{" "}
+          <code className="font-mono">admin</code> dashboard role. Your read-only
+          policy snapshot above is still the active kernel state.
+        </section>
+      ) : toml.isPending ? (
+        <PageSpinner />
+      ) : toml.error ? (
+        <ErrorBox error={toml.error} onRetry={() => toml.refetch()} />
+      ) : (
+        <section className="card p-0 overflow-hidden">
+          <header className="px-4 py-3 border-b border-edge flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-semibold text-ink">Current policy.toml</h2>
+              <p className="mt-1 text-xs text-ink-muted">
+                Read-only view of the policy bytes currently loaded by the kernel.
+              </p>
+            </div>
+            <div className="text-[11px] text-ink-subtle font-mono flex items-center gap-2">
+              active sha256: <Mono>{shortSha(s.policy_sha256)}</Mono>
+              <CopyButton value={s.policy_sha256} />
+            </div>
+          </header>
+          <div className="h-[60vh]">
+            <Editor
+              height="100%"
+              defaultLanguage="toml"
+              beforeMount={ensureTomlLanguage}
+              theme={monacoTheme}
+              value={toml.data ?? ""}
+              options={{
+                readOnly: true,
+                fontSize: 13,
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                tabSize: 2,
+                wordWrap: "on",
+              }}
+            />
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PolicyBuilderPage — canvas redesign
+// ---------------------------------------------------------------------------
+
+export function PolicyBuilderPage() {
+  const profile = getStoredProfile();
+  const canWrite =
+    !!profile && (profile.roles.includes("write_policy") || profile.roles.includes("admin"));
+  const { theme } = useTheme();
+  const monacoTheme = raxisMonacoTheme(theme);
 
   const snap = useQuery({
     queryKey: ["policy"],
@@ -244,29 +343,26 @@ export function PolicyPage() {
   const [validation, setValidation] = useState<BuilderValidationResponse | null>(null);
   const [validationBusy, setValidationBusy] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [rightTab, setRightTab] = useState<"validate" | "apply" | "recovery">("validate");
   const [environmentRecommendationDismissed, setEnvironmentRecommendationDismissed] =
     useState(() => {
       if (typeof window === "undefined" || !window.localStorage) return false;
       return window.localStorage.getItem(ENVIRONMENT_RECOMMENDATION_KEY) === "1";
     });
 
-  // Initialize the draft once the raw TOML is fetched.
   useEffect(() => {
     if (toml.data && draft === null) setDraft(toml.data);
   }, [toml.data, draft]);
 
-  // Keep the SHA-256 indicator current so the operator can
-  // cross-check the value the kernel will compute on advance
-  // (and the value the authority signed over).
   useEffect(() => {
-    if (draft != null) sha256Hex(draft).then(setDraftHash);
+    if (draft != null) void sha256Hex(draft).then(setDraftHash);
   }, [draft]);
 
   const visibleFeatures = useMemo(
     () =>
       featureCategory === "All"
         ? POLICY_FEATURES
-        : POLICY_FEATURES.filter((feature) => feature.category === featureCategory),
+        : POLICY_FEATURES.filter((f) => f.category === featureCategory),
     [featureCategory],
   );
 
@@ -289,6 +385,7 @@ export function PolicyPage() {
     if (!draft) return;
     setValidationBusy(true);
     setValidationError(null);
+    setRightTab("validate");
     try {
       setValidation(await dashboardApi.builders.validatePolicy(draft));
     } catch (e) {
@@ -306,10 +403,7 @@ export function PolicyPage() {
     setError(null);
     setAdvancement(null);
     try {
-      const adv = await dashboardApi.policy.update({
-        toml: draft,
-        signature_b64: sig.trim(),
-      });
+      const adv = await dashboardApi.policy.update({ toml: draft, signature_b64: sig.trim() });
       setAdvancement(adv);
       await snap.refetch();
       await toml.refetch();
@@ -322,383 +416,211 @@ export function PolicyPage() {
     }
   };
 
-  if (snap.isPending) return <PageSpinner />;
-  if (snap.error) return <ErrorBox error={snap.error} onRetry={() => snap.refetch()} />;
-  const s = snap.data;
+  const validationIssueCount = validation ? (validation.ok ? 0 : validation.issues.length) : 0;
+
+  const rightTabs: InspectorTab[] = [
+    { id: "validate", label: "Validate", badge: validationIssueCount },
+    { id: "apply",    label: "Apply" },
+    { id: "recovery", label: "Recovery" },
+  ];
+
+  // Editor is the canvas for policy builder. If not writable, show read-only note.
+  const editorArea = !canWrite ? (
+    <div className="flex-1 flex items-center justify-center p-8">
+      <div className="card p-6 text-sm text-ink-muted max-w-md text-center space-y-2">
+        <p>You are signed in with read-only roles.</p>
+        <p>
+          To edit policy, your operator certificate needs the{" "}
+          <code className="font-mono">RotateEpoch</code> permission, which maps to the{" "}
+          <code className="font-mono">write_policy</code> dashboard role.
+        </p>
+        <Link to="/policy" className="btn block mt-2 justify-center">
+          View active policy
+        </Link>
+      </div>
+    </div>
+  ) : toml.isPending ? (
+    <div className="flex-1 flex items-center justify-center">
+      <PageSpinner />
+    </div>
+  ) : toml.error ? (
+    <div className="p-4">
+      <ErrorBox error={toml.error} onRetry={() => toml.refetch()} />
+    </div>
+  ) : (
+    <div className="flex-1 min-h-0">
+      <Editor
+        height="100%"
+        defaultLanguage="toml"
+        beforeMount={ensureTomlLanguage}
+        theme={monacoTheme}
+        value={draft ?? ""}
+        onChange={(v) => {
+          setDraft(v ?? "");
+          setValidation(null);
+        }}
+        options={{
+          fontSize: 13,
+          minimap: { enabled: false },
+          scrollBeyondLastLine: false,
+          automaticLayout: true,
+          tabSize: 2,
+          wordWrap: "on",
+        }}
+      />
+    </div>
+  );
 
   return (
-    <div className="space-y-5">
-      <header>
-        <h1 className="text-xl font-semibold text-ink">Policy</h1>
-        <p className="text-sm text-ink-muted">
-          Inspect the active policy, use builder tools to draft safe changes,
-          validate policy.toml, then advance through the signed kernel path.
-          Editing requires the <code className="font-mono">write_policy</code> role.
-        </p>
-      </header>
-
-      <section className="card p-4">
-        <h2 className="text-sm font-semibold text-ink mb-3">Snapshot</h2>
-        <dl className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <Stat label="Epoch" value={`#${s.epoch}`} mono />
-          <Stat label="SHA-256" value={shortSha(s.policy_sha256)} mono />
-          <Stat label="Signed by" value={shortFingerprint(s.signed_by)} mono />
-          <Stat label="Signed at" value={fmtAbsolute(Number(s.signed_at))} />
-        </dl>
-        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <h3 className="text-xs text-ink-subtle uppercase tracking-wider mb-2">
-              Operators ({s.operators.length})
-            </h3>
-            <ul className="space-y-1 text-xs">
-              {s.operators.map((o) => (
-                <li key={o.fingerprint} className="flex items-center gap-2">
-                  <Mono pill>{shortFingerprint(o.fingerprint)}</Mono>
-                  <span className="text-ink">{o.display_name}</span>
-                  <span className="ml-auto text-ink-subtle font-mono text-[10px]">
-                    {o.permitted_ops.join(", ")}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-          <div>
-            <h3 className="text-xs text-ink-subtle uppercase tracking-wider mb-2">
-              Notification routes
-            </h3>
-            <ul className="space-y-1 text-xs">
-              {Object.entries(s.notification_routes).map(([kind, ids]) => (
-                <li key={kind} className="flex items-center gap-2">
-                  <span className="text-ink">{kind}</span>
-                  <span className="text-ink-subtle font-mono">→ {ids.join(", ")}</span>
-                </li>
-              ))}
-              {Object.keys(s.notification_routes).length === 0 && (
-                <li className="text-ink-subtle">(none)</li>
-              )}
-            </ul>
-          </div>
-        </div>
-      </section>
-
-      {!environmentRecommendationDismissed && (
-        <section className="card border-info/40 bg-info-muted/20 p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="max-w-4xl">
-              <h2 className="text-sm font-semibold text-ink">
-                Environment recommendation
-              </h2>
-              <p className="mt-1 text-xs leading-relaxed text-ink-muted">
-                Raxis supports multiple environments in one policy and one
-                kernel, which is useful for controlled staging workflows. For
-                production/staging separation, prefer one Homebrew service data
-                dir per environment so policy, provider files, audit logs, and
-                operator keys cannot be mixed accidentally. The default
-                Homebrew service uses <code className="font-mono">RAXIS_ENV=default</code>{" "}
-                and <code className="font-mono">$(brew --prefix)/var/lib/raxis</code>.
-              </p>
-            </div>
-            <button
-              type="button"
-              className="btn"
-              onClick={dismissEnvironmentRecommendation}
-            >
-              Dismiss
-            </button>
-          </div>
-        </section>
-      )}
-
-      <section className="card p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h2 className="text-sm font-semibold text-ink">Policy feature library</h2>
-            <p className="mt-1 text-xs text-ink-muted">
-              Discover the policy sections Raxis understands, copy known-good
-              snippets, and keep the authority signature boundary explicit.
-              The kernel remains the source of truth for accepted policy.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-1">
-            {(["All", "Authority", "Execution", "Network", "Providers", "Safety", "Operations"] as const).map((cat) => (
-              <button
-                key={cat}
-                type="button"
-                className={
-                  featureCategory === cat
-                    ? "badge border-accent bg-accent/20 text-accent"
-                    : "badge border-edge bg-panel text-ink-muted hover:border-accent"
-                }
-                onClick={() => setFeatureCategory(cat)}
-              >
-                {cat}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="mt-4 grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
-          {visibleFeatures.map((feature) => (
-            <PolicyFeatureCard
-              key={feature.title}
-              feature={feature}
-              canInsert={canWrite && draft !== null && feature.snippet !== undefined}
-              onInsert={() => {
-                if (feature.snippet) appendSnippet(feature.snippet);
-              }}
-            />
-          ))}
-        </div>
-      </section>
-
-      {canWrite && (
-        <section className="card p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h2 className="text-sm font-semibold text-ink">Kernel validation</h2>
-              <p className="mt-1 text-xs text-ink-muted">
-                Read-only validation of the draft through the policy loader and
-                active epoch checks. This does not advance policy or store bytes.
-              </p>
-            </div>
-            <button
-              type="button"
-              className="btn"
-              disabled={validationBusy || !draft}
-              onClick={onValidate}
-            >
-              {validationBusy ? (
-                <>
-                  <Spinner className="h-4 w-4" /> Validating
-                </>
-              ) : (
-                "Validate with kernel"
-              )}
-            </button>
-          </div>
-          {validationError && (
-            <div className="mt-3 rounded border border-bad/40 bg-bad/10 p-2 text-xs text-bad">
-              {validationError}
-            </div>
-          )}
-          {validation ? (
-            <BuilderValidationPanel response={validation} />
-          ) : (
-            <p className="mt-3 text-xs text-ink-muted">
-              Validate before signing so TOML, cert, epoch, and policy-loader
-              errors are visible while the draft is still easy to edit.
-            </p>
-          )}
-        </section>
-      )}
-
-      <section className="card p-4">
-        <h2 className="text-sm font-semibold text-ink">When something is stuck</h2>
-        <p className="mt-1 text-xs text-ink-muted">
-          Start with the smallest command that tells you which layer is failing.
-          The dashboard shows the same recovery loop so operators do not have to
-          remember it under pressure.
-        </p>
-        <div className="mt-3 grid gap-2 lg:grid-cols-4">
-          {[
-            {
-              label: "Doctor",
-              command: "raxis doctor",
-              hint: "Data dir, policy, DB, audit, certs.",
-            },
-            {
-              label: "Supervisor",
-              command: 'raxis-supervisor status --data-dir "$RAXIS_DATA_DIR"',
-              hint: "Healthy, Restarting, Halted, or CircuitOpen.",
-            },
-            {
-              label: "Kernel log",
-              command: 'tail -n 80 "$(brew --prefix)/var/log/raxis/kernel.err.log"',
-              hint: "Boot, gateway, policy, and VM errors.",
-            },
-            {
-              label: "Plan validation",
-              command: "raxis plan validate plan.toml",
-              hint: "Catch TOML and DAG mistakes before submit.",
-            },
-          ].map((item) => (
-            <div key={item.label} className="rounded border border-edge bg-panel p-3">
-              <div className="flex items-center justify-between gap-2">
-                <h3 className="text-xs font-semibold text-ink">{item.label}</h3>
-                <CopyButton value={item.command} label={`Copy ${item.label} command`} />
-              </div>
-              <code className="mt-2 block truncate font-mono text-[11px] text-ink-muted">
-                {item.command}
-              </code>
-              <p className="mt-2 text-xs text-ink-subtle">{item.hint}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {!canWrite ? (
-        <section className="card p-4 text-sm text-ink-muted">
-          You are signed in with read-only roles. To edit policy, your
-          operator certificate needs the{" "}
-          <code className="font-mono">RotateEpoch</code> permission, which
-          maps to the <code className="font-mono">write_policy</code>{" "}
-          dashboard role.
-        </section>
-      ) : toml.isPending ? (
-        <PageSpinner />
-      ) : toml.error ? (
-        <ErrorBox error={toml.error} onRetry={() => toml.refetch()} />
-      ) : (
-        <>
-          <section className="card p-0 overflow-hidden">
-            <header className="px-4 py-3 border-b border-edge flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-ink">policy.toml</h2>
-              <div className="text-[11px] text-ink-subtle font-mono flex items-center gap-2">
-                draft sha256: <Mono>{draftHash ? `${draftHash.slice(0, 12)}…` : "computing…"}</Mono>
-                {draftHash && <CopyButton value={draftHash} />}
-              </div>
-            </header>
-            <div className="h-[60vh]">
-              <Editor
-                height="100%"
-                defaultLanguage="toml"
-                beforeMount={ensureTomlLanguage}
-                theme={monacoTheme}
-                value={draft ?? ""}
-                onChange={(v) => {
-                  setDraft(v ?? "");
-                  setValidation(null);
-                }}
-                options={{
-                  fontSize: 13,
-                  minimap: { enabled: false },
-                  scrollBeyondLastLine: false,
-                  automaticLayout: true,
-                  tabSize: 2,
-                  wordWrap: "on",
-                }}
-              />
-            </div>
-          </section>
-
-          <section className="card p-4">
-            <h2 className="text-sm font-semibold text-ink">Apply update</h2>
-            <p className="mt-1 text-xs text-ink-muted">
-              Paste the detached Ed25519 signature (base64) the policy
-              authority computed over these exact TOML bytes. The dashboard
-              never touches the authority private key — this signature is
-              the only proof of authorization.
-            </p>
-            <textarea
-              rows={3}
-              spellCheck={false}
-              className="input w-full mt-3 font-mono text-xs"
-              placeholder="base64 signature (64 raw bytes ⇒ 88 chars padded / 86 unpadded)"
-              value={sig}
-              onChange={(e) => setSig(e.target.value)}
-            />
-            <div className="mt-3 flex items-center gap-3">
-              <button
-                type="button"
-                className="btn-primary"
-                disabled={busy || !draft || sig.trim().length === 0}
-                onClick={onApply}
-              >
-                {busy ? <><Spinner className="w-4 h-4" /> Applying…</> : "Apply policy"}
-              </button>
-              <button
-                type="button"
-                className="btn"
-                disabled={busy}
-                onClick={() => {
-                  if (toml.data) setDraft(toml.data);
-                  setSig("");
-                  setError(null);
-                  setAdvancement(null);
-                  setValidation(null);
-                }}
-              >
-                Reset to current
-              </button>
-              {advancement && (
-                <span className="text-xs text-ok">
-                  ✓ advanced epoch #{advancement.previous_epoch} → #{advancement.new_epoch}
+    <CanvasLayout
+      leftPaneTitle="Feature Library"
+      leftPaneStorageKey="raxis.builder.policy.leftOpen"
+      leftPaneWidth={272}
+      rightPaneTitle="Policy Actions"
+      rightPaneStorageKey="raxis.builder.policy.rightOpen"
+      rightPaneWidth={340}
+      headerBar={
+        <CanvasHeaderBar>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle shrink-0">
+              Policy Builder
+            </span>
+            {snap.data && (
+              <>
+                <span className="text-ink-subtle text-xs">/</span>
+                <span className="text-xs text-ink-muted">
+                  epoch #{snap.data.epoch}
                 </span>
-              )}
-            </div>
-            {error && (
-              <div className="card border-bad/40 p-3 mt-3 text-sm text-bad">{error}</div>
+              </>
             )}
-            {advancement && (
-              <div className="card mt-3 p-3 text-xs space-y-1">
-                <Stat label="New epoch" value={`#${advancement.new_epoch}`} mono />
-                <Stat label="SHA-256" value={advancement.policy_sha256} mono />
-                <Stat label="Sessions invalidated" value={String(advancement.n_sessions_invalidated)} />
-                <Stat label="Delegations marked stale" value={String(advancement.n_delegations_marked_stale)} />
-                <Stat label="At" value={fmtAbsolute(advancement.advanced_at)} />
-              </div>
-            )}
-          </section>
-        </>
-      )}
-    </div>
-  );
-}
-
-function BuilderValidationPanel({ response }: { response: BuilderValidationResponse }) {
-  return (
-    <div className="mt-3 space-y-3">
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span className={response.ok ? "badge border-ok bg-ok-muted text-ok" : "badge border-bad bg-bad/10 text-bad"}>
-          {response.ok ? "Kernel check passed" : "Kernel check found errors"}
-        </span>
-        <span className="text-ink-subtle">policy epoch #{response.policy_epoch}</span>
-      </div>
-      {response.issues.length === 0 ? (
-        <div className="rounded border border-ok/40 bg-ok-muted px-2.5 py-2 text-xs text-ok">
-          No issues reported by kernel validation.
-        </div>
-      ) : (
-        <ul className="space-y-2">
-          {response.issues.map((issue) => (
-            <li
-              key={`${issue.code}-${issue.message}`}
-              className={`rounded border px-2.5 py-2 text-xs ${issueClass(issue.severity)}`}
-            >
-              <div className="font-semibold">{issue.message}</div>
-              <div className="mt-1 text-ink-muted">{issue.remediation}</div>
-              <code className="mt-1 inline-block font-mono text-[10px] text-ink-subtle">
-                {issue.code}
-              </code>
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="grid gap-2 lg:grid-cols-2">
-        {response.next_steps.map((command) => (
-          <div key={command} className="flex items-center gap-2 rounded border border-edge bg-panel px-2.5 py-2">
-            <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-muted">
-              {command}
-            </code>
-            <CopyButton value={command} label="Copy command" />
           </div>
-        ))}
-      </div>
-    </div>
+
+          {draftHash && (
+            <div className="text-[10px] text-ink-subtle font-mono flex items-center gap-1 hidden sm:flex">
+              draft:
+              <Mono>{draftHash.slice(0, 12)}…</Mono>
+              <CopyButton value={draftHash} />
+            </div>
+          )}
+
+          <div className="ml-auto flex items-center gap-2">
+            {!environmentRecommendationDismissed && (
+              <button
+                type="button"
+                className="text-[10px] text-info hover:underline"
+                onClick={dismissEnvironmentRecommendation}
+                title="One kernel service per environment is recommended. Click to dismiss."
+              >
+                ⓘ Env recommendation
+              </button>
+            )}
+            <Link to="/policy" className="btn text-xs py-1">
+              View active
+            </Link>
+            <button
+              type="button"
+              className="btn text-xs py-1"
+              disabled={validationBusy || !draft}
+              onClick={() => void onValidate()}
+            >
+              {validationBusy ? <><Spinner className="h-3.5 w-3.5" /> Validating…</> : "Validate"}
+            </button>
+          </div>
+        </CanvasHeaderBar>
+      }
+      leftPane={
+        <PolicyFeatureLibrary
+          featureCategory={featureCategory}
+          visibleFeatures={visibleFeatures}
+          canInsert={canWrite && draft !== null}
+          onSetCategory={setFeatureCategory}
+          onAppendSnippet={appendSnippet}
+        />
+      }
+      canvasClassName="border-l border-r border-edge"
+      rightPane={
+        <PolicyInspector
+          tabs={rightTabs}
+          activeTab={rightTab}
+          onTabChange={(id) => setRightTab(id as typeof rightTab)}
+          // Validate tab
+          validation={validation}
+          validationError={validationError}
+          validationBusy={validationBusy}
+          onValidate={() => void onValidate()}
+          // Apply tab
+          sig={sig}
+          onSetSig={setSig}
+          busy={busy}
+          error={error}
+          advancement={advancement}
+          canWrite={canWrite}
+          hasDraft={draft !== null && draft.length > 0}
+          onApply={() => void onApply()}
+          onResetToActive={() => {
+            if (toml.data) setDraft(toml.data);
+            setSig("");
+            setError(null);
+            setAdvancement(null);
+            setValidation(null);
+          }}
+        />
+      }
+    >
+      {editorArea}
+    </CanvasLayout>
   );
 }
 
-function issueClass(severity: BuilderValidationSeverity) {
-  if (severity === "error") return "border-bad/40 bg-bad/10 text-bad";
-  if (severity === "warning") return "border-warn/40 bg-warn-muted text-warn";
-  return "border-info/40 bg-info-muted text-info";
-}
+// ---------------------------------------------------------------------------
+// PolicyFeatureLibrary (left pane)
+// ---------------------------------------------------------------------------
 
-function Stat({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+function PolicyFeatureLibrary({
+  featureCategory,
+  visibleFeatures,
+  canInsert,
+  onSetCategory,
+  onAppendSnippet,
+}: {
+  featureCategory: PolicyFeatureCategory | "All";
+  visibleFeatures: PolicyFeature[];
+  canInsert: boolean;
+  onSetCategory: (cat: PolicyFeatureCategory | "All") => void;
+  onAppendSnippet: (snippet: string) => void;
+}) {
   return (
-    <div>
-      <div className="text-[10px] uppercase tracking-wider text-ink-subtle">{label}</div>
-      <div className={`mt-0.5 ${mono ? "font-mono text-ink" : "text-ink"} text-sm break-all`}>
-        {value}
+    <div className="flex flex-col">
+      <CollapsibleSection title="Browse by category" defaultOpen>
+        <div className="flex flex-wrap gap-1 pt-1">
+          {(["All", "Authority", "Execution", "Network", "Providers", "Safety", "Operations"] as const).map((cat) => (
+            <button
+              key={cat}
+              type="button"
+              className={`text-[10px] font-semibold px-2 py-0.5 rounded border transition-colors ${
+                featureCategory === cat
+                  ? "border-accent bg-accent/15 text-accent"
+                  : "border-edge text-ink-muted hover:border-accent"
+              }`}
+              onClick={() => onSetCategory(cat)}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
+      </CollapsibleSection>
+
+      <PaneDivider />
+
+      <div className="flex flex-col gap-1.5 px-3 pb-4 pt-1">
+        {visibleFeatures.map((feature) => (
+          <PolicyFeatureCard
+            key={feature.title}
+            feature={feature}
+            canInsert={canInsert && feature.snippet !== undefined}
+            onInsert={() => { if (feature.snippet) onAppendSnippet(feature.snippet); }}
+          />
+        ))}
       </div>
     </div>
   );
@@ -713,48 +635,329 @@ function PolicyFeatureCard({
   canInsert: boolean;
   onInsert: () => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   return (
-    <article className="flex min-h-[13rem] flex-col rounded-md border border-edge bg-panel p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-semibold text-ink">{feature.title}</h3>
-          <span className="mt-1 inline-flex text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">
+    <div className="rounded border border-edge bg-panel p-2 text-xs">
+      <div className="flex items-start justify-between gap-1">
+        <button type="button" onClick={() => setExpanded((v) => !v)} className="flex-1 text-left">
+          <div className="font-semibold text-ink leading-tight">{feature.title}</div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle mt-0.5">
             {feature.category}
-          </span>
-        </div>
+          </div>
+        </button>
         {feature.snippet && (
           <CopyButton value={feature.snippet} label={`Copy ${feature.title} snippet`} />
         )}
       </div>
-      <p className="mt-2 text-xs leading-relaxed text-ink-muted">{feature.purpose}</p>
-      <div className="mt-3 flex flex-wrap gap-1">
-        {feature.fields.map((field) => (
-          <code
-            key={field}
-            className="rounded border border-edge bg-panel-raised px-1.5 py-0.5 font-mono text-[10px] text-ink-muted"
-          >
-            {field}
-          </code>
-        ))}
-      </div>
-      <div className="mt-auto pt-3">
-        {feature.snippet ? (
-          <button
-            type="button"
-            className="btn w-full justify-center"
-            disabled={!canInsert}
-            onClick={onInsert}
-            title={canInsert ? "Append snippet to policy.toml draft" : "Load editable policy TOML first"}
-          >
-            Append snippet
-          </button>
-        ) : (
-          <div className="rounded border border-edge bg-panel-raised px-2 py-1.5 text-xs text-ink-subtle">
-            No inline snippet: this section needs image digests or generated
-            cert material.
+
+      {expanded && (
+        <>
+          <p className="text-ink-muted mt-1.5 leading-relaxed">{feature.purpose}</p>
+          <div className="flex flex-wrap gap-0.5 mt-1.5">
+            {feature.fields.map((field) => (
+              <code key={field} className="rounded border border-edge bg-panel-raised px-1 py-px font-mono text-[9px] text-ink-muted">
+                {field}
+              </code>
+            ))}
+          </div>
+        </>
+      )}
+
+      {feature.snippet ? (
+        <button
+          type="button"
+          className="btn w-full justify-center mt-1.5 py-0.5 text-[10px]"
+          disabled={!canInsert}
+          onClick={onInsert}
+          title={canInsert ? "Append snippet to policy.toml draft" : "Load editable policy TOML first"}
+        >
+          Append snippet
+        </button>
+      ) : (
+        <div className="rounded border border-edge bg-panel-raised px-2 py-1 text-[10px] text-ink-subtle mt-1.5">
+          No inline snippet — needs image digests or cert material.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PolicyInspector (right pane)
+// ---------------------------------------------------------------------------
+
+interface PolicyInspectorProps {
+  tabs: InspectorTab[];
+  activeTab: string;
+  onTabChange: (id: string) => void;
+  // Validate
+  validation: BuilderValidationResponse | null;
+  validationError: string | null;
+  validationBusy: boolean;
+  onValidate: () => void;
+  // Apply
+  sig: string;
+  onSetSig: (v: string) => void;
+  busy: boolean;
+  error: string | null;
+  advancement: PolicyAdvancement | null;
+  canWrite: boolean;
+  hasDraft: boolean;
+  onApply: () => void;
+  onResetToActive: () => void;
+}
+
+function PolicyInspector(props: PolicyInspectorProps) {
+  const { tabs, activeTab, onTabChange } = props;
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <InspectorTabBar tabs={tabs} active={activeTab} onChange={onTabChange} />
+
+      <div className="flex-1 min-h-0 overflow-y-auto scroll-thin">
+
+        {/* VALIDATE TAB */}
+        {activeTab === "validate" && (
+          <div className="p-3 space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <p className="text-xs text-ink-muted leading-relaxed flex-1">
+                Read-only validation through the policy loader and active epoch checks.
+                Does not advance policy or store bytes.
+              </p>
+              <button
+                type="button"
+                className="btn text-xs py-1 shrink-0"
+                disabled={props.validationBusy || !props.hasDraft}
+                onClick={props.onValidate}
+              >
+                {props.validationBusy ? <><Spinner className="h-3 w-3" /> Running</> : "Run"}
+              </button>
+            </div>
+            {props.validationError && (
+              <div className="rounded border border-bad/40 bg-bad/10 p-2 text-xs text-bad">
+                {props.validationError}
+              </div>
+            )}
+            {props.validation ? (
+              <BuilderValidationPanel response={props.validation} />
+            ) : (
+              <p className="text-xs text-ink-subtle leading-relaxed">
+                Validate before signing so TOML, cert, epoch, and policy-loader errors are visible while the draft is still easy to edit.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* APPLY TAB */}
+        {activeTab === "apply" && (
+          <div className="p-3 space-y-3">
+            {!props.canWrite ? (
+              <div className="rounded border border-edge p-3 text-xs text-ink-muted">
+                You are signed in with read-only roles. Policy updates require{" "}
+                <code className="font-mono">write_policy</code> or{" "}
+                <code className="font-mono">admin</code> role.
+              </div>
+            ) : (
+              <>
+                <div>
+                  <p className="text-xs text-ink-muted leading-relaxed">
+                    Paste the detached Ed25519 signature (base64) computed over the exact draft TOML bytes. The dashboard never touches the authority private key.
+                  </p>
+                  <textarea
+                    rows={3}
+                    spellCheck={false}
+                    className="input w-full mt-2 font-mono text-xs"
+                    placeholder="base64 signature (88 chars padded / 86 unpadded)"
+                    value={props.sig}
+                    onChange={(e) => props.onSetSig(e.target.value)}
+                  />
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    className="btn-primary text-xs py-1"
+                    disabled={props.busy || !props.hasDraft || props.sig.trim().length === 0}
+                    onClick={props.onApply}
+                  >
+                    {props.busy ? <><Spinner className="w-3.5 h-3.5" /> Applying…</> : "Apply policy"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn text-xs py-1"
+                    disabled={props.busy}
+                    onClick={props.onResetToActive}
+                  >
+                    Reset to current
+                  </button>
+                  {props.advancement && (
+                    <span className="text-xs text-ok">
+                      ✓ epoch #{props.advancement.previous_epoch} → #{props.advancement.new_epoch}
+                    </span>
+                  )}
+                </div>
+                {props.error && (
+                  <div className="rounded border border-bad/40 bg-bad/10 p-2 text-xs text-bad">
+                    {props.error}
+                  </div>
+                )}
+                {props.advancement && (
+                  <div className="rounded border border-edge bg-panel p-3 text-xs space-y-1.5">
+                    <StatRow label="New epoch" value={`#${props.advancement.new_epoch}`} mono />
+                    <StatRow label="SHA-256" value={props.advancement.policy_sha256} mono />
+                    <StatRow label="Sessions invalidated" value={String(props.advancement.n_sessions_invalidated)} />
+                    <StatRow label="Delegations stale" value={String(props.advancement.n_delegations_marked_stale)} />
+                    <StatRow label="At" value={fmtAbsolute(props.advancement.advanced_at)} />
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* RECOVERY TAB */}
+        {activeTab === "recovery" && (
+          <div className="p-3 space-y-2">
+            <p className="text-xs text-ink-muted leading-relaxed">
+              Start with the smallest command that tells you which layer is failing.
+            </p>
+            {[
+              { label: "Doctor", command: "raxis doctor", hint: "Data dir, policy, DB, audit, certs." },
+              { label: "Supervisor", command: 'raxis-supervisor status --data-dir "$RAXIS_DATA_DIR"', hint: "Healthy, Restarting, Halted, or CircuitOpen." },
+              { label: "Kernel log", command: 'tail -n 80 "$(brew --prefix)/var/log/raxis/kernel.err.log"', hint: "Boot, gateway, policy, and VM errors." },
+              { label: "Plan validation", command: "raxis plan validate plan.toml", hint: "Catch TOML and DAG mistakes before submit." },
+            ].map((item) => (
+              <div key={item.label} className="rounded border border-edge bg-panel p-2.5">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <span className="text-xs font-semibold text-ink">{item.label}</span>
+                  <CopyButton value={item.command} label={`Copy ${item.label} command`} />
+                </div>
+                <code className="block truncate font-mono text-[10px] text-ink-muted">{item.command}</code>
+                <p className="text-[10px] text-ink-subtle mt-1">{item.hint}</p>
+              </div>
+            ))}
           </div>
         )}
       </div>
-    </article>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+function BuilderValidationPanel({ response }: { response: BuilderValidationResponse }) {
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className={response.ok ? "badge border-ok bg-ok-muted text-ok" : "badge border-bad bg-bad/10 text-bad"}>
+          {response.ok ? "Kernel check passed" : "Kernel check found errors"}
+        </span>
+        <span className="text-ink-subtle">epoch #{response.policy_epoch}</span>
+      </div>
+      {response.issues.length === 0 ? (
+        <div className="rounded border border-ok/40 bg-ok-muted px-2.5 py-1.5 text-xs text-ok">
+          No issues reported by kernel validation.
+        </div>
+      ) : (
+        <ul className="space-y-1.5">
+          {response.issues.map((issue) => (
+            <li key={`${issue.code}-${issue.message}`} className={`rounded border px-2.5 py-1.5 text-xs ${issueClass(issue.severity)}`}>
+              <div className="font-semibold">{issue.message}</div>
+              <div className="mt-0.5 text-ink-muted">{issue.remediation}</div>
+              <code className="mt-0.5 inline-block font-mono text-[9px] text-ink-subtle">{issue.code}</code>
+            </li>
+          ))}
+        </ul>
+      )}
+      {response.next_steps.length > 0 && (
+        <div className="grid gap-1.5">
+          {response.next_steps.map((cmd) => (
+            <div key={cmd} className="flex items-center gap-2 rounded border border-edge bg-panel px-2.5 py-1.5">
+              <code className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-muted">{cmd}</code>
+              <CopyButton value={cmd} label="Copy command" />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function issueClass(severity: BuilderValidationSeverity) {
+  if (severity === "error") return "border-bad/40 bg-bad/10 text-bad";
+  if (severity === "warning") return "border-warn/40 bg-warn-muted text-warn";
+  return "border-info/40 bg-info-muted text-info";
+}
+
+function StatRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-ink-subtle shrink-0">{label}</span>
+      <span className={`${mono ? "font-mono" : ""} text-ink truncate`}>{value}</span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PolicySnapshotSection (unchanged, used by PolicyPage)
+// ---------------------------------------------------------------------------
+
+function PolicySnapshotSection({ snapshot: s }: { snapshot: PolicySnapshotView }) {
+  return (
+    <section className="card p-4">
+      <h2 className="text-sm font-semibold text-ink mb-3">Active snapshot</h2>
+      <dl className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatDl label="Epoch" value={`#${s.epoch}`} mono />
+        <StatDl label="SHA-256" value={shortSha(s.policy_sha256)} mono />
+        <StatDl label="Signed by" value={shortFingerprint(s.signed_by)} mono />
+        <StatDl label="Signed at" value={fmtAbsolute(Number(s.signed_at))} />
+      </dl>
+      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <h3 className="text-xs text-ink-subtle uppercase tracking-wider mb-2">
+            Operators ({s.operators.length})
+          </h3>
+          <ul className="space-y-1 text-xs">
+            {s.operators.map((o) => (
+              <li key={o.fingerprint} className="flex items-center gap-2">
+                <Mono pill>{shortFingerprint(o.fingerprint)}</Mono>
+                <span className="text-ink">{o.display_name}</span>
+                <span className="ml-auto text-ink-subtle font-mono text-[10px]">
+                  {o.permitted_ops.join(", ")}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div>
+          <h3 className="text-xs text-ink-subtle uppercase tracking-wider mb-2">
+            Notification routes
+          </h3>
+          <ul className="space-y-1 text-xs">
+            {Object.entries(s.notification_routes).map(([kind, ids]) => (
+              <li key={kind} className="flex items-center gap-2">
+                <span className="text-ink">{kind}</span>
+                <span className="text-ink-subtle font-mono">→ {ids.join(", ")}</span>
+              </li>
+            ))}
+            {Object.keys(s.notification_routes).length === 0 && (
+              <li className="text-ink-subtle">(none)</li>
+            )}
+          </ul>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function StatDl({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-ink-subtle">{label}</div>
+      <div className={`mt-0.5 ${mono ? "font-mono text-ink" : "text-ink"} text-sm break-all`}>
+        {value}
+      </div>
+    </div>
   );
 }

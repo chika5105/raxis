@@ -6,6 +6,7 @@
 
 const STORAGE_KEY = "raxis.dashboard.token.v1";
 const PROFILE_KEY = "raxis.dashboard.profile.v1";
+const DEV_BYPASS_OPERATOR_ID = "dev-auth-bypass";
 
 export interface OperatorProfile {
   operator_id: string;
@@ -46,6 +47,23 @@ export function getStoredProfile(): OperatorProfile | null {
   }
 }
 
+export function getDevAuthBypassProfile(): OperatorProfile | null {
+  if (!isBrowser()) return null;
+  if (!import.meta.env.DEV) return null;
+  if (import.meta.env.VITE_RAXIS_DASHBOARD_AUTH_BYPASS !== "1") return null;
+  if (!isLoopbackHost(window.location.hostname)) return null;
+  return {
+    operator_id: DEV_BYPASS_OPERATOR_ID,
+    display_name: "dev-auth-bypass",
+    roles: ["read", "write_policy", "admin"],
+    expires_at: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
+  };
+}
+
+export function getDashboardProfile(): OperatorProfile | null {
+  return getStoredProfile() ?? getDevAuthBypassProfile();
+}
+
 export function setStoredProfile(profile: OperatorProfile): void {
   if (!isBrowser()) return;
   window.localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
@@ -60,4 +78,13 @@ export function isTokenLive(profile: OperatorProfile | null): boolean {
   // Subtract a 30-second buffer so a request mid-flight does
   // not race the expiry boundary.
   return profile.expires_at - 30 > now;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  );
 }

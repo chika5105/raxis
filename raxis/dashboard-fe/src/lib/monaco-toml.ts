@@ -1,4 +1,19 @@
 type MonacoLanguageApi = {
+  editor?: {
+    defineTheme?: (
+      name: string,
+      theme: {
+        base: "vs" | "vs-dark";
+        inherit: boolean;
+        rules: Array<{
+          token: string;
+          foreground?: string;
+          fontStyle?: string;
+        }>;
+        colors: Record<string, string>;
+      },
+    ) => void;
+  };
   languages: {
     getLanguages: () => Array<{ id: string }>;
     register: (lang: {
@@ -13,6 +28,13 @@ type MonacoLanguageApi = {
 };
 
 let tomlTokensRegistered = false;
+let raxisThemesRegistered = false;
+
+export type RaxisMonacoTheme = "raxis-light" | "raxis-dark";
+
+export function raxisMonacoTheme(theme: "light" | "dark"): RaxisMonacoTheme {
+  return theme === "dark" ? "raxis-dark" : "raxis-light";
+}
 
 /// Register a compact TOML Monarch tokenizer with Monaco.
 ///
@@ -31,6 +53,8 @@ export function ensureTomlLanguage(monaco: MonacoLanguageApi): void {
       mimetypes: ["application/toml"],
     });
   }
+
+  registerRaxisThemes(monaco);
 
   if (tomlTokensRegistered) return;
   tomlTokensRegistered = true;
@@ -99,6 +123,73 @@ export function ensureTomlLanguage(monaco: MonacoLanguageApi): void {
         [/'''/, "string", "@pop"],
         [/[^']+|'/, "string"],
       ],
+    },
+  });
+}
+
+function registerRaxisThemes(monaco: MonacoLanguageApi): void {
+  if (raxisThemesRegistered) return;
+  const defineTheme = monaco.editor?.defineTheme;
+  if (!defineTheme) return;
+  raxisThemesRegistered = true;
+
+  defineTheme("raxis-light", {
+    base: "vs",
+    inherit: true,
+    rules: [
+      { token: "metatag.toml", foreground: "8b5e00", fontStyle: "bold" },
+      { token: "namespace.toml", foreground: "8b5e00", fontStyle: "bold" },
+      { token: "type.identifier.toml", foreground: "0b7285" },
+      { token: "keyword.toml", foreground: "9f1239", fontStyle: "bold" },
+      { token: "string.toml", foreground: "2f7d32" },
+      { token: "string.escape.toml", foreground: "6d28d9", fontStyle: "bold" },
+      { token: "number.toml", foreground: "6d28d9" },
+      { token: "comment.toml", foreground: "6b7280", fontStyle: "italic" },
+      { token: "operator.toml", foreground: "374151" },
+      { token: "delimiter.toml", foreground: "4b5563" },
+      { token: "invalid.toml", foreground: "b91c1c", fontStyle: "bold underline" },
+    ],
+    colors: {
+      "editor.background": "#ffffff",
+      "editor.foreground": "#172021",
+      "editorLineNumber.foreground": "#8a9697",
+      "editorLineNumber.activeForeground": "#286f7d",
+      "editorCursor.foreground": "#286f7d",
+      "editor.selectionBackground": "#cfe9ee",
+      "editor.inactiveSelectionBackground": "#edf5f6",
+      "editor.lineHighlightBackground": "#f6f9f9",
+      "editorIndentGuide.background1": "#dce2e2",
+      "editorIndentGuide.activeBackground1": "#9fb4b7",
+    },
+  });
+
+  defineTheme("raxis-dark", {
+    base: "vs-dark",
+    inherit: true,
+    rules: [
+      { token: "metatag.toml", foreground: "f0d38a", fontStyle: "bold" },
+      { token: "namespace.toml", foreground: "f0d38a", fontStyle: "bold" },
+      { token: "type.identifier.toml", foreground: "9ac9d4" },
+      { token: "keyword.toml", foreground: "f0a6b4", fontStyle: "bold" },
+      { token: "string.toml", foreground: "b8dfae" },
+      { token: "string.escape.toml", foreground: "d7b1ff", fontStyle: "bold" },
+      { token: "number.toml", foreground: "d7b1ff" },
+      { token: "comment.toml", foreground: "73888c", fontStyle: "italic" },
+      { token: "operator.toml", foreground: "e2edf0" },
+      { token: "delimiter.toml", foreground: "aabdc1" },
+      { token: "invalid.toml", foreground: "ff8b96", fontStyle: "bold underline" },
+    ],
+    colors: {
+      "editor.background": "#0f1718",
+      "editor.foreground": "#d8e8e8",
+      "editorLineNumber.foreground": "#51666b",
+      "editorLineNumber.activeForeground": "#9ac9d4",
+      "editorCursor.foreground": "#e7f1f1",
+      "editor.selectionBackground": "#28515a",
+      "editor.inactiveSelectionBackground": "#1a2a2d",
+      "editor.lineHighlightBackground": "#152124",
+      "editorIndentGuide.background1": "#24373a",
+      "editorIndentGuide.activeBackground1": "#56777d",
     },
   });
 }

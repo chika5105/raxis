@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 
-import { getStoredProfile, isTokenLive } from "@/lib/auth-store";
+import { getDashboardProfile, isTokenLive } from "@/lib/auth-store";
 
 interface RequireAuthProps {
   children: ReactNode;
@@ -17,7 +17,7 @@ interface RequireAuthProps {
 /// the required role is sent to a soft "forbidden" placeholder.
 export function RequireAuth({ children, rolesAny }: RequireAuthProps) {
   const location = useLocation();
-  const profile = getStoredProfile();
+  const profile = getDashboardProfile();
 
   if (!profile || !isTokenLive(profile)) {
     const next = encodeURIComponent(location.pathname + location.search);
