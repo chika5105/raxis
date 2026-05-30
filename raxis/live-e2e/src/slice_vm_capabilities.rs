@@ -34,7 +34,7 @@
 //!
 //!   4. The **system-prompt hint** (`build_capability_hint`)
 //!      produces a coherent string: contains the `## VM Environment`
-//!      header, the `Image:` line, the normal-client network warning,
+//!      header, the role line, the normal-client network warning,
 //!      and the credential-proxy env-var NAMES (never
 //!      their values — the hint is a name-only summary so the
 //!      provider's prompt cache is value-stable). Same probe
@@ -341,7 +341,6 @@ fn run_assertions(
         // Pinned by `build_capability_hint`. If a future change
         // re-formats this header, update the slice in lockstep.
         "role=executor",
-        "image_origin=canonical",
         "Use normal HTTP(S) clients",
         // env-var NAMES surface in the hint (so the LLM knows which
         // proxies are wired) — but never their VALUES (so the hint
@@ -379,6 +378,18 @@ fn run_assertions(
             "INV-EXEC-DISCOVERY-01: capability hint MUST NOT carry the \
              kernel-private sentinel; got hint: {hint}"
         );
+    }
+    for forbidden in [
+        "image_origin",
+        "RAXIS_VM_IMAGE_ORIGIN",
+        "RAXIS_VM_IMAGE_DIGEST",
+    ] {
+        if hint.contains(forbidden) {
+            bail!(
+                "INV-EXEC-DISCOVERY-01: kernel/operator image provenance \
+                 MUST NOT leak into capability hint as {forbidden:?}; got hint: {hint}"
+            );
+        }
     }
     tracing::info!("vm-capabilities: capability hint coherent and value-redacted");
 

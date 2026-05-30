@@ -731,30 +731,18 @@ pub const PLANNER_BINARY_PATHS_TO_MASK: &[&str] = &[
 /// Env vars that MUST be removed from the process environment
 /// BEFORE the agent's `BashTool` /
 /// [`crate::custom_tools::SubprocessTool`] is allowed to spawn a
-/// child. Most are secrets or kernel transport handles; a few
-/// are runtime-control knobs whose presence would mislead the
-/// model about the VM's actual task-level capabilities. Each
-/// in-guest listener that needs one of these has already read its
-/// non-secret transport hints by the time [`harden_guest_for_agent`]
-/// runs, so removing them here cannot break the legitimate egress
-/// path; it only strips `Command::spawn` inheritance for the agent's
-/// child processes. `RAXIS_SESSION_TOKEN` remains in this list as a
-/// defense-in-depth guard for stale or third-party images, but the
-/// supported kernel spawn path no longer exposes it to the guest.
-///
-/// Pinned alphabetically so a future addition does not silently
-/// reorder the audit-replay scrub log.
-pub const SENSITIVE_ENV_VARS_TO_SCRUB: &[&str] = &[
-    "CARGO_NET_OFFLINE",
-    "RAXIS_AIRGAP_A3_ADMISSION_PORT",
-    "RAXIS_AIRGAP_A3_HOST_CID",
-    "RAXIS_AIRGAP_A3_TUNNEL_PORT",
-    "RAXIS_KERNEL_VSOCK_LISTEN_PORT",
-    "RAXIS_PLANNER_TASK_PROMPT",
-    "RAXIS_PLANNER_TASK_PROMPT_PATH",
-    "RAXIS_SESSION_TOKEN",
-    "RAXIS_TPROXY_KERNEL_TCP",
-];
+/// child. Most are secrets or kernel transport handles; a few are
+/// routing, KSB/tool-sidecar, or runtime-control knobs whose presence
+/// would mislead the model about the VM's actual task-level
+/// capabilities. The planner PID 1 keeps a process-local snapshot for
+/// legitimate post-scrub reads; spawned children inherit only
+/// `std::env`, where these keys are gone. `RAXIS_SESSION_ID` is
+/// captured into `BootEnv` before scrub; `RAXIS_SESSION_TOKEN`
+/// remains in this list as a defense-in-depth guard for stale or
+/// third-party images, but the supported kernel spawn path no longer
+/// exposes it to the guest.
+pub const SENSITIVE_ENV_VARS_TO_SCRUB: &[&str] =
+    raxis_types::planner_env::AGENT_SUBPROCESS_SCRUBBED_ENV_VARS;
 
 /// `INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01` — last-line
 /// post-PID-1-boot defenses against an in-VM LLM agent reading
@@ -2345,35 +2333,31 @@ mod guest_harden_tests {
     fn sensitive_env_vars_to_scrub_pinned() {
         assert_eq!(
             SENSITIVE_ENV_VARS_TO_SCRUB,
-            &[
-                "CARGO_NET_OFFLINE",
-                "RAXIS_AIRGAP_A3_ADMISSION_PORT",
-                "RAXIS_AIRGAP_A3_HOST_CID",
-                "RAXIS_AIRGAP_A3_TUNNEL_PORT",
-                "RAXIS_KERNEL_VSOCK_LISTEN_PORT",
-                "RAXIS_PLANNER_TASK_PROMPT",
-                "RAXIS_PLANNER_TASK_PROMPT_PATH",
-                "RAXIS_SESSION_TOKEN",
-                "RAXIS_TPROXY_KERNEL_TCP",
-            ],
+            raxis_types::planner_env::AGENT_SUBPROCESS_SCRUBBED_ENV_VARS,
             "SENSITIVE_ENV_VARS_TO_SCRUB is the agent token/capability \
              recovery surface; any change must be paired with a spec \
              update in specs/v3/guest-agent-jailbreak-defense.md §2.6"
         );
+        assert!(SENSITIVE_ENV_VARS_TO_SCRUB.contains(&"RAXIS_MODEL_CHAIN"));
+        assert!(SENSITIVE_ENV_VARS_TO_SCRUB.contains(&"RAXIS_MODEL_ID"));
+        assert!(SENSITIVE_ENV_VARS_TO_SCRUB.contains(&"RAXIS_VM_IMAGE_ORIGIN"));
+        assert!(SENSITIVE_ENV_VARS_TO_SCRUB.contains(&"RAXIS_VM_IMAGE_DIGEST"));
+        assert!(SENSITIVE_ENV_VARS_TO_SCRUB.contains(&"RAXIS_PLANNER_SESSION_ROLE"));
+        assert!(SENSITIVE_ENV_VARS_TO_SCRUB.contains(&"RAXIS_PLANNER_KSB_PATH"));
+        assert!(SENSITIVE_ENV_VARS_TO_SCRUB.contains(&"RAXIS_PLANNER_CUSTOM_TOOLS_PATH"));
+        assert!(SENSITIVE_ENV_VARS_TO_SCRUB.contains(&"RAXIS_PLANNER_SIDECAR_HMAC_SECRET"));
     }
 
-    /// `RAXIS_SESSION_ID` is intentionally NOT scrubbed — it is the
-    /// kernel-side correlator the agent's tool dispatch needs for
-    /// audit logging. Pin the exclusion so a defence-in-depth
-    /// sweep does not accidentally remove it and break audit
-    /// chain stitching.
+    /// `RAXIS_SESSION_ID` is scrubbed from child-process env after
+    /// `BootEnv` captures it. Tool dispatch keeps audit attribution
+    /// through `ToolContext`, not by asking bash/custom tools to read
+    /// identity metadata from their environment.
     #[test]
-    fn session_id_is_not_scrubbed() {
+    fn session_id_is_scrubbed_after_bootenv_capture() {
         assert!(
-            !SENSITIVE_ENV_VARS_TO_SCRUB.contains(&"RAXIS_SESSION_ID"),
-            "RAXIS_SESSION_ID is the audit-chain correlator; it must \
-             survive `scrub_sensitive_env_for_agent`. See \
-             specs/v3/guest-agent-jailbreak-defense.md §2.6 final note."
+            SENSITIVE_ENV_VARS_TO_SCRUB.contains(&"RAXIS_SESSION_ID"),
+            "RAXIS_SESSION_ID is planner-process metadata, not an \
+             agent-tool env contract. BootEnv captures it before scrub."
         );
     }
 

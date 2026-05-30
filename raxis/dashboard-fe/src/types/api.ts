@@ -112,6 +112,32 @@ export interface StructuredOutputView {
   at: number;
 }
 
+export interface CustomToolCallView {
+  seq: number;
+  event_id: string;
+  at: number;
+  tool_name: string;
+  profile_name: string;
+  execution_locality: string;
+  outcome: string;
+  duration_ms: number;
+  exit_code?: number | null;
+  signal?: number | null;
+  timeout_ms: number;
+  command_argv_sha256: string;
+  stdin_bytes_total: number;
+  stdin_sha256: string;
+  stdout_bytes_total: number;
+  stdout_bytes_captured: number;
+  stdout_sha256: string;
+  stdout_truncated: boolean;
+  stderr_bytes_total: number;
+  stderr_bytes_captured: number;
+  stderr_sha256: string;
+  stderr_truncated: boolean;
+  error?: string | null;
+}
+
 export interface TaskView {
   task_id: string;
   initiative_id: string;
@@ -122,6 +148,7 @@ export interface TaskView {
   session_id: string | null;
   reviewer_verdicts: ReviewerVerdictView[];
   structured_outputs: StructuredOutputView[];
+  custom_tool_calls?: CustomToolCallView[];
   path_allowlist: string[];
   created_at: number;
   updated_at: number;
@@ -681,6 +708,10 @@ export interface SessionVmEnvView {
   key: string;
   value: string;
   redacted: boolean;
+  visible_to_planner_process?: boolean;
+  visible_to_agent_tools?: boolean;
+  visibility?: "planner-only" | "agent-visible" | "redacted" | string;
+  visibility_note?: string;
   source: string;
   captured_at: number;
 }

@@ -35,7 +35,8 @@ Related setup entry points:
 | Managed repo | The repo RAXIS clones from and merges back into. Use the actual repo name as its id; keep branch names in `target_ref`. |
 | Plan / initiative / task | A signed `plan.toml`, one admitted unit of work, and the executor/reviewer nodes inside it. |
 | Orchestrator / executor / reviewer | Kernel-created coordinator, code-editing agent, and review agent. |
-| Plan Builder / Policy Builder | Dashboard helpers for drafting TOML and validating it through the same kernel rules used at admission/epoch advance. |
+| Plan Builder | Visual `plan.toml` editor for the initiative DAG, task cards, model routing, tool profiles, credential setup, verifiers, kernel validation, copy, and download. |
+| Policy Builder | Dashboard helper for policy discovery, TOML editing, kernel validation, and the signed epoch-advance path. |
 
 The fastest path is to let the Homebrew helper run the safe defaults.
 It uses POSIX `sh`, so the same command works from both zsh and bash.

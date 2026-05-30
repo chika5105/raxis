@@ -52,14 +52,14 @@ use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
     AuditEntryView, BuilderValidationIssue, BuilderValidationResponse, BuilderValidationSeverity,
-    ChainStatusView, CredentialMetadata, CredentialReveal, DagEdge, DashboardData, EscalationView,
-    HealthCheck, HealthSnapshot, InitiativeListEntry, InitiativePlanView, InitiativeView,
-    NotificationView, OperatorAuthResolution, OrchestratorGapsResponse, PolicyAdvancement,
-    PolicyOperatorView, PolicySnapshotView, RecentSessionEntry, ReviewerPanelEntry,
-    ReviewerVerdictView, SessionView, SessionVmEnvView, StructuredOutputView, SubsystemDetailRow,
-    SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail, WorktreeDiff,
-    WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry,
-    SUBSYSTEM_CATALOG,
+    ChainStatusView, CredentialMetadata, CredentialReveal, CustomToolCallView, DagEdge,
+    DashboardData, EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry,
+    InitiativePlanView, InitiativeView, NotificationView, OperatorAuthResolution,
+    OrchestratorGapsResponse, PolicyAdvancement, PolicyOperatorView, PolicySnapshotView,
+    RecentSessionEntry, ReviewerPanelEntry, ReviewerVerdictView, SessionView, SessionVmEnvView,
+    StructuredOutputView, SubsystemDetailRow, SubsystemHealthCard, SubsystemHealthResponse,
+    TaskView, WorktreeDetail, WorktreeDiff, WorktreeFile, WorktreeListEntry, WorktreeLogEntry,
+    WorktreeTree, WorktreeTreeEntry, SUBSYSTEM_CATALOG,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -1669,11 +1669,12 @@ impl DashboardData for KernelDashboardData {
             log_only: format!("sessions::list_all: {e}"),
         })?;
         // Resolve the optional `?initiative_id=…` filter by
-        // walking the initiative's tasks and collecting any
-        // `session_id` they reference. The `sessions` catalog
-        // itself does not carry an initiative FK — tasks own
-        // the link — so this is the only consistent way to
-        // narrow without a schema change.
+        // walking both task-owned sessions and the durable
+        // `sessions.initiative_id` back-edge. Orchestrator
+        // sessions are respawnable: only the latest coordinator
+        // task row points at the current session, while older
+        // historical orchestrator rows remain attributable via the
+        // sessions table.
         let allowed: Option<std::collections::HashSet<String>> = match initiative_id {
             None => None,
             Some(i) => {
@@ -1681,7 +1682,10 @@ impl DashboardData for KernelDashboardData {
                     .map_err(|e| ApiError::Internal {
                         log_only: format!("tasks::list_by_initiative: {e}"),
                     })?;
-                Some(tasks.into_iter().filter_map(|t| t.session_id).collect())
+                let mut allowed: std::collections::HashSet<String> =
+                    tasks.into_iter().filter_map(|t| t.session_id).collect();
+                add_sessions_for_initiative(&conn, i, &mut allowed);
+                Some(allowed)
             }
         };
         // Pre-load the audit chain so the per-session
@@ -4279,6 +4283,49 @@ pub(crate) fn owning_task_for_session(
     });
     match row {
         Ok(v) => Ok(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            orchestrator_coordinator_task_for_session(conn, session_id)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Fallback for historical orchestrator sessions. Only the current
+/// coordinator task row points at the latest orchestrator session via
+/// `tasks.session_id`; earlier orchestrator sessions still carry the
+/// immutable `sessions.initiative_id` back-edge. The dashboard must
+/// keep those historical session detail pages bound to the synthetic
+/// coordinator task (`task_id == initiative_id`) so LLM turns and token
+/// totals remain visible after respawns.
+fn orchestrator_coordinator_task_for_session(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> rusqlite::Result<SessionOwningTask> {
+    let sql = format!(
+        "SELECT s.initiative_id, t.task_id, \
+                t.cumulative_input_tokens, t.cumulative_output_tokens \
+         FROM {sessions} AS s \
+         JOIN {tasks} AS t \
+           ON t.task_id = s.initiative_id \
+          AND t.initiative_id = s.initiative_id \
+         WHERE s.session_id = ?1 \
+           AND s.initiative_id IS NOT NULL \
+           AND COALESCE(s.session_agent_type, '') = 'Orchestrator' \
+         LIMIT 1",
+        sessions = raxis_store::Table::Sessions.as_str(),
+        tasks = raxis_store::Table::Tasks.as_str(),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row = stmt.query_row(rusqlite::params![session_id], |r| {
+        Ok(SessionOwningTask {
+            initiative_id: r.get::<_, Option<String>>(0)?,
+            task_id: r.get::<_, Option<String>>(1)?,
+            input_tokens: r.get::<_, i64>(2)?.max(0) as u64,
+            output_tokens: r.get::<_, i64>(3)?.max(0) as u64,
+        })
+    });
+    match row {
+        Ok(v) => Ok(v),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(SessionOwningTask::default()),
         Err(e) => Err(e),
     }
@@ -4332,7 +4379,84 @@ fn owning_tasks_for_sessions(
             out.entry(session_id).or_insert(owning);
         }
     }
+    add_orchestrator_coordinator_tasks_for_sessions(conn, session_ids, &mut out);
     out
+}
+
+fn add_orchestrator_coordinator_tasks_for_sessions(
+    conn: &rusqlite::Connection,
+    session_ids: &[String],
+    out: &mut std::collections::HashMap<String, SessionOwningTask>,
+) {
+    if session_ids.is_empty() {
+        return;
+    }
+    let missing: Vec<&str> = session_ids
+        .iter()
+        .filter(|id| !out.contains_key(id.as_str()))
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(missing.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT s.session_id, s.initiative_id, t.task_id, \
+                t.cumulative_input_tokens, t.cumulative_output_tokens \
+         FROM {sessions} AS s \
+         JOIN {tasks} AS t \
+           ON t.task_id = s.initiative_id \
+          AND t.initiative_id = s.initiative_id \
+         WHERE s.session_id IN ({placeholders}) \
+           AND s.initiative_id IS NOT NULL \
+           AND COALESCE(s.session_agent_type, '') = 'Orchestrator' \
+         ORDER BY s.session_id ASC",
+        sessions = raxis_store::Table::Sessions.as_str(),
+        tasks = raxis_store::Table::Tasks.as_str(),
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return;
+    };
+    let rows = stmt.query_map(rusqlite::params_from_iter(missing), |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            SessionOwningTask {
+                initiative_id: r.get::<_, Option<String>>(1)?,
+                task_id: r.get::<_, Option<String>>(2)?,
+                input_tokens: r.get::<_, i64>(3)?.max(0) as u64,
+                output_tokens: r.get::<_, i64>(4)?.max(0) as u64,
+            },
+        ))
+    });
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            let (session_id, owning) = row;
+            out.entry(session_id).or_insert(owning);
+        }
+    }
+}
+
+fn add_sessions_for_initiative(
+    conn: &rusqlite::Connection,
+    initiative_id: &str,
+    out: &mut std::collections::HashSet<String>,
+) {
+    let sql = format!(
+        "SELECT session_id FROM {sessions} WHERE initiative_id = ?1",
+        sessions = raxis_store::Table::Sessions.as_str(),
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return;
+    };
+    let rows = stmt.query_map(rusqlite::params![initiative_id], |r| r.get::<_, String>(0));
+    if let Ok(rows) = rows {
+        for session_id in rows.flatten() {
+            out.insert(session_id);
+        }
+    }
 }
 
 fn session_agent_type_for_session(conn: &rusqlite::Connection, session_id: &str) -> Option<String> {
@@ -4406,6 +4530,11 @@ fn session_vm_env_view_for_session(
         .map(|rows| {
             rows.into_iter()
                 .map(|r| SessionVmEnvView {
+                    visible_to_planner_process: true,
+                    visible_to_agent_tools:
+                        !raxis_types::planner_env::env_var_is_hidden_from_agent_tools(&r.key),
+                    visibility: session_env_visibility_label(&r.key, r.redacted).to_owned(),
+                    visibility_note: session_env_visibility_note(&r.key, r.redacted).to_owned(),
                     key: r.key,
                     value: r.value,
                     redacted: r.redacted,
@@ -4417,6 +4546,26 @@ fn session_vm_env_view_for_session(
         .map_err(|e| ApiError::Internal {
             log_only: format!("sessions::vm_env_for_session({session_id}): {e}"),
         })
+}
+
+fn session_env_visibility_label(key: &str, redacted: bool) -> &'static str {
+    if redacted {
+        "redacted"
+    } else if raxis_types::planner_env::env_var_is_hidden_from_agent_tools(key) {
+        "planner-only"
+    } else {
+        "agent-visible"
+    }
+}
+
+fn session_env_visibility_note(key: &str, redacted: bool) -> &'static str {
+    if redacted {
+        "Value is redacted in kernel.db/dashboard; raw bytes are not persisted."
+    } else if raxis_types::planner_env::env_var_is_hidden_from_agent_tools(key) {
+        "Present in the VM spawn envelope, then scrubbed before model-driven tools inherit env."
+    } else {
+        "Visible to planner PID 1 and inherited by model-driven tools in this VM."
+    }
 }
 
 fn semantic_agent_type_for_task(
@@ -4980,6 +5129,7 @@ fn task_row_to_view(
         session_id: t.session_id.clone(),
         reviewer_verdicts: Vec::<ReviewerVerdictView>::new(),
         structured_outputs: outputs,
+        custom_tool_calls: Vec::new(),
         path_allowlist,
         created_at: t.admitted_at,
         updated_at: t.transitioned_at,
@@ -5053,6 +5203,7 @@ fn task_row_to_view_with_lifecycle(
     if panel.is_empty() {
         panel = reviewer_panel_entries_from_verdicts(&reviewer_verdicts);
     }
+    let custom_tool_calls = extract_custom_tool_calls_for_task(audit_chain, &t.task_id);
     view.annotations = annotations;
     view.latest_annotation = latest;
     view.review_retry_exhausted = review_retry_exhausted(
@@ -5064,6 +5215,7 @@ fn task_row_to_view_with_lifecycle(
     view.last_critique = last_critique;
     view.reviewer_verdicts = reviewer_verdicts;
     view.reviewer_panel_results = panel;
+    view.custom_tool_calls = custom_tool_calls;
     Ok(view)
 }
 
@@ -5104,6 +5256,7 @@ fn task_row_to_view_with_lifecycle_indexed(
     if panel.is_empty() {
         panel = reviewer_panel_entries_from_verdicts(&reviewer_verdicts);
     }
+    let custom_tool_calls = extract_custom_tool_calls_from_rows(audit_index.task_rows(&t.task_id));
     view.annotations = annotations;
     view.latest_annotation = latest;
     view.review_retry_exhausted = review_retry_exhausted(
@@ -5115,6 +5268,7 @@ fn task_row_to_view_with_lifecycle_indexed(
     view.last_critique = last_critique;
     view.reviewer_verdicts = reviewer_verdicts;
     view.reviewer_panel_results = panel;
+    view.custom_tool_calls = custom_tool_calls;
     Ok(view)
 }
 
@@ -5185,6 +5339,13 @@ fn collect_lifecycle_audit_rows(audit_dir: &Path) -> Vec<lifecycle::AuditRow> {
             .unwrap_or(serde_json::Value::Null);
         out.push(lifecycle::AuditRow {
             seq: rec.seq,
+            event_id: rec
+                .parsed_value
+                .as_ref()
+                .and_then(|v| v.get("event_id"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_owned(),
             event_kind: rec.event_kind,
             initiative_id: rec.initiative_id,
             task_id: rec.task_id,
@@ -5265,6 +5426,81 @@ impl<'a> LifecycleAuditIndex<'a> {
 
 fn payload_str<'a>(row: &'a lifecycle::AuditRow, key: &str) -> Option<&'a str> {
     row.payload.get(key).and_then(|v| v.as_str())
+}
+
+fn payload_string(row: &lifecycle::AuditRow, key: &str) -> String {
+    payload_str(row, key).unwrap_or_default().to_owned()
+}
+
+fn payload_u64(row: &lifecycle::AuditRow, key: &str) -> u64 {
+    row.payload.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
+}
+
+fn payload_i32(row: &lifecycle::AuditRow, key: &str) -> Option<i32> {
+    row.payload
+        .get(key)
+        .and_then(|v| v.as_i64())
+        .and_then(|v| i32::try_from(v).ok())
+}
+
+fn payload_bool(row: &lifecycle::AuditRow, key: &str) -> bool {
+    row.payload
+        .get(key)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn extract_custom_tool_calls_for_task(
+    audit_chain: &[lifecycle::AuditRow],
+    task_id: &str,
+) -> Vec<CustomToolCallView> {
+    let rows: Vec<&lifecycle::AuditRow> = audit_chain
+        .iter()
+        .filter(|row| {
+            row.task_id.as_deref() == Some(task_id) || payload_str(row, "task_id") == Some(task_id)
+        })
+        .collect();
+    extract_custom_tool_calls_from_rows(&rows)
+}
+
+fn extract_custom_tool_calls_from_rows(rows: &[&lifecycle::AuditRow]) -> Vec<CustomToolCallView> {
+    let mut out: Vec<CustomToolCallView> = rows
+        .iter()
+        .filter(|row| row.event_kind == "CustomToolInvoked")
+        .filter_map(|row| {
+            let tool_name = payload_string(row, "tool_name");
+            if tool_name.is_empty() {
+                return None;
+            }
+            Some(CustomToolCallView {
+                seq: row.seq,
+                event_id: row.event_id.clone(),
+                at: row.at.max(0) as u64,
+                tool_name,
+                profile_name: payload_string(row, "profile_name"),
+                execution_locality: payload_string(row, "execution_locality"),
+                outcome: payload_string(row, "outcome"),
+                duration_ms: payload_u64(row, "duration_ms"),
+                exit_code: payload_i32(row, "exit_code"),
+                signal: payload_i32(row, "signal"),
+                timeout_ms: payload_u64(row, "timeout_ms"),
+                command_argv_sha256: payload_string(row, "command_argv_sha256"),
+                stdin_bytes_total: payload_u64(row, "stdin_bytes_total"),
+                stdin_sha256: payload_string(row, "stdin_sha256"),
+                stdout_bytes_total: payload_u64(row, "stdout_bytes_total"),
+                stdout_bytes_captured: payload_u64(row, "stdout_bytes_captured"),
+                stdout_sha256: payload_string(row, "stdout_sha256"),
+                stdout_truncated: payload_bool(row, "stdout_truncated"),
+                stderr_bytes_total: payload_u64(row, "stderr_bytes_total"),
+                stderr_bytes_captured: payload_u64(row, "stderr_bytes_captured"),
+                stderr_sha256: payload_string(row, "stderr_sha256"),
+                stderr_truncated: payload_bool(row, "stderr_truncated"),
+                error: payload_str(row, "error").map(str::to_owned),
+            })
+        })
+        .collect();
+    out.sort_by_key(|call| call.seq);
+    out
 }
 
 /// Read `tasks.review_verdict` and `tasks.last_critique` for the
@@ -6533,7 +6769,11 @@ fn is_path_safe_id(value: &str) -> bool {
 /// recent-list page surfaces revoked + expired alongside active.
 /// `session_agent_type` is the migration-5 addition (nullable on
 /// V1 rows). The `task_id` / `initiative_id` are populated from
-/// `tasks.session_id` if available, otherwise NULL.
+/// `tasks.session_id` when a task directly owns the session. For
+/// historical orchestrator sessions that have been superseded by a
+/// newer coordinator respawn, they fall back to
+/// `sessions.initiative_id` and the synthetic coordinator task
+/// (`task_id == initiative_id`).
 ///
 /// Returns a partly-populated [`RecentSessionEntry`] — fields
 /// that depend on the audit chain (`final_annotation`) and the
@@ -6553,12 +6793,26 @@ fn read_sessions_all_for_recent(
                        s.role_id, \
                        s.created_at, \
                        s.revoked_at, \
-                       (SELECT t.task_id FROM {TBL_TASKS} t \
-                          WHERE t.session_id = s.session_id \
-                          ORDER BY t.task_id ASC LIMIT 1) AS task_id, \
-                       (SELECT t.initiative_id FROM {TBL_TASKS} t \
-                          WHERE t.session_id = s.session_id \
-                          ORDER BY t.task_id ASC LIMIT 1) AS initiative_id \
+                       COALESCE( \
+                         (SELECT t.task_id FROM {TBL_TASKS} t \
+                            WHERE t.session_id = s.session_id \
+                            ORDER BY t.task_id ASC LIMIT 1), \
+                         CASE \
+                           WHEN COALESCE(s.session_agent_type, '') = 'Orchestrator' \
+                            AND s.initiative_id IS NOT NULL \
+                           THEN (SELECT t.task_id FROM {TBL_TASKS} t \
+                                   WHERE t.task_id = s.initiative_id \
+                                     AND t.initiative_id = s.initiative_id \
+                                   LIMIT 1) \
+                           ELSE NULL \
+                         END \
+                       ) AS task_id, \
+                       COALESCE( \
+                         (SELECT t.initiative_id FROM {TBL_TASKS} t \
+                            WHERE t.session_id = s.session_id \
+                            ORDER BY t.task_id ASC LIMIT 1), \
+                         s.initiative_id \
+                       ) AS initiative_id \
                 FROM {TBL_SESSIONS} s \
                 ORDER BY COALESCE(s.revoked_at, s.created_at) DESC \
                 LIMIT ?1"
@@ -7094,6 +7348,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn task_projection_surfaces_custom_tool_invocations_from_audit_chain() {
+        let row = lifecycle::AuditRow {
+            seq: 199,
+            event_id: "event-custom-tool".into(),
+            event_kind: "CustomToolInvoked".into(),
+            initiative_id: Some("init-tools".into()),
+            task_id: Some("tooling-mcp-unity".into()),
+            session_id: Some("session-tools".into()),
+            at: 1_779_211_351,
+            payload: serde_json::json!({
+                "kind": "CustomToolInvoked",
+                "tool_name": "unity_run_playmode_tests",
+                "profile_name": "unity_mcp_tools",
+                "execution_locality": "host_mcp",
+                "outcome": "Success",
+                "duration_ms": 83,
+                "exit_code": 0,
+                "signal": null,
+                "timeout_ms": 5000,
+                "command_argv_sha256": "argv-sha",
+                "stdin_bytes_total": 2,
+                "stdin_sha256": "stdin-sha",
+                "stdout_bytes_total": 287,
+                "stdout_bytes_captured": 287,
+                "stdout_sha256": "stdout-sha",
+                "stdout_truncated": false,
+                "stderr_bytes_total": 0,
+                "stderr_bytes_captured": 0,
+                "stderr_sha256": "stderr-sha",
+                "stderr_truncated": false
+            }),
+        };
+
+        let calls = extract_custom_tool_calls_for_task(&[row], "tooling-mcp-unity");
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.seq, 199);
+        assert_eq!(call.event_id, "event-custom-tool");
+        assert_eq!(call.tool_name, "unity_run_playmode_tests");
+        assert_eq!(call.profile_name, "unity_mcp_tools");
+        assert_eq!(call.execution_locality, "host_mcp");
+        assert_eq!(call.outcome, "Success");
+        assert_eq!(call.duration_ms, 83);
+        assert_eq!(call.exit_code, Some(0));
+        assert_eq!(call.stdout_bytes_total, 287);
+        assert!(!call.stdout_truncated);
+    }
+
     // ── INV-DASHBOARD-TASK-STATE-COMPLETENESS-01 ───────────────────────
     //
     // Wire-shape witness: for every variant of the kernel
@@ -7393,6 +7696,7 @@ task_id = "t-state"
         const TASKS: &str = raxis_store::Table::Tasks.as_str();
         const SESSIONS: &str = raxis_store::Table::Sessions.as_str();
         const INITIATIVES: &str = raxis_store::Table::Initiatives.as_str();
+        const SIGNED_PLAN_ARTIFACTS: &str = raxis_store::Table::SignedPlanArtifacts.as_str();
         let tmp = tempfile::tempdir().unwrap();
         let store = raxis_store::Store::open(&tmp.path().join("kernel.db")).unwrap();
         let g = store.lock_sync();
@@ -7404,6 +7708,25 @@ task_id = "t-state"
                  VALUES ('init-a', 'Executing', '{{}}', 'deadbeef', 100)"
             ),
             [],
+        )
+        .unwrap();
+        let plan = br#"
+[plan.initiative]
+description = "Dashboard session enrichment fixture"
+
+[workspace]
+name = "Existing initiative"
+
+[[tasks]]
+task_id = "task-a"
+"#;
+        g.execute(
+            &format!(
+                "INSERT INTO {SIGNED_PLAN_ARTIFACTS} \
+                    (initiative_id, plan_bytes, plan_sig, stored_at) \
+                 VALUES ('init-a', ?1, x'00', 100)"
+            ),
+            rusqlite::params![plan.as_slice()],
         )
         .unwrap();
         g.execute(
@@ -7553,6 +7876,130 @@ task_id = "t-state"
         assert!(r.task_id.is_none());
         assert_eq!(r.input_tokens, 0);
         assert_eq!(r.output_tokens, 0);
+    }
+
+    /// Historical orchestrator sessions are not always referenced by
+    /// `tasks.session_id`: after an orchestrator respawn, the
+    /// synthetic coordinator task points at the newest session, while
+    /// older session detail pages remain valid forensic artifacts.
+    /// The dashboard must bind those old rows through
+    /// `sessions.initiative_id` so LLM turns and coordinator token
+    /// totals stay visible after revocation.
+    #[test]
+    fn owning_task_for_session_uses_orchestrator_initiative_backedge() {
+        const TASKS: &str = raxis_store::Table::Tasks.as_str();
+        const SESSIONS: &str = raxis_store::Table::Sessions.as_str();
+        let tmp = seed_session_with_task();
+        let store = raxis_store::Store::open(&tmp.path().join("kernel.db")).unwrap();
+        {
+            let g = store.lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {SESSIONS} \
+                        (session_id, role_id, session_token, lineage_id, \
+                         fetch_quota, created_at, expires_at, revoked, revoked_at, \
+                         session_agent_type, can_delegate, initiative_id) \
+                     VALUES ('orch-old', 'Planner', 'tok-orch-old', 'lin', \
+                             0, 110, 9999999999, 1, 160, \
+                             'Orchestrator', 1, 'init-a')",
+                ),
+                [],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {SESSIONS} \
+                        (session_id, role_id, session_token, lineage_id, \
+                         fetch_quota, created_at, expires_at, revoked, \
+                         session_agent_type, can_delegate, initiative_id) \
+                     VALUES ('orch-current', 'Planner', 'tok-orch-current', 'lin', \
+                             0, 170, 9999999999, 0, \
+                             'Orchestrator', 1, 'init-a')",
+                ),
+                [],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {TASKS} \
+                        (task_id, initiative_id, lane_id, state, actor, \
+                         policy_epoch, admitted_at, transitioned_at, \
+                         session_id, cumulative_input_tokens, \
+                         cumulative_output_tokens) \
+                     VALUES ('init-a', 'init-a', 'lane-1', 'Running', 'orch', \
+                             1, 100, 200, 'orch-current', 15644, 1159)"
+                ),
+                [],
+            )
+            .unwrap();
+        }
+
+        let conn = raxis_store::ro::open(tmp.path()).unwrap();
+        let r = owning_task_for_session(&conn, "orch-old").unwrap();
+        assert_eq!(r.initiative_id.as_deref(), Some("init-a"));
+        assert_eq!(r.task_id.as_deref(), Some("init-a"));
+        assert_eq!(r.input_tokens, 15644);
+        assert_eq!(r.output_tokens, 1159);
+    }
+
+    #[test]
+    fn recent_sessions_use_orchestrator_initiative_backedge() {
+        const TASKS: &str = raxis_store::Table::Tasks.as_str();
+        const SESSIONS: &str = raxis_store::Table::Sessions.as_str();
+        let tmp = seed_session_with_task();
+        let store = raxis_store::Store::open(&tmp.path().join("kernel.db")).unwrap();
+        {
+            let g = store.lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {SESSIONS} \
+                        (session_id, role_id, session_token, lineage_id, \
+                         fetch_quota, created_at, expires_at, revoked, revoked_at, \
+                         session_agent_type, can_delegate, initiative_id) \
+                     VALUES ('orch-old', 'Planner', 'tok-orch-old', 'lin', \
+                             0, 110, 9999999999, 1, 160, \
+                             'Orchestrator', 1, 'init-a')",
+                ),
+                [],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {SESSIONS} \
+                        (session_id, role_id, session_token, lineage_id, \
+                         fetch_quota, created_at, expires_at, revoked, \
+                         session_agent_type, can_delegate, initiative_id) \
+                     VALUES ('orch-current', 'Planner', 'tok-orch-current', 'lin', \
+                             0, 170, 9999999999, 0, \
+                             'Orchestrator', 1, 'init-a')",
+                ),
+                [],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {TASKS} \
+                        (task_id, initiative_id, lane_id, state, actor, \
+                         policy_epoch, admitted_at, transitioned_at, \
+                         session_id, cumulative_input_tokens, \
+                         cumulative_output_tokens) \
+                     VALUES ('init-a', 'init-a', 'lane-1', 'Running', 'orch', \
+                             1, 100, 200, 'orch-current', 15644, 1159)"
+                ),
+                [],
+            )
+            .unwrap();
+        }
+
+        let conn = raxis_store::ro::open(tmp.path()).unwrap();
+        let rows = read_sessions_all_for_recent(&conn, 20).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.session_id == "orch-old")
+            .expect("historical orchestrator session should remain visible");
+        assert_eq!(row.agent_type, "Orchestrator");
+        assert_eq!(row.initiative_id.as_deref(), Some("init-a"));
+        assert_eq!(row.task_id.as_deref(), Some("init-a"));
     }
 
     /// When more than one task references the same session, the

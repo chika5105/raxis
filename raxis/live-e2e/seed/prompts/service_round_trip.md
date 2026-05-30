@@ -27,7 +27,10 @@ Create `out/services/` and write evidence for:
 
 - Read `service_evidence_mongo` in database `raxis_e2e_mongo`.
 - Sort by `doc_id`.
-- Write one canonical JSON object per line with `doc_id`, `label`, and `magic`.
+- Write one canonical JSON object per line with exactly these keys in order:
+  `doc_id`, `label`, `magic`.
+- The JSON must be compact, with no spaces after `:` or `,`.
+  Example: `{"doc_id":"mongo_seed_doc_1","label":"service-evidence-label-1","magic":1000003}`
 - The seeded fixture includes `mongo_seed_doc_1`.
 
 `out/services/redis.txt`
@@ -40,8 +43,16 @@ Create `out/services/` and write evidence for:
 `out/services/smtp.txt`
 
 - Send one small canonical test message through the configured SMTP endpoint.
-- Write the accepted envelope and message identifiers with lowercase keys.
-- Use `smtp_seed_subject_1` as the subject marker.
+- Use this envelope and body:
+  - from: `sender@live-e2e.test`
+  - to: `raxis-tenant@live-e2e.test`
+  - subject: `smtp_seed_subject_1`
+  - body: `smtp_seed_body_1: service-evidence smtp round-trip`
+- Write exactly these four lowercase lines:
+  - `from: sender@live-e2e.test`
+  - `to: raxis-tenant@live-e2e.test`
+  - `subject: smtp_seed_subject_1`
+  - `body: smtp_seed_body_1: service-evidence smtp round-trip`
 
 Optional `mysql.txt` and `mssql.txt`
 

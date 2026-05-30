@@ -20,12 +20,19 @@ for required in \
     "/usr/local/bin/raxis-planner-executor" \
     "/sbin/init" \
     "/bin/bash" \
+    "/usr/bin/cargo" \
+    "/usr/bin/cargo-clippy" \
+    "/usr/bin/clippy-driver" \
     "/usr/bin/git" \
     "/usr/bin/curl" \
+    "/usr/bin/rg" \
+    "/usr/local/bin/fd" \
     "/usr/bin/wget" \
     "/usr/sbin/nft" \
     "/usr/bin/node" \
     "/usr/bin/python3" \
+    "/usr/bin/rustc" \
+    "/usr/bin/rustfmt" \
     "/usr/bin/make"; do
     if [ ! -e "$ROOTFS$required" ]; then
         echo "verify: missing required file $required" >&2
@@ -152,31 +159,20 @@ done
 # INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01.
 #
 # The realistic-scenario `lint-runner-rust` task invokes the standard
-# rustup shims (`cargo fmt --check`, `cargo clippy ...`). The image must
-# therefore ship both the shims under `/root/.cargo/bin` and the stable
-# toolchain payload under `/root/.rustup/toolchains/stable-*`; otherwise
-# rustup reports "no default toolchain configured" at task time and the
-# executor wastes a review-retry round on environment setup instead of
-# the code defect.
-for rust_bin in rustup cargo rustfmt cargo-clippy clippy-driver; do
-    if [ ! -e "$ROOTFS/root/.cargo/bin/$rust_bin" ]; then
-        echo "verify: missing /root/.cargo/bin/$rust_bin — \
+# Cargo subcommands (`cargo fmt --check`, `cargo clippy ...`). The
+# image intentionally uses Debian's distro packages here instead of
+# rustup: rustup's full toolchain tree made the initramfs exceed the
+# guest boot envelope, so executor VMs panicked before planner vsock
+# could bind. The required runtime contract is the binaries being on
+# PATH, not the presence of rustup itself.
+for rust_bin in cargo rustc rustfmt cargo-clippy clippy-driver; do
+    if [ ! -e "$ROOTFS/usr/bin/$rust_bin" ]; then
+        echo "verify: missing /usr/bin/$rust_bin — \
 INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED. Remediation: \
 re-bake the executor-starter rootfs; the Containerfile installs \
-rustup stable plus rustfmt/clippy components." >&2
+the distro Rust packages rustc/cargo/rustfmt/rust-clippy." >&2
         exit 1
     fi
 done
-
-RUST_TOOLCHAIN_DIR="$(ls -d "$ROOTFS/root/.rustup/toolchains/stable-"* \
-    2>/dev/null | head -n1)"
-if [ -z "$RUST_TOOLCHAIN_DIR" ] || [ ! -e "$RUST_TOOLCHAIN_DIR/bin/cargo" ]; then
-    echo "verify: stable rustup toolchain payload not found under \
-/root/.rustup/toolchains/stable-* — \
-INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED. Remediation: \
-re-bake the executor-starter rootfs so rustup stable is installed \
-inside /root/.rustup." >&2
-    exit 1
-fi
 
 echo "verify: executor-starter rootfs at $ROOTFS passes structural checks"

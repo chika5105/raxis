@@ -27,7 +27,8 @@ export default function GetStartedPage() {
             This is the fastest route for a new Homebrew user. Run the guided
             setup once; it installs the bottle, creates the operator key,
             initializes the service data dir, writes the provider credential,
-            signs policy, and starts the daemon.
+            signs policy, starts the daemon, and leaves the dashboard ready for
+            plan drafting and inspection.
           </p>
           <div className="mt-9 flex flex-wrap gap-3">
             <a href="#fast-path" className="btn btn-primary">
@@ -198,11 +199,19 @@ raxis doctor`}</CommandBlock>
             />
             <DashboardFeature
               title="Plan Builder"
-              body="Add tasks, browse plan features, confirm the DAG, validate with the kernel, then copy or download plan.toml."
+              body="Draw the task DAG, keep plan.toml synchronized, attach model routes, tool profiles, credentials, and verifiers, then validate with the kernel."
             />
             <DashboardFeature
-              title="Tool Builder"
-              body="Wrap existing scripts, MCP servers, local HTTP services, commercial tool bridges, Unity, and Blender as bounded Executor custom tools before copying them into plan.toml."
+              title="Tool profiles"
+              body="Define shared Executor tool bundles once, then reference one or many profiles from task cards without making tools an authority channel."
+            />
+            <DashboardFeature
+              title="Credential setup"
+              body="Draft the non-secret credential names and expected shapes that plan tasks can bind to; secret values stay in the data dir."
+            />
+            <DashboardFeature
+              title="Plan verifiers"
+              body="Add merged-tree checks and connect policy gate references so operators can see what ran, when it ran, and why it blocked or warned."
             />
             <DashboardFeature
               title="Policy Builder"
@@ -216,7 +225,7 @@ raxis doctor`}</CommandBlock>
           <div className="mt-8 space-y-6">
             <DashboardShot
               src="/images/dashboard-plan-builder.png"
-              alt="Raxis dashboard Plan Builder with feature library and DAG preview"
+              alt="Raxis dashboard Plan Builder with DAG canvas and synchronized plan.toml"
               title="Plan Builder"
             />
             <DashboardShot
@@ -326,15 +335,27 @@ const glossaryTerms = [
   },
   {
     term: "Plan Builder",
-    body: "Dashboard helper for drafting plan.toml, rendering the DAG, validating with the kernel, and copying/downloading the result.",
+    body: "Visual plan.toml editor. The DAG, inline task cards, model routing, tool profiles, credential setup, verifiers, and TOML source stay synchronized.",
   },
   {
-    term: "Tool Builder",
-    body: "Dashboard helper for wrapping existing scripts, stdio MCP servers, local HTTP services, commercial tool bridges, Unity, Blender, and other local automation as bounded Executor custom tools.",
+    term: "Model routing",
+    body: "Plan Builder pane for choosing provider:model fallback chains for Executor and Reviewer aliases. The active policy still owns provider credentials and model allowlists.",
+  },
+  {
+    term: "Tool profiles",
+    body: "Plan Builder pane for shared Executor tool bundles. Tasks reference profiles instead of redefining tools per task.",
+  },
+  {
+    term: "Credential setup",
+    body: "Plan Builder pane for the credential names and expected proxy shapes a task may bind. Secret values stay in provider or credential files, not in plan.toml.",
+  },
+  {
+    term: "Plan verifiers",
+    body: "Plan Builder pane for per-plan integration checks and policy gate references. Verifier results surface in gates, task detail, and audit views.",
   },
   {
     term: "Policy Builder",
-    body: "Dashboard helper for discovering policy features, validating drafts, and preparing the signed epoch-advance path.",
+    body: "Dashboard helper for discovering policy features, validating drafts, and preparing the signed policy/epoch-advance path.",
   },
   {
     term: "Custom tool",

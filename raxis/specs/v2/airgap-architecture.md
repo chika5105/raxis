@@ -323,10 +323,10 @@ invariants whose canonical home is [`planner-harness.md §10.6`](planner-harness
   globally installed at bake time so `npx --no-install`'s
   resolution-fallback to `$PATH` finds them before the
   `--no-install` branch fires.
-- `INV-EXECUTOR-IMAGE-RUST-TOOLCHAIN-01` — Rust stable plus
-  `cargo`, `rustfmt`, and `clippy` are baked into the executor
-  image. Raxis does not stamp `CARGO_NET_OFFLINE=true`; agents
-  see normal Cargo behaviour and the kernel enforces any
+- `INV-EXECUTOR-IMAGE-RUST-TOOLCHAIN-01` — `rustc`, `cargo`,
+  `rustfmt`, and `clippy` are baked into the executor image via
+  distro packages. Raxis does not stamp `CARGO_NET_OFFLINE=true`;
+  agents see normal Cargo behaviour and the kernel enforces any
   package-host policy decision underneath.
 - `INV-EXECUTOR-EGRESS-PREINSTALLED-FIRST-01` — the umbrella
   invariant: the realistic-scenario plan should use baked

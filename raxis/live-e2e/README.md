@@ -355,7 +355,7 @@ the executor-starter Containerfile is the structural answer:
 
 | Lane     | Pre-baked binaries                                                                                                          | Pinned in                                              |
 | -------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| Rust     | `cargo`, `rustfmt`, `clippy` (rustup stable)                                                                                | [`images/executor-starter/Containerfile`](../images/executor-starter/Containerfile) |
+| Rust     | `cargo`, `rustfmt`, `clippy` (Debian distro packages; no rustup tree)                                                        | [`images/executor-starter/Containerfile`](../images/executor-starter/Containerfile) |
 | Python   | `ruff==0.7.4` (pip → system site-packages; CLI shim at `/usr/local/bin/ruff`; importable as `python -m ruff`)               | Containerfile + [`manifest.toml`](../images/executor-starter/manifest.toml) `[lint_toolchain] ruff_version` |
 | JS / TS  | `eslint@9.15.0`, `prettier@3.3.3`, `typescript@5.6.3`, `tsx@4.19.2`, `@types/node@20.17.6`, `@typescript-eslint/parser@8.15.0` (npm install -g; `/usr/bin/<bin>` shims) | Containerfile + `manifest.toml` `[lint_toolchain]` |
 
@@ -1026,6 +1026,11 @@ Anthropic, Gemini, and OpenAI; every executor keeps the other two
 models as retryable fallbacks. Before launching, ensure `raxis/.env`
 contains non-empty `ANTHROPIC-API-DEV-KEY`, `GEMINI-API-DEV-KEY`, and
 `OPEN-AI-API-DEV-KEY` lines.
+
+`gpt-5.3-codex` is intentionally exercised as an OpenAI-family
+completion-only model: the planner adapter routes it to
+`/v1/completions`, while chat-capable OpenAI models continue to use
+`/v1/chat/completions`.
 
 ```bash
 RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 \

@@ -2187,15 +2187,16 @@ the LLM consults.
 **Pre-installed lint toolchain (canonical-only,
 `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01` +
 `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`).** Symmetric to the
-Rust toolchain (rustup-installed `cargo` + `rustfmt` + `clippy`),
-the starter image pre-bakes the Python and JavaScript / TypeScript
+Rust toolchain (`cargo` + `rustc` + `rustfmt` + `clippy` from the
+starter image's distro packages), the starter image pre-bakes the
+Python and JavaScript / TypeScript
 lint stacks the realistic-scenario per-language
 `lint-runner-{python,rust,js}` tasks drive:
 
 | Language   | Tool                  | Pinned version | Resolved via                              |
 | ---------- | --------------------- | -------------- | ----------------------------------------- |
-| Rust       | `cargo fmt --check`   | rustup stable  | `/root/.cargo/bin/cargo` (already baked)  |
-| Rust       | `cargo clippy`        | rustup stable  | `/root/.cargo/bin/cargo` (already baked)  |
+| Rust       | `cargo fmt --check`   | Debian bookworm package set | `/usr/bin/cargo` + `/usr/bin/rustfmt` (already baked) |
+| Rust       | `cargo clippy`        | Debian bookworm package set | `/usr/bin/cargo` + `/usr/bin/cargo-clippy` (already baked) |
 | Python     | `python -m ruff check`/`format --check` | `ruff==0.7.4` | `pip3 --break-system-packages` into system site-packages; `python -m ruff` resolves through the same import path the seed `ruff.toml` targets. CLI shim at `/usr/local/bin/ruff` |
 | JavaScript | `npx --no-install eslint --max-warnings 0`   | `eslint@9.15.0`     | `npm install -g` global node_modules; `/usr/bin/eslint` shim |
 | JavaScript | `npx --no-install prettier --check`          | `prettier@3.3.3`    | `npm install -g`; `/usr/bin/prettier` shim |
@@ -2264,15 +2265,18 @@ Full schema and redaction rules: [`canonical-images.md §6`](canonical-images.md
 
 **Rust toolchain network posture
 (`INV-EXECUTOR-IMAGE-RUST-TOOLCHAIN-01`).** The executor
-starter image bakes Rust stable plus `cargo`, `rustfmt`, and
-`clippy`. Raxis no longer stamps `CARGO_NET_OFFLINE=true` at
-PID-1 boot: that env var teaches the model the wrong global
-lesson ("networking is unavailable") and can make it give up
-even when the task legitimately needs a fetch. Rust tasks should
-prefer the baked toolchain and existing lockfiles, but ordinary
-`cargo` networking remains available when the task and policy
-allow it. If a future realistic seed adds a third-party Rust dep,
-either prebundle the crate set into the image or explicitly open
+starter image bakes Debian's `rustc`, `cargo`, `rustfmt`, and
+`rust-clippy` packages. It intentionally does not carry rustup's
+full toolchain tree: that made the executor initramfs too large
+for the guest boot envelope. Raxis no longer stamps
+`CARGO_NET_OFFLINE=true` at PID-1 boot: that env var teaches the
+model the wrong global lesson ("networking is unavailable") and
+can make it give up even when the task legitimately needs a fetch.
+Rust tasks should prefer the baked toolchain and existing
+lockfiles, but ordinary `cargo` networking remains available when
+the task and policy allow it. If a future realistic seed adds a
+third-party Rust dep, either prebundle the crate set into the image
+or explicitly open
 the required package-host egress in the task/policy and document
 why.
 

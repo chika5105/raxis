@@ -939,6 +939,14 @@ pub struct TaskView {
     pub reviewer_verdicts: Vec<ReviewerVerdictView>,
     /// Structured outputs surfaced via `task outputs`.
     pub structured_outputs: Vec<StructuredOutputView>,
+    /// Custom tool invocations recorded in the audit chain for
+    /// this task. These are kernel-audited calls for guest
+    /// subprocess, host subprocess, host MCP, remote MCP, and
+    /// future tool localities. The dashboard surfaces them beside
+    /// structured outputs so an operator does not have to discover
+    /// `CustomToolInvoked` rows manually in the raw audit chain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_tool_calls: Vec<CustomToolCallView>,
     /// Path-scope allowlist (effective).
     pub path_allowlist: Vec<String>,
     /// Unix-seconds creation timestamp.
@@ -1211,6 +1219,67 @@ pub struct StructuredOutputView {
     pub at: u64,
 }
 
+/// One custom-tool invocation projected from a
+/// `CustomToolInvoked` audit-chain row.
+#[derive(Debug, Clone, Serialize)]
+pub struct CustomToolCallView {
+    /// Audit-chain sequence number for deep forensic correlation.
+    pub seq: u64,
+    /// Audit event id, when present on the chain row.
+    pub event_id: String,
+    /// Unix-seconds emit timestamp.
+    pub at: u64,
+    /// Tool id from the tool profile.
+    pub tool_name: String,
+    /// Tool profile id that authorized the call.
+    pub profile_name: String,
+    /// Execution locality (`guest_subprocess`, `host_mcp`,
+    /// `remote_mcp`, etc.).
+    pub execution_locality: String,
+    /// Outcome string emitted by the kernel (`Success`, `Failed`,
+    /// `TimedOut`, ...).
+    pub outcome: String,
+    /// Wall-clock tool duration.
+    pub duration_ms: u64,
+    /// Process exit code when the locality has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Process signal when the locality has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
+    /// Configured timeout ceiling for the invocation.
+    pub timeout_ms: u64,
+    /// SHA-256 of the normalized command argv / invocation
+    /// descriptor. The dashboard intentionally avoids exposing raw
+    /// argv text here; hashes preserve auditability without leaking
+    /// command arguments into every summary surface.
+    pub command_argv_sha256: String,
+    /// Total stdin bytes supplied to the tool.
+    pub stdin_bytes_total: u64,
+    /// SHA-256 of stdin bytes.
+    pub stdin_sha256: String,
+    /// Total stdout bytes produced by the tool.
+    pub stdout_bytes_total: u64,
+    /// Captured stdout bytes persisted by the kernel.
+    pub stdout_bytes_captured: u64,
+    /// SHA-256 of stdout bytes.
+    pub stdout_sha256: String,
+    /// True when stdout was larger than the capture budget.
+    pub stdout_truncated: bool,
+    /// Total stderr bytes produced by the tool.
+    pub stderr_bytes_total: u64,
+    /// Captured stderr bytes persisted by the kernel.
+    pub stderr_bytes_captured: u64,
+    /// SHA-256 of stderr bytes.
+    pub stderr_sha256: String,
+    /// True when stderr was larger than the capture budget.
+    pub stderr_truncated: bool,
+    /// Structured error, when the tool failed before or during
+    /// execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Session row.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionView {
@@ -1290,6 +1359,22 @@ pub struct SessionVmEnvView {
     pub value: String,
     /// Whether `value` was redacted by the store view.
     pub redacted: bool,
+    /// Whether the RAXIS planner PID 1 can consume this value during
+    /// boot/runtime. Planner-only values may be scrubbed from
+    /// subprocess env while remaining available through the in-process
+    /// runtime snapshot.
+    pub visible_to_planner_process: bool,
+    /// Whether model-driven tools (`bash`, custom guest subprocesses)
+    /// inherit this key after guest hardening. `false` means the key
+    /// was present in the VM spawn envelope but scrubbed before the
+    /// agent could discover it via `env`, `/proc/cmdline`, or
+    /// `/proc/1/environ`.
+    pub visible_to_agent_tools: bool,
+    /// Compact operator-facing classification: `planner-only`,
+    /// `agent-visible`, or `redacted`.
+    pub visibility: String,
+    /// Short explanation shown in the dashboard table.
+    pub visibility_note: String,
     /// Capture source, usually `session-spawn`.
     pub source: String,
     /// Unix timestamp when the snapshot was captured.
@@ -4054,6 +4139,7 @@ mod tests {
                     session_id: Some("s-1".into()),
                     reviewer_verdicts: vec![],
                     structured_outputs: vec![],
+                    custom_tool_calls: vec![],
                     path_allowlist: vec!["src/".into()],
                     created_at: 100,
                     updated_at: 150,
@@ -4081,6 +4167,7 @@ mod tests {
                     session_id: Some("s-2".into()),
                     reviewer_verdicts: vec![],
                     structured_outputs: vec![],
+                    custom_tool_calls: vec![],
                     path_allowlist: vec!["src/".into()],
                     created_at: 150,
                     updated_at: 200,
@@ -4182,6 +4269,7 @@ mod tests {
             session_id: None,
             reviewer_verdicts: vec![],
             structured_outputs: vec![],
+            custom_tool_calls: vec![],
             path_allowlist: vec![],
             created_at: 0,
             updated_at: 0,
@@ -4224,6 +4312,7 @@ mod tests {
             session_id: None,
             reviewer_verdicts: vec![],
             structured_outputs: vec![],
+            custom_tool_calls: vec![],
             path_allowlist: vec![],
             created_at: 0,
             updated_at: 0,

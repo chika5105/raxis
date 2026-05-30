@@ -41,5 +41,5 @@ prettier_version = "3.3.3"
 typescript_version = "5.6.3"
 tsx_version = "4.19.2"
 typescript_eslint_parser_version = "8.15.0"
-rust_toolchain = "stable"
-rust_components = ["rustfmt", "clippy"]
+rust_toolchain = "debian-bookworm-apt"
+rust_packages = ["rustc", "cargo", "rustfmt", "rust-clippy"]

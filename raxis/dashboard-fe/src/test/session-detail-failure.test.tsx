@@ -12,7 +12,7 @@
  * noisy in test output. */
 
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Route, Routes } from "react-router-dom";
 import { TestMemoryRouter } from "@/test/router";
@@ -139,6 +139,32 @@ describe("<SessionDetailPage> failure rendering", () => {
     expect(screen.getByTestId("session-stream-mock")).toHaveAttribute(
       "data-historical",
       "true",
+    );
+  });
+
+  it("keeps LLM turns available for historical orchestrator sessions via coordinator task", async () => {
+    const turnsSpy = vi
+      .spyOn(dashboardApi.tasks, "llmTurns")
+      .mockResolvedValue([]);
+    mockSession({
+      role: "Orchestrator",
+      state: "Revoked",
+      task_id: null,
+      initiative_id: "init_xyz",
+      failure: null,
+      updated_at: 1714500300,
+    });
+    renderAt("sess_abc");
+    expect(
+      await screen.findByTestId("session-lifecycle-notice"),
+    ).toBeInTheDocument();
+
+    const tab = screen.getByTestId("tab-llm-turns");
+    expect(tab).not.toBeDisabled();
+    fireEvent.click(tab);
+
+    await waitFor(() =>
+      expect(turnsSpy).toHaveBeenCalledWith("init_xyz", 100, expect.anything()),
     );
   });
 });

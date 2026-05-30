@@ -14,7 +14,7 @@
 # Generalist tooling consistent with planner-harness.md §10.6:
 #  - Node 20 LTS
 #  - Python 3.11
-#  - Rust stable
+#  - Rust toolchain (cargo, rustc, rustfmt, clippy)
 #  - Go 1.22
 #  - git ≥ 2.30, GitHub CLI
 #  - Modern Unix tooling: rg, fd, jq, yq
@@ -40,6 +40,8 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     ca-certificates \
     coreutils \
     curl \
+    cargo \
+    fd-find \
     findutils \
     git \
     gnupg \
@@ -51,11 +53,17 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     netcat-openbsd \
     nftables \
     procps \
+    ripgrep \
+    rust-clippy \
+    rustc \
+    rustfmt \
     sed \
     tar \
     unzip \
     wget \
     xz-utils \
+    && mkdir -p /usr/local/bin \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
 # Path A3 universal-airgap (`specs/v2/airgap-architecture.md §6`)
@@ -166,10 +174,10 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # `pip install ruff` at runtime — the lint capture has to find
 # `ruff` already importable from system site-packages.
 #
-# This mirrors how `cargo fmt --check` + `cargo clippy` already
-# work for the parallel `lint-runner-rust` task: the Rust
-# toolchain is rustup-installed earlier in this Containerfile and
-# the seed crate's `[dependencies]` is empty, so `cargo` runs
+# This mirrors how `cargo fmt --check` + `cargo clippy` work for
+# the parallel `lint-runner-rust` task: the starter image carries
+# the distro Rust toolchain and the seed crate's `[dependencies]`
+# is empty, so `cargo` runs
 # against the pre-baked binaries without ever needing network
 # access. The Python side reaches the same shape by pinning ruff
 # at image-bake time into system site-packages; `python -m ruff`
@@ -187,17 +195,6 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 RUN pip3 install --no-cache-dir --break-system-packages \
         "ruff==0.7.4"
 
-# Rust stable via rustup. The explicit envs are mirrored by the
-# executor PID-1 defaults so rustup shims resolve the baked toolchain
-# even when a substrate boots with HOME=/.
-ENV CARGO_HOME=/root/.cargo
-ENV RUSTUP_HOME=/root/.rustup
-ENV RUSTUP_TOOLCHAIN=stable
-ENV PATH=/root/.cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
-    && rustup default stable \
-    && rustup component add rustfmt clippy
-
 # Go 1.22 — fetch the upstream tarball matching the build platform.
 # `dpkg --print-architecture` returns the Debian arch identifier
 # (`amd64` / `arm64` / ...), which lines up with Google's Go release
@@ -213,7 +210,7 @@ ENV PATH=/usr/local/go/bin:$PATH
 
 # GitHub CLI — pin the apt source's `arch=` to the build platform so
 # `apt-get install gh` resolves the matching binary. NodeSource +
-# rustup + Go each handle arch internally; the GitHub CLI Debian
+# distro Rust + Go each handle arch internally; the GitHub CLI Debian
 # repo gates by `arch=` so an `arch=amd64` line on an arm64 builder
 # silently surfaces an empty package list and `Unable to locate
 # package gh`.
@@ -224,9 +221,6 @@ RUN GH_ARCH="$(dpkg --print-architecture)" \
         > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install --no-install-recommends -y gh \
     && rm -rf /var/lib/apt/lists/*
-
-# rg + fd via cargo (pinned to their stable versions).
-RUN cargo install ripgrep fd-find
 
 # Note: `raxis-planner-executor` (the role's PID-1 entry point) is
 # **NOT** copied in by this Containerfile. The planner binary is

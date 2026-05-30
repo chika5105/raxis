@@ -474,6 +474,12 @@ Both surfaces read from the **same** memoized
 `OnceLock<Arc<CapabilityManifest>>`. For a given `(image
 digest, session env)` pair the manifest is byte-deterministic,
 which is what makes prompt caching across turns correct.
+The raw manifest includes kernel/operator provenance metadata such
+as image origin and digest for internal diagnostics. The LLM-facing
+capability hint and `vm_capabilities` tool redact that provenance:
+the agent can discover installed runtimes, binaries, package sets,
+workspace state, and credential-proxy env names, but not whether the
+VM came from a canonical or BYO image nor the image digest.
 
 ### §6.3 — Manifest schema
 

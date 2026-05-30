@@ -85,10 +85,10 @@ use crate::intent::{
     reviewer_terminal_tool_to_intent_kind, IntentSubmitter, SubmitError,
 };
 use crate::model::{AnthropicClient, MessageRequest, MessageResponse, ModelClient, ModelError};
-use crate::openai_client::OpenAiClient;
+use crate::openai_client::{OpenAiApiSurface, OpenAiClient};
 use crate::provider_model::{
-    resolve_model_chain_from_env_fn, KnownModel, ProviderId, ProviderModelError, MODEL_CHAIN_ENV,
-    MODEL_ID_ENV,
+    resolve_model_chain_from_env_fn, KnownModel, OpenAiModelApiSurface, ProviderId,
+    ProviderModelError, MODEL_CHAIN_ENV, MODEL_ID_ENV,
 };
 use crate::retry::{FallbackModelClient, RetryConfig, RetryingModelClient};
 use crate::sidecar_client::{SidecarConstructError, SidecarModelClient};
@@ -753,10 +753,19 @@ where
             base_url.to_owned(),
             Arc::clone(http_fetch),
         )),
-        ProviderId::OpenAi => Arc::new(OpenAiClient::with_http_fetch(
-            base_url.to_owned(),
-            Arc::clone(http_fetch),
-        )),
+        ProviderId::OpenAi => {
+            let api_surface = match known_model
+                .openai_api_surface()
+                .unwrap_or(OpenAiModelApiSurface::ChatCompletions)
+            {
+                OpenAiModelApiSurface::ChatCompletions => OpenAiApiSurface::ChatCompletions,
+                OpenAiModelApiSurface::Completions => OpenAiApiSurface::Completions,
+            };
+            Arc::new(
+                OpenAiClient::with_http_fetch(base_url.to_owned(), Arc::clone(http_fetch))
+                    .with_api_surface(api_surface),
+            )
+        }
         ProviderId::Gemini => Arc::new(GeminiClient::with_http_fetch(
             base_url.to_owned(),
             Arc::clone(http_fetch),
@@ -1948,6 +1957,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_model_client_routes_completion_only_openai_models_to_completions_url() {
+        let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
+        let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
+        let m = known("gpt-5.3-codex");
+        let client = build_model_client(m, "https://api.openai.com", &fetch, &|_| None).unwrap();
+        let url = url_dialled_by(client, rec).await;
+        assert_eq!(url, "https://api.openai.com/v1/completions");
+    }
+
+    #[tokio::test]
     async fn build_model_client_routes_gemini_to_gemini_url() {
         let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
         let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
@@ -1985,7 +2004,7 @@ mod tests {
         // Bedrock URL: <base>/model/<model>/invoke
         assert_eq!(
             url,
-            "https://bedrock-runtime.us-east-1.amazonaws.com/model/fixture-model/invoke",
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-sonnet-20241022-v2:0/invoke",
         );
     }
 

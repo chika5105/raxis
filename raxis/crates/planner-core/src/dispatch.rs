@@ -1086,6 +1086,7 @@ mod tests {
     use super::*;
     use crate::model::{MessageResponse, MockModelClient, Usage};
     use crate::tools::Tool;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn empty_response_end_turn(text: &str) -> MessageResponse {
         MessageResponse {
@@ -1151,6 +1152,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("hello.txt"), "hi from raxis").unwrap();
         dir
+    }
+
+    struct AlwaysFallbackError {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelClient for AlwaysFallbackError {
+        async fn create_message(
+            &self,
+            _req: &MessageRequest,
+        ) -> Result<MessageResponse, ModelError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(ModelError::Upstream {
+                status: 503,
+                body: "provider unavailable".to_owned(),
+            })
+        }
     }
 
     #[tokio::test]
@@ -1396,6 +1415,51 @@ mod tests {
                 assert_eq!(turns, 3);
             }
             other => panic!("expected MaxTurnsExceeded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_success_is_one_dispatch_turn_and_still_charged_against_token_caps() {
+        let primary_calls = Arc::new(AtomicUsize::new(0));
+        let primary = Arc::new(AlwaysFallbackError {
+            calls: Arc::clone(&primary_calls),
+        }) as Arc<dyn ModelClient>;
+        let secondary = Arc::new(MockModelClient::new(vec![
+            empty_response_end_turn_with_usage("done", 120, 5),
+        ]));
+        let secondary_seen = Arc::clone(&secondary.seen);
+        let model = Arc::new(crate::retry::FallbackModelClient::new(vec![
+            primary,
+            secondary as Arc<dyn ModelClient>,
+        ]));
+        let registry = Arc::new(crate::tools::build_executor_registry());
+        let ws = fixture_workspace();
+        let mut cfg = DispatchConfig::new("test-model");
+        cfg.max_turns = 1;
+        cfg.max_tokens_total = Some(100);
+
+        let mut d = DispatchLoop::new(model, registry, cfg, ToolContext::for_workspace(ws.path()));
+        let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
+
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            secondary_seen.lock().await.len(),
+            1,
+            "fallback attempts are one bounded provider chain inside one logical dispatch turn",
+        );
+        match out {
+            DispatchOutcome::TokensExceeded {
+                which,
+                input_tokens,
+                output_tokens,
+                ceiling,
+            } => {
+                assert_eq!(which, "total");
+                assert_eq!(input_tokens, 120);
+                assert_eq!(output_tokens, 5);
+                assert_eq!(ceiling, 100);
+            }
+            other => panic!("expected TokensExceeded(total), got {other:?}"),
         }
     }
 

@@ -148,6 +148,63 @@ pub const PLANNER_SIDECAR_PROVIDER_ID_ENV: &str = "RAXIS_PLANNER_SIDECAR_PROVIDE
 ///   compromised planner cannot replay across spawns). NEVER logged.
 pub const PLANNER_SIDECAR_HMAC_SECRET_ENV: &str = "RAXIS_PLANNER_SIDECAR_HMAC_SECRET";
 
+/// Env vars that are present in the VM spawn envelope but MUST be
+/// removed from the process environment before any model-driven tool
+/// subprocess can run.
+///
+/// The planner PID 1 may still need some of these values after the
+/// scrub pass. It keeps an in-process snapshot for those legitimate
+/// reads; child processes spawned by the agent inherit only the
+/// scrubbed OS environment. `RAXIS_SESSION_ID` is scrubbed too: the
+/// planner process already captured it in `BootEnv`, and model-driven
+/// subprocesses do not need identity metadata to do their work. The
+/// bearer session token stays host-side.
+pub const AGENT_SUBPROCESS_SCRUBBED_ENV_VARS: &[&str] = &[
+    "CARGO_NET_OFFLINE",
+    "RAXIS_AIRGAP_A3_ADMISSION_PORT",
+    "RAXIS_AIRGAP_A3_HOST_CID",
+    "RAXIS_AIRGAP_A3_TUNNEL_PORT",
+    "RAXIS_BLOCK_MOUNTS",
+    "RAXIS_CREDENTIAL_PROXY_LOOPBACK_PLAN",
+    "RAXIS_KERNEL_PLANNER_SOCKET",
+    "RAXIS_KERNEL_VSOCK_CID",
+    "RAXIS_KERNEL_VSOCK_LISTEN_PORT",
+    "RAXIS_KERNEL_VSOCK_PORT",
+    "RAXIS_MODEL_CHAIN",
+    "RAXIS_MODEL_ID",
+    "RAXIS_PLANNER_BASE_URL",
+    "RAXIS_PLANNER_CUSTOM_TOOLS",
+    "RAXIS_PLANNER_CUSTOM_TOOLS_PATH",
+    "RAXIS_PLANNER_KSB",
+    "RAXIS_PLANNER_KSB_PATH",
+    "RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS",
+    "RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL",
+    "RAXIS_PLANNER_MAX_TOKENS",
+    "RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL",
+    "RAXIS_PLANNER_MAX_TOKENS_OUTPUT_TOTAL",
+    "RAXIS_PLANNER_MAX_TOKENS_TOTAL",
+    "RAXIS_PLANNER_MAX_TURNS",
+    "RAXIS_PLANNER_SIDECAR_ENDPOINT",
+    "RAXIS_PLANNER_SIDECAR_HMAC_SECRET",
+    "RAXIS_PLANNER_SIDECAR_PROVIDER_ID",
+    "RAXIS_PLANNER_TASK_PROMPT",
+    "RAXIS_PLANNER_TASK_PROMPT_PATH",
+    "RAXIS_SESSION_ID",
+    "RAXIS_SESSION_TOKEN",
+    "RAXIS_TPROXY_KERNEL_TCP",
+    "RAXIS_PLANNER_SESSION_ROLE",
+    "RAXIS_VM_IMAGE_DIGEST",
+    "RAXIS_VM_IMAGE_ORIGIN",
+    "RAXIS_VIRTIOFS_MOUNTS",
+    "RAXIS_WORKSPACE_PATH",
+];
+
+/// True when `key` is scrubbed before model-driven tool
+/// subprocesses can inherit the planner process environment.
+pub fn env_var_is_hidden_from_agent_tools(key: &str) -> bool {
+    AGENT_SUBPROCESS_SCRUBBED_ENV_VARS.contains(&key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +261,18 @@ mod tests {
             PLANNER_SIDECAR_HMAC_SECRET_ENV,
             "RAXIS_PLANNER_SIDECAR_HMAC_SECRET"
         );
+        assert!(env_var_is_hidden_from_agent_tools(
+            "RAXIS_KERNEL_VSOCK_LISTEN_PORT"
+        ));
+        assert!(env_var_is_hidden_from_agent_tools("RAXIS_MODEL_CHAIN"));
+        assert!(env_var_is_hidden_from_agent_tools(
+            "RAXIS_PLANNER_SIDECAR_HMAC_SECRET"
+        ));
+        assert!(env_var_is_hidden_from_agent_tools("RAXIS_SESSION_ID"));
+        assert!(env_var_is_hidden_from_agent_tools("RAXIS_VM_IMAGE_ORIGIN"));
+        assert!(env_var_is_hidden_from_agent_tools("RAXIS_VM_IMAGE_DIGEST"));
+        assert!(env_var_is_hidden_from_agent_tools(
+            "RAXIS_PLANNER_SESSION_ROLE"
+        ));
     }
 }

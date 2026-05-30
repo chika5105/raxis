@@ -5,13 +5,10 @@ bundle showing the tool bridge is working.
 
 ## Goal
 
-Create `out/tooling/unity/` with:
+Create `out/tools/` with:
 
-- `scenes.json` from the scene-listing tool.
-- `playmode-test.json` from the playmode smoke test tool.
-- `ios-build.json` from the iOS build tool.
-- `summary.json` with the task id, tool names used, success flags, and artifact
-  paths.
+- `unity-mcp-smoke.json` containing the scene-listing, playmode smoke-test,
+  and iOS build tool responses.
 
 Run the tools in a sensible order: inspect scenes, run the smoke test, then
 build the iOS target for the main scene if the prior checks are healthy.
@@ -20,6 +17,6 @@ build the iOS target for the main scene if the prior checks are healthy.
 
 - Use tool calls rather than inventing local Unity state.
 - Preserve the raw tool responses in the evidence files.
-- Commit only `out/tooling/unity/`.
+- Commit only `out/tools/unity-mcp-smoke.json`.
 
 Complete the task with the tools invoked and whether each succeeded.

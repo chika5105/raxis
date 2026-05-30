@@ -55,6 +55,7 @@
 use crate::tools::{Tool, ToolContext, ToolError, ToolOutput};
 use crate::vm_capabilities::{
     cached_capabilities_for_workdir, project_manifest, CapabilityCategory, CapabilityFilter,
+    ImageOrigin,
 };
 
 /// The `vm_capabilities` LLM-callable tool. Returns the
@@ -134,7 +135,9 @@ impl Tool for VmCapabilitiesTool {
         // same workspace root as the rest of the tools, so this is O(1)
         // after the first call and does not drift to process CWD `/`.
         let base = cached_capabilities_for_workdir(&ctx.workspace_root);
-        let projected = project_manifest(base.as_ref(), &categories, &filter);
+        let mut projected = project_manifest(base.as_ref(), &categories, &filter);
+        projected.image_origin = ImageOrigin::Unknown;
+        projected.image_digest = None;
 
         let json = serde_json::to_string_pretty(&projected).map_err(|e| ToolError::Internal {
             tool: "vm_capabilities".to_owned(),
@@ -374,6 +377,16 @@ mod tests {
         assert!(parsed.get("binaries").is_some());
         // Env section present (filtered).
         assert!(parsed.get("env").is_some());
+        assert_eq!(
+            parsed.pointer("/image_origin").and_then(|v| v.as_str()),
+            Some("unknown"),
+            "image origin is kernel/operator provenance and must not leak to the agent"
+        );
+        let digest = parsed.pointer("/image_digest");
+        assert!(
+            digest.is_none() || digest.is_some_and(|v| v.is_null()),
+            "image digest is kernel/operator provenance and must not leak to the agent"
+        );
     }
 
     /// Negative test: unknown category produces a structured

@@ -30,7 +30,10 @@
 //!
 //! Both surfaces consume the SAME [`CapabilityManifest`] computed
 //! by [`probe_capabilities`], so the in-prompt summary and the
-//! tool output can never disagree about what the VM has.
+//! tool output can never disagree about what the VM has. Kernel-only
+//! provenance metadata such as VM image origin/digest remains in the
+//! raw manifest for operator/debugging code, but is not rendered into
+//! the LLM-facing hint or `vm_capabilities` tool output.
 //!
 //! ## Caching
 //!
@@ -221,10 +224,10 @@ pub enum ImageOrigin {
     Unknown,
 }
 
-/// **The manifest the LLM sees.** Returned by both the
-/// system-prompt assembler ([`build_capability_hint`]) and the
-/// `vm_capabilities` tool, so the in-prompt hint and the tool
-/// output never disagree.
+/// Raw VM capability manifest. Most fields are safe to expose through
+/// the system-prompt hint and `vm_capabilities` tool, but image
+/// provenance fields are kernel/operator metadata and are redacted
+/// from those LLM-facing surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityManifest {
     /// Which planner role this manifest was probed in.
@@ -472,7 +475,7 @@ pub fn project_manifest(
 /// 1. **Explicit name list.** The kernel's own session-spawn env
 ///    (`RAXIS_SESSION_TOKEN`, `RAXIS_VSOCK_LOOPBACK_PLAN`, the A3
 ///    control-plane ports, the KSB snapshot, the task prompt,
-///    sidecar HMAC) plus runtime knobs such as
+///    sidecar HMAC, VM image provenance hints) plus runtime knobs such as
 ///    `CARGO_NET_OFFLINE` that are not task capabilities.
 ///
 /// 2. **Pattern denylist.** Anything whose name (case-insensitively)
@@ -498,6 +501,9 @@ pub fn is_kernel_private_env(name: &str) -> bool {
             | "RAXIS_PLANNER_SIDECAR_HMAC_SECRET"
             | "RAXIS_PLANNER_SIDECAR_PROVIDER_ID"
             | "RAXIS_PLANNER_SIDECAR_ENDPOINT"
+            | "RAXIS_PLANNER_SESSION_ROLE"
+            | "RAXIS_VM_IMAGE_DIGEST"
+            | "RAXIS_VM_IMAGE_ORIGIN"
     ) {
         return true;
     }
@@ -1137,7 +1143,7 @@ fn git_head_sha(cwd: &Path) -> Option<String> {
 ///
 /// The hint advertises:
 ///
-/// * Session role / image origin / digest (when stamped).
+/// * Session role.
 /// * Available language runtimes + versions.
 /// * The TOP curated subset of pre-installed Python / Node packages.
 /// * The curated subset of available CLI binaries (excluding
@@ -1160,15 +1166,6 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
         SessionRole::Unknown => "unknown",
     };
     s.push_str(&format!("role={role}"));
-    let origin = match &m.image_origin {
-        ImageOrigin::Canonical => "canonical",
-        ImageOrigin::Byo => "byo",
-        ImageOrigin::Unknown => "unknown",
-    };
-    s.push_str(&format!(" image_origin={origin}"));
-    if let Some(digest) = &m.image_digest {
-        s.push_str(&format!(" digest={digest}"));
-    }
     s.push('\n');
 
     // Languages + versions.
@@ -1432,6 +1429,13 @@ mod tests {
     fn redacts_kernel_private_ksb_and_task_prompt() {
         assert!(is_kernel_private_env("RAXIS_PLANNER_KSB"));
         assert!(is_kernel_private_env("RAXIS_PLANNER_TASK_PROMPT"));
+    }
+
+    #[test]
+    fn redacts_kernel_private_image_provenance() {
+        assert!(is_kernel_private_env("RAXIS_PLANNER_SESSION_ROLE"));
+        assert!(is_kernel_private_env("RAXIS_VM_IMAGE_ORIGIN"));
+        assert!(is_kernel_private_env("RAXIS_VM_IMAGE_DIGEST"));
     }
 
     #[test]

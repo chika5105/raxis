@@ -356,11 +356,13 @@ pub struct VmSpec {
     ///   `RAXIS_TPROXY_KERNEL_TCP` so the in-guest tproxy
     ///   substrate can find it. Replaced by a vsock CID at V2 GA.
     ///
-    /// * **Session identity** — `RAXIS_SESSION_ID` is safe
-    ///   guest-visible correlation metadata. The bearer
-    ///   `session_token` stays host-side; session-bound IPC streams
-    ///   are stamped with it by the kernel dispatcher after the VM
-    ///   connection is accepted.
+    /// * **Session identity** — `RAXIS_SESSION_ID` is stamped so
+    ///   the planner PID 1 can bind its boot context to the kernel
+    ///   session. Guest hardening scrubs it before model-driven
+    ///   tool subprocesses inherit env. The bearer `session_token`
+    ///   stays host-side; session-bound IPC streams are stamped with
+    ///   it by the kernel dispatcher after the VM connection is
+    ///   accepted.
     ///
     /// Substrates MUST honour this map in spawn order; the
     /// reference subprocess substrate forwards the map to

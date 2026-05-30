@@ -1,8 +1,13 @@
-//! `OpenAiClient`: OpenAI Chat Completions API.
+//! `OpenAiClient`: OpenAI-compatible APIs.
 //!
 //! Translates the canonical Anthropic-flavoured [`MessageRequest`] /
 //! [`MessageResponse`] types (defined in `crate::model`) into the
-//! OpenAI `/v1/chat/completions` wire shape and back.
+//! OpenAI `/v1/chat/completions` or `/v1/completions` wire shape and
+//! back. Most OpenAI-family models use Chat Completions; a small set
+//! of completion-only models reject Chat Completions with
+//! `This is not a chat model`. Those models use
+//! [`OpenAiApiSurface::Completions`] and receive a flattened transcript
+//! prompt instead of native chat messages.
 //!
 //! ## Wire shape (normative reference: `provider-client-impls.md §2`)
 //!
@@ -208,6 +213,56 @@ struct OpenAiPromptTokensDetails {
     cached_tokens: u32,
 }
 
+/// OpenAI-family HTTP API surface selected per model. This is
+/// intentionally explicit: sending a completion-only model to
+/// `/v1/chat/completions` fails as a provider configuration error,
+/// and treating every model as plain completions would throw away
+/// native tool calls for chat-capable models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiApiSurface {
+    /// Use `/v1/chat/completions` with native OpenAI chat messages
+    /// and function/tool-call envelopes.
+    ChatCompletions,
+    /// Use `/v1/completions` with a flattened transcript prompt.
+    Completions,
+}
+
+impl OpenAiApiSurface {
+    const fn path(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "/v1/chat/completions",
+            Self::Completions => "/v1/completions",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiCompletionRequest<'a> {
+    model: &'a str,
+    prompt: String,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompletionResponse {
+    id: String,
+    #[serde(default)]
+    model: String,
+    choices: Vec<OpenAiCompletionChoice>,
+    #[serde(default)]
+    usage: OpenAiUsage,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompletionChoice {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Translation: canonical → OpenAI
 // ---------------------------------------------------------------------------
@@ -340,6 +395,89 @@ fn build_request_body<'a>(req: &'a MessageRequest) -> OpenAiRequest<'a> {
     }
 }
 
+fn render_completion_content(blocks: &[ContentBlock]) -> String {
+    let mut out = Vec::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text } => out.push(text.clone()),
+            ContentBlock::ToolUse { id, name, input } => out.push(format!(
+                "assistant_tool_call id={id} name={name} input={input}"
+            )),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let status = if is_error.unwrap_or(false) {
+                    "error"
+                } else {
+                    "ok"
+                };
+                out.push(format!(
+                    "tool_result id={tool_use_id} status={status}\n{content}"
+                ));
+            }
+            ContentBlock::Other(value) => out.push(value.to_string()),
+        }
+    }
+    out.join("\n\n")
+}
+
+fn build_completion_prompt(req: &MessageRequest) -> String {
+    let mut out = String::new();
+    if let Some(system) = req.system.as_ref().filter(|s| !s.is_empty()) {
+        out.push_str("System:\n");
+        out.push_str(system);
+        out.push_str("\n\n");
+    }
+
+    if !req.tools.is_empty() {
+        out.push_str("Available tools:\n");
+        for tool in &req.tools {
+            out.push_str("- ");
+            out.push_str(&tool.name);
+            if !tool.description.is_empty() {
+                out.push_str(": ");
+                out.push_str(&tool.description);
+            }
+            out.push_str("\n  schema: ");
+            out.push_str(&tool.input_schema.to_string());
+            out.push('\n');
+        }
+        out.push_str(
+            "\nCompletion-only tool-call contract:\n\
+             To call tools, respond with only compact JSON in this shape:\n\
+             {\"tool_calls\":[{\"name\":\"tool_name\",\"input\":{}}]}\n\
+             Do not wrap the JSON in Markdown fences.\n",
+        );
+        out.push('\n');
+    }
+
+    for message in &req.messages {
+        match message.role.as_str() {
+            "assistant" => out.push_str("Assistant:\n"),
+            "user" => out.push_str("User:\n"),
+            other => {
+                out.push_str(other);
+                out.push_str(":\n");
+            }
+        }
+        out.push_str(&render_completion_content(&message.content));
+        out.push_str("\n\n");
+    }
+    out.push_str("Assistant:\n");
+    out
+}
+
+fn build_completion_request_body<'a>(req: &'a MessageRequest) -> OpenAiCompletionRequest<'a> {
+    OpenAiCompletionRequest {
+        model: req.model.as_str(),
+        prompt: build_completion_prompt(req),
+        max_tokens: req.max_tokens,
+        temperature: req.temperature,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Translation: OpenAI → canonical
 // ---------------------------------------------------------------------------
@@ -408,6 +546,132 @@ fn parse_response(raw: &OpenAiResponse) -> Result<MessageResponse, ModelError> {
     })
 }
 
+fn strip_markdown_json_fence(s: &str) -> &str {
+    let trimmed = s.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let rest = rest
+        .strip_prefix("json")
+        .or_else(|| rest.strip_prefix("JSON"))
+        .unwrap_or(rest)
+        .trim_start_matches(['\r', '\n']);
+    rest.strip_suffix("```").unwrap_or(rest).trim()
+}
+
+fn parse_jsonish_text(s: &str) -> Option<serde_json::Value> {
+    let stripped = strip_markdown_json_fence(s);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stripped) {
+        return Some(value);
+    }
+    let start = stripped.find('{')?;
+    let end = stripped.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(&stripped[start..=end]).ok()
+}
+
+fn parse_openai_function_arguments(value: &serde_json::Value) -> serde_json::Value {
+    if let Some(input) = value.get("input") {
+        return input.clone();
+    }
+    let Some(arguments) = value.pointer("/function/arguments") else {
+        return serde_json::json!({});
+    };
+    if let Some(s) = arguments.as_str() {
+        serde_json::from_str::<serde_json::Value>(s)
+            .unwrap_or_else(|_| serde_json::json!({ "raw": s }))
+    } else {
+        arguments.clone()
+    }
+}
+
+fn tool_call_name(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("name")
+        .and_then(|v| v.as_str())
+        .or_else(|| value.pointer("/function/name").and_then(|v| v.as_str()))
+        .map(ToOwned::to_owned)
+}
+
+fn tool_call_block(
+    value: &serde_json::Value,
+    fallback_id_prefix: &str,
+    index: usize,
+) -> Option<ContentBlock> {
+    let name = tool_call_name(value)?;
+    let id = value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("{fallback_id_prefix}-tool-{index}"));
+    Some(ContentBlock::ToolUse {
+        id,
+        name,
+        input: parse_openai_function_arguments(value),
+    })
+}
+
+fn parse_completion_tool_calls(text: &str, message_id: &str) -> Vec<ContentBlock> {
+    let Some(value) = parse_jsonish_text(text) else {
+        return Vec::new();
+    };
+    if let Some(calls) = value.get("tool_calls").and_then(|v| v.as_array()) {
+        return calls
+            .iter()
+            .enumerate()
+            .filter_map(|(i, call)| tool_call_block(call, message_id, i))
+            .collect();
+    }
+    if let Some(call) = value
+        .get("tool_use")
+        .or_else(|| value.get("tool_call"))
+        .or_else(|| value.get("function_call"))
+    {
+        return tool_call_block(call, message_id, 0).into_iter().collect();
+    }
+    Vec::new()
+}
+
+fn parse_completion_response(
+    raw: &OpenAiCompletionResponse,
+) -> Result<MessageResponse, ModelError> {
+    let choice = raw
+        .choices
+        .first()
+        .ok_or_else(|| ModelError::Json("OpenAI completion response had no choices".to_owned()))?;
+    let mut content = parse_completion_tool_calls(&choice.text, &raw.id);
+    let stop_reason = if content.is_empty() {
+        choice.finish_reason.as_deref().map(map_finish_reason)
+    } else {
+        Some("tool_use".to_owned())
+    };
+    if content.is_empty() && !choice.text.is_empty() {
+        content.push(ContentBlock::Text {
+            text: choice.text.clone(),
+        });
+    }
+    let cache_read = std::cmp::max(
+        raw.usage.prompt_tokens_details.cached_tokens,
+        raw.usage.cached_tokens,
+    );
+    Ok(MessageResponse {
+        id: raw.id.clone(),
+        kind: "message".to_owned(),
+        role: "assistant".to_owned(),
+        content,
+        stop_reason,
+        usage: Usage {
+            input_tokens: raw.usage.prompt_tokens,
+            output_tokens: raw.usage.completion_tokens,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: cache_read,
+        },
+        model: raw.model.clone(),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // OpenAiClient
 // ---------------------------------------------------------------------------
@@ -420,6 +684,7 @@ pub struct OpenAiClient {
     http_fetch: std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
     base_url: String,
     request_timeout: Duration,
+    api_surface: OpenAiApiSurface,
 }
 
 impl OpenAiClient {
@@ -446,7 +711,16 @@ impl OpenAiClient {
             http_fetch,
             base_url: base_url.into(),
             request_timeout: Duration::from_secs(300),
+            api_surface: OpenAiApiSurface::ChatCompletions,
         }
+    }
+
+    /// Select the OpenAI-family API surface for this model. The
+    /// default remains Chat Completions; registry-selected
+    /// completion-only models use this to route to `/v1/completions`.
+    pub fn with_api_surface(mut self, api_surface: OpenAiApiSurface) -> Self {
+        self.api_surface = api_surface;
+        self
     }
 
     /// Override the per-request timeout (default 300s); tests usually
@@ -460,9 +734,14 @@ impl OpenAiClient {
 #[async_trait]
 impl ModelClient for OpenAiClient {
     async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse, ModelError> {
-        let url = format!("{}/v1/chat/completions", self.base_url);
-        let body = build_request_body(req);
-        let body_bytes = serde_json::to_vec(&body).map_err(|e| ModelError::Json(e.to_string()))?;
+        let url = format!("{}{}", self.base_url, self.api_surface.path());
+        let body_bytes = match self.api_surface {
+            OpenAiApiSurface::ChatCompletions => serde_json::to_vec(&build_request_body(req)),
+            OpenAiApiSurface::Completions => {
+                serde_json::to_vec(&build_completion_request_body(req))
+            }
+        }
+        .map_err(|e| ModelError::Json(e.to_string()))?;
 
         let fetch_req = crate::http_fetch::HttpFetchRequest {
             url: &url,
@@ -500,9 +779,18 @@ impl ModelClient for OpenAiClient {
             });
         }
 
-        let raw: OpenAiResponse =
-            serde_json::from_slice(&resp.body).map_err(|e| ModelError::Json(e.to_string()))?;
-        parse_response(&raw)
+        match self.api_surface {
+            OpenAiApiSurface::ChatCompletions => {
+                let raw: OpenAiResponse = serde_json::from_slice(&resp.body)
+                    .map_err(|e| ModelError::Json(e.to_string()))?;
+                parse_response(&raw)
+            }
+            OpenAiApiSurface::Completions => {
+                let raw: OpenAiCompletionResponse = serde_json::from_slice(&resp.body)
+                    .map_err(|e| ModelError::Json(e.to_string()))?;
+                parse_completion_response(&raw)
+            }
+        }
     }
 }
 
@@ -610,6 +898,26 @@ mod tests {
     }
 
     #[test]
+    fn completion_request_translation_flattens_transcript() {
+        let req = req_with_history();
+        let body = build_completion_request_body(&req);
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["model"], "gpt-4o-mini");
+        assert_eq!(json["max_tokens"], 256);
+        let prompt = json["prompt"].as_str().unwrap();
+        assert!(prompt.contains("System:\nbe helpful"));
+        assert!(prompt.contains("User:\nwhat is 1+1?"));
+        assert!(prompt.contains("assistant_tool_call id=call-A name=calc input={\"expr\":\"1+1\"}"));
+        assert!(prompt.contains("tool_result id=call-A status=ok\n2"));
+        assert!(prompt.contains("{\"tool_calls\":[{\"name\":\"tool_name\",\"input\":{}}]}"));
+        assert!(prompt.ends_with("Assistant:\n"));
+        assert!(
+            json.get("messages").is_none(),
+            "completion endpoint must not receive chat messages"
+        );
+    }
+
+    #[test]
     fn response_translation_maps_finish_reason_and_tool_calls() {
         let raw = serde_json::json!({
             "id": "chatcmpl-x",
@@ -678,6 +986,86 @@ mod tests {
                 assert_eq!(input["raw"], "ls -la /tmp");
             }
             other => panic!("expected tool_use with raw fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completion_response_translation_maps_text_and_usage() {
+        let raw = serde_json::json!({
+            "id": "cmpl-1",
+            "model": "gpt-5.3-codex",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop",
+                "text": "looks good"
+            }],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 3,
+                "prompt_tokens_details": { "cached_tokens": 8 }
+            }
+        });
+        let raw: OpenAiCompletionResponse = serde_json::from_value(raw).unwrap();
+        let canonical = parse_completion_response(&raw).unwrap();
+        assert_eq!(canonical.id, "cmpl-1");
+        assert_eq!(canonical.model, "gpt-5.3-codex");
+        assert_eq!(canonical.role, "assistant");
+        assert_eq!(canonical.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(canonical.usage.input_tokens, 12);
+        assert_eq!(canonical.usage.output_tokens, 3);
+        assert_eq!(canonical.usage.cache_read_input_tokens, 8);
+        match &canonical.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "looks good"),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completion_response_translation_parses_normalized_tool_call_json() {
+        let raw = serde_json::json!({
+            "id": "cmpl-tool",
+            "model": "gpt-5.3-codex",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop",
+                "text": "{\"tool_calls\":[{\"name\":\"submit_review\",\"input\":{\"approved\":true}}]}"
+            }],
+            "usage": { "prompt_tokens": 20, "completion_tokens": 5 }
+        });
+        let raw: OpenAiCompletionResponse = serde_json::from_value(raw).unwrap();
+        let canonical = parse_completion_response(&raw).unwrap();
+        assert_eq!(canonical.stop_reason.as_deref(), Some("tool_use"));
+        match &canonical.content[0] {
+            ContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "cmpl-tool-tool-0");
+                assert_eq!(name, "submit_review");
+                assert_eq!(input["approved"], true);
+            }
+            other => panic!("expected parsed tool use, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completion_response_translation_parses_openai_like_tool_call_json() {
+        let raw = serde_json::json!({
+            "id": "cmpl-tool-openai",
+            "model": "gpt-5.3-codex",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop",
+                "text": "```json\n{\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"calc\",\"arguments\":\"{\\\"expr\\\":\\\"2+2\\\"}\"}}]}\n```"
+            }]
+        });
+        let raw: OpenAiCompletionResponse = serde_json::from_value(raw).unwrap();
+        let canonical = parse_completion_response(&raw).unwrap();
+        assert_eq!(canonical.stop_reason.as_deref(), Some("tool_use"));
+        match &canonical.content[0] {
+            ContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "calc");
+                assert_eq!(input["expr"], "2+2");
+            }
+            other => panic!("expected parsed tool use, got {other:?}"),
         }
     }
 

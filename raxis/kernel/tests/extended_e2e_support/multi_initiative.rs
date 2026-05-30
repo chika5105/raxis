@@ -89,23 +89,33 @@ pub fn sibling_plan_toml() -> String {
     s.push_str(SIBLING_PLAN_HEADER);
     s.push_str("\n\n");
     s.push_str(SIBLING_PLAN_MATERIALIZER_HEAD);
-    s.push_str(super::plan_realistic::MATERIALIZER_PROMPT_MD);
+    s.push_str(&sibling_materializer_prompt());
     s.push_str("\n\"\"\"\n");
     s.push_str(SIBLING_PLAN_MATERIALIZER_CREDS);
     s
+}
+
+fn sibling_materializer_prompt() -> String {
+    super::plan_realistic::MATERIALIZER_PROMPT_MD
+        .replace("out/postgres", "out/sibling/postgres")
+        .replace("out/mongo", "out/sibling/mongo")
+        .replace("out/manifest.json", "out/sibling/manifest.json")
 }
 
 const SIBLING_PLAN_HEADER: &str = r#"[plan.initiative]
 description = """
 Realistic-scenario sibling initiative — submitted in parallel
 with the primary realistic initiative to assert per-initiative
-audit-chain isolation.
+audit-chain isolation and conflict-free concurrent target-ref
+composition.
 
 Distinct lane id ensures budget reservations cannot interleave
 across initiatives. Distinct task_id namespace
 ("sibling-materialize-records") ensures the
 `MultiInitiativeIsolationWitness` partitioning predicate is
-materially testable.
+materially testable. Distinct output paths keep the sibling's
+evidence subtree disjoint from the primary materializer while both
+initiatives still publish to refs/heads/main.
 """
 
 [workspace]
@@ -134,11 +144,13 @@ name               = "Sibling-initiative materializer (audit-chain isolation wit
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 # Same workload as `materialize-records` (25 pg rows + 25 mongo docs +
-# 50 file writes + commit). 150 mirrors the primary materializer for
-# the audit-chain isolation witness — both initiatives must converge.
-# Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
+# 50 file writes + commit), but written under `out/sibling/` so the
+# shared refs/heads/main integration path exercises concurrent
+# target-ref preservation without an intentional add/add conflict
+# against the primary materializer. 150 mirrors the primary
+# materializer for `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 150
-path_allowlist     = ["out/postgres/", "out/mongo/", "out/manifest.json"]
+path_allowlist     = ["out/sibling/postgres/", "out/sibling/mongo/", "out/sibling/manifest.json"]
 description        = "Materialize sibling postgres rows and mongo docs to JSON files."
 prompt = """
 "#;
@@ -347,12 +359,61 @@ mod tests {
         assert_eq!(lane, Some(SIBLING_LANE_ID));
     }
 
+    #[test]
+    fn sibling_plan_uses_disjoint_output_paths_on_shared_target_ref() {
+        let toml_text = sibling_plan_toml();
+        let v: toml::Value = toml::from_str(&toml_text).expect("sibling plan must decode");
+        let workspace = v
+            .get("workspace")
+            .and_then(|w| w.as_table())
+            .expect("[workspace]");
+        assert_eq!(
+            workspace.get("target_ref").and_then(|r| r.as_str()),
+            Some("refs/heads/main"),
+            "sibling initiative intentionally shares the primary target ref \
+             so the live e2e exercises conflict-free concurrent target-ref \
+             composition"
+        );
+
+        let task = v
+            .get("tasks")
+            .and_then(|t| t.as_array())
+            .and_then(|tasks| tasks.first())
+            .expect("sibling task");
+        let allowlist: Vec<&str> = task
+            .get("path_allowlist")
+            .and_then(|a| a.as_array())
+            .expect("path_allowlist")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            allowlist,
+            vec![
+                "out/sibling/postgres/",
+                "out/sibling/mongo/",
+                "out/sibling/manifest.json",
+            ]
+        );
+
+        let prompt = task.get("prompt").and_then(|p| p.as_str()).expect("prompt");
+        assert!(prompt.contains("out/sibling/postgres/<id>.json"));
+        assert!(prompt.contains("out/sibling/mongo/<doc_id>.json"));
+        assert!(
+            !prompt.contains("out/postgres/<id>.json")
+                && !prompt.contains("out/mongo/<doc_id>.json"),
+            "sibling helper must not write the primary materializer paths; \
+             that creates deterministic add/add conflicts at IntegrationMerge"
+        );
+    }
+
     /// Iter52 parity guard for `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
     ///
     /// The sibling initiative carries the same materializer workload
-    /// as the primary plan's `materialize-records` task (25 pg rows +
-    /// 25 mongo docs + 50 file writes + commit). The primary task
-    /// declares `max_turns = 150` in
+    /// shape as the primary plan's `materialize-records` task (25 pg
+    /// rows + 25 mongo docs + 50 file writes + commit), but under a
+    /// disjoint `out/sibling/` subtree so both initiatives can compose
+    /// on the same target ref. The primary task declares `max_turns = 150` in
     /// `super::plan_realistic::REALISTIC_PLAN_MATERIALIZER_HEAD`;
     /// the sibling task MUST declare the same ceiling so the audit-
     /// chain isolation witness compares two initiatives that have

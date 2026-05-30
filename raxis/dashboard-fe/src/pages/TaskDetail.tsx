@@ -19,6 +19,7 @@ import {
   isTerminalFailureState,
   taskDisplayId,
 } from "@/lib/state-color";
+import type { CustomToolCallView } from "@/types/api";
 
 export function TaskDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
@@ -44,6 +45,7 @@ export function TaskDetailPage() {
     t.initiative_display_name.trim() ||
     initiativeQ.data?.display_name?.trim() ||
     "Initiative";
+  const customToolCalls = t.custom_tool_calls ?? [];
 
   return (
     <div className="space-y-5">
@@ -219,6 +221,11 @@ export function TaskDetailPage() {
         </section>
       </div>
 
+      <CustomToolCallsPanel
+        calls={customToolCalls}
+        initiativeId={t.initiative_id}
+      />
+
       {/* `<TaskLlmTurns>` consumes
           `GET /api/tasks/:task_id/llm-turns` and renders one
           collapsible card per turn with usage + cache-hit
@@ -261,4 +268,163 @@ export function TaskDetailPage() {
       </section>
     </div>
   );
+}
+
+function CustomToolCallsPanel({
+  calls,
+  initiativeId,
+}: {
+  calls: CustomToolCallView[];
+  initiativeId: string;
+}) {
+  return (
+    <section className="card p-4">
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <h2 className="text-sm font-semibold text-ink">Custom tool calls</h2>
+          <p className="text-xs text-ink-subtle">
+            Kernel-audited tool invocations for subprocesses and MCP-backed tools.
+          </p>
+        </div>
+        <span className="text-xs text-ink-subtle tabular">
+          {calls.length} {calls.length === 1 ? "call" : "calls"}
+        </span>
+      </div>
+      {calls.length === 0 ? (
+        <Empty
+          title="No custom tool calls recorded."
+          hint="Tool calls appear here when this task invokes a configured subprocess, host MCP, or remote MCP tool."
+        />
+      ) : (
+        <ul className="space-y-3">
+          {calls.map((call) => (
+            <li key={`${call.seq}-${call.tool_name}`} className="border border-edge rounded p-3">
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={toolOutcomeBadge(call.outcome)}>
+                      {call.outcome || "Unknown"}
+                    </span>
+                    <Mono className="text-sm">{call.tool_name}</Mono>
+                    <span className="badge bg-panel-high border-edge text-ink-muted">
+                      {call.execution_locality || "locality unknown"}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex items-center gap-2 flex-wrap text-[11px] text-ink-subtle">
+                    <span>profile</span>
+                    <Mono>{call.profile_name || "unknown"}</Mono>
+                    <span>·</span>
+                    <span>{fmtAbsolute(call.at)}</span>
+                    <span>·</span>
+                    <Link
+                      to={`/audit?highlight_initiative_id=${encodeURIComponent(
+                        initiativeId,
+                      )}&search=${encodeURIComponent(
+                        `CustomToolInvoked ${call.tool_name} ${call.seq}`,
+                      )}`}
+                      className="text-accent hover:underline"
+                    >
+                      Audit #{call.seq}
+                    </Link>
+                  </div>
+                </div>
+                <div className="text-right text-xs text-ink-muted tabular">
+                  <div>{call.duration_ms} ms</div>
+                  <div>timeout {call.timeout_ms} ms</div>
+                </div>
+              </div>
+
+              <dl className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                <ToolMetric label="Exit" value={formatExit(call)} />
+                <ToolMetric
+                  label="stdin"
+                  value={`${call.stdin_bytes_total.toLocaleString()} B`}
+                />
+                <ToolMetric
+                  label="stdout"
+                  value={formatByteCapture(
+                    call.stdout_bytes_captured,
+                    call.stdout_bytes_total,
+                    call.stdout_truncated,
+                  )}
+                />
+                <ToolMetric
+                  label="stderr"
+                  value={formatByteCapture(
+                    call.stderr_bytes_captured,
+                    call.stderr_bytes_total,
+                    call.stderr_truncated,
+                  )}
+                />
+              </dl>
+
+              {call.error && (
+                <div className="mt-3 rounded border border-bad/40 bg-bad-muted/20 px-3 py-2 text-xs text-bad">
+                  {call.error}
+                </div>
+              )}
+
+              <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2 text-[11px]">
+                <HashField label="argv sha" value={call.command_argv_sha256} />
+                <HashField label="stdout sha" value={call.stdout_sha256} />
+                <HashField label="stderr sha" value={call.stderr_sha256} />
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function ToolMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt className="uppercase tracking-wide text-ink-subtle">{label}</dt>
+      <dd className="mt-1 font-mono text-ink-muted">{value}</dd>
+    </div>
+  );
+}
+
+function HashField({ label, value }: { label: string; value: string }) {
+  if (!value) return null;
+  return (
+    <div className="rounded border border-edge bg-panel-high px-2 py-1.5 min-w-0">
+      <div className="text-ink-subtle uppercase tracking-wide">{label}</div>
+      <div className="mt-1 flex items-center gap-1 min-w-0">
+        <Mono className="truncate">{shortHash(value)}</Mono>
+        <CopyButton value={value} />
+      </div>
+    </div>
+  );
+}
+
+function toolOutcomeBadge(outcome: string) {
+  const normalized = outcome.toLowerCase();
+  if (normalized === "success" || normalized === "passed") {
+    return "badge bg-ok-muted/30 border-ok text-ok";
+  }
+  if (normalized.includes("timeout") || normalized.includes("timed")) {
+    return "badge bg-warn-muted/30 border-warn text-warn";
+  }
+  if (normalized.includes("fail") || normalized.includes("error")) {
+    return "badge bg-bad-muted/30 border-bad text-bad";
+  }
+  return "badge bg-panel-high border-edge text-ink-muted";
+}
+
+function formatExit(call: CustomToolCallView): string {
+  if (typeof call.exit_code === "number") return String(call.exit_code);
+  if (typeof call.signal === "number") return `signal ${call.signal}`;
+  return "n/a";
+}
+
+function formatByteCapture(captured: number, total: number, truncated: boolean): string {
+  const body = `${captured.toLocaleString()} / ${total.toLocaleString()} B`;
+  return truncated ? `${body} truncated` : body;
+}
+
+function shortHash(value: string): string {
+  if (value.length <= 16) return value;
+  return `${value.slice(0, 12)}…${value.slice(-8)}`;
 }

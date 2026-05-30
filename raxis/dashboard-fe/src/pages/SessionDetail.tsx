@@ -103,9 +103,12 @@ export function SessionDetailPage() {
           </div>
         </div>
         <div className="card p-3 text-xs space-y-1.5 min-w-[260px]">
-          <Row label="Provider" value={<ProviderBadge provider={s.provider} />} />
           <Row
-            label="Model"
+            label="Primary Provider"
+            value={<ProviderBadge provider={s.provider} />}
+          />
+          <Row
+            label="Primary Model"
             value={
               <span className="font-mono text-ink-muted break-all">
                 {s.model ?? "model pending"}
@@ -187,6 +190,8 @@ export function SessionDetailPage() {
       <SessionDetailTabs
         sessionId={s.session_id}
         owningTaskId={s.task_id ?? null}
+        initiativeId={s.initiative_id ?? null}
+        role={s.role}
         annotations={s.annotations ?? []}
         historical={historical}
         env={s.env ?? []}
@@ -229,18 +234,25 @@ type DetailTab = "stream" | "llm-turns" | "environment" | "postmortem";
 function SessionDetailTabs({
   sessionId,
   owningTaskId,
+  initiativeId,
+  role,
   annotations,
   historical,
   env,
 }: {
   sessionId: string;
   owningTaskId: string | null;
+  initiativeId: string | null;
+  role: string;
   annotations: LifecycleAnnotation[];
   historical: boolean;
   env: SessionVmEnvView[];
 }) {
   const [tab, setTab] = useState<DetailTab>("stream");
-  const llmTurnsEnabled = !!owningTaskId;
+  const llmTurnTaskId =
+    owningTaskId ??
+    (role === "Orchestrator" && initiativeId ? initiativeId : null);
+  const llmTurnsEnabled = !!llmTurnTaskId;
   return (
     <section data-testid="session-detail-tabs" className="space-y-3">
       <div
@@ -262,8 +274,8 @@ function SessionDetailTabs({
           disabled={!llmTurnsEnabled}
           title={
             llmTurnsEnabled
-              ? "Raw LLM request/response envelopes for the session's owning task"
-              : "No owning task is bound to this session (pre-iter72 fixture)."
+              ? "Raw LLM request/response envelopes for the session's task or coordinator row"
+              : "No task or coordinator row is bound to this session."
           }
         >
           LLM turns
@@ -291,8 +303,8 @@ function SessionDetailTabs({
           historical={historical}
         />
       )}
-      {tab === "llm-turns" && owningTaskId && (
-        <TaskLlmTurns taskId={owningTaskId} />
+      {tab === "llm-turns" && llmTurnTaskId && (
+        <TaskLlmTurns taskId={llmTurnTaskId} />
       )}
       {tab === "environment" && <SessionEnvironmentPanel env={env} />}
       {tab === "postmortem" && <SessionPostmortemPanel sessionId={sessionId} />}
@@ -392,7 +404,10 @@ function SessionEnvironmentPanel({ env }: { env: SessionVmEnvView[] }) {
         row.key,
         row.value,
         row.source,
+        row.visibility ?? "",
+        row.visibility_note ?? "",
         row.redacted ? "redacted" : "visible",
+        row.visible_to_agent_tools === false ? "planner-only hidden agent-tools" : "",
       ]
         .join(" ")
         .toLowerCase();
@@ -400,6 +415,9 @@ function SessionEnvironmentPanel({ env }: { env: SessionVmEnvView[] }) {
     });
   }, [env, normalized]);
   const redactedCount = env.filter((row) => row.redacted).length;
+  const plannerOnlyCount = env.filter(
+    (row) => row.visible_to_agent_tools === false,
+  ).length;
 
   return (
     <div className="card p-0 overflow-hidden" data-testid="session-env-panel">
@@ -407,14 +425,20 @@ function SessionEnvironmentPanel({ env }: { env: SessionVmEnvView[] }) {
         <div>
           <h3 className="text-sm font-semibold text-ink">VM environment</h3>
           <p className="mt-1 text-xs text-ink-muted">
-            Captured at session spawn after kernel control vars and credential
-            proxy loopback URLs were stamped.
+            Captured from the VM spawn envelope. Scope shows what remains
+            visible after guest hardening: planner-only rows are consumed by
+            RAXIS PID 1 and scrubbed before model-driven tools run.
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs">
           <span className="badge bg-panel border-edge text-ink-muted">
             {env.length} var{env.length === 1 ? "" : "s"}
           </span>
+          {plannerOnlyCount > 0 && (
+            <span className="badge bg-accent/10 border-accent/30 text-accent">
+              {plannerOnlyCount} planner-only
+            </span>
+          )}
           {redactedCount > 0 && (
             <span className="badge bg-warn/10 border-warn/30 text-warn">
               {redactedCount} redacted
@@ -445,11 +469,12 @@ function SessionEnvironmentPanel({ env }: { env: SessionVmEnvView[] }) {
         </div>
       ) : (
         <div className="overflow-x-auto">
-          <table className="min-w-[900px] w-full text-sm">
+          <table className="min-w-[1120px] w-full text-sm">
             <thead className="bg-panel-high text-left text-xs uppercase tracking-wide text-ink-subtle">
               <tr>
                 <th className="px-4 py-2.5 font-medium">Key</th>
                 <th className="px-4 py-2.5 font-medium">Value</th>
+                <th className="px-4 py-2.5 font-medium">Scope</th>
                 <th className="px-4 py-2.5 font-medium">Source</th>
                 <th className="px-4 py-2.5 font-medium">Captured</th>
               </tr>
@@ -477,6 +502,9 @@ function SessionEnvironmentPanel({ env }: { env: SessionVmEnvView[] }) {
                       )}
                     </div>
                   </td>
+                  <td className="px-4 py-3 w-[230px]">
+                    <EnvScope row={row} />
+                  </td>
                   <td className="px-4 py-3 text-xs text-ink-muted">
                     {row.source}
                   </td>
@@ -491,6 +519,44 @@ function SessionEnvironmentPanel({ env }: { env: SessionVmEnvView[] }) {
       )}
     </div>
   );
+}
+
+function EnvScope({ row }: { row: SessionVmEnvView }) {
+  const visibility = row.visibility ?? inferredEnvVisibility(row);
+  const plannerVisible = row.visible_to_planner_process !== false;
+  const agentVisible = row.visible_to_agent_tools !== false;
+  const note =
+    row.visibility_note ??
+    (agentVisible
+      ? "Visible to model-driven tool subprocesses."
+      : "Scrubbed before model-driven tool subprocesses inherit env.");
+  const badgeClass =
+    visibility === "redacted"
+      ? "bg-warn/10 border-warn/30 text-warn"
+      : agentVisible
+        ? "bg-success/10 border-success/30 text-success"
+        : "bg-accent/10 border-accent/30 text-accent";
+
+  return (
+    <div className="space-y-1">
+      <span className={`badge ${badgeClass}`}>{visibility}</span>
+      <div className="flex flex-wrap gap-1 text-[11px] text-ink-subtle">
+        <span className="badge bg-panel border-edge text-ink-muted">
+          planner {plannerVisible ? "yes" : "no"}
+        </span>
+        <span className="badge bg-panel border-edge text-ink-muted">
+          tools {agentVisible ? "yes" : "no"}
+        </span>
+      </div>
+      <p className="text-[11px] leading-snug text-ink-muted">{note}</p>
+    </div>
+  );
+}
+
+function inferredEnvVisibility(row: SessionVmEnvView) {
+  if (row.redacted) return "redacted";
+  if (row.visible_to_agent_tools === false) return "planner-only";
+  return "agent-visible";
 }
 
 /// Post-mortem capture panel. Reads the per-session lifecycle
@@ -624,9 +690,13 @@ function ProviderBadge({ provider }: { provider: string | null | undefined }) {
           ? "bg-accent/10 border-accent/30 text-accent"
           : "bg-panel border-edge text-ink-faint")
       }
-      title={provider ? "Observed provider" : "Provider not observed yet"}
+      title={
+        provider
+          ? "Observed primary provider"
+          : "Primary provider not observed yet"
+      }
     >
-      {provider ?? "provider pending"}
+      {provider ?? "primary provider pending"}
     </span>
   );
 }

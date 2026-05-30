@@ -1,7 +1,7 @@
 # 03 · Dashboard Tour
 
 > **Goal.** Open the operator dashboard, sign in once, and learn the
-> the views you will use every day.
+> views you will use every day.
 
 When `raxis-kernel` boots in foreground mode it prints a clickable
 line:
@@ -79,9 +79,10 @@ Searchable definitions for the concepts that show up across the UI:
 data dir, install dir, operator key, genesis, policy, provider, kernel,
 supervisor, managed repo, initiative, task, orchestrator, executor,
 reviewer, Plan Builder, Policy Builder, environments, gates, witnesses,
-Tool Builder, custom tools, MCP adapters, and the audit chain. This is intentionally available inside the
-dashboard so operators do not have to keep the website open during a
-live run.
+model routing, tool profiles, credential setup, custom tools, MCP
+adapters, and the audit chain. This is intentionally available inside
+the dashboard so operators do not have to keep the website open during
+a live run.
 
 ### 3 · Plan Builder — create plan.toml
 
@@ -89,15 +90,20 @@ live run.
 
 Use Plan Builder before submitting a new initiative. It provides:
 
-- A feature library for executors, reviewers, fan-out, scoped paths,
-  egress, credential proxies, verifiers, turn budgets, wall-clock
-  limits, VM image overrides, and cross-task artifacts.
-- A live task DAG derived from `predecessors` so you can confirm the
-  execution graph before submission.
-- Generated `plan.toml` with copy/download controls.
-- **Validate with kernel**, which runs the draft through the same
-  policy/DAG checks the kernel uses at admission and returns next-step
-  commands.
+- A canvas-native task DAG. Drag from one task card edge to another to
+  add a dependency; the second task's `predecessors` field updates in
+  `plan.toml`.
+- Inline task editors for description, prompt, role, clone strategy,
+  path allowlist, egress, runtime limits, VM image, tool profiles,
+  credential bindings, and verifier gates.
+- A synchronized `plan.toml` panel. Canvas edits update TOML; valid
+  TOML edits update the canvas; clearing TOML clears the plan.
+- Drawers for plan setup, model routing, tool profiles, credential
+  setup, and integration verifiers.
+- Draft persistence in browser storage so an accidental navigation does
+  not discard work.
+- **Validate**, which runs the draft through the same policy/DAG checks
+  the kernel uses at admission and returns next-step commands.
 
 Plan Builder is a helper, not an authority boundary. The CLI still
 signs and submits the canonical bundle:
@@ -108,12 +114,22 @@ raxis submit plan plan.toml --no-dry-run
 raxis plan approve <initiative_id>
 ```
 
-### 4 · Tool Builder — wrap existing tools
+### 4 · Plan Builder panes — models, tools, credentials, verifiers
 
-Use Tool Builder when an Executor needs access to local automation that
-RAXIS does not ship as a built-in tool: an existing script, a stdio MCP
-server, a local HTTP service, a commercial tool bridge, Unity Editor,
-Blender, or a test harness.
+Plan Builder keeps the plan-level setup beside the DAG instead of
+splitting authoring across separate pages.
+
+Use **Model routing** to define Executor and Reviewer provider:model
+aliases with ordered fallbacks. Orchestrator routing remains
+policy-owned because the Orchestrator is the most sensitive agent role.
+The active policy must still declare each provider credential, model
+allowlist, timeout, and pricing entry before the kernel admits the
+plan.
+
+Use **Tool profiles** when an Executor needs access to local automation
+that RAXIS does not ship as a built-in tool: an existing script, a
+stdio MCP server, a local HTTP service, a commercial tool bridge,
+Unity Editor, Blender, or a test harness.
 
 The safe pattern is deliberately narrow:
 
@@ -125,9 +141,18 @@ The safe pattern is deliberately narrow:
   Homebrew tool path.
 - Keep `timeout_seconds` short. The kernel and planner enforce a hard
   cap so tools cannot run forever.
-- Copy the generated `[profiles.<name>]` block into `plan.toml`.
-- Set `profiles = ["repo_tools", "db_tools"]` on each Executor task that
-  should receive those shared tool bundles.
+- Attach one or more profiles to each Executor task with
+  `profiles = ["repo_tools", "db_tools"]`.
+
+Use **Credential setup** to declare the credential names and expected
+proxy shapes that the plan may bind. Secret values are not entered in
+the builder; they stay in provider/credential files under the data dir
+and are mediated by the kernel.
+
+Use **Verifiers** for plan-level integration checks and policy gate
+references. The UI should make clear whether a result came from a
+policy gate, a per-task verifier, or an integration verifier, and
+whether it ran before review or before final merge.
 
 Validate from the dashboard, then validate the complete plan:
 
@@ -136,9 +161,11 @@ raxis plan validate plan.toml
 raxis submit plan plan.toml --no-dry-run
 ```
 
-Tool Builder is a helper, not an authority boundary. The kernel still
+These panes are helpers, not authority boundaries. The kernel still
 rejects malformed bundles, Reviewer/Orchestrator tools, inherited name
-collisions, and task-level custom tools at plan admission.
+collisions, empty model chains, unauthorized provider/model pairs,
+unbound credentials, and invalid verifier references at plan
+admission.
 
 ### 5 · Initiatives — the running DAG
 
@@ -235,17 +262,18 @@ the dashboard exists to make the same records easy to scan visually.
 | **Escalations**   | Pending operator decisions surfaced by agents (`SubmitEscalation` intents).                                                                                                                       | When an Executor or Reviewer can't make progress without a human nudge.    |
 | **Inbox**         | Kernel-pushed notifications + per-operator unread state.                                                                                                                                          | Daily glance — catches policy violations, expiring certs, budget overruns. |
 | **Notifications** | The kernel-owned notifications table; the route surface that backs `[[notifications]]` in policy.                                                                                                 | Configuring email / Slack / webhook fan-out.                               |
-| **Tool Builder** | Draft Executor custom tools for scripts, MCP adapters, local HTTP services, commercial tool bridges, Unity, Blender, and other local automation; validate the profile block with the kernel. | When an Executor needs operator-owned tooling beyond the built-ins. |
+| **Plan Builder panes** | Model routing, tool profiles, credential setup, and verifier drawers inside the visual `plan.toml` editor. | When an Executor needs operator-owned tooling, credentials, provider fallbacks, or mechanical checks beyond the starter plan. |
 | **Policy Builder** | Read the live `policy.toml`, discover feature snippets, validate with the kernel, and prepare the signed CLI/dashboard epoch-advance path. | When changing operator authority, providers, environments, gates, lanes, or dashboard settings. |
 | **Health**        | The same data as Overview but as a wide raw-fields table — useful when scraping or screenshotting.                                                                                                | Incidents.                                                                 |
+| **Credentials**   | Provider-bound credential metadata and audited reveal flow for privileged operators.                                                                                                            | Auditing what sensitive upstreams the kernel can reach.                    |
 
 ---
 
-## Light mode
+## Theme
 
-The top-right theme toggle flips the entire UI between dark (default)
-and light mode. Preference is persisted in `localStorage`; no kernel
-state changes.
+The dashboard starts in light mode and the top-right theme toggle flips
+the entire UI between light and dark. Preference is persisted in
+`localStorage`; no kernel state changes.
 
 ---
 

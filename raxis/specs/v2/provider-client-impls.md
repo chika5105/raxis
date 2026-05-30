@@ -48,13 +48,17 @@ exactly. Other provider impls translate to and from this canonical shape.
    resilience shells (retry, circuit, fallback) work identically across
    providers.
 
-## §2 — `OpenAiClient` — Chat Completions API
+## §2 — `OpenAiClient` — OpenAI-compatible APIs
 
 **Crate:** `raxis-planner-core` (`src/openai_client.rs`)
-**Upstream:** `POST /v1/chat/completions` against `<base_url>` (default
-`https://api.openai.com`).
+**Upstream:** usually `POST /v1/chat/completions` against `<base_url>`
+(default `https://api.openai.com`). Completion-only models in the
+known-model registry (for example `gpt-5.3-codex`) use
+`POST /v1/completions` instead. The endpoint choice is model-owned,
+not planner-owned; a planner must not discover this dynamically by
+burning failed turns against the wrong endpoint.
 
-### §2.1 — Request translation: Anthropic → OpenAI
+### §2.1 — Request translation: Anthropic → OpenAI chat completions
 
 | Canonical field | OpenAI body field | Translation |
 |---|---|---|
@@ -67,7 +71,31 @@ exactly. Other provider impls translate to and from this canonical shape.
 | `ContentBlock::ToolResult { tool_use_id, content, is_error }` | A separate `messages[]` entry with `role = "tool"`, `tool_call_id = tool_use_id`, and `content = stringify(content)` | OpenAI requires tool results as their own messages. The translator splits a single Anthropic `user` message containing tool results into one OpenAI `tool` message per result. |
 | `tools[].name` / `description` / `input_schema` | `tools[].function.name` / `description` / `parameters` | Wrap each `ToolSpec` in `{ "type": "function", "function": { ... } }`. |
 
-### §2.2 — Response translation: OpenAI → Anthropic
+### §2.2 — Request translation: Anthropic → OpenAI completions
+
+For completion-only OpenAI-family models, the canonical transcript is
+flattened into a single `prompt` string and sent to `/v1/completions`.
+The body contains `model`, `prompt`, `max_tokens`, and optional
+`temperature`; it does **not** contain `messages` or native
+`tool_calls`. Tool names and schemas are rendered into the prompt as a
+compact manifest so the model can still follow the same planner
+contract, but there is no provider-native function-call envelope on
+this surface.
+
+Completion-only tool calls therefore use a normalized text contract.
+When a model needs a tool, it is prompted to emit only compact JSON:
+
+```json
+{"tool_calls":[{"name":"tool_name","input":{}}]}
+```
+
+The adapter accepts that normalized shape and an OpenAI-like
+`function.arguments` string shape, converts either into canonical
+`ContentBlock::ToolUse`, and maps the stop reason to `tool_use`. This
+keeps completion-only models compatible with the same dispatch loop
+without granting them any planner-side provider special cases.
+
+### §2.3 — Response translation: OpenAI → Anthropic
 
 | OpenAI field | Canonical field | Translation |
 |---|---|---|
@@ -81,7 +109,11 @@ exactly. Other provider impls translate to and from this canonical shape.
 | `usage.completion_tokens` | `usage.output_tokens` | Verbatim. |
 | `usage.cached_tokens` (optional) | `usage.cache_read_input_tokens` | When present in response. |
 
-### §2.3 — Error mapping
+For `/v1/completions`, `choices[0].text` becomes a single
+`ContentBlock::Text`, and `choices[0].finish_reason` uses the same
+stop-reason mapping.
+
+### §2.4 — Error mapping
 
 * HTTP non-2xx → `ModelError::Upstream { status, body (≤4KB) }`. Same
   shape as `AnthropicClient` so the retry classifier and circuit
@@ -90,7 +122,7 @@ exactly. Other provider impls translate to and from this canonical shape.
 * Connection / TLS / DNS → `ModelError::Transport(s)`.
 * OpenAI error envelope (`{ "error": { "type": ..., "code": ..., "message": ... } }`) is preserved verbatim in the `body` field.
 
-### §2.4 — Headers
+### §2.5 — Headers
 
 * `Content-Type: application/json` (always)
 * `Accept: application/json`
@@ -318,8 +350,10 @@ provider-agnostic.
   SigV4 plug-in.
 * **OpenAI `/v1/responses`.** OpenAI's newer "Responses API" with
   built-in tool routing and structured output. V2 ships against
-  `chat/completions` because the canonical type is Anthropic-flavoured
-  and `chat/completions` is the closest OpenAI mirror.
+  `chat/completions` for chat-capable models because the canonical type
+  is Anthropic-flavoured and `chat/completions` is the closest OpenAI
+  mirror. Completion-only models use `/v1/completions` until a
+  provider-specific Responses adapter is implemented.
 * **Anthropic prompt caching** (`cache_control` field on
   `system` / `user` blocks). V2 emits the field in the request when
   set but does not opt in; the canonical `Usage` shape already exposes

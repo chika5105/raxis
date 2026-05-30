@@ -68,7 +68,7 @@ pub const MODEL_CHAIN_ENV: &str = "RAXIS_MODEL_CHAIN";
 pub enum ProviderId {
     /// Anthropic Messages API → [`crate::model::AnthropicClient`].
     Anthropic,
-    /// OpenAI Chat Completions API →
+    /// OpenAI-compatible APIs →
     /// [`crate::openai_client::OpenAiClient`].
     OpenAi,
     /// Google Gemini Generative Language API →
@@ -128,6 +128,20 @@ impl ProviderId {
     }
 }
 
+/// OpenAI-family API surface required by a known model.
+///
+/// Chat-capable models keep native tool-call support through
+/// `/v1/chat/completions`. Completion-only models must be routed to
+/// `/v1/completions`; routing them to the chat endpoint returns the
+/// upstream `This is not a chat model` error and burns a failed turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiModelApiSurface {
+    /// Native OpenAI chat messages and function/tool-call envelopes.
+    ChatCompletions,
+    /// Legacy/plain completion prompt surface.
+    Completions,
+}
+
 /// One row in the V2 known-model registry. Both `name` and
 /// `provider` are stable wire shapes — operators reference them in
 /// `policy.toml` and `plan.toml`.
@@ -148,6 +162,20 @@ pub struct KnownModel {
     /// upstream code to bound the per-request prompt size; `None`
     /// when the provider has not committed to a fixed value.
     pub context_window: Option<u32>,
+}
+
+impl KnownModel {
+    /// OpenAI-family endpoint selector. `None` for non-OpenAI
+    /// providers.
+    pub fn openai_api_surface(self) -> Option<OpenAiModelApiSurface> {
+        match self.provider {
+            ProviderId::OpenAi => match self.name {
+                "gpt-5.3-codex" => Some(OpenAiModelApiSurface::Completions),
+                _ => Some(OpenAiModelApiSurface::ChatCompletions),
+            },
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +465,24 @@ mod tests {
         .unwrap();
         assert_eq!(m.name, "claude-opus-4.7-thinking-medium");
         assert_eq!(m.provider, ProviderId::Anthropic);
+    }
+
+    #[test]
+    fn openai_registry_marks_completion_only_models() {
+        let chat = validate_model_id("gpt-5.5-medium").unwrap();
+        assert_eq!(
+            chat.openai_api_surface(),
+            Some(OpenAiModelApiSurface::ChatCompletions)
+        );
+
+        let completions = validate_model_id("gpt-5.3-codex").unwrap();
+        assert_eq!(
+            completions.openai_api_surface(),
+            Some(OpenAiModelApiSurface::Completions)
+        );
+
+        let non_openai = validate_model_id("claude-haiku-4-5").unwrap();
+        assert_eq!(non_openai.openai_api_surface(), None);
     }
 
     #[test]

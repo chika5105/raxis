@@ -41,7 +41,7 @@ export function AuditPage() {
   // surface (input, "clear", browser back/forward) drove the
   // change.
   const [highlightDraft, setHighlightDraft] = useState(highlightInitiativeId ?? "");
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(params.get("search") ?? "");
   const [sessionFilter, setSessionFilter] = useState("");
   const [initiativeFilter, setInitiativeFilter] = useState("");
   const [workspaceName, setWorkspaceName] = useState("All");

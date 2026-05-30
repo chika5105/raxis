@@ -179,6 +179,12 @@ pricing.output_tokens_per_dollar = 50000
 EOF
 ```
 
+Every planner role must have at least one selected model. For higher
+availability, use the ordered `planner_model_<role>_chain` fields
+instead of the single-model fields; the kernel attempts configured
+fallbacks on provider/model availability failures while still
+rejecting malformed requests fail-closed.
+
 The pricing values are conservative tokens-per-dollar estimates used
 for budget admission. Tune them to your provider contract later; they
 do not expose your API key and do not change which model the planner
@@ -347,9 +353,12 @@ http://127.0.0.1:9820/plan-builder
 ```
 
 It lets you add tasks, discover plan features, confirm the DAG,
-validate the draft with the kernel, and copy/download the resulting
-`plan.toml`. The CLI block below is the exact same starter plan for
-operators who want a copy-paste terminal flow.
+edit task cards inline, attach model routes, tool profiles,
+credential bindings, and verifier gates, validate the draft with the
+kernel, and copy/download the resulting `plan.toml`. Your draft is
+kept in browser storage, so navigating away from the builder does not
+discard the plan. The CLI block below is the exact same starter plan
+for operators who want a copy-paste terminal flow.
 
 ```bash
 export PLAN_PATH="/tmp/raxis-hello-plan.toml"

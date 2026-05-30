@@ -1195,8 +1195,11 @@ console log records six structured lines (`proc_cmdline_masked`,
 calls `scrub_sensitive_env_for_agent`; the console log records
 a seventh structured line (`sensitive_env_scrubbed`). The
 agent then dispatches a tool call; the `BashTool` spawns
-`bash -lc 'env | grep RAXIS_'`, which returns no output —
-proving the hardening engaged before the first agent dispatch.
+`bash -lc 'env | grep RAXIS_'`, which returns no output because
+transport hints, model-routing hints, sidecar paths, budget knobs,
+and session identity metadata were scrubbed from child-process
+inheritance — proving the hardening engaged before the first agent
+dispatch.
 
 ---
 

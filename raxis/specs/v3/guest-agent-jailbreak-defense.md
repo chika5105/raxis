@@ -562,18 +562,23 @@ each planner-binary's `run()` async fn AFTER
 `BootContext::from_process` has consumed the env vars into
 `ctx.env` and BEFORE `run_role_session` enters the dispatch
 loop. The function iterates over `SENSITIVE_ENV_VARS_TO_SCRUB`
-(`CARGO_NET_OFFLINE`, `RAXIS_AIRGAP_A3_*`,
-`RAXIS_KERNEL_VSOCK_LISTEN_PORT`,
-`RAXIS_PLANNER_TASK_PROMPT[_PATH]`, `RAXIS_SESSION_TOKEN` (defense-in-depth
-for stale images),
-`RAXIS_TPROXY_KERNEL_TCP`) and removes each from the process
-environment via `std::env::remove_var`. **Critically**, it ALSO snapshots each
+(`CARGO_NET_OFFLINE`, kernel/vsock/A3 transport hints,
+model routing hints such as `RAXIS_MODEL_ID` /
+`RAXIS_MODEL_CHAIN`, KSB / task-prompt / custom-tool sidecar
+paths, planner budget knobs, sidecar HMAC material,
+`RAXIS_SESSION_ID`, `RAXIS_SESSION_TOKEN` (defense-in-depth
+for stale images), `RAXIS_TPROXY_KERNEL_TCP`, workspace/mount
+metadata, and VM image provenance hints such as
+`RAXIS_VM_IMAGE_ORIGIN` / `RAXIS_VM_IMAGE_DIGEST`) and removes
+each from the process environment via
+`std::env::remove_var`. **Critically**, it ALSO snapshots each
 removed value into a process-local `OnceLock`
 (`SCRUBBED_ENV_SNAPSHOT`) so subsequent in-process readers — most
 notably `driver::run_role_session_with_env_fn`, which reads
 `RAXIS_KERNEL_VSOCK_LISTEN_PORT` to configure the kernel
-transport and `RAXIS_PLANNER_TASK_PROMPT[_PATH]` to source the
-seed prompt — can still resolve the value via
+transport, `RAXIS_MODEL_CHAIN` to construct the operator-approved
+fallback chain, and `RAXIS_PLANNER_TASK_PROMPT[_PATH]` to source
+the seed prompt — can still resolve the value via
 `read_scrubbed_env_snapshot`. The snapshot is in-process Rust
 memory unreachable from a spawned child (a `bash` subprocess
 cannot invoke a Rust function), so the security boundary is
@@ -610,7 +615,7 @@ references via task-local capture.
 **Log line confirming defense fired:**
 
 ```text
-{"level":"info","step":"guest-harden","event":"sensitive_env_scrubbed","scrubbed":8,"already_unset":1,"invariant":"INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01"}
+{"level":"info","step":"guest-harden","event":"sensitive_env_scrubbed","scrubbed":37,"already_unset":0,"invariant":"INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01"}
 ```
 
 **Operator verification:**
@@ -620,12 +625,6 @@ $ bash -lc 'env | grep -E "^(RAXIS_|CARGO_NET_OFFLINE=)"'
 (no output — every listed RAXIS_* var and `CARGO_NET_OFFLINE`
 are absent from the agent's env.)
 ```
-
-(Note: `RAXIS_SESSION_ID` is intentionally NOT scrubbed — it
-is the kernel-side correlator the agent's tool dispatch needs
-for audit logging; the scrub list pins only secrets and
-runtime-control values that could reveal or misstate the kernel's
-network posture.)
 
 ## 3. End-to-end log walkthrough
 
@@ -654,7 +653,7 @@ log (`<data_dir>/guests/<session_id>/console.log`):
 {"level":"info","step":"guest-harden","event":"pr_set_no_new_privs_enabled"}
 {"level":"info","step":"vsock-loopback-forwarder","role":"executor","outcome":"activated","entries":2}
 {"level":"info","step":"airgap-a3-chokepoint","role":"executor","outcome":"activated","host_cid":2,"admission_port":5380,"tunnel_port":5381}
-{"level":"info","step":"guest-harden","event":"sensitive_env_scrubbed","scrubbed":8,"already_unset":1,"invariant":"INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01"}
+{"level":"info","step":"guest-harden","event":"sensitive_env_scrubbed","scrubbed":34,"already_unset":0,"invariant":"INV-PLANNER-GUEST-AGENT-JAILBREAK-DEFENSE-01"}
 {"level":"info","step":"planner-boot","role":"executor",…}
 ```
 

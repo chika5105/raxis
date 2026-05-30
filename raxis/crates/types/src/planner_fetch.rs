@@ -49,7 +49,7 @@ use uuid::Uuid;
 /// the two enums 1:1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlannerFetchKind {
-    /// LLM API call (Anthropic Messages, OpenAI Chat Completions,
+    /// LLM API call (Anthropic Messages, OpenAI Chat/Completions,
     /// Bedrock InvokeModel, …). Higher per-attempt timeout, larger
     /// response body cap.
     Inference,

@@ -737,7 +737,9 @@ impl SessionSpawnService {
     ///
     /// Stamps three classes of values into `req.vm_spec.env`:
     ///
-    /// * `RAXIS_SESSION_ID` — echo of the request's session_id.
+    /// * `RAXIS_SESSION_ID` — echo of the request's session_id for
+    ///   planner PID-1 boot binding; guest hardening scrubs it before
+    ///   model-driven tool subprocesses inherit env.
     /// * `RAXIS_TPROXY_KERNEL_TCP` — the per-session admission
     ///   listener address.
     /// * One entry per credential proxy, keyed by the operator-

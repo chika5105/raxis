@@ -53,6 +53,8 @@ use raxis_dashboard::data::LifecycleAnnotation;
 pub struct AuditRow {
     /// Monotonic chain sequence number.
     pub seq: u64,
+    /// Audit event id, when present on the chain row.
+    pub event_id: String,
     /// Audit event kind discriminant string.
     pub event_kind: String,
     /// Owning initiative id (if any).
@@ -813,6 +815,7 @@ mod tests {
     ) -> AuditRow {
         AuditRow {
             seq,
+            event_id: format!("event-{seq}"),
             event_kind: kind.into(),
             initiative_id: None,
             task_id: task.map(str::to_owned),
