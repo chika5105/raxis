@@ -631,6 +631,9 @@ fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          spawn_timeout_secs       = 30\n\
          respawn_backoff_ms       = 1000\n\
          max_consecutive_respawns = 5\n\
+         planner_model_orchestrator = \"claude-haiku-4-5\"\n\
+         planner_model_executor     = \"claude-haiku-4-5\"\n\
+         planner_model_reviewer     = \"claude-haiku-4-5\"\n\
          \n\
          [egress]\n\
          domains = [\"api.anthropic.com\"]\n\

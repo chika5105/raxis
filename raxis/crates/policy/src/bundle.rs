@@ -2586,6 +2586,33 @@ fn default_gateway_max_consecutive_respawns() -> u32 {
     5
 }
 
+fn validate_gateway_role_models(
+    role: &str,
+    single_model: Option<&str>,
+    model_chain: &[String],
+) -> Result<(), PolicyError> {
+    let single = single_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    let mut chain_has_model = false;
+    for model in model_chain {
+        if model.trim().is_empty() {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "[gateway].planner_model_{role}_chain contains an empty model id; \
+                 declare at least one non-empty model for every planner role"
+            )));
+        }
+        chain_has_model = true;
+    }
+    if single.is_none() && !chain_has_model {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "[gateway] must declare planner_model_{role} or \
+             planner_model_{role}_chain with at least one model"
+        )));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Plan-signing freshness / replay-protection — `[plan_signing]`
 // ---------------------------------------------------------------------------
@@ -5150,6 +5177,21 @@ impl PolicyBundle {
                         .to_owned(),
                 ));
             }
+            validate_gateway_role_models(
+                "orchestrator",
+                g.planner_model_orchestrator.as_deref(),
+                &g.planner_model_orchestrator_chain,
+            )?;
+            validate_gateway_role_models(
+                "executor",
+                g.planner_model_executor.as_deref(),
+                &g.planner_model_executor_chain,
+            )?;
+            validate_gateway_role_models(
+                "reviewer",
+                g.planner_model_reviewer.as_deref(),
+                &g.planner_model_reviewer_chain,
+            )?;
         }
 
         // Validate `[[providers]]` entries.
@@ -6935,6 +6977,10 @@ priority             = 100
     const LLM_PRICING_BLOCK: &str = "  pricing.input_tokens_per_dollar  = 200000\n\
           pricing.output_tokens_per_dollar = 50000\n";
 
+    const GATEWAY_ROLE_MODELS_BLOCK: &str = "planner_model_orchestrator = \"claude-haiku-4-5\"\n\
+planner_model_executor     = \"gemini-2.5-flash\"\n\
+planner_model_reviewer     = \"gpt-5.3-codex\"\n";
+
     // ── No-section happy path ─────────────────────────────────────────────
 
     #[test]
@@ -6957,6 +7003,7 @@ priority             = 100
     fn gateway_section_with_defaults_round_trips_through_loader() {
         let mut t = minimal_policy_toml();
         t.push_str("\n[gateway]\nbinary_path = \"/usr/local/bin/raxis-gateway\"\n");
+        t.push_str(GATEWAY_ROLE_MODELS_BLOCK);
         let bundle = write_and_load(&t).expect("valid [gateway] must load");
         let g = bundle
             .gateway()
@@ -6966,9 +7013,15 @@ priority             = 100
         assert_eq!(g.spawn_timeout_secs, 5);
         assert_eq!(g.respawn_backoff_ms, 1000);
         assert_eq!(g.max_consecutive_respawns, 5);
-        assert!(g.planner_model_orchestrator.is_none());
-        assert!(g.planner_model_executor.is_none());
-        assert!(g.planner_model_reviewer.is_none());
+        assert_eq!(
+            g.planner_model_orchestrator.as_deref(),
+            Some("claude-haiku-4-5")
+        );
+        assert_eq!(
+            g.planner_model_executor.as_deref(),
+            Some("gemini-2.5-flash")
+        );
+        assert_eq!(g.planner_model_reviewer.as_deref(), Some("gpt-5.3-codex"));
         assert!(g.planner_model_orchestrator_chain.is_empty());
         assert!(g.planner_model_executor_chain.is_empty());
         assert!(g.planner_model_reviewer_chain.is_empty());
@@ -6981,7 +7034,7 @@ priority             = 100
         t.push_str(
             "\n[gateway]\n\
              binary_path = \"/usr/local/bin/raxis-gateway\"\n\
-             planner_model_orchestrator = \"claude-3-haiku-20240307\"\n\
+             planner_model_orchestrator = \"claude-haiku-4-5\"\n\
              planner_model_executor     = \"gemini-2.5-flash\"\n\
              planner_model_reviewer     = \"gpt-5.3-codex\"\n",
         );
@@ -6989,7 +7042,7 @@ priority             = 100
         let g = bundle.gateway().expect("gateway section loaded");
         assert_eq!(
             g.planner_model_orchestrator.as_deref(),
-            Some("claude-3-haiku-20240307")
+            Some("claude-haiku-4-5")
         );
         assert_eq!(
             g.planner_model_executor.as_deref(),
@@ -7004,7 +7057,9 @@ priority             = 100
         t.push_str(
             "\n[gateway]\n\
              binary_path = \"/usr/local/bin/raxis-gateway\"\n\
-             planner_model_executor_chain = [\"claude-3-haiku-20240307\", \"gemini-2.5-flash\", \"gpt-5.3-codex\"]\n\
+             planner_model_orchestrator_chain = [\"claude-haiku-4-5\", \"gemini-2.5-flash\", \"gpt-5.3-codex\"]\n\
+             planner_model_executor_chain = [\"claude-haiku-4-5\", \"gemini-2.5-flash\", \"gpt-5.3-codex\"]\n\
+             planner_model_reviewer_chain = [\"gpt-5.3-codex\", \"claude-haiku-4-5\", \"gemini-2.5-flash\"]\n\
              planner_model_executor_rotate_primary = true\n",
         );
         let bundle = write_and_load(&t).expect("valid [gateway] must load");
@@ -7012,12 +7067,47 @@ priority             = 100
         assert_eq!(
             g.planner_model_executor_chain,
             vec![
-                "claude-3-haiku-20240307".to_owned(),
+                "claude-haiku-4-5".to_owned(),
                 "gemini-2.5-flash".to_owned(),
                 "gpt-5.3-codex".to_owned(),
             ]
         );
         assert!(g.planner_model_executor_rotate_primary);
+    }
+
+    #[test]
+    fn gateway_section_requires_model_for_every_planner_role() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[gateway]\n\
+             binary_path = \"/usr/local/bin/raxis-gateway\"\n\
+             planner_model_orchestrator = \"claude-haiku-4-5\"\n\
+             planner_model_executor     = \"gemini-2.5-flash\"\n",
+        );
+        let err = write_and_load(&t).expect_err("reviewer model must be required");
+        let s = format!("{err}");
+        assert!(
+            s.contains("planner_model_reviewer"),
+            "error must name missing reviewer model; got: {s}"
+        );
+    }
+
+    #[test]
+    fn gateway_section_rejects_empty_model_chain_entry() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[gateway]\n\
+             binary_path = \"/usr/local/bin/raxis-gateway\"\n\
+             planner_model_orchestrator_chain = [\"claude-haiku-4-5\", \"\"]\n\
+             planner_model_executor           = \"gemini-2.5-flash\"\n\
+             planner_model_reviewer           = \"gpt-5.3-codex\"\n",
+        );
+        let err = write_and_load(&t).expect_err("empty model chain entry must be rejected");
+        let s = format!("{err}");
+        assert!(
+            s.contains("planner_model_orchestrator_chain") && s.contains("empty model id"),
+            "error must name empty chain entry; got: {s}"
+        );
     }
 
     // ── [gateway] negative cases ──────────────────────────────────────────
@@ -7041,6 +7131,9 @@ priority             = 100
         t.push_str(
             "\n[gateway]\n\
              binary_path        = \"/usr/local/bin/raxis-gateway\"\n\
+             planner_model_orchestrator = \"claude-haiku-4-5\"\n\
+             planner_model_executor     = \"gemini-2.5-flash\"\n\
+             planner_model_reviewer     = \"gpt-5.3-codex\"\n\
              spawn_timeout_secs = 0\n",
         );
         let err = write_and_load(&t).expect_err("zero spawn_timeout must fail");
@@ -7056,6 +7149,9 @@ priority             = 100
         t.push_str(
             "\n[gateway]\n\
              binary_path              = \"/usr/local/bin/raxis-gateway\"\n\
+             planner_model_orchestrator = \"claude-haiku-4-5\"\n\
+             planner_model_executor     = \"gemini-2.5-flash\"\n\
+             planner_model_reviewer     = \"gpt-5.3-codex\"\n\
              max_consecutive_respawns = 0\n",
         );
         let err = write_and_load(&t).expect_err("zero respawn cap must fail");

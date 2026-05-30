@@ -539,6 +539,9 @@ binary_path              = "/usr/local/bin/raxis-gateway"   # MUST be absolute
 spawn_timeout_secs       = 5     # default; max 60
 respawn_backoff_ms       = 1000  # initial; doubles each consecutive crash, cap 60_000
 max_consecutive_respawns = 5     # circuit-breaker; quarantines after this many crashes
+planner_model_orchestrator = "claude-haiku-4-5" # at least one model per role
+planner_model_executor     = "claude-haiku-4-5"
+planner_model_reviewer     = "claude-haiku-4-5"
 
 [[providers]]
 provider_id           = "anthropic-prod"  # unique within the array
@@ -553,6 +556,7 @@ max_response_bytes    = 16777216 # default 16 MiB; max 64 MiB
 
 - `[gateway].binary_path` MUST be absolute. Relative paths are rejected to prevent PATH-based hijacks. The file's existence is checked at *spawn* time (not validate time) since policy.toml may travel separately from the binary.
 - `[gateway].spawn_timeout_secs`, `respawn_backoff_ms`, and `max_consecutive_respawns` MUST all be `> 0`. Zero `max_consecutive_respawns` is rejected with a hint that `1` (not `0`) disables auto-respawn.
+- `[gateway]` MUST declare at least one non-empty model for each planner role: Orchestrator, Executor, and Reviewer. Use the single `planner_model_<role>` field or the ordered `planner_model_<role>_chain` fallback list.
 - Every `[[providers]] provider_id` is non-empty and unique within the array.
 - Every `credentials_file` is a bare filename — no `/`, no `\`, no `.`, no `..`. The validator rejects path-traversal payloads at policy load time, *before* the gateway opens the file.
 - Each timeout / size knob is `> 0` and `<=` the spec ceiling (`MAX_INFERENCE_TIMEOUT_MS = 120_000`, `MAX_DATA_FETCH_TIMEOUT_MS = 60_000`, `MAX_RESPONSE_BYTES_CEILING = 64 MiB`).

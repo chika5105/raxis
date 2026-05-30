@@ -67,7 +67,7 @@ output_per_1k_tokens = 0.015
 [[providers.entries.allowed_models]]
 model = "claude-3-5-sonnet-20241022"
 [[providers.entries.allowed_models]]
-model = "claude-3-haiku-20240307"
+model = "claude-haiku-4-5"
 ```
 
 | Field | Meaning |

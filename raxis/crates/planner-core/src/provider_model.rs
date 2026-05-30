@@ -199,9 +199,9 @@ pub const KNOWN_MODELS: &[KnownModel] = &[
         context_window: Some(200_000),
     },
     KnownModel {
-        name: "claude-3-haiku-20240307",
+        name: "claude-haiku-4-5",
         provider: ProviderId::Anthropic,
-        deprecated: Some("claude-sonnet-4-5-20250929"),
+        deprecated: None,
         context_window: Some(200_000),
     },
     // --- OpenAI ---
@@ -446,31 +446,25 @@ mod tests {
         // asserted (cargo test isolates stderr capture per-test
         // and we don't want a snapshot dependency here).
         let m = resolve_model_from_env_fn(|k| match k {
-            "RAXIS_MODEL_ID" => Some("claude-3-haiku-20240307".to_owned()),
+            "RAXIS_MODEL_ID" => Some("claude-3-5-sonnet-20241022".to_owned()),
             _ => None,
         })
         .unwrap();
-        assert_eq!(m.name, "claude-3-haiku-20240307");
+        assert_eq!(m.name, "claude-3-5-sonnet-20241022");
         assert!(m.deprecated.is_some());
     }
 
     #[test]
     fn resolves_model_chain_from_env() {
         let models = resolve_model_chain_from_env_fn(|k| match k {
-            MODEL_CHAIN_ENV => {
-                Some("gemini-2.5-flash, gpt-5.3-codex, claude-3-haiku-20240307".to_owned())
-            }
+            MODEL_CHAIN_ENV => Some("gemini-2.5-flash, gpt-5.3-codex, claude-haiku-4-5".to_owned()),
             _ => None,
         })
         .unwrap();
         let names: Vec<&str> = models.iter().map(|m| m.name).collect();
         assert_eq!(
             names,
-            vec![
-                "gemini-2.5-flash",
-                "gpt-5.3-codex",
-                "claude-3-haiku-20240307",
-            ]
+            vec!["gemini-2.5-flash", "gpt-5.3-codex", "claude-haiku-4-5",]
         );
     }
 

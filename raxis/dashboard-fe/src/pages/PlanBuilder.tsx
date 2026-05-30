@@ -3487,7 +3487,7 @@ function parsePlanToml(text: string): {
       rawAgentType === "Executor" || rawAgentType === "Reviewer" ? rawAgentType : "";
     const profiles = readArray(block, "profiles").join(", ");
     const taskName = nonEmpty(readString(block, "name"));
-    const shortDescription = nonEmpty(readString(block, "description"));
+    const shortDescription = nonEmpty(readTomlText(block, "description"));
     const explicitPrompt = readTriple(block, "prompt") ?? readString(block, "prompt");
     const description = shortDescription ?? taskName ?? "";
     const prompt = explicitPrompt ?? "";
@@ -3561,7 +3561,7 @@ function parseProfileTools(text: string) {
     const block = nextMatch >= 0 ? text.slice(start, start + nextMatch) : text.slice(start);
     profiles.set(id, {
       id,
-      description: readString(block, "description") ?? "",
+      description: readTomlText(block, "description") ?? "",
       providerAlias: readString(block, "provider_alias") ?? "",
       tools: [],
     });
@@ -3581,7 +3581,7 @@ function parseProfileTools(text: string) {
     };
     existing.tools.push({
       name: readString(block, "name") ?? "",
-      description: readString(block, "description") ?? "",
+      description: readTomlText(block, "description") ?? "",
       locality: (readString(block, "execution_locality") as ToolLocality | null) ?? "guest_subprocess",
       command: readArray(block, "command").join("\n"),
       timeoutSeconds: readNumber(block, "timeout_seconds") ?? "30",
@@ -3614,7 +3614,7 @@ function parseModelRoutes(text: string): ModelRouteDraft[] {
       normalizeModelRoute({
         alias,
         scope: parseModelAliasScope(readString(block, "scope"), alias),
-        description: readString(block, "description") ?? "",
+        description: readTomlText(block, "description") ?? "",
         fallbackBehavior: "attempt_in_order",
         sessionAffinity: readBoolean(block, "session_affinity") ?? false,
         rotateExecutorPrimary: readBoolean(block, "rotate_primary") ?? false,
@@ -3958,7 +3958,11 @@ function slugifyToolName(value: string) {
 }
 
 function tomlString(value: string) {
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  const normalized = value.replace(/\r\n?/g, "\n");
+  if (normalized.includes("\n")) {
+    return `"""\n${normalized.replace(/\\/g, "\\\\").replace(/"""/g, '\\"""')}\n"""`;
+  }
+  return `"${normalized.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 function tomlKey(value: string) {

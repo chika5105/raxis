@@ -34,6 +34,13 @@
 //! | `Upstream { 4xx (other) }` | NO     | Client error: retry will not help      |
 //! | `Json(_)`                | NO        | Wire shape break: bug, not transient   |
 //!
+//! Cross-provider fallback is a little broader than same-provider
+//! retry: an explicitly configured model chain may advance past
+//! 401/403/404 provider/model availability failures because retrying
+//! the same provider will not help, but a later configured provider
+//! may be healthy. That still fails closed when the chain is empty or
+//! exhausted; it does not silently choose an operator-undeclared model.
+//!
 //! Backoff is `base_delay * multiplier^attempt` with `±jitter%`
 //! uniform jitter applied per-attempt. The sleep is bounded by the
 //! configured `total_deadline` so a runaway retry never blocks a turn
@@ -141,6 +148,23 @@ pub fn is_retryable(err: &ModelError) -> bool {
         }
         ModelError::Json(_) => false,
     }
+}
+
+/// Decide whether `err` should advance an explicitly configured
+/// fallback chain. This intentionally differs from [`is_retryable`]:
+/// a provider/model 404 should not be retried against the same
+/// provider, but it should try the next operator-declared model.
+pub fn is_fallbackable(err: &ModelError) -> bool {
+    if is_retryable(err) {
+        return true;
+    }
+    matches!(
+        err,
+        ModelError::Upstream {
+            status: 401 | 403 | 404,
+            ..
+        }
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +321,7 @@ impl ModelClient for FallbackModelClient {
         for client in &self.chain {
             match client.create_message(req).await {
                 Ok(resp) => return Ok(resp),
-                Err(err) if is_retryable(&err) => {
+                Err(err) if is_fallbackable(&err) => {
                     last = Some(err);
                     continue;
                 }
@@ -398,6 +422,21 @@ mod tests {
         assert!(!is_retryable(&ModelError::Json("malformed".into())));
     }
 
+    #[test]
+    fn fallback_classifier_advances_on_provider_availability_errors() {
+        for status in [401, 403, 404] {
+            assert!(is_fallbackable(&ModelError::Upstream {
+                status,
+                body: "provider/model unavailable".into(),
+            }));
+        }
+        assert!(!is_fallbackable(&ModelError::Upstream {
+            status: 400,
+            body: "bad request".into(),
+        }));
+        assert!(!is_fallbackable(&ModelError::Json("malformed".into())));
+    }
+
     #[tokio::test]
     async fn retry_succeeds_after_two_transient_failures() {
         let inner = Arc::new(FailThenSucceed {
@@ -473,12 +512,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_does_not_advance_on_non_retryable_error() {
+    async fn fallback_advances_on_model_not_found() {
         let primary = Arc::new(FailThenSucceed {
             remaining_fails: Mutex::new(10),
             err_factory: Box::new(|| ModelError::Upstream {
-                status: 401,
-                body: "auth".into(),
+                status: 404,
+                body: "model not found".into(),
+            }),
+        }) as Arc<dyn ModelClient>;
+        let secondary = Arc::new(FailThenSucceed {
+            remaining_fails: Mutex::new(0),
+            err_factory: Box::new(|| ModelError::Transport("never".into())),
+        }) as Arc<dyn ModelClient>;
+        let chain = FallbackModelClient::new(vec![primary, secondary]);
+        let resp = chain.create_message(&empty_request()).await.unwrap();
+        assert_eq!(resp.id, "msg-ok");
+    }
+
+    #[tokio::test]
+    async fn fallback_does_not_advance_on_bad_request() {
+        let primary = Arc::new(FailThenSucceed {
+            remaining_fails: Mutex::new(10),
+            err_factory: Box::new(|| ModelError::Upstream {
+                status: 400,
+                body: "bad request".into(),
             }),
         }) as Arc<dyn ModelClient>;
         let secondary = Arc::new(FailThenSucceed {
@@ -488,7 +545,7 @@ mod tests {
         let chain = FallbackModelClient::new(vec![primary, secondary]);
         let err = chain.create_message(&empty_request()).await.unwrap_err();
         match err {
-            ModelError::Upstream { status, .. } => assert_eq!(status, 401),
+            ModelError::Upstream { status, .. } => assert_eq!(status, 400),
             other => panic!("unexpected error: {other:?}"),
         }
     }

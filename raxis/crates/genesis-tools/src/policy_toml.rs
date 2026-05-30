@@ -411,6 +411,9 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
          # spawn_timeout_secs       = 5\n\
          # respawn_backoff_ms       = 1000\n\
          # max_consecutive_respawns = 5\n\
+         # planner_model_orchestrator = \"claude-haiku-4-5\"\n\
+         # planner_model_executor     = \"claude-haiku-4-5\"\n\
+         # planner_model_reviewer     = \"claude-haiku-4-5\"\n\
          #\n\
          # [[providers]]\n\
          # provider_id           = \"anthropic-prod\"\n\

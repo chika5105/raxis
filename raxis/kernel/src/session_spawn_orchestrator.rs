@@ -6217,7 +6217,7 @@ mod tests {
     #[test]
     fn planner_model_env_stamps_role_specific_policy_models() {
         let mut gateway = gateway_with_default(None);
-        gateway.planner_model_orchestrator = Some("claude-3-haiku-20240307".to_owned());
+        gateway.planner_model_orchestrator = Some("claude-haiku-4-5".to_owned());
         gateway.planner_model_executor = Some("gemini-2.5-flash".to_owned());
         gateway.planner_model_reviewer = Some("gpt-5.3-codex".to_owned());
 
@@ -6255,7 +6255,7 @@ mod tests {
     fn planner_model_env_rotates_executor_fallback_chain_by_task() {
         let mut gateway = gateway_with_default(None);
         gateway.planner_model_executor_chain = vec![
-            "claude-3-haiku-20240307".to_owned(),
+            "claude-haiku-4-5".to_owned(),
             "gemini-2.5-flash".to_owned(),
             "gpt-5.3-codex".to_owned(),
         ];

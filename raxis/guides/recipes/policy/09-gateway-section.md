@@ -38,6 +38,9 @@ binary_path                = "/usr/local/bin/raxis-gateway"
 spawn_timeout_secs         = 5
 respawn_backoff_ms         = 1000
 max_consecutive_respawns   = 5
+planner_model_orchestrator = "claude-haiku-4-5"
+planner_model_executor     = "claude-haiku-4-5"
+planner_model_reviewer     = "claude-haiku-4-5"
 # planner_max_turns_default = 50    # optional V2.7 — org-wide cap; per-task overrides still win
 # planner_max_turns_step_default = 25  # optional V3 — org-wide progressive-scaling step
 ```
@@ -51,6 +54,9 @@ binary_path              = "/opt/raxis/bin/raxis-gateway"
 spawn_timeout_secs       = 2          # fail fast on startup hang
 respawn_backoff_ms       = 500
 max_consecutive_respawns = 3          # quarantine after 3 — restart kernel to recover
+planner_model_orchestrator = "claude-haiku-4-5"
+planner_model_executor     = "claude-haiku-4-5"
+planner_model_reviewer     = "claude-haiku-4-5"
 ```
 
 ---

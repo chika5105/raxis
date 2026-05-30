@@ -407,6 +407,7 @@ purpose = "Plan-scoped integration verifier coverage for the realistic e2e merge
 const REALISTIC_PLAN_TOOLING_MCP_PROFILE: &str = r#"# -- Executor profile: bounded Unity MCP adapter tools ----
 [profiles.unity_mcp_tools]
 role = "Executor"
+description = "Unity MCP adapter tools for executor tasks that need bounded Unity scene, object, and editor metadata."
 
 [[profiles.unity_mcp_tools.custom_tool]]
 name        = "unity_list_scenes"

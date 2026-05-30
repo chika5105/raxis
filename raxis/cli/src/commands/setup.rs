@@ -648,6 +648,9 @@ binary_path             = "/usr/local/bin/raxis-gateway"
 spawn_timeout_secs      = 30
 respawn_backoff_ms      = 1000
 max_consecutive_respawns = 5
+planner_model_orchestrator = "claude-haiku-4-5"
+planner_model_executor     = "claude-haiku-4-5"
+planner_model_reviewer     = "claude-haiku-4-5"
 
 # ──────────────────────────────────────────────────────────────────────
 # §4. Egress allowlist for in-VM tasks (npm registries, package

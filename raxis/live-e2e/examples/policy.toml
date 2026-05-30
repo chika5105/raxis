@@ -84,6 +84,9 @@ jwt_ttl_secs = 86400
 # spawn_timeout_secs       = 5
 # respawn_backoff_ms       = 1000
 # max_consecutive_respawns = 5
+# planner_model_orchestrator = "claude-haiku-4-5"
+# planner_model_executor     = "claude-haiku-4-5"
+# planner_model_reviewer     = "claude-haiku-4-5"
 #
 # [[providers]]
 # provider_id           = "anthropic-prod"
@@ -108,10 +111,10 @@ binary_path              = "/Users/jinanwachikafavour/raxis/raxis/target/release
 spawn_timeout_secs       = 30
 respawn_backoff_ms       = 1000
 max_consecutive_respawns = 5
-planner_model_orchestrator_chain = ["claude-3-haiku-20240307", "gemini-2.5-flash", "gpt-5.3-codex"]
-planner_model_executor_chain     = ["claude-3-haiku-20240307", "gemini-2.5-flash", "gpt-5.3-codex"]
+planner_model_orchestrator_chain = ["claude-haiku-4-5", "gemini-2.5-flash", "gpt-5.3-codex"]
+planner_model_executor_chain     = ["claude-haiku-4-5", "gemini-2.5-flash", "gpt-5.3-codex"]
 planner_model_executor_rotate_primary = true
-planner_model_reviewer_chain     = ["gpt-5.3-codex", "claude-3-haiku-20240307", "gemini-2.5-flash"]
+planner_model_reviewer_chain     = ["gpt-5.3-codex", "claude-haiku-4-5", "gemini-2.5-flash"]
 
 # `example.com` admits the iter65 dep-fetch-evidence task's
 # one HTTPS GET via Path A3; the witness in

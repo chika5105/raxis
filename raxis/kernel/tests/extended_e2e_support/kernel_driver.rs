@@ -88,7 +88,7 @@ pub fn resolved_install_dir() -> PathBuf {
 // bother bootstrapping a kernel.
 // ---------------------------------------------------------------------------
 
-const E2E_ORCHESTRATOR_MODEL_ID: &str = "claude-3-haiku-20240307";
+const E2E_ORCHESTRATOR_MODEL_ID: &str = "claude-haiku-4-5";
 const E2E_REVIEWER_MODEL_ID: &str = "gpt-5.3-codex";
 const E2E_GEMINI_MODEL_ID: &str = "gemini-2.5-flash";
 

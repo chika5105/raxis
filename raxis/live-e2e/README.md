@@ -1020,7 +1020,7 @@ For an interactive live run where the dashboard should remain
 available after either success or failure, add keep-alive:
 
 The realistic run exercises a three-provider cheap-model chain by
-default. Orchestrators start on `claude-3-haiku-20240307`, reviewers
+default. Orchestrators start on `claude-haiku-4-5`, reviewers
 start on `gpt-5.3-codex`, and executor primaries rotate by task across
 Anthropic, Gemini, and OpenAI; every executor keeps the other two
 models as retryable fallbacks. Before launching, ensure `raxis/.env`
