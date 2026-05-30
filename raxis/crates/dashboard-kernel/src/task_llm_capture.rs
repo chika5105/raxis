@@ -150,6 +150,21 @@ pub struct LlmTurnRecord {
     /// `None` on success.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub error: Option<String>,
+    /// Policy provider id the kernel routed this fetch through.
+    ///
+    /// This is captured as first-class metadata rather than
+    /// inferred from the provider payload because error envelopes
+    /// often omit model/provider fields, and BYO providers may use
+    /// model names Raxis cannot and should not classify by prefix.
+    /// `None` for legacy records that pre-date this field.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub provider: Option<String>,
+    /// Model id selected for this fetch, when known at dispatch
+    /// time. This fills the dashboard gap for providers whose
+    /// request URL carries the model (Gemini) or whose error body
+    /// does not echo it. `None` for legacy records.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub model: Option<String>,
     /// **Agent role of the originating session** —
     /// `"Orchestrator"` / `"Executor"` / `"Reviewer"`. Distinct
     /// from the provider's `body.role` (`"user"` / `"assistant"`
@@ -528,6 +543,8 @@ mod tests {
             body_truncated: false,
             original_body_bytes: body.len() as u64,
             error: None,
+            provider: None,
+            model: None,
             agent_role: None,
         }
     }
@@ -607,6 +624,8 @@ mod tests {
         );
         assert_eq!(parsed.body, "x");
         assert_eq!(parsed.at_ms, 7);
+        assert!(parsed.provider.is_none());
+        assert!(parsed.model.is_none());
     }
 
     #[test]

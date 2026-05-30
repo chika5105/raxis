@@ -500,17 +500,25 @@ export const dashboardApi = {
     list: (
       params: {
         cursor?: number;
+        filter_initiative_id?: string;
         highlight_initiative_id?: string;
         limit?: number;
+        search?: string;
+        session_id?: string;
       } = {},
       signal?: AbortSignal,
     ): Promise<AuditEntryView[]> => {
       const qs = new URLSearchParams();
       if (params.cursor !== undefined) qs.set("cursor_seq", String(params.cursor));
+      if (params.filter_initiative_id) {
+        qs.set("filter_initiative_id", params.filter_initiative_id);
+      }
       if (params.highlight_initiative_id) {
         qs.set("highlight_initiative_id", params.highlight_initiative_id);
       }
       if (params.limit !== undefined) qs.set("limit", String(params.limit));
+      if (params.search) qs.set("search", params.search);
+      if (params.session_id) qs.set("session_id", params.session_id);
       const suffix = qs.toString() ? `?${qs}` : "";
       return apiFetch<AuditEntryView[]>(`/api/audit${suffix}`, signal ? { signal } : {});
     },

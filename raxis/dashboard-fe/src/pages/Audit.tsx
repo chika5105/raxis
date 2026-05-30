@@ -77,15 +77,28 @@ export function AuditPage() {
   };
 
   const q = useInfiniteQuery({
-    queryKey: ["audit", { highlightInitiativeId }],
+    queryKey: [
+      "audit",
+      {
+        filterInitiativeId: initiativeFilter.trim(),
+        highlightInitiativeId,
+        search: search.trim(),
+        sessionId: sessionFilter.trim(),
+      },
+    ],
     queryFn: ({ pageParam, signal }) =>
       dashboardApi.audit.list(
         {
           limit: PAGE_SIZE,
           ...(pageParam !== undefined ? { cursor: pageParam } : {}),
+          ...(initiativeFilter.trim()
+            ? { filter_initiative_id: initiativeFilter.trim() }
+            : {}),
           ...(highlightInitiativeId
             ? { highlight_initiative_id: highlightInitiativeId }
             : {}),
+          ...(search.trim() ? { search: search.trim() } : {}),
+          ...(sessionFilter.trim() ? { session_id: sessionFilter.trim() } : {}),
         },
         signal,
       ),
@@ -488,7 +501,7 @@ function auditRowMatchesFilters(
     row.initiative_id ?? "",
     row.task_id ?? "",
     row.session_id ?? "",
-    JSON.stringify(row.payload ?? {}),
+    payloadSearchText(row.payload),
   ]
     .join(" ")
     .toLowerCase();
@@ -504,6 +517,30 @@ function payloadString(payload: unknown, key: string): string | null {
   }
   const value = (payload as Record<string, unknown>)[key];
   return typeof value === "string" ? value : null;
+}
+
+function payloadSearchText(payload: unknown): string {
+  const out: string[] = [];
+  const walk = (value: unknown) => {
+    if (value == null) return;
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      out.push(String(value));
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(walk);
+      return;
+    }
+    if (typeof value === "object") {
+      Object.values(value as Record<string, unknown>).forEach(walk);
+    }
+  };
+  walk(payload);
+  return out.join(" ");
 }
 
 function JsonPayload({ payload }: { payload: unknown }) {

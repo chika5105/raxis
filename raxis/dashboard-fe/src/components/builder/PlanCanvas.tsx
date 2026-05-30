@@ -33,6 +33,7 @@ import type {
   CredentialDraft,
   CredentialProxyType,
   CredentialSetupDraft,
+  PlanVerifierDraft,
   PolicyGateRef,
   TaskDraft,
   ToolProfileDraft,
@@ -40,6 +41,8 @@ import type {
 
 const NODE_W = 270;
 const NODE_H = 104;
+const GATE_NODE_W = 220;
+const GATE_NODE_H = 72;
 const EDITOR_W = 440;
 const EDITOR_H = 690;
 // Handles sit outside the card to make edge-dragging forgiving; the edge path
@@ -64,6 +67,20 @@ const EDGE_MARKER = {
   color: "rgb(var(--c-accent))",
 };
 
+const GATE_EDGE_STYLE: React.CSSProperties = {
+  stroke: "rgb(var(--c-ok))",
+  strokeWidth: 2,
+  strokeDasharray: "7 5",
+  strokeLinecap: "round",
+};
+
+const GATE_EDGE_MARKER = {
+  type: MarkerType.ArrowClosed,
+  width: 13,
+  height: 13,
+  color: "rgb(var(--c-ok))",
+};
+
 const credentialProxyTypes: CredentialProxyType[] = [
   "postgres",
   "mysql",
@@ -80,6 +97,7 @@ const credentialProxyTypes: CredentialProxyType[] = [
 
 export interface PlanCanvasProps {
   tasks: TaskDraft[];
+  planVerifiers: PlanVerifierDraft[];
   toolProfiles: ToolProfileDraft[];
   credentialSetups: CredentialSetupDraft[];
   policyGateRefs: PolicyGateRef[];
@@ -109,6 +127,16 @@ interface TaskNodeData extends Record<string, unknown> {
   onOpenToolProfiles: () => void;
   onOpenCredentialSetup: () => void;
 }
+
+interface GateNodeData extends Record<string, unknown> {
+  title: string;
+  subtitle: string;
+  badge: string;
+  tone: "task" | "policy" | "integration";
+  parentTaskId?: string;
+}
+
+type BuilderNode = Node<TaskNodeData | GateNodeData>;
 
 function splitList(raw: string): string[] {
   return raw
@@ -199,11 +227,12 @@ function computeLayout(tasks: TaskDraft[]): Map<string, { x: number; y: number }
 
 function tasksToNodes(
   tasks: TaskDraft[],
+  planVerifiers: PlanVerifierDraft[],
   positions: Map<string, { x: number; y: number }>,
   selectedTaskId: string | null,
   handlers: Omit<TaskNodeData, "task">,
-): Node<TaskNodeData>[] {
-  return tasks.map((task, index) => ({
+): BuilderNode[] {
+  const taskNodes = tasks.map((task, index) => ({
     id: task.id,
     type: "task",
     position: positions.get(task.id) ?? { x: 90 + index * (NODE_W + 120), y: 120 },
@@ -214,12 +243,17 @@ function tasksToNodes(
     } as TaskNodeData,
     selected: false,
     zIndex: task.id === selectedTaskId ? 30 : 1,
-  }));
+  })) satisfies BuilderNode[];
+  return [
+    ...taskNodes,
+    ...taskVerifierNodes(tasks, positions, handlers.policyGateRefs as PolicyGateRef[]),
+    ...integrationVerifierNodes(tasks, planVerifiers, positions),
+  ];
 }
 
-function tasksToEdges(tasks: TaskDraft[]): Edge[] {
+function tasksToEdges(tasks: TaskDraft[], planVerifiers: PlanVerifierDraft[] = []): Edge[] {
   const ids = new Set(tasks.map((task) => task.id));
-  return tasks.flatMap((task) =>
+  const taskEdges = tasks.flatMap((task) =>
     splitList(task.predecessors)
       .filter((pred) => ids.has(pred) && pred !== task.id)
       .map((pred) => ({
@@ -231,6 +265,122 @@ function tasksToEdges(tasks: TaskDraft[]): Edge[] {
         markerEnd: EDGE_MARKER,
       })),
   );
+  const taskGateEdges = tasks
+    .filter((task) => task.verifierName.trim())
+    .map((task) => ({
+      id: `${task.id}=>${taskGateNodeId(task)}`,
+      source: task.id,
+      target: taskGateNodeId(task),
+      type: "deletable",
+      data: { kind: "gate" },
+      selectable: false,
+      deletable: false,
+      style: GATE_EDGE_STYLE,
+      markerEnd: GATE_EDGE_MARKER,
+    }));
+  const integrationGateEdges = planVerifiers.flatMap((verifier) =>
+    integrationVerifierSourceIds(tasks, verifier).map((source) => ({
+      id: `${source}=>${integrationVerifierNodeId(verifier)}`,
+      source,
+      target: integrationVerifierNodeId(verifier),
+      type: "deletable",
+      data: { kind: "gate" },
+      selectable: false,
+      deletable: false,
+      style: GATE_EDGE_STYLE,
+      markerEnd: GATE_EDGE_MARKER,
+    })),
+  );
+  return [...taskEdges, ...taskGateEdges, ...integrationGateEdges];
+}
+
+function taskVerifierNodes(
+  tasks: TaskDraft[],
+  positions: Map<string, { x: number; y: number }>,
+  policyGateRefs: PolicyGateRef[],
+): BuilderNode[] {
+  return tasks
+    .filter((task) => task.verifierName.trim())
+    .map((task, index) => {
+      const position = positions.get(task.id) ?? { x: 90 + index * (NODE_W + 120), y: 120 };
+      const gate = policyGateRefs.find((candidate) => candidate.name === task.verifierName);
+      return {
+        id: taskGateNodeId(task),
+        type: "gate",
+        position: {
+          x: position.x + NODE_W * 0.42,
+          y: position.y + NODE_H + 34,
+        },
+        data: {
+          title: task.verifierName.trim(),
+          subtitle: gate
+            ? `${gate.source} policy gate${gate.claimTypes.length ? ` · ${gate.claimTypes.join(", ")}` : ""}`
+            : task.verifierCommand.trim() || "Per-task verifier",
+          badge: gate ? "Policy gate" : "Task verifier",
+          tone: gate ? "policy" : "task",
+          parentTaskId: task.id,
+        } satisfies GateNodeData,
+        draggable: false,
+        selectable: false,
+        connectable: false,
+        zIndex: 0,
+      };
+    });
+}
+
+function integrationVerifierNodes(
+  tasks: TaskDraft[],
+  planVerifiers: PlanVerifierDraft[],
+  positions: Map<string, { x: number; y: number }>,
+): BuilderNode[] {
+  if (tasks.length === 0) return [];
+  const taskPositions = tasks.map((task, index) => positions.get(task.id) ?? { x: 90 + index * (NODE_W + 120), y: 120 });
+  const maxX = Math.max(...taskPositions.map((position) => position.x));
+  const minY = Math.min(...taskPositions.map((position) => position.y));
+  return planVerifiers
+    .filter((verifier) => verifier.name.trim())
+    .map((verifier, index) => ({
+      id: integrationVerifierNodeId(verifier),
+      type: "gate",
+      position: {
+        x: maxX + NODE_W + 120,
+        y: minY + index * (GATE_NODE_H + 28),
+      },
+      data: {
+        title: verifier.name.trim(),
+        subtitle:
+          verifier.appliesTo === "task_set"
+            ? `Integration verifier · ${splitList(verifier.taskSet).length || 0} task scope`
+            : `Integration verifier · ${verifier.appliesTo}`,
+        badge: verifier.onFailure === "warn_only" ? "Warn only" : "Blocks merge",
+        tone: "integration",
+      } satisfies GateNodeData,
+      draggable: false,
+      selectable: false,
+      connectable: false,
+      zIndex: 0,
+    }));
+}
+
+function taskGateNodeId(task: TaskDraft) {
+  return `gate::task::${task.id}::${task.verifierName.trim()}`;
+}
+
+function integrationVerifierNodeId(verifier: PlanVerifierDraft) {
+  return `gate::integration::${verifier.name.trim()}`;
+}
+
+function integrationVerifierSourceIds(tasks: TaskDraft[], verifier: PlanVerifierDraft): string[] {
+  const ids = new Set(tasks.map((task) => task.id));
+  if (verifier.appliesTo === "task_set") {
+    return splitList(verifier.taskSet).filter((taskId) => ids.has(taskId));
+  }
+  return terminalTaskIds(tasks);
+}
+
+function terminalTaskIds(tasks: TaskDraft[]): string[] {
+  const dependedOn = new Set(tasks.flatMap((task) => splitList(task.predecessors)));
+  return tasks.map((task) => task.id).filter((taskId) => !dependedOn.has(taskId));
 }
 
 const TaskNode = memo(({ data }: NodeProps<Node<TaskNodeData>>) => {
@@ -1514,9 +1664,11 @@ function DeletableEdge({
   style,
   markerEnd,
   selected,
+  data,
 }: EdgeProps) {
   const reactFlow = useReactFlow();
   const { deleteElements } = reactFlow;
+  const isGate = isGateEdgeData(data);
   const sourceRect = nodeRect(reactFlow.getInternalNode(source));
   const targetRect = nodeRect(reactFlow.getInternalNode(target));
   const route = sourceRect && targetRect
@@ -1532,46 +1684,93 @@ function DeletableEdge({
         interactionWidth={24}
         style={{
           ...style,
-          stroke: selected ? "rgb(var(--c-accent))" : (style?.stroke as string),
-          strokeWidth: selected ? 3 : ((style?.strokeWidth as number) ?? 2.25),
+          stroke: isGate
+            ? "rgb(var(--c-ok))"
+            : selected
+              ? "rgb(var(--c-accent))"
+              : (style?.stroke as string),
+          strokeDasharray: isGate ? "7 5" : style?.strokeDasharray,
+          strokeWidth: selected && !isGate ? 3 : ((style?.strokeWidth as number) ?? 2.25),
         }}
       />
-      <EdgeLabelRenderer>
-        <button
-          className="nodrag nopan flex items-center justify-center rounded-full border border-edge-strong bg-panel-raised text-[9px] font-bold text-ink-muted opacity-0 transition-opacity hover:bg-bad/10 hover:text-bad"
-          style={{
-            position: "absolute",
-            transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
-            pointerEvents: "all",
-            width: 20,
-            height: 20,
-          }}
-          onMouseEnter={(event) => {
-            event.currentTarget.style.opacity = "1";
-          }}
-          onMouseLeave={(event) => {
-            event.currentTarget.style.opacity = "0";
-          }}
-          onClick={(event) => {
-            event.stopPropagation();
-            void deleteElements({ edges: [{ id }] });
-          }}
-          title="Remove dependency"
-          aria-label="Remove dependency"
-          type="button"
-        >
-          ×
-        </button>
-      </EdgeLabelRenderer>
+      {!isGate && (
+        <EdgeLabelRenderer>
+          <button
+            className="nodrag nopan flex items-center justify-center rounded-full border border-edge-strong bg-panel-raised text-[9px] font-bold text-ink-muted opacity-0 transition-opacity hover:bg-bad/10 hover:text-bad"
+            style={{
+              position: "absolute",
+              transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
+              pointerEvents: "all",
+              width: 20,
+              height: 20,
+            }}
+            onMouseEnter={(event) => {
+              event.currentTarget.style.opacity = "1";
+            }}
+            onMouseLeave={(event) => {
+              event.currentTarget.style.opacity = "0";
+            }}
+            onClick={(event) => {
+              event.stopPropagation();
+              void deleteElements({ edges: [{ id }] });
+            }}
+            title="Remove dependency"
+            aria-label="Remove dependency"
+            type="button"
+          >
+            ×
+          </button>
+        </EdgeLabelRenderer>
+      )}
     </>
   );
 }
 
-const NODE_TYPES = { task: TaskNode };
+function GateNode({ data }: NodeProps<Node<GateNodeData>>) {
+  const toneClass =
+    data.tone === "policy"
+      ? "border-ok bg-ok-muted text-ok"
+      : data.tone === "integration"
+        ? "border-warn bg-warn-muted text-warn"
+        : "border-info bg-info-muted text-info";
+  return (
+    <div
+      className="rounded-lg border border-dashed border-ok/70 bg-panel-raised px-3 py-2 text-ink shadow-soft"
+      style={{ width: GATE_NODE_W, minHeight: GATE_NODE_H }}
+      title={data.parentTaskId ? `${data.badge} for ${data.parentTaskId}` : data.badge}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate font-mono text-xs font-semibold">{data.title}</div>
+          <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-ink-muted">
+            {data.subtitle}
+          </div>
+        </div>
+        <span className={`badge shrink-0 text-[9px] ${toneClass}`}>{data.badge}</span>
+      </div>
+    </div>
+  );
+}
+
+function isGateEdgeData(data: unknown): boolean {
+  return Boolean(
+    data &&
+      typeof data === "object" &&
+      "kind" in data &&
+      (data as { kind?: unknown }).kind === "gate",
+  );
+}
+
+function isGateEdge(edge: Edge): boolean {
+  return isGateEdgeData(edge.data);
+}
+
+const NODE_TYPES = { task: TaskNode, gate: GateNode };
 const EDGE_TYPES = { deletable: DeletableEdge };
 
 function PlanCanvasInner({
   tasks,
+  planVerifiers,
   toolProfiles,
   credentialSetups,
   policyGateRefs,
@@ -1620,17 +1819,17 @@ function PlanCanvasInner({
     [canRemoveTask, credentialSetups, onOpenCredentialSetup, onOpenToolProfiles, onRemoveTask, onSelectTask, onUpdateTask, policyGateRefs, tasks, toolProfiles],
   );
 
-  const [rfNodes, setRfNodes] = useState<Node<TaskNodeData>[]>(() =>
-    tasksToNodes(tasks, positionsRef.current, selectedTaskId, handlers),
+  const [rfNodes, setRfNodes] = useState<BuilderNode[]>(() =>
+    tasksToNodes(tasks, planVerifiers, positionsRef.current, selectedTaskId, handlers),
   );
-  const [rfEdges, setRfEdges] = useState<Edge[]>(() => tasksToEdges(tasks));
+  const [rfEdges, setRfEdges] = useState<Edge[]>(() => tasksToEdges(tasks, planVerifiers));
 
   const refreshNodes = useCallback(
     (positions = positionsRef.current) => {
-      setRfNodes(tasksToNodes(tasks, positions, selectedTaskId, handlers));
-      setRfEdges(tasksToEdges(tasks));
+      setRfNodes(tasksToNodes(tasks, planVerifiers, positions, selectedTaskId, handlers));
+      setRfEdges(tasksToEdges(tasks, planVerifiers));
     },
-    [handlers, selectedTaskId, tasks],
+    [handlers, planVerifiers, selectedTaskId, tasks],
   );
 
   useEffect(() => {
@@ -1755,26 +1954,36 @@ function PlanCanvasInner({
 
   useEffect(() => {
     setRfNodes((prev) =>
-      prev.map((node) => ({
-        ...node,
-        zIndex: node.id === selectedTaskId ? 30 : 1,
-        data: {
-          ...node.data,
-          isExpanded: node.id === selectedTaskId,
-        } as TaskNodeData,
-        selected: false,
-      })),
+      prev.map((node) => {
+        if (node.type !== "task") {
+          return { ...node, zIndex: 0, selected: false };
+        }
+        return {
+          ...node,
+          zIndex: node.id === selectedTaskId ? 30 : 1,
+          data: {
+            ...node.data,
+            isExpanded: node.id === selectedTaskId,
+          } as TaskNodeData,
+          selected: false,
+        };
+      }),
     );
   }, [selectedTaskId]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
-    setRfNodes((nodes) => applyNodeChanges(changes, nodes) as Node<TaskNodeData>[]);
+    setRfNodes((nodes) => applyNodeChanges(changes, nodes) as BuilderNode[]);
+    let shouldRefreshGatePositions = false;
     changes.forEach((change) => {
       if (change.type === "position" && change.position && !change.dragging) {
         positionsRef.current.set(change.id, change.position);
+        if (!change.id.startsWith("gate::")) shouldRefreshGatePositions = true;
       }
     });
-  }, []);
+    if (shouldRefreshGatePositions) {
+      window.setTimeout(() => refreshNodes(positionsRef.current), 0);
+    }
+  }, [refreshNodes]);
 
   const onEdgesChange = useCallback((changes: EdgeChange[]) => {
     setRfEdges((edges) => applyEdgeChanges(changes, edges));
@@ -1810,6 +2019,7 @@ function PlanCanvasInner({
     (deletedEdges) => {
       rfInteractingRef.current = true;
       deletedEdges.forEach((edge) => {
+        if (isGateEdge(edge)) return;
         const targetTask = tasks.find((task) => task.id === edge.target);
         if (!targetTask) return;
         const next = splitList(targetTask.predecessors)
@@ -1868,6 +2078,11 @@ function PlanCanvasInner({
           }, 150);
         }}
         onNodeClick={(event, node) => {
+          if (node.type === "gate") {
+            const parentTaskId = (node.data as GateNodeData).parentTaskId;
+            if (parentTaskId) onSelectTask(parentTaskId);
+            return;
+          }
           const start = nodePointerDownRef.current;
           nodePointerDownRef.current = null;
           const moved =

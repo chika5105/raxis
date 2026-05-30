@@ -27,7 +27,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::DashboardRole;
-use crate::data::{recent_activity_filter, AuditEntryView, ChainStatusView};
+use crate::data::{recent_activity_filter, AuditEntryView, AuditListFilters, ChainStatusView};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
 
@@ -50,6 +50,20 @@ pub struct ListQuery {
     /// highlight-only now; the audit chain remains kernel-wide.
     #[serde(default)]
     pub initiative_id: Option<String>,
+    /// Server-side free-text search. Matches event kind, ids,
+    /// task/session/initiative ids, and payload text before page
+    /// truncation so old matching rows are discoverable without
+    /// manually paging the audit chain first.
+    #[serde(default, alias = "q")]
+    pub search: Option<String>,
+    /// Server-side partial session-id filter.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Server-side partial initiative-id filter. Kept distinct
+    /// from `initiative_id`, which is a deprecated highlight-only
+    /// alias for older dashboard URLs.
+    #[serde(default)]
+    pub filter_initiative_id: Option<String>,
 }
 
 impl ListQuery {
@@ -74,10 +88,17 @@ where
     D: crate::data::DashboardData,
 {
     require_read(&op)?;
-    let rows =
-        state
-            .data
-            .list_audit(q.cursor, q.limit.clamp(1, 500), q.highlight_initiative_id())?;
+    let highlight_initiative_id = q.highlight_initiative_id().map(str::to_owned);
+    let rows = state.data.list_audit(
+        q.cursor,
+        q.limit.clamp(1, 500),
+        highlight_initiative_id.as_deref(),
+        AuditListFilters {
+            query: q.search,
+            session_id: q.session_id,
+            initiative_id: q.filter_initiative_id,
+        },
+    )?;
     Ok(Json(rows))
 }
 
@@ -129,9 +150,12 @@ where
 {
     require_read(&op)?;
     let limit = q.limit.clamp(1, 50) as usize;
-    let scan = state
-        .data
-        .list_audit(None, RECENT_ACTIVITY_SCAN_CAP, None)?;
+    let scan = state.data.list_audit(
+        None,
+        RECENT_ACTIVITY_SCAN_CAP,
+        None,
+        AuditListFilters::default(),
+    )?;
     let curated: Vec<AuditEntryView> = scan
         .into_iter()
         .filter(|row| recent_activity_filter::is_important(&row.event_kind))
@@ -233,5 +257,17 @@ mod tests {
         let q: ListQuery =
             serde_json::from_str(r#"{"initiative_id":"init-a","limit":10}"#).unwrap();
         assert_eq!(q.highlight_initiative_id(), Some("init-a"));
+    }
+
+    #[test]
+    fn list_query_keeps_filter_initiative_id_separate_from_highlight_alias() {
+        let q: ListQuery = serde_json::from_str(
+            r#"{"initiative_id":"init-a","filter_initiative_id":"init-b","search":"tool","session_id":"sess"}"#,
+        )
+        .unwrap();
+        assert_eq!(q.highlight_initiative_id(), Some("init-a"));
+        assert_eq!(q.filter_initiative_id.as_deref(), Some("init-b"));
+        assert_eq!(q.search.as_deref(), Some("tool"));
+        assert_eq!(q.session_id.as_deref(), Some("sess"));
     }
 }

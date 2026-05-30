@@ -54,7 +54,7 @@
 //! Tests can substitute a `MockModelClient` that fails N times, then
 //! succeeds, and verify the wrapper without driving any real HTTP.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -113,6 +113,24 @@ impl RetryConfig {
             multiplier: 2.0,
             jitter: 0.25,
             total_deadline: Some(Duration::from_secs(90)),
+            call_timeout: Some(Duration::from_secs(60)),
+        }
+    }
+
+    /// Default used for each provider inside an explicit
+    /// multi-provider chain. In that shape, the fallback chain itself
+    /// is the retry surface: hammering one unhealthy provider several
+    /// times before trying the next operator-declared provider burns
+    /// turn wall-clock and floods the dashboard with expected 429/5xx
+    /// attempts. A single attempt per provider keeps failover fast
+    /// while preserving the single-provider retry policy above.
+    pub fn fallback_chain_provider_default() -> Self {
+        Self {
+            max_retries: 0,
+            base_delay: Duration::from_millis(0),
+            multiplier: 1.0,
+            jitter: 0.0,
+            total_deadline: Some(Duration::from_secs(60)),
             call_timeout: Some(Duration::from_secs(60)),
         }
     }
@@ -301,13 +319,47 @@ impl ModelClient for RetryingModelClient {
 /// cross-provider fallback fires.
 pub struct FallbackModelClient {
     chain: Vec<Arc<dyn ModelClient>>,
+    cooldown_until: Mutex<Vec<Option<Instant>>>,
+    cooldown: Duration,
 }
 
 impl FallbackModelClient {
     /// Construct a fallback chain. Empty chain ⇒ every call fails
     /// with `ModelError::Transport("no providers configured")`.
     pub fn new(chain: Vec<Arc<dyn ModelClient>>) -> Self {
-        Self { chain }
+        Self::with_cooldown(chain, Duration::from_secs(60))
+    }
+
+    /// Construct a fallback chain with an explicit per-provider
+    /// cooldown. Exposed for tests and for future policy plumbing; the
+    /// production default is intentionally short enough that transient
+    /// recoveries are picked up soon, but long enough to stop one bad
+    /// provider from being retried on every model turn.
+    pub fn with_cooldown(chain: Vec<Arc<dyn ModelClient>>, cooldown: Duration) -> Self {
+        Self {
+            cooldown_until: Mutex::new(vec![None; chain.len()]),
+            chain,
+            cooldown,
+        }
+    }
+
+    fn provider_is_cooling(&self, index: usize, now: Instant) -> bool {
+        self.cooldown_until
+            .lock()
+            .unwrap()
+            .get(index)
+            .and_then(|until| *until)
+            .is_some_and(|until| until > now)
+    }
+
+    fn mark_provider_cooling(&self, index: usize, now: Instant) {
+        if self.cooldown.is_zero() {
+            return;
+        }
+        let mut cooldowns = self.cooldown_until.lock().unwrap();
+        if let Some(slot) = cooldowns.get_mut(index) {
+            *slot = now.checked_add(self.cooldown);
+        }
     }
 }
 
@@ -318,15 +370,27 @@ impl ModelClient for FallbackModelClient {
             return Err(ModelError::Transport("no providers configured".to_owned()));
         }
         let mut last: Option<ModelError> = None;
-        for client in &self.chain {
+        let mut attempted = false;
+        for (index, client) in self.chain.iter().enumerate() {
+            let now = Instant::now();
+            if self.provider_is_cooling(index, now) {
+                continue;
+            }
+            attempted = true;
             match client.create_message(req).await {
                 Ok(resp) => return Ok(resp),
                 Err(err) if is_fallbackable(&err) => {
+                    self.mark_provider_cooling(index, Instant::now());
                     last = Some(err);
                     continue;
                 }
                 Err(err) => return Err(err),
             }
+        }
+        if !attempted {
+            return Err(ModelError::Transport(
+                "fallback chain exhausted: all providers are cooling down".to_owned(),
+            ));
         }
         Err(last.unwrap_or_else(|| {
             ModelError::Transport("fallback chain exhausted with no recorded error".to_owned())
@@ -384,6 +448,28 @@ mod tests {
                 return Err((self.err_factory)());
             }
             Ok(ok_response())
+        }
+    }
+
+    struct CountingFail {
+        calls: Mutex<u32>,
+        err_factory: Box<dyn Fn() -> ModelError + Send + Sync>,
+    }
+
+    impl CountingFail {
+        fn calls(&self) -> u32 {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl ModelClient for CountingFail {
+        async fn create_message(
+            &self,
+            _req: &MessageRequest,
+        ) -> Result<MessageResponse, ModelError> {
+            *self.calls.lock().unwrap() += 1;
+            Err((self.err_factory)())
         }
     }
 
@@ -509,6 +595,37 @@ mod tests {
         let chain = FallbackModelClient::new(vec![primary, secondary]);
         let resp = chain.create_message(&empty_request()).await.unwrap();
         assert_eq!(resp.id, "msg-ok");
+    }
+
+    #[tokio::test]
+    async fn fallback_cools_unhealthy_provider_on_later_turns() {
+        let primary = Arc::new(CountingFail {
+            calls: Mutex::new(0),
+            err_factory: Box::new(|| ModelError::Upstream {
+                status: 429,
+                body: "rate limited".into(),
+            }),
+        });
+        let secondary = Arc::new(FailThenSucceed {
+            remaining_fails: Mutex::new(0),
+            err_factory: Box::new(|| ModelError::Transport("never".into())),
+        }) as Arc<dyn ModelClient>;
+        let chain = FallbackModelClient::with_cooldown(
+            vec![primary.clone() as Arc<dyn ModelClient>, secondary],
+            Duration::from_secs(60),
+        );
+
+        let first = chain.create_message(&empty_request()).await.unwrap();
+        let second = chain.create_message(&empty_request()).await.unwrap();
+
+        assert_eq!(first.id, "msg-ok");
+        assert_eq!(second.id, "msg-ok");
+        assert_eq!(
+            primary.calls(),
+            1,
+            "a provider that just returned a fallbackable 429 must be \
+             skipped on the next turn instead of being hammered again"
+        );
     }
 
     #[tokio::test]

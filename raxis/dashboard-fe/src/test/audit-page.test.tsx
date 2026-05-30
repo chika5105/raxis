@@ -170,12 +170,56 @@ describe("<AuditPage>", () => {
     fireEvent.change(screen.getByPlaceholderText("Event name, payload text, task..."), {
       target: { value: "tproxy" },
     });
-    expect(screen.getByText("TproxyAdmissionGranted")).toBeInTheDocument();
-    expect(screen.queryByText("CredentialProxyStarted")).toBeNull();
+    expect(await screen.findByText("TproxyAdmissionGranted")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText("CredentialProxyStarted")).toBeNull();
+    });
 
     fireEvent.change(screen.getByDisplayValue("All workspaces"), {
       target: { value: "Beta workspace" },
     });
     expect(await screen.findByText("No audit rows match these filters.")).toBeInTheDocument();
+  });
+
+  it("sends audit search to the backend and avoids matching payload keys as text", async () => {
+    const listSpy = vi
+      .spyOn(dashboardApi.audit, "list")
+      .mockResolvedValue([
+        row({
+          seq: 2,
+          event_kind: "SessionRevoked",
+          payload: { terminal_tool: null },
+        }),
+        row({
+          seq: 1,
+          event_kind: "CustomToolInvoked",
+          task_id: "tooling-mcp-unity",
+          payload: { tool_name: "unity_build_player" },
+        }),
+      ]);
+    vi.spyOn(dashboardApi.audit, "chainStatus").mockResolvedValue({
+      status: "ok",
+      last_verified_seq: 2,
+      total_records: 2,
+      segment_count: 1,
+      verified_at_ms: 1_700_000_000_000,
+      last_error: null,
+      fresh: true,
+    });
+    vi.spyOn(dashboardApi.initiatives, "list").mockResolvedValue([]);
+
+    renderAudit("/audit?search=tool");
+
+    expect(await screen.findByText("CustomToolInvoked")).toBeInTheDocument();
+    expect(screen.queryByText("SessionRevoked")).toBeNull();
+    await waitFor(() => {
+      expect(listSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          limit: 50,
+          search: "tool",
+        }),
+        expect.anything(),
+      );
+    });
   });
 });

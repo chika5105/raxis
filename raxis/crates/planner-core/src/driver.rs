@@ -517,6 +517,7 @@ where
         .expect("resolver always returns a non-empty model chain")
         .name
         .to_owned();
+    validate_model_chain_base_urls(&known_models, &f)?;
     let max_turns = var("RAXIS_PLANNER_MAX_TURNS")
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(DEFAULT_PLANNER_MAX_TURNS);
@@ -683,6 +684,7 @@ impl ModelClient for ModelIdOverrideClient {
 ///   env (each is `SidecarEnvMissing` if absent / empty). The HMAC
 ///   secret is per-spawn material — see `extensibility-traits.md
 ///   §9A.7A` for the threat-model rationale.
+#[cfg(test)]
 fn build_model_client<F>(
     known_model: &KnownModel,
     base_url: &str,
@@ -715,26 +717,63 @@ where
     let single_model = known_models.len() == 1;
     let mut chain = Vec::with_capacity(known_models.len());
     for known_model in known_models {
-        let base_url = if single_model {
-            match f("RAXIS_PLANNER_BASE_URL").filter(|v| !v.is_empty()) {
-                Some(u) => u,
-                None => known_model.provider.default_base_url().to_owned(),
-            }
+        let base_url = resolved_model_base_url(known_model, single_model, f);
+        validate_model_base_url(known_model, &base_url)?;
+        let retry_config = if single_model {
+            RetryConfig::anthropic_default()
         } else {
-            known_model.provider.default_base_url().to_owned()
+            RetryConfig::fallback_chain_provider_default()
         };
-        if known_model.provider != ProviderId::Sidecar
-            && !(base_url.starts_with("http://") || base_url.starts_with("https://"))
-        {
-            return Err(DriverError::BadBaseUrl { got: base_url });
-        }
-        chain.push(build_model_client(known_model, &base_url, http_fetch, f)?);
+        chain.push(build_model_client_with_retry_config(
+            known_model,
+            &base_url,
+            http_fetch,
+            f,
+            retry_config,
+        )?);
     }
     if chain.len() == 1 {
         Ok(chain.remove(0))
     } else {
         Ok(Arc::new(FallbackModelClient::new(chain)))
     }
+}
+
+fn validate_model_chain_base_urls<F>(known_models: &[&KnownModel], f: &F) -> Result<(), DriverError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let single_model = known_models.len() == 1;
+    for known_model in known_models {
+        let base_url = resolved_model_base_url(known_model, single_model, f);
+        validate_model_base_url(known_model, &base_url)?;
+    }
+    Ok(())
+}
+
+fn resolved_model_base_url<F>(known_model: &KnownModel, single_model: bool, f: &F) -> String
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if single_model {
+        match f("RAXIS_PLANNER_BASE_URL").filter(|v| !v.is_empty()) {
+            Some(u) => u,
+            None => known_model.provider.default_base_url().to_owned(),
+        }
+    } else {
+        known_model.provider.default_base_url().to_owned()
+    }
+}
+
+fn validate_model_base_url(known_model: &KnownModel, base_url: &str) -> Result<(), DriverError> {
+    if known_model.provider != ProviderId::Sidecar
+        && !(base_url.starts_with("http://") || base_url.starts_with("https://"))
+    {
+        return Err(DriverError::BadBaseUrl {
+            got: base_url.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn build_model_client_with_retry_config<F>(
@@ -1943,6 +1982,41 @@ mod tests {
         assert_eq!(
             rec.last_url.lock().await.as_deref(),
             Some("https://api.anthropic.com/v1/messages")
+        );
+    }
+
+    #[tokio::test]
+    async fn build_model_client_chain_falls_back_before_retrying_primary() {
+        let body = br#"{
+            "id":"m_test","type":"message","model":"fixture-model","role":"assistant",
+            "content":[],"stop_reason":"end_turn",
+            "usage":{"input_tokens":1,"output_tokens":1}
+        }"#
+        .to_vec();
+        let rec = Arc::new(FlakyRecordingFetch::new(1, body));
+        let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
+        let client = build_model_client_chain(
+            &[known("gpt-5.5-medium"), known("claude-sonnet-4-5-20250929")],
+            &fetch,
+            &|_| None,
+        )
+        .unwrap();
+        let req = crate::model::MessageRequest {
+            model: "fixture-model".to_owned(),
+            ..crate::model::MessageRequest::default()
+        };
+
+        client
+            .create_message(&req)
+            .await
+            .expect("one primary transport failure should fall back to the secondary provider");
+
+        assert_eq!(rec.calls(), 2);
+        assert_eq!(
+            rec.last_url.lock().await.as_deref(),
+            Some("https://api.anthropic.com/v1/messages"),
+            "multi-provider chains should try the next operator-declared provider \
+             instead of spending same-provider retry budget first"
         );
     }
 

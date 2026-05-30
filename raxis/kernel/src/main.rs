@@ -1673,6 +1673,8 @@ async fn main() {
             body_bytes: Option<&[u8]>,
             error: Option<&str>,
             agent_role: Option<&str>,
+            provider_id: Option<&str>,
+            model_id: Option<&str>,
         ) {
             // iter64 — capture the upstream REQUEST body alongside
             // the response so the dashboard's per-turn panel can
@@ -1700,6 +1702,8 @@ async fn main() {
                 original_body_bytes: 0,
                 error: error.map(str::to_owned),
                 agent_role: agent_role.map(str::to_owned),
+                provider: provider_id.map(str::to_owned),
+                model: model_id.map(str::to_owned),
             };
             if let Err(e) = self.capture.append(task_id, record) {
                 eprintln!(

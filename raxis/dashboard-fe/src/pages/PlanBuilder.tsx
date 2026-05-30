@@ -920,6 +920,7 @@ export function PlanBuilderPage() {
           {planEnabled ? (
             <PlanCanvas
               tasks={tasks}
+              planVerifiers={planVerifiers}
               toolProfiles={toolProfiles}
               credentialSetups={credentialSetups}
               policyGateRefs={policyGateRefs}
@@ -4013,3 +4014,9 @@ function downloadText(filename: string, text: string) {
   document.body.removeChild(anchor);
   URL.revokeObjectURL(url);
 }
+
+export const __planBuilderTest = {
+  parsePlanToml,
+  renderPlan,
+  validatePlan,
+};

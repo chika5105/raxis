@@ -8031,7 +8031,34 @@ async fn handle_retry_sub_task(
                 (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
             })?;
 
-            // 2e. Reset `tasks.state` so a subsequent
+            // 2e. Reset per-attempt VCS working state.
+            //
+            // `task_intent_ranges`, `task_exported_path_snapshots`,
+            // and `tasks.evaluation_sha` are admission working state
+            // for the active executor attempt, not durable history.
+            // The audit chain is the historical record. A retry
+            // provisions a fresh worktree, so carrying prior
+            // attempt SHAs forward would make `CompleteTask` re-diff
+            // commits that may not exist in the new clone and reject
+            // an otherwise-valid repair as `FAIL_INVALID_DIFF`.
+            tx.execute(
+                &format!("DELETE FROM {TASK_INTENT_RANGES} WHERE task_id = ?1"),
+                rusqlite::params![&task_id_clone],
+            )
+            .map_err(|_| {
+                emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+            })?;
+            tx.execute(
+                &format!("DELETE FROM {TASK_EXPORTED_PATH_SNAPSHOTS} WHERE task_id = ?1"),
+                rusqlite::params![&task_id_clone],
+            )
+            .map_err(|_| {
+                emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+            })?;
+
+            // 2f. Reset `tasks.state` so a subsequent
             //      `ActivateSubTask` is dispatch-legal. The Phase A
             //      task-state gate accepts only `Admitted` /
             //      `Running` (line ~497 above); `Failed` /
@@ -8048,7 +8075,12 @@ async fn handle_retry_sub_task(
             //      recent intent timestamp.
             tx.execute(
                 &format!(
-                    "UPDATE {TASKS} SET state = ?1, transitioned_at = ?2
+                    "UPDATE {TASKS}
+                        SET state = ?1,
+                            transitioned_at = ?2,
+                            session_id = NULL,
+                            evaluation_sha = NULL,
+                            base_sha = NULL
                        WHERE task_id = ?3"
                 ),
                 rusqlite::params![
@@ -8061,7 +8093,7 @@ async fn handle_retry_sub_task(
                 (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
             })?;
 
-            // ── Step 2f: reactivate the reviewer panel.
+            // ── Step 2g: reactivate the reviewer panel.
             //
             // iter62 — `INV-RETRY-REVIEWER-PANEL-REACTIVATED-01`.
             //
@@ -13884,6 +13916,61 @@ mod tests {
         .unwrap()
     }
 
+    /// Read retry-sensitive task working state. These fields are
+    /// per-attempt substrates and must be cleared by RetrySubTask
+    /// before the next activation gets a fresh worktree.
+    async fn read_task_retry_working_state(
+        store: Arc<Store>,
+        task_id: &str,
+    ) -> (Option<String>, Option<String>, Option<String>, i64, i64) {
+        let task_id = task_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = store.lock_sync();
+            let (session_id, evaluation_sha, base_sha) = conn
+                .query_row(
+                    &format!(
+                        "SELECT session_id, evaluation_sha, base_sha
+                           FROM {TASKS}
+                          WHERE task_id = ?1"
+                    ),
+                    rusqlite::params![&task_id],
+                    |r| {
+                        Ok((
+                            r.get::<_, Option<String>>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            let range_count = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {TASK_INTENT_RANGES} WHERE task_id = ?1"),
+                    rusqlite::params![&task_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap();
+            let export_count = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {TASK_EXPORTED_PATH_SNAPSHOTS} WHERE task_id = ?1"
+                    ),
+                    rusqlite::params![&task_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap();
+            (
+                session_id,
+                evaluation_sha,
+                base_sha,
+                range_count,
+                export_count,
+            )
+        })
+        .await
+        .unwrap()
+    }
+
     /// Happy path: prior activation is Failed with both counters
     /// well under budget. The handler must:
     ///   * insert a brand-new `PendingActivation` row;
@@ -13983,6 +14070,120 @@ mod tests {
             1,
             "retry must SQL-revoke the prior session so its token \
              cannot be replayed by a stale planner",
+        );
+    }
+
+    /// Retry must clear per-attempt VCS substrates. Prior accepted
+    /// ranges and exported path snapshots are meaningful only inside
+    /// the worktree that produced them; a retry activation provisions
+    /// a fresh worktree, so stale SHAs would make CompleteTask reject
+    /// a valid repair as `FAIL_INVALID_DIFF`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_sub_task_clears_prior_attempt_vcs_working_state() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, registry, _sink) = build_retry_test_ctx(store.clone());
+
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_orchestrator_session(&store_for_seed);
+            seed_failed_executor_for_retry(
+                &store_for_seed,
+                &registry_for_seed,
+                "exe-retry-vcs-state",
+                /*crash*/ 1,
+                /*review*/ 1,
+                /*max_crash*/ Some(3),
+                /*max_review*/ Some(2),
+                /*prior_session*/ Some("11111111-2222-3333-4444-555555555555"),
+            );
+
+            let conn = store_for_seed.lock_sync();
+            conn.execute(
+                &format!(
+                    "UPDATE {TASKS}
+                        SET session_id = ?1,
+                            evaluation_sha = ?2,
+                            base_sha = ?3
+                      WHERE task_id = ?4"
+                ),
+                rusqlite::params![
+                    "11111111-2222-3333-4444-555555555555",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "exe-retry-vcs-state",
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASK_INTENT_RANGES}
+                        (task_id, base_sha, head_sha, accepted_at)
+                     VALUES (?1, ?2, ?3, ?4)"
+                ),
+                rusqlite::params![
+                    "exe-retry-vcs-state",
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    unix_now_secs(),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASK_EXPORTED_PATH_SNAPSHOTS}
+                        (task_id, path)
+                     VALUES (?1, ?2)"
+                ),
+                rusqlite::params!["exe-retry-vcs-state", "src/stale.rs"],
+            )
+            .unwrap();
+        })
+        .await
+        .unwrap();
+
+        let before = read_task_retry_working_state(store.clone(), "exe-retry-vcs-state").await;
+        assert!(before.0.is_some(), "fixture must bind a stale session");
+        assert!(
+            before.1.is_some(),
+            "fixture must bind a stale evaluation_sha"
+        );
+        assert!(before.2.is_some(), "fixture must bind a stale base_sha");
+        assert_eq!(before.3, 1, "fixture must seed a stale intent range");
+        assert_eq!(before.4, 1, "fixture must seed a stale export snapshot");
+
+        let req = make_retry_request("exe-retry-vcs-state", 1);
+        let resp = handle_retry_sub_task(
+            req,
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            &ctx,
+        )
+        .await
+        .expect("retry under budget must succeed");
+        assert_eq!(resp.task_state, TaskState::Admitted);
+
+        let after = read_task_retry_working_state(store.clone(), "exe-retry-vcs-state").await;
+        assert!(
+            after.0.is_none(),
+            "retry must unbind the prior session until ActivateSubTask mints the next one"
+        );
+        assert!(
+            after.1.is_none(),
+            "retry must clear stale evaluation_sha from the prior attempt"
+        );
+        assert!(
+            after.2.is_none(),
+            "retry must clear stale base_sha from the prior attempt"
+        );
+        assert_eq!(
+            after.3, 0,
+            "retry must clear stale task_intent_ranges before the next worktree"
+        );
+        assert_eq!(
+            after.4, 0,
+            "retry must clear stale exported path snapshots before the next attempt"
         );
     }
 

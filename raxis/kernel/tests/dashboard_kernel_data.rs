@@ -24,7 +24,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use raxis_audit_tools::genesis::write_genesis_segment;
 use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
-use raxis_dashboard::data::DashboardData;
+use raxis_dashboard::data::{AuditListFilters, DashboardData};
 use raxis_policy::{OperatorEntry, PolicyBundle};
 use raxis_store::Store;
 use raxis_test_support::stub_cert_for_pubkey;
@@ -293,7 +293,9 @@ async fn audit_list_returns_genesis_record_from_real_chain() {
     )
     .expect("KernelDashboardData::new");
 
-    let page = data.list_audit(None, 100, None).expect("list_audit");
+    let page = data
+        .list_audit(None, 100, None, AuditListFilters::default())
+        .expect("list_audit");
     assert!(!page.is_empty(), "genesis record should appear");
     let genesis = page
         .iter()

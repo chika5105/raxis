@@ -1504,6 +1504,124 @@ impl AuditEntryView {
     }
 }
 
+/// Server-side audit list filters.
+///
+/// The dashboard audit page is a forensic surface, so initiative
+/// highlighting remains separate from filtering. These filters are
+/// applied while walking the chain, before the page-size cap, so a
+/// search for an older event such as `CustomToolInvoked` does not
+/// depend on the operator manually loading enough recent pages first.
+#[derive(Debug, Clone, Default)]
+pub struct AuditListFilters {
+    /// Free-text terms matched against event names, ids, task/session
+    /// identifiers, and payload values.
+    pub query: Option<String>,
+    /// Partial session-id selector.
+    pub session_id: Option<String>,
+    /// Partial initiative-id selector. This filters rows; it is
+    /// intentionally separate from the highlight-only initiative
+    /// focus used by `/api/audit`.
+    pub initiative_id: Option<String>,
+}
+
+impl AuditListFilters {
+    /// True when no filter field has a non-empty value.
+    pub fn is_empty(&self) -> bool {
+        self.query.as_ref().map_or(true, |s| s.trim().is_empty())
+            && self
+                .session_id
+                .as_ref()
+                .map_or(true, |s| s.trim().is_empty())
+            && self
+                .initiative_id
+                .as_ref()
+                .map_or(true, |s| s.trim().is_empty())
+    }
+
+    /// Return whether this audit row satisfies every active filter.
+    pub fn matches(&self, row: &AuditEntryView) -> bool {
+        if !contains_ci(
+            row.session_id
+                .as_deref()
+                .or_else(|| payload_str(&row.payload, "session_id")),
+            self.session_id.as_deref(),
+        ) {
+            return false;
+        }
+        if !contains_ci(
+            row.initiative_id
+                .as_deref()
+                .or_else(|| payload_str(&row.payload, "initiative_id")),
+            self.initiative_id.as_deref(),
+        ) {
+            return false;
+        }
+
+        let Some(query) = self
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return true;
+        };
+        let haystack = [
+            row.seq.to_string(),
+            row.event_id.clone(),
+            row.event_kind.clone(),
+            row.initiative_id.clone().unwrap_or_default(),
+            row.task_id.clone().unwrap_or_default(),
+            row.session_id.clone().unwrap_or_default(),
+            payload_search_text(&row.payload),
+        ]
+        .join(" ")
+        .to_lowercase();
+        query
+            .to_lowercase()
+            .split_whitespace()
+            .all(|token| haystack.contains(token))
+    }
+}
+
+fn contains_ci(value: Option<&str>, needle: Option<&str>) -> bool {
+    let Some(needle) = needle.map(str::trim).filter(|s| !s.is_empty()) else {
+        return true;
+    };
+    value
+        .unwrap_or_default()
+        .to_lowercase()
+        .contains(&needle.to_lowercase())
+}
+
+fn payload_str<'a>(payload: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    payload.get(key).and_then(|v| v.as_str())
+}
+
+fn payload_search_text(payload: &serde_json::Value) -> String {
+    fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Null => {}
+            serde_json::Value::Bool(v) => out.push(v.to_string()),
+            serde_json::Value::Number(v) => out.push(v.to_string()),
+            serde_json::Value::String(v) => out.push(v.clone()),
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    walk(value, out);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values() {
+                    walk(value, out);
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(payload, &mut out);
+    out.join(" ")
+}
+
 /// Snapshot of the policy bundle the dashboard surfaces (read).
 #[derive(Debug, Clone, Serialize)]
 pub struct PolicySnapshotView {
@@ -2454,6 +2572,7 @@ pub trait DashboardData: Send + Sync + 'static {
         cursor_seq: Option<u64>,
         limit: u32,
         highlight_initiative_id: Option<&str>,
+        filters: AuditListFilters,
     ) -> Result<Vec<AuditEntryView>, ApiError>;
 
     /// Operator inbox: union of pending escalations + reviews
@@ -3204,6 +3323,7 @@ impl DashboardData for InMemoryDashboardData {
         cursor_seq: Option<u64>,
         limit: u32,
         highlight_initiative_id: Option<&str>,
+        filters: AuditListFilters,
     ) -> Result<Vec<AuditEntryView>, ApiError> {
         let g = self.inner.read();
         let mut out: Vec<AuditEntryView> = g
@@ -3218,6 +3338,7 @@ impl DashboardData for InMemoryDashboardData {
                 e.apply_initiative_highlight(highlight_initiative_id);
                 e
             })
+            .filter(|e| filters.matches(e))
             .collect();
         out.sort_by(|a, b| b.seq.cmp(&a.seq));
         out.truncate(limit.min(500) as usize);
@@ -4424,11 +4545,18 @@ mod tests {
                 highlight_reasons: Vec::new(),
             });
         }
-        let page1 = d.list_audit(None, 4, None).unwrap();
+        let page1 = d
+            .list_audit(None, 4, None, AuditListFilters::default())
+            .unwrap();
         assert_eq!(page1.len(), 4);
         assert_eq!(page1[0].seq, 10);
         let page2 = d
-            .list_audit(Some(page1.last().unwrap().seq), 4, None)
+            .list_audit(
+                Some(page1.last().unwrap().seq),
+                4,
+                None,
+                AuditListFilters::default(),
+            )
             .unwrap();
         assert_eq!(page2.first().unwrap().seq, 6);
     }
@@ -4451,7 +4579,9 @@ mod tests {
             });
         }
 
-        let rows = d.list_audit(None, 10, Some("init-a")).unwrap();
+        let rows = d
+            .list_audit(None, 10, Some("init-a"), AuditListFilters::default())
+            .unwrap();
         assert_eq!(rows.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![2, 1]);
         assert!(!rows[0].is_highlighted);
         assert!(rows[1].is_highlighted);
@@ -4459,6 +4589,51 @@ mod tests {
             rows[1].highlight_reasons,
             vec!["audit.initiative_id".to_owned()]
         );
+    }
+
+    #[test]
+    fn list_audit_filters_before_page_cap() {
+        let d = InMemoryDashboardData::new();
+        for seq in 1..=80 {
+            d.push_audit(AuditEntryView {
+                seq,
+                event_id: format!("ev{seq}"),
+                event_kind: if seq == 7 {
+                    "CustomToolInvoked".into()
+                } else {
+                    "SessionRevoked".into()
+                },
+                initiative_id: Some("init-a".into()),
+                task_id: Some(if seq == 7 {
+                    "tooling-mcp-unity".into()
+                } else {
+                    "other".into()
+                }),
+                session_id: Some(if seq == 7 { "sess-tool" } else { "sess-other" }.into()),
+                at: seq,
+                payload: serde_json::json!({
+                    "tool_name": if seq == 7 { "unity_build_player" } else { "" },
+                }),
+                is_highlighted: false,
+                highlight_reasons: Vec::new(),
+            });
+        }
+
+        let rows = d
+            .list_audit(
+                None,
+                5,
+                None,
+                AuditListFilters {
+                    query: Some("unity".into()),
+                    session_id: Some("tool".into()),
+                    initiative_id: Some("init-a".into()),
+                },
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].seq, 7);
+        assert_eq!(rows[0].event_kind, "CustomToolInvoked");
     }
 
     #[test]

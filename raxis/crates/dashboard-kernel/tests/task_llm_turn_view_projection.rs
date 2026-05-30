@@ -69,6 +69,8 @@ fn anthropic_record() -> LlmTurnRecord {
         body_truncated: false,
         original_body_bytes: 770,
         error: None,
+        provider: None,
+        model: None,
         agent_role: Some("Executor".into()),
     }
 }
@@ -199,6 +201,57 @@ fn projection_uses_request_model_when_response_is_non_json() {
 }
 
 #[test]
+fn projection_uses_captured_provider_model_when_error_payload_omits_them() {
+    let mut r = anthropic_record();
+    r.provider = Some("gemini-realism-e2e".into());
+    r.model = Some("gemini-2.5-flash".into());
+    r.request_body = json!({
+        "contents": [
+            { "role": "user", "parts": [{ "text": "execute this task" }] }
+        ]
+    })
+    .to_string();
+    r.body = json!({
+        "error": {
+            "code": 429,
+            "message": "quota exceeded",
+            "status": "RESOURCE_EXHAUSTED"
+        }
+    })
+    .to_string();
+    r.status_code = Some(429);
+
+    let view = record_to_view(r, 9);
+
+    assert_eq!(view.provider.as_deref(), Some("gemini-realism-e2e"));
+    assert_eq!(view.model, "gemini-2.5-flash");
+    assert_eq!(view.status_code, Some(429));
+}
+
+#[test]
+fn projection_preserves_custom_provider_alias_without_model_prefix_guessing() {
+    let mut r = anthropic_record();
+    r.provider = Some("studio-local-llm".into());
+    r.model = Some("my-org/custom-planner-v7".into());
+    r.request_body = json!({
+        "messages": [{ "role": "user", "content": "execute this task" }]
+    })
+    .to_string();
+    r.body = json!({
+        "error": {
+            "message": "custom provider rejected the request"
+        }
+    })
+    .to_string();
+    r.status_code = Some(503);
+
+    let view = record_to_view(r, 10);
+
+    assert_eq!(view.provider.as_deref(), Some("studio-local-llm"));
+    assert_eq!(view.model, "my-org/custom-planner-v7");
+}
+
+#[test]
 fn projection_maps_openai_prompt_completion_tokens_onto_canonical_slots() {
     // OpenAI's `chat.completion` envelope uses `prompt_tokens` /
     // `completion_tokens` and does NOT expose prompt-cache
@@ -235,6 +288,8 @@ fn projection_maps_openai_prompt_completion_tokens_onto_canonical_slots() {
         body_truncated: false,
         original_body_bytes: 0,
         error: None,
+        provider: None,
+        model: None,
         agent_role: None,
     };
 

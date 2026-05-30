@@ -160,6 +160,15 @@ struct Pending {
     /// when the kernel issued the fetch without a planner-
     /// session attribution (e.g. bootstrap probes).
     agent_role: Option<String>,
+    /// Policy provider id selected for this fetch. Stored outside
+    /// the provider request/response bytes because some providers
+    /// (notably Gemini on quota errors) do not echo the model or
+    /// provider in their JSON envelope, and custom/BYO provider
+    /// aliases are intentionally not inferable from model names.
+    provider_id: Option<String>,
+    /// Model id selected for this fetch, when the kernel can
+    /// derive it from the outbound body or provider URL.
+    model_id: Option<String>,
 }
 
 /// Hook invoked by the gateway pump for every successful
@@ -215,6 +224,12 @@ pub trait LlmTurnObserver: Send + Sync {
         // from the provider's `body.role` field which is
         // extracted downstream from the parsed response.
         agent_role: Option<&str>,
+        // Policy/provider-routing metadata captured at dispatch
+        // time. These are not inferred from raw JSON envelopes so
+        // provider badges survive vendor-specific error shapes and
+        // custom model/provider aliases.
+        provider_id: Option<&str>,
+        model_id: Option<&str>,
     );
 }
 
@@ -371,6 +386,44 @@ impl GatewayClient {
         // gateway warm-up pings).
         agent_role: Option<String>,
     ) -> Result<FetchResult, GatewayCallError> {
+        self.fetch_with_observer_metadata(
+            gateway_token,
+            fetch_kind,
+            url,
+            method,
+            headers,
+            body_bytes,
+            timeout_ms,
+            session_id,
+            task_id,
+            agent_role,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Submit a fetch with explicit metadata for dashboard LLM-turn
+    /// capture. The metadata is not sent to the gateway; it is only
+    /// kept in the kernel-side inflight slot so the observer can
+    /// persist the policy provider/model even when the upstream
+    /// response body omits both fields.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fetch_with_observer_metadata(
+        &self,
+        gateway_token: String,
+        fetch_kind: FetchKind,
+        url: String,
+        method: String,
+        headers: Vec<(String, String)>,
+        body_bytes: Vec<u8>,
+        timeout_ms: u32,
+        session_id: Option<Uuid>,
+        task_id: Option<String>,
+        agent_role: Option<String>,
+        provider_id: Option<String>,
+        model_id: Option<String>,
+    ) -> Result<FetchResult, GatewayCallError> {
         let fetch_id = Uuid::new_v4();
         // Clone the correlation ids BEFORE moving them into the
         // payload so `Pending` can keep its own copy for the
@@ -381,6 +434,8 @@ impl GatewayClient {
         let task_id_for_inflight = task_id.clone();
         let session_id_for_inflight = session_id;
         let agent_role_for_inflight = agent_role.clone();
+        let provider_id_for_inflight = provider_id.clone();
+        let model_id_for_inflight = model_id.clone();
         // iter64 — capture the request body for observer fan-out so
         // the per-turn dashboard panel can render BOTH sides of the
         // upstream round-trip. This is deliberately conditional:
@@ -425,6 +480,8 @@ impl GatewayClient {
                 session_id: session_id_for_inflight,
                 request_body: request_body_for_inflight,
                 agent_role: agent_role_for_inflight,
+                provider_id: provider_id_for_inflight,
+                model_id: model_id_for_inflight,
             })),
         )
         .await
@@ -547,11 +604,10 @@ async fn pump(
     observer: Option<Arc<dyn LlmTurnObserver>>,
 ) {
     /// Per-fetch slot we keep across the request → response round trip.
-    /// Carries `(reply_tx, task_id, session_id, request_body)` so the
-    /// response-side handler can both unblock the dispatch caller AND
-    /// fan a record to the observer keyed by task. Pulling these into
-    /// a small struct (instead of a tuple) keeps the pump's bookkeeping
-    /// self-documenting.
+    /// Carries dispatch context so the response-side handler can both
+    /// unblock the dispatch caller AND fan a record to the observer
+    /// keyed by task. Pulling these into a small struct (instead of a
+    /// tuple) keeps the pump's bookkeeping self-documenting.
     struct InflightSlot {
         reply_tx: oneshot::Sender<Result<FetchResult, GatewayCallError>>,
         task_id: Option<String>,
@@ -565,6 +621,11 @@ async fn pump(
         /// dashboard can render a role badge per turn. See
         /// `orchestrator-llm-turns` in the iter65 task queue.
         agent_role: Option<String>,
+        /// Policy provider id + model id selected for this fetch.
+        /// Captured here because the gateway response wire shape does
+        /// not echo them and provider error JSON is not reliable.
+        provider_id: Option<String>,
+        model_id: Option<String>,
     }
 
     let mut inflight: HashMap<Uuid, InflightSlot> = HashMap::new();
@@ -590,6 +651,8 @@ async fn pump(
                             session_id:   pending.session_id,
                             request_body: pending.request_body,
                             agent_role:   pending.agent_role,
+                            provider_id:  pending.provider_id,
+                            model_id:     pending.model_id,
                         });
                         match tokio::time::timeout(
                             GATEWAY_FRAME_WRITE_TIMEOUT,
@@ -709,6 +772,8 @@ async fn pump(
                                 body_bytes.as_deref(),
                                 error.as_deref(),
                                 slot.agent_role.as_deref(),
+                                slot.provider_id.as_deref(),
+                                slot.model_id.as_deref(),
                             );
                         }
                         let outcome = match error {
@@ -819,7 +884,7 @@ mod tests {
     /// `pump_fans_observer_for_every_response_with_task_id` and
     /// `pump_skips_observer_when_no_task_id` tests below.
     /// Captures every `(task_id, fetch_id, status, request_body_str,
-    /// body_str, error, agent_role)` tuple it sees so the test can
+    /// body_str, error, agent_role, provider_id, model_id)` tuple it sees so the test can
     /// assert on order + content.
     ///
     /// iter65 — added `agent_role` slot so the orchestrator-llm-turns
@@ -831,6 +896,8 @@ mod tests {
         Option<u16>,
         String,
         String,
+        Option<String>,
+        Option<String>,
         Option<String>,
         Option<String>,
     );
@@ -852,6 +919,8 @@ mod tests {
             body_bytes: Option<&[u8]>,
             error: Option<&str>,
             agent_role: Option<&str>,
+            provider_id: Option<&str>,
+            model_id: Option<&str>,
         ) {
             let request_body = request_body_bytes
                 .map(|b| String::from_utf8_lossy(b).to_string())
@@ -867,6 +936,8 @@ mod tests {
                 body,
                 error.map(str::to_owned),
                 agent_role.map(str::to_owned),
+                provider_id.map(str::to_owned),
+                model_id.map(str::to_owned),
             ));
         }
     }
@@ -914,6 +985,47 @@ mod tests {
         // planner_fetch → gateway.fetch → InflightSlot →
         // pump → observer.
         assert_eq!(seen[0].6.as_deref(), Some("Executor"));
+        assert!(seen[0].7.is_none());
+        assert!(seen[0].8.is_none());
+    }
+
+    /// Explicit dispatch metadata must reach the observer so the
+    /// dashboard can render provider badges for providers whose
+    /// success/error JSON does not echo model/provider fields.
+    #[tokio::test]
+    async fn pump_fans_provider_model_metadata_to_observer() {
+        let (kernel_side, gateway_side) = UnixStream::pair().unwrap();
+        let _gw = spawn_echo_gateway(gateway_side).await;
+
+        let client = GatewayClient::new();
+        let obs = Arc::new(RecordingObserver::default());
+        client.install_observer(obs.clone()).await;
+        client.install_connection(kernel_side).await;
+
+        let result = client
+            .fetch_with_observer_metadata(
+                "tok".into(),
+                FetchKind::Inference,
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent".into(),
+                "POST".into(),
+                vec![],
+                br#"{"contents":[]}"#.to_vec(),
+                5_000,
+                None,
+                Some("task-cap-meta".into()),
+                Some("Executor".into()),
+                Some("gemini-realism-e2e".into()),
+                Some("gemini-2.5-flash".into()),
+            )
+            .await
+            .expect("fetch must succeed");
+        assert_eq!(result.status_code, Some(200));
+
+        let seen = obs.seen.lock().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "task-cap-meta");
+        assert_eq!(seen[0].7.as_deref(), Some("gemini-realism-e2e"));
+        assert_eq!(seen[0].8.as_deref(), Some("gemini-2.5-flash"));
     }
 
     /// Fetches without a `task_id` (e.g. early gateway warm-up

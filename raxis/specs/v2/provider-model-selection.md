@@ -314,6 +314,24 @@ both can use a frontier model in a pinch; the Executor specifically
 uses Gemini-Flash at tier-3 instead of Gemini-Pro for the per-token
 cost difference (Executor is high-volume).
 
+### 4.4 Fallback attempt shape
+
+`fallback_behavior = "attempt_in_order"` means exactly one provider
+attempt per declared chain entry for a logical model turn. The fallback
+chain itself is the retry strategy. Single-provider deployments may
+retry the same provider with exponential backoff, but multi-provider
+chains MUST NOT spend the full same-provider retry budget before trying
+the next operator-declared provider.
+
+When a chain entry returns a fallbackable provider failure (`408`,
+`429`, `5xx`, transport timeout/network error, or provider/model
+availability `401`/`403`/`404`), the planner records a short
+per-session cooldown for that entry. Later turns skip cooled-down
+entries and go directly to the next healthy fallback until the cooldown
+expires. This preserves the operator's explicit chain while avoiding a
+provider-health loop where every turn repeatedly hammers a known-bad
+primary and floods the dashboard with expected failures.
+
 ---
 
 ## §5 — Auto-diversification

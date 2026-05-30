@@ -99,6 +99,29 @@ describe("<TaskLlmTurns>", () => {
     expect(ratio.textContent).toContain("80%");
   });
 
+  it("renders custom provider aliases verbatim", async () => {
+    vi.spyOn(dashboardApi.tasks, "llmTurns").mockResolvedValue([
+      turn({
+        provider: "studio-local-llm",
+        model: "my-org/custom-planner-v7",
+        response: {
+          error: { message: "custom provider rejected the request" },
+        },
+        status_code: 503,
+      }),
+    ]);
+
+    renderWithProviders(<TaskLlmTurns taskId="task-x" />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("task-llm-turns-list")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("task-llm-turns-provider")).toHaveTextContent(
+      "studio-local-llm",
+    );
+    expect(screen.getByText("my-org/custom-planner-v7")).toBeInTheDocument();
+  });
+
   /// `INV-DASHBOARD-LLM-TURN-PANEL-WIRE-SHAPE-01`. Pin the post-
   /// iter64 contract end-to-end: with the new wire shape (model
   /// + role + parsed response + per-turn usage flowing through

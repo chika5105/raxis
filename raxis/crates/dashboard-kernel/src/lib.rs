@@ -51,15 +51,15 @@ use raxis_audit_tools::reader::ChainReader;
 use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
-    AuditEntryView, BuilderValidationIssue, BuilderValidationResponse, BuilderValidationSeverity,
-    ChainStatusView, CredentialMetadata, CredentialReveal, CustomToolCallView, DagEdge,
-    DashboardData, EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry,
-    InitiativePlanView, InitiativeView, NotificationView, OperatorAuthResolution,
-    OrchestratorGapsResponse, PolicyAdvancement, PolicyOperatorView, PolicySnapshotView,
-    RecentSessionEntry, ReviewerPanelEntry, ReviewerVerdictView, SessionView, SessionVmEnvView,
-    StructuredOutputView, SubsystemDetailRow, SubsystemHealthCard, SubsystemHealthResponse,
-    TaskView, WorktreeDetail, WorktreeDiff, WorktreeFile, WorktreeListEntry, WorktreeLogEntry,
-    WorktreeTree, WorktreeTreeEntry, SUBSYSTEM_CATALOG,
+    AuditEntryView, AuditListFilters, BuilderValidationIssue, BuilderValidationResponse,
+    BuilderValidationSeverity, ChainStatusView, CredentialMetadata, CredentialReveal,
+    CustomToolCallView, DagEdge, DashboardData, EscalationView, HealthCheck, HealthSnapshot,
+    InitiativeListEntry, InitiativePlanView, InitiativeView, NotificationView,
+    OperatorAuthResolution, OrchestratorGapsResponse, PolicyAdvancement, PolicyOperatorView,
+    PolicySnapshotView, RecentSessionEntry, ReviewerPanelEntry, ReviewerVerdictView, SessionView,
+    SessionVmEnvView, StructuredOutputView, SubsystemDetailRow, SubsystemHealthCard,
+    SubsystemHealthResponse, TaskView, WorktreeDetail, WorktreeDiff, WorktreeFile,
+    WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry, SUBSYSTEM_CATALOG,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -1959,6 +1959,7 @@ impl DashboardData for KernelDashboardData {
         cursor_seq: Option<u64>,
         limit: u32,
         highlight_initiative_id: Option<&str>,
+        filters: AuditListFilters,
     ) -> Result<Vec<AuditEntryView>, ApiError> {
         // INV-OBSERVABILITY-DATAPLANE-LATENCY-07 — the audit
         // tail read is bounded but not free; tag it under
@@ -2019,6 +2020,9 @@ impl DashboardData for KernelDashboardData {
                         highlight_reasons: Vec::new(),
                     };
                     entry.apply_initiative_highlight(highlight_initiative_id);
+                    if !filters.matches(&entry) {
+                        continue;
+                    }
                     out.push(entry);
                     if out.len() == cap {
                         break;
@@ -4660,9 +4664,24 @@ fn model_from_turn_record(last: &crate::LlmTurnRecord) -> Option<String> {
         .as_ref()
         .and_then(model_from_json_value)
         .or_else(|| request.as_ref().and_then(model_from_json_value))
+        .or_else(|| {
+            last.model
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
 }
 
 fn provider_from_turn_record(last: &crate::LlmTurnRecord) -> Option<String> {
+    if let Some(provider) = last
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(provider.to_owned());
+    }
     let response = serde_json::from_str::<serde_json::Value>(&last.body).ok();
     let request = serde_json::from_str::<serde_json::Value>(&last.request_body).ok();
     provider_from_turn_payloads(request.as_ref(), response.as_ref())
@@ -4927,8 +4946,21 @@ pub fn record_to_view(
 
     let model = model_from_json_value(&response)
         .or_else(|| model_from_json_value(&request))
+        .or_else(|| {
+            r.model
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
         .unwrap_or_default();
-    let provider = provider_from_turn_payloads(Some(&request), Some(&response));
+    let provider = r
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| provider_from_turn_payloads(Some(&request), Some(&response)));
 
     let (role, input_tokens, output_tokens, cache_creation, cache_read) = match &response {
         serde_json::Value::Object(_) => {
@@ -8168,6 +8200,8 @@ task_id = "task-a"
             body_truncated: false,
             original_body_bytes: 0,
             error: None,
+            provider: None,
+            model: None,
             agent_role: None,
         };
         cap.append("task-a", rec).unwrap();
@@ -8192,6 +8226,8 @@ task_id = "task-a"
             body_truncated: false,
             original_body_bytes: 0,
             error: None,
+            provider: None,
+            model: None,
             agent_role: None,
         };
         cap.append("task-a", rec).unwrap();
@@ -8218,6 +8254,8 @@ task_id = "task-a"
             body_truncated: false,
             original_body_bytes: 0,
             error: Some("NetworkError".into()),
+            provider: None,
+            model: None,
             agent_role: None,
         };
         cap.append("task-a", rec).unwrap();
@@ -8245,6 +8283,8 @@ task_id = "task-a"
             body_truncated: false,
             original_body_bytes: 0,
             error: None,
+            provider: None,
+            model: None,
             agent_role: None,
         };
         cap.append("task-a", rec).unwrap();
@@ -8291,6 +8331,8 @@ task_id = "task-a"
             body_truncated: false,
             original_body_bytes: 0,
             error: None,
+            provider: None,
+            model: None,
             agent_role: None,
         }
     }

@@ -295,11 +295,15 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
     // was in play, so persist the first observation as soon as the
     // fetch is admitted. The write is best-effort and NULL-coalescing:
     // it cannot block or rewrite the planner's real egress path.
+    let provider_id_for_observer =
+        provider_id_for_fetch_url(ctx.policy.load().as_ref(), &url_for_stall_detection);
+    let model_id_for_observer =
+        model_id_for_fetch_request(&url_for_stall_detection, &req.body_bytes);
     persist_session_provider_model_observation(
         ctx,
         session.session_id.as_str(),
-        provider_id_for_fetch_url(ctx.policy.load().as_ref(), &url_for_stall_detection),
-        model_id_for_fetch_request(&url_for_stall_detection, &req.body_bytes),
+        provider_id_for_observer.clone(),
+        model_id_for_observer.clone(),
     );
 
     let provider_label = extract_host_port(&url_for_stall_detection)
@@ -315,7 +319,7 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
 
     let result = ctx
         .gateway
-        .fetch(
+        .fetch_with_observer_metadata(
             gateway_token,
             fetch_kind,
             req.url,
@@ -326,6 +330,8 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
             session_uuid,
             task_id_for_observer,
             agent_role_for_observer,
+            provider_id_for_observer,
+            model_id_for_observer,
         )
         .await;
 
