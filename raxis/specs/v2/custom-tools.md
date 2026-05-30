@@ -10,8 +10,8 @@
 > declared inline in `plan.toml`, translated by the planner harness into
 > JSON-Schema function definitions, and presented to the LLM on equal
 > footing with base tools. Their behavior is implemented by an operator
-> command line (typically a script baked into the operator's VM image)
-> that reads JSON from stdin and writes a result to stdout.
+> command line or kernel-owned adapter that reads JSON from stdin and
+> writes a result to stdout.
 >
 > **Cross-references (canonical homes for adjacent material):**
 >
@@ -68,9 +68,11 @@ fumbling through `bash` with hand-crafted invocation strings.
   `grep_search`, etc.). Anything weaker (system-prompt-documented
   `bash` invocations) destroys the model's training distribution and
   inflates hallucination rates.
-- **Bounded by existing VM authority.** A custom-tool subprocess is
-  just another in-VM process — same network namespace, same filesystem
-  mounts, same cgroup hierarchy. No new authority surface.
+- **Bounded by declared execution locality.** A `guest_subprocess` is
+  just another in-VM process. `host_subprocess`, `host_mcp`, and
+  `remote_mcp` are kernel-executed from the signed plan declaration,
+  so the guest never controls host paths, MCP endpoints, or
+  credentials. No runtime discovery.
 - **Reviewer cannot use them.** Custom tools are arbitrary code
   execution. The Reviewer's pure-static guarantee
   (`INV-PLANNER-HARNESS-01`) must hold structurally; custom tools are
@@ -86,15 +88,15 @@ This spec specifies the mechanism that satisfies all five constraints.
 
 - The `[[profiles.<name>.custom_tool]]` declaration schema in
   `plan.toml` (§3).
-- The Draft-07 JSON Schema subset accepted for tool input definitions
-  (§4).
+- The RAXIS Tool Schema authoring model and Draft-07 JSON Schema subset
+  accepted for tool input definitions (§4).
 - The reserved-name list and collision rules (§5).
 - The stdin / stdout / stderr wire protocol between the harness and
   the operator command (§6).
 - Process containment via cgroup v2, timeout enforcement via
   `cgroup.kill` (§7).
 - Profile inheritance and merge semantics (§8).
-- Token-budget projection at admission and per-profile count caps
+- Token-budget projection at admission plus per-profile and per-task count caps
   (§9).
 - Reviewer-role prohibition (`INV-PLANNER-HARNESS-04`) (§10).
 - Custom tools vs. verifiers — when to use which (§11).
@@ -113,15 +115,13 @@ This spec specifies the mechanism that satisfies all five constraints.
 - **Tool composition / chaining inside the harness.** The LLM composes
   tool calls; the harness does not pre-pipe one custom tool into
   another.
-- **Host-side custom-tool scripts (Option Y from the design discussion).**
-  V2 keeps custom-tool scripts in the operator's VM image. Plan-bundle
-  inlining of script bytes (so the operator can ship the script
-  alongside `plan.toml` rather than baking it into the image) is
-  deferred to V3.
-- **Host-network access for custom tools.** A custom-tool subprocess
-  uses the VM's network namespace; it has the same egress rights as
-  any other in-VM process (Tier 1 tproxy + Tier 2 credential proxy).
-  No special carve-outs.
+- **Generic host script runners and generic MCP clients.** V2 supports
+  host-side and MCP adapter localities, but only as one named operation
+  per signed custom tool. It does not expose arbitrary `run_script`,
+  `mcp_call`, URL, method-name, or discovery surfaces to the agent.
+- **Plan-bundle script inlining.** Operators still provide the script or
+  adapter as an installed executable. Inlining script bytes into
+  `plan.toml` is deferred to a future release.
 - **Side-effecting state shared across invocations beyond what the
   filesystem provides.** The harness does not maintain per-tool
   caches, sessions, or persistent connections. Each invocation forks
@@ -148,7 +148,7 @@ inherits_from = "Executor"
 [[profiles.frontend_dev.custom_tool]]
 name        = "query_telemetry"
 description = "Query the internal telemetry service for a target. Returns the raw JSON record."
-command     = ["python3", "/usr/local/bin/query_telemetry.py"]
+command     = ["/usr/bin/python3", "/usr/local/bin/query_telemetry.py"]
 
   # JSON Schema (Draft-07 subset) for the LLM-facing input shape.
   [profiles.frontend_dev.custom_tool.schema]
@@ -160,11 +160,28 @@ command     = ["python3", "/usr/local/bin/query_telemetry.py"]
   type        = "integer"
   description = "Numeric ID of the target to query."
 
-  [profiles.frontend_dev.custom_tool.schema.properties.include_raw]
+[profiles.frontend_dev.custom_tool.schema.properties.include_raw]
   type        = "boolean"
   description = "Include raw event payload in the response."
   default     = false
 ```
+
+Attach profiles to Executor tasks with `profiles = [...]`:
+
+```toml
+[[tasks]]
+task_id            = "implement_api"
+session_agent_type = "Executor"
+profiles           = ["repo_tools", "db_tools"]
+path_allowlist     = ["src/api/"]
+predecessors       = []
+prompt             = "Implement the API change and commit the result."
+```
+
+`profiles` is deliberately plural. Operators can compose small,
+reviewable capability bundles (`repo_tools`, `db_tools`,
+`cloud_status_tools`) instead of creating one large toolbox profile for
+every possible task.
 
 ### 3.2 Field reference
 
@@ -172,21 +189,74 @@ command     = ["python3", "/usr/local/bin/query_telemetry.py"]
 |---|---|---|---|---|
 | `name` | string | yes | — | LLM-visible function name. Must match `^[a-z][a-z0-9_]{0,47}$`. Reserved-name and uniqueness rules per §5. |
 | `description` | string | yes | — | LLM-visible function description. Must be 8–800 characters; counts toward the token-budget projection (§9). |
-| `command` | array of strings | yes | — | Argv to invoke when the LLM calls the tool. The first element is an absolute path inside the VM filesystem; all elements must be non-empty. The harness invokes via `execvp`-equivalent; **no shell interpolation**. |
+| `command` | array of strings | yes | — | Argv to invoke when the LLM calls the tool. The first element is an absolute path inside the VM filesystem for `guest_subprocess`, and an absolute path on the kernel host for host-owned localities. All elements must be non-empty. The runtime invokes directly; **no shell interpolation**. |
+| `execution_locality` | string | no | `"guest_subprocess"` | One of `"guest_subprocess"`, `"host_subprocess"`, `"host_mcp"`, or `"remote_mcp"`. The agent never chooses this value at runtime; the kernel stamps it from the signed plan bundle. |
 | `schema` | object | yes | — | JSON Schema (Draft-07 subset per §4) describing the input object the LLM constructs. The harness sends exactly this object to the script's stdin. |
 | `timeout_seconds` | integer | no | `60` | Per-invocation wall-clock cap. Hard-capped by `policy.toml` `max_custom_tool_timeout_seconds` (default 300). |
-| `stdin_max_bytes` | integer | no | `262_144` (256 KiB) | Maximum bytes of JSON the harness will send to the script. The LLM's tool input is rejected at the harness boundary if it exceeds this; the LLM receives a `tool_result` error and may retry with a smaller input. |
-| `stdout_max_bytes` | integer | no | `65_536` (64 KiB) | Maximum bytes of stdout returned to the LLM. Excess is truncated and the truncation flagged in the `tool_result` (per §6.4). |
-| `stderr_max_bytes` | integer | no | `16_384` (16 KiB) | Maximum stderr bytes captured for the audit log. Excess is truncated; truncation flagged in `CustomToolInvoked`. |
+| `stdin_max_bytes` | integer | no | `262_144` (256 KiB) | Maximum bytes of JSON the harness will send to the script. Hard-capped at 1 MiB. The LLM's tool input is rejected at the harness boundary if it exceeds this; the LLM receives a `tool_result` error and may retry with a smaller input. |
+| `stdout_max_bytes` | integer | no | `65_536` (64 KiB) | Maximum stdout bytes retained for model/audit output. Hard-capped at 1 MiB. Excess is truncated and the truncation flagged in the `tool_result` (per §6.4). |
+| `stderr_max_bytes` | integer | no | `16_384` (16 KiB) | Maximum stderr bytes retained for model/audit output. Hard-capped at 256 KiB. Excess is truncated; truncation flagged in `CustomToolInvoked`. |
 | `expose_stderr` | bool | no | `false` | If `true`, the script's stderr is appended to the LLM-facing `tool_result` (after stdout, separated by a sentinel). Stderr is **always** captured in the audit event regardless. |
-| `env` | table of string-string | no | `{}` | Additional environment variables to set for the subprocess. Keys must match `^[A-Z][A-Z0-9_]*$`. The harness clears all other env except a small kernel-defined safelist (§6.6). |
 
-> **No host-side script verification.** V2 deliberately omits any
-> kernel-side hash verification of the binary at `command[0]`. The
-> kernel does not bundle, stage, or inspect the script bytes; the
-> script lives exclusively inside the operator's VM image. Operators
-> who need supply-chain integrity for their custom-tool scripts pin
-> the **entire VM image** by OCI digest:
+### 3.3 Authoring from CLI or UI
+
+Operators can write the TOML directly, use the dashboard Plan Builder, or
+use the CLI. All three produce the same profile-scoped declaration.
+
+```bash
+raxis tools add \
+  --plan plan.toml \
+  --profile repo_tools \
+  --name repo_symbol_search \
+  --description "Search repository symbols with ripgrep." \
+  --command /usr/bin/rg \
+  --command-arg --json \
+  --tool-schema '{"query":"string","limit?":{"type":"integer","minimum":1,"maximum":20}}'
+
+raxis tools attach --plan plan.toml --task implement_api --profile repo_tools
+raxis tools validate plan.toml
+raxis tools test --plan plan.toml --profile repo_tools --tool repo_symbol_search --input-json '{"query":"CustomToolInvoked"}'
+```
+
+The CLI is an authoring helper only. It does not grant authority,
+discover tools at runtime, or bypass plan signing. `tools test` is a
+local dry-run for the declared adapter contract; the kernel remains the
+runtime authority after submission.
+
+### 3.4 Execution locality
+
+The LLM-visible contract is independent of where the operation runs. A
+custom tool is always a narrow `(name, schema, result)` capability; the
+execution locality is host/kernel-owned metadata, not something the agent
+chooses or discovers.
+
+Current implementation:
+
+- `guest_subprocess` — executor VM runs a fixed argv with JSON on stdin
+  and reports bounded metadata to the kernel before the result is shown
+  to the model.
+- `host_subprocess` — the kernel runs an operator-declared host
+  executable with JSON on stdin. The executable runs with a cleared
+  environment plus non-secret RAXIS context variables
+  (`RAXIS_SESSION_ID`, `RAXIS_TASK_ID`, etc.).
+- `host_mcp` — the kernel runs an operator-declared host adapter for one
+  local MCP operation. The adapter may speak stdio or local HTTP MCP to
+  an existing server, but the agent sees only the narrow RAXIS tool.
+- `remote_mcp` — the kernel runs an operator-declared host adapter for
+  one remote MCP operation. Remote credentials and account routing stay
+  in host-owned config, OS keychain, or the adapter's own secure store;
+  they are not placed in the guest environment or the plan.
+
+In all cases the agent sees only the operation-specific tool. It does not
+see MCP discovery, server URLs, credentials, broad method namespaces, or a
+generic script runner.
+
+> **Executable supply-chain verification.** V2 deliberately omits
+> per-tool hash verification of the binary at `command[0]`. The kernel
+> does not bundle, stage, or inspect script/adapter bytes; it executes
+> the operator-installed path from the signed plan. For
+> `guest_subprocess`, operators who need supply-chain integrity pin the
+> **entire VM image** by OCI digest:
 >
 > ```toml
 > # policy.toml
@@ -200,13 +270,15 @@ command     = ["python3", "/usr/local/bin/query_telemetry.py"]
 > *every* byte of the executor filesystem — script, interpreter,
 > shared libraries, libc, and all transitive dependencies — in one
 > shot. Per-script hashing covers a strict subset of this surface and
-> creates a false sense of security (a tampered Python interpreter
-> can subvert a hash-pinned `analyze.py` regardless). The Kernel does
-> not babysit the Executor's sandbox: everything inside the
-> operator's VM image is the operator's responsibility, and image
-> digests are the canonical mechanism for binding it.
+> creates a false sense of security (a tampered Python interpreter can
+> subvert a hash-pinned `analyze.py` regardless). For host-owned
+> localities, the equivalent operator responsibility is host package
+> management, file permissions, and release signing for the adapter
+> executable. RAXIS binds *which* adapter may run and records every
+> invocation; it does not claim to make an arbitrary host binary
+> trustworthy.
 
-### 3.3 Profile-level fields
+### 3.5 Profile-level fields
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
@@ -216,7 +288,37 @@ command     = ["python3", "/usr/local/bin/query_telemetry.py"]
 A profile MAY declare zero custom tools; this is the common case for
 profiles inheriting from `Executor` without extension.
 
-### 3.4 Per-task overrides — explicitly disallowed
+### 3.6 Task profile assignment
+
+Executor tasks MAY reference zero or more profile names with:
+
+```toml
+profiles = ["repo_tools", "db_tools"]
+```
+
+The kernel resolves each profile, including inheritance, in the order
+declared on the task. It then merges the effective custom-tool arrays
+into the kernel-stamped Executor bundle. Tool names must remain unique
+across the merged set. If two selected profiles contribute byte-identical
+tool declarations with the same name, the kernel deduplicates them and
+keeps the first profile's attribution; the dashboard surfaces this as a
+warning because the overlap may be intentional. If the duplicate names
+resolve to different command/schema/limit semantics, admission fails
+closed rather than treating either declaration as an override. The
+kernel stamps each effective tool with the profile that contributed it,
+and that `profile_name` is recorded in `CustomToolInvoked` audit events.
+
+Reviewer and Orchestrator tasks cannot receive custom-tool profiles.
+Reviewers retain the static review surface, and Orchestrators remain
+kernel-managed.
+
+The deprecated singular spelling is rejected:
+
+```toml
+profile = "repo_tools" # invalid; use profiles = ["repo_tools"]
+```
+
+### 3.7 Per-task overrides — explicitly disallowed
 
 `plan.toml` does NOT permit custom-tool declarations under
 `[plan.tasks.<id>]`. Custom tools live exclusively at the profile
@@ -231,11 +333,23 @@ mental model.
 
 ---
 
-## §4 — Schema Validation
+## §4 — Tool Schema Validation
 
-Custom-tool input schemas are validated at admission time against a
-**vendored, deterministic Draft-07 subset**. The subset is chosen for
-two properties:
+RAXIS uses a normalized **Tool Schema** for model-facing custom-tool
+inputs. Operators can author it as full JSON Schema or as shorthand:
+
+```json
+{"query":"string","limit?":{"type":"integer","minimum":1,"maximum":20}}
+```
+
+The authoring core expands that into an object-root schema with
+`properties`, `required`, and `additionalProperties = false`. Custom
+models and vendor-specific tool formats plug in through adapters, but
+the signed plan stores the normalized RAXIS Tool Schema so the kernel,
+dashboard, CLI, audit chain, and planner all speak one stable contract.
+
+Custom-tool input schemas are validated against a **deterministic
+provider-safe subset**. The subset is chosen for two properties:
 
 1. **All accepted schemas round-trip through both Anthropic's and
    OpenAI's tool-schema validators without modification.** The harness
@@ -253,19 +367,14 @@ The accepted vocabulary is the intersection of Anthropic's and
 OpenAI's tool-schema acceptance, restricted further to Draft-07 core:
 
 - **Type:** `type` (must be one of `"object"`, `"string"`, `"integer"`,
-  `"number"`, `"boolean"`, `"array"`, `"null"`).
+  `"number"`, `"boolean"`, `"array"`).
 - **Object structure:** `properties`, `required`, `additionalProperties`
-  (must be `false` at the root for V2 — the LLM's tool input must be
-  fully specified by the declared properties; `true` permits unbounded
-  inputs that bypass the declared schema's intent).
+  (`false` at the root is the default produced by CLI/UI shorthand).
 - **Array structure:** `items` (single schema only — tuple-typed
   `items: [...]` is rejected as `FAIL_CUSTOM_TOOL_SCHEMA_UNSUPPORTED_FEATURE`).
-- **String constraints:** `minLength`, `maxLength`, `pattern` (POSIX
-  ERE; no PCRE), `enum`, `format` (only `"uri"`, `"email"`,
-  `"date-time"`, `"uuid"` accepted; others rejected).
-- **Numeric constraints:** `minimum`, `maximum`, `multipleOf`.
-- **Array constraints:** `minItems`, `maxItems`, `uniqueItems`.
-- **Documentation:** `description`, `title`, `default`, `examples`
+- **String constraints:** `minLength`, `maxLength`, `enum`.
+- **Numeric constraints:** `minimum`, `maximum`.
+- **Documentation:** `description`, `default`
   (all advisory; counted into token-budget projection §9).
 - **Conditional and polymorphic constructs:** `enum` only.
   `oneOf` / `anyOf` / `allOf` / `not` / `if` / `then` / `else` are
@@ -349,20 +458,22 @@ tool, the harness:
 
 1. Validates the LLM-supplied `input` object against the declared
    schema. On failure → returns a `tool_result` with `is_error: true`
-   and a structured error message; does NOT invoke the script.
-2. Allocates a transient cgroup `/sys/fs/cgroup/raxis/customtool-<seq>/`
-   (per §7).
-3. Forks `command[0]` with `command[1..]` as argv, environment per
-   §6.6, current directory set to `/workspace`, stdin connected to a
-   pipe, stdout and stderr to separate pipes.
-4. Writes the canonical UTF-8 JSON serialization of the LLM's input
+   and a structured error message; does not invoke the script/adapter.
+2. Dispatches by `execution_locality`:
+   - `guest_subprocess`: the Executor harness forks `command[0]`
+     inside the VM.
+   - `host_subprocess`, `host_mcp`, `remote_mcp`: the Executor sends
+     `CustomToolExecution { tool_name, input }` to the kernel. The
+     kernel looks up `command` from the signed plan bundle and forks
+     it on the host.
+3. Writes the canonical UTF-8 JSON serialization of the LLM's input
    object to the script's stdin and closes the write end. Encoding is
    minified JSON with sorted object keys.
-5. Reads stdout and stderr concurrently into bounded buffers
+4. Reads stdout and stderr concurrently into bounded buffers
    (`stdout_max_bytes`, `stderr_max_bytes`).
-6. Awaits process exit, subject to `timeout_seconds`.
-7. Emits the `CustomToolInvoked` audit event (§12).
-8. Constructs the LLM-facing `tool_result` (§6.4).
+5. Awaits process exit, subject to `timeout_seconds`.
+6. Emits the `CustomToolInvoked` audit event (§12).
+7. Constructs the LLM-facing `tool_result` (§6.4).
 
 ### 6.2 Stdin contract
 
@@ -437,22 +548,27 @@ The audit log always records both.
 
 ### 6.6 Environment variables
 
-The harness clears the script's environment to a small kernel-defined
-safelist before adding the operator's `env` table:
+`guest_subprocess` inherits the executor VM's deliberately sparse runtime
+environment. `host_subprocess`, `host_mcp`, and `remote_mcp` are run by
+the kernel with a cleared environment and only a small, non-secret
+RAXIS context set:
 
 | Variable | Source | Purpose |
 |---|---|---|
-| `PATH` | Image-default `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` | Standard executable search path. |
-| `HOME` | `/root` | Subprocess HOME. |
-| `LANG` | `C.UTF-8` | Deterministic locale. |
+| `PATH` | Kernel-defined system path | Standard executable search path for host adapters; `command[0]` is still required to be absolute. |
 | `RAXIS_CUSTOM_TOOL_NAME` | Tool's `name` field | Lets the script identify which tool it's serving (useful for shared scripts). |
+| `RAXIS_CUSTOM_TOOL_LOCALITY` | Tool's `execution_locality` field | Lets shared adapters branch between host subprocess / host MCP / remote MCP modes. |
+| `RAXIS_CUSTOM_TOOL_REQUEST_ID` | Per-invocation UUID | Matches the audit event correlation id. |
+| `RAXIS_SESSION_ID` | Current session ID | For audit correlation in operator-side logs. |
 | `RAXIS_TASK_ID` | Current task ID | For audit correlation in operator-side logs. |
-| `RAXIS_INVOCATION_ID` | Per-invocation UUID | Matches the audit event's `invocation_id`. |
-| `RAXIS_CREDENTIAL_PROXY_*` | Per [`credential-proxy.md`](credential-proxy.md) | Standard credential proxy localhost ports, if any. |
+| `RAXIS_INITIATIVE_ID` | Current initiative ID | For audit correlation in operator-side logs. |
 
-The operator's `env` table is merged on top. Operator-supplied keys
-collide with kernel-supplied keys → admission rejection
-(`FAIL_CUSTOM_TOOL_ENV_RESERVED_KEY`).
+There is intentionally no plan-level `env` table in the shipped V2
+runtime. Host adapters that need credentials must load them from
+host-owned config, OS keychain, or a RAXIS credential proxy path the
+operator configured outside the agent environment. This keeps the
+planner's environment free of bearer secrets and makes session envs
+safe to display in the operator dashboard.
 
 ### 6.7 Exit code semantics
 
@@ -675,17 +791,20 @@ The asymmetry reflects the underlying invariants: Reviewer is a
 
 ## §9 — Token Budget Projection and Count Cap
 
-### 9.1 Per-profile count cap
+### 9.1 Per-profile and per-task count cap
 
 Each profile may declare at most **25** custom tools (after
-inheritance merge). The cap is hard-coded in V2; future versions may
-make it configurable. Violation →
-`FAIL_CUSTOM_TOOL_COUNT_EXCEEDED { profile, count, limit: 25 }`.
+inheritance merge). Each executor task's merged `profiles = [...]`
+bundle may also expose at most **25** effective custom tools. The cap
+is hard-coded in V2; future versions may make it configurable.
+Violation → `FAIL_CUSTOM_TOOL_COUNT_EXCEEDED { scope, count, limit: 25 }`.
 
 The cap exists to push operators toward composing capability across
-multiple profiles / tasks rather than building one mega-agent with
-100 tools (which both bloats system prompt and degrades the LLM's
-ability to choose the right tool).
+multiple tasks rather than building one mega-agent with 100 tools
+(which both bloats system prompt and degrades the LLM's ability to
+choose the right tool). Multiple profiles improve reuse and operator
+ergonomics; they do not widen the per-task tool surface beyond the
+same fail-closed cap.
 
 ### 9.2 Token-budget projection at admission
 
@@ -849,12 +968,12 @@ semantic territory and confusion is predictable.
 | Concern | Verifier ([`verifier-processes.md`](verifier-processes.md)) | Custom Tool (this spec) |
 |---|---|---|
 | **Invoked by** | Kernel (preflight, on `CompleteTask`) | LLM (on-demand during a session) |
-| **VM** | Dedicated isolated verifier VM | The agent's own VM |
+| **VM / locality** | Dedicated isolated verifier VM | `guest_subprocess` in the agent VM, or kernel-owned host/MCP adapter locality |
 | **Output reaches** | Audit chain (`witness_records`) → Reviewer KSB | LLM context as `tool_result` |
 | **Affects review gate?** | Yes — `block_review` failures fail the task; `warn_only` failures surface as KSB witnesses | No — informational to the LLM only |
-| **Image** | Operator-published, OCI-pinned, `role_restriction` includes `Verifier` | The Executor profile's image (custom tools are Executor-only in V2 — Reviewer per `INV-PLANNER-HARNESS-04`, Orchestrator per `INV-PLANNER-HARNESS-06`) |
+| **Image / binary source** | Operator-published, OCI-pinned, `role_restriction` includes `Verifier` | Executor image for `guest_subprocess`; host-installed adapter for host-owned localities (custom tools are Executor-only in V2 — Reviewer per `INV-PLANNER-HARNESS-04`, Orchestrator per `INV-PLANNER-HARNESS-06`) |
 | **Invocation cardinality** | Exactly once per `CompleteTask` per declared verifier | Zero, one, or many times per session at LLM discretion |
-| **Network** | Air-gapped by default; explicit `allowed_egress` opt-in | Whatever the agent VM has (tproxy + credential proxy) |
+| **Network** | Air-gapped by default; explicit `allowed_egress` opt-in | Guest locality gets the agent VM's mediated egress; host/MCP localities use the operator-declared host adapter, never a generic agent-controlled network client |
 | **Auditability** | `WitnessSubmission` + `VerifierTimedOut` etc. | `CustomToolInvoked` (this spec §12) |
 | **Use it for** | Lint, type-check, unit-test, symbol-index — anything that should gate Reviewer judgment | LLM-callable utilities (telemetry lookup, schema introspection, internal status APIs) — anything informational to the LLM's reasoning loop |
 
@@ -882,40 +1001,48 @@ pub enum AuditEventKind {
     // … existing variants …
 
     CustomToolInvoked {
-        session_id:        Uuid,
-        task_id:           TaskId,
-        profile_name:      String,
-        tool_name:         String,
-        invocation_id:     Uuid,                  // matches RAXIS_INVOCATION_ID env
-        invocation_seq:    u64,                   // monotonic per session
-        input_sha256:      [u8; 32],              // of the canonical-JSON stdin bytes
-        input_bytes:       u32,
-        stdout_sha256:     [u8; 32],              // of the FULL stdout (pre-truncation)
-        stdout_bytes:      u32,                   // full size
-        stdout_truncated:  bool,                  // true if truncated to stdout_max_bytes
-        stderr_sha256:     [u8; 32],              // of the FULL stderr
-        stderr_bytes:      u32,
-        stderr_truncated:  bool,
-        stderr_exposed_to_llm: bool,              // expose_stderr flag
-        exit_code:         i32,                   // -1 if killed before exit
-        duration_ms:       u64,                   // execution time only (dequeue → exit); excludes queue wait
-        queued_for_ms:     u64,                   // time spent in the harness concurrency queue (0 if not queued); see §7.3
-        outcome:           CustomToolOutcome,
-        cgroup_path:       String,                // /sys/fs/cgroup/raxis/customtool-<seq>/
+        tool_name:               String,
+        profile_name:            String,
+        execution_locality:      String, // guest_subprocess | host_subprocess | host_mcp | remote_mcp
+        outcome:                 String,
+        duration_ms:             u64,
+        exit_code:               Option<i32>,
+        signal:                  Option<i32>,
+        timeout_ms:              u64,
+        command_argv_sha256:     String,
+        stdin_bytes_total:       u64,
+        stdin_sha256:            String,
+        stdout_bytes_total:      u64,
+        stdout_bytes_captured:   u64,
+        stdout_sha256:           String,
+        stdout_truncated:        bool,
+        stderr_bytes_total:      u64,
+        stderr_bytes_captured:   u64,
+        stderr_sha256:           String,
+        stderr_truncated:        bool,
+        error:                   Option<String>,
     },
 }
 
 pub enum CustomToolOutcome {
     Success,
-    NonZeroExit { code: i32 },
+    ToolError,
+    SchemaRejected,
+    InputTooLarge,
+    SpawnFailed,
+    StdinWriteFailed,
+    WaitFailed,
     Timeout,
+    NonZeroExit,
+    StdoutReadFailed,
+    StderrReadFailed,
+    AuditReportFailed,
+    // Reserved / not yet implemented:
     /// Queued but `max_queue_wait_ms` elapsed before a concurrency
     /// slot freed (§7.3). `queued_for_ms` on the parent event
     /// equals `max_queue_wait_ms` at the boundary.
     QueueTimeout { queued_for_ms: u64 },
     KilledOnTeardown,
-    StdinTooLarge { input_bytes: u32, limit: u32 },
-    InputSchemaValidationFailed { error_summary: String },
     /// Queue full at admission — request was never queued.
     /// Distinct from `QueueTimeout`, which fires for a request
     /// that *was* queued but waited too long. See §6.7 / §7.3.
@@ -1000,19 +1127,21 @@ truncation state, and the resolved command line.
 ## §14 — Implementation Checklist
 
 - [x] Plan parser accepts `[[profiles.<name>.custom_tool]]` array-of-tables under each profile, with the field schema in §3.2.
-- [x] Plan parser rejects `[[plan.tasks.<id>.custom_tool]]` and `[[tasks]].custom_tool` with `FAIL_CUSTOM_TOOL_TASK_LEVEL_NOT_ALLOWED` (§3.4).
+- [x] Task parser accepts plural `profiles = [...]`, rejects singular `profile = "..."`, resolves profiles in declared order, deduplicates identical overlapping tool declarations, and rejects conflicting duplicate effective tool names across selected profiles.
+- [x] Plan parser rejects `[[plan.tasks.<id>.custom_tool]]` and `[[tasks]].custom_tool` with `FAIL_CUSTOM_TOOL_TASK_LEVEL_NOT_ALLOWED` (§3.5).
 - [ ] Vendored Draft-07 schema validator implementing the accepted-keyword set in §4.1 and rejecting all keywords in §4.2.
 - [ ] Reserved-name list mirrored from kernel binary; `raxis admin reserved-tool-names` CLI exposes it.
-- [x] Inheritance walker computes effective custom-tool set; rejects cycles, name collisions, Reviewer-role + non-empty set, and Orchestrator-rooted profiles.
+- [x] Inheritance walker computes effective custom-tool set; rejects cycles, name collisions, Reviewer-role + non-empty set, Orchestrator-rooted profiles, and per-task merged bundles above 25 tools.
 - [ ] Admission emits all `FAIL_*` and `WARN_*` codes per §3, §4.3, §5, §9.3, §10.1. Current implementation emits the structural `FAIL_*` family for profile shape, name, command, timeout, inheritance, and role violations; token-budget and schema-budget warnings remain outstanding.
 - [ ] Token-budget projector pulls tokenizer from `raxis-gateway`'s `tokenize(model, text)` admin interface; computes `custom_tool_share` per §9.2.
-- [x] Harness side: loads kernel-stamped custom-tool bundles only for Executor sessions, rejects malformed bundles fail-closed, and constructs JSON stdin for subprocess wrappers.
-- [x] Harness side: enforces per-tool timeout by killing the subprocess and returning a structured `tool_result.is_error`.
-- [ ] Harness side: schema-validates LLM input before script invocation; forks into per-invocation cgroup; enforces stdin/stdout/stderr caps and timeout via `cgroup.kill`.
-- [ ] Harness side: builds `tool_result` per §6.4 (truncation sentinel) and §6.5 (stderr exposure rules).
+- [x] Harness side: loads kernel-stamped custom-tool bundles only for Executor sessions, rejects malformed bundles fail-closed, and constructs JSON stdin for guest subprocess wrappers or kernel-owned execution requests.
+- [x] Kernel side: implements `host_subprocess`, `host_mcp`, and `remote_mcp` as signed-plan-resolved host adapter executions. The planner supplies only `tool_name` and JSON input; command argv, locality, and adapter placement are resolved by the kernel.
+- [x] Harness/kernel side: enforces per-tool timeout by killing the subprocess and returning a structured `tool_result.is_error`.
+- [x] Harness/kernel side: schema-validates the shipped Draft-07 subset before script invocation and enforces stdin/stdout/stderr byte caps. Per-invocation cgroups and `cgroup.kill` remain outstanding.
+- [x] Harness side: builds bounded `tool_result` output and applies stderr exposure rules (`expose_stderr` defaults false).
 - [ ] Harness side: implements the queue-wait deadline per §7.3 (`max_queue_wait_ms`). Each queued invocation stamps `queued_at_ms`; a `tokio::time::sleep_until` task races the `concurrency_slot_available` notify channel; on timeout, surfaces `CustomToolQueueTimeout` distinct from `Timeout` and `CustomToolConcurrencyExhausted`.
 - [ ] Policy admission validates `max_queue_wait_ms ∈ [1_000, max_custom_tool_timeout_seconds * 1000]`; out-of-range emits `FAIL_POLICY_CUSTOM_TOOL_QUEUE_WAIT_EXCEEDS_TIMEOUT` / `FAIL_POLICY_CUSTOM_TOOL_QUEUE_WAIT_TOO_SMALL`.
-- [ ] Audit event `CustomToolInvoked` per §12.1; emits regardless of outcome.
+- [x] Audit event `CustomToolInvoked` per §12.1; emits regardless of outcome for `guest_subprocess`, `host_subprocess`, `host_mcp`, and `remote_mcp` execution attempts once the request resolves to a signed tool. Guest-subprocess audit reports are accepted only when tool name, profile name, locality, argv digest, and timeout match the signed effective task bundle.
 - [ ] Optional full-payload archival per §12.2 (gated on `[audit.custom_tools] archive_full_payloads`).
 - [ ] `raxis log` CLI gains the custom-tool view per §12.3.
 - [ ] `raxis-gateway` exposes `tokenize` admin interface (cross-spec dependency).
@@ -1020,6 +1149,9 @@ truncation state, and the resolved command line.
 - [x] Live e2e includes a Unity-like MCP fixture proving the supported BYO/MCP migration path: one bounded Executor custom tool per MCP method, no generic MCP discovery bridge.
 - [ ] Tests:
       - Plan with valid custom tool → admitted; LLM sees the tool in `tools` array. (unit coverage exists for bundle resolution; full admission/runtime e2e added via `tooling-mcp-unity` slice)
+      - Executor task with multiple profiles → admitted; effective tools merge in declared task order.
+      - Executor task selecting two profiles with an identical effective tool declaration → admitted with one LLM-visible tool and first-profile attribution.
+      - Executor task selecting two profiles with the same effective tool name but different semantics → `FAIL_CUSTOM_TOOL_NAME_COLLISION`.
       - Plan with reserved-name custom tool → `FAIL_CUSTOM_TOOL_NAME_RESERVED`.
       - Plan with name collision across inherited profile → `FAIL_CUSTOM_TOOL_NAME_COLLISION`.
       - Reviewer profile with custom tool → `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED`.
@@ -1036,7 +1168,7 @@ truncation state, and the resolved command line.
       - Custom tool with `expose_stderr = false` (default) → LLM sees stdout only; audit captures stderr.
       - Custom tool with `expose_stderr = true` → LLM sees stdout + sentinel-bracketed stderr.
       - Custom tool double-fork daemonization → cgroup.kill catches both processes on timeout.
-      - Custom tool with operator `env` collision against `RAXIS_*` → `FAIL_CUSTOM_TOOL_ENV_RESERVED_KEY`.
+      - Host-owned custom tool tries to spoof command/locality from the guest request → kernel ignores the guest and resolves from the signed task bundle.
       - Profile inheritance cycle → `FAIL_PLAN_PROFILE_INHERITANCE_CYCLE`.
       - 5 concurrent invocations against `max_concurrent_custom_tool_invocations = 4` → 5th gets `CustomToolConcurrencyExhausted`. (Queue still has slots, but the 5th *also* exceeds queue depth — `max_queued_custom_tool_invocations = 0`.)
       - 5 concurrent invocations against `max_concurrent_custom_tool_invocations = 4`, `max_queued_custom_tool_invocations = 4`, `max_queue_wait_ms = 200` with the running tools holding their slots for 30 s → 5th invocation queues, waits 200 ms, surfaces `CustomToolQueueTimeout` (NOT `CustomToolConcurrencyExhausted`); audit row records `outcome = QueueTimeout { queued_for_ms: 200 }` and `duration_ms = 0`.

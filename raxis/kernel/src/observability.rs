@@ -2232,6 +2232,9 @@ pub const IPC_MSG_KIND_WITNESS_SUBMISSION: &str = "witness_submission";
 pub const IPC_MSG_KIND_ESCALATION_REQUEST: &str = "escalation_request";
 /// Pairs with `role = planner`. Gateway-mediated egress request.
 pub const IPC_MSG_KIND_PLANNER_FETCH_REQUEST: &str = "planner_fetch_request";
+/// Pairs with `role = planner`. Bounded metadata report for one
+/// Executor custom-tool subprocess invocation.
+pub const IPC_MSG_KIND_CUSTOM_TOOL_INVOCATION: &str = "custom_tool_invocation";
 /// Pairs with `role = planner`. The structured
 /// [`raxis_types::PlannerExitOutcome`] notice the planner emits
 /// immediately before EOF (`INV-FAILURE-REASON-CONCRETE-01`).
@@ -2253,6 +2256,7 @@ pub const KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET: &[&str] = &[
     IPC_MSG_KIND_WITNESS_SUBMISSION,
     IPC_MSG_KIND_ESCALATION_REQUEST,
     IPC_MSG_KIND_PLANNER_FETCH_REQUEST,
+    IPC_MSG_KIND_CUSTOM_TOOL_INVOCATION,
     IPC_MSG_KIND_PLANNER_EXIT_NOTICE,
     IPC_MSG_KIND_UNEXPECTED,
 ];
@@ -2279,6 +2283,8 @@ pub fn kernel_substrate_ipc_route(msg: &raxis_ipc::IpcMessage) -> (&'static str,
         M::WitnessSubmission(_) => (IPC_ROLE_VERIFIER, IPC_MSG_KIND_WITNESS_SUBMISSION),
         M::EscalationRequest(_) => (IPC_ROLE_PLANNER, IPC_MSG_KIND_ESCALATION_REQUEST),
         M::PlannerFetchRequest(_) => (IPC_ROLE_PLANNER, IPC_MSG_KIND_PLANNER_FETCH_REQUEST),
+        M::CustomToolInvocation(_) => (IPC_ROLE_PLANNER, IPC_MSG_KIND_CUSTOM_TOOL_INVOCATION),
+        M::CustomToolExecution(_) => (IPC_ROLE_PLANNER, IPC_MSG_KIND_CUSTOM_TOOL_INVOCATION),
         M::PlannerExitNotice { .. } => (IPC_ROLE_PLANNER, IPC_MSG_KIND_PLANNER_EXIT_NOTICE),
 
         // ── Response variants, operator-socket variants, tproxy /
@@ -2289,6 +2295,8 @@ pub fn kernel_substrate_ipc_route(msg: &raxis_ipc::IpcMessage) -> (&'static str,
         M::KernelIntentResponse(_)
         | M::KernelEscalationResponse(_)
         | M::KernelPlannerFetchResponse(_)
+        | M::KernelCustomToolInvocationAck(_)
+        | M::KernelCustomToolExecutionResponse(_)
         | M::KernelPlannerExitNoticeAck
         | M::WitnessAck { .. }
         | M::OperatorRequest(_)

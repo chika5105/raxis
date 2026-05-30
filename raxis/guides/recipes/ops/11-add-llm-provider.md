@@ -113,7 +113,8 @@ description = "Probe new provider"
 [workspace]
 name        = "probe-anthropic-prod"
 lane_id     = "default"
-# target_ref is optional; kernel uses policy default (typically refs/heads/main)
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "probe"
@@ -121,7 +122,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = []     # @raxis-explicit no-write-acknowledged
 predecessors       = []
-description        = """Print the provider id you're using and exit."""
+description        = "Provider probe"
+prompt             = """Print the provider id you're using and exit."""
 EOF
 
 INIT="$(raxis submit plan /tmp/probe-plan.toml --no-dry-run | awk '/^Initiative / {print $2} /^initiative_id:/ {print $2}')"

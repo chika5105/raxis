@@ -2371,8 +2371,9 @@ sparse-checkout configuration from the already-signed allowlist.
 
 `raxis_types::CloneStrategy` (`Full | Blobless | Sparse`, lower-case at-rest /
 TOML strings) is the typed surface. Per-task TOML reads `clone_strategy = "..."`
-and `session_agent_type = "..."`; defaults are `Blobless` and `Executor`
-(the Orchestrator is auto-created at admission per [`planner-harness.md §4.8`](planner-harness.md),
+and `session_agent_type = "..."`; both fields are required. `blobless` is the
+recommended common clone strategy, but the kernel never inserts it implicitly.
+The Orchestrator is auto-created at admission per [`planner-harness.md §4.8`](planner-harness.md),
 not declared in `[[tasks]]`).
 
 `parse_plan_tasks` rejects unknown values for either field at parse time
@@ -3141,16 +3142,37 @@ Backwards-compatible with existing JWT cookie sessions.
 [[tasks]]
 task_id            = "auth_implementer"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/auth/"]
+description        = "Implement OAuth2 device code flow"
+prompt             = """
+Implement OAuth2 device-code flow support in the auth subsystem while preserving
+existing JWT cookie sessions.
+"""
 # inherits plan.vm_image
 
 [[tasks]]
 task_id            = "frontend_implementer"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["web/"]
 vm_image           = "raxis/node:20"   # per-task override
+description        = "Add OAuth2 UI"
+prompt             = """
+Add the frontend screens and API calls needed for the OAuth2 device-code flow.
+"""
 
 [[tasks]]
 task_id            = "auth_reviewer"
 session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/auth/", "web/"]
+predecessors       = ["auth_implementer", "frontend_implementer"]
+description        = "Review OAuth2 implementation"
+prompt             = """
+Review the OAuth2 device-code implementation for correctness, security, and
+compatibility with existing JWT cookie sessions.
+"""
 # vm_image MUST be omitted; the kernel boots the canonical
 # raxis-reviewer-core image per INV-PLANNER-HARNESS-02.
 

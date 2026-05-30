@@ -7,6 +7,8 @@ Read src/lib.rs and produce docs/api.md.
 [workspace]
 name = "Generate Docs From Source"
 lane_id     = "doc-gen-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "docgen"

@@ -18,20 +18,22 @@ Files mirrored:
 | File / dir                                | Source in the harness                                                                                                                                                                                  |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `policy.toml`                             | `<data_dir>/policy/policy.toml` after `enable_gateway_in_policy` runs (bootstrap + harness overlay).                                                                                                    |
-| `plan_primary.toml`                       | `realistic_plan_toml()` in `extended_e2e_support::plan_realistic`. The 9-task primary initiative (materializer + xfile-refactor + lint-defect + 2 reviewers + allowlist + service-rt + tproxy + cred-sub). |
+| `plan_primary.toml`                       | `realistic_plan_toml()` in `extended_e2e_support::plan_realistic`. The primary initiative (materializer + xfile-refactor + lint-defect/lint-runner/reviewer fan-out + allowlist + service/proxy/credential/egress/tooling evidence). |
 | `plan_sibling.toml`                       | `sibling_plan_toml()` in `extended_e2e_support::multi_initiative`. The 1-task sibling initiative (`sibling-materialize-records`).                                                                       |
 | `credentials/test-pg-dev.env`             | `write_credentials` — libpq URL for the local docker-compose Postgres at `127.0.0.1:54399`.                                                                                                             |
 | `credentials/test-mongo-dev.env`          | `write_credentials` — mongo URI for the local docker-compose MongoDB at `127.0.0.1:27399`.                                                                                                              |
 | `credentials/test-redis-dev.env`          | `write_credentials` — single-line `--requirepass` value for the local docker-compose Redis at `127.0.0.1:63799`.                                                                                        |
 | `credentials/test-smtp-dev.env`           | `write_credentials` — raw SASL secret for the local docker-mailserver at `127.0.0.1:25199`.                                                                                                             |
-| `credentials/anthropic.env.placeholder`   | **Hardcoded template (NEVER copied from the live credential).** Documents the file shape; the real key MUST NEVER be checked in.                                                                        |
-| `seed/prompts/*`                          | Verbatim mirror of `raxis/live-e2e/seed/prompts/` — the per-task prompt markdown files the realistic plan embeds into `[[tasks]].description`. Mirrored so the bundle is a complete reproducible picture. |
+| `credentials/anthropic.env.placeholder`   | **Hardcoded template (NEVER copied from the live credential).** Documents the Anthropic key shape; the real key MUST NEVER be checked in.                                                              |
+| `credentials/gemini.env.placeholder`      | **Hardcoded template (NEVER copied from the live credential).** Documents the Gemini key shape; the real key MUST NEVER be checked in.                                                                 |
+| `credentials/openai.env.placeholder`      | **Hardcoded template (NEVER copied from the live credential).** Documents the OpenAI key shape; the real key MUST NEVER be checked in.                                                                 |
+| `seed/prompts/*`                          | Verbatim mirror of `raxis/live-e2e/seed/prompts/` — the per-task prompt markdown files the realistic plan embeds into `[[tasks]].prompt`. Mirrored so the bundle is a complete reproducible picture. |
 
 > **The example bundle is the same shape as the live tmpdir.**
 > Drop into any kernel data_dir, copy `policy.toml` to
 > `<data_dir>/policy/policy.toml`, copy `credentials/*.env` to
-> `<data_dir>/credentials/`, write a synthetic provider creds file
-> under `<data_dir>/providers/anthropic-realism-e2e.toml`, and the
+> `<data_dir>/credentials/`, write synthetic provider creds files
+> under `<data_dir>/providers/*-realism-e2e.toml`, and the
 > kernel will boot in the same shape the live-e2e harness boots
 > in. (This is not an end-to-end test, just a fidelity check.)
 
@@ -47,6 +49,10 @@ before the run that lands the `working e2e` commit so the
 checked-in examples always match the most recent passing iter:
 
 ```bash
+# requires raxis/.env with ANTHROPIC-API-DEV-KEY,
+# GEMINI-API-DEV-KEY, and OPEN-AI-API-DEV-KEY
+# executor primaries rotate across those three providers and keep
+# the other two as fallback models
 RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 \
   RAXIS_E2E_REFRESH_EXAMPLES=1 \
   cargo test -p raxis-kernel \
@@ -84,18 +90,21 @@ unit test runs on every `cargo test -p raxis-kernel` so a
 regression in the refresh shape surfaces immediately, no live
 docker stack required.
 
-## Anthropic credential rule (NON-NEGOTIABLE)
+## Provider credential rule (NON-NEGOTIABLE)
 
-`anthropic.env.placeholder` is the ONLY file in `credentials/`
-that uses a placeholder value. The real Anthropic API key MUST
-NEVER be checked into this directory or any other directory in
-the repo. This is enforced **three** ways:
+The provider placeholder files in `credentials/` document the local
+development shapes for Anthropic, Gemini, and OpenAI. Real provider
+API keys MUST NEVER be checked into this directory or any other
+directory in the repo. The Anthropic shape is currently enforced
+**three** ways because its key prefix is stable enough for a reliable
+repo-wide guard:
 
 1. **At refresh time** — `maybe_refresh_examples` rewrites
-   `anthropic.env.placeholder` from a hardcoded template, NOT
-   from whatever real `ANTHROPIC-API-DEV-KEY` value the harness
-   loaded into the kernel's `providers/` directory. The
-   real-key bytes never reach the refresh code path.
+   `anthropic.env.placeholder`, `gemini.env.placeholder`, and
+   `openai.env.placeholder` from hardcoded templates, NOT from
+   whatever real provider values the harness loaded into the
+   kernel's `providers/` directory. The real-key bytes never reach
+   the refresh code path.
 2. **At end of refresh** — `assert_no_real_anthropic_key` scans
    every file under `examples/credentials/` for the regex
    `sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{20,}` and panics with a

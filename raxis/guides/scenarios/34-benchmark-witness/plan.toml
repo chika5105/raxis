@@ -7,6 +7,8 @@ Benchmark witness (scenario 34)
 [workspace]
 name = "Benchmark Witness"
 lane_id     = "bench-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "speed-it-up"

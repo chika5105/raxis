@@ -7,6 +7,8 @@ Http api and curl witness (scenario 15)
 [workspace]
 name = "Http Api And Curl Witness"
 lane_id     = "http-api-curl-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "build"

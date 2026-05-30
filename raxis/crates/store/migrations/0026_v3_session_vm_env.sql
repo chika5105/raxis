@@ -1,0 +1,5 @@
+-- Migration 26 is rendered from crates/store/src/migration.rs so table
+-- identifiers stay type-safe. This mirror is documentation for operators
+-- inspecting the migration directory.
+--
+-- Adds session_vm_env for per-session VM environment debugging.

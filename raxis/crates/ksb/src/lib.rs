@@ -259,6 +259,18 @@ pub struct KsbSnapshot {
     #[serde(default)]
     pub pending_escalations: Vec<PendingEscalation>,
 
+    /// Verifier / witness gate lifecycle rows visible to this role.
+    ///
+    /// This is deliberately compact and source/hook typed so the
+    /// planner does not have to infer "what is pending" from a vague
+    /// task FSM state. Orchestrators see the initiative-wide gate
+    /// posture; executors see only their own task's gate posture;
+    /// reviewers see their own row only. Accepted witness evidence
+    /// still lives in `witness_records`; this projection is a
+    /// decision aid, not a second source of truth.
+    #[serde(default)]
+    pub gate_statuses: Vec<GateStatusView>,
+
     /// Credential-proxy port assignments: which loopback ports map
     /// to which logical upstream services for this task. Empty for
     /// reviewer / orchestrator and for executor tasks without
@@ -381,6 +393,31 @@ pub struct GateFixupContext {
     /// together so it can budget its repair effort against the
     /// remaining retry quota.
     pub max_attempts: u32,
+}
+
+// ---------------------------------------------------------------------------
+// GateStatusView — compact gate lifecycle KSB feed
+// ---------------------------------------------------------------------------
+
+/// One visible verifier/witness gate lifecycle row.
+///
+/// `gate_source` distinguishes policy gates from plan/task/integration
+/// verifiers. `gate_hook` tells the model when the gate applies, e.g.
+/// `intent`, `complete_task`, or `integration_merge`. `verdict` mirrors the
+/// dashboard lifecycle vocabulary: `Pending`, `Pass`, `Fail`,
+/// `Inconclusive`, `SpawnFailed`, `ProcessFailed`, `Timeout`,
+/// `ConfigInvalid`, `BudgetExhausted`, or `CapExceeded`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GateStatusView {
+    pub task_id: String,
+    pub gate_type: String,
+    pub gate_source: String,
+    pub gate_hook: String,
+    pub evaluation_sha: String,
+    pub verdict: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    pub observed_at: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -992,6 +1029,29 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
             }
         }
     }
+    for g in &snapshot.gate_statuses {
+        for s in [
+            &g.task_id,
+            &g.gate_type,
+            &g.gate_source,
+            &g.gate_hook,
+            &g.evaluation_sha,
+            &g.verdict,
+        ] {
+            if s.contains(KSB_DELIMITER_CLOSE) {
+                return Err(KsbError::DelimiterInjection {
+                    field: "gate_statuses",
+                });
+            }
+        }
+        if let Some(reason) = &g.failure_reason {
+            if reason.contains(KSB_DELIMITER_CLOSE) {
+                return Err(KsbError::DelimiterInjection {
+                    field: "gate_statuses",
+                });
+            }
+        }
+    }
     for c in &snapshot.credential_ports {
         for s in [&c.upstream_id, &c.kind] {
             if s.contains(KSB_DELIMITER_CLOSE) {
@@ -1261,6 +1321,41 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
                 buf.push_str(line);
                 buf.push('\n');
             }
+        }
+    }
+
+    // V3 — compact verifier/witness gate lifecycle feed. Appended after
+    // the existing optional blocks so the KSB prefix stays byte-stable for
+    // replay/debug tooling that keys on the older field order.
+    buf.push_str("gate_statuses=\n");
+    if snapshot.gate_statuses.is_empty() {
+        buf.push_str("  <empty>\n");
+    } else {
+        for g in &snapshot.gate_statuses {
+            buf.push_str("  - task=");
+            buf.push_str(&g.task_id);
+            buf.push_str(" gate=");
+            buf.push_str(&g.gate_type);
+            buf.push_str(" source=");
+            buf.push_str(&g.gate_source);
+            buf.push_str(" hook=");
+            buf.push_str(&g.gate_hook);
+            buf.push_str(" verdict=");
+            buf.push_str(&g.verdict);
+            buf.push_str(" sha=");
+            buf.push_str(if g.evaluation_sha.is_empty() {
+                "<none>"
+            } else {
+                g.evaluation_sha.as_str()
+            });
+            buf.push_str(" observed_at=");
+            buf.push_str(&g.observed_at.to_string());
+            if let Some(reason) = &g.failure_reason {
+                buf.push_str(" reason=\"");
+                buf.push_str(reason);
+                buf.push('"');
+            }
+            buf.push('\n');
         }
     }
 
@@ -1629,6 +1724,7 @@ mod tests {
             base_sha: "f3d21a09f3d21a09f3d21a09f3d21a09f3d21a09".to_owned(),
             reviewer_verdicts: vec![],
             pending_escalations: vec![],
+            gate_statuses: vec![],
             credential_ports: vec![],
             capabilities: None,
             last_critique: None,
@@ -1647,6 +1743,19 @@ mod tests {
             parent_worktree_pointer: "/var/lib/raxis/worktrees/init-3/task-7".to_owned(),
             attempt_index: 1,
             max_attempts: 3,
+        }
+    }
+
+    fn gate_status_fixture() -> GateStatusView {
+        GateStatusView {
+            task_id: "task-42".to_owned(),
+            gate_type: "NoSecretStrings".to_owned(),
+            gate_source: "task_verifier".to_owned(),
+            gate_hook: "complete_task".to_owned(),
+            evaluation_sha: "abcdef0123456789abcdef0123456789abcdef01".to_owned(),
+            verdict: "Fail".to_owned(),
+            failure_reason: Some("secret-like token in src/lib.rs".to_owned()),
+            observed_at: 1_779_000_001,
         }
     }
 
@@ -2018,7 +2127,52 @@ mod tests {
         assert!(snap.target_ref.is_empty());
         assert!(snap.reviewer_verdicts.is_empty());
         assert!(snap.pending_escalations.is_empty());
+        assert!(snap.gate_statuses.is_empty());
         assert!(snap.credential_ports.is_empty());
+    }
+
+    #[test]
+    fn render_emits_gate_statuses_block_when_set() {
+        let mut snap = fixture_snapshot();
+        snap.gate_statuses.push(gate_status_fixture());
+        let s = render_ksb(&snap).unwrap();
+        assert!(
+            s.contains("gate_statuses=\n"),
+            "rendered KSB must open the gate_statuses block; got: {s}"
+        );
+        assert!(
+            s.contains(
+                "  - task=task-42 gate=NoSecretStrings source=task_verifier \
+                 hook=complete_task verdict=Fail \
+                 sha=abcdef0123456789abcdef0123456789abcdef01 \
+                 observed_at=1779000001 reason=\"secret-like token in src/lib.rs\"\n"
+            ),
+            "rendered KSB must carry compact gate lifecycle rows; got: {s}"
+        );
+    }
+
+    #[test]
+    fn render_gate_statuses_empty_block_is_explicit() {
+        let s = render_ksb(&fixture_snapshot()).unwrap();
+        assert!(
+            s.contains("gate_statuses=\n  <empty>\n"),
+            "empty gate_statuses should be explicit so the model knows no \
+             gate rows are currently visible; got: {s}"
+        );
+    }
+
+    #[test]
+    fn render_rejects_close_delimiter_in_gate_statuses() {
+        let mut snap = fixture_snapshot();
+        let mut gate = gate_status_fixture();
+        gate.failure_reason = Some(format!("bad{}", KSB_DELIMITER_CLOSE));
+        snap.gate_statuses.push(gate);
+        match render_ksb(&snap).unwrap_err() {
+            KsbError::DelimiterInjection { field } => {
+                assert_eq!(field, "gate_statuses");
+            }
+            other => panic!("expected DelimiterInjection, got {other:?}"),
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────

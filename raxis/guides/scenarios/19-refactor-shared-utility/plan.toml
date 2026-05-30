@@ -7,6 +7,8 @@ Refactor shared utility (scenario 19)
 [workspace]
 name = "Refactor Shared Utility"
 lane_id     = "refactor-util-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "extract"

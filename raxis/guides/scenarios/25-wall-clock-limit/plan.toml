@@ -7,6 +7,8 @@ Wall clock limit (scenario 25)
 [workspace]
 name = "Wall Clock Limit"
 lane_id     = "wallclock-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "slow"

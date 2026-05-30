@@ -33,6 +33,7 @@ import type {
   CredentialDraft,
   CredentialProxyType,
   CredentialSetupDraft,
+  PolicyGateRef,
   TaskDraft,
   ToolProfileDraft,
 } from "@/pages/PlanBuilder";
@@ -81,6 +82,7 @@ export interface PlanCanvasProps {
   tasks: TaskDraft[];
   toolProfiles: ToolProfileDraft[];
   credentialSetups: CredentialSetupDraft[];
+  policyGateRefs: PolicyGateRef[];
   selectedTaskId: string | null;
   arrangeVersion: number;
   canRemoveTask: boolean;
@@ -97,6 +99,7 @@ interface TaskNodeData extends Record<string, unknown> {
   task: TaskDraft;
   toolProfiles: ToolProfileDraft[];
   credentialSetups: CredentialSetupDraft[];
+  policyGateRefs: PolicyGateRef[];
   allTaskIds: string[];
   canRemoveTask: boolean;
   isExpanded: boolean;
@@ -259,6 +262,7 @@ const TaskNode = memo(({ data }: NodeProps<Node<TaskNodeData>>) => {
           task={task}
           toolProfiles={data.toolProfiles}
           credentialSetups={data.credentialSetups}
+          policyGateRefs={data.policyGateRefs}
           allTaskIds={data.allTaskIds}
           canRemove={data.canRemoveTask}
           onUpdate={(patch) => data.onUpdateTask(task.id, patch)}
@@ -345,6 +349,7 @@ function InlineTaskEditor({
   task,
   toolProfiles,
   credentialSetups,
+  policyGateRefs,
   allTaskIds,
   canRemove,
   onUpdate,
@@ -356,6 +361,7 @@ function InlineTaskEditor({
   task: TaskDraft;
   toolProfiles: ToolProfileDraft[];
   credentialSetups: CredentialSetupDraft[];
+  policyGateRefs: PolicyGateRef[];
   allTaskIds: string[];
   canRemove: boolean;
   onUpdate: (patch: Partial<TaskDraft>) => void;
@@ -368,6 +374,7 @@ function InlineTaskEditor({
   const selectedProfiles = splitList(task.profiles);
   const knownProfileIds = new Set(toolProfiles.map((profile) => profile.id));
   const missingProfiles = selectedProfiles.filter((profile) => !knownProfileIds.has(profile));
+  const selectedPolicyGate = policyGateRefs.find((gate) => gate.name === task.verifierName);
   const effectiveTools = selectedProfiles.flatMap((profileId) => {
     const profile = toolProfiles.find((candidate) => candidate.id === profileId);
     if (!profile) return [];
@@ -476,7 +483,7 @@ function InlineTaskEditor({
                 isExecutor ? "border-info bg-info-muted text-info" : "border-ok bg-ok-muted text-ok"
               }`}
             >
-              {task.agentType}
+              {task.agentType || "Role required"}
             </span>
             <button
               type="button"
@@ -552,6 +559,7 @@ function InlineTaskEditor({
               onChange={(e) => onUpdate({ agentType: e.target.value as TaskDraft["agentType"] })}
               className="input w-full text-xs"
             >
+              <option value="">Choose role</option>
               <option>Executor</option>
               <option>Reviewer</option>
             </select>
@@ -606,6 +614,7 @@ function InlineTaskEditor({
               onChange={(e) => onUpdate({ cloneStrategy: e.target.value as TaskDraft["cloneStrategy"] })}
               className="input w-full text-xs"
             >
+              <option value="">Choose strategy</option>
               <option>blobless</option>
               <option>full</option>
               <option>sparse</option>
@@ -885,41 +894,95 @@ function InlineTaskEditor({
           </>
         )}
 
-        <InlineSection title="Verifier / witness gate">
+        <InlineSection title="Per-task verifier">
           <div className="grid grid-cols-3 gap-2">
             <CardField label="Verifier">
+              <div className="space-y-1">
+                <input
+                  value={task.verifierName}
+                  onChange={(e) => onUpdate({ verifierName: e.target.value })}
+                  className="input w-full font-mono text-xs"
+                  placeholder="no_secret_strings"
+                  list={`policy-gates-${task.id}`}
+                />
+                <datalist id={`policy-gates-${task.id}`}>
+                  {policyGateRefs.map((gate) => (
+                    <option key={`${gate.source}:${gate.name}`} value={gate.name}>
+                      {gate.source} policy gate
+                    </option>
+                  ))}
+                </datalist>
+                {selectedPolicyGate && (
+                  <p className="text-[10px] leading-snug text-ink-subtle">
+                    Policy gate from {selectedPolicyGate.source}
+                    {selectedPolicyGate.claimTypes.length
+                      ? `; satisfies ${selectedPolicyGate.claimTypes.join(", ")}`
+                      : ""}
+                    .
+                  </p>
+                )}
+              </div>
+            </CardField>
+            <CardField label="Image">
               <input
-                value={task.verifierName}
-                onChange={(e) => onUpdate({ verifierName: e.target.value })}
+                value={task.verifierImage}
+                onChange={(e) => onUpdate({ verifierImage: e.target.value })}
                 className="input w-full font-mono text-xs"
-                placeholder="cargo-test"
+                placeholder="raxis-verifier-starter"
               />
             </CardField>
-            <CardField label="Gate type">
-              <input
-                value={task.verifierGateType}
-                onChange={(e) => onUpdate({ verifierGateType: e.target.value })}
+            <CardField label="On failure">
+              <select
+                value={task.verifierOnFailure}
+                onChange={(e) =>
+                  onUpdate({
+                    verifierOnFailure:
+                      e.target.value === "warn_only" ? "warn_only" : "block_review",
+                  })
+                }
                 className="input w-full font-mono text-xs"
-                placeholder="TestPass"
+              >
+                <option value="block_review">block_review</option>
+                <option value="warn_only">warn_only</option>
+              </select>
+            </CardField>
+          </div>
+          <div className="grid grid-cols-[1fr_8rem] gap-2">
+            <CardField label="Command">
+              <input
+                value={task.verifierCommand}
+                onChange={(e) => onUpdate({ verifierCommand: e.target.value })}
+                className="input w-full font-mono text-xs"
+                placeholder="cargo test --workspace"
               />
             </CardField>
-            <CardField label="Gate on">
+            <CardField label="Timeout">
               <input
-                value={task.verifierGateOn}
-                onChange={(e) => onUpdate({ verifierGateOn: e.target.value })}
+                value={task.verifierTimeout}
+                onChange={(e) => onUpdate({ verifierTimeout: e.target.value })}
                 className="input w-full font-mono text-xs"
-                placeholder="Pass"
+                placeholder="30s"
               />
             </CardField>
           </div>
-          <CardField label="Command">
-            <input
-              value={task.verifierCommand}
-              onChange={(e) => onUpdate({ verifierCommand: e.target.value })}
-              className="input w-full font-mono text-xs"
-              placeholder="cargo test --workspace"
-            />
-          </CardField>
+          <div className="grid grid-cols-[1fr_8rem] gap-2">
+            <CardField label="Artifact">
+              <input
+                value={task.verifierArtifact}
+                onChange={(e) => onUpdate({ verifierArtifact: e.target.value })}
+                className="input w-full font-mono text-xs"
+                placeholder="/raxis/verifier-output.json"
+              />
+            </CardField>
+            <CardField label="Max bytes">
+              <input
+                value={task.verifierArtifactMaxBytes}
+                onChange={(e) => onUpdate({ verifierArtifactMaxBytes: e.target.value })}
+                className="input w-full font-mono text-xs"
+                placeholder="1048576"
+              />
+            </CardField>
+          </div>
         </InlineSection>
 
         <CardField label="Prompt">
@@ -1511,6 +1574,7 @@ function PlanCanvasInner({
   tasks,
   toolProfiles,
   credentialSetups,
+  policyGateRefs,
   selectedTaskId,
   arrangeVersion,
   canRemoveTask,
@@ -1544,6 +1608,7 @@ function PlanCanvasInner({
     () => ({
       toolProfiles,
       credentialSetups,
+      policyGateRefs,
       allTaskIds: tasks.map((task) => task.id),
       canRemoveTask,
       onUpdateTask,
@@ -1552,7 +1617,7 @@ function PlanCanvasInner({
       onOpenToolProfiles,
       onOpenCredentialSetup,
     }),
-    [canRemoveTask, credentialSetups, onOpenCredentialSetup, onOpenToolProfiles, onRemoveTask, onSelectTask, onUpdateTask, tasks, toolProfiles],
+    [canRemoveTask, credentialSetups, onOpenCredentialSetup, onOpenToolProfiles, onRemoveTask, onSelectTask, onUpdateTask, policyGateRefs, tasks, toolProfiles],
   );
 
   const [rfNodes, setRfNodes] = useState<Node<TaskNodeData>[]>(() =>

@@ -400,16 +400,22 @@ pub struct GateStatRow {
 /// historical verdicts live on the per-task witness panel.
 ///
 /// `latest_verdict` is one of `"Pending" | "Pass" | "Fail" |
-/// "Inconclusive"`. `Pending` comes from an issued verifier token
-/// that has not produced a witness row yet; the other three match
-/// `WitnessResultClass`. Adding another class requires a parallel
-/// edit on the FE chip palette so the new verdict has a colour
-/// assignment.
+/// "Inconclusive"` or a no-witness terminal verifier-run state such
+/// as `"SpawnFailed"`, `"ProcessFailed"`, or `"Timeout"`. `Pending`
+/// comes from an issued verifier token that has not produced a
+/// witness row yet; pass/fail/inconclusive match `WitnessResultClass`.
+/// Adding another class requires a parallel edit on the FE chip
+/// palette so the new verdict has a colour assignment.
 #[derive(Debug, Clone, Serialize)]
 pub struct DagGateVerdictChip {
     /// The gate this verdict applies to (e.g. `tests`, `coverage`).
     pub gate_type: String,
-    /// One of `"Pending" | "Pass" | "Fail" | "Inconclusive"`.
+    /// Provenance stamped by `verifier_run_tokens.gate_source`.
+    pub gate_source: String,
+    /// Lifecycle hook that caused the verifier to run.
+    pub gate_hook: String,
+    /// One of `"Pending" | "Pass" | "Fail" | "Inconclusive"` or
+    /// a no-witness terminal verifier-run status.
     pub latest_verdict: String,
     /// Unix-seconds wall-clock of the latest witness for this gate.
     pub recorded_at: i64,
@@ -438,7 +444,18 @@ pub struct WitnessView {
     pub task_id: String,
     /// Gate the witness was attached to (e.g. `tests`, `coverage`).
     pub gate_type: String,
-    /// One of `Pass | Fail | Inconclusive`. The FE renders this
+    /// `policy_gate`, `task_verifier`, `integration_verifier`, ...
+    pub gate_source: String,
+    /// `complete_task`, `integration_merge`, `intent`, ...
+    pub gate_hook: String,
+    /// Operator-visible verifier image alias when known.
+    pub verifier_image_alias: Option<String>,
+    /// Command label/path recorded at spawn.
+    pub verifier_command: Option<String>,
+    /// Failure routing declared for this verifier run.
+    pub verifier_on_failure: Option<String>,
+    /// One of `Pending | Pass | Fail | Inconclusive` or a
+    /// no-witness terminal verifier-run status. The FE renders this
     /// as a colour-coded pill.
     pub result_class: String,
     /// HEAD sha the verifier evaluated against. Pinned by the
@@ -3348,7 +3365,7 @@ impl DashboardData for InMemoryDashboardData {
             issues,
             next_steps: vec![
                 "Paste this [profiles.<name>] block into plan.toml.".into(),
-                "Set profile = \"<name>\" on each Executor task that should receive the tools."
+                "Set profiles = [\"<name>\"] on each Executor task that should receive the tools."
                     .into(),
                 "raxis plan validate plan.toml".into(),
             ],

@@ -1,4 +1,5 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import Editor from "@monaco-editor/react";
 
 import { ApiError, dashboardApi } from "@/api/client";
@@ -6,14 +7,15 @@ import { CopyButton } from "@/components/CopyButton";
 import { PlanCanvas } from "@/components/builder/PlanCanvas";
 import { Spinner } from "@/components/Spinner";
 import { ensureTomlLanguage, raxisMonacoTheme } from "@/lib/monaco-toml";
+import { readPolicyDraft } from "@/lib/policy-draft";
 import { useTheme } from "@/lib/theme-context";
 import type {
   BuilderValidationResponse,
   BuilderValidationSeverity,
 } from "@/types/api";
 
-type AgentType = "Executor" | "Reviewer";
-type CloneStrategy = "blobless" | "full" | "sparse";
+type AgentType = "" | "Executor" | "Reviewer";
+type CloneStrategy = "" | "blobless" | "full" | "sparse";
 export type ToolLocality =
   | "guest_subprocess"
   | "host_subprocess"
@@ -37,7 +39,22 @@ type ParseStatus =
   | { kind: "empty"; message: string }
   | { kind: "synced"; message: string }
   | { kind: "error"; message: string };
-type BuilderDrawer = "plan" | "tools" | "credentials" | null;
+type BuilderDrawer =
+  | "plan"
+  | "models"
+  | "tools"
+  | "credentials"
+  | "verifiers"
+  | null;
+type ProviderKind =
+  | "anthropic"
+  | "openai"
+  | "google"
+  | "bedrock"
+  | "ollama"
+  | "http_sidecar"
+  | "custom";
+type ModelAliasScope = "executor" | "reviewer" | "custom";
 
 interface PlanBasics {
   initiative: string;
@@ -63,11 +80,34 @@ export interface TaskDraft {
   vmImage: string;
   profiles: string;
   verifierName: string;
-  verifierGateType: string;
+  verifierImage: string;
   verifierCommand: string;
-  verifierGateOn: string;
+  verifierTimeout: string;
+  verifierOnFailure: "block_review" | "warn_only";
+  verifierArtifact: string;
+  verifierArtifactMaxBytes: string;
   credentials: CredentialDraft[];
   prompt: string;
+}
+
+export interface PlanVerifierDraft {
+  name: string;
+  image: string;
+  command: string;
+  timeout: string;
+  onFailure: "block_merge" | "warn_only";
+  appliesTo: "all" | "task_set" | "last";
+  taskSet: string;
+  artifact: string;
+  artifactMaxBytes: string;
+  allowedEgress: string;
+}
+
+export interface PolicyGateRef {
+  name: string;
+  claimTypes: string[];
+  hooks: string[];
+  source: "active" | "draft";
 }
 
 export interface CredentialDraft {
@@ -104,7 +144,24 @@ export interface ToolDraft {
 export interface ToolProfileDraft {
   id: string;
   description: string;
+  providerAlias?: string;
   tools: ToolDraft[];
+}
+
+export interface ModelRouteEntryDraft {
+  providerKind: ProviderKind;
+  providerId: string;
+  model: string;
+}
+
+export interface ModelRouteDraft {
+  alias: string;
+  scope: ModelAliasScope;
+  description: string;
+  fallbackBehavior: "attempt_in_order";
+  sessionAffinity: boolean;
+  rotateExecutorPrimary: boolean;
+  chain: ModelRouteEntryDraft[];
 }
 
 interface LocalIssue {
@@ -139,9 +196,12 @@ const starterTasks: TaskDraft[] = [
     vmImage: "",
     profiles: "repo_tools",
     verifierName: "",
-    verifierGateType: "TestPass",
+    verifierImage: "raxis-verifier-starter",
     verifierCommand: "",
-    verifierGateOn: "Pass",
+    verifierTimeout: "30s",
+    verifierOnFailure: "block_review",
+    verifierArtifact: "",
+    verifierArtifactMaxBytes: "",
     credentials: [],
     prompt:
       "Write HELLO.md at the repository root with the exact text: hello from alex. Stage and commit it as a single commit with the message: add HELLO.md. Do not modify any other file.",
@@ -152,6 +212,7 @@ const starterToolProfiles: ToolProfileDraft[] = [
   {
     id: "repo_tools",
     description: "Repository inspection tools available to executor tasks.",
+    providerAlias: "executor",
     tools: [
       {
         name: "repo_symbol_search",
@@ -169,12 +230,98 @@ const starterToolProfiles: ToolProfileDraft[] = [
 ];
 
 const starterCredentialSetups: CredentialSetupDraft[] = [];
+const starterPlanVerifiers: PlanVerifierDraft[] = [];
+const starterModelRoutes: ModelRouteDraft[] = [
+  {
+    alias: "executor",
+    scope: "executor",
+    description: "Default model chain for executor sessions.",
+    fallbackBehavior: "attempt_in_order",
+    sessionAffinity: false,
+    rotateExecutorPrimary: true,
+    chain: [
+      {
+        providerKind: "anthropic",
+        providerId: "anthropic",
+        model: "claude-4.6-sonnet-medium-thinking",
+      },
+      {
+        providerKind: "openai",
+        providerId: "openai",
+        model: "gpt-5.5-medium",
+      },
+      {
+        providerKind: "google",
+        providerId: "google",
+        model: "gemini-2.5-flash",
+      },
+    ],
+  },
+  {
+    alias: "reviewer",
+    scope: "reviewer",
+    description: "Default model chain for reviewer sessions.",
+    fallbackBehavior: "attempt_in_order",
+    sessionAffinity: true,
+    rotateExecutorPrimary: false,
+    chain: [
+      {
+        providerKind: "openai",
+        providerId: "openai",
+        model: "gpt-5.3-codex",
+      },
+      {
+        providerKind: "anthropic",
+        providerId: "anthropic",
+        model: "claude-opus-4.7-thinking-medium",
+      },
+      {
+        providerKind: "google",
+        providerId: "google",
+        model: "gemini-2.5-pro",
+      },
+    ],
+  },
+];
+
+const PLAN_BUILDER_DRAFT_STORAGE_KEY = "raxis.dashboard.planBuilderDraft.v1";
+
+interface PlanBuilderStoredDraft {
+  version: 1;
+  savedAt: number;
+  planEnabled: boolean;
+  plan: PlanBasics;
+  tasks: TaskDraft[];
+  toolProfiles: ToolProfileDraft[];
+  modelRoutes: ModelRouteDraft[];
+  planVerifiers: PlanVerifierDraft[];
+  credentialSetups: CredentialSetupDraft[];
+  selectedTaskId: string | null;
+  drawer: BuilderDrawer;
+  sourceOpen: boolean;
+  filename: string;
+  tomlText: string;
+}
 
 const toolLocalities: ToolLocality[] = [
   "guest_subprocess",
   "host_subprocess",
   "host_mcp",
   "remote_mcp",
+];
+const providerKinds: ProviderKind[] = [
+  "anthropic",
+  "openai",
+  "google",
+  "bedrock",
+  "ollama",
+  "http_sidecar",
+  "custom",
+];
+const modelAliasScopes: ModelAliasScope[] = [
+  "executor",
+  "reviewer",
+  "custom",
 ];
 export const credentialProxyTypes = [
   "postgres",
@@ -206,40 +353,202 @@ const planSubmitCommands = [
   "raxis plan approve <initiative_id>",
 ];
 
+function readPlanBuilderDraft(): PlanBuilderStoredDraft | null {
+  if (typeof window === "undefined" || !window.localStorage) return null;
+  try {
+    const raw = window.localStorage.getItem(PLAN_BUILDER_DRAFT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PlanBuilderStoredDraft>;
+    if (parsed.version !== 1) return null;
+    if (!parsed.plan || !Array.isArray(parsed.tasks)) return null;
+    return {
+      version: 1,
+      savedAt: Number(parsed.savedAt ?? 0),
+      planEnabled: parsed.planEnabled !== false,
+      plan: { ...emptyPlan, ...parsed.plan },
+      tasks: parsed.tasks.map(normalizeTask),
+      toolProfiles: Array.isArray(parsed.toolProfiles)
+        ? parsed.toolProfiles
+        : starterToolProfiles,
+      modelRoutes: Array.isArray(parsed.modelRoutes)
+        ? parsed.modelRoutes.map(normalizeModelRoute)
+        : starterModelRoutes,
+      planVerifiers: Array.isArray(parsed.planVerifiers)
+        ? parsed.planVerifiers
+        : starterPlanVerifiers,
+      credentialSetups: Array.isArray(parsed.credentialSetups)
+        ? parsed.credentialSetups
+        : starterCredentialSetups,
+      selectedTaskId:
+        typeof parsed.selectedTaskId === "string" ? parsed.selectedTaskId : null,
+      drawer:
+        parsed.drawer === "plan" ||
+        parsed.drawer === "models" ||
+        parsed.drawer === "tools" ||
+        parsed.drawer === "credentials" ||
+        parsed.drawer === "verifiers"
+          ? parsed.drawer
+          : null,
+      sourceOpen: parsed.sourceOpen !== false,
+      filename:
+        typeof parsed.filename === "string" && parsed.filename.trim()
+          ? parsed.filename
+          : "plan.toml",
+      tomlText: typeof parsed.tomlText === "string" ? parsed.tomlText : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writePlanBuilderDraft(draft: PlanBuilderStoredDraft) {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    window.localStorage.setItem(
+      PLAN_BUILDER_DRAFT_STORAGE_KEY,
+      JSON.stringify(draft),
+    );
+  } catch {
+    // Draft persistence is a dashboard convenience only. The
+    // downloaded / submitted plan.toml remains the authority-bearing
+    // artifact.
+  }
+}
+
 export function PlanBuilderPage() {
   const { theme } = useTheme();
   const monacoTheme = raxisMonacoTheme(theme);
-  const [planEnabled, setPlanEnabled] = useState(true);
-  const [plan, setPlan] = useState<PlanBasics>(initialPlan);
-  const [tasks, setTasks] = useState<TaskDraft[]>(starterTasks);
-  const [toolProfiles, setToolProfiles] = useState<ToolProfileDraft[]>(starterToolProfiles);
+  const persistedDraft = useMemo(() => readPlanBuilderDraft(), []);
+  const [planEnabled, setPlanEnabled] = useState(
+    persistedDraft?.planEnabled ?? true,
+  );
+  const [plan, setPlan] = useState<PlanBasics>(persistedDraft?.plan ?? initialPlan);
+  const [tasks, setTasks] = useState<TaskDraft[]>(
+    persistedDraft?.tasks ?? starterTasks,
+  );
+  const [toolProfiles, setToolProfiles] = useState<ToolProfileDraft[]>(
+    persistedDraft?.toolProfiles ?? starterToolProfiles,
+  );
+  const [modelRoutes, setModelRoutes] = useState<ModelRouteDraft[]>(
+    persistedDraft?.modelRoutes ?? starterModelRoutes,
+  );
+  const [planVerifiers, setPlanVerifiers] =
+    useState<PlanVerifierDraft[]>(persistedDraft?.planVerifiers ?? starterPlanVerifiers);
   const [credentialSetups, setCredentialSetups] =
-    useState<CredentialSetupDraft[]>(starterCredentialSetups);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [drawer, setDrawer] = useState<BuilderDrawer>(null);
-  const [sourceOpen, setSourceOpen] = useState(true);
+    useState<CredentialSetupDraft[]>(
+      persistedDraft?.credentialSetups ?? starterCredentialSetups,
+    );
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(
+    persistedDraft?.selectedTaskId ?? null,
+  );
+  const [drawer, setDrawer] = useState<BuilderDrawer>(persistedDraft?.drawer ?? null);
+  const [sourceOpen, setSourceOpen] = useState(persistedDraft?.sourceOpen ?? true);
   const [validationOpen, setValidationOpen] = useState(false);
-  const [filename, setFilename] = useState("plan.toml");
+  const [filename, setFilename] = useState(persistedDraft?.filename ?? "plan.toml");
   const [arrangeVersion, setArrangeVersion] = useState(0);
   const [parseStatus, setParseStatus] = useState<ParseStatus>({
-    kind: "synced",
-    message: "Canvas and TOML are in sync.",
+    kind: persistedDraft?.planEnabled === false ? "empty" : "synced",
+    message:
+      persistedDraft?.planEnabled === false
+        ? "TOML is empty. Add a task or paste a plan to start again."
+        : persistedDraft
+          ? "Restored local draft."
+          : "Canvas and TOML are in sync.",
   });
   const [tomlText, setTomlText] = useState(() =>
+    persistedDraft?.tomlText ??
     renderPlan({
       plan: initialPlan,
       tasks: starterTasks,
       toolProfiles: starterToolProfiles,
+      modelRoutes: starterModelRoutes,
+      planVerifiers: starterPlanVerifiers,
     }),
   );
   const [kernelValidation, setKernelValidation] =
     useState<BuilderValidationResponse | null>(null);
   const [kernelBusy, setKernelBusy] = useState(false);
   const [kernelError, setKernelError] = useState<string | null>(null);
+  const [policyDraftToml, setPolicyDraftToml] = useState(() => readPolicyDraft() ?? "");
+  useEffect(() => {
+    writePlanBuilderDraft({
+      version: 1,
+      savedAt: Date.now(),
+      planEnabled,
+      plan,
+      tasks,
+      toolProfiles,
+      modelRoutes,
+      planVerifiers,
+      credentialSetups,
+      selectedTaskId:
+        selectedTaskId && tasks.some((task) => task.id === selectedTaskId)
+          ? selectedTaskId
+          : null,
+      drawer,
+      sourceOpen,
+      filename,
+      tomlText,
+    });
+  }, [
+    planEnabled,
+    plan,
+    tasks,
+    toolProfiles,
+    modelRoutes,
+    planVerifiers,
+    credentialSetups,
+    selectedTaskId,
+    drawer,
+    sourceOpen,
+    filename,
+    tomlText,
+  ]);
+
+  const activePolicyToml = useQuery({
+    queryKey: ["policy-toml", "plan-builder-gates"],
+    queryFn: ({ signal }) => dashboardApi.policy.rawToml(signal),
+    staleTime: 30_000,
+  });
+  useEffect(() => {
+    const refreshDraft = () => setPolicyDraftToml(readPolicyDraft() ?? "");
+    window.addEventListener("focus", refreshDraft);
+    window.addEventListener("storage", refreshDraft);
+    return () => {
+      window.removeEventListener("focus", refreshDraft);
+      window.removeEventListener("storage", refreshDraft);
+    };
+  }, []);
+  const policyGateRefs = useMemo(
+    () =>
+      mergePolicyGateRefs([
+        ...parsePolicyGateRefs(activePolicyToml.data ?? "", "active"),
+        ...parsePolicyGateRefs(policyDraftToml, "draft"),
+      ]),
+    [activePolicyToml.data, policyDraftToml],
+  );
 
   const localIssues = useMemo(
-    () => (planEnabled ? validatePlan({ plan, tasks, toolProfiles, credentialSetups }) : []),
-    [planEnabled, plan, tasks, toolProfiles, credentialSetups],
+    () =>
+      planEnabled
+        ? validatePlan({
+            plan,
+            tasks,
+            toolProfiles,
+            modelRoutes,
+            credentialSetups,
+            planVerifiers,
+          })
+        : [],
+    [
+      planEnabled,
+      plan,
+      tasks,
+      toolProfiles,
+      modelRoutes,
+      credentialSetups,
+      planVerifiers,
+    ],
   );
   const status = useMemo<PlanStatus>(() => {
     if (!planEnabled) return "empty";
@@ -252,15 +561,21 @@ export function PlanBuilderPage() {
     nextPlan: PlanBasics,
     nextTasks: TaskDraft[],
     nextToolProfiles = toolProfiles,
+    nextModelRoutes = modelRoutes,
+    nextPlanVerifiers = planVerifiers,
   ) => {
     setPlanEnabled(true);
     setPlan(nextPlan);
     setTasks(nextTasks);
     setToolProfiles(nextToolProfiles);
+    setModelRoutes(nextModelRoutes);
+    setPlanVerifiers(nextPlanVerifiers);
     setTomlText(renderPlan({
       plan: nextPlan,
       tasks: nextTasks,
       toolProfiles: nextToolProfiles,
+      modelRoutes: nextModelRoutes,
+      planVerifiers: nextPlanVerifiers,
     }));
     setParseStatus({ kind: "synced", message: "Canvas and TOML are in sync." });
     setKernelValidation(null);
@@ -281,6 +596,20 @@ export function PlanBuilderPage() {
   ) => {
     const next = updater(toolProfiles);
     syncFromState(planEnabled ? plan : initialPlan, tasks, next);
+  };
+
+  const updatePlanVerifiers = (
+    updater: (prev: PlanVerifierDraft[]) => PlanVerifierDraft[],
+  ) => {
+    const next = updater(planVerifiers);
+    syncFromState(planEnabled ? plan : initialPlan, tasks, toolProfiles, modelRoutes, next);
+  };
+
+  const updateModelRoutes = (
+    updater: (prev: ModelRouteDraft[]) => ModelRouteDraft[],
+  ) => {
+    const next = updater(modelRoutes);
+    syncFromState(planEnabled ? plan : initialPlan, tasks, toolProfiles, next);
   };
 
   const updateCredentialSetups = (
@@ -370,6 +699,8 @@ export function PlanBuilderPage() {
     setPlan(emptyPlan);
     setTasks([]);
     setToolProfiles([]);
+    setModelRoutes([]);
+    setPlanVerifiers([]);
     setCredentialSetups([]);
     setSelectedTaskId(null);
     setDrawer(null);
@@ -392,6 +723,8 @@ export function PlanBuilderPage() {
       setPlan(emptyPlan);
       setTasks([]);
       setToolProfiles([]);
+      setModelRoutes([]);
+      setPlanVerifiers([]);
       setCredentialSetups([]);
       setSelectedTaskId(null);
       setDrawer(null);
@@ -407,6 +740,8 @@ export function PlanBuilderPage() {
       setPlan(parsed.plan);
       setTasks(parsed.tasks);
       setToolProfiles(parsed.toolProfiles);
+      setModelRoutes(parsed.modelRoutes);
+      setPlanVerifiers(parsed.planVerifiers);
       setSelectedTaskId((prev) =>
         prev && parsed.tasks.some((t) => t.id === prev) ? prev : null,
       );
@@ -464,9 +799,25 @@ export function PlanBuilderPage() {
               type="button"
               className="btn text-xs py-1"
               disabled={!planEnabled}
+              onClick={() => setDrawer((open) => (open === "models" ? null : "models"))}
+            >
+              {drawer === "models" ? "Hide routing" : "Model routing"}
+            </button>
+            <button
+              type="button"
+              className="btn text-xs py-1"
+              disabled={!planEnabled}
               onClick={() => setDrawer((open) => (open === "tools" ? null : "tools"))}
             >
               {drawer === "tools" ? "Hide profiles" : "Tool profiles"}
+            </button>
+            <button
+              type="button"
+              className="btn text-xs py-1"
+              disabled={!planEnabled}
+              onClick={() => setDrawer((open) => (open === "verifiers" ? null : "verifiers"))}
+            >
+              {drawer === "verifiers" ? "Hide verifiers" : "Verifiers"}
             </button>
             <button
               type="button"
@@ -537,7 +888,24 @@ export function PlanBuilderPage() {
         {drawer === "tools" && planEnabled && (
           <ToolProfilesDrawer
             profiles={toolProfiles}
+            modelRoutes={modelRoutes}
             onUpdate={updateToolProfiles}
+            onClose={() => setDrawer(null)}
+          />
+        )}
+        {drawer === "models" && planEnabled && (
+          <ModelRoutingDrawer
+            routes={modelRoutes}
+            onUpdate={updateModelRoutes}
+            onClose={() => setDrawer(null)}
+          />
+        )}
+        {drawer === "verifiers" && planEnabled && (
+          <PlanVerifiersDrawer
+            verifiers={planVerifiers}
+            tasks={tasks}
+            policyGateRefs={policyGateRefs}
+            onUpdate={updatePlanVerifiers}
             onClose={() => setDrawer(null)}
           />
         )}
@@ -554,6 +922,7 @@ export function PlanBuilderPage() {
               tasks={tasks}
               toolProfiles={toolProfiles}
               credentialSetups={credentialSetups}
+              policyGateRefs={policyGateRefs}
               selectedTaskId={selectedTaskId}
               arrangeVersion={arrangeVersion}
               onSelectTask={setSelectedTaskId}
@@ -751,12 +1120,359 @@ function PlanSetupDrawer({
   );
 }
 
+function ModelRoutingDrawer({
+  routes,
+  onUpdate,
+  onClose,
+}: {
+  routes: ModelRouteDraft[];
+  onUpdate: (updater: (prev: ModelRouteDraft[]) => ModelRouteDraft[]) => void;
+  onClose: () => void;
+}) {
+  const [selectedAlias, setSelectedAlias] = useState(() => routes[0]?.alias ?? "");
+  const selected = routes.find((route) => route.alias === selectedAlias) ?? routes[0];
+
+  const updateRoute = (alias: string, patch: Partial<ModelRouteDraft>) => {
+    onUpdate((prev) =>
+      prev.map((route) =>
+        route.alias === alias ? normalizeModelRoute({ ...route, ...patch }) : route,
+      ),
+    );
+    if (patch.alias) setSelectedAlias(patch.alias);
+  };
+
+  const updateEntry = (
+    alias: string,
+    index: number,
+    patch: Partial<ModelRouteEntryDraft>,
+  ) => {
+    onUpdate((prev) =>
+      prev.map((route) =>
+        route.alias === alias
+          ? normalizeModelRoute({
+              ...route,
+              chain: route.chain.map((entry, entryIndex) =>
+                entryIndex === index ? { ...entry, ...patch } : entry,
+              ),
+            })
+          : route,
+      ),
+    );
+  };
+
+  const addRoute = () => {
+    const next = makeModelRoute(routes);
+    onUpdate((prev) => [...prev, next]);
+    setSelectedAlias(next.alias);
+  };
+
+  const removeRoute = (alias: string) => {
+    onUpdate((prev) => prev.filter((route) => route.alias !== alias));
+    setSelectedAlias("");
+  };
+
+  const addEntry = (alias: string) => {
+    onUpdate((prev) =>
+      prev.map((route) =>
+        route.alias === alias
+          ? normalizeModelRoute({
+              ...route,
+              chain: [...route.chain, makeModelRouteEntry("custom")],
+            })
+          : route,
+      ),
+    );
+  };
+
+  const removeEntry = (alias: string, index: number) => {
+    onUpdate((prev) =>
+      prev.map((route) =>
+        route.alias === alias
+          ? normalizeModelRoute({
+              ...route,
+              chain: route.chain.filter((_, entryIndex) => entryIndex !== index),
+            })
+          : route,
+      ),
+    );
+  };
+
+  const moveEntry = (alias: string, index: number, direction: -1 | 1) => {
+    onUpdate((prev) =>
+      prev.map((route) => {
+        if (route.alias !== alias) return route;
+        const nextIndex = index + direction;
+        if (nextIndex < 0 || nextIndex >= route.chain.length) return route;
+        const chain = [...route.chain];
+        [chain[index], chain[nextIndex]] = [chain[nextIndex], chain[index]];
+        return normalizeModelRoute({ ...route, chain });
+      }),
+    );
+  };
+
+  return (
+    <aside className="w-[380px] shrink-0 border-r border-edge bg-panel-raised min-h-0 overflow-y-auto scroll-thin max-xl:w-full max-xl:max-h-[380px] max-xl:border-r-0 max-xl:border-b">
+      <div className="sticky top-0 z-10 border-b border-edge bg-panel-raised px-4 py-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-ink">Model routing</div>
+            <p className="mt-1 text-xs text-ink-subtle">
+              Ordered executor/reviewer provider:model aliases. Orchestrator routing stays policy-owned.
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button type="button" className="btn text-xs py-1" onClick={addRoute}>
+              Add
+            </button>
+            <DrawerCloseButton label="Collapse model routing" onClick={onClose} />
+          </div>
+        </div>
+        <div className="mt-3 rounded border border-info/40 bg-info-muted px-3 py-2 text-xs leading-relaxed text-info">
+          Custom, BYO, local, and sidecar providers are allowed here by naming their
+          provider id. The active policy still must declare the provider credential,
+          model allowlist, timeout, and pricing fields before the kernel admits the plan.
+        </div>
+      </div>
+      <div className="grid grid-cols-[9rem_1fr] gap-0 min-h-full max-md:grid-cols-1">
+        <div className="border-r border-edge p-3 space-y-1 max-md:border-r-0 max-md:border-b">
+          {routes.length === 0 ? (
+            <div className="rounded border border-dashed border-edge px-2.5 py-3 text-xs text-ink-muted">
+              No aliases yet.
+            </div>
+          ) : (
+            routes.map((route) => (
+              <button
+                key={route.alias}
+                type="button"
+                className={`w-full truncate rounded border px-2.5 py-2 text-left font-mono text-[11px] transition-colors ${
+                  selected?.alias === route.alias
+                    ? "border-accent bg-accent-muted text-accent"
+                    : "border-transparent text-ink-muted hover:border-edge hover:bg-panel"
+                }`}
+                onClick={() => setSelectedAlias(route.alias)}
+              >
+                {route.alias || "(blank)"}
+              </button>
+            ))
+          )}
+        </div>
+        <div className="p-4 space-y-3">
+          {!selected ? (
+            <div className="rounded border border-edge bg-panel px-3 py-4 text-xs text-ink-muted">
+              Add an alias to define model precedence and fallback behavior.
+            </div>
+          ) : (
+            <>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">
+                    Alias
+                  </div>
+                  <div className="mt-1 truncate font-mono text-sm text-ink">
+                    {selected.alias || "(blank)"}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="btn text-xs py-1 text-bad border-bad/30 hover:bg-bad/10"
+                  onClick={() => removeRoute(selected.alias)}
+                >
+                  Remove
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Alias id">
+                  <input
+                    value={selected.alias}
+                    onChange={(e) => updateRoute(selected.alias, { alias: e.target.value })}
+                    className="input w-full font-mono text-xs"
+                    placeholder="executor"
+                  />
+                </Field>
+                <Field label="Role scope">
+                  <select
+                    value={selected.scope}
+                    onChange={(e) =>
+                      updateRoute(selected.alias, {
+                        scope: e.target.value as ModelAliasScope,
+                      })
+                    }
+                    className="input w-full text-xs"
+                  >
+                    {modelAliasScopes.map((scope) => (
+                      <option key={scope} value={scope}>
+                        {scope}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              </div>
+              <Field label="Description">
+                <textarea
+                  value={selected.description}
+                  onChange={(e) => updateRoute(selected.alias, { description: e.target.value })}
+                  rows={2}
+                  className="input w-full min-h-[54px] text-xs"
+                  placeholder="Default model chain for executor sessions."
+                />
+              </Field>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Fallback behavior">
+                  <select
+                    value={selected.fallbackBehavior}
+                    onChange={() =>
+                      updateRoute(selected.alias, {
+                        fallbackBehavior: "attempt_in_order",
+                      })
+                    }
+                    className="input w-full font-mono text-xs"
+                  >
+                    <option value="attempt_in_order">attempt_in_order</option>
+                  </select>
+                </Field>
+                <Field label="Session affinity">
+                  <select
+                    value={selected.sessionAffinity ? "true" : "false"}
+                    onChange={(e) =>
+                      updateRoute(selected.alias, {
+                        sessionAffinity: e.target.value === "true",
+                      })
+                    }
+                    className="input w-full font-mono text-xs"
+                  >
+                    <option value="false">false</option>
+                    <option value="true">true</option>
+                  </select>
+                </Field>
+              </div>
+              {selected.scope === "executor" && (
+                <label className="flex items-start gap-2 rounded border border-edge bg-panel px-2.5 py-2 text-xs text-ink-muted">
+                  <input
+                    type="checkbox"
+                    checked={selected.rotateExecutorPrimary}
+                    onChange={(e) =>
+                      updateRoute(selected.alias, {
+                        rotateExecutorPrimary: e.target.checked,
+                      })
+                    }
+                    className="mt-0.5"
+                  />
+                  <span>
+                    Rotate executor primary by task id so concurrent executors exercise
+                    different first-choice providers while keeping the same fallback set.
+                  </span>
+                </label>
+              )}
+              <Divider label="Precedence chain" />
+              <div className="space-y-2">
+                {selected.chain.map((entry, index) => (
+                  <section
+                    key={`${selected.alias}-${index}`}
+                    className="rounded border border-edge bg-panel p-3 space-y-2"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-xs font-semibold text-ink">
+                        {index === 0 ? "Primary" : `Fallback ${index}`}
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          className="btn text-xs py-1"
+                          disabled={index === 0}
+                          onClick={() => moveEntry(selected.alias, index, -1)}
+                        >
+                          Up
+                        </button>
+                        <button
+                          type="button"
+                          className="btn text-xs py-1"
+                          disabled={index === selected.chain.length - 1}
+                          onClick={() => moveEntry(selected.alias, index, 1)}
+                        >
+                          Down
+                        </button>
+                        <button
+                          type="button"
+                          className="btn text-xs py-1 text-bad border-bad/30 hover:bg-bad/10"
+                          onClick={() => removeEntry(selected.alias, index)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-[8.5rem_1fr] gap-2">
+                      <Field label="Provider">
+                        <select
+                          value={entry.providerKind}
+                          onChange={(e) => {
+                            const providerKind = e.target.value as ProviderKind;
+                            updateEntry(selected.alias, index, {
+                              providerKind,
+                              providerId:
+                                entry.providerId.trim() &&
+                                entry.providerId !== defaultProviderId(entry.providerKind)
+                                  ? entry.providerId
+                                  : defaultProviderId(providerKind),
+                            });
+                          }}
+                          className="input w-full text-xs"
+                        >
+                          {providerKinds.map((kind) => (
+                            <option key={kind} value={kind}>
+                              {providerKindLabel(kind)}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="Provider id">
+                        <input
+                          value={entry.providerId}
+                          onChange={(e) =>
+                            updateEntry(selected.alias, index, {
+                              providerId: e.target.value,
+                            })
+                          }
+                          className="input w-full font-mono text-xs"
+                          placeholder={defaultProviderId(entry.providerKind)}
+                        />
+                      </Field>
+                    </div>
+                    <Field label="Model">
+                      <input
+                        value={entry.model}
+                        onChange={(e) =>
+                          updateEntry(selected.alias, index, { model: e.target.value })
+                        }
+                        className="input w-full font-mono text-xs"
+                        placeholder={defaultModelForProvider(entry.providerKind)}
+                      />
+                    </Field>
+                  </section>
+                ))}
+                <button
+                  type="button"
+                  className="btn text-xs py-1 w-full justify-center"
+                  onClick={() => addEntry(selected.alias)}
+                >
+                  Add fallback model
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 function ToolProfilesDrawer({
   profiles,
+  modelRoutes,
   onUpdate,
   onClose,
 }: {
   profiles: ToolProfileDraft[];
+  modelRoutes: ModelRouteDraft[];
   onUpdate: (updater: (prev: ToolProfileDraft[]) => ToolProfileDraft[]) => void;
   onClose: () => void;
 }) {
@@ -910,6 +1626,22 @@ function ToolProfilesDrawer({
                   placeholder="Repository inspection tools available to executor tasks."
                 />
               </Field>
+              <Field label="Provider alias">
+                <select
+                  value={selected.providerAlias ?? ""}
+                  onChange={(e) =>
+                    updateProfile(selected.id, { providerAlias: e.target.value })
+                  }
+                  className="input w-full font-mono text-xs"
+                >
+                  <option value="">Role default</option>
+                  {modelRoutes.map((route) => (
+                    <option key={route.alias} value={route.alias}>
+                      {route.alias || "(blank)"}
+                    </option>
+                  ))}
+                </select>
+              </Field>
               <Divider label="Tools" />
               {selected.tools.length === 0 ? (
                 <div className="rounded border border-dashed border-edge px-3 py-4 text-xs text-ink-muted">
@@ -1029,6 +1761,225 @@ function ToolProfilesDrawer({
                 Add tool to profile
               </button>
             </>
+          )}
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function PlanVerifiersDrawer({
+  verifiers,
+  tasks,
+  policyGateRefs,
+  onUpdate,
+  onClose,
+}: {
+  verifiers: PlanVerifierDraft[];
+  tasks: TaskDraft[];
+  policyGateRefs: PolicyGateRef[];
+  onUpdate: (updater: (prev: PlanVerifierDraft[]) => PlanVerifierDraft[]) => void;
+  onClose: () => void;
+}) {
+  const [selectedName, setSelectedName] = useState(() => verifiers[0]?.name ?? "");
+  const selected = verifiers.find((verifier) => verifier.name === selectedName) ?? verifiers[0];
+
+  const updateVerifier = (name: string, patch: Partial<PlanVerifierDraft>) => {
+    onUpdate((prev) =>
+      prev.map((verifier) =>
+        verifier.name === name ? normalizePlanVerifier({ ...verifier, ...patch }) : verifier,
+      ),
+    );
+    if (patch.name) setSelectedName(patch.name);
+  };
+
+  const addVerifier = () => {
+    const next = makePlanVerifier(verifiers);
+    onUpdate((prev) => [...prev, next]);
+    setSelectedName(next.name);
+  };
+
+  const removeVerifier = (name: string) => {
+    onUpdate((prev) => prev.filter((verifier) => verifier.name !== name));
+    setSelectedName("");
+  };
+
+  return (
+    <aside className="w-[360px] shrink-0 border-r border-edge bg-panel-raised min-h-0 overflow-y-auto scroll-thin max-xl:w-full max-xl:max-h-[360px] max-xl:border-r-0 max-xl:border-b">
+      <div className="sticky top-0 z-10 border-b border-edge bg-panel-raised px-4 py-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-ink">Plan verifiers</div>
+            <p className="mt-1 text-xs text-ink-subtle">
+              Merged-result checks from [[plan.integration_merge_verifiers]].
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button type="button" className="btn text-xs py-1" onClick={addVerifier}>
+              Add
+            </button>
+            <DrawerCloseButton label="Collapse plan verifiers" onClick={onClose} />
+          </div>
+        </div>
+        {policyGateRefs.length > 0 && (
+          <div className="mt-3 rounded border border-edge bg-panel px-3 py-2">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">
+              Policy gates available to task verifiers
+            </div>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {policyGateRefs.slice(0, 8).map((gate) => (
+                <span
+                  key={`${gate.source}:${gate.name}`}
+                  className="badge max-w-full border-warn bg-warn-muted text-warn"
+                  title={`${gate.source} policy${gate.claimTypes.length ? ` • satisfies ${gate.claimTypes.join(", ")}` : ""}`}
+                >
+                  {gate.name}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="grid grid-cols-[8.5rem_1fr] gap-0 min-h-full max-md:grid-cols-1">
+        <div className="border-r border-edge p-3 space-y-1 max-md:border-r-0 max-md:border-b">
+          {verifiers.length === 0 ? (
+            <div className="rounded border border-dashed border-edge px-2.5 py-3 text-xs text-ink-muted">
+              No plan verifiers yet.
+            </div>
+          ) : (
+            verifiers.map((verifier) => (
+              <button
+                key={verifier.name}
+                type="button"
+                className={`w-full truncate rounded border px-2.5 py-2 text-left font-mono text-[11px] transition-colors ${
+                  selected?.name === verifier.name
+                    ? "border-accent bg-accent-muted text-accent"
+                    : "border-transparent text-ink-muted hover:border-edge hover:bg-panel"
+                }`}
+                onClick={() => setSelectedName(verifier.name)}
+              >
+                {verifier.name || "(unnamed)"}
+              </button>
+            ))
+          )}
+        </div>
+        <div className="p-4">
+          {selected ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-semibold text-ink">Merged tree verifier</div>
+                <button
+                  type="button"
+                  className="btn-danger text-xs py-1"
+                  onClick={() => removeVerifier(selected.name)}
+                >
+                  Remove
+                </button>
+              </div>
+              <Field label="Name">
+                <input
+                  value={selected.name}
+                  onChange={(e) => updateVerifier(selected.name, { name: e.target.value })}
+                  className="input w-full font-mono text-xs"
+                />
+              </Field>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Image">
+                  <input
+                    value={selected.image}
+                    onChange={(e) => updateVerifier(selected.name, { image: e.target.value })}
+                    className="input w-full font-mono text-xs"
+                  />
+                </Field>
+                <Field label="Timeout">
+                  <input
+                    value={selected.timeout}
+                    onChange={(e) => updateVerifier(selected.name, { timeout: e.target.value })}
+                    className="input w-full font-mono text-xs"
+                  />
+                </Field>
+              </div>
+              <Field label="Command">
+                <input
+                  value={selected.command}
+                  onChange={(e) => updateVerifier(selected.name, { command: e.target.value })}
+                  className="input w-full font-mono text-xs"
+                />
+              </Field>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Applies to">
+                  <select
+                    value={selected.appliesTo}
+                    onChange={(e) =>
+                      updateVerifier(selected.name, {
+                        appliesTo: e.target.value as PlanVerifierDraft["appliesTo"],
+                      })
+                    }
+                    className="input w-full font-mono text-xs"
+                  >
+                    <option value="all">all</option>
+                    <option value="task_set">task_set</option>
+                    <option value="last">last</option>
+                  </select>
+                </Field>
+                <Field label="On failure">
+                  <select
+                    value={selected.onFailure}
+                    onChange={(e) =>
+                      updateVerifier(selected.name, {
+                        onFailure: e.target.value === "warn_only" ? "warn_only" : "block_merge",
+                      })
+                    }
+                    className="input w-full font-mono text-xs"
+                  >
+                    <option value="block_merge">block_merge</option>
+                    <option value="warn_only">warn_only</option>
+                  </select>
+                </Field>
+              </div>
+              <Field label="Task set">
+                <input
+                  value={selected.taskSet}
+                  onChange={(e) => updateVerifier(selected.name, { taskSet: e.target.value })}
+                  className="input w-full font-mono text-xs"
+                  placeholder={tasks.map((task) => task.id).slice(0, 3).join(", ")}
+                />
+              </Field>
+              <div className="grid grid-cols-[1fr_8rem] gap-2">
+                <Field label="Artifact">
+                  <input
+                    value={selected.artifact}
+                    onChange={(e) => updateVerifier(selected.name, { artifact: e.target.value })}
+                    className="input w-full font-mono text-xs"
+                    placeholder="/raxis/integration-report.json"
+                  />
+                </Field>
+                <Field label="Max bytes">
+                  <input
+                    value={selected.artifactMaxBytes}
+                    onChange={(e) =>
+                      updateVerifier(selected.name, { artifactMaxBytes: e.target.value })
+                    }
+                    className="input w-full font-mono text-xs"
+                    placeholder="1048576"
+                  />
+                </Field>
+              </div>
+              <Field label="Allowed egress">
+                <input
+                  value={selected.allowedEgress}
+                  onChange={(e) =>
+                    updateVerifier(selected.name, { allowedEgress: e.target.value })
+                  }
+                  className="input w-full font-mono text-xs"
+                  placeholder="registry.npmjs.org, crates.io"
+                />
+              </Field>
+            </div>
+          ) : (
+            <div className="rounded border border-dashed border-edge p-4 text-sm text-ink-muted">
+              Add a verifier to require final merged-state checks before integration.
+            </div>
           )}
         </div>
       </div>
@@ -1623,9 +2574,12 @@ function makeTask(agentType: AgentType, existing: TaskDraft[]): TaskDraft {
     vmImage: "",
     profiles: "",
     verifierName: "",
-    verifierGateType: "TestPass",
+    verifierImage: "raxis-verifier-starter",
     verifierCommand: "",
-    verifierGateOn: "Pass",
+    verifierTimeout: "30s",
+    verifierOnFailure: "block_review",
+    verifierArtifact: "",
+    verifierArtifactMaxBytes: "",
     credentials: [],
     prompt:
       agentType === "Reviewer"
@@ -1634,10 +2588,88 @@ function makeTask(agentType: AgentType, existing: TaskDraft[]): TaskDraft {
   });
 }
 
+function makePlanVerifier(existing: PlanVerifierDraft[]): PlanVerifierDraft {
+  const name = uniquePlanVerifierName("integration_checks", existing);
+  return normalizePlanVerifier({
+    name,
+    image: "raxis-verifier-starter",
+    command: "cargo test --workspace",
+    timeout: "10m",
+    onFailure: "block_merge",
+    appliesTo: "last",
+    taskSet: "",
+    artifact: "/raxis/integration-report.json",
+    artifactMaxBytes: "1048576",
+    allowedEgress: "",
+  });
+}
+
+function makeModelRoute(existing: ModelRouteDraft[]): ModelRouteDraft {
+  const alias = uniqueModelRouteAlias("executor", existing);
+  return normalizeModelRoute({
+    alias,
+    scope: "executor",
+    description: "Model fallback chain for executor sessions.",
+    fallbackBehavior: "attempt_in_order",
+    sessionAffinity: false,
+    rotateExecutorPrimary: true,
+    chain: [makeModelRouteEntry("anthropic")],
+  });
+}
+
+function makeModelRouteEntry(
+  providerKind: ProviderKind,
+  providerId = defaultProviderId(providerKind),
+  model = defaultModelForProvider(providerKind),
+): ModelRouteEntryDraft {
+  return { providerKind, providerId, model };
+}
+
+function normalizeModelRoute(route: ModelRouteDraft): ModelRouteDraft {
+  const scope = modelAliasScopes.includes(route.scope) ? route.scope : "custom";
+  return {
+    ...route,
+    scope,
+    fallbackBehavior: "attempt_in_order",
+    sessionAffinity: Boolean(route.sessionAffinity),
+    rotateExecutorPrimary: Boolean(route.rotateExecutorPrimary),
+    chain: Array.isArray(route.chain)
+      ? route.chain.map((entry) => {
+          const providerKind = providerKinds.includes(entry.providerKind)
+            ? entry.providerKind
+            : inferProviderKind(entry.providerId);
+          return {
+            providerKind,
+            providerId: entry.providerId ?? defaultProviderId(providerKind),
+            model: entry.model ?? "",
+          };
+        })
+      : [],
+  };
+}
+
+function normalizePlanVerifier(verifier: PlanVerifierDraft): PlanVerifierDraft {
+  return {
+    ...verifier,
+    image: verifier.image || "raxis-verifier-starter",
+    timeout: verifier.timeout || "10m",
+    onFailure: verifier.onFailure === "warn_only" ? "warn_only" : "block_merge",
+    appliesTo:
+      verifier.appliesTo === "task_set" || verifier.appliesTo === "last"
+        ? verifier.appliesTo
+        : "all",
+  };
+}
+
 function normalizeTask(task: TaskDraft): TaskDraft {
   const normalized = {
     ...task,
     credentials: task.credentials ?? [],
+    verifierImage: task.verifierImage ?? "raxis-verifier-starter",
+    verifierTimeout: task.verifierTimeout ?? "30s",
+    verifierOnFailure: task.verifierOnFailure ?? "block_review",
+    verifierArtifact: task.verifierArtifact ?? "",
+    verifierArtifactMaxBytes: task.verifierArtifactMaxBytes ?? "",
   };
   if (normalized.agentType !== "Reviewer") return normalized;
   return {
@@ -1660,11 +2692,34 @@ function uniqueTaskId(prefix: string, existing: TaskDraft[]) {
   return `${safePrefix}-${Date.now().toString(36)}`;
 }
 
+function uniquePlanVerifierName(prefix: string, existing: PlanVerifierDraft[]) {
+  const used = new Set(existing.map((verifier) => verifier.name));
+  const safePrefix = slugify(prefix || "verifier").replaceAll("-", "_");
+  if (!used.has(safePrefix)) return safePrefix;
+  for (let i = existing.length + 1; i < existing.length + 200; i += 1) {
+    const candidate = `${safePrefix}_${i}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  return `${safePrefix}_${Date.now().toString(36)}`;
+}
+
+function uniqueModelRouteAlias(prefix: string, existing: ModelRouteDraft[]) {
+  const used = new Set(existing.map((route) => route.alias));
+  const safePrefix = slugify(prefix || "route");
+  if (!used.has(safePrefix)) return safePrefix;
+  for (let i = existing.length + 1; i < existing.length + 200; i += 1) {
+    const candidate = `${safePrefix}-${i}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  return `${safePrefix}-${Date.now().toString(36)}`;
+}
+
 function makeToolProfile(existing: ToolProfileDraft[]): ToolProfileDraft {
   const id = uniqueProfileId("repo_tools", existing);
   return {
     id,
     description: "Reusable tools available to selected executor tasks.",
+    providerAlias: "executor",
     tools: [makeTool([])],
   };
 }
@@ -1751,7 +2806,9 @@ function validatePlan(input: {
   plan: PlanBasics;
   tasks: TaskDraft[];
   toolProfiles: ToolProfileDraft[];
+  modelRoutes: ModelRouteDraft[];
   credentialSetups: CredentialSetupDraft[];
+  planVerifiers: PlanVerifierDraft[];
 }) {
   const issues: LocalIssue[] = [];
   const push = (
@@ -1772,10 +2829,16 @@ function validatePlan(input: {
   if (!input.plan.lane.trim()) {
     push("error", "[workspace].lane_id", "Lane id is required.", "Set the policy lane that should execute this plan.");
   }
-  if (!input.plan.targetRef.startsWith("refs/heads/")) {
+  const targetRef = input.plan.targetRef.trim();
+  if (!targetRef) {
+    push("error", "[workspace].target_ref", "Target ref is required.", "Use a full branch ref such as refs/heads/main.");
+  } else if (!targetRef.startsWith("refs/heads/")) {
     push("error", "[workspace].target_ref", "Target ref must start with refs/heads/.", "Use a full branch ref such as refs/heads/main.");
   }
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(input.plan.repository.trim())) {
+  const repository = input.plan.repository.trim();
+  if (!repository) {
+    push("error", "[workspace].repository", "Repository name is required.", "Set the managed repository id explicitly, commonly main.");
+  } else if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(repository)) {
     push("error", "[workspace].repository", "Repository name must be path-safe.", "Use letters, digits, dots, underscores, or dashes.");
   }
   for (const artifact of splitList(input.plan.crossCuttingArtifacts)) {
@@ -1785,6 +2848,61 @@ function validatePlan(input: {
   }
   if (input.tasks.length === 0) {
     push("error", "[[tasks]]", "At least one task is required.", "Add an executor task or paste a plan containing tasks.");
+  }
+
+  const routeAliases = new Set<string>();
+  for (const route of input.modelRoutes) {
+    const alias = route.alias.trim();
+    if (!alias) {
+      push("error", "[provider_aliases]", "Every model route needs an alias id.", "Open Model routing and name the route, such as executor or reviewer.");
+    } else if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(alias)) {
+      push("error", `[provider_aliases.${alias}]`, `Model route ${alias} is invalid.`, "Start with a letter and use only letters, digits, underscores, or dashes.");
+    }
+    if (routeAliases.has(alias)) {
+      push("error", `[provider_aliases.${alias}]`, `Duplicate model route ${alias}.`, "Use one alias per fallback chain.");
+    }
+    routeAliases.add(alias);
+    if (!modelAliasScopes.includes(route.scope)) {
+      push("error", `[provider_aliases.${alias || "blank"}].scope`, `Model route ${alias || "(blank)"} has an unsupported scope.`, "Choose executor, reviewer, or custom.");
+    }
+    if (route.fallbackBehavior !== "attempt_in_order") {
+      push("error", `[provider_aliases.${alias || "blank"}].fallback_behavior`, `Model route ${alias || "(blank)"} has unsupported fallback behavior.`, "Use attempt_in_order.");
+    }
+    if (route.chain.length === 0) {
+      push("error", `[provider_aliases.${alias || "blank"}].chain`, `Model route ${alias || "(blank)"} needs at least one model.`, "Add a primary provider:model entry.");
+    }
+    const seenModels = new Set<string>();
+    for (const [index, entry] of route.chain.entries()) {
+      const providerId = entry.providerId.trim();
+      const model = entry.model.trim();
+      const field = `[provider_aliases.${alias || "blank"}].chain[${index + 1}]`;
+      if (!providerKinds.includes(entry.providerKind)) {
+        push("error", `${field}.provider`, `Route ${alias || "(blank)"} has an unsupported provider selector.`, "Choose a known provider or Custom for BYO/local providers.");
+      }
+      if (!providerId) {
+        push("error", `${field}.provider_id`, `Route ${alias || "(blank)"} entry ${index + 1} needs a provider id.`, "Use the provider_id from policy.toml, such as anthropic, google, openai, or a BYO id.");
+      } else if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(providerId)) {
+        push("error", `${field}.provider_id`, `Provider id ${providerId} is invalid.`, "Use letters, digits, dots, underscores, or dashes; no colons or spaces.");
+      }
+      if (!model) {
+        push("error", `${field}.model`, `Route ${alias || "(blank)"} entry ${index + 1} needs a model.`, "Enter the exact model id that policy will permit.");
+      } else if (/[\s,:]/.test(model)) {
+        push("error", `${field}.model`, `Model ${model} has unsupported characters.`, "Use the provider's exact model id without spaces, commas, or colons.");
+      }
+      if (providerId && model) {
+        const providerModel = `${providerId}:${model}`;
+        if (seenModels.has(providerModel)) {
+          push("warning", `${field}`, `Route ${alias || "(blank)"} repeats ${providerModel}.`, "Remove duplicates unless you are intentionally pinning the same model twice for a test.");
+        }
+        seenModels.add(providerModel);
+      }
+      if (entry.providerKind === "custom" || entry.providerKind === "ollama" || entry.providerKind === "http_sidecar") {
+        push("warning", `${field}`, `${providerKindLabel(entry.providerKind)} provider ${providerId || "(blank)"} requires policy setup.`, "Declare the provider credential, endpoint or sidecar config, permitted model, timeout, and pricing in policy before submitting.");
+      }
+    }
+    if (route.chain.length === 1) {
+      push("warning", `[provider_aliases.${alias || "blank"}].chain`, `Model route ${alias || "(blank)"} has no fallback.`, "Add at least one cross-provider fallback when production availability matters.");
+    }
   }
 
   const profileIds = new Set<string>();
@@ -1810,6 +2928,10 @@ function validatePlan(input: {
     }
     if (!profile.description.trim()) {
       push("warning", `[profiles.${profileId}].description`, `Tool profile ${profileId || "(blank)"} has no description.`, "Describe the kind of tasks this profile supports.");
+    }
+    const providerAlias = profile.providerAlias?.trim();
+    if (providerAlias && !routeAliases.has(providerAlias)) {
+      push("error", `[profiles.${profileId}].provider_alias`, `Tool profile ${profileId || "(blank)"} references missing model route ${providerAlias}.`, "Create that route in Model routing or choose Role default.");
     }
     if (profile.tools.length === 0) {
       push("warning", `[profiles.${profileId}.custom_tool]`, `Tool profile ${profileId || "(blank)"} has no tools.`, "Add at least one custom tool or remove the empty profile.");
@@ -1851,8 +2973,35 @@ function validatePlan(input: {
           push("error", `[profiles.${profileId}.custom_tool.${toolName}].${field}`, `${field} must be a positive integer.`, "Replace it with a whole number greater than zero.");
         }
       }
-	    }
-	  }
+    }
+  }
+
+  const taskIdsForVerifiers = new Set(input.tasks.map((task) => task.id.trim()).filter(Boolean));
+  const planVerifierNames = new Set<string>();
+  for (const verifier of input.planVerifiers) {
+    const name = verifier.name.trim();
+    if (!name) {
+      push("error", "[plan.integration_merge_verifiers].name", "Every plan verifier needs a name.", "Open Verifiers and enter a stable verifier id.");
+    } else if (planVerifierNames.has(name)) {
+      push("error", `[plan.integration_merge_verifiers.${name}]`, `Plan verifier ${name} is duplicated.`, "Use one verifier name per merged-state check.");
+    }
+    planVerifierNames.add(name);
+    if (!verifier.image.trim()) {
+      push("error", `[plan.integration_merge_verifiers.${name || "blank"}].image`, `Plan verifier ${name || "(blank)"} needs an image.`, "Choose the verifier VM image that contains the command.");
+    }
+    if (!verifier.command.trim()) {
+      push("error", `[plan.integration_merge_verifiers.${name || "blank"}].command`, `Plan verifier ${name || "(blank)"} needs a command.`, "Set the command that checks the merged tree.");
+    }
+    if (!verifier.timeout.trim()) {
+      push("error", `[plan.integration_merge_verifiers.${name || "blank"}].timeout`, `Plan verifier ${name || "(blank)"} needs a timeout.`, "Use a duration such as 30s or 10m.");
+    }
+    if (verifier.appliesTo === "task_set") {
+      const missing = splitList(verifier.taskSet).filter((taskId) => !taskIdsForVerifiers.has(taskId));
+      if (missing.length > 0) {
+        push("warning", `[plan.integration_merge_verifiers.${name || "blank"}].task_set`, `Plan verifier ${name || "(blank)"} references unknown task ids: ${missing.join(", ")}.`, "Fix the task_set list or add those tasks to the DAG.");
+      }
+    }
+  }
 
   const setupNames = new Set<string>();
   const referencedCredentials = new Set(
@@ -1894,7 +3043,13 @@ function validatePlan(input: {
       push("error", `${id}.description`, `Task ${id || "(blank)"} needs a description.`, "Describe what this task is meant to do.");
     }
     if (!task.prompt.trim()) {
-      push("error", `${id}.prompt`, `Task ${id || "(blank)"} needs a prompt.`, "Give the agent the precise work instructions.");
+      push("error", `${id}.prompt`, `Task ${id || "(blank)"} has no prompt.`, "Add prompt for precise work instructions; description is only the short dashboard summary.");
+    }
+    if (task.agentType !== "Executor" && task.agentType !== "Reviewer") {
+      push("error", `${id}.session_agent_type`, `Task ${id || "(blank)"} needs a role.`, "Choose Executor for work tasks or Reviewer for review-only tasks.");
+    }
+    if (!task.cloneStrategy) {
+      push("error", `${id}.clone_strategy`, `Task ${id || "(blank)"} needs a clone strategy.`, "Choose blobless, sparse, or full explicitly.");
     }
     for (const pred of splitList(task.predecessors)) {
       if (!input.tasks.some((candidate) => candidate.id.trim() === pred)) {
@@ -1970,8 +3125,8 @@ function validatePlan(input: {
         push("warning", `${id}.predecessors`, `Reviewer ${id || "(blank)"} has no predecessor.`, "Drag an edge from the executor it should inspect.");
       }
     }
-    if (task.verifierName.trim() && !task.verifierGateType.trim()) {
-      push("error", `${id}.verifiers.gate_type`, `Verifier ${task.verifierName} needs a gate type.`, "Set the mechanical witness type this verifier produces.");
+    if (task.verifierName.trim() && !task.verifierCommand.trim()) {
+      push("error", `${id}.verifiers.command`, `Verifier ${task.verifierName} needs a command.`, "Set the verifier command that runs inside the verifier image.");
     }
     for (const [field, raw] of [
       ["max_turns", task.maxTurns],
@@ -2031,6 +3186,8 @@ function renderPlan(input: {
   plan: PlanBasics;
   tasks: TaskDraft[];
   toolProfiles: ToolProfileDraft[];
+  modelRoutes: ModelRouteDraft[];
+  planVerifiers: PlanVerifierDraft[];
 }) {
   const lines: string[] = [
     "[plan.initiative]",
@@ -2051,11 +3208,35 @@ function renderPlan(input: {
     lines.push("");
   }
 
+  for (const rawRoute of input.modelRoutes) {
+    const route = normalizeModelRoute(rawRoute);
+    if (!route.alias.trim()) continue;
+    const chain = route.chain
+      .map(providerModelKey)
+      .filter((value): value is string => Boolean(value));
+    if (chain.length === 0) continue;
+    lines.push(`[provider_aliases.${tomlKey(route.alias.trim())}]`);
+    if (route.description.trim()) {
+      lines.push(`description       = ${tomlString(route.description.trim())}`);
+    }
+    lines.push(`scope             = ${tomlString(route.scope)}`);
+    lines.push(`chain             = [${chain.map(tomlString).join(", ")}]`);
+    lines.push(`fallback_behavior = ${tomlString(route.fallbackBehavior)}`);
+    lines.push(`session_affinity  = ${route.sessionAffinity ? "true" : "false"}`);
+    if (route.scope === "executor") {
+      lines.push(`rotate_primary    = ${route.rotateExecutorPrimary ? "true" : "false"}`);
+    }
+    lines.push("");
+  }
+
   for (const profile of input.toolProfiles) {
     if (!profile.id.trim()) continue;
     lines.push(`[profiles.${tomlKey(profile.id.trim())}]`);
     lines.push('inherits_from = "Executor"');
     lines.push(`description = ${tomlString(profile.description.trim() || `Tool profile for ${profile.id.trim()}`)}`);
+    if (profile.providerAlias?.trim()) {
+      lines.push(`provider_alias = ${tomlString(profile.providerAlias.trim())}`);
+    }
     lines.push("");
     for (const tool of profile.tools) {
       if (!tool.name.trim()) continue;
@@ -2081,6 +3262,33 @@ function renderPlan(input: {
       }
       lines.push("");
     }
+  }
+
+  for (const verifier of input.planVerifiers) {
+    const normalized = normalizePlanVerifier(verifier);
+    if (!normalized.name.trim()) continue;
+    lines.push("[[plan.integration_merge_verifiers]]");
+    lines.push(`name       = ${tomlString(normalized.name.trim())}`);
+    lines.push(`image      = ${tomlString(normalized.image.trim())}`);
+    lines.push(`command    = ${tomlString(normalized.command.trim())}`);
+    lines.push(`timeout    = ${tomlString(normalized.timeout.trim())}`);
+    lines.push(`on_failure = ${tomlString(normalized.onFailure)}`);
+    lines.push(`applies_to = ${tomlString(normalized.appliesTo)}`);
+    const taskSet = splitList(normalized.taskSet);
+    if (normalized.appliesTo === "task_set") {
+      lines.push(`task_set   = [${taskSet.map(tomlString).join(", ")}]`);
+    }
+    if (normalized.artifact.trim()) {
+      lines.push(`artifact   = ${tomlString(normalized.artifact.trim())}`);
+    }
+    if (normalized.artifactMaxBytes.trim()) {
+      lines.push(`artifact_max_bytes = ${normalized.artifactMaxBytes.trim()}`);
+    }
+    const egress = splitList(normalized.allowedEgress);
+    if (egress.length > 0) {
+      lines.push(`allowed_egress = [${egress.map(tomlString).join(", ")}]`);
+    }
+    lines.push("");
   }
 
   for (const rawTask of input.tasks) {
@@ -2130,12 +3338,17 @@ function renderPlan(input: {
     if (task.verifierName.trim()) {
       lines.push("");
       lines.push("[[tasks.verifiers]]");
-      lines.push(`name      = ${tomlString(task.verifierName.trim())}`);
-      lines.push(`gate_type = ${tomlString(task.verifierGateType.trim() || "TestPass")}`);
-      if (task.verifierCommand.trim()) {
-        lines.push(`command   = ${tomlString(task.verifierCommand.trim())}`);
+      lines.push(`name       = ${tomlString(task.verifierName.trim())}`);
+      lines.push(`image      = ${tomlString(task.verifierImage.trim() || "raxis-verifier-starter")}`);
+      lines.push(`command    = ${tomlString(task.verifierCommand.trim() || "raxis-verifier")}`);
+      lines.push(`timeout    = ${tomlString(task.verifierTimeout.trim() || "30s")}`);
+      lines.push(`on_failure = ${tomlString(task.verifierOnFailure || "block_review")}`);
+      if (task.verifierArtifact.trim()) {
+        lines.push(`artifact   = ${tomlString(task.verifierArtifact.trim())}`);
       }
-      lines.push(`gate_on   = ${tomlString(task.verifierGateOn.trim() || "Pass")}`);
+      if (task.verifierArtifactMaxBytes.trim()) {
+        lines.push(`artifact_max_bytes = ${task.verifierArtifactMaxBytes.trim()}`);
+      }
     }
     lines.push("");
   }
@@ -2244,6 +3457,8 @@ function parsePlanToml(text: string): {
   plan: PlanBasics;
   tasks: TaskDraft[];
   toolProfiles: ToolProfileDraft[];
+  modelRoutes: ModelRouteDraft[];
+  planVerifiers: PlanVerifierDraft[];
 } {
   const plan: PlanBasics = {
     initiative:
@@ -2258,6 +3473,8 @@ function parsePlanToml(text: string): {
   };
 
   const toolProfiles = parseProfileTools(text);
+  const modelRoutes = parseModelRoutes(text);
+  const planVerifiers = parsePlanVerifiers(text);
   const taskBlocks = text
     .split(/^\[\[tasks\]\]\s*$/m)
     .slice(1)
@@ -2265,8 +3482,15 @@ function parsePlanToml(text: string): {
     .filter(Boolean);
 
   const tasks = taskBlocks.map((block, index) => {
-    const agentType = readString(block, "session_agent_type") === "Reviewer" ? "Reviewer" : "Executor";
+    const rawAgentType = readString(block, "session_agent_type");
+    const agentType: AgentType =
+      rawAgentType === "Executor" || rawAgentType === "Reviewer" ? rawAgentType : "";
     const profiles = readArray(block, "profiles").join(", ");
+    const taskName = nonEmpty(readString(block, "name"));
+    const shortDescription = nonEmpty(readString(block, "description"));
+    const explicitPrompt = readTriple(block, "prompt") ?? readString(block, "prompt");
+    const description = shortDescription ?? taskName ?? "";
+    const prompt = explicitPrompt ?? "";
     const credentials = readNestedBlocks(block, "tasks.credentials").map((credential) => {
       const proxyType =
         ((readString(credential, "proxy_type") ??
@@ -2293,31 +3517,37 @@ function parsePlanToml(text: string): {
     const verifier = readNestedBlock(block, "tasks.verifiers");
     return normalizeTask({
       id: readString(block, "task_id") ?? `task-${index + 1}`,
-      description: readString(block, "description") ?? "",
+      description,
       agentType,
       predecessors: readArray(block, "predecessors").join(", "),
       paths: readArray(block, "path_allowlist").join(", "),
       pathExports: readArray(block, "path_export_globs").join(", "),
       allowedEgress: readArray(block, "allowed_egress").join(", "),
-      cloneStrategy: (readString(block, "clone_strategy") as CloneStrategy | null) ?? "blobless",
+      cloneStrategy: parseCloneStrategy(readString(block, "clone_strategy")),
       maxTurns: readNumber(block, "max_turns") ?? "",
       maxTurnsStep: readNumber(block, "max_turns_step") ?? "",
       cumulativeMaxSeconds: readNumber(block, "cumulative_max_seconds") ?? "",
       vmImage: readString(block, "vm_image") ?? "",
       profiles,
       verifierName: verifier ? readString(verifier, "name") ?? "" : "",
-      verifierGateType: verifier ? readString(verifier, "gate_type") ?? "TestPass" : "TestPass",
+      verifierImage: verifier ? readString(verifier, "image") ?? "raxis-verifier-starter" : "raxis-verifier-starter",
       verifierCommand: verifier ? readString(verifier, "command") ?? "" : "",
-      verifierGateOn: verifier ? readString(verifier, "gate_on") ?? "Pass" : "Pass",
+      verifierTimeout: verifier ? readString(verifier, "timeout") ?? "30s" : "30s",
+      verifierOnFailure:
+        verifier && readString(verifier, "on_failure") === "warn_only"
+          ? "warn_only"
+          : "block_review",
+      verifierArtifact: verifier ? readString(verifier, "artifact") ?? "" : "",
+      verifierArtifactMaxBytes: verifier ? readNumber(verifier, "artifact_max_bytes") ?? "" : "",
       credentials,
-      prompt: readTriple(block, "prompt") ?? readString(block, "prompt") ?? "",
+      prompt,
     });
   });
 
   if (!text.includes("[[tasks]]")) {
-    return { plan, tasks: [], toolProfiles };
+    return { plan, tasks: [], toolProfiles, modelRoutes, planVerifiers };
   }
-  return { plan, tasks, toolProfiles };
+  return { plan, tasks, toolProfiles, modelRoutes, planVerifiers };
 }
 
 function parseProfileTools(text: string) {
@@ -2332,6 +3562,7 @@ function parseProfileTools(text: string) {
     profiles.set(id, {
       id,
       description: readString(block, "description") ?? "",
+      providerAlias: readString(block, "provider_alias") ?? "",
       tools: [],
     });
   }
@@ -2364,6 +3595,87 @@ function parseProfileTools(text: string) {
   return [...profiles.values()];
 }
 
+function parseModelRoutes(text: string): ModelRouteDraft[] {
+  const routes: ModelRouteDraft[] = [];
+  const re = /^\[provider_aliases\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\]\s*$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    const alias = match[1] ?? match[2] ?? "";
+    const start = match.index + match[0].length;
+    const nextMatch = text.slice(start).search(/^\[[^\]]+\]\s*$/m);
+    const block = nextMatch >= 0 ? text.slice(start, start + nextMatch) : text.slice(start);
+    const chain = readArray(block, "chain").map((item) => {
+      const colon = item.indexOf(":");
+      const providerId = colon >= 0 ? item.slice(0, colon) : "";
+      const model = colon >= 0 ? item.slice(colon + 1) : item;
+      return makeModelRouteEntry(inferProviderKind(providerId), providerId, model);
+    });
+    routes.push(
+      normalizeModelRoute({
+        alias,
+        scope: parseModelAliasScope(readString(block, "scope"), alias),
+        description: readString(block, "description") ?? "",
+        fallbackBehavior: "attempt_in_order",
+        sessionAffinity: readBoolean(block, "session_affinity") ?? false,
+        rotateExecutorPrimary: readBoolean(block, "rotate_primary") ?? false,
+        chain,
+      }),
+    );
+  }
+  return routes;
+}
+
+function parsePlanVerifiers(text: string): PlanVerifierDraft[] {
+  return readNestedBlocks(text, "plan.integration_merge_verifiers").map((block) =>
+    normalizePlanVerifier({
+      name: readString(block, "name") ?? "",
+      image: readString(block, "image") ?? "raxis-verifier-starter",
+      command: readString(block, "command") ?? "",
+      timeout: readString(block, "timeout") ?? "10m",
+      onFailure:
+        readString(block, "on_failure") === "warn_only" ? "warn_only" : "block_merge",
+      appliesTo:
+        readString(block, "applies_to") === "task_set"
+          ? "task_set"
+          : readString(block, "applies_to") === "last"
+            ? "last"
+            : "all",
+      taskSet: readArray(block, "task_set").join(", "),
+      artifact: readString(block, "artifact") ?? "",
+      artifactMaxBytes: readNumber(block, "artifact_max_bytes") ?? "",
+      allowedEgress: readArray(block, "allowed_egress").join(", "),
+    }),
+  );
+}
+
+function parsePolicyGateRefs(text: string, source: PolicyGateRef["source"]): PolicyGateRef[] {
+  return readNestedBlocks(text, "gates")
+    .map((block) => {
+      const name = readString(block, "gate_type") ?? "";
+      const explicitClaim = readString(block, "claim_type");
+      const satisfies = readArray(block, "satisfies");
+      const hooks = readArrayFromSection(block, "gates.selectors", "hooks");
+      return {
+        name,
+        claimTypes: [...new Set([explicitClaim, ...satisfies].filter(isString))],
+        hooks,
+        source,
+      };
+    })
+    .filter((gate) => gate.name.trim().length > 0);
+}
+
+function mergePolicyGateRefs(gates: PolicyGateRef[]): PolicyGateRef[] {
+  const byName = new Map<string, PolicyGateRef>();
+  for (const gate of gates) {
+    const existing = byName.get(gate.name);
+    if (!existing || gate.source === "draft") {
+      byName.set(gate.name, gate);
+    }
+  }
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function readSection(text: string, section: string) {
   const escaped = section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`^\\[${escaped}\\]\\s*$`, "m");
@@ -2376,7 +3688,7 @@ function readSection(text: string, section: string) {
 
 function readSectionString(text: string, section: string, key: string) {
   const block = readSection(text, section);
-  return block ? readString(block, key) : null;
+  return block ? readTomlText(block, key) : null;
 }
 
 function readArrayFromSection(text: string, section: string, key: string) {
@@ -2407,6 +3719,10 @@ function readString(text: string, key: string) {
   return match ? unescapeToml(match[1]) : null;
 }
 
+function readTomlText(text: string, key: string) {
+  return nonEmpty(readTriple(text, key)) ?? nonEmpty(readString(text, key));
+}
+
 function readTriple(text: string, key: string) {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = new RegExp(`^\\s*${escaped}\\s*=\\s*"""\\n?([\\s\\S]*?)\\n?"""`, "m").exec(text);
@@ -2417,6 +3733,30 @@ function readNumber(text: string, key: string) {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = new RegExp(`^\\s*${escaped}\\s*=\\s*([0-9]+)\\s*$`, "m").exec(text);
   return match?.[1] ?? "";
+}
+
+function readBoolean(text: string, key: string) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`^\\s*${escaped}\\s*=\\s*(true|false)\\s*$`, "m").exec(text);
+  return match ? match[1] === "true" : null;
+}
+
+function parseCloneStrategy(value: string | null): CloneStrategy {
+  return value === "blobless" || value === "full" || value === "sparse" ? value : "";
+}
+
+function parseModelAliasScope(value: string | null, alias: string): ModelAliasScope {
+  if (value === "executor" || value === "reviewer" || value === "custom") {
+    return value;
+  }
+  if (alias === "executor") return "executor";
+  if (alias === "reviewer") return "reviewer";
+  return "custom";
+}
+
+function nonEmpty(value: string | null) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
 }
 
 function readArray(text: string, key: string) {
@@ -2502,6 +3842,86 @@ function splitCommand(raw: string) {
     .split(/\r?\n/)
     .map((value) => value.trim())
     .filter(Boolean);
+}
+
+function providerModelKey(entry: ModelRouteEntryDraft) {
+  const providerId = entry.providerId.trim();
+  const model = entry.model.trim();
+  return providerId && model ? `${providerId}:${model}` : null;
+}
+
+function defaultProviderId(kind: ProviderKind) {
+  switch (kind) {
+    case "anthropic":
+      return "anthropic";
+    case "openai":
+      return "openai";
+    case "google":
+      return "google";
+    case "bedrock":
+      return "bedrock";
+    case "ollama":
+      return "ollama-local";
+    case "http_sidecar":
+      return "sidecar";
+    case "custom":
+      return "custom-provider";
+    default:
+      return "custom-provider";
+  }
+}
+
+function defaultModelForProvider(kind: ProviderKind) {
+  switch (kind) {
+    case "anthropic":
+      return "claude-4.6-sonnet-medium-thinking";
+    case "openai":
+      return "gpt-5.5-medium";
+    case "google":
+      return "gemini-2.5-flash";
+    case "bedrock":
+      return "anthropic.claude-sonnet";
+    case "ollama":
+      return "llama3.1:8b";
+    case "http_sidecar":
+      return "sidecar-default";
+    case "custom":
+      return "model-id";
+    default:
+      return "model-id";
+  }
+}
+
+function inferProviderKind(providerId: string): ProviderKind {
+  const normalized = providerId.trim().toLowerCase();
+  if (normalized.includes("anthropic") || normalized === "claude") return "anthropic";
+  if (normalized.includes("openai") || normalized === "gpt") return "openai";
+  if (normalized.includes("google") || normalized.includes("gemini")) return "google";
+  if (normalized.includes("bedrock") || normalized.includes("aws")) return "bedrock";
+  if (normalized.includes("ollama") || normalized.includes("local")) return "ollama";
+  if (normalized.includes("sidecar")) return "http_sidecar";
+  return "custom";
+}
+
+function providerKindLabel(kind: ProviderKind) {
+  switch (kind) {
+    case "http_sidecar":
+      return "HTTP sidecar";
+    case "anthropic":
+      return "Anthropic";
+    case "openai":
+      return "OpenAI";
+    case "google":
+      return "Google";
+    case "bedrock":
+      return "Bedrock";
+    case "ollama":
+      return "Ollama/local";
+    case "custom":
+      return "Custom/BYO";
+    default:
+      return kind;
+  }
 }
 
 function toolSignature(tool: ToolDraft) {

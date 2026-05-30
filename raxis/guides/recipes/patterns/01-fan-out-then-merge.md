@@ -70,6 +70,8 @@ description = "Add tracing to N modules"
 [workspace]
 name        = "tracing-fanout"
 lane_id     = "default"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 # Fan-out: three independent Executors. Each writes only its own
 # module. The kernel admits all three immediately (predecessors=[]).
@@ -80,7 +82,8 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/auth/"]
 predecessors       = []
-description        = """Add OpenTelemetry tracing to src/auth/. Match the spans declared in spec/tracing.md."""
+description        = "Trace Auth"
+prompt             = """Add OpenTelemetry tracing to src/auth/. Match the spans declared in spec/tracing.md."""
 
 [[tasks]]
 task_id            = "trace-api"
@@ -88,7 +91,8 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/api/"]
 predecessors       = []
-description        = """Add OpenTelemetry tracing to src/api/."""
+description        = "Trace Api"
+prompt             = """Add OpenTelemetry tracing to src/api/."""
 
 [[tasks]]
 task_id            = "trace-db"
@@ -96,7 +100,8 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/db/"]
 predecessors       = []
-description        = """Add OpenTelemetry tracing to src/db/."""
+description        = "Trace Db"
+prompt             = """Add OpenTelemetry tracing to src/db/."""
 
 # One Reviewer per Executor. Each Reviewer's predecessors is the
 # single Executor it reviews. The Reviewer has NO write authority
@@ -110,7 +115,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]
 predecessors       = ["trace-auth"]
-description        = """Verify span names and propagation match spec/tracing.md for src/auth/."""
+description        = "Review Auth"
+prompt             = """Verify span names and propagation match spec/tracing.md for src/auth/."""
 
 [[tasks]]
 task_id            = "review-api"
@@ -118,7 +124,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/api/"]
 predecessors       = ["trace-api"]
-description        = """Verify span names and propagation for src/api/."""
+description        = "Review Api"
+prompt             = """Verify span names and propagation for src/api/."""
 
 [[tasks]]
 task_id            = "review-db"
@@ -126,7 +133,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/db/"]
 predecessors       = ["trace-db"]
-description        = """Verify span names and propagation for src/db/."""
+description        = "Review Db"
+prompt             = """Verify span names and propagation for src/db/."""
 
 # Cross-cutting artifacts the Orchestrator may touch during merge.
 # This is the ONLY operator-tunable input the auto-spawned
@@ -205,9 +213,11 @@ Reviewer activates:
 
 ```toml
 [[tasks.verifiers]]
-id           = "rg-pre-commit"
-gate         = "pre_review"
-required     = true
+name       = "rg_pre_commit"
+image      = "raxis-verifier-starter"
+command    = "rg --line-number --hidden --glob '!.git/*' TODO src/"
+timeout    = "30s"
+on_failure = "block_review"
 ```
 
 These are mechanical checks (`cargo fmt --check`, `rg`), not

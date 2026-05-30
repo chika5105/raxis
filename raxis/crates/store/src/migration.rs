@@ -48,7 +48,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 26;
+pub const SCHEMA_VERSION: u32 = 28;
 
 /// Apply all pending migrations to `conn`.
 /// Safe to call on every startup — skips already-applied migrations. Returns
@@ -139,6 +139,12 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 26 {
         apply_migration_26(conn)?;
+    }
+    if current_version < 27 {
+        apply_migration_27(conn)?;
+    }
+    if current_version < 28 {
+        apply_migration_28(conn)?;
     }
 
     Ok(())
@@ -2912,6 +2918,18 @@ fn apply_migration_26(conn: &Connection) -> Result<(), StoreError> {
         .map_err(|e| StoreError::Migration(format!("migration 26 failed: {e}")))
 }
 
+fn apply_migration_27(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_27_ddl();
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 27 failed: {e}")))
+}
+
+fn apply_migration_28(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_28_ddl();
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 28 failed: {e}")))
+}
+
 /// The complete migration-26 DDL.
 pub fn render_migration_26_ddl() -> String {
     let session_vm_env = Table::SessionVmEnv.as_str();
@@ -2945,6 +2963,88 @@ CREATE INDEX IF NOT EXISTS idx_session_vm_env_session
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (26, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+/// The complete migration-27 DDL.
+pub fn render_migration_27_ddl() -> String {
+    let verifier_run_tokens = Table::VerifierRunTokens.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- iter verifier-provenance -- classify every verifier run by source and hook.
+-- These fields let the dashboard and audit readers distinguish active
+-- policy gates, per-task plan verifiers, and future integration verifiers
+-- without inferring semantics from gate_type strings.
+ALTER TABLE {verifier_run_tokens}
+    ADD COLUMN gate_source TEXT NOT NULL DEFAULT 'policy_gate';
+
+ALTER TABLE {verifier_run_tokens}
+    ADD COLUMN gate_hook TEXT NOT NULL DEFAULT 'intent';
+
+ALTER TABLE {verifier_run_tokens}
+    ADD COLUMN verifier_image_alias TEXT;
+
+ALTER TABLE {verifier_run_tokens}
+    ADD COLUMN verifier_command TEXT;
+
+ALTER TABLE {verifier_run_tokens}
+    ADD COLUMN verifier_on_failure TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_verifier_run_tokens_source_hook
+    ON {verifier_run_tokens} (task_id, gate_source, gate_hook, issued_at DESC);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (27, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+/// The complete migration-28 DDL.
+pub fn render_migration_28_ddl() -> String {
+    let verifier_run_tokens = Table::VerifierRunTokens.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- verifier-run lifecycle status -- make failed verifier launches and
+-- process failures visible in dashboard/API projections even when no
+-- witness row can be produced.
+ALTER TABLE {verifier_run_tokens}
+    ADD COLUMN status TEXT NOT NULL DEFAULT 'Pending'
+        CHECK (status IN (
+            'Pending',
+            'Pass',
+            'Fail',
+            'Inconclusive',
+            'SpawnFailed',
+            'ProcessFailed',
+            'Timeout',
+            'ConfigInvalid',
+            'BudgetExhausted',
+            'CapExceeded'
+        ));
+
+ALTER TABLE {verifier_run_tokens}
+    ADD COLUMN failure_reason TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_verifier_run_tokens_status
+    ON {verifier_run_tokens} (task_id, status, issued_at DESC);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (28, strftime('%s', 'now'));
 
 COMMIT;
 "
@@ -6663,5 +6763,53 @@ mod tests {
             )
             .unwrap();
         assert_eq!(exists, 1);
+    }
+
+    /// Migration 28 adds verifier-run terminal status metadata so
+    /// failed verifier launches do not appear as endless Pending in
+    /// the dashboard.
+    #[test]
+    fn migration_28_adds_verifier_run_status_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "PRAGMA table_info({})",
+                Table::VerifierRunTokens.as_str()
+            ))
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for expected in ["status", "failure_reason"] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "{expected} column missing from verifier_run_tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_28_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let count = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name IN ('status','failure_reason')",
+                    Table::VerifierRunTokens.as_str()
+                ),
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
     }
 }

@@ -74,7 +74,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 vm_image           = "rust-toolchain-2026-05"      # ← matches [[vm_images]] name
-description        = """Build the project."""
+description        = "Build the project"
+prompt             = """Build the project and fix any build-only failures in scope."""
 ```
 
 If `vm_image` is omitted, the kernel uses

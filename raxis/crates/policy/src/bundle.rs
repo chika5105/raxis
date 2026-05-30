@@ -151,9 +151,9 @@ pub(crate) struct RawPolicy {
     #[serde(default)]
     pub(crate) verifier_runtime: Option<VerifierRuntimeSection>,
 
-    /// `[git]` — operator-side defaults for git-domain configuration.
+    /// `[git]` — operator-side git-domain policy.
     /// **Optional**: a kernel that omits the section gets the
-    /// hardcoded defaults (`default_target_ref = "refs/heads/main"`,
+    /// hardcoded policy values (`default_target_ref = "refs/heads/main"`,
     /// `target_ref_locked = false`).
     #[serde(default)]
     pub(crate) git: Option<GitSection>,
@@ -1391,22 +1391,23 @@ fn validate_isolation_section(
     Ok(cfg)
 }
 
-/// `[git]` — operator default + lock for the per-initiative
+/// `[git]` — operator reference policy + lock for the per-initiative
 /// `target_ref` field declared in `plan.toml [workspace] target_ref`.
-/// Resolution at admission time follows
+/// Admission-time validation follows
 /// `INV-PLAN-POLICY-PRECEDENCE-01`:
-/// * If the plan declares `target_ref`, it wins **unless**
-///   `target_ref_locked = true`, in which case the kernel rejects
-///   admission with `FAIL_POLICY_LOCKED_FIELD`.
-/// * If the plan omits `target_ref`, `default_target_ref` applies.
-/// * If the operator omits the whole section, the hardcoded fallback
-///   `"refs/heads/main"` applies and `target_ref_locked` defaults to
-///   `false` (i.e., plans may freely override).
+/// * Every plan must declare `[workspace] target_ref`.
+/// * If `target_ref_locked = true`, the declared plan ref must equal
+///   `default_target_ref`; otherwise the kernel rejects admission with
+///   `FAIL_POLICY_LOCKED_FIELD`.
+/// * If the operator omits the whole section, the policy comparison
+///   value is `"refs/heads/main"` and `target_ref_locked` defaults to
+///   `false` (i.e., plans may freely choose their own explicit ref).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub(crate) struct GitSection {
-    /// Default value the kernel applies when the plan omits its own
-    /// `[workspace] target_ref` field. Validated at policy-load to
-    /// be a fully-qualified `refs/heads/...` ref.
+    /// Policy reference value used when `target_ref_locked = true`.
+    /// Plans must still declare their own `[workspace] target_ref`.
+    /// Validated at policy-load to be a fully-qualified
+    /// `refs/heads/...` ref.
     #[serde(default)]
     pub(crate) default_target_ref: Option<String>,
 
@@ -1802,19 +1803,50 @@ pub struct BypassedCertMisconfig {
 /// [[gates]]
 /// gate_type        = "TestCoverage"
 /// verifier_command = "/usr/local/bin/raxis-verify-coverage"
+/// verifier_sha256  = "..."
 /// max_wall_seconds = 120
 /// max_memory_bytes = 536870912
 /// network_allowed  = false
 /// agent_hint_default = "Inspect failing test logs and adjust the diff."
+///
+/// satisfies = ["TestCoverage"]
+///
+/// [gates.selectors]
+/// workspaces       = ["checkout-api"]
+/// lane_ids         = ["default"]
+/// path_globs       = ["src/**", "Cargo.toml"]
+/// task_agent_types = ["Executor"]
+/// environments     = ["staging"]
+/// hooks            = ["complete_task"]
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct GateEntry {
     pub gate_type: String,
     pub verifier_command: String,
+    #[serde(default)]
+    pub verifier_sha256: Option<String>,
     pub max_wall_seconds: u32,
     pub max_memory_bytes: u64,
     /// Advisory only in v1 — not enforced at the OS level (kernel-store.md §2.5.6).
     pub network_allowed: bool,
+
+    /// Optional canonical claim emitted by this gate. When absent,
+    /// `gate_type` remains the default claim name for compatibility
+    /// with existing policies.
+    #[serde(default)]
+    pub claim_type: Option<String>,
+
+    /// Additional typed claims this gate satisfies. This decouples
+    /// the operator-visible gate name (`gate_type`) from the
+    /// claim classes used by policy rules.
+    #[serde(default)]
+    pub satisfies: Vec<String>,
+
+    /// Optional scope selectors. Empty selector vectors mean
+    /// "applies everywhere" for that dimension; non-empty vectors
+    /// narrow the gate to matching runtime contexts.
+    #[serde(default)]
+    pub selectors: GateSelectors,
 
     /// `iter63-followups.md` — Operator-authored, schema-validated
     /// hints surfaced to the verifier as the
@@ -1854,6 +1886,29 @@ pub struct GateEntry {
     /// load-time-mandatory when `[gate_fixup].enabled = true`.
     #[serde(default)]
     pub agent_hint_default: Option<String>,
+}
+
+/// Selector set for a `[[gates]]` entry.
+///
+/// The absence of a selector dimension is intentionally broad: a
+/// policy that does not opt into selectors keeps the historical
+/// active-policy-wide gate behavior. Runtime evaluation treats an
+/// unresolved selector dimension fail-closed by applying the gate
+/// rather than silently skipping it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GateSelectors {
+    #[serde(default, alias = "workspace")]
+    pub workspaces: Vec<String>,
+    #[serde(default, alias = "lane")]
+    pub lane_ids: Vec<String>,
+    #[serde(default)]
+    pub path_globs: Vec<String>,
+    #[serde(default, alias = "task_agent_type")]
+    pub task_agent_types: Vec<String>,
+    #[serde(default, alias = "environment")]
+    pub environments: Vec<String>,
+    #[serde(default, alias = "hook")]
+    pub hooks: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1905,6 +1960,51 @@ pub enum IntegrationMergeVerifierOnFailure {
     WarnOnly,
 }
 
+/// Failure routing for a plan-source `[[tasks.verifiers]]` entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskVerifierOnFailure {
+    /// `on_failure = "block_review"` — reviewer activation is held
+    /// until the verifier passes or the executor repairs the task.
+    BlockReview,
+    /// `on_failure = "warn_only"` — verifier output is audit/UI
+    /// visible but reviewer activation may proceed.
+    WarnOnly,
+}
+
+impl Default for TaskVerifierOnFailure {
+    fn default() -> Self {
+        Self::BlockReview
+    }
+}
+
+/// Canonical plan-side per-task verifier declaration.
+///
+/// `[[tasks.verifiers]]` runs against one task's evaluation commit
+/// after `CompleteTask` and before Reviewer activation. The schema
+/// intentionally mirrors plan-side integration verifiers where the
+/// semantics overlap, but uses `block_review` instead of
+/// `block_merge` for the blocking failure route.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct TaskVerifierEntry {
+    pub name: String,
+    pub image: String,
+    pub command: String,
+    pub timeout: String,
+    #[serde(default)]
+    pub on_failure: TaskVerifierOnFailure,
+    #[serde(default)]
+    pub artifact: Option<String>,
+    #[serde(default)]
+    pub artifact_max_bytes: Option<u64>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub allowed_egress: Vec<String>,
+    #[serde(default)]
+    pub hints: BTreeMap<String, serde_json::Value>,
+}
+
 /// One declared `[[integration_merge_verifiers]]` entry.
 /// **Schema parity.** Mirrors the `policy.toml` operator-side schema
 /// in `policy-plan-authority.md §4 [[integration_merge_verifiers]]`
@@ -1917,7 +2017,7 @@ pub enum IntegrationMergeVerifierOnFailure {
 /// [[integration_merge_verifiers]]`; the plan-side parser sets it to
 /// `None` and the cross-source validator rejects any plan-side entry
 /// that populates it.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct IntegrationMergeVerifierEntry {
     /// Identifier for the verifier within the (plan-source ∪
     /// policy-source) union. Validated at policy/plan load to be
@@ -2430,6 +2530,50 @@ pub struct GatewaySection {
     ///    derived default.
     #[serde(default)]
     pub planner_max_turns_step_default: Option<u32>,
+
+    /// Optional model id stamped into Orchestrator sessions as
+    /// `RAXIS_MODEL_ID`. The model id is still validated by the
+    /// planner's known-model registry at boot; the policy owns the
+    /// selection so host environment variables cannot silently
+    /// reroute inference.
+    #[serde(default)]
+    pub planner_model_orchestrator: Option<String>,
+
+    /// Optional model id stamped into Executor sessions as
+    /// `RAXIS_MODEL_ID`.
+    #[serde(default)]
+    pub planner_model_executor: Option<String>,
+
+    /// Optional model id stamped into Reviewer sessions as
+    /// `RAXIS_MODEL_ID`.
+    #[serde(default)]
+    pub planner_model_reviewer: Option<String>,
+
+    /// Optional ordered fallback chain stamped into Orchestrator
+    /// sessions as `RAXIS_MODEL_CHAIN`. First element is primary;
+    /// subsequent elements are attempted only for retryable provider
+    /// failures. When present, this chain takes precedence over the
+    /// single `planner_model_orchestrator` field.
+    #[serde(default)]
+    pub planner_model_orchestrator_chain: Vec<String>,
+
+    /// Optional ordered fallback chain stamped into Executor
+    /// sessions as `RAXIS_MODEL_CHAIN`.
+    #[serde(default)]
+    pub planner_model_executor_chain: Vec<String>,
+
+    /// Optional ordered fallback chain stamped into Reviewer
+    /// sessions as `RAXIS_MODEL_CHAIN`.
+    #[serde(default)]
+    pub planner_model_reviewer_chain: Vec<String>,
+
+    /// When true, Executor sessions rotate the
+    /// `planner_model_executor_chain` primary by stable task id while
+    /// keeping the same set of fallback models. This is primarily a
+    /// live-e2e diversification knob: concurrent executors exercise
+    /// different provider primaries instead of stampeding one vendor.
+    #[serde(default)]
+    pub planner_model_executor_rotate_primary: bool,
 }
 
 fn default_gateway_spawn_timeout_secs() -> u64 {
@@ -3177,6 +3321,7 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     // intent
     "IntentAccepted",
     "IntentRejected",
+    "CustomToolInvoked",
     "IntegrationMergeCompleted",
     // kernel push protocol
     "PushAttempted",
@@ -3649,14 +3794,134 @@ pub fn validate_verifier_hints(
     Ok(())
 }
 
-/// iter63-followups.md — operator-side `[[gates]]` validator.
-/// Today this only enforces the hints discipline (the rest of the
-/// gate schema is parsed via serde with its own per-field defaults).
-/// Called from `PolicyBundle::validate`.
+/// Operator-side `[[gates]]` validator.
+///
+/// In addition to the iter63 hints discipline, this now pins the
+/// production hardening fields that make gates auditable and
+/// selector-aware: typed claim aliases, explicit selectors, and an
+/// optional binary digest for the host-side verifier command.
 pub(crate) fn validate_gates_hints(raw_gates: &[GateEntry]) -> Result<(), PolicyError> {
+    let mut seen_gate_types = std::collections::HashSet::new();
     for g in raw_gates {
+        if g.gate_type.trim().is_empty() || g.gate_type.len() > 64 {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_GATE_TYPE_INVALID: [[gates]] gate_type {:?} \
+                 must be non-empty and at most 64 bytes.",
+                g.gate_type,
+            )));
+        }
+        if !seen_gate_types.insert(g.gate_type.as_str()) {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_GATE_TYPE_DUPLICATE: duplicate [[gates]] \
+                 gate_type {:?}. Gate names must be unique so witness \
+                 records and dashboard lifecycle rows are unambiguous.",
+                g.gate_type,
+            )));
+        }
+        if g.verifier_command.trim().is_empty() {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_GATE_VERIFIER_COMMAND_EMPTY: [[gates]] \
+                 gate_type {:?} must declare verifier_command.",
+                g.gate_type,
+            )));
+        }
+        if let Some(digest) = g.verifier_sha256.as_deref() {
+            if !is_valid_sha256_hex(digest) {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_POLICY_GATE_VERIFIER_SHA256_INVALID: [[gates]] \
+                     gate_type {:?} verifier_sha256 must be exactly 64 \
+                     lowercase hex characters.",
+                    g.gate_type,
+                )));
+            }
+        }
+        if let Some(claim_type) = g.claim_type.as_deref() {
+            validate_gate_claim_name(&g.gate_type, "claim_type", claim_type)?;
+        }
+        let mut seen_satisfies = std::collections::HashSet::new();
+        for claim in &g.satisfies {
+            validate_gate_claim_name(&g.gate_type, "satisfies", claim)?;
+            if !seen_satisfies.insert(claim.as_str()) {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_POLICY_GATE_SATISFIES_DUPLICATE: [[gates]] \
+                     gate_type {:?} lists claim {:?} more than once.",
+                    g.gate_type, claim,
+                )));
+            }
+        }
+        validate_gate_selectors(&g.gate_type, &g.selectors)?;
         validate_verifier_hints("[[gates]]", &g.gate_type, &g.hints)?;
     }
+    Ok(())
+}
+
+fn is_valid_sha256_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.as_bytes()
+            .iter()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn validate_gate_claim_name(gate_type: &str, field: &str, claim: &str) -> Result<(), PolicyError> {
+    let trimmed = claim.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "FAIL_POLICY_GATE_CLAIM_INVALID: [[gates]] gate_type {:?} \
+             field `{}` must contain non-empty claim names at most 64 bytes.",
+            gate_type, field,
+        )));
+    }
+    Ok(())
+}
+
+fn validate_gate_selectors(gate_type: &str, selectors: &GateSelectors) -> Result<(), PolicyError> {
+    fn validate_list(
+        gate_type: &str,
+        field: &str,
+        values: &[String],
+        max_len: usize,
+    ) -> Result<(), PolicyError> {
+        if values.len() > 64 {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_GATE_SELECTOR_TOO_MANY_VALUES: [[gates]] \
+                 gate_type {:?} selector `{}` declared {} values; max is 64.",
+                gate_type,
+                field,
+                values.len(),
+            )));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for value in values {
+            let trimmed = value.trim();
+            if trimmed.is_empty() || trimmed.len() > max_len {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_POLICY_GATE_SELECTOR_INVALID: [[gates]] gate_type \
+                     {:?} selector `{}` contains an empty or oversized value.",
+                    gate_type, field,
+                )));
+            }
+            if !seen.insert(trimmed) {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_POLICY_GATE_SELECTOR_DUPLICATE: [[gates]] \
+                     gate_type {:?} selector `{}` repeats {:?}.",
+                    gate_type, field, trimmed,
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    validate_list(gate_type, "workspaces", &selectors.workspaces, 64)?;
+    validate_list(gate_type, "lane_ids", &selectors.lane_ids, 64)?;
+    validate_list(gate_type, "path_globs", &selectors.path_globs, 256)?;
+    validate_list(
+        gate_type,
+        "task_agent_types",
+        &selectors.task_agent_types,
+        32,
+    )?;
+    validate_list(gate_type, "environments", &selectors.environments, 64)?;
+    validate_list(gate_type, "hooks", &selectors.hooks, 64)?;
     Ok(())
 }
 
@@ -4496,13 +4761,14 @@ pub struct PolicyBundle {
     /// grace.
     verifier_runtime: VerifierRuntimeConfig,
 
-    /// Resolved `[git] default_target_ref` — the fully-qualified ref
-    /// the kernel's IntegrationMerge handler advances when the plan
-    /// omits `[workspace] target_ref`. Always non-empty; defaults to
-    /// `"refs/heads/main"` when the operator omits the `[git]`
-    /// section. Validated at policy-load to start with `refs/heads/`
-    /// and pass `git-check-ref-format`-style structural rules. See
-    /// and `INV-PLAN-POLICY-PRECEDENCE-01`.
+    /// Resolved `[git] default_target_ref` — the fully-qualified policy
+    /// comparison ref used when `target_ref_locked = true`. Plans must
+    /// still declare `[workspace] target_ref`; this value is not a
+    /// runtime substitute for missing plan data. Always non-empty;
+    /// defaults to `"refs/heads/main"` when the operator omits the
+    /// `[git]` section. Validated at policy-load to start with
+    /// `refs/heads/` and pass `git-check-ref-format`-style structural
+    /// rules. See `INV-PLAN-POLICY-PRECEDENCE-01`.
     git_default_target_ref: String,
 
     /// Resolved `[git] target_ref_locked`. When `true`, plans MAY
@@ -5465,10 +5731,9 @@ impl PolicyBundle {
 
     /// Operator-side `[git] default_target_ref`.
     /// Always non-empty; defaults to `"refs/heads/main"` when the
-    /// operator omits the `[git]` section. The plan-admission code
-    /// path resolves the per-initiative `target_ref` as
-    /// `plan_value || policy_default || "refs/heads/main"`,
-    /// subject to [`git_target_ref_locked`].
+    /// operator omits the `[git]` section. Admission requires the plan
+    /// to declare `[workspace] target_ref`; this value only constrains
+    /// that explicit plan value when [`git_target_ref_locked`] is true.
     /// [`git_target_ref_locked`]: PolicyBundle::git_target_ref_locked
     pub fn git_default_target_ref(&self) -> &str {
         &self.git_default_target_ref
@@ -6701,6 +6966,58 @@ priority             = 100
         assert_eq!(g.spawn_timeout_secs, 5);
         assert_eq!(g.respawn_backoff_ms, 1000);
         assert_eq!(g.max_consecutive_respawns, 5);
+        assert!(g.planner_model_orchestrator.is_none());
+        assert!(g.planner_model_executor.is_none());
+        assert!(g.planner_model_reviewer.is_none());
+        assert!(g.planner_model_orchestrator_chain.is_empty());
+        assert!(g.planner_model_executor_chain.is_empty());
+        assert!(g.planner_model_reviewer_chain.is_empty());
+        assert!(!g.planner_model_executor_rotate_primary);
+    }
+
+    #[test]
+    fn gateway_section_accepts_per_role_planner_models() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[gateway]\n\
+             binary_path = \"/usr/local/bin/raxis-gateway\"\n\
+             planner_model_orchestrator = \"claude-3-haiku-20240307\"\n\
+             planner_model_executor     = \"gemini-2.5-flash\"\n\
+             planner_model_reviewer     = \"gpt-5.3-codex\"\n",
+        );
+        let bundle = write_and_load(&t).expect("valid [gateway] must load");
+        let g = bundle.gateway().expect("gateway section loaded");
+        assert_eq!(
+            g.planner_model_orchestrator.as_deref(),
+            Some("claude-3-haiku-20240307")
+        );
+        assert_eq!(
+            g.planner_model_executor.as_deref(),
+            Some("gemini-2.5-flash")
+        );
+        assert_eq!(g.planner_model_reviewer.as_deref(), Some("gpt-5.3-codex"));
+    }
+
+    #[test]
+    fn gateway_section_accepts_per_role_planner_model_chains() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[gateway]\n\
+             binary_path = \"/usr/local/bin/raxis-gateway\"\n\
+             planner_model_executor_chain = [\"claude-3-haiku-20240307\", \"gemini-2.5-flash\", \"gpt-5.3-codex\"]\n\
+             planner_model_executor_rotate_primary = true\n",
+        );
+        let bundle = write_and_load(&t).expect("valid [gateway] must load");
+        let g = bundle.gateway().expect("gateway section loaded");
+        assert_eq!(
+            g.planner_model_executor_chain,
+            vec![
+                "claude-3-haiku-20240307".to_owned(),
+                "gemini-2.5-flash".to_owned(),
+                "gpt-5.3-codex".to_owned(),
+            ]
+        );
+        assert!(g.planner_model_executor_rotate_primary);
     }
 
     // ── [gateway] negative cases ──────────────────────────────────────────
@@ -8197,6 +8514,29 @@ channels   = []
                 sequence_number: 0,
             }
             .as_str(),
+            AuditEventKind::CustomToolInvoked {
+                tool_name: "x".into(),
+                profile_name: "repo_tools".into(),
+                execution_locality: "guest_subprocess".into(),
+                outcome: "Success".into(),
+                duration_ms: 0,
+                exit_code: Some(0),
+                signal: None,
+                timeout_ms: 0,
+                command_argv_sha256: "x".into(),
+                stdin_bytes_total: 0,
+                stdin_sha256: "x".into(),
+                stdout_bytes_total: 0,
+                stdout_bytes_captured: 0,
+                stdout_sha256: "x".into(),
+                stdout_truncated: false,
+                stderr_bytes_total: 0,
+                stderr_bytes_captured: 0,
+                stderr_sha256: "x".into(),
+                stderr_truncated: false,
+                error: None,
+            }
+            .as_str(),
             AuditEventKind::IntegrationMergeCompleted {
                 initiative_id: "x".into(),
                 session_id: "x".into(),
@@ -8657,6 +8997,8 @@ channels   = []
                 oci_digest: "x".into(),
                 command: "x".into(),
                 on_failure: "x".into(),
+                gate_source: "policy_gate".into(),
+                gate_hook: "integration_merge".into(),
             }
             .as_str(),
             AuditEventKind::VerifierVmExited {
@@ -10437,6 +10779,75 @@ mod implicit_provider_grants_tests {
 }
 
 #[cfg(test)]
+mod gate_validation_tests {
+    use super::*;
+
+    fn gate(name: &str) -> GateEntry {
+        GateEntry {
+            gate_type: name.to_owned(),
+            verifier_command: "/usr/local/bin/raxis-verify-no-secrets".to_owned(),
+            verifier_sha256: Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            ),
+            max_wall_seconds: 60,
+            max_memory_bytes: 256 * 1024 * 1024,
+            network_allowed: false,
+            claim_type: Some("NoSecretStrings".to_owned()),
+            satisfies: vec!["CredentialFree".to_owned()],
+            selectors: GateSelectors {
+                workspaces: vec!["checkout-api".to_owned()],
+                lane_ids: vec!["default".to_owned()],
+                path_globs: vec!["src/**".to_owned(), "Cargo.toml".to_owned()],
+                task_agent_types: vec!["Executor".to_owned()],
+                environments: vec!["staging".to_owned()],
+                hooks: vec!["intent".to_owned()],
+            },
+            hints: BTreeMap::new(),
+            agent_hint_default: None,
+        }
+    }
+
+    #[test]
+    fn gate_with_typed_claims_selectors_and_digest_validates() {
+        validate_gates_hints(&[gate("NoSecretStrings")])
+            .expect("canonical gate hardening fields must validate");
+    }
+
+    #[test]
+    fn gate_digest_rejects_uppercase_or_malformed_hex() {
+        let mut g = gate("NoSecretStrings");
+        g.verifier_sha256 =
+            Some("ABCDEFabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123".to_owned());
+        let err = validate_gates_hints(&[g])
+            .expect_err("verifier_sha256 must be normalized lowercase hex");
+        assert!(format!("{err}").contains("FAIL_POLICY_GATE_VERIFIER_SHA256_INVALID"));
+    }
+
+    #[test]
+    fn gate_satisfies_rejects_duplicate_claim_aliases() {
+        let mut g = gate("NoSecretStrings");
+        g.satisfies = vec!["CredentialFree".to_owned(), "CredentialFree".to_owned()];
+        let err = validate_gates_hints(&[g])
+            .expect_err("duplicate typed claims make dashboard/audit mapping ambiguous");
+        assert!(format!("{err}").contains("FAIL_POLICY_GATE_SATISFIES_DUPLICATE"));
+    }
+
+    #[test]
+    fn gate_selectors_reject_empty_values_and_duplicates() {
+        let mut g = gate("NoSecretStrings");
+        g.selectors.workspaces = vec!["checkout-api".to_owned(), "checkout-api".to_owned()];
+        let err =
+            validate_gates_hints(&[g]).expect_err("duplicate selector values should be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_GATE_SELECTOR_DUPLICATE"));
+
+        let mut g = gate("NoSecretStrings");
+        g.selectors.hooks = vec![" ".to_owned()];
+        let err = validate_gates_hints(&[g]).expect_err("blank selector values should be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_GATE_SELECTOR_INVALID"));
+    }
+}
+
+#[cfg(test)]
 mod gate_fixup_tests {
     //! iter65 — `[gate_fixup]` section + `agent_hint_default`
     //! cross-validation against `[[gates]]`. Pinned by
@@ -10448,9 +10859,13 @@ mod gate_fixup_tests {
         GateEntry {
             gate_type: name.to_owned(),
             verifier_command: "/usr/local/bin/raxis-verify-coverage".to_owned(),
+            verifier_sha256: None,
             max_wall_seconds: 60,
             max_memory_bytes: 256 * 1024 * 1024,
             network_allowed: false,
+            claim_type: None,
+            satisfies: Vec::new(),
+            selectors: GateSelectors::default(),
             hints: BTreeMap::new(),
             agent_hint_default: default_hint.map(str::to_owned),
         }

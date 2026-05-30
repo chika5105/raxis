@@ -7,13 +7,16 @@ Feature flag rollout (scenario 16)
 [workspace]
 name = "Feature Flag Rollout"
 lane_id     = "ff-flip-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "flip"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["config/"]
-description = """
+description        = "Flip"
+prompt             = """
   Edit config/flags.json: set `new_pricing` to true. Commit only the
   flag file; do not modify src.
 """

@@ -7,6 +7,8 @@ Generate openapi from handlers (scenario 20)
 [workspace]
 name = "Generate Openapi From Handlers"
 lane_id     = "openapi-gen-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "generate"

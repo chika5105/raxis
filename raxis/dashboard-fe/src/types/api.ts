@@ -435,7 +435,13 @@ export interface WitnessView {
   verifier_run_id: string;
   task_id: string;
   gate_type: string;
-  /// One of `"Pass" | "Fail" | "Inconclusive"`. Colour-coded
+  gate_source: string;
+  gate_hook: string;
+  verifier_image_alias?: string | null;
+  verifier_command?: string | null;
+  verifier_on_failure?: string | null;
+  /// One of `"Pending" | "Pass" | "Fail" | "Inconclusive"` or a
+  /// verifier-run terminal status such as `"SpawnFailed"`. Colour-coded
   /// by the FE.
   result_class: string;
   evaluation_sha: string;
@@ -625,7 +631,10 @@ export interface DagNode {
 export interface DagGateVerdictChip {
   /// Gate this verdict applies to (e.g. `tests`).
   gate_type: string;
-  /// One of `"Pending" | "Pass" | "Fail" | "Inconclusive"`.
+  gate_source?: string;
+  gate_hook?: string;
+  /// One of `"Pending" | "Pass" | "Fail" | "Inconclusive"` or a
+  /// verifier-run terminal status such as `"Timeout"`.
   latest_verdict: string;
   /// Unix-seconds wall-clock of the verdict.
   recorded_at: number;

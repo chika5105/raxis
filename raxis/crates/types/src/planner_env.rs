@@ -54,7 +54,7 @@ pub const PLANNER_TASK_PROMPT_PATH_ENV: &str = "RAXIS_PLANNER_TASK_PROMPT_PATH";
 /// JSON-encoded custom-tool bundle for this Executor session.
 /// The kernel stamps this only after plan admission has validated
 /// `[[profiles.<name>.custom_tool]]`, resolved the task's
-/// `profile = "..."`, merged inherited tools, and confirmed the
+/// `profiles = [...]`, merged inherited tools, and confirmed the
 /// task is an Executor. Reviewer and Orchestrator sessions must not
 /// receive this var.
 pub const PLANNER_CUSTOM_TOOLS_ENV: &str = "RAXIS_PLANNER_CUSTOM_TOOLS";

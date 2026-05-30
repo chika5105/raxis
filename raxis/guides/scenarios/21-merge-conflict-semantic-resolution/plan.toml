@@ -7,6 +7,8 @@ Merge conflict semantic resolution (scenario 21)
 [workspace]
 name = "Merge Conflict Semantic Resolution"
 lane_id     = "semantic-merge-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "harden-add"

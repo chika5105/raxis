@@ -16,6 +16,8 @@ export interface DagGraphNode {
   node_kind?: "task" | "gate";
   parent_task_id?: string;
   gate_type?: string;
+  gate_source?: string;
+  gate_hook?: string;
   latest_verdict?: string;
   /// Backend signals an active subtask activation for this task.
   /// The graph treats `is_active` as Running for tone, chip label
@@ -27,6 +29,8 @@ export interface DagGraphNode {
   /// part of the graph, not hidden in a tiny decoration.
   gate_verdict_summary?: Array<{
     gate_type: string;
+    gate_source?: string;
+    gate_hook?: string;
     latest_verdict: string;
     recorded_at: number;
   }>;
@@ -385,7 +389,9 @@ export function DagGraph({
                   ? `task: ${n.parent_task_id}`
                   : `${n.agent_type ?? "Task"}: ${n.task_id}`}
                 {"\n"}
-                {isGate ? `verdict: ${n.latest_verdict ?? "Pending"}` : `state: ${eff}`}
+                {isGate
+                  ? `source: ${gateSourceLabel(n.gate_source)}\nhook: ${hookLabel(n.gate_hook)}\nverdict: ${n.latest_verdict ?? "Pending"}`
+                  : `state: ${eff}`}
                 {!isGate && reviewLine(n) ? `\nreview: ${reviewLine(n)}` : ""}
                 {n.is_active && n.state !== eff
                   ? `\n(FSM row: ${n.state} · executor active)`
@@ -439,7 +445,12 @@ export function DagGraph({
                 fontWeight={500}
                 fontFamily="Inter, system-ui, sans-serif"
               >
-                {truncate(isGate ? `Gate: ${n.gate_type ?? n.title}` : n.title, TITLE_MAX_CHARS)}
+                {truncate(
+                  isGate
+                    ? `${gateSourceLabel(n.gate_source)}: ${n.gate_type ?? n.title}`
+                    : n.title,
+                  TITLE_MAX_CHARS,
+                )}
               </text>
               <text
                 x={10}
@@ -545,6 +556,8 @@ function expandGateNodes(
         node_kind: "gate",
         parent_task_id: n.task_id,
         gate_type: chip.gate_type,
+        gate_source: chip.gate_source,
+        gate_hook: chip.gate_hook,
         latest_verdict: chip.latest_verdict,
       });
       outEdges.push({ from: n.task_id, to: gateId, kind: "gate" });
@@ -558,11 +571,47 @@ function gateState(verdict: string): string {
     case "Pass":
       return "Completed";
     case "Fail":
+    case "SpawnFailed":
+    case "ProcessFailed":
+    case "Timeout":
+    case "ConfigInvalid":
+    case "BudgetExhausted":
+    case "CapExceeded":
       return "Failed";
     case "Pending":
     case "Inconclusive":
       return "GatesPending";
     default:
       return "GatesPending";
+  }
+}
+
+function gateSourceLabel(source: string | undefined): string {
+  switch (source) {
+    case "task_verifier":
+      return "Task gate";
+    case "plan_integration_verifier":
+      return "Plan integration gate";
+    case "policy_integration_verifier":
+      return "Policy integration gate";
+    case "integration_verifier":
+      return "Integration gate";
+    case "policy_gate":
+      return "Policy gate";
+    default:
+      return "Gate";
+  }
+}
+
+function hookLabel(hook: string | undefined): string {
+  switch (hook) {
+    case "complete_task":
+      return "CompleteTask";
+    case "integration_merge":
+      return "IntegrationMerge";
+    case "intent":
+      return "Intent";
+    default:
+      return hook ?? "unknown";
   }
 }

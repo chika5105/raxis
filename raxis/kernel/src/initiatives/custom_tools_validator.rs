@@ -73,6 +73,17 @@ pub const RESERVED_TOOL_NAMES: &[&str] = &[
 /// one. Per `custom-tools.md §3.2`'s default for
 /// `max_custom_tool_timeout_seconds`.
 pub const DEFAULT_MAX_CUSTOM_TOOL_TIMEOUT_SECONDS: u32 = 300;
+pub const MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK: usize = 25;
+const DEFAULT_STDIN_MAX_BYTES: u64 = 262_144;
+const DEFAULT_STDOUT_MAX_BYTES: u64 = 65_536;
+const DEFAULT_STDERR_MAX_BYTES: u64 = 16_384;
+const HARD_MAX_STDIN_BYTES: u64 = 1_048_576;
+const HARD_MAX_STDOUT_BYTES: u64 = 1_048_576;
+const HARD_MAX_STDERR_BYTES: u64 = 262_144;
+const LOCALITY_GUEST_SUBPROCESS: &str = "guest_subprocess";
+const LOCALITY_HOST_SUBPROCESS: &str = "host_subprocess";
+const LOCALITY_HOST_MCP: &str = "host_mcp";
+const LOCALITY_REMOTE_MCP: &str = "remote_mcp";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -134,6 +145,16 @@ pub enum CustomToolValidationError {
         /// Free-form reason.
         reason: String,
     },
+    /// `execution_locality` is not one of the supported locality labels.
+    #[error("FAIL_CUSTOM_TOOL_LOCALITY_INVALID: profile={profile}, name={name:?}, locality={locality:?}")]
+    LocalityInvalid {
+        /// Profile the offending entry sits on.
+        profile: String,
+        /// Offending tool name.
+        name: String,
+        /// Operator-supplied locality.
+        locality: String,
+    },
     /// `timeout_seconds` exceeds the policy hard cap.
     #[error("FAIL_CUSTOM_TOOL_TIMEOUT_EXCEEDED: profile={profile}, name={name:?}, got={got}s, cap={cap}s")]
     TimeoutExceeded {
@@ -145,6 +166,16 @@ pub enum CustomToolValidationError {
         got: u32,
         /// Policy hard cap.
         cap: u32,
+    },
+    /// Effective profile or task-level merged bundle exceeds the V2 count cap.
+    #[error("FAIL_CUSTOM_TOOL_COUNT_EXCEEDED: scope={scope}, count={count}, limit={limit}")]
+    CountExceeded {
+        /// Profile or task id being validated.
+        scope: String,
+        /// Effective tool count.
+        count: usize,
+        /// Hard limit.
+        limit: usize,
     },
     /// `[plan.tasks.<id>.custom_tool]` is declared (custom tools
     /// must live at the profile level only).
@@ -240,6 +271,13 @@ pub fn validate_plan_custom_tools(
     for (profile_name, profile) in &profiles {
         total = total.saturating_add(profile.tools.len() as u32);
         let resolved = resolve_profile(&profiles, profile_name)?;
+        if resolved.tools.len() > MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK {
+            return Err(CustomToolValidationError::CountExceeded {
+                scope: profile_name.clone(),
+                count: resolved.tools.len(),
+                limit: MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK,
+            });
+        }
         if resolved.role == ProfileRole::Orchestrator {
             return Err(CustomToolValidationError::OrchestratorProfileNotAllowed {
                 profile: profile_name.clone(),
@@ -256,8 +294,9 @@ pub fn validate_plan_custom_tools(
 }
 
 /// Resolve the kernel-stamped custom-tool JSON bundle for one task.
-/// `None` means the task has no `profile = "..."` or the profile has
-/// no effective tools. Errors mirror admission validation failures.
+/// `None` means the task has no `profiles = [...]` or the referenced
+/// profiles have no effective tools. Errors mirror admission
+/// validation failures.
 pub fn custom_tool_bundle_json_for_task(
     plan_toml: &str,
     task_id: &str,
@@ -267,38 +306,61 @@ pub fn custom_tool_bundle_json_for_task(
         toml::from_str(plan_toml).map_err(|e| CustomToolValidationError::SchemaInvalid {
             reason: format!("plan TOML parse error: {e}"),
         })?;
-    let profile_name = task_profile_name(&doc, task_id)?;
-    let Some(profile_name) = profile_name else {
+    let profile_names = task_profile_names(&doc, task_id)?;
+    if profile_names.is_empty() {
         return Ok(None);
-    };
+    }
     let profiles = parse_profiles(&doc, DEFAULT_MAX_CUSTOM_TOOL_TIMEOUT_SECONDS)?;
-    let resolved = resolve_profile(&profiles, &profile_name).map_err(|e| match e {
-        CustomToolValidationError::SchemaInvalid { .. } => {
-            CustomToolValidationError::ProfileUnknown {
-                task_id: task_id.to_owned(),
-                profile: profile_name.clone(),
+    let mut merged_tools = Vec::new();
+    let mut seen_tools: HashMap<String, ValidatedTool> = HashMap::new();
+    for profile_name in profile_names {
+        let resolved = resolve_profile(&profiles, &profile_name).map_err(|e| match e {
+            CustomToolValidationError::SchemaInvalid { .. } => {
+                CustomToolValidationError::ProfileUnknown {
+                    task_id: task_id.to_owned(),
+                    profile: profile_name.clone(),
+                }
             }
+            other => other,
+        })?;
+        if resolved.role == ProfileRole::Reviewer && !resolved.tools.is_empty() {
+            return Err(CustomToolValidationError::ReviewerCustomToolNotAllowed {
+                profile: profile_name,
+            });
         }
-        other => other,
-    })?;
-    if resolved.role == ProfileRole::Reviewer && !resolved.tools.is_empty() {
-        return Err(CustomToolValidationError::ReviewerCustomToolNotAllowed {
-            profile: profile_name,
+        if resolved.role.as_str() != task_role {
+            return Err(CustomToolValidationError::ProfileAgentMismatch {
+                task_id: task_id.to_owned(),
+                profile: profile_name,
+                profile_role: resolved.role.as_str(),
+                task_role,
+            });
+        }
+        for tool in resolved.tools {
+            if let Some(previous) = seen_tools.get(&tool.name) {
+                if tool_defs_equivalent(previous, &tool) {
+                    continue;
+                }
+                return Err(CustomToolValidationError::InheritedNameCollision {
+                    profile: tool.profile_name,
+                    name: tool.name,
+                });
+            }
+            seen_tools.insert(tool.name.clone(), tool.clone());
+            merged_tools.push(tool.json);
+        }
+    }
+    if merged_tools.len() > MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK {
+        return Err(CustomToolValidationError::CountExceeded {
+            scope: format!("task:{task_id}"),
+            count: merged_tools.len(),
+            limit: MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK,
         });
     }
-    if resolved.role.as_str() != task_role {
-        return Err(CustomToolValidationError::ProfileAgentMismatch {
-            task_id: task_id.to_owned(),
-            profile: profile_name,
-            profile_role: resolved.role.as_str(),
-            task_role,
-        });
-    }
-    if resolved.tools.is_empty() {
+    if merged_tools.is_empty() {
         return Ok(None);
     }
-    let tools: Vec<_> = resolved.tools.into_iter().map(|t| t.json).collect();
-    let json = serde_json::to_string(&json!({ "tools": tools })).map_err(|e| {
+    let json = serde_json::to_string(&json!({ "tools": merged_tools })).map_err(|e| {
         CustomToolValidationError::SchemaInvalid {
             reason: format!("custom tool bundle JSON serialize failed: {e}"),
         }
@@ -332,6 +394,7 @@ struct ProfileDef {
 #[derive(Debug, Clone)]
 struct ValidatedTool {
     name: String,
+    profile_name: String,
     json: serde_json::Value,
 }
 
@@ -386,6 +449,13 @@ fn parse_profiles(
         return Ok(out);
     };
     for (profile_name, profile_body) in profiles {
+        if !is_valid_profile_name(profile_name) {
+            return Err(CustomToolValidationError::SchemaInvalid {
+                reason: format!(
+                    "profile {profile_name:?} is invalid; use ^[A-Za-z][A-Za-z0-9_-]{{0,63}}$"
+                ),
+            });
+        }
         let Some(table) = profile_body.as_table() else {
             continue;
         };
@@ -523,6 +593,84 @@ fn validate_profile_tool(
                 ),
             })?,
     };
+    let parse_byte_cap = |field: &'static str,
+                          default: u64,
+                          hard_cap: u64|
+     -> Result<u64, CustomToolValidationError> {
+        match t.get(field) {
+            None => Ok(default),
+            Some(v) => {
+                let cap = v.as_integer().and_then(|n| u64::try_from(n).ok()).ok_or_else(|| {
+                    CustomToolValidationError::SchemaInvalid {
+                        reason: format!(
+                            "profile {profile_name:?} custom_tool {name:?} {field} must be a positive integer",
+                        ),
+                    }
+                })?;
+                if cap == 0 {
+                    return Err(CustomToolValidationError::SchemaInvalid {
+                        reason: format!(
+                            "profile {profile_name:?} custom_tool {name:?} {field} must be at least 1 byte",
+                        ),
+                    });
+                }
+                if cap > hard_cap {
+                    return Err(CustomToolValidationError::SchemaInvalid {
+                        reason: format!(
+                            "profile {profile_name:?} custom_tool {name:?} {field}={cap} exceeds hard cap {hard_cap}",
+                        ),
+                    });
+                }
+                Ok(cap)
+            }
+        }
+    };
+    let stdin_max_bytes = parse_byte_cap(
+        "stdin_max_bytes",
+        DEFAULT_STDIN_MAX_BYTES,
+        HARD_MAX_STDIN_BYTES,
+    )?;
+    let stdout_max_bytes = parse_byte_cap(
+        "stdout_max_bytes",
+        DEFAULT_STDOUT_MAX_BYTES,
+        HARD_MAX_STDOUT_BYTES,
+    )?;
+    let stderr_max_bytes = parse_byte_cap(
+        "stderr_max_bytes",
+        DEFAULT_STDERR_MAX_BYTES,
+        HARD_MAX_STDERR_BYTES,
+    )?;
+    let expose_stderr = t
+        .get("expose_stderr")
+        .map(|v| {
+            v.as_bool()
+                .ok_or_else(|| CustomToolValidationError::SchemaInvalid {
+                    reason: format!(
+                    "profile {profile_name:?} custom_tool {name:?} expose_stderr must be a boolean",
+                ),
+                })
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let execution_locality = match t.get("execution_locality") {
+        None => LOCALITY_GUEST_SUBPROCESS.to_owned(),
+        Some(toml::Value::String(s)) if is_supported_execution_locality(s) => s.clone(),
+        Some(toml::Value::String(s)) => {
+            return Err(CustomToolValidationError::LocalityInvalid {
+                profile: profile_name.to_owned(),
+                name: name.to_owned(),
+                locality: s.clone(),
+            });
+        }
+        Some(other) => {
+            return Err(CustomToolValidationError::SchemaInvalid {
+                reason: format!(
+                    "profile {profile_name:?} custom_tool {name:?} execution_locality must be a string; got {:?}",
+                    other.type_str(),
+                ),
+            });
+        }
+    };
 
     if !is_valid_custom_tool_name(name) {
         return Err(CustomToolValidationError::NameInvalid {
@@ -579,12 +727,15 @@ fn validate_profile_tool(
             });
         }
         if i == 0 && !s.starts_with('/') {
+            let path_scope = if execution_locality == LOCALITY_GUEST_SUBPROCESS {
+                "inside the VM filesystem"
+            } else {
+                "on the kernel host"
+            };
             return Err(CustomToolValidationError::CommandInvalid {
                 profile: profile_name.to_owned(),
                 name: name.to_owned(),
-                reason: format!(
-                    "command[0]={s:?} must be an absolute path inside the VM filesystem",
-                ),
+                reason: format!("command[0]={s:?} must be an absolute path {path_scope}",),
             });
         }
         command.push(s.to_owned());
@@ -604,13 +755,20 @@ fn validate_profile_tool(
         .unwrap_or_else(|| json!({ "type": "object", "additionalProperties": true }));
     let mut json_obj = BTreeMap::new();
     json_obj.insert("name".to_owned(), json!(name));
+    json_obj.insert("profile_name".to_owned(), json!(profile_name));
     json_obj.insert("description".to_owned(), json!(description));
     json_obj.insert("command".to_owned(), json!(command));
+    json_obj.insert("execution_locality".to_owned(), json!(execution_locality));
     json_obj.insert("schema".to_owned(), schema);
     json_obj.insert("timeout_seconds".to_owned(), json!(timeout_secs));
+    json_obj.insert("stdin_max_bytes".to_owned(), json!(stdin_max_bytes));
+    json_obj.insert("stdout_max_bytes".to_owned(), json!(stdout_max_bytes));
+    json_obj.insert("stderr_max_bytes".to_owned(), json!(stderr_max_bytes));
+    json_obj.insert("expose_stderr".to_owned(), json!(expose_stderr));
 
     Ok(ValidatedTool {
         name: name.to_owned(),
+        profile_name: profile_name.to_owned(),
         json: json!(json_obj),
     })
 }
@@ -660,45 +818,106 @@ fn resolve_profile_inner(
     };
     visiting.remove(profile_name);
 
-    let mut names: HashSet<String> = resolved.tools.iter().map(|t| t.name.clone()).collect();
+    let mut tools_by_name: HashMap<String, ValidatedTool> = resolved
+        .tools
+        .iter()
+        .map(|t| (t.name.clone(), t.clone()))
+        .collect();
     for tool in &profile.tools {
-        if !names.insert(tool.name.clone()) {
+        if let Some(previous) = tools_by_name.get(&tool.name) {
+            if tool_defs_equivalent(previous, tool) {
+                continue;
+            }
             return Err(CustomToolValidationError::InheritedNameCollision {
-                profile: profile_name.to_owned(),
+                profile: tool.profile_name.clone(),
                 name: tool.name.clone(),
             });
         }
+        tools_by_name.insert(tool.name.clone(), tool.clone());
         resolved.tools.push(tool.clone());
     }
     Ok(resolved)
 }
 
-fn task_profile_name(
+fn tool_defs_equivalent(a: &ValidatedTool, b: &ValidatedTool) -> bool {
+    comparable_tool_json(&a.json) == comparable_tool_json(&b.json)
+}
+
+fn comparable_tool_json(value: &serde_json::Value) -> serde_json::Value {
+    let mut value = value.clone();
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("profile_name");
+    }
+    value
+}
+
+fn task_profile_names(
     doc: &toml::Value,
     task_id: &str,
-) -> Result<Option<String>, CustomToolValidationError> {
+) -> Result<Vec<String>, CustomToolValidationError> {
     let Some(tasks) = doc.get("tasks").and_then(|v| v.as_array()) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     for task in tasks {
         let Some(table) = task.as_table() else {
             continue;
         };
         if table.get("task_id").and_then(|v| v.as_str()) == Some(task_id) {
-            return match table.get("profile") {
-                None => Ok(None),
-                Some(toml::Value::String(s)) if !s.trim().is_empty() => {
-                    Ok(Some(s.trim().to_owned()))
+            if table.contains_key("profile") {
+                return Err(CustomToolValidationError::SchemaInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) uses deprecated `profile`; use profiles = [\"...\"]"
+                    ),
+                });
+            }
+            return match table.get("profiles") {
+                None => Ok(Vec::new()),
+                Some(toml::Value::Array(values)) => {
+                    let mut out = Vec::with_capacity(values.len());
+                    let mut seen = HashSet::new();
+                    for value in values {
+                        match value {
+                            toml::Value::String(s) if !s.trim().is_empty() => {
+                                let profile = s.trim().to_owned();
+                                if !seen.insert(profile.clone()) {
+                                    return Err(CustomToolValidationError::SchemaInvalid {
+                                        reason: format!(
+                                            "[[tasks]] (task `{task_id}`) declares duplicate profile {profile:?}"
+                                        ),
+                                    });
+                                }
+                                out.push(profile);
+                            }
+                            _ => {
+                                return Err(CustomToolValidationError::SchemaInvalid {
+                                    reason: format!(
+                                        "[[tasks]] (task `{task_id}`) profiles must be an array of non-empty strings"
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    Ok(out)
                 }
                 Some(_) => Err(CustomToolValidationError::SchemaInvalid {
                     reason: format!(
-                        "[[tasks]] (task `{task_id}`) profile must be a non-empty string"
+                        "[[tasks]] (task `{task_id}`) profiles must be an array of non-empty strings"
                     ),
                 }),
             };
         }
     }
-    Ok(None)
+    Ok(Vec::new())
+}
+
+fn is_supported_execution_locality(locality: &str) -> bool {
+    matches!(
+        locality,
+        LOCALITY_GUEST_SUBPROCESS
+            | LOCALITY_HOST_SUBPROCESS
+            | LOCALITY_HOST_MCP
+            | LOCALITY_REMOTE_MCP
+    )
 }
 
 fn toml_value_to_json(value: &toml::Value) -> serde_json::Value {
@@ -718,6 +937,21 @@ pub fn is_valid_custom_tool_name(name: &str) -> bool {
     bytes[1..]
         .iter()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+}
+
+/// Profile identifiers are operator-facing labels that also become
+/// kernel-stamped audit metadata, so keep them compact and shell-neutral.
+pub fn is_valid_profile_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    if !bytes[0].is_ascii_alphabetic() {
+        return false;
+    }
+    bytes[1..]
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
 }
 
 // ---------------------------------------------------------------------------
@@ -776,12 +1010,67 @@ command     = ["/usr/local/bin/query.sh"]
     }
 
     #[test]
+    fn stamps_kernel_owned_execution_locality_into_task_bundle() {
+        let plan = r#"
+[[tasks]]
+task_id            = "unity-build"
+session_agent_type = "Executor"
+profiles          = ["unity_mobile"]
+
+[profiles.unity_mobile]
+inherits_from = "Executor"
+
+[[profiles.unity_mobile.custom_tool]]
+name               = "unity_list_scenes"
+description        = "List Unity editor scenes through a host MCP adapter"
+command            = ["/usr/local/bin/raxis-tool-mcp", "unity", "list-scenes"]
+execution_locality = "host_mcp"
+"#;
+        assert_eq!(validate_plan_custom_tools(plan, 300).unwrap(), 1);
+        let bundle = custom_tool_bundle_json_for_task(plan, "unity-build", "Executor")
+            .unwrap()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&bundle).unwrap();
+        assert_eq!(parsed["tools"][0]["profile_name"], "unity_mobile");
+        assert_eq!(parsed["tools"][0]["execution_locality"], "host_mcp");
+    }
+
+    #[test]
+    fn rejects_invalid_profile_name() {
+        let plan = r#"
+[profiles."bad space"]
+inherits_from = "Executor"
+"#;
+        let err = validate_plan_custom_tools(plan, 300).unwrap_err();
+        assert!(err.to_string().contains("profile \"bad space\" is invalid"));
+    }
+
+    #[test]
+    fn rejects_unknown_execution_locality() {
+        let plan = plan_with_tool(
+            "frontend",
+            r#"
+name               = "ok_tool"
+description        = "valid description here"
+command            = ["/usr/local/bin/dummy"]
+execution_locality = "browser_extension"
+"#,
+        );
+        match validate_plan_custom_tools(&plan, 300).unwrap_err() {
+            CustomToolValidationError::LocalityInvalid { locality, .. } => {
+                assert_eq!(locality, "browser_extension");
+            }
+            other => panic!("expected LocalityInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn resolves_inherited_executor_profile_bundle_for_task() {
         let plan = r#"
 [[tasks]]
 task_id            = "unity-build"
 session_agent_type = "Executor"
-profile            = "unity_mobile"
+profiles          = ["unity_mobile"]
 
 [profiles.unity_base]
 inherits_from = "Executor"
@@ -816,6 +1105,183 @@ type = "object"
     }
 
     #[test]
+    fn resolves_multiple_executor_profiles_for_task_in_declared_order() {
+        let plan = r#"
+[[tasks]]
+task_id            = "repo-db"
+session_agent_type = "Executor"
+profiles          = ["repo_tools", "db_tools"]
+
+[profiles.repo_tools]
+inherits_from = "Executor"
+
+[[profiles.repo_tools.custom_tool]]
+name        = "repo_search"
+description = "Search repository files through a local wrapper"
+command     = ["/usr/local/bin/raxis-tool", "repo-search"]
+
+[profiles.db_tools]
+inherits_from = "Executor"
+
+[[profiles.db_tools.custom_tool]]
+name        = "db_schema_lookup"
+description = "Look up one database schema through a local wrapper"
+command     = ["/usr/local/bin/raxis-tool", "db-schema"]
+"#;
+        assert_eq!(validate_plan_custom_tools(plan, 300).unwrap(), 2);
+        let bundle = custom_tool_bundle_json_for_task(plan, "repo-db", "Executor")
+            .unwrap()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&bundle).unwrap();
+        let tools = parsed["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["name"], "repo_search");
+        assert_eq!(tools[1]["name"], "db_schema_lookup");
+        assert_eq!(tools[0]["profile_name"], "repo_tools");
+        assert_eq!(tools[1]["profile_name"], "db_tools");
+    }
+
+    #[test]
+    fn rejects_merged_task_bundle_above_effective_tool_cap() {
+        let mut plan = String::from(
+            r#"
+[[tasks]]
+task_id            = "repo-db"
+session_agent_type = "Executor"
+profiles          = [
+"#,
+        );
+        for idx in 0..=MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK {
+            plan.push_str(&format!("  \"p{idx}\",\n"));
+        }
+        plan.push_str("]\n");
+        for idx in 0..=MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK {
+            plan.push_str(&format!(
+                r#"
+[profiles.p{idx}]
+inherits_from = "Executor"
+
+[[profiles.p{idx}.custom_tool]]
+name        = "tool_{idx}"
+description = "Lookup helper for profile {idx}"
+command     = ["/usr/local/bin/raxis-tool", "tool-{idx}"]
+"#
+            ));
+        }
+
+        match custom_tool_bundle_json_for_task(&plan, "repo-db", "Executor").unwrap_err() {
+            CustomToolValidationError::CountExceeded {
+                scope,
+                count,
+                limit,
+            } => {
+                assert_eq!(scope, "task:repo-db");
+                assert_eq!(count, MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK + 1);
+                assert_eq!(limit, MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK);
+            }
+            other => panic!("expected CountExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_tool_name_across_selected_task_profiles() {
+        let plan = r#"
+[[tasks]]
+task_id            = "repo-db"
+session_agent_type = "Executor"
+profiles          = ["repo_tools", "db_tools"]
+
+[profiles.repo_tools]
+inherits_from = "Executor"
+
+[[profiles.repo_tools.custom_tool]]
+name        = "lookup"
+description = "Search repository files through a local wrapper"
+command     = ["/usr/local/bin/raxis-tool", "repo-search"]
+
+[profiles.db_tools]
+inherits_from = "Executor"
+
+[[profiles.db_tools.custom_tool]]
+name        = "lookup"
+description = "Look up one database schema through a local wrapper"
+command     = ["/usr/local/bin/raxis-tool", "db-schema"]
+"#;
+        match custom_tool_bundle_json_for_task(plan, "repo-db", "Executor").unwrap_err() {
+            CustomToolValidationError::InheritedNameCollision { profile, name } => {
+                assert_eq!(profile, "db_tools");
+                assert_eq!(name, "lookup");
+            }
+            other => panic!("expected InheritedNameCollision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deduplicates_identical_tool_name_across_selected_task_profiles() {
+        let plan = r#"
+[[tasks]]
+task_id            = "repo-db"
+session_agent_type = "Executor"
+profiles          = ["repo_tools", "db_tools"]
+
+[profiles.repo_tools]
+inherits_from = "Executor"
+
+[[profiles.repo_tools.custom_tool]]
+name        = "lookup"
+description = "Search repository files through a local wrapper"
+command     = ["/usr/local/bin/raxis-tool", "lookup"]
+
+[profiles.db_tools]
+inherits_from = "Executor"
+
+[[profiles.db_tools.custom_tool]]
+name        = "lookup"
+description = "Search repository files through a local wrapper"
+command     = ["/usr/local/bin/raxis-tool", "lookup"]
+"#;
+        assert_eq!(validate_plan_custom_tools(plan, 300).unwrap(), 2);
+        let bundle = custom_tool_bundle_json_for_task(plan, "repo-db", "Executor")
+            .unwrap()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&bundle).unwrap();
+        let tools = parsed["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "lookup");
+        assert_eq!(tools[0]["profile_name"], "repo_tools");
+    }
+
+    #[test]
+    fn rejects_deprecated_singular_task_profile() {
+        let plan = r#"
+[[tasks]]
+task_id            = "repo-db"
+session_agent_type = "Executor"
+profile            = "repo_tools"
+
+[profiles.repo_tools]
+inherits_from = "Executor"
+"#;
+        let err = custom_tool_bundle_json_for_task(plan, "repo-db", "Executor").unwrap_err();
+        assert!(err.to_string().contains("deprecated `profile`"));
+    }
+
+    #[test]
+    fn rejects_duplicate_task_profile_selection() {
+        let plan = r#"
+[[tasks]]
+task_id            = "repo-db"
+session_agent_type = "Executor"
+profiles          = ["repo_tools", "repo_tools"]
+
+[profiles.repo_tools]
+inherits_from = "Executor"
+"#;
+        let err = custom_tool_bundle_json_for_task(plan, "repo-db", "Executor").unwrap_err();
+        assert!(err.to_string().contains("duplicate profile"));
+    }
+
+    #[test]
     fn reviewer_effective_profile_rejects_custom_tools() {
         let plan = r#"
 [profiles.review_local]
@@ -840,7 +1306,7 @@ command     = ["/usr/local/bin/raxis-tool-mcp", "unity", "inspect"]
 [[tasks]]
 task_id            = "review-unity"
 session_agent_type = "Reviewer"
-profile            = "unity_mobile"
+profiles          = ["unity_mobile"]
 
 [profiles.unity_mobile]
 inherits_from = "Executor"
@@ -971,6 +1437,26 @@ timeout_seconds = 999
                 assert_eq!(cap, 300);
             }
             other => panic!("expected TimeoutExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_io_cap_above_hard_limit() {
+        let plan = plan_with_tool(
+            "frontend",
+            r#"
+name             = "large_output"
+description      = "valid description here"
+command          = ["/usr/local/bin/dummy"]
+stdout_max_bytes = 1048577
+"#,
+        );
+        match validate_plan_custom_tools(&plan, 300).unwrap_err() {
+            CustomToolValidationError::SchemaInvalid { reason } => {
+                assert!(reason.contains("stdout_max_bytes"));
+                assert!(reason.contains("exceeds hard cap"));
+            }
+            other => panic!("expected SchemaInvalid(cap), got {other:?}"),
         }
     }
 

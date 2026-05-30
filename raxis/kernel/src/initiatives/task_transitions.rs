@@ -198,7 +198,8 @@ pub fn transition_task_with_audit(
 /// also live inside the same transaction so they all commit or none do.
 ///
 /// The `block_reason` string is stored in `tasks.block_reason` when
-/// transitioning to `GatesPending`, `Failed`, or `BlockedRecoveryPending`.
+/// transitioning to `GatesPending`, `Failed`, `BlockedRecoveryPending`,
+/// `Aborted`, or `Cancelled`. Runnable/success states clear it.
 pub fn transition_task_in_tx(
     conn: &rusqlite::Connection,
     task_id: &str,
@@ -277,8 +278,9 @@ pub fn transition_task_in_tx(
 
     // All transitions use the same DDL-canonical columns:
     //   state, transitioned_at, actor — always written.
-    //   block_reason — written for GatesPending / Failed / BlockedRecoveryPending,
-    //                  cleared (NULL) for Running / Admitted / Completed / terminal.
+    //   block_reason — written for GatesPending / Failed /
+    //                  BlockedRecoveryPending / Aborted / Cancelled,
+    //                  cleared (NULL) for Running / Admitted / Completed.
     match &new_state {
         TaskState::Running | TaskState::Admitted | TaskState::Completed => {
             conn.execute(
@@ -301,10 +303,10 @@ pub fn transition_task_in_tx(
         TaskState::Aborted | TaskState::Cancelled => {
             conn.execute(
                 &format!(
-                    "UPDATE {TASKS} SET state=?1, transitioned_at=?2, actor=?3
-                     WHERE task_id=?4"
+                    "UPDATE {TASKS} SET state=?1, transitioned_at=?2, block_reason=?3, actor=?4
+                     WHERE task_id=?5"
                 ),
-                rusqlite::params![new_state_str, now, &actor_desc, task_id],
+                rusqlite::params![new_state_str, now, block_reason, &actor_desc, task_id],
             )?;
         }
     }
@@ -691,7 +693,7 @@ mod tests {
         transition_task(
             "t-abort",
             TaskState::Aborted,
-            None,
+            Some(raxis_types::BlockReason::OperatorAbort.as_sql_str()),
             TransitionActor::Operator {
                 fingerprint: "op-fp".to_owned(),
             },
@@ -705,6 +707,20 @@ mod tests {
             "activation FSM has no Aborted variant; collapse to Failed"
         );
         assert!(terminated_at.is_some());
+
+        let block_reason: Option<String> = store
+            .lock_sync()
+            .query_row(
+                &format!("SELECT block_reason FROM {TASKS} WHERE task_id='t-abort'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            block_reason.as_deref(),
+            Some(raxis_types::BlockReason::OperatorAbort.as_sql_str()),
+            "operator abort must persist an operator-actionable block_reason",
+        );
     }
 
     /// Idempotency: a second terminal transition on the same task is a

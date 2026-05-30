@@ -98,6 +98,12 @@ pub struct VerifierAuditContext {
     /// Operator-supplied disposition for the verifier's witness
     /// (`fail_initiative`, `warn_only`, `retry_task`).
     pub on_failure: String,
+    /// Durable source classification (`policy_gate`, `task_verifier`,
+    /// `integration_verifier`, ...).
+    pub gate_source: String,
+    /// Lifecycle hook that caused the run (`complete_task`,
+    /// `integration_merge`, ...).
+    pub gate_hook: String,
 }
 
 /// Emit `VerifierVmSpawned`. Call-site: `spawn_verifier` after the
@@ -111,6 +117,8 @@ pub fn emit_vm_spawned(sink: &dyn AuditSink, ctx: &VerifierAuditContext) {
         oci_digest: ctx.oci_digest.clone(),
         command: ctx.command.clone(),
         on_failure: ctx.on_failure.clone(),
+        gate_source: ctx.gate_source.clone(),
+        gate_hook: ctx.gate_hook.clone(),
     };
     record(sink, kind, Some(&ctx.task_id), Some(&ctx.initiative_id));
 }
@@ -294,6 +302,8 @@ mod tests {
             oci_digest: "deadbeef".to_owned(),
             command: "<builtin>".to_owned(),
             on_failure: "warn_only".to_owned(),
+            gate_source: "task_verifier".to_owned(),
+            gate_hook: "complete_task".to_owned(),
         }
     }
 

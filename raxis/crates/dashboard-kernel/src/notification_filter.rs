@@ -741,6 +741,11 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // surfaces them on the per-task timeline + the worktree
         // detail page directly; the notification inbox stays clean.
         K::WorktreeSnapshotted { .. } => None,
+        // Custom tool invocations are high-volume forensic events.
+        // The audit chain and task timeline need them; the operator
+        // inbox should only page for the downstream task/gate failure
+        // that makes a tool failure actionable.
+        K::CustomToolInvoked { .. } => None,
     }
 }
 

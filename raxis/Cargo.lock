@@ -3169,6 +3169,7 @@ dependencies = [
  "raxis-runtime",
  "raxis-store",
  "raxis-test-support",
+ "raxis-tool-authoring",
  "raxis-types",
  "reqwest",
  "rusqlite",
@@ -4071,6 +4072,16 @@ dependencies = [
  "tokio",
  "toml",
  "uuid",
+]
+
+[[package]]
+name = "raxis-tool-authoring"
+version = "0.2.3"
+dependencies = [
+ "serde_json",
+ "thiserror 1.0.69",
+ "toml",
+ "toml_edit",
 ]
 
 [[package]]

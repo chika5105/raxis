@@ -1215,8 +1215,8 @@ impl DashboardData for KernelDashboardData {
         use std::collections::{BTreeMap, HashMap};
         let conn = self.open_ro()?;
         let sql = format!(
-            "SELECT v.task_id, v.gate_type, \
-                    COALESCE(w.result_class, 'Pending') AS latest_verdict, \
+            "SELECT v.task_id, v.gate_type, v.gate_source, v.gate_hook, \
+                    COALESCE(w.result_class, v.status, 'Pending') AS latest_verdict, \
                     COALESCE(w.recorded_at, v.issued_at) AS observed_at \
              FROM {TBL_VERIFIER_RUN_TOKENS} v \
              JOIN {TBL_TASKS} t ON t.task_id = v.task_id \
@@ -1234,8 +1234,10 @@ impl DashboardData for KernelDashboardData {
                     row.get::<_, String>(0)?,
                     raxis_dashboard::data::DagGateVerdictChip {
                         gate_type: row.get(1)?,
-                        latest_verdict: row.get(2)?,
-                        recorded_at: row.get::<_, i64>(3)?.max(0),
+                        gate_source: row.get(2)?,
+                        gate_hook: row.get(3)?,
+                        latest_verdict: row.get(4)?,
+                        recorded_at: row.get::<_, i64>(5)?.max(0),
                     },
                 ))
             })
@@ -1265,18 +1267,29 @@ impl DashboardData for KernelDashboardData {
 
     /// iter68 PR 5 — `GET /api/witnesses?limit=N`.
     ///
-    /// Newest-first cross-task witness timeline. One ORDER BY +
-    /// LIMIT scan; no joins. Capped at 500 by the route handler.
+    /// Newest-first cross-task verifier timeline. Starts from
+    /// `verifier_run_tokens` so pending verifier runs are visible before a
+    /// witness callback lands; final witness rows replace `Pending` when
+    /// present. Capped at 500 by the route handler.
     fn list_recent_witnesses(
         &self,
         limit: u32,
     ) -> Result<Vec<raxis_dashboard::data::WitnessView>, ApiError> {
         let conn = self.open_ro()?;
         let sql = format!(
-            "SELECT verifier_run_id, task_id, gate_type, result_class, \
-                    evaluation_sha, blob_sha256, recorded_at \
-             FROM {TBL_WITNESS_RECORDS} \
-             ORDER BY recorded_at DESC, verifier_run_id DESC \
+            "SELECT v.verifier_run_id, v.task_id, v.gate_type, \
+                    COALESCE(v.gate_source, 'policy_gate'), \
+                    COALESCE(v.gate_hook, 'intent'), \
+                    v.verifier_image_alias, v.verifier_command, \
+                    v.verifier_on_failure, \
+                    COALESCE(w.result_class, v.status, 'Pending'), \
+                    COALESCE(w.evaluation_sha, v.evaluation_sha), \
+                    COALESCE(w.blob_sha256, ''), \
+                    COALESCE(w.recorded_at, v.issued_at) \
+             FROM {TBL_VERIFIER_RUN_TOKENS} v \
+             LEFT JOIN {TBL_WITNESS_RECORDS} w \
+                    ON w.verifier_run_id = v.verifier_run_id \
+             ORDER BY COALESCE(w.recorded_at, v.issued_at) DESC, v.verifier_run_id DESC \
              LIMIT ?1"
         );
         let mut stmt = conn.prepare(&sql).map_err(|e| ApiError::Internal {
@@ -1288,10 +1301,15 @@ impl DashboardData for KernelDashboardData {
                     verifier_run_id: r.get(0)?,
                     task_id: r.get(1)?,
                     gate_type: r.get(2)?,
-                    result_class: r.get(3)?,
-                    evaluation_sha: r.get(4)?,
-                    blob_sha256: r.get(5)?,
-                    recorded_at: r.get::<_, i64>(6)?.max(0),
+                    gate_source: r.get(3)?,
+                    gate_hook: r.get(4)?,
+                    verifier_image_alias: r.get(5)?,
+                    verifier_command: r.get(6)?,
+                    verifier_on_failure: r.get(7)?,
+                    result_class: r.get(8)?,
+                    evaluation_sha: r.get(9)?,
+                    blob_sha256: r.get(10)?,
+                    recorded_at: r.get::<_, i64>(11)?.max(0),
                 })
             })
             .map_err(|e| ApiError::Internal {
@@ -1306,33 +1324,58 @@ impl DashboardData for KernelDashboardData {
 
     /// iter68 — `GET /api/tasks/:task_id/witnesses`.
     ///
-    /// Read-side wrapper around
-    /// `raxis_store::views::witnesses::for_task`. The store
-    /// projection is already shaped correctly; we only need to
-    /// convert the `WitnessRow` → `WitnessView` and forward
-    /// SQL errors as `ApiError::Internal`.
+    /// Per-task verifier timeline. Starts from run tokens so
+    /// operator-visible `Pending` rows appear as soon as the kernel spawns
+    /// a verifier, not only after the witness callback lands.
     fn list_witnesses_for_task(
         &self,
         task_id: &str,
     ) -> Result<Vec<raxis_dashboard::data::WitnessView>, ApiError> {
         let conn = self.open_ro()?;
-        let rows = raxis_store::views::witnesses::for_task(&conn, task_id).map_err(|e| {
-            ApiError::Internal {
-                log_only: format!("witnesses for_task: {e}"),
-            }
+        let sql = format!(
+            "SELECT v.verifier_run_id, v.task_id, v.gate_type, \
+                    COALESCE(v.gate_source, 'policy_gate'), \
+                    COALESCE(v.gate_hook, 'intent'), \
+                    v.verifier_image_alias, v.verifier_command, \
+                    v.verifier_on_failure, \
+                    COALESCE(w.result_class, 'Pending'), \
+                    COALESCE(w.evaluation_sha, v.evaluation_sha), \
+                    COALESCE(w.blob_sha256, ''), \
+                    COALESCE(w.recorded_at, v.issued_at) \
+             FROM {TBL_VERIFIER_RUN_TOKENS} v \
+             LEFT JOIN {TBL_WITNESS_RECORDS} w \
+                    ON w.verifier_run_id = v.verifier_run_id \
+             WHERE v.task_id = ?1 \
+             ORDER BY COALESCE(w.recorded_at, v.issued_at) DESC"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| ApiError::Internal {
+            log_only: format!("witnesses for_task prepare: {e}"),
         })?;
-        Ok(rows
-            .into_iter()
-            .map(|r| raxis_dashboard::data::WitnessView {
-                verifier_run_id: r.verifier_run_id,
-                task_id: r.task_id,
-                gate_type: r.gate_type,
-                result_class: r.result_class,
-                evaluation_sha: r.evaluation_sha,
-                blob_sha256: r.blob_sha256,
-                recorded_at: r.recorded_at.min(i64::MAX as u64) as i64,
+        let rows = stmt
+            .query_map(rusqlite::params![task_id], |r| {
+                Ok(raxis_dashboard::data::WitnessView {
+                    verifier_run_id: r.get(0)?,
+                    task_id: r.get(1)?,
+                    gate_type: r.get(2)?,
+                    gate_source: r.get(3)?,
+                    gate_hook: r.get(4)?,
+                    verifier_image_alias: r.get(5)?,
+                    verifier_command: r.get(6)?,
+                    verifier_on_failure: r.get(7)?,
+                    result_class: r.get(8)?,
+                    evaluation_sha: r.get(9)?,
+                    blob_sha256: r.get(10)?,
+                    recorded_at: r.get::<_, i64>(11)?.max(0),
+                })
             })
-            .collect())
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("witnesses for_task query: {e}"),
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("witnesses for_task collect: {e}"),
+            })?;
+        Ok(rows)
     }
 
     /// iter68 — `specs/v3/worktree-snapshots.md` §5.
@@ -5592,39 +5635,51 @@ fn validate_plan_draft_with_policy(
             "Use a lane_id from the active policy, commonly \"default\".",
         )),
     }
-    if let Some(repository) = workspace.and_then(|t| string_field(t, "repository")) {
-        if !is_path_safe_id(repository) {
-            issues.push(builder_issue(
-                BuilderValidationSeverity::Error,
-                "PLAN_REPOSITORY_ID",
-                "repository must be a path-safe id.",
-                "Use the actual repository name, like acme-api, frontend, or docs; avoid slashes and spaces.",
-            ));
+    match workspace.and_then(|t| string_field(t, "repository")) {
+        Some(repository) if !repository.is_empty() && is_path_safe_id(repository) => {}
+        Some(_) => issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "PLAN_REPOSITORY_ID",
+            "repository must be a path-safe id.",
+            "Use the actual repository name, like main, acme-api, frontend, or docs; avoid slashes and spaces.",
+        )),
+        None => issues.push(builder_issue(
+            BuilderValidationSeverity::Error,
+            "PLAN_REPOSITORY_REQUIRED",
+            "[workspace].repository is required.",
+            "Set the managed repository id explicitly, commonly \"main\".",
+        )),
+    }
+    match workspace.and_then(|t| string_field(t, "target_ref")) {
+        Some(target_ref) if !target_ref.is_empty() => {
+            if let Err(reason) = raxis_policy::validate_target_ref_format(target_ref) {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_TARGET_REF",
+                    format!("target_ref {target_ref:?} is invalid."),
+                    format!("Use a branch ref such as refs/heads/main. Details: {reason}"),
+                ));
+            } else {
+                resolved_target_ref = Some(target_ref.to_owned());
+            }
+            if policy.git_target_ref_locked() && target_ref != policy.git_default_target_ref() {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_TARGET_REF_LOCKED",
+                    "The active policy locks target_ref overrides.",
+                    format!(
+                        "Use {} or advance policy with [git].target_ref_locked = false.",
+                        policy.git_default_target_ref()
+                    ),
+                ));
+            }
         }
-    }
-    let target_ref = workspace
-        .and_then(|t| string_field(t, "target_ref"))
-        .unwrap_or_else(|| policy.git_default_target_ref());
-    if let Err(reason) = raxis_policy::validate_target_ref_format(target_ref) {
-        issues.push(builder_issue(
+        _ => issues.push(builder_issue(
             BuilderValidationSeverity::Error,
-            "PLAN_TARGET_REF",
-            format!("target_ref {target_ref:?} is invalid."),
-            format!("Use a branch ref such as refs/heads/main. Details: {reason}"),
-        ));
-    } else {
-        resolved_target_ref = Some(target_ref.to_owned());
-    }
-    if policy.git_target_ref_locked() && target_ref != policy.git_default_target_ref() {
-        issues.push(builder_issue(
-            BuilderValidationSeverity::Error,
-            "PLAN_TARGET_REF_LOCKED",
-            "The active policy locks target_ref overrides.",
-            format!(
-                "Use {} or advance policy with [git].target_ref_locked = false.",
-                policy.git_default_target_ref()
-            ),
-        ));
+            "PLAN_TARGET_REF_REQUIRED",
+            "[workspace].target_ref is required.",
+            "Set the fully-qualified branch ref explicitly, commonly refs/heads/main.",
+        )),
     }
 
     let tasks = root.get("tasks").and_then(|v| v.as_array());
@@ -5716,20 +5771,26 @@ fn validate_plan_draft_with_policy(
         }
         if string_field(task, "prompt").is_none_or(str::is_empty) {
             issues.push(builder_issue(
-                BuilderValidationSeverity::Warning,
+                BuilderValidationSeverity::Error,
                 "PLAN_TASK_PROMPT",
                 format!("task {id:?} has no prompt."),
                 "Add prompt for the executor/reviewer instruction; description should stay brief.",
             ));
         }
-        let clone_strategy = string_field(task, "clone_strategy").unwrap_or_default();
-        if !matches!(clone_strategy, "blobless" | "full" | "sparse") {
-            issues.push(builder_issue(
+        match string_field(task, "clone_strategy") {
+            Some(clone_strategy) if matches!(clone_strategy, "blobless" | "full" | "sparse") => {}
+            Some(_) => issues.push(builder_issue(
                 BuilderValidationSeverity::Error,
                 "PLAN_CLONE_STRATEGY",
                 format!("task {id:?} has an invalid clone_strategy."),
                 "Use blobless, sparse, or full.",
-            ));
+            )),
+            None => issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_CLONE_STRATEGY",
+                format!("task {id:?} is missing clone_strategy."),
+                "Set clone_strategy explicitly: blobless, sparse, or full.",
+            )),
         }
         let paths = string_array_field(task, "path_allowlist", &id, &mut issues);
         let allowed_egress = string_array_field(task, "allowed_egress", &id, &mut issues);
@@ -6277,7 +6338,7 @@ fn policy_next_steps() -> Vec<String> {
 fn tool_next_steps() -> Vec<String> {
     vec![
         "Paste this [profiles.<name>] block into plan.toml.".to_owned(),
-        "Set profile = \"<name>\" on each Executor task that should receive these tools."
+        "Set profiles = [\"<name>\"] on each Executor task that should receive these tools."
             .to_owned(),
         "raxis plan validate plan.toml".to_owned(),
         "raxis submit plan plan.toml --no-dry-run".to_owned(),

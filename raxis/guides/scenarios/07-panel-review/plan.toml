@@ -10,6 +10,8 @@ The implementer Executor adds a tiny URL-parsing function. Three
 [workspace]
 name = "Panel Review"
 lane_id     = "panel-review-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "implementer"

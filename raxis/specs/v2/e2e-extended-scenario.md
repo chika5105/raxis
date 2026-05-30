@@ -554,8 +554,10 @@ Plan defines **two** Reviewer tasks for `materialize-records`:
 [[tasks]]
 task_id            = "review-materialize-A"
 session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
 predecessors       = ["materialize-records"]
-description = """
+description        = "Forced disagreement reviewer A"
+prompt             = """
 Reject the diff. Submit `SubmitReview { approved: false,
 critique: "test forces a disagreement round" }`.
 """
@@ -563,8 +565,10 @@ critique: "test forces a disagreement round" }`.
 [[tasks]]
 task_id            = "review-materialize-B"
 session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
 predecessors       = ["materialize-records"]
-description = """
+description        = "Forced disagreement reviewer B"
+prompt             = """
 Approve only after Reviewer A has rejected and the executor has
 re-submitted. Submit `SubmitReview { approved: true, ... }`.
 """

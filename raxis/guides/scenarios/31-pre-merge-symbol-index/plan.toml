@@ -7,6 +7,8 @@ Pre merge symbol index (scenario 31)
 [workspace]
 name = "Pre Merge Symbol Index"
 lane_id     = "premerge-index-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "edit"
@@ -17,8 +19,10 @@ description = "symbol-index"
 prompt             = """
 Add `pub fn nop() {}` to src/lib.rs.
 """
-[[plan.verifiers.pre_merge]]
-name             = "symbol-index"
-on_failure       = "block"
-command          = ["bash", "-c", "find src -name '*.rs' | head -1"]
-attach_artifacts = ["symbol-index.json"]
+[[plan.integration_merge_verifiers]]
+name       = "symbol_index"
+image      = "raxis-verifier-symbol-index"
+command    = "find src -name '*.rs' | head -1"
+timeout    = "30s"
+on_failure = "block_merge"
+artifact   = "/raxis/symbol-index.json"

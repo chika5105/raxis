@@ -47,7 +47,8 @@
 //! | `RAXIS_PLANNER_KSB`            | no (test-only fallback) | absent ⇒ NNSP-only system prompt     | JSON-encoded [`raxis_ksb::KsbSnapshot`] §2.4 |
 //! | `RAXIS_KERNEL_PLANNER_SOCKET`  | yes (live mode only)    | —                                    | UDS path to `<data_dir>/sockets/planner.sock` |
 //! | `RAXIS_PLANNER_BASE_URL`       | no                      | `https://api.anthropic.com`          | Model API base URL — tests override         |
-//! | `RAXIS_MODEL_ID`               | no                      | [`crate::DEFAULT_MODEL`]             | Model id stamped into every request         |
+//! | `RAXIS_MODEL_ID`               | no                      | [`crate::DEFAULT_MODEL`]             | Single model id stamped into every request  |
+//! | `RAXIS_MODEL_CHAIN`            | no                      | unset                                | Comma-separated primary + fallback models   |
 //! | `RAXIS_WORKSPACE_PATH`         | no                      | `/workspace`                         | Tool sandbox root                           |
 //! | `RAXIS_PLANNER_MAX_TURNS`      | no                      | `50`                                 | Hard turn ceiling per session               |
 //! | `RAXIS_PLANNER_MAX_TOKENS`     | no                      | `4096`                               | Per-request `max_tokens`                    |
@@ -76,21 +77,20 @@ use thiserror::Error;
 use raxis_types::{IntentOutcome, IntentResponse, PlannerErrorCode, TaskId, TaskState};
 
 use crate::bedrock_client::BedrockClient;
-use crate::custom_tools::{
-    load_custom_tools, read_custom_tool_decls_from_env_fn, CustomToolDecl, CustomToolError,
-};
+use crate::custom_tools::{read_custom_tool_decls_from_env_fn, CustomToolDecl, CustomToolError};
 use crate::dispatch::{DispatchConfig, DispatchError, DispatchLoop, DispatchOutcome};
 use crate::gemini_client::GeminiClient;
 use crate::intent::{
     executor_terminal_tool_to_intent_kind, orchestrator_terminal_tool_to_intent_kind,
     reviewer_terminal_tool_to_intent_kind, IntentSubmitter, SubmitError,
 };
-use crate::model::{AnthropicClient, ModelClient};
+use crate::model::{AnthropicClient, MessageRequest, MessageResponse, ModelClient, ModelError};
 use crate::openai_client::OpenAiClient;
 use crate::provider_model::{
-    resolve_model_from_env_fn, KnownModel, ProviderId, ProviderModelError,
+    resolve_model_chain_from_env_fn, KnownModel, ProviderId, ProviderModelError, MODEL_CHAIN_ENV,
+    MODEL_ID_ENV,
 };
-use crate::retry::{RetryConfig, RetryingModelClient};
+use crate::retry::{FallbackModelClient, RetryConfig, RetryingModelClient};
 use crate::sidecar_client::{SidecarConstructError, SidecarModelClient};
 use crate::tools::{
     build_executor_registry, build_executor_registry_full, build_orchestrator_registry,
@@ -191,7 +191,8 @@ const PLANNER_RUNTIME_ENV_KEYS: &[&str] = &[
     "RAXIS_KERNEL_VSOCK_CID",
     "RAXIS_KERNEL_VSOCK_LISTEN_PORT",
     "RAXIS_KERNEL_VSOCK_PORT",
-    "RAXIS_MODEL_ID",
+    MODEL_ID_ENV,
+    MODEL_CHAIN_ENV,
     "RAXIS_PLANNER_BASE_URL",
     "RAXIS_PLANNER_KSB",
     "RAXIS_PLANNER_KSB_PATH",
@@ -506,29 +507,16 @@ where
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_WORKSPACE_PATH));
 
-    // Resolve model id + provider via the registry. The `provider`
-    // field drives the multi-provider router below; the `name` field
-    // is what gets stamped into every `MessageRequest::model`.
-    let known_model = resolve_model_from_env_fn(&f)?;
-    let model_id = known_model.name.to_owned();
-    let provider = known_model.provider;
-
-    // Base URL precedence: explicit operator override
-    // (`RAXIS_PLANNER_BASE_URL`) wins for every provider. Otherwise
-    // each provider has a canonical default
-    // ([`ProviderId::default_base_url`]); the sidecar variant
-    // returns "" because there is no well-known sidecar URL —
-    // operators MUST stamp `RAXIS_PLANNER_SIDECAR_ENDPOINT` (the
-    // construction path below validates that).
-    let base_url = match var("RAXIS_PLANNER_BASE_URL") {
-        Some(u) => u,
-        None => provider.default_base_url().to_owned(),
-    };
-    if provider != ProviderId::Sidecar
-        && !(base_url.starts_with("http://") || base_url.starts_with("https://"))
-    {
-        return Err(DriverError::BadBaseUrl { got: base_url });
-    }
+    // Resolve model id(s) + provider(s) via the registry. A
+    // single-model deployment uses `RAXIS_MODEL_ID` (or the compiled
+    // default); multi-provider deployments stamp `RAXIS_MODEL_CHAIN`
+    // with primary first and fallback models after it.
+    let known_models = resolve_model_chain_from_env_fn(&f)?;
+    let model_id = known_models
+        .first()
+        .expect("resolver always returns a non-empty model chain")
+        .name
+        .to_owned();
     let max_turns = var("RAXIS_PLANNER_MAX_TURNS")
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(DEFAULT_PLANNER_MAX_TURNS);
@@ -601,7 +589,7 @@ where
     //    through identically for every provider — the planner never
     //    holds a credential, the gateway injects per
     //    `peripherals.md §3.2`.
-    let model: Arc<dyn ModelClient> = build_model_client(known_model, &base_url, &http_fetch, &f)?;
+    let model: Arc<dyn ModelClient> = build_model_client_chain(&known_models, &http_fetch, &f)?;
 
     let token_caps = TokenCaps {
         input_total: max_tokens_input_total,
@@ -646,6 +634,29 @@ pub struct TokenCaps {
     pub total: Option<u64>,
 }
 
+struct ModelIdOverrideClient {
+    inner: Arc<dyn ModelClient>,
+    model_id: String,
+}
+
+impl ModelIdOverrideClient {
+    fn new(inner: Arc<dyn ModelClient>, model_id: impl Into<String>) -> Self {
+        Self {
+            inner,
+            model_id: model_id.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelClient for ModelIdOverrideClient {
+    async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse, ModelError> {
+        let mut request = req.clone();
+        request.model = self.model_id.clone();
+        self.inner.create_message(&request).await
+    }
+}
+
 /// **multi-provider model client
 /// router.**
 /// Picks the right [`ModelClient`] impl for the resolved provider
@@ -688,6 +699,42 @@ where
         f,
         RetryConfig::anthropic_default(),
     )
+}
+
+fn build_model_client_chain<F>(
+    known_models: &[&KnownModel],
+    http_fetch: &Arc<dyn crate::http_fetch::HttpFetch>,
+    f: &F,
+) -> Result<Arc<dyn ModelClient>, DriverError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if known_models.is_empty() {
+        return Err(ProviderModelError::EmptyModelChainEnv.into());
+    }
+    let single_model = known_models.len() == 1;
+    let mut chain = Vec::with_capacity(known_models.len());
+    for known_model in known_models {
+        let base_url = if single_model {
+            match f("RAXIS_PLANNER_BASE_URL").filter(|v| !v.is_empty()) {
+                Some(u) => u,
+                None => known_model.provider.default_base_url().to_owned(),
+            }
+        } else {
+            known_model.provider.default_base_url().to_owned()
+        };
+        if known_model.provider != ProviderId::Sidecar
+            && !(base_url.starts_with("http://") || base_url.starts_with("https://"))
+        {
+            return Err(DriverError::BadBaseUrl { got: base_url });
+        }
+        chain.push(build_model_client(known_model, &base_url, http_fetch, f)?);
+    }
+    if chain.len() == 1 {
+        Ok(chain.remove(0))
+    } else {
+        Ok(Arc::new(FallbackModelClient::new(chain)))
+    }
 }
 
 fn build_model_client_with_retry_config<F>(
@@ -740,7 +787,14 @@ where
         }
     };
 
-    Ok(Arc::new(RetryingModelClient::new(raw_client, retry_config)))
+    let model_specific: Arc<dyn ModelClient> = Arc::new(ModelIdOverrideClient::new(
+        raw_client,
+        known_model.name.to_owned(),
+    ));
+    Ok(Arc::new(RetryingModelClient::new(
+        model_specific,
+        retry_config,
+    )))
 }
 
 /// Helper for `run_role_session_with_env_fn` — read the
@@ -994,7 +1048,17 @@ pub async fn run_role_session_with_connected_transport(
     }
     let (mut registry, terminal_tools) = build_role(role, Arc::clone(&submitter), sleep_caps);
     if matches!(role, Role::Executor) && !custom_tools.is_empty() {
-        load_custom_tools(&mut registry, &custom_tools)?;
+        let audit = crate::custom_tools::CustomToolAuditEmitter::new(
+            Arc::clone(&transport),
+            env.session_id.clone(),
+            task_id_owned.clone(),
+            args.initiative_id.clone(),
+        );
+        crate::custom_tools::load_custom_tools_with_audit(
+            &mut registry,
+            &custom_tools,
+            Some(audit),
+        )?;
     }
     let registry = Arc::new(registry);
 
@@ -1355,60 +1419,62 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
         Role::Orchestrator => {
             "You are the RAXIS orchestrator for initiative `{INIT}`.\n\
              \n\
-             Authority: trust only the KSB. `dag=` rows are forensic \
-             (`<task_id> <state> reviewers=N preds_ready=<true|false> \
+             Trust only the KSB. `dag=` is forensic context only: \
+             `<task_id> <state> reviewers=N preds_ready=<true|false> \
              aggregate=<AwaitingReviewerVerdicts|AllPassed|AtLeastOneRejected|NoSuccessors> \
-             sha=<40-hex|<none>> \"<title>\"`). `capabilities.ready_now=[...]` \
-             is the activation menu; `dag=` is forensic context only. NEVER \
-             activate a task id that is NOT in `ready_now` \
+             sha=<40-hex|<none>> \"<title>\"`. `gate_statuses=` explains \
+             gates (`source`, `hook`, `verdict`, `reason`). \
+             `capabilities.ready_now=[...]` is the only activation menu. \
+             NEVER activate a task id that is NOT in `ready_now` \
              (`ActivateSubTaskReviewerNoEvalSha`). Reviewer activation is \
              handled transparently by `ready_now` after predecessor \
-             `evaluation_sha`. Paths are workspace-relative; never prefix \
-             `workspace/` or `/workspace/`. Search with `grep_search`; shell \
-             search should prefer ripgrep (`rg`).\n\
+             `evaluation_sha`. Prefer ripgrep `rg` for search.\n\
              \n\
-             Decision order; end with exactly one terminal tool:\n\
+             Decision order; end with one terminal tool:\n\
              1. PRIORITY: `retry_subtask` has ABSOLUTE precedence over fresh \
              activation. If any executor row is `state=failed` with \
              `capabilities.tasks[*].retry_admissible=true`, call \
              `retry_subtask`; failed executors are not waiting on reviewers. \
              Also retry completed executors with `aggregate=AtLeastOneRejected` \
              and `retry_admissible=true`. DO NOT activate any pending task or \
-             call `integration_merge` while a retry is admissible; the kernel \
-             backstops this as `FAIL_REVIEW_OUTSTANDING` / \
-             `IntegrationMergeBlockedByOutstandingReview`, and each rejected \
-             attempt burns `orch_no_progress_respawns=`.\n\
+             call `integration_merge` while a retry is admissible; rejects burn \
+             `orch_no_progress_respawns=` and surface as `FAIL_REVIEW_OUTSTANDING` \
+             / `IntegrationMergeBlockedByOutstandingReview`.\n\
              2. If failed / `aggregate=AtLeastOneRejected` but \
              `retry_admissible=false`: reason `prior state PendingActivation` \
-             means `activate_subtask`; reasons like `crash_retry_count ... >= \
+             means `activate_subtask`; `crash_retry_count ... >= \
              max_crash_retries` or `review_reject_count ... >= \
-             max_review_rejections` mean max_rounds / retry ceilings are spent.\n\
+             max_review_rejections` means max_rounds / retry ceilings are spent.\n\
              3. NEVER call `retry_subtask` while \
              `aggregate=AwaitingReviewerVerdicts`; sibling reviewers still owe \
              votes. This is not a background kernel computation. \
              `reviewer_verdicts=` is critique evidence only; decisions use \
              `aggregate=` + `retry_admissible`.\n\
-             4. If `ready_now` has one id, `activate_subtask`; if multiple, \
+             4. If a task or integration merge is blocked by gates, use \
+             `gate_statuses=` to classify it. `verdict=Pending` means a \
+             verifier is outstanding; SpawnFailed/ProcessFailed/Timeout/\
+             ConfigInvalid/BudgetExhausted/CapExceeded are failures. Do NOT \
+             describe these as waiting for reviewers or aggregates; do NOT \
+             retry/merge unless `retry_admissible` or `integration_merge.ready` \
+             allows it.\n\
+             5. If `ready_now` has one id, `activate_subtask`; if multiple, \
              `batch_activate_subtasks` up to `concurrency: ... headroom=K`.\n\
-             5. If `ready_now=[]`, do not wait for aggregates to \"resolve\". \
+             6. If `ready_now=[]`, do not wait for aggregates to \"resolve\". \
              Merge only when every executor row is complete with \
              `aggregate=AllPassed` or `aggregate=NoSuccessors` and reviewers are \
-             complete. Collect every completed executor row `sha=` and call \
+             complete. Collect every completed executor row `sha=`; call \
              `prepare_integration_merge { base_sha, executor_shas }`; verify each \
              collected SHA is an ancestor of the final integrated HEAD. \
              Use the returned `head_sha` immediately in \
-             `integration_merge { base_sha, head_sha }`. `integration_merge` \
-             verifies `required_executor_shas` locally, auto-prepares a clean \
-             missing merge, and returns recoverable errors for conflicts. \
-             Do not use `read_file`, \
+             `integration_merge { base_sha, head_sha }`. Do not use `read_file`, \
              `grep_search`, or `vm_capabilities` to infer the merge head. If \
              `prepare_integration_merge` reports conflicts, resolve only those \
              files with `read_file`, `bash` (`git status` / `git diff`), \
              `edit_file`, and `git_commit`; the conflict-resolution commit may \
              sit on top of executor commits. Never submit `<none>`/`<unset>` or \
-             progress text.\n\
+             prose.\n\
              \n\
-             Track `planner_max_turns=N`, token/wallclock budgets, and \
+             Track `planner_max_turns=N`, budgets, and \
              `orch_no_progress_respawns=`. Free text without a tool is an Idle \
              failure."
         }
@@ -2176,6 +2242,7 @@ mod tests {
         }
         for required in [
             "capabilities.ready_now=[",
+            "gate_statuses=",
             "state=failed",
             "failed executors are not",
             "aggregate=AtLeastOneRejected",
@@ -2191,6 +2258,23 @@ mod tests {
                 "orchestrator prompt lost {required}"
             );
         }
+    }
+
+    #[test]
+    fn render_system_prompt_for_orchestrator_classifies_gate_blocks() {
+        let args = BootArgs {
+            initiative_id: "init-A".to_owned(),
+            task_id: None,
+        };
+        let prompt = render_system_prompt_for_role(Role::Orchestrator, &args);
+        assert!(
+            prompt.contains("gate_statuses=")
+                && prompt.contains("verdict=Pending")
+                && prompt.contains("SpawnFailed")
+                && prompt.contains("Do NOT describe these as waiting for reviewers"),
+            "orchestrator NNSP MUST make gate waits distinct from reviewer \
+             / aggregate waits; got prompt: {prompt}",
+        );
     }
 
     /// The orchestrator NNSP MUST tell the model to call
@@ -2602,6 +2686,7 @@ mod tests {
             base_sha: String::new(),
             reviewer_verdicts: vec![],
             pending_escalations: vec![],
+            gate_statuses: vec![],
             credential_ports: vec![],
             capabilities: None,
             last_critique: None,

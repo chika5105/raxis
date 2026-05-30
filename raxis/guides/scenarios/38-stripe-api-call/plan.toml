@@ -7,6 +7,8 @@ Stripe api call (scenario 38)
 [workspace]
 name = "Stripe Api Call"
 lane_id     = "stripe-api-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "create-customer"

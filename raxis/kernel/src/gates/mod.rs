@@ -33,9 +33,10 @@ pub mod witness;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use raxis_policy::PolicyBundle;
-use raxis_store::Store;
+use raxis_policy::{GateEntry, PolicyBundle};
+use raxis_store::{Store, Table};
 use raxis_types::{SessionId, SubmittedClaim};
+use rusqlite::OptionalExtension;
 
 use crate::authority::delegation;
 use crate::ipc::context::HandlerContext;
@@ -388,6 +389,209 @@ pub async fn spawn_verifiers_for_missing_gates(
     }
 }
 
+/// Spawn plan-declared per-task verifiers after `CompleteTask` parks the task
+/// in `GatesPending`.
+pub async fn spawn_task_verifiers_for_task(
+    initiative_id: &str,
+    task_id: &str,
+    evaluation_sha: &str,
+    worktree_root: &Path,
+    policy: &PolicyBundle,
+    ctx: &HandlerContext,
+) {
+    spawn_task_verifiers_for_task_filtered(
+        initiative_id,
+        task_id,
+        evaluation_sha,
+        worktree_root,
+        policy,
+        ctx,
+        true,
+        true,
+    )
+    .await;
+}
+
+/// Spawn only plan-declared warn-only task verifiers. Used after a task has
+/// completed normally: warning evidence should still land in audit/UI, but it
+/// must not hold the task in `GatesPending` or trigger repair feedback.
+pub async fn spawn_warn_only_task_verifiers_for_task(
+    initiative_id: &str,
+    task_id: &str,
+    evaluation_sha: &str,
+    worktree_root: &Path,
+    policy: &PolicyBundle,
+    ctx: &HandlerContext,
+) {
+    spawn_task_verifiers_for_task_filtered(
+        initiative_id,
+        task_id,
+        evaluation_sha,
+        worktree_root,
+        policy,
+        ctx,
+        false,
+        true,
+    )
+    .await;
+}
+
+#[derive(Debug, Clone)]
+pub struct IntegrationMergeVerifierSpec {
+    pub entry: raxis_policy::IntegrationMergeVerifierEntry,
+    pub gate_source: &'static str,
+}
+
+pub fn integration_merge_verifier_specs_for(
+    initiative_id: &str,
+    policy: &PolicyBundle,
+    ctx: &HandlerContext,
+) -> Vec<IntegrationMergeVerifierSpec> {
+    let mut out = Vec::new();
+    if let Some(orch) = ctx.plan_registry.orchestrator(initiative_id) {
+        out.extend(orch.integration_merge_verifiers.into_iter().map(|entry| {
+            IntegrationMergeVerifierSpec {
+                entry,
+                gate_source: "plan_integration_verifier",
+            }
+        }));
+    }
+    out.extend(
+        policy
+            .integration_merge_verifiers()
+            .iter()
+            .cloned()
+            .map(|entry| IntegrationMergeVerifierSpec {
+                entry,
+                gate_source: "policy_integration_verifier",
+            }),
+    );
+    out
+}
+
+/// Spawn plan/policy integration-merge verifiers after an `IntegrationMerge`
+/// intent parks the synthetic coordinator in `GatesPending`.
+pub async fn spawn_integration_merge_verifiers_for_task(
+    initiative_id: &str,
+    task_id: &str,
+    evaluation_sha: &str,
+    worktree_root: &Path,
+    missing_gates: &[String],
+    policy: &PolicyBundle,
+    ctx: &HandlerContext,
+) {
+    let missing: std::collections::HashSet<&str> =
+        missing_gates.iter().map(String::as_str).collect();
+    for spec in integration_merge_verifier_specs_for(initiative_id, policy, ctx) {
+        if !missing.contains(spec.entry.name.as_str()) {
+            continue;
+        }
+        let vconfig = match verifier_runner::VerifierConfig::from_integration_merge_verifier(
+            policy,
+            &spec.entry,
+            &ctx.data_dir,
+            spec.gate_source,
+        ) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"IntegrationMergeVerifierConfigInvalid\",\
+                     \"initiative_id\":\"{initiative_id}\",\"task_id\":\"{task_id}\",\
+                     \"gate_type\":\"{}\",\"gate_source\":\"{}\",\"error\":\"{e}\"}}",
+                    spec.entry.name, spec.gate_source,
+                );
+                continue;
+            }
+        };
+        match verifier_runner::spawn_verifier_with_audit(
+            task_id,
+            &spec.entry.name,
+            evaluation_sha,
+            worktree_root,
+            &vconfig,
+            ctx.store.as_ref(),
+            Some(ctx.audit.clone()),
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"IntegrationMergeVerifierSpawnFailed\",\
+                     \"initiative_id\":\"{initiative_id}\",\"task_id\":\"{task_id}\",\
+                     \"gate_type\":\"{}\",\"gate_source\":\"{}\",\"error\":\"{e}\"}}",
+                    spec.entry.name, spec.gate_source,
+                );
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_task_verifiers_for_task_filtered(
+    initiative_id: &str,
+    task_id: &str,
+    evaluation_sha: &str,
+    worktree_root: &Path,
+    policy: &PolicyBundle,
+    ctx: &HandlerContext,
+    include_blocking: bool,
+    include_warn_only: bool,
+) {
+    let key = crate::initiatives::TaskKey::new(initiative_id, task_id);
+    let fields = ctx.plan_registry.get(&key);
+    let Some(fields) = fields else {
+        return;
+    };
+
+    for verifier in fields.task_verifiers {
+        let include = match verifier.on_failure {
+            raxis_policy::TaskVerifierOnFailure::BlockReview => include_blocking,
+            raxis_policy::TaskVerifierOnFailure::WarnOnly => include_warn_only,
+        };
+        if !include {
+            continue;
+        }
+        let vconfig = match verifier_runner::VerifierConfig::from_task_verifier(
+            policy,
+            &verifier,
+            &ctx.data_dir,
+        ) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"TaskVerifierConfigInvalid\",\
+                         \"task_id\":\"{task_id}\",\"gate_type\":\"{}\",\
+                         \"error\":\"{e}\"}}",
+                    verifier.name,
+                );
+                continue;
+            }
+        };
+        match verifier_runner::spawn_verifier_with_audit(
+            task_id,
+            &verifier.name,
+            evaluation_sha,
+            worktree_root,
+            &vconfig,
+            ctx.store.as_ref(),
+            Some(ctx.audit.clone()),
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"TaskVerifierSpawnFailed\",\
+                     \"task_id\":\"{task_id}\",\"gate_type\":\"{}\",\
+                     \"error\":\"{e}\"}}",
+                    verifier.name,
+                );
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // evaluate_pre_spawn — sync DB-touching block of `evaluate_claims`.
 // ---------------------------------------------------------------------------
@@ -408,6 +612,160 @@ enum PreSpawnDecision {
     /// (spawn_verifier) for each `missing_gates` entry on the async
     /// runtime.
     NeedsVerifierSpawn { missing_gates: Vec<String> },
+}
+
+#[derive(Debug, Clone, Default)]
+struct GateRuntimeContext {
+    initiative_id: Option<String>,
+    workspace_name: Option<String>,
+    lane_id: Option<String>,
+    task_agent_type: Option<String>,
+    environment: Option<String>,
+    hook: &'static str,
+}
+
+fn read_gate_runtime_context(store: &Store, task_id: &str) -> GateRuntimeContext {
+    let mut out = GateRuntimeContext {
+        hook: "complete_task",
+        ..GateRuntimeContext::default()
+    };
+    let conn = store.lock_sync();
+
+    let task_row: rusqlite::Result<Option<(String, String)>> = conn
+        .query_row(
+            &format!(
+                "SELECT initiative_id, lane_id FROM {} WHERE task_id = ?1",
+                Table::Tasks.as_str()
+            ),
+            rusqlite::params![task_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional();
+    let Some((initiative_id, lane_id)) = task_row.ok().flatten() else {
+        return out;
+    };
+    out.initiative_id = Some(initiative_id.clone());
+    out.lane_id = Some(lane_id);
+
+    let plan_bytes = lookup_plan_bytes_for_gate_context(&conn, &initiative_id)
+        .ok()
+        .flatten();
+    let Some(plan_bytes) = plan_bytes else {
+        return out;
+    };
+    let plan_toml = String::from_utf8_lossy(&plan_bytes);
+    let Ok(doc) = toml::from_str::<toml::Value>(&plan_toml) else {
+        return out;
+    };
+
+    out.workspace_name = doc
+        .get("workspace")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
+    out.environment = doc
+        .get("workspace")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("environment"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
+    out.task_agent_type = doc
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .and_then(|tasks| {
+            tasks
+                .iter()
+                .find(|entry| entry.get("task_id").and_then(|v| v.as_str()) == Some(task_id))
+        })
+        .and_then(|entry| entry.get("session_agent_type"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .or_else(|| Some("Executor".to_owned()));
+
+    out
+}
+
+fn lookup_plan_bytes_for_gate_context(
+    conn: &rusqlite::Connection,
+    initiative_id: &str,
+) -> rusqlite::Result<Option<Vec<u8>>> {
+    let v1: Option<Vec<u8>> = conn
+        .query_row(
+            &format!(
+                "SELECT plan_bytes FROM {} WHERE initiative_id = ?1",
+                Table::SignedPlanArtifacts.as_str()
+            ),
+            rusqlite::params![initiative_id],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .optional()?;
+    if v1.is_some() {
+        return Ok(v1);
+    }
+
+    conn.query_row(
+        &format!(
+            "SELECT pba.artifact_bytes \
+             FROM {init} AS i \
+             JOIN {pba} AS pba ON pba.bundle_sha256 = i.plan_bundle_sha256 \
+             WHERE i.initiative_id = ?1 AND pba.artifact_name = 'plan.toml' \
+             LIMIT 1",
+            init = Table::Initiatives.as_str(),
+            pba = Table::PlanBundleArtifacts.as_str(),
+        ),
+        rusqlite::params![initiative_id],
+        |r| r.get::<_, Vec<u8>>(0),
+    )
+    .optional()
+}
+
+fn gate_satisfies_claim(gate: &GateEntry, claim: &str) -> bool {
+    gate.gate_type == claim
+        || gate.claim_type.as_deref() == Some(claim)
+        || gate.satisfies.iter().any(|v| v == claim)
+}
+
+fn gate_applies(gate: &GateEntry, ctx: &GateRuntimeContext, touched_paths: &[PathBuf]) -> bool {
+    let selectors = &gate.selectors;
+    selector_matches(&selectors.workspaces, ctx.workspace_name.as_deref())
+        && selector_matches(&selectors.lane_ids, ctx.lane_id.as_deref())
+        && selector_matches(&selectors.task_agent_types, ctx.task_agent_type.as_deref())
+        && selector_matches(&selectors.environments, ctx.environment.as_deref())
+        && selector_matches(&selectors.hooks, Some(ctx.hook))
+        && path_selector_matches(&selectors.path_globs, touched_paths)
+}
+
+fn selector_matches(values: &[String], runtime_value: Option<&str>) -> bool {
+    if values.is_empty() {
+        return true;
+    }
+    let Some(runtime_value) = runtime_value else {
+        // Fail closed: if the kernel cannot resolve the selector
+        // dimension, the gate remains active rather than silently
+        // disappearing.
+        return true;
+    };
+    values.iter().any(|v| v == runtime_value)
+}
+
+fn path_selector_matches(path_globs: &[String], touched_paths: &[PathBuf]) -> bool {
+    if path_globs.is_empty() {
+        return true;
+    }
+    if touched_paths.is_empty() {
+        // Empty touched set cannot prove non-applicability, so keep
+        // the gate active.
+        return true;
+    }
+    touched_paths.iter().any(|path| {
+        let path_str = path.to_string_lossy();
+        path_globs
+            .iter()
+            .any(|glob| policy_lookup::glob_matches(glob, &path_str))
+    })
 }
 
 /// Synchronous pre-Step-5 portion of `evaluate_claims`. Encapsulates
@@ -435,9 +793,15 @@ fn evaluate_pre_spawn(
 ) -> Result<PreSpawnDecision, GateError> {
     // ── Step 2: Policy lookup ─────────────────────────────────────────────
     let required_claims = policy_lookup::required_claims(touched_paths, policy)?;
+    let runtime_ctx = read_gate_runtime_context(store, task_id);
+    let applicable_gates: Vec<&GateEntry> = policy
+        .gates()
+        .iter()
+        .filter(|gate| gate_applies(gate, &runtime_ctx, touched_paths))
+        .collect();
 
     // Fast path: no claims required and no gates configured.
-    if required_claims.is_empty() && policy.gates().is_empty() {
+    if required_claims.is_empty() && applicable_gates.is_empty() {
         return Ok(PreSpawnDecision::Pass {
             delegate_renewal_required: false,
         });
@@ -470,14 +834,38 @@ fn evaluate_pre_spawn(
             continue; // No witness can satisfy StrictDefault — handled by claim::evaluate
         }
 
-        // Check if a passing witness exists for this gate type + task + sha.
-        let witness = witness::lookup(evaluation_sha, task_id, claim_type_str, None, store)?;
-        if let Some(ref rec) = witness {
-            if rec.result_class == ResultClass::Pass {
-                effective_claims.push(SubmittedClaim {
-                    claim_type: claim_type_str.to_owned(),
-                    evidence_ref: Some(rec.blob_sha256.clone()),
-                });
+        for gate in &applicable_gates {
+            if !gate_satisfies_claim(gate, claim_type_str) {
+                continue;
+            }
+            // Check if a passing witness exists for this gate type + task + sha.
+            let witness = witness::lookup(evaluation_sha, task_id, &gate.gate_type, None, store)?;
+            if let Some(ref rec) = witness {
+                if rec.result_class == ResultClass::Pass {
+                    effective_claims.push(SubmittedClaim {
+                        claim_type: claim_type_str.to_owned(),
+                        evidence_ref: Some(rec.blob_sha256.clone()),
+                    });
+                    break;
+                }
+            }
+        }
+
+        // Compatibility fallback for existing policies whose claim
+        // type was already equal to the persisted witness gate_type
+        // but whose gate row is absent (or selector-filtered away).
+        if !effective_claims
+            .iter()
+            .any(|claim| claim.claim_type == claim_type_str)
+        {
+            let witness = witness::lookup(evaluation_sha, task_id, claim_type_str, None, store)?;
+            if let Some(ref rec) = witness {
+                if rec.result_class == ResultClass::Pass {
+                    effective_claims.push(SubmittedClaim {
+                        claim_type: claim_type_str.to_owned(),
+                        evidence_ref: Some(rec.blob_sha256.clone()),
+                    });
+                }
             }
         }
     }
@@ -531,7 +919,10 @@ fn evaluate_pre_spawn(
     }
 
     // ── Step 4: Witness check per gate type ───────────────────────────────
-    let gate_types: Vec<String> = policy.gates().iter().map(|g| g.gate_type.clone()).collect();
+    let gate_types: Vec<String> = applicable_gates
+        .iter()
+        .map(|g| g.gate_type.clone())
+        .collect();
     let mut missing_gates: Vec<String> = Vec::new();
 
     for gate_type in &gate_types {

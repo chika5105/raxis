@@ -1,0 +1,7 @@
+-- Migration 27 is rendered from crates/store/src/migration.rs so table
+-- identifiers stay type-safe. This mirror is documentation for operators
+-- inspecting the migration directory.
+--
+-- Adds verifier-run provenance columns to verifier_run_tokens:
+--   gate_source, gate_hook, verifier_image_alias, verifier_command,
+--   verifier_on_failure.

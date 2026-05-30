@@ -7,6 +7,8 @@ Coverage witness (scenario 33)
 [workspace]
 name = "Coverage Witness"
 lane_id     = "coverage-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "extend-with-coverage"

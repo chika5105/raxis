@@ -10,6 +10,8 @@ designer_a proposes one approach in docs/proposal.md, designer_b
 [workspace]
 name = "Structured Debate"
 lane_id     = "structured-debate-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "designer_a"

@@ -124,19 +124,19 @@ printf '{"content":"generic script wrapper received a bounded request","is_error
         .with_context(|| format!("chmod {}", script_path.display()))?;
 
     let mut registry = build_executor_registry();
-    let decl = CustomToolDecl {
-        name: "repo_codegen_check".to_owned(),
-        description: "Run a pre-existing repository code-generation check wrapper.".to_owned(),
-        command: vec![script_path.display().to_string()],
-        input_schema: json!({
+    let decl = custom_tool_decl(
+        "repo_codegen_check",
+        "Run a pre-existing repository code-generation check wrapper.",
+        vec![script_path.display().to_string()],
+        json!({
             "type": "object",
             "properties": {
                 "scope": { "type": "string", "maxLength": 120 }
             },
             "additionalProperties": false
         }),
-        timeout_secs: 5,
-    };
+        5,
+    );
     load_custom_tools(&mut registry, &[decl]).context("load generic script custom tool")?;
     if registry.get("run_any_script").is_some() {
         bail!("generic script launcher surfaced; custom tools must stay operation-specific");
@@ -208,38 +208,37 @@ fn unity_tool_decls(exe: &Path, socket_path: &Path) -> Vec<CustomToolDecl> {
         ]
     };
     vec![
-        CustomToolDecl {
-            name: "unity_list_scenes".to_owned(),
-            description: "List scenes known to the local Unity Editor MCP adapter.".to_owned(),
-            command: base_command("unity.listScenes"),
-            input_schema: json!({
+        custom_tool_decl(
+            "unity_list_scenes",
+            "List scenes known to the local Unity Editor MCP adapter.",
+            base_command("unity.listScenes"),
+            json!({
                 "type": "object",
                 "properties": {
                     "include_disabled": { "type": "boolean" }
                 },
                 "additionalProperties": false
             }),
-            timeout_secs: 5,
-        },
-        CustomToolDecl {
-            name: "unity_run_playmode_tests".to_owned(),
-            description: "Run bounded Unity playmode tests through the local MCP adapter."
-                .to_owned(),
-            command: base_command("unity.runPlaymodeTests"),
-            input_schema: json!({
+            5,
+        ),
+        custom_tool_decl(
+            "unity_run_playmode_tests",
+            "Run bounded Unity playmode tests through the local MCP adapter.",
+            base_command("unity.runPlaymodeTests"),
+            json!({
                 "type": "object",
                 "properties": {
                     "filter": { "type": "string", "maxLength": 80 }
                 },
                 "additionalProperties": false
             }),
-            timeout_secs: 10,
-        },
-        CustomToolDecl {
-            name: "unity_build_player".to_owned(),
-            description: "Build one Unity player target through the local MCP adapter.".to_owned(),
-            command: base_command("unity.buildPlayer"),
-            input_schema: json!({
+            10,
+        ),
+        custom_tool_decl(
+            "unity_build_player",
+            "Build one Unity player target through the local MCP adapter.",
+            base_command("unity.buildPlayer"),
+            json!({
                 "type": "object",
                 "required": ["target", "scene"],
                 "properties": {
@@ -254,9 +253,30 @@ fn unity_tool_decls(exe: &Path, socket_path: &Path) -> Vec<CustomToolDecl> {
                 },
                 "additionalProperties": false
             }),
-            timeout_secs: 30,
-        },
+            30,
+        ),
     ]
+}
+
+fn custom_tool_decl(
+    name: impl Into<String>,
+    description: impl Into<String>,
+    command: Vec<String>,
+    input_schema: serde_json::Value,
+    timeout_secs: u32,
+) -> CustomToolDecl {
+    CustomToolDecl {
+        name: name.into(),
+        description: description.into(),
+        command,
+        execution_locality: "guest_subprocess".to_owned(),
+        input_schema,
+        timeout_secs,
+        stdin_max_bytes: 262_144,
+        stdout_max_bytes: 65_536,
+        stderr_max_bytes: 16_384,
+        expose_stderr: true,
+    }
 }
 
 async fn invoke(

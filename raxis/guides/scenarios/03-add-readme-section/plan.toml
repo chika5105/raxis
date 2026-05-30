@@ -9,6 +9,8 @@ The documenter Executor adds a new top-level section "## Quickstart"
 [workspace]
 name = "Add Readme Section"
 lane_id     = "readme-edit-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "documenter"
@@ -16,7 +18,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["README.md"]
 predecessors       = []
-description        = "Documenter"## Quickstart\" to README.md, AFTER"
+description        = "Documenter"
 prompt             = """
   Add a new top-level section titled "## Quickstart" to README.md, AFTER
   any existing top-level sections, with three numbered steps explaining

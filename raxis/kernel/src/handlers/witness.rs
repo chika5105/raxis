@@ -446,6 +446,7 @@ async fn handle_inner(
         Accepted {
             run_id: String,
             task_row: TaskRowData,
+            verifier_on_failure: Option<String>,
         },
         Rejected {
             run_id: String,
@@ -477,7 +478,9 @@ async fn handle_inner(
             // or had its evaluation_sha rebound between any pre-tx read and
             // this point.
             let task_row = load_task_row_in_tx(&tx, &task_id_owned)?;
-            if task_row.state != TaskState::GatesPending.as_sql_str() {
+            let verifier_on_failure = token_row.verifier_on_failure.clone();
+            let warn_only_verifier = verifier_on_failure.as_deref() == Some("warn_only");
+            if task_row.state != TaskState::GatesPending.as_sql_str() && !warn_only_verifier {
                 drop(tx); // rollback — token is NOT consumed.
                 return Ok(CommitOutcome::Rejected {
                     run_id,
@@ -544,21 +547,32 @@ async fn handle_inner(
             // it before this transaction, this returns TokenConsumed → we propagate
             // an Unauthorized error and the transaction is rolled back, undoing
             // the witness INSERT we just wrote. INV-INIT-08 holds.
-            verifier_token::consume_verifier_token_in_tx(&tx, &raw_token).map_err(|e| {
-                HandlerError::Unauthorized {
-                    reason: format!("consume failed: {e}"),
-                }
+            verifier_token::consume_verifier_token_in_tx_with_status(
+                &tx,
+                &raw_token,
+                Some(result_class_for_record.as_str()),
+            )
+            .map_err(|e| HandlerError::Unauthorized {
+                reason: format!("consume failed: {e}"),
             })?;
 
             tx.commit()
                 .map_err(|e| HandlerError::Store(e.to_string()))?;
-            Ok(CommitOutcome::Accepted { run_id, task_row })
+            Ok(CommitOutcome::Accepted {
+                run_id,
+                task_row,
+                verifier_on_failure,
+            })
         })
         .await
         .map_err(|e| HandlerError::Store(format!("witness commit join: {e}")))??;
 
-    let (run_id, task_row) = match outcome {
-        CommitOutcome::Accepted { run_id, task_row } => (run_id, task_row),
+    let (run_id, task_row, verifier_on_failure) = match outcome {
+        CommitOutcome::Accepted {
+            run_id,
+            task_row,
+            verifier_on_failure,
+        } => (run_id, task_row, verifier_on_failure),
         CommitOutcome::Rejected {
             run_id,
             initiative_id,
@@ -724,6 +738,35 @@ async fn handle_inner(
     }
 
     // ── Step 6: Gate-recheck ──────────────────────────────────────────────
+    //
+    // Plan-source `warn_only` verifiers are first-class evidence, but they
+    // are deliberately not admission gates. Their witnesses are accepted,
+    // written to the witness index, paired to audit, and surfaced in the UI;
+    // non-pass warn-only results do NOT enter the gate-fixup pipeline or
+    // block Reviewer / IntegrationMerge progress.
+    if verifier_on_failure.as_deref() == Some("warn_only") {
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"WarnOnlyVerifierWitnessRecorded\",\
+             \"task_id\":\"{}\",\"gate_type\":\"{}\",\
+             \"result_class\":\"{}\"}}",
+            sub.task_id.as_str(),
+            sub.gate_type.as_str(),
+            result_class.as_str(),
+        );
+        return if result_class == ResultClass::Pass {
+            Ok(WitnessAck::Accepted {
+                run_id,
+                remaining_gates: Vec::new(),
+            })
+        } else {
+            Ok(WitnessAck::AcceptedNonPass {
+                run_id,
+                gate_type: sub.gate_type.clone(),
+                result_class,
+            })
+        };
+    }
+
     // Only recheck if the witness was a Pass — Fail/Inconclusive can't clear
     // the gate, so the non-Pass branch routes into the iter65 gate-rejection
     // pipeline (agent_hint resolution → `last_gate_critique` persist →
@@ -826,6 +869,139 @@ async fn gate_recheck(
             .map_err(|_| HandlerError::Store("task has no session_id".to_owned()))?
     };
 
+    let task_verifier_declared = {
+        let store = ctx.store.clone();
+        let registry = ctx.plan_registry.clone();
+        let task_id_owned = task_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            task_verifier_declared_sync(&task_id_owned, store.as_ref(), registry.as_ref())
+        })
+        .await
+        .map_err(|e| HandlerError::Store(format!("task verifier declared join: {e}")))?
+    };
+
+    if task_verifier_declared {
+        let remaining = {
+            let store = ctx.store.clone();
+            let registry = ctx.plan_registry.clone();
+            let task_id_owned = task_id.to_owned();
+            let evaluation_sha_owned = evaluation_sha.to_owned();
+            tokio::task::spawn_blocking(move || {
+                remaining_task_verifier_gates_sync(
+                    &task_id_owned,
+                    &evaluation_sha_owned,
+                    store.as_ref(),
+                    registry.as_ref(),
+                )
+            })
+            .await
+            .map_err(|e| {
+                HandlerError::Store(format!("remaining task verifier gates join: {e}"))
+            })??
+        };
+        if remaining.is_empty() {
+            finalize_task_verifier_completion_after_gate_recheck(task_id, task_row, ctx).await?;
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"TaskVerifiersCleared\",\
+                 \"task_id\":\"{task_id}\",\"final_witness_run_id\":\"(recheck-pass)\"}}",
+            );
+            return Ok(vec![]);
+        }
+        return Ok(remaining
+            .into_iter()
+            .filter_map(|s| raxis_types::GateType::parse(&s).ok())
+            .collect());
+    }
+
+    let integration_merge_verifier_declared = task_id == task_row.initiative_id
+        && integration_merge_verifier_declared_sync(
+            &task_row.initiative_id,
+            ctx.plan_registry.as_ref(),
+            ctx.policy.load().as_ref(),
+        );
+    if integration_merge_verifier_declared {
+        let mut remaining = {
+            let store = ctx.store.clone();
+            let registry = ctx.plan_registry.clone();
+            let policy = ctx.policy.load_full();
+            let task_id_owned = task_id.to_owned();
+            let initiative_id_owned = task_row.initiative_id.clone();
+            let evaluation_sha_owned = evaluation_sha.to_owned();
+            tokio::task::spawn_blocking(move || {
+                remaining_integration_merge_verifier_gates_sync(
+                    &task_id_owned,
+                    &initiative_id_owned,
+                    &evaluation_sha_owned,
+                    store.as_ref(),
+                    registry.as_ref(),
+                    policy.as_ref(),
+                )
+            })
+            .await
+            .map_err(|e| {
+                HandlerError::Store(format!("remaining integration verifier gates join: {e}"))
+            })??
+        };
+
+        let gate_result = gates::evaluate_claims(
+            &session_id,
+            evaluation_sha,
+            task_id,
+            &touched_paths,
+            &[],
+            &worktree_root,
+            ctx,
+        )
+        .await
+        .map_err(|e| HandlerError::GateRecheck(e.to_string()))?;
+
+        match gate_result {
+            GateEvalResult::Pass { .. } | GateEvalResult::BreakglassPass { .. } => {}
+            GateEvalResult::PendingWitness { missing_gates } => {
+                remaining.extend(missing_gates);
+            }
+            GateEvalResult::ClaimInsufficient { reason } => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"WitnessClaimInsufficient\",\
+                     \"task_id\":\"{task_id}\",\"reason\":\"{reason}\"}}",
+                );
+                return Ok(vec![]);
+            }
+        }
+
+        remaining.sort();
+        remaining.dedup();
+        if remaining.is_empty() {
+            transition_to_admitted_after_gate_recheck(task_id, task_row, ctx).await?;
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"IntegrationMergeVerifiersCleared\",\
+                 \"task_id\":\"{task_id}\",\"final_witness_run_id\":\"(recheck-pass)\"}}",
+            );
+            return Ok(vec![]);
+        }
+
+        let policy_snapshot = ctx.policy.load_full();
+        crate::gates::spawn_integration_merge_verifiers_for_task(
+            &task_row.initiative_id,
+            task_id,
+            evaluation_sha,
+            &worktree_root,
+            &remaining,
+            policy_snapshot.as_ref(),
+            ctx,
+        )
+        .await;
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"IntegrationMergeGatesStillPending\",\
+             \"task_id\":\"{task_id}\",\"remaining\":{}}}",
+            remaining.len()
+        );
+        return Ok(remaining
+            .into_iter()
+            .filter_map(|s| raxis_types::GateType::parse(&s).ok())
+            .collect());
+    }
+
     // Gate evaluation — uses the planner session's delegation context.
     // Spec: "task.session_id is used, not sub.session_id — the verifier's
     // ValidatedSession carries no planner delegations."
@@ -861,21 +1037,7 @@ async fn gate_recheck(
             // panic with "Cannot block the current thread from within a
             // runtime" the way iter66.1's first IntegrationMerge witness
             // did.
-            let task_id_owned = task_id.to_owned();
-            let store_clone = ctx.store.clone();
-            let audit_clone = ctx.audit.clone();
-            let session_id_clone = task_row.session_id.clone();
-            tokio::task::spawn_blocking(move || {
-                crate::scheduler::transition_to_admitted(
-                    &task_id_owned,
-                    store_clone.as_ref(),
-                    audit_clone.as_ref(),
-                    session_id_clone.as_deref(),
-                )
-            })
-            .await
-            .map_err(|e| HandlerError::Store(format!("transition_to_admitted join: {e}")))?
-            .map_err(|e| HandlerError::Store(e.to_string()))?;
+            transition_to_admitted_after_gate_recheck(task_id, task_row, ctx).await?;
 
             eprintln!(
                 "{{\"level\":\"info\",\"event\":\"TaskGatesCleared\",\
@@ -957,6 +1119,226 @@ async fn gate_recheck(
             Ok(vec![])
         }
     }
+}
+
+fn task_verifier_declared_sync(
+    task_id: &str,
+    store: &raxis_store::Store,
+    plan_registry: &crate::initiatives::PlanRegistry,
+) -> bool {
+    let initiative_id = {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!("SELECT initiative_id FROM {TASKS} WHERE task_id = ?1"),
+            rusqlite::params![task_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    };
+    let Some(initiative_id) = initiative_id else {
+        return false;
+    };
+    plan_registry
+        .get(&crate::initiatives::TaskKey::new(&initiative_id, task_id))
+        .map(|f| {
+            f.task_verifiers.iter().any(|v| {
+                matches!(
+                    v.on_failure,
+                    raxis_policy::TaskVerifierOnFailure::BlockReview
+                )
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn remaining_task_verifier_gates_sync(
+    task_id: &str,
+    evaluation_sha: &str,
+    store: &raxis_store::Store,
+    plan_registry: &crate::initiatives::PlanRegistry,
+) -> Result<Vec<String>, HandlerError> {
+    let initiative_id = {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!("SELECT initiative_id FROM {TASKS} WHERE task_id = ?1"),
+            rusqlite::params![task_id],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|e| HandlerError::Store(e.to_string()))?
+    };
+    let fields = plan_registry.get(&crate::initiatives::TaskKey::new(&initiative_id, task_id));
+    let Some(fields) = fields else {
+        return Ok(Vec::new());
+    };
+
+    let conn = store.lock_sync();
+    let mut remaining = Vec::new();
+    for verifier in fields.task_verifiers {
+        if !matches!(
+            verifier.on_failure,
+            raxis_policy::TaskVerifierOnFailure::BlockReview
+        ) {
+            continue;
+        }
+        let passed: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {} \
+                     WHERE task_id = ?1 AND evaluation_sha = ?2 \
+                       AND gate_type = ?3 AND result_class = 'Pass'",
+                    Table::WitnessRecords.as_str(),
+                ),
+                rusqlite::params![task_id, evaluation_sha, &verifier.name],
+                |r| r.get(0),
+            )
+            .map_err(|e| HandlerError::Store(e.to_string()))?;
+        if passed == 0 {
+            remaining.push(verifier.name);
+        }
+    }
+    Ok(remaining)
+}
+
+async fn transition_to_admitted_after_gate_recheck(
+    task_id: &str,
+    task_row: &TaskRowData,
+    ctx: &HandlerContext,
+) -> Result<bool, HandlerError> {
+    let task_id_owned = task_id.to_owned();
+    let store = ctx.store.clone();
+    let audit = ctx.audit.clone();
+    let session_id = task_row.session_id.clone();
+
+    tokio::task::spawn_blocking(move || {
+        match crate::scheduler::transition_to_admitted(
+            &task_id_owned,
+            store.as_ref(),
+            audit.as_ref(),
+            session_id.as_deref(),
+        ) {
+            Ok(()) => Ok(true),
+            Err(err) => {
+                let current = load_task_row(&task_id_owned, store.as_ref())?.state;
+                if current != TaskState::GatesPending.as_sql_str() {
+                    eprintln!(
+                        "{{\"level\":\"info\",\"event\":\"GateRecheckTransitionAlreadyCleared\",\
+                         \"task_id\":\"{task_id_owned}\",\"current_state\":\"{current}\"}}",
+                    );
+                    Ok(false)
+                } else {
+                    Err(HandlerError::Store(err.to_string()))
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|e| HandlerError::Store(format!("transition_to_admitted join: {e}")))?
+}
+
+async fn finalize_task_verifier_completion_after_gate_recheck(
+    task_id: &str,
+    task_row: &TaskRowData,
+    ctx: &HandlerContext,
+) -> Result<bool, HandlerError> {
+    let task_id_owned = task_id.to_owned();
+    let lane_id = task_row.lane_id.clone();
+    let session_id = task_row.session_id.clone();
+    let store = ctx.store.clone();
+    let audit = ctx.audit.clone();
+
+    tokio::task::spawn_blocking(move || {
+        match crate::handlers::intent::finalize_task_verifier_completion(
+            &task_id_owned,
+            &lane_id,
+            session_id.as_deref(),
+            store.as_ref(),
+            audit.as_ref(),
+        ) {
+            Ok(_) => Ok(true),
+            Err(_) => {
+                let current = load_task_row(&task_id_owned, store.as_ref())?.state;
+                if current != TaskState::GatesPending.as_sql_str() {
+                    eprintln!(
+                        "{{\"level\":\"info\",\"event\":\"TaskVerifierCompletionAlreadyCleared\",\
+                         \"task_id\":\"{task_id_owned}\",\"current_state\":\"{current}\"}}",
+                    );
+                    Ok(false)
+                } else {
+                    Err(HandlerError::Store(
+                        "finalize task verifier completion".to_owned(),
+                    ))
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|e| HandlerError::Store(format!("finalize task verifier join: {e}")))?
+}
+
+fn integration_merge_verifier_declared_sync(
+    initiative_id: &str,
+    plan_registry: &crate::initiatives::PlanRegistry,
+    policy: &raxis_policy::PolicyBundle,
+) -> bool {
+    plan_registry
+        .orchestrator(initiative_id)
+        .map(|o| {
+            o.integration_merge_verifiers.iter().any(|v| {
+                matches!(
+                    v.on_failure,
+                    raxis_policy::IntegrationMergeVerifierOnFailure::BlockMerge
+                )
+            })
+        })
+        .unwrap_or(false)
+        || policy.integration_merge_verifiers().iter().any(|v| {
+            matches!(
+                v.on_failure,
+                raxis_policy::IntegrationMergeVerifierOnFailure::BlockMerge
+            )
+        })
+}
+
+fn remaining_integration_merge_verifier_gates_sync(
+    task_id: &str,
+    initiative_id: &str,
+    evaluation_sha: &str,
+    store: &raxis_store::Store,
+    plan_registry: &crate::initiatives::PlanRegistry,
+    policy: &raxis_policy::PolicyBundle,
+) -> Result<Vec<String>, HandlerError> {
+    let mut specs = Vec::new();
+    if let Some(orch) = plan_registry.orchestrator(initiative_id) {
+        specs.extend(orch.integration_merge_verifiers);
+    }
+    specs.extend(policy.integration_merge_verifiers().iter().cloned());
+
+    let conn = store.lock_sync();
+    let mut remaining = Vec::new();
+    for verifier in specs {
+        if !matches!(
+            verifier.on_failure,
+            raxis_policy::IntegrationMergeVerifierOnFailure::BlockMerge
+        ) {
+            continue;
+        }
+        let passed: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {} \
+                     WHERE task_id = ?1 AND evaluation_sha = ?2 \
+                       AND gate_type = ?3 AND result_class = 'Pass'",
+                    Table::WitnessRecords.as_str(),
+                ),
+                rusqlite::params![task_id, evaluation_sha, &verifier.name],
+                |r| r.get(0),
+            )
+            .map_err(|e| HandlerError::Store(e.to_string()))?;
+        if passed == 0 {
+            remaining.push(verifier.name);
+        }
+    }
+    Ok(remaining)
 }
 
 // ---------------------------------------------------------------------------

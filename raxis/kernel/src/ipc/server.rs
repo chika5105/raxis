@@ -802,6 +802,53 @@ where
                 .await?;
             }
 
+            // ── CustomToolInvocation ────────────────────────────────────
+            // Executor custom tools run inside the guest, but their
+            // invocation metadata belongs in the kernel-owned audit chain.
+            // Session-bound VM streams get the same host-side token stamping
+            // as IntentRequest/PlannerFetchRequest so the planner never holds
+            // bearer authority.
+            IpcMessage::CustomToolInvocation(mut req) => {
+                if let Some(token) = bound_session_token.as_ref() {
+                    req.session_token = token.clone();
+                }
+                let _ipc_metric = crate::observability::KernelSubstrateIpcRoundtrip::start(
+                    ctx.observability.as_ref(),
+                    crate::observability::IPC_ROLE_PLANNER,
+                    crate::observability::IPC_MSG_KIND_CUSTOM_TOOL_INVOCATION,
+                );
+                let ack = handle_custom_tool_invocation(req, &ctx).await;
+                write_planner_frame(
+                    &mut stream,
+                    &IpcMessage::KernelCustomToolInvocationAck(ack),
+                    "KernelCustomToolInvocationAck",
+                )
+                .await?;
+            }
+
+            // ── CustomToolExecution ─────────────────────────────────────
+            // Host-owned custom tools and MCP adapters are executed by the
+            // kernel from the signed plan declaration. The guest supplies only
+            // a tool name plus JSON input; no host command, endpoint, or
+            // credential can be smuggled through the request.
+            IpcMessage::CustomToolExecution(mut req) => {
+                if let Some(token) = bound_session_token.as_ref() {
+                    req.session_token = token.clone();
+                }
+                let _ipc_metric = crate::observability::KernelSubstrateIpcRoundtrip::start(
+                    ctx.observability.as_ref(),
+                    crate::observability::IPC_ROLE_PLANNER,
+                    crate::observability::IPC_MSG_KIND_CUSTOM_TOOL_INVOCATION,
+                );
+                let resp = crate::ipc::custom_tools::handle_kernel_execution(req, &ctx).await;
+                write_planner_frame(
+                    &mut stream,
+                    &IpcMessage::KernelCustomToolExecutionResponse(resp),
+                    "KernelCustomToolExecutionResponse",
+                )
+                .await?;
+            }
+
             // ── PlannerExitNotice ─────────────────────────────────
             // `INV-FAILURE-REASON-CONCRETE-01`. The planner ships
             // its structured exit outcome (max_turns hit / token
@@ -855,6 +902,234 @@ where
         idle_watchdog_fired,
         idle_watchdog_threshold_secs: idle_threshold_secs,
     })
+}
+
+async fn handle_custom_tool_invocation(
+    req: raxis_types::CustomToolInvocationRequest,
+    ctx: &Arc<HandlerContext>,
+) -> raxis_types::CustomToolInvocationAck {
+    fn reject(
+        request_id: uuid::Uuid,
+        reason: impl Into<String>,
+    ) -> raxis_types::CustomToolInvocationAck {
+        raxis_types::CustomToolInvocationAck {
+            request_id,
+            accepted: false,
+            reason: Some(reason.into()),
+        }
+    }
+    fn is_lower_tool_name(s: &str) -> bool {
+        let bytes = s.as_bytes();
+        !bytes.is_empty()
+            && bytes.len() <= 64
+            && bytes[0].is_ascii_lowercase()
+            && bytes[1..]
+                .iter()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+    }
+    fn is_sha256_hex(s: &str) -> bool {
+        s.len() == 64
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+    fn byte_report_is_well_formed(report: &raxis_types::CustomToolByteReport) -> bool {
+        report.bytes_captured <= report.bytes_total && is_sha256_hex(&report.sha256)
+    }
+
+    if req.session_token.is_empty() {
+        return reject(
+            req.request_id,
+            "custom tool audit requires a session-bound stream or session token",
+        );
+    }
+    if !is_lower_tool_name(&req.tool_name) {
+        return reject(
+            req.request_id,
+            "custom tool audit carried invalid tool_name",
+        );
+    }
+    if !is_sha256_hex(&req.command_argv_sha256)
+        || !byte_report_is_well_formed(&req.stdin)
+        || !byte_report_is_well_formed(&req.stdout)
+        || !byte_report_is_well_formed(&req.stderr)
+    {
+        return reject(
+            req.request_id,
+            "custom tool audit carried invalid byte or digest shape",
+        );
+    }
+    match req.execution_locality.as_str() {
+        "guest_subprocess" => {}
+        "host_subprocess" | "host_mcp" | "remote_mcp" => {
+            return reject(
+                req.request_id,
+                "host-owned custom tools must be executed by the kernel, not reported by the guest",
+            );
+        }
+        _ => return reject(req.request_id, "custom tool audit carried invalid locality"),
+    }
+
+    let token = req.session_token.clone();
+    let store = Arc::clone(&ctx.store);
+    let session = match tokio::task::spawn_blocking(move || {
+        crate::authority::session::get_active_session_by_token(&token, &store)
+    })
+    .await
+    {
+        Ok(Ok(session)) => session,
+        Ok(Err(e)) => {
+            return reject(
+                req.request_id,
+                format!("custom tool audit session auth failed: {e}"),
+            );
+        }
+        Err(e) => {
+            return reject(
+                req.request_id,
+                format!("custom tool audit session auth task failed: {e}"),
+            );
+        }
+    };
+    if req.session_id != session.session_id {
+        return reject(req.request_id, "custom tool audit session_id mismatch");
+    }
+    if session.session_agent_type != Some(raxis_types::SessionAgentType::Executor) {
+        return reject(req.request_id, "custom tools are executor-session only");
+    }
+    match session.initiative_id.as_deref() {
+        Some(initiative_id) if initiative_id == req.initiative_id => {}
+        Some(_) => return reject(req.request_id, "custom tool audit initiative_id mismatch"),
+        None => {
+            return reject(
+                req.request_id,
+                "custom tool audit session has no initiative binding",
+            );
+        }
+    }
+
+    let task_lookup = {
+        let store = Arc::clone(&ctx.store);
+        let task_id = req.task_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = store.lock_sync();
+            conn.query_row(
+                &format!(
+                    "SELECT initiative_id, session_id FROM {tasks} WHERE task_id = ?1",
+                    tasks = raxis_store::Table::Tasks.as_str(),
+                ),
+                rusqlite::params![task_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => "task not found".to_owned(),
+                other => format!("task lookup failed: {other}"),
+            })
+        })
+        .await
+    };
+    let (task_initiative_id, task_session_id) = match task_lookup {
+        Ok(Ok(row)) => row,
+        Ok(Err(e)) => return reject(req.request_id, e),
+        Err(e) => return reject(req.request_id, format!("task lookup task failed: {e}")),
+    };
+    if task_initiative_id != req.initiative_id {
+        return reject(req.request_id, "custom tool audit task initiative mismatch");
+    }
+    match task_session_id.as_deref() {
+        Some(sid) if sid == session.session_id => {}
+        Some(_) => return reject(req.request_id, "custom tool audit task session mismatch"),
+        None => {
+            return reject(
+                req.request_id,
+                "custom tool audit task has no session binding",
+            );
+        }
+    }
+
+    let key = crate::initiatives::plan_registry::TaskKey::new(&req.initiative_id, &req.task_id);
+    let Some(fields) = ctx.plan_registry.get(&key) else {
+        return reject(req.request_id, "custom tool audit plan registry miss");
+    };
+    let Some(bundle_json) = fields.custom_tools_json.as_deref() else {
+        return reject(
+            req.request_id,
+            "custom tool audit task has no signed tool bundle",
+        );
+    };
+    let signed =
+        match crate::ipc::custom_tools::signed_custom_tool_metadata(bundle_json, &req.tool_name) {
+            Ok(metadata) => metadata,
+            Err(e) => return reject(req.request_id, e),
+        };
+    if signed.execution_locality != "guest_subprocess" {
+        return reject(
+            req.request_id,
+            "custom tool audit resolved to a host-owned tool; guest report rejected",
+        );
+    }
+    if req.profile_name != signed.profile_name {
+        return reject(
+            req.request_id,
+            "custom tool audit profile_name does not match signed tool bundle",
+        );
+    }
+    if req.execution_locality != signed.execution_locality {
+        return reject(
+            req.request_id,
+            "custom tool audit locality does not match signed tool bundle",
+        );
+    }
+    if req.command_argv_sha256 != signed.command_argv_sha256 {
+        return reject(
+            req.request_id,
+            "custom tool audit argv digest does not match signed tool bundle",
+        );
+    }
+    if req.timeout_ms != signed.timeout_ms {
+        return reject(
+            req.request_id,
+            "custom tool audit timeout does not match signed tool bundle",
+        );
+    }
+
+    let kind = raxis_audit_tools::AuditEventKind::CustomToolInvoked {
+        tool_name: req.tool_name.clone(),
+        profile_name: signed.profile_name.clone(),
+        execution_locality: signed.execution_locality.clone(),
+        outcome: req.outcome.as_str().to_owned(),
+        duration_ms: req.duration_ms,
+        exit_code: req.exit_code,
+        signal: req.signal,
+        timeout_ms: signed.timeout_ms,
+        command_argv_sha256: signed.command_argv_sha256.clone(),
+        stdin_bytes_total: req.stdin.bytes_total,
+        stdin_sha256: req.stdin.sha256.clone(),
+        stdout_bytes_total: req.stdout.bytes_total,
+        stdout_bytes_captured: req.stdout.bytes_captured,
+        stdout_sha256: req.stdout.sha256.clone(),
+        stdout_truncated: req.stdout.truncated,
+        stderr_bytes_total: req.stderr.bytes_total,
+        stderr_bytes_captured: req.stderr.bytes_captured,
+        stderr_sha256: req.stderr.sha256.clone(),
+        stderr_truncated: req.stderr.truncated,
+        error: req.error.clone(),
+    };
+    match ctx.audit.emit(
+        kind,
+        Some(&session.session_id),
+        Some(&req.task_id),
+        Some(&req.initiative_id),
+    ) {
+        Ok(_) => raxis_types::CustomToolInvocationAck {
+            request_id: req.request_id,
+            accepted: true,
+            reason: None,
+        },
+        Err(e) => reject(
+            req.request_id,
+            format!("custom tool audit sink write failed: {e}"),
+        ),
+    }
 }
 
 async fn resolve_bound_session_token(
@@ -1745,10 +2020,14 @@ pub(crate) mod planner_dispatch_log {
             IpcMessage::IntentRequest(_) => "IntentRequest",
             IpcMessage::EscalationRequest(_) => "EscalationRequest",
             IpcMessage::PlannerFetchRequest(_) => "PlannerFetchRequest",
+            IpcMessage::CustomToolInvocation(_) => "CustomToolInvocation",
+            IpcMessage::CustomToolExecution(_) => "CustomToolExecution",
             IpcMessage::PlannerExitNotice { .. } => "PlannerExitNotice",
             IpcMessage::KernelIntentResponse(_) => "KernelIntentResponse",
             IpcMessage::KernelEscalationResponse(_) => "KernelEscalationResponse",
             IpcMessage::KernelPlannerFetchResponse(_) => "KernelPlannerFetchResponse",
+            IpcMessage::KernelCustomToolInvocationAck(_) => "KernelCustomToolInvocationAck",
+            IpcMessage::KernelCustomToolExecutionResponse(_) => "KernelCustomToolExecutionResponse",
             IpcMessage::KernelPlannerExitNoticeAck => "KernelPlannerExitNoticeAck",
             IpcMessage::WitnessSubmission(_) => "WitnessSubmission",
             IpcMessage::WitnessAck { .. } => "WitnessAck",
@@ -2184,6 +2463,53 @@ mod planner_dispatch_log_tests {
         assert_eq!(
             planner_dispatch_log::ipc_message_variant_name(&escalation),
             "EscalationRequest"
+        );
+
+        let zero_report = raxis_types::CustomToolByteReport {
+            bytes_total: 0,
+            bytes_captured: 0,
+            sha256: "0".repeat(64),
+            truncated: false,
+        };
+        let custom_tool =
+            IpcMessage::CustomToolInvocation(raxis_types::CustomToolInvocationRequest {
+                request_id: Uuid::nil(),
+                session_token: String::new(),
+                session_id: "session-1".to_owned(),
+                task_id: "task-1".to_owned(),
+                initiative_id: "initiative-1".to_owned(),
+                tool_name: "custom_tool".to_owned(),
+                profile_name: "repo_tools".to_owned(),
+                execution_locality: "guest_subprocess".to_owned(),
+                command_argv_sha256: "0".repeat(64),
+                timeout_ms: 1000,
+                outcome: raxis_types::CustomToolInvocationOutcome::Success,
+                duration_ms: 1,
+                exit_code: Some(0),
+                signal: None,
+                stdin: zero_report.clone(),
+                stdout: zero_report.clone(),
+                stderr: zero_report,
+                error: None,
+            });
+        assert_eq!(
+            planner_dispatch_log::ipc_message_variant_name(&custom_tool),
+            "CustomToolInvocation"
+        );
+
+        let custom_tool_execution =
+            IpcMessage::CustomToolExecution(raxis_types::CustomToolExecutionRequest {
+                request_id: Uuid::nil(),
+                session_token: String::new(),
+                session_id: "session-1".to_owned(),
+                task_id: "task-1".to_owned(),
+                initiative_id: "initiative-1".to_owned(),
+                tool_name: "custom_tool".to_owned(),
+                input: serde_json::json!({ "ok": true }),
+            });
+        assert_eq!(
+            planner_dispatch_log::ipc_message_variant_name(&custom_tool_execution),
+            "CustomToolExecution"
         );
 
         let witness = IpcMessage::WitnessSubmission(fixture_witness("x"));

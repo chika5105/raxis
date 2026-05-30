@@ -126,8 +126,8 @@ The safe pattern is deliberately narrow:
 - Keep `timeout_seconds` short. The kernel and planner enforce a hard
   cap so tools cannot run forever.
 - Copy the generated `[profiles.<name>]` block into `plan.toml`.
-- Set `profile = "<name>"` on each Executor task that should receive
-  those tools.
+- Set `profiles = ["repo_tools", "db_tools"]` on each Executor task that
+  should receive those shared tool bundles.
 
 Validate from the dashboard, then validate the complete plan:
 
@@ -150,6 +150,12 @@ Failed, Quarantined). Clicking an initiative opens its task DAG:
   `Running`, `Completed`, `Failed`, `Aborted`).
 - **Task detail panel.** Per-task `path_allowlist`, `clone_strategy`,
   `evaluation_sha`, latest verifier verdicts, retry counters.
+- **Gate nodes and witness chips.** Mechanical gates render as dashed
+  DAG nodes with source/hook labels: policy gate, per-task verifier,
+  plan integration verifier, or policy integration verifier. `Pending`
+  means a verifier run is still outstanding; `Pass`, `Fail`,
+  `Inconclusive`, `SpawnFailed`, `ProcessFailed`, and `Timeout` are
+  terminal verifier outcomes.
 - **Session detail.** Each task that spawned a VM gets a session row
   with the live status of its credential proxies, egress decisions,
   and the linked git worktree on the host.

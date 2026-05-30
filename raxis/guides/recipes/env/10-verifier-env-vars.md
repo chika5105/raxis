@@ -132,7 +132,7 @@ check.
 | `RAXIS_VERIFIER_TOKEN missing` | Verifier was launched outside the kernel's spawn path. Don't run it manually. |
 | `connect: $RAXIS_KERNEL_SOCKET No such file` | The kernel exited / crashed mid-verifier. Check `<data-dir>/runtime/`. |
 | Witness submitted but kernel ignores it | Token mismatch (token was reused or stale). The kernel emits `WitnessSubmissionRejected` with the reason. |
-| Kernel times out the verifier | The verifier exceeded `[[gates]] max_wall_seconds` or per-task `max_wall_seconds`. Raise the cap or fix the verifier's runtime. |
+| Kernel times out the verifier | The verifier exceeded `[[gates]] max_wall_seconds` or the per-task `timeout`. Raise the cap or fix the verifier's runtime. |
 
 ---
 

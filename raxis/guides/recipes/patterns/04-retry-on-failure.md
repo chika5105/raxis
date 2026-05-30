@@ -50,6 +50,8 @@ description = "Migrate auth module"
 [workspace]
 name        = "auth-migration"
 lane_id     = "default"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id              = "migrate-auth"
@@ -57,7 +59,8 @@ session_agent_type   = "Executor"
 clone_strategy       = "sparse"
 path_allowlist       = ["src/auth/", "tests/auth/"]
 predecessors         = []
-description          = """Port src/auth/ from session-cookie middleware to JWT."""
+description        = "Migrate Auth"
+prompt             = """Port src/auth/ from session-cookie middleware to JWT."""
 
 # Be explicit. Operator-declared ceilings document budget intent
 # and override the kernel defaults (3 / 2). A flaky test suite
@@ -72,7 +75,8 @@ session_agent_type   = "Reviewer"
 clone_strategy       = "blobless"
 path_allowlist       = ["src/auth/", "tests/auth/"]
 predecessors         = ["migrate-auth"]
-description          = """Verify the JWT migration preserves all session lifecycle invariants."""
+description        = "Review Auth"
+prompt             = """Verify the JWT migration preserves all session lifecycle invariants."""
 
 [orchestrator]
 cross_cutting_artifacts = []

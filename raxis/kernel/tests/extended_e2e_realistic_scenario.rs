@@ -84,11 +84,12 @@ use extended_e2e_support::{
         bootstrap_with_custom_cert, build_operator_key, enable_gateway_in_policy,
         locate_executor_worktree_via_chain, locate_session_id_for_task, maybe_refresh_examples,
         poll_for_dual_lifecycle_completion, realism_workspace_root, realistic_lifecycle_deadline,
-        reap_avf_orphan_vms, require_anthropic_dev_key, require_canonical_images,
-        require_disk_hygiene, require_gateway_binary, require_gcp_adc, require_tcp_reachable,
-        resolved_install_dir, seed_realistic_main_repository, spawn_kernel_normal,
-        walk_chain_or_panic, write_credentials, write_provider_credentials, ExampleRefreshInputs,
-        OperatorIpc, LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED, SHUTDOWN_DEADLINE,
+        reap_avf_orphan_vms, require_canonical_images, require_disk_hygiene,
+        require_gateway_binary, require_gcp_adc, require_live_provider_dev_keys,
+        require_tcp_reachable, resolved_install_dir, seed_realistic_main_repository,
+        spawn_kernel_normal, walk_chain_or_panic, write_credentials, write_provider_credentials,
+        ExampleRefreshInputs, OperatorIpc, LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED,
+        SHUTDOWN_DEADLINE,
     },
     multi_initiative::{
         sibling_plan_toml, MultiInitiativeIsolationWitness, SIBLING_LANE_ID,
@@ -99,7 +100,7 @@ use extended_e2e_support::{
     plan_realistic::{
         realistic_plan_toml, TASK_ALLOWLIST_POSITIVE, TASK_CREDENTIAL_SUBSTITUTION_CANARY,
         TASK_DEP_FETCH_EVIDENCE, TASK_LINT_DEFECT, TASK_MATERIALIZE, TASK_SERVICE_ROUND_TRIP,
-        TASK_TRANSPARENT_PROXY_REALSCRIPTS, TASK_XFILE_REFACTOR,
+        TASK_TOOLING_MCP_UNITY, TASK_TRANSPARENT_PROXY_REALSCRIPTS, TASK_XFILE_REFACTOR,
     },
     reviewer_substantive_disagreement::ReviewerSubstantiveDisagreementWitness,
     seeds::{
@@ -111,6 +112,7 @@ use extended_e2e_support::{
         render_failures, seed_mongodb, seed_mssql, seed_mysql, seed_postgres, seed_redis,
         seed_smtp, WitnessScope,
     },
+    tooling_mcp_evidence::{self, ToolingMcpEvidenceWitness},
     transparent_proxy_evidence::{
         self as tp_evidence, TransparentProxyExpectations, WRAPPER_SUMMARY_PATH,
     },
@@ -146,7 +148,8 @@ fn realistic_session_lifecycle() {
              flow:\n  \
              1. docker compose -f live-e2e/docker-compose.extended.e2e.yml \
              up -d --wait\n  \
-             2. ensure raxis/.env carries ANTHROPIC-API-DEV-KEY=sk-ant-...\n  \
+             2. ensure raxis/.env carries ANTHROPIC-API-DEV-KEY=..., \
+             GEMINI-API-DEV-KEY=..., and OPEN-AI-API-DEV-KEY=...\n  \
              3. ensure ~/.config/gcloud/application_default_credentials.json \
              exists\n  \
              4. export RAXIS_INSTALL_DIR=\"${{RAXIS_INSTALL_DIR:-/usr/local/lib/raxis}}\"\n  \
@@ -192,7 +195,7 @@ fn realistic_session_lifecycle() {
     preflight_seed_fixtures();
     require_tcp_reachable(PG_HOST_PORT, "Postgres docker container");
     require_tcp_reachable(MONGO_HOST_PORT, "MongoDB docker container");
-    require_anthropic_dev_key();
+    require_live_provider_dev_keys();
     require_gcp_adc();
     require_gateway_binary();
     require_canonical_images();
@@ -472,6 +475,13 @@ fn realistic_session_lifecycle() {
     let dep_fetch_witness =
         DepFetchEvidenceWitness::for_realistic_plan(&dep_fetch_session_id, &dep_fetch_workdir);
 
+    // Tooling / MCP custom tools: dashboard-visible primary-plan
+    // task proving BYO tools arrive as bounded Executor-only
+    // custom tools and produce operator-inspectable evidence.
+    let tooling_workdir =
+        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, TASK_TOOLING_MCP_UNITY);
+    let tooling_witness = ToolingMcpEvidenceWitness::for_realistic_plan(&tooling_workdir);
+
     let global_witnesses: Vec<Box<dyn EnforcementWitness>> = vec![
         Box::new(NoSecurityViolationWitness),
         Box::new(PathAllowlistPositiveWitness::for_realistic_plan(
@@ -480,6 +490,7 @@ fn realistic_session_lifecycle() {
         Box::new(isolation),
         Box::new(crash_witness),
         Box::new(dep_fetch_witness),
+        Box::new(tooling_witness),
     ];
     extended_e2e_support::witnesses::assert_all_satisfied(&global_witnesses, &chain);
     eprintln!("[realism-e2e] all chain-side + on-disk witnesses satisfied");
@@ -591,6 +602,14 @@ fn realistic_session_lifecycle() {
     tier3.add_worktree(
         format!("primary-services ({})", &initiative_primary),
         &service_workdir,
+    );
+    tier3.add_worktree(
+        format!(
+            "primary-tooling-mcp ({}; {})",
+            &initiative_primary,
+            tooling_mcp_evidence::EVIDENCE_FILE_REL_PATH,
+        ),
+        &tooling_workdir,
     );
     // Surface the transparent-proxy worktree so an operator
     // inspecting a Tier-3 failure can `cat
@@ -818,6 +837,22 @@ fn wiring_smoke_test() {
         dep_fetch_witness.diagnostic(&dep_fetch_chain),
     );
     eprintln!("[realism-e2e] smoke: DepFetchEvidenceWitness satisfied");
+
+    // ToolingMcpEvidence: synthetic commit chain + committed evidence
+    // file. This ensures the full realistic primary plan's custom
+    // tooling task remains wired into the smoke path even when live
+    // gates are off.
+    let tooling_tmp = tempfile::tempdir().unwrap();
+    tooling_mcp_evidence::write_synthetic_evidence(tooling_tmp.path())
+        .expect("smoke: write_synthetic_tooling_evidence");
+    let tooling_chain = tooling_mcp_evidence::synthetic_commit_chain();
+    let tooling_witness = ToolingMcpEvidenceWitness::for_realistic_plan(tooling_tmp.path());
+    assert!(
+        tooling_witness.satisfied_by(&tooling_chain),
+        "smoke: tooling-mcp-evidence witness on synthetic chain: {}",
+        tooling_witness.diagnostic(&tooling_chain),
+    );
+    eprintln!("[realism-e2e] smoke: ToolingMcpEvidenceWitness satisfied");
 
     // ReviewerSubstantiveDisagreement: synthetic chain + a fixture tasks.db.
     let db_path = seed_minimal_tasks_db(

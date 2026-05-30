@@ -131,19 +131,20 @@ raxis policy sign /tmp/policy.toml --key /tmp/op.key
 
 ```toml
 [[tasks.verifiers]]
-id          = "rg-verifier-v1"
-gate        = "pre_review"     # or "pre_merge", "pre_admit"
-required    = true
+name       = "rg_verifier_v1"
+image      = "rg-verifier-v1"
+command    = "rg --line-number --hidden --glob '!.git/*' FIXME src/"
+timeout    = "30s"
+on_failure = "block_review"
 ```
 
-`gate` controls when the kernel runs the verifier:
+`on_failure` controls whether a non-pass blocks reviewer activation
+or records an audit-only warning:
 
-- `pre_admit` — before the task starts; failure prevents admission.
-- `pre_review` — between executor finish and reviewer start.
-- `pre_merge` — after reviewer approves but before the merge.
-
-`required = true` makes failure abort the task. `required = false`
-records the witness but doesn't gate.
+- `block_review` — prevent downstream reviewers from spawning until
+  the executor repairs the task.
+- `warn_only` — record the witness and surface a dashboard/audit
+  warning without blocking review.
 
 ### 5. Test
 
@@ -166,7 +167,7 @@ raxis log <init_id> --kind WitnessRecorded
 |---|---|
 | `verifiers install: signature invalid` | The signing key isn't trusted. Confirm `[[vm_images]].signed_by` matches your `RAXIS_IMAGE_SIGNING_KEY`'s kid. |
 | Verifier exits with `RAXIS_KERNEL_SOCKET unset` | The kernel isn't passing the env; check the verifier image is registered with `purpose = "verifier"` (executors get a different env). |
-| Verifier produces a witness but the task still fails | Check `class` field; only `pass` is treated as success unless `required = false`. |
+| Verifier produces a witness but the task still blocks review | Check the result class; `block_review` requires `Pass`. Use `warn_only` only for audit-only checks. |
 | Image too large | Verifier images should be tiny. Use `cgr.dev/chainguard/static`, distroless, or scratch. The kernel pulls on first use. |
 
 ---

@@ -29,6 +29,7 @@ nothing kills the task on time alone.
 ```toml
 [[tasks]]
 task_id                = "fix-typo"
+prompt             = """Complete Fix Typo according to this plan's acceptance criteria."""
 session_agent_type     = "Executor"
 clone_strategy         = "blobless"
 path_allowlist         = ["README.md"]
@@ -44,6 +45,8 @@ the agent is doing something wrong; the cap forces a fail-loud.
 ```toml
 [[tasks]]
 task_id                = "rebuild-from-scratch"
+description        = "Rebuild From Scratch"
+prompt             = """Complete Rebuild From Scratch according to this plan's acceptance criteria."""
 session_agent_type     = "Executor"
 clone_strategy         = "full"
 path_allowlist         = ["target/", "Cargo.lock"]
@@ -58,6 +61,7 @@ hour; budget for it.
 ```toml
 [[tasks]]
 task_id                = "code-reviewer"
+prompt             = """Complete Code Reviewer according to this plan's acceptance criteria."""
 session_agent_type     = "Reviewer"
 clone_strategy         = "blobless"
 path_allowlist         = ["src/auth/"]

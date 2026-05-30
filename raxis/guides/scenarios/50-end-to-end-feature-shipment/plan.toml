@@ -9,6 +9,8 @@ A realistic feature: add a /version endpoint that returns crate
 [workspace]
 name = "End To End Feature Shipment"
 lane_id     = "e2e-feature-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [budget]
 max_tokens          = 200000

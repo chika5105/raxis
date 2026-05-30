@@ -47,6 +47,7 @@ const TASKS: &str = Table::Tasks.as_str();
 const TASK_INTENT_RANGES: &str = Table::TaskIntentRanges.as_str();
 const INITIATIVES: &str = Table::Initiatives.as_str();
 const TASK_EXPORTED_PATH_SNAPSHOTS: &str = Table::TaskExportedPathSnapshots.as_str();
+const WITNESS_RECORDS: &str = Table::WitnessRecords.as_str();
 const SUBTASK_ACTIVATIONS: &str = Table::SubtaskActivations.as_str();
 const SESSIONS: &str = Table::Sessions.as_str();
 const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
@@ -446,6 +447,43 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
             return Err((code, state));
         }
         PreGateOutcome::EarlyResponse(resp) => {
+            if matches!(req.intent_kind, IntentKind::CompleteTask)
+                && resp.task_state == TaskState::GatesPending
+            {
+                let task_id_for_lookup = req.task_id.as_str().to_owned();
+                let store_for_lookup = Arc::clone(&ctx.store);
+                let gated_row = tokio::task::spawn_blocking(move || {
+                    let conn = store_for_lookup.lock_sync();
+                    conn.query_row(
+                        &format!(
+                            "SELECT initiative_id, evaluation_sha FROM {TASKS} WHERE task_id = ?1"
+                        ),
+                        rusqlite::params![&task_id_for_lookup],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                    )
+                    .ok()
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some((initiative_id, Some(evaluation_sha))) = gated_row {
+                    let worktree = session
+                        .worktree_root
+                        .as_deref()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| ctx.data_dir.clone());
+                    gates::spawn_task_verifiers_for_task(
+                        &initiative_id,
+                        req.task_id.as_str(),
+                        &evaluation_sha,
+                        &worktree,
+                        &policy_snapshot,
+                        ctx,
+                    )
+                    .await;
+                }
+            }
+
             // ── V2 Step 6 — Orchestrator continuation re-spawn ────────────
             //
             // The Orchestrator in V2.4 is short-lived per decision: it
@@ -584,7 +622,7 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
 
     // Phase B post-processing — pure sync, no `lock_sync`, kept on the
     // async path so we don't hop pools just to inspect an enum.
-    let pending_gates: Vec<String>;
+    let mut pending_gates: Vec<String>;
     let warn_stale: bool;
     match &gate_result {
         GateEvalResult::ClaimInsufficient { .. } => {
@@ -643,6 +681,30 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
         }
     }
 
+    if matches!(req.intent_kind, IntentKind::IntegrationMerge) {
+        let task_id_for_integration = req.task_id.as_str().to_owned();
+        let initiative_for_integration = pre_state.task.initiative_id.clone();
+        let evaluation_for_integration = pre_state.head_sha_raw.clone();
+        let store_for_integration = Arc::clone(&ctx.store);
+        let registry_for_integration = Arc::clone(&ctx.plan_registry);
+        let policy_for_integration = Arc::clone(&policy_snapshot);
+        let mut integration_missing = tokio::task::spawn_blocking(move || {
+            missing_blocking_integration_merge_verifiers(
+                &task_id_for_integration,
+                &initiative_for_integration,
+                &evaluation_for_integration,
+                store_for_integration.as_ref(),
+                registry_for_integration.as_ref(),
+                policy_for_integration.as_ref(),
+            )
+        })
+        .await
+        .map_err(|_| (PlannerErrorCode::FailMissingWitness, pre_state.task_state))?;
+        pending_gates.append(&mut integration_missing);
+        pending_gates.sort();
+        pending_gates.dedup();
+    }
+
     // ── Phase C (spawn_blocking) — Steps 10-13 + final response ───────────
     let task_id_owned = req.task_id.as_str().to_owned();
     let intent_kind = req.intent_kind;
@@ -683,6 +745,36 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
                 ctx,
             )
             .await;
+            if matches!(intent_kind, IntentKind::IntegrationMerge) {
+                let initiative_for_spawn = {
+                    let task_id_for_lookup = task_id_for_spawn.clone();
+                    let store_for_lookup = Arc::clone(&ctx.store);
+                    tokio::task::spawn_blocking(move || {
+                        let conn = store_for_lookup.lock_sync();
+                        conn.query_row(
+                            &format!("SELECT initiative_id FROM {TASKS} WHERE task_id = ?1"),
+                            rusqlite::params![&task_id_for_lookup],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .ok()
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                };
+                if let Some(initiative_id) = initiative_for_spawn {
+                    gates::spawn_integration_merge_verifiers_for_task(
+                        &initiative_id,
+                        task_id_for_spawn.as_str(),
+                        evaluation_sha_for_spawn.as_str(),
+                        &worktree_for_spawn,
+                        &pending_gates_for_spawn,
+                        &policy_for_spawn,
+                        ctx,
+                    )
+                    .await;
+                }
+            }
         }
     }
 
@@ -3154,6 +3246,10 @@ fn handle_complete_task(
         .filter(|f| f.path_export_to_successors)
         .map(|f| compute_export_set(&touched_vec, &f.path_export_globs))
         .unwrap_or_default();
+    let task_verifiers = plan_fields
+        .as_ref()
+        .map(|f| f.task_verifiers.clone())
+        .unwrap_or_default();
 
     // ── 7. Atomic commit — Running → Completed + snapshot inserts ───────
     //
@@ -3169,6 +3265,61 @@ fn handle_complete_task(
     // INV-STORE-02 atomicity: a crash between the status flip
     // and the SHA stamp is impossible.
     let head_sha_for_eval = req.head_sha.as_ref().map(|s| s.as_str().to_owned());
+    let missing_task_verifiers = missing_blocking_task_verifiers(
+        req.task_id.as_str(),
+        head_sha_for_eval.as_deref(),
+        &task_verifiers,
+        store,
+    );
+    if !missing_task_verifiers.is_empty() {
+        let gates_pending_record = commit_task_completion_gates_pending(
+            req.task_id.as_str(),
+            &export_paths,
+            head_sha_for_eval.as_deref(),
+            store,
+        )
+        .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+        emit_task_state_changed_audit(
+            ctx.audit.as_ref(),
+            &gates_pending_record,
+            Some(session_id.as_str()),
+        );
+
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"TaskVerifiersPending\",\
+             \"task_id\":\"{}\",\"missing\":{}}}",
+            req.task_id.as_str(),
+            missing_task_verifiers.len(),
+        );
+        if let Some(head_sha) = head_sha_for_eval.as_deref() {
+            copy_executor_closure_for_downstream(
+                req.task_id.as_str(),
+                head_sha,
+                &task,
+                &worktree_path,
+                ctx,
+            );
+        }
+
+        let remaining = lane_budget_snapshot(&task.lane_id, policy, store);
+        emit_complete_task_accepted_audit(
+            ctx.audit.as_ref(),
+            &req,
+            session_id,
+            seq,
+            &task.initiative_id,
+            remaining.admission_units,
+        );
+
+        return Ok(IntentResponse {
+            sequence_number: seq,
+            task_state: TaskState::GatesPending,
+            outcome: IntentOutcome::Accepted {
+                remaining_budget: remaining,
+                warn_delegation_stale: false,
+            },
+        });
+    }
     let completion_record = commit_task_completion(
         req.task_id.as_str(),
         &task.lane_id,
@@ -3316,6 +3467,22 @@ fn handle_complete_task(
         }
     }
 
+    if task_verifiers
+        .iter()
+        .any(|v| matches!(v.on_failure, raxis_policy::TaskVerifierOnFailure::WarnOnly))
+    {
+        if let Some(head_sha) = head_sha_for_eval.as_deref() {
+            rt_handle.block_on(gates::spawn_warn_only_task_verifiers_for_task(
+                &task.initiative_id,
+                req.task_id.as_str(),
+                head_sha,
+                &worktree_path,
+                policy,
+                ctx,
+            ));
+        }
+    }
+
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"TaskCompleted\",\"task_id\":\"{}\",\
          \"exported_paths\":{}}}",
@@ -3337,29 +3504,14 @@ fn handle_complete_task(
     // attribute the on-disk worktree write to. Best-effort post-commit
     // per `kernel-store.md §2.5.2`. The lane-budget snapshot reuses
     // the value already computed above for the wire response.
-    let head_sha_audit = req.head_sha.as_ref().map(|s| s.as_str().to_owned());
-    let base_sha_audit = req.base_sha.as_ref().map(|s| s.as_str().to_owned());
-    if let Err(e) = ctx.audit.emit(
-        raxis_audit_tools::AuditEventKind::IntentAccepted {
-            task_id: req.task_id.as_str().to_owned(),
-            session_id: session_id.as_str().to_owned(),
-            intent_kind: "CompleteTask".to_owned(),
-            base_sha: base_sha_audit,
-            head_sha: head_sha_audit,
-            sequence_number: seq,
-            remaining_units: remaining.admission_units,
-        },
-        Some(session_id.as_str()),
-        Some(req.task_id.as_str()),
-        Some(task.initiative_id.as_str()),
-    ) {
-        eprintln!(
-            "{{\"level\":\"error\",\"event\":\"AuditEmitFailed\",\
-             \"audit_event\":\"IntentAccepted\",\"intent_kind\":\"CompleteTask\",\
-             \"task_id\":\"{}\",\"reason\":\"{e}\"}}",
-            req.task_id.as_str(),
-        );
-    }
+    emit_complete_task_accepted_audit(
+        ctx.audit.as_ref(),
+        &req,
+        session_id,
+        seq,
+        &task.initiative_id,
+        remaining.admission_units,
+    );
 
     Ok(IntentResponse {
         sequence_number: seq,
@@ -3369,6 +3521,39 @@ fn handle_complete_task(
             warn_delegation_stale: false,
         },
     })
+}
+
+fn emit_complete_task_accepted_audit(
+    audit: &dyn raxis_audit_tools::AuditSink,
+    req: &IntentRequest,
+    session_id: &SessionId,
+    seq: u64,
+    initiative_id: &str,
+    remaining_units: u64,
+) {
+    let head_sha_audit = req.head_sha.as_ref().map(|s| s.as_str().to_owned());
+    let base_sha_audit = req.base_sha.as_ref().map(|s| s.as_str().to_owned());
+    if let Err(e) = audit.emit(
+        raxis_audit_tools::AuditEventKind::IntentAccepted {
+            task_id: req.task_id.as_str().to_owned(),
+            session_id: session_id.as_str().to_owned(),
+            intent_kind: "CompleteTask".to_owned(),
+            base_sha: base_sha_audit,
+            head_sha: head_sha_audit,
+            sequence_number: seq,
+            remaining_units,
+        },
+        Some(session_id.as_str()),
+        Some(req.task_id.as_str()),
+        Some(initiative_id),
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"AuditEmitFailed\",\
+             \"audit_event\":\"IntentAccepted\",\"intent_kind\":\"CompleteTask\",\
+             \"task_id\":\"{}\",\"reason\":\"{e}\"}}",
+            req.task_id.as_str(),
+        );
+    }
 }
 
 type CompletionInputs = (Option<String>, Vec<(String, String)>);
@@ -3450,6 +3635,155 @@ fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<Strin
             }
         })
         .collect()
+}
+
+fn missing_blocking_task_verifiers(
+    task_id: &str,
+    evaluation_sha: Option<&str>,
+    verifiers: &[raxis_policy::TaskVerifierEntry],
+    store: &Store,
+) -> Vec<String> {
+    let Some(evaluation_sha) = evaluation_sha.filter(|s| !s.is_empty()) else {
+        return verifiers
+            .iter()
+            .filter(|v| {
+                matches!(
+                    v.on_failure,
+                    raxis_policy::TaskVerifierOnFailure::BlockReview
+                )
+            })
+            .map(|v| v.name.clone())
+            .collect();
+    };
+    let conn = store.lock_sync();
+    verifiers
+        .iter()
+        .filter(|v| {
+            matches!(
+                v.on_failure,
+                raxis_policy::TaskVerifierOnFailure::BlockReview
+            )
+        })
+        .filter(|v| {
+            let pass: rusqlite::Result<i64> = conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {WITNESS_RECORDS} \
+                     WHERE task_id = ?1 AND evaluation_sha = ?2 \
+                       AND gate_type = ?3 AND result_class = 'Pass'"
+                ),
+                rusqlite::params![task_id, evaluation_sha, &v.name],
+                |r| r.get(0),
+            );
+            pass.unwrap_or(0) == 0
+        })
+        .map(|v| v.name.clone())
+        .collect()
+}
+
+fn missing_blocking_integration_merge_verifiers(
+    task_id: &str,
+    initiative_id: &str,
+    evaluation_sha: &str,
+    store: &Store,
+    plan_registry: &crate::initiatives::PlanRegistry,
+    policy: &raxis_policy::PolicyBundle,
+) -> Vec<String> {
+    let conn = store.lock_sync();
+    let mut remaining = Vec::new();
+    let mut specs = Vec::new();
+    if let Some(orch) = plan_registry.orchestrator(initiative_id) {
+        specs.extend(orch.integration_merge_verifiers);
+    }
+    specs.extend(policy.integration_merge_verifiers().iter().cloned());
+
+    for verifier in specs {
+        if !matches!(
+            verifier.on_failure,
+            raxis_policy::IntegrationMergeVerifierOnFailure::BlockMerge
+        ) {
+            continue;
+        }
+        let pass: rusqlite::Result<i64> = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {WITNESS_RECORDS} \
+                 WHERE task_id = ?1 AND evaluation_sha = ?2 \
+                   AND gate_type = ?3 AND result_class = 'Pass'"
+            ),
+            rusqlite::params![task_id, evaluation_sha, &verifier.name],
+            |r| r.get(0),
+        );
+        if pass.unwrap_or(0) == 0 {
+            remaining.push(verifier.name);
+        }
+    }
+    remaining
+}
+
+fn copy_executor_closure_for_downstream(
+    task_id: &str,
+    head_sha: &str,
+    task: &TaskRow,
+    exec_worktree: &std::path::Path,
+    ctx: &HandlerContext,
+) {
+    let data_dir = ctx.data_dir.clone();
+    let orch_worktree =
+        crate::worktree_provisioning::orchestrator_worktree_path(&data_dir, &task.initiative_id);
+    if let Err(e) = crate::worktree_provisioning::copy_executor_commit_to_orchestrator_odb(
+        &orch_worktree,
+        exec_worktree,
+        task_id,
+        head_sha,
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"CompleteTaskCopyClosureFailed\",\
+             \"task_id\":\"{task_id}\",\"head_sha\":\"{head_sha}\",\
+             \"orch_worktree\":\"{}\",\"exec_worktree\":\"{}\",\
+             \"error\":\"{}\"}}",
+            orch_worktree.display(),
+            exec_worktree.display(),
+            e,
+        );
+    } else {
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"CompleteTaskCopiedClosure\",\
+             \"task_id\":\"{task_id}\",\"head_sha\":\"{head_sha}\"}}",
+        );
+
+        if let Some(base_sha) = task.base_sha.clone() {
+            let snap_res = crate::worktree_snapshot::snapshot_worktree(
+                &ctx.store,
+                &data_dir,
+                crate::worktree_snapshot::SnapshotInput {
+                    task_id: task_id.to_owned(),
+                    session_id: task.session_id.clone(),
+                    initiative_id: Some(task.initiative_id.clone()),
+                    trigger: crate::worktree_snapshot::SnapshotTrigger::ExecutorCommitCopy,
+                    worktree_root: exec_worktree.to_path_buf(),
+                    base_sha,
+                },
+            );
+            match snap_res {
+                Ok(rec) => {
+                    eprintln!(
+                        "{{\"level\":\"info\",\"event\":\"WorktreeSnapshotted\",\
+                         \"trigger\":\"ExecutorCommitCopy\",\"task_id\":\"{task_id}\",\
+                         \"snapshot_id\":\"{}\",\"head_sha\":\"{}\",\
+                         \"commit_count\":{}}}",
+                        rec.snapshot_id, rec.head_sha, rec.commit_count,
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"WorktreeSnapshotFailed\",\
+                         \"trigger\":\"ExecutorCommitCopy\",\"task_id\":\"{task_id}\",\
+                         \"error\":\"{}\"}}",
+                        e,
+                    );
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5444,6 +5778,47 @@ async fn handle_activate_sub_task(
         task_prompt: String,
     }
 
+    struct WorkerSessionInsert<'a> {
+        session_id: &'a str,
+        session_token: &'a str,
+        lineage_id: &'a str,
+        created_at: i64,
+        expires_at: i64,
+        agent_type: &'a str,
+        initiative_id: &'a str,
+    }
+
+    fn insert_worker_session_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        row: WorkerSessionInsert<'_>,
+    ) -> rusqlite::Result<usize> {
+        tx.execute(
+            &format!(
+                "INSERT INTO {SESSIONS} (
+                    session_id, role_id, session_token, sequence_number,
+                    worktree_root, base_sha, base_tracking_ref,
+                    lineage_id, fetch_quota, created_at, expires_at, revoked,
+                    session_agent_type, can_delegate, initiative_id
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,0,?13)"
+            ),
+            rusqlite::params![
+                row.session_id,
+                "Planner",
+                row.session_token,
+                0i64,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                row.lineage_id,
+                1000i64,
+                row.created_at,
+                row.expires_at,
+                row.agent_type,
+                row.initiative_id,
+            ],
+        )
+    }
+
     // `ActivateRejection` carries either the conventional
     // `(PlannerErrorCode, TaskState)` reject pair OR the structured
     // `INV-KERNEL-DAG-AUTHORITY-01` `DependencyNotMet` info the
@@ -5631,6 +6006,16 @@ async fn handle_activate_sub_task(
                 //     is the start of a new lineage; tying it to the
                 //     Orchestrator's lineage would conflate parent /
                 //     child trust scopes).
+                //
+                // `sessions.initiative_id` is an immutable authority
+                // back-edge for every planner-class session, not just
+                // coordinators. Host-owned custom tools and MCP adapters
+                // validate this row before touching host resources, and
+                // dashboard/session projections can attribute revoked
+                // worker sessions without depending on a live
+                // subtask_activations row. The subtask activation remains
+                // the per-attempt row; the session row is the
+                // per-principal binding.
                 let new_session_id = raxis_types::SessionId::new_v4();
                 let new_session_str = new_session_id.as_str().to_owned();
                 let new_lineage_id = uuid::Uuid::new_v4().to_string();
@@ -5653,29 +6038,17 @@ async fn handle_activate_sub_task(
                         raxis_types::SessionAgentType::Reviewer.as_sql_str()
                     }
                 };
-                tx.execute(
-                    &format!(
-                        "INSERT INTO {SESSIONS} (
-                        session_id, role_id, session_token, sequence_number,
-                        worktree_root, base_sha, base_tracking_ref,
-                        lineage_id, fetch_quota, created_at, expires_at, revoked,
-                        session_agent_type, can_delegate
-                     ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,0)"
-                    ),
-                    rusqlite::params![
-                        new_session_str,
-                        "Planner",
-                        session_token,
-                        0i64,
-                        Option::<String>::None,
-                        Option::<String>::None,
-                        Option::<String>::None,
-                        new_lineage_id,
-                        1000i64,
-                        now_secs,
+                insert_worker_session_in_tx(
+                    &tx,
+                    WorkerSessionInsert {
+                        session_id: &new_session_str,
+                        session_token: &session_token,
+                        lineage_id: &new_lineage_id,
+                        created_at: now_secs,
                         expires_at,
-                        agent_type_str,
-                    ],
+                        agent_type: agent_type_str,
+                        initiative_id: &initiative_id,
+                    },
                 )
                 .map_err(|_| {
                     ActivateRejection::standard(
@@ -8259,6 +8632,101 @@ fn commit_task_completion(
     Ok(record)
 }
 
+/// Atomically park a completed executor behind plan-declared task verifiers.
+///
+/// This is the `CompleteTask` analogue of Phase C's `GatesPending` path:
+/// the executor's head SHA and export snapshot are durable, but reviewer
+/// activation is blocked until the per-task verifier witnesses pass.
+fn commit_task_completion_gates_pending(
+    task_id: &str,
+    export_paths: &[String],
+    evaluation_sha: Option<&str>,
+    store: &Store,
+) -> Result<TaskTransitionRecord, ()> {
+    let mut conn = store.lock_sync();
+    let tx = conn.transaction().map_err(|_| ())?;
+
+    let record = transition_task_in_tx(
+        &tx,
+        task_id,
+        TaskState::GatesPending,
+        Some("task_verifiers_pending"),
+        TransitionActor::Kernel,
+    )
+    .map_err(|_| ())?;
+
+    if evaluation_sha.is_some() {
+        tx.execute(
+            &format!(
+                "UPDATE {TASKS} SET evaluation_sha = COALESCE(?1, evaluation_sha) \
+                 WHERE task_id = ?2",
+            ),
+            rusqlite::params![evaluation_sha, task_id],
+        )
+        .map_err(|_| ())?;
+    }
+
+    if !export_paths.is_empty() {
+        let mut stmt = tx
+            .prepare_cached(&format!(
+                "INSERT OR IGNORE INTO {TASK_EXPORTED_PATH_SNAPSHOTS} (task_id, path)
+             VALUES (?1, ?2)",
+            ))
+            .map_err(|_| ())?;
+        for p in export_paths {
+            stmt.execute(rusqlite::params![task_id, p])
+                .map_err(|_| ())?;
+        }
+    }
+
+    tx.commit().map_err(|_| ())?;
+    Ok(record)
+}
+
+/// Complete a task that was parked in `GatesPending` solely for
+/// plan-declared `[[tasks.verifiers]]`.
+///
+/// The FSM does not allow `GatesPending → Completed` directly, so this
+/// performs the legal normalization hops in one SQLite transaction and emits
+/// the resulting records post-commit. The final hop also releases the lane
+/// reservation, matching `commit_task_completion`.
+pub(crate) fn finalize_task_verifier_completion(
+    task_id: &str,
+    lane_id: &str,
+    session_id: Option<&str>,
+    store: &Store,
+    audit: &dyn raxis_audit_tools::AuditSink,
+) -> Result<Vec<TaskTransitionRecord>, ()> {
+    let mut conn = store.lock_sync();
+    let tx = conn.transaction().map_err(|_| ())?;
+
+    let mut records = Vec::with_capacity(3);
+    for next in [
+        TaskState::Admitted,
+        TaskState::Running,
+        TaskState::Completed,
+    ] {
+        let rec = transition_task_in_tx(&tx, task_id, next, None, TransitionActor::Kernel)
+            .map_err(|_| ())?;
+        records.push(rec);
+    }
+
+    if let Err(e) = crate::scheduler::budget::release_budget_in_tx(&tx, lane_id, task_id) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"ReleaseBudgetFailed\",\
+             \"task_id\":\"{task_id}\",\"lane_id\":\"{lane_id}\",\
+             \"reason\":\"{e}\"}}",
+        );
+        return Err(());
+    }
+
+    tx.commit().map_err(|_| ())?;
+    for rec in &records {
+        emit_task_state_changed_audit(audit, rec, session_id);
+    }
+    Ok(records)
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
@@ -9067,6 +9535,44 @@ mod tests {
             structured_output: None,
             batch_task_ids: None,
         }
+    }
+
+    #[test]
+    fn complete_task_accepted_audit_helper_emits_head_sha() {
+        let sink = raxis_test_support::FakeAuditSink::new();
+        let session = dummy_session_id();
+        let req = make_intent_for_classify(None, Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+
+        emit_complete_task_accepted_audit(&sink, &req, &session, 7, "init-audit", 42);
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            raxis_audit_tools::AuditEventKind::IntentAccepted {
+                task_id,
+                session_id,
+                intent_kind,
+                base_sha,
+                head_sha,
+                sequence_number,
+                remaining_units,
+            } => {
+                assert_eq!(task_id, "task-c7-cls");
+                assert_eq!(session_id, session.as_str());
+                assert_eq!(intent_kind, "CompleteTask");
+                assert!(base_sha.is_none());
+                assert_eq!(
+                    head_sha.as_deref(),
+                    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                );
+                assert_eq!(*sequence_number, 7);
+                assert_eq!(*remaining_units, 42);
+            }
+            other => panic!("expected IntentAccepted audit event, got {other:?}"),
+        }
+        assert_eq!(events[0].session_id.as_deref(), Some(session.as_str()));
+        assert_eq!(events[0].task_id.as_deref(), Some("task-c7-cls"));
+        assert_eq!(events[0].initiative_id.as_deref(), Some("init-audit"));
     }
 
     /// Wire surface: a `CompleteTask` whose `head_sha` is None

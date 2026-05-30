@@ -9,6 +9,8 @@ Add a function `parse_version(s: &str) -> Result<(u32, u32, u32),
 [workspace]
 name = "Api Contract Change"
 lane_id     = "api-contract-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "handler"

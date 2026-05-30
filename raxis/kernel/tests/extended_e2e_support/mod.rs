@@ -30,5 +30,6 @@ pub mod prompts;
 pub mod reviewer_substantive_disagreement;
 pub mod seeds;
 pub mod service_evidence;
+pub mod tooling_mcp_evidence;
 pub mod transparent_proxy_evidence;
 pub mod witnesses;

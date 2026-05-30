@@ -50,6 +50,8 @@ description = "Roll out percent-based pricing"
 [workspace]
 name        = "pricing-rollout"
 lane_id     = "default"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 # Stage 1: Land the gate (feature-flagged stub).
 [[tasks]]
@@ -58,7 +60,8 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/pricing/", "tests/pricing/"]
 predecessors       = []
-description        = """Add a `flat_fee` vs `percent_fee` enum behind the off-by-default `RAXIS_PRICING_PERCENT` flag. No behaviour change at runtime."""
+description        = "Pricing Stub"
+prompt             = """Add a `flat_fee` vs `percent_fee` enum behind the off-by-default `RAXIS_PRICING_PERCENT` flag. No behaviour change at runtime."""
 
 [[tasks]]
 task_id            = "review-stub"
@@ -66,7 +69,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/pricing/", "tests/pricing/"]
 predecessors       = ["pricing-stub"]
-description        = """Verify the gate exists, defaults to off, and is exercised by tests in both states."""
+description        = "Review Stub"
+prompt             = """Verify the gate exists, defaults to off, and is exercised by tests in both states."""
 
 # Stage 2: Real implementation. CANNOT START until Stage 1 is
 # Completed (`predecessors = ["review-stub"]` is the contract).
@@ -76,7 +80,8 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/pricing/", "tests/pricing/"]
 predecessors       = ["review-stub"]
-description        = """Implement percent-based pricing in the new `percent_fee` arm of the enum from stage 1. Flag remains off in production."""
+description        = "Pricing Impl"
+prompt             = """Implement percent-based pricing in the new `percent_fee` arm of the enum from stage 1. Flag remains off in production."""
 
 [[tasks]]
 task_id            = "review-impl"
@@ -84,7 +89,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/pricing/", "tests/pricing/"]
 predecessors       = ["pricing-impl"]
-description        = """Verify the percent-fee arithmetic (boundary tests, overflow, zero-fee corner)."""
+description        = "Review Impl"
+prompt             = """Verify the percent-fee arithmetic (boundary tests, overflow, zero-fee corner)."""
 
 # Stage 3: The flag flip. Touches a different path, must wait
 # for the impl to merge first.
@@ -94,7 +100,8 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["config/feature-flags.toml"]
 predecessors       = ["review-impl"]
-description        = """Set `pricing.percent_fee_enabled = true` in config/feature-flags.toml."""
+description        = "Pricing Flip"
+prompt             = """Set `pricing.percent_fee_enabled = true` in config/feature-flags.toml."""
 
 [[tasks]]
 task_id            = "review-flip"
@@ -102,7 +109,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["config/feature-flags.toml"]
 predecessors       = ["pricing-flip"]
-description        = """Verify the flip is the ONLY change in this commit."""
+description        = "Review Flip"
+prompt             = """Verify the flip is the ONLY change in this commit."""
 
 [orchestrator]
 cross_cutting_artifacts = []

@@ -11,6 +11,7 @@
 
 pub mod capability;
 pub mod clock;
+pub mod custom_tool_audit;
 pub mod error;
 pub mod escalation;
 pub mod fsm;
@@ -35,6 +36,10 @@ pub mod witness;
 // Convenient flat re-exports for the most-used types.
 pub use capability::{CapabilityClass, DelegationStatus};
 pub use clock::{unix_now_secs, Clock, RealClock};
+pub use custom_tool_audit::{
+    CustomToolByteReport, CustomToolExecutionRequest, CustomToolExecutionResponse,
+    CustomToolInvocationAck, CustomToolInvocationOutcome, CustomToolInvocationRequest,
+};
 pub use error::{
     EmptyReasonError, FailureReason, OperatorErrorCode, PlannerErrorCode, MAX_FAILURE_REASON_LEN,
 };

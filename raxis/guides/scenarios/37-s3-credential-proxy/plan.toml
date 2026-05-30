@@ -7,6 +7,8 @@ S3 credential proxy (scenario 37)
 [workspace]
 name = "S3 Credential Proxy"
 lane_id     = "aws-cred-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "fetch-object"

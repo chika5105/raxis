@@ -88,6 +88,14 @@ pub fn resolved_install_dir() -> PathBuf {
 // bother bootstrapping a kernel.
 // ---------------------------------------------------------------------------
 
+const E2E_ORCHESTRATOR_MODEL_ID: &str = "claude-3-haiku-20240307";
+const E2E_REVIEWER_MODEL_ID: &str = "gpt-5.3-codex";
+const E2E_GEMINI_MODEL_ID: &str = "gemini-2.5-flash";
+
+const E2E_ANTHROPIC_KEY: &str = "ANTHROPIC-API-DEV-KEY";
+const E2E_GEMINI_KEY: &str = "GEMINI-API-DEV-KEY";
+const E2E_OPENAI_KEY: &str = "OPEN-AI-API-DEV-KEY";
+
 pub fn require_tcp_reachable(host_port: &str, what: &str) {
     if std::net::TcpStream::connect_timeout(
         &host_port.parse().expect("static literal parses"),
@@ -102,23 +110,42 @@ pub fn require_tcp_reachable(host_port: &str, what: &str) {
     }
 }
 
-pub fn require_anthropic_dev_key() {
+pub fn require_live_provider_dev_keys() {
     let env_path = workspace_dotenv_path();
     let body = std::fs::read_to_string(&env_path).unwrap_or_else(|e| {
         panic!(
-            "{} is required for the live LLM round-trip but read failed: {e}\n\
-         Create it with one line:\n  ANTHROPIC-API-DEV-KEY=sk-ant-...",
+            "{} is required for the live LLM round-trips but read failed: {e}\n\
+         Create it with three lines:\n  {E2E_ANTHROPIC_KEY}=sk-ant-...\n  \
+         {E2E_GEMINI_KEY}=...\n  {E2E_OPENAI_KEY}=sk-...",
             env_path.display(),
         )
     });
-    let has_key = body.lines().any(|l| {
-        l.starts_with("ANTHROPIC-API-DEV-KEY=") && l.len() > "ANTHROPIC-API-DEV-KEY=".len()
-    });
-    assert!(
-        has_key,
-        "{} must contain a non-empty ANTHROPIC-API-DEV-KEY=... line",
-        env_path.display(),
-    );
+    for key in [E2E_ANTHROPIC_KEY, E2E_GEMINI_KEY, E2E_OPENAI_KEY] {
+        dotenv_value(&body, key).unwrap_or_else(|| {
+            panic!(
+                "{} must contain a non-empty {key}=... line for the \
+                 three-provider realistic e2e model matrix",
+                env_path.display(),
+            )
+        });
+    }
+}
+
+fn dotenv_value(body: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    body.lines().find_map(|raw| {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let mut value = line.strip_prefix(&prefix)?.trim();
+        if let Some(unquoted) = value.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+            value = unquoted;
+        } else if let Some(unquoted) = value.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+            value = unquoted;
+        }
+        (!value.is_empty()).then(|| value.to_owned())
+    })
 }
 
 pub fn require_gcp_adc() {
@@ -1313,6 +1340,10 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          spawn_timeout_secs       = 30\n\
          respawn_backoff_ms       = 1000\n\
          max_consecutive_respawns = 5\n\
+         planner_model_orchestrator_chain = [\"{orch_model}\", \"{gemini_model}\", \"{review_model}\"]\n\
+         planner_model_executor_chain     = [\"{orch_model}\", \"{gemini_model}\", \"{review_model}\"]\n\
+         planner_model_executor_rotate_primary = true\n\
+         planner_model_reviewer_chain     = [\"{review_model}\", \"{orch_model}\", \"{gemini_model}\"]\n\
          \n\
          # `example.com` admits the iter65 dep-fetch-evidence task's\n\
          # one HTTPS GET via Path A3; the witness in\n\
@@ -1328,13 +1359,33 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          # example.com fetch, and the witness verifies the install\n\
          # via the `--report` JSON (wheel sha256 + package version).\n\
          [egress]\n\
-         domains = [\"api.anthropic.com\", \"example.com\", \"pypi.org\", \"files.pythonhosted.org\"]\n\
+         domains = [\"api.anthropic.com\", \"api.openai.com\", \"generativelanguage.googleapis.com\", \"example.com\", \"pypi.org\", \"files.pythonhosted.org\"]\n\
          patterns = []\n\
          \n\
          [[providers]]\n\
          provider_id           = \"anthropic-realism-e2e\"\n\
          kind                  = \"Anthropic\"\n\
          credentials_file      = \"anthropic-realism-e2e.toml\"\n\
+         inference_timeout_ms  = 120000\n\
+         data_fetch_timeout_ms = 30000\n\
+         pricing.input_tokens_per_dollar      = 200000\n\
+         pricing.output_tokens_per_dollar     = 50000\n\
+         pricing.cache_read_tokens_per_dollar = 2000000\n\
+         \n\
+         [[providers]]\n\
+         provider_id           = \"gemini-realism-e2e\"\n\
+         kind                  = \"Gemini\"\n\
+         credentials_file      = \"gemini-realism-e2e.toml\"\n\
+         inference_timeout_ms  = 120000\n\
+         data_fetch_timeout_ms = 30000\n\
+         pricing.input_tokens_per_dollar      = 200000\n\
+         pricing.output_tokens_per_dollar     = 50000\n\
+         pricing.cache_read_tokens_per_dollar = 2000000\n\
+         \n\
+         [[providers]]\n\
+         provider_id           = \"openai-realism-e2e\"\n\
+         kind                  = \"OpenAI\"\n\
+         credentials_file      = \"openai-realism-e2e.toml\"\n\
          inference_timeout_ms  = 120000\n\
          data_fetch_timeout_ms = 30000\n\
          pricing.input_tokens_per_dollar      = 200000\n\
@@ -1375,6 +1426,9 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          max_cost_per_epoch   = 100000\n\
          priority             = 100\n",
         gw = gateway_binary.display(),
+        orch_model = E2E_ORCHESTRATOR_MODEL_ID,
+        gemini_model = E2E_GEMINI_MODEL_ID,
+        review_model = E2E_REVIEWER_MODEL_ID,
     );
     body.push_str(&injected);
     body.push_str(&observability_policy_block());
@@ -1412,6 +1466,7 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
              # kernel's gate-then-merge ordering contract.\n\
              [[gates]]\n\
              gate_type        = \"NoSecretStrings\"\n\
+             claim_type       = \"NoSecretStrings\"\n\
              verifier_command = \"{vb}\"\n\
              max_wall_seconds = 30\n\
              max_memory_bytes = 268435456\n\
@@ -1424,7 +1479,20 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
              # a Fail / Inconclusive without a wire-valid hint (e.g. an early\n\
              # build before the verifier was migrated to the typestate SDK).\n\
              # Required at policy load whenever `[gate_fixup].enabled = true`.\n\
-             agent_hint_default = \"A `NoSecretStrings` gate detected secret-shaped material in your commit. Remove any literal API keys, tokens, or credentials and reference them via env vars or your secret store instead. Re-run your local secret scanner before resubmitting.\"\n",
+             agent_hint_default = \"A `NoSecretStrings` gate detected secret-shaped material in your commit. Remove any literal API keys, tokens, or credentials and reference them via env vars or your secret store instead. Re-run your local secret scanner before resubmitting.\"\n\
+             \n\
+             [[integration_merge_verifiers]]\n\
+             name       = \"policy_no_secret_merge\"\n\
+             image      = \"raxis-verifier-starter\"\n\
+             command    = \"{vb}\"\n\
+             timeout    = \"30s\"\n\
+             on_failure = \"block_merge\"\n\
+             applies_to = \"all\"\n\
+             artifact   = \"/raxis/reports/policy-no-secret-merge.json\"\n\
+             artifact_max_bytes = 1048576\n\
+             \n\
+             [integration_merge_verifiers.hints]\n\
+             purpose = \"Policy-scoped integration verifier coverage for every realistic e2e merged tree.\"\n",
             vb = verifier_bin.display(),
         );
         body.push_str(&gate_block);
@@ -1843,22 +1911,43 @@ pub fn write_provider_credentials(data_dir: &Path) {
 
     let env_path = workspace_dotenv_path();
     let body = std::fs::read_to_string(&env_path).expect("preflight verified .env");
-    let api_key = body
-        .lines()
-        .find_map(|l| l.strip_prefix("ANTHROPIC-API-DEV-KEY="))
-        .map(str::trim)
-        .expect("preflight verified ANTHROPIC-API-DEV-KEY=...")
-        .to_owned();
+    let anthropic_key =
+        dotenv_value(&body, E2E_ANTHROPIC_KEY).expect("preflight verified Anthropic key");
+    let gemini_key = dotenv_value(&body, E2E_GEMINI_KEY).expect("preflight verified Gemini key");
+    let openai_key = dotenv_value(&body, E2E_OPENAI_KEY).expect("preflight verified OpenAI key");
 
-    let provider_toml = format!(
-        "api_key     = \"{api_key}\"\n\
-         auth_header = \"x-api-key\"\n\
-         auth_prefix = \"\"\n",
-    );
-    write_with_mode_0600(
-        &providers_dir.join("anthropic-realism-e2e.toml"),
-        provider_toml.as_bytes(),
-    );
+    for (file, api_key, auth_header, auth_prefix) in [
+        (
+            "anthropic-realism-e2e.toml",
+            anthropic_key.as_str(),
+            "x-api-key",
+            "",
+        ),
+        (
+            "gemini-realism-e2e.toml",
+            gemini_key.as_str(),
+            "x-goog-api-key",
+            "",
+        ),
+        (
+            "openai-realism-e2e.toml",
+            openai_key.as_str(),
+            "Authorization",
+            "Bearer ",
+        ),
+    ] {
+        let api_key = toml_basic_string_value(api_key);
+        let provider_toml = format!(
+            "api_key     = \"{api_key}\"\n\
+             auth_header = \"{auth_header}\"\n\
+             auth_prefix = \"{auth_prefix}\"\n",
+        );
+        write_with_mode_0600(&providers_dir.join(file), provider_toml.as_bytes());
+    }
+}
+
+fn toml_basic_string_value(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Write a credentials-bearing file at exactly mode 0600.
@@ -1917,11 +2006,11 @@ fn write_with_mode_0600(path: &Path, body: &[u8]) {
 // always matches the most recent passing iter. See
 // `raxis/live-e2e/examples/README.md` for the full contract.
 //
-// The Anthropic credential rule is structural, not cosmetic: the
-// hook (a) rewrites `anthropic.env.placeholder` from a hardcoded
-// template (NOT a copy of whatever real `ANTHROPIC-API-DEV-KEY` the
-// harness loaded into the kernel's `providers/` dir), so the real
-// bytes never enter the refresh path; (b) at end of refresh,
+// The provider credential rule is structural, not cosmetic: the
+// hook (a) rewrites provider placeholder files from hardcoded
+// templates (NOT copies of whatever real keys the harness loaded
+// into the kernel's `providers/` dir), so the real bytes never
+// enter the refresh path; (b) at end of refresh,
 // `assert_no_real_anthropic_key` scans every file under
 // `examples/credentials/` for the real-key regex and panics with a
 // copy-pastable remediation hint if a match is found.
@@ -1988,6 +2077,28 @@ const ANTHROPIC_PLACEHOLDER_BODY: &str = r#"# Live-e2e Anthropic API credential 
 # `raxis/specs/invariants.md §11.10`.
 
 ANTHROPIC_API_KEY=PLACEHOLDER_REPLACE_ME_WITH_REAL_KEY
+"#;
+
+const GEMINI_PLACEHOLDER_BODY: &str = r#"# Live-e2e Gemini API credential - PLACEHOLDER ONLY
+#
+# The realistic-scenario live-e2e harness sources its real key from
+# `<workspace>/raxis/.env` (line `GEMINI-API-DEV-KEY=...`) and writes
+# `<data_dir>/providers/gemini-realism-e2e.toml` (mode 0600) at
+# kernel-bootstrap time. This placeholder documents the expected local
+# dev shape only and MUST NOT contain a real key.
+
+GEMINI_API_KEY=PLACEHOLDER_REPLACE_ME_WITH_REAL_KEY
+"#;
+
+const OPENAI_PLACEHOLDER_BODY: &str = r#"# Live-e2e OpenAI API credential - PLACEHOLDER ONLY
+#
+# The realistic-scenario live-e2e harness sources its real key from
+# `<workspace>/raxis/.env` (line `OPEN-AI-API-DEV-KEY=...`) and writes
+# `<data_dir>/providers/openai-realism-e2e.toml` (mode 0600) at
+# kernel-bootstrap time. This placeholder documents the expected local
+# dev shape only and MUST NOT contain a real key.
+
+OPENAI_API_KEY=PLACEHOLDER_REPLACE_ME_WITH_REAL_KEY
 "#;
 
 /// Per-credential body the harness writes via `write_credentials`.
@@ -2154,19 +2265,20 @@ pub(crate) fn refresh_examples_inner(examples_dir: &Path, inputs: ExampleRefresh
         });
     }
 
-    // 4. anthropic.env.placeholder — rewritten from the hardcoded
-    // template. The real Anthropic key value at
-    // `<data_dir>/providers/anthropic-realism-e2e.toml` is NOT
-    // consulted; the placeholder body is the same constant on
-    // every refresh, so a real key can never leak through the
-    // refresh path.
-    let anth = creds_dir.join("anthropic.env.placeholder");
-    std::fs::write(&anth, ANTHROPIC_PLACEHOLDER_BODY).unwrap_or_else(|e| {
-        panic!(
-            "[realism-e2e] refresh_examples: write {}: {e}",
-            anth.display()
-        )
-    });
+    // 4. Provider placeholders — rewritten from hardcoded templates.
+    // The real provider key values at `<data_dir>/providers/*.toml`
+    // are NOT consulted; placeholder bodies are constants so real
+    // keys can never leak through the refresh path.
+    for (name, body) in [
+        ("anthropic.env.placeholder", ANTHROPIC_PLACEHOLDER_BODY),
+        ("gemini.env.placeholder", GEMINI_PLACEHOLDER_BODY),
+        ("openai.env.placeholder", OPENAI_PLACEHOLDER_BODY),
+    ] {
+        let p = creds_dir.join(name);
+        std::fs::write(&p, body).unwrap_or_else(|e| {
+            panic!("[realism-e2e] refresh_examples: write {}: {e}", p.display())
+        });
+    }
 
     // 5. seed/prompts/* — verbatim copy of the canonical seed
     // prompts the realistic plan `include_str!`s. Keeping the
@@ -3738,6 +3850,18 @@ mod tests {
             "refreshed anthropic.env.placeholder must NOT contain anything \
              matching the real-key regex",
         );
+        let gemini = std::fs::read_to_string(creds.join("gemini.env.placeholder"))
+            .expect("read refreshed gemini.env.placeholder");
+        assert_eq!(
+            gemini, GEMINI_PLACEHOLDER_BODY,
+            "refreshed gemini.env.placeholder must match the hardcoded template",
+        );
+        let openai = std::fs::read_to_string(creds.join("openai.env.placeholder"))
+            .expect("read refreshed openai.env.placeholder");
+        assert_eq!(
+            openai, OPENAI_PLACEHOLDER_BODY,
+            "refreshed openai.env.placeholder must match the hardcoded template",
+        );
 
         // Seed prompts mirror — every file in EXAMPLE_SEED_PROMPTS
         // copied verbatim from the source.
@@ -3949,6 +4073,7 @@ mod tests {
             .expect("NoSecretStrings row located above");
         for required in [
             "verifier_command",
+            "claim_type",
             "max_wall_seconds",
             "max_memory_bytes",
             "network_allowed",
@@ -4000,6 +4125,24 @@ mod tests {
              tier-2 fallback contract before enabling [gate_fixup]",
             path.display(),
         );
+        let merge_verifiers = v
+            .get("integration_merge_verifiers")
+            .and_then(|g| g.as_array())
+            .unwrap_or_else(|| {
+                panic!(
+                    "examples policy.toml {} MUST carry a \
+                     [[integration_merge_verifiers]] array so policy-scoped \
+                     pre-merge gates are visible to operators",
+                    path.display(),
+                )
+            });
+        assert!(
+            merge_verifiers.iter().any(|g| {
+                g.get("name").and_then(|t| t.as_str()) == Some("policy_no_secret_merge")
+            }),
+            "examples policy.toml {} MUST declare policy_no_secret_merge; got {merge_verifiers:?}",
+            path.display(),
+        );
     }
 
     /// Mirror pin for the runtime side of the gate block.
@@ -4036,6 +4179,7 @@ mod tests {
              # kernel's gate-then-merge ordering contract.\n\
              [[gates]]\n\
              gate_type        = \"NoSecretStrings\"\n\
+             claim_type       = \"NoSecretStrings\"\n\
              verifier_command = \"{vb}\"\n\
              max_wall_seconds = 30\n\
              max_memory_bytes = 268435456\n\
@@ -4048,7 +4192,20 @@ mod tests {
              # a Fail / Inconclusive without a wire-valid hint (e.g. an early\n\
              # build before the verifier was migrated to the typestate SDK).\n\
              # Required at policy load whenever `[gate_fixup].enabled = true`.\n\
-             agent_hint_default = \"A `NoSecretStrings` gate detected secret-shaped material in your commit. Remove any literal API keys, tokens, or credentials and reference them via env vars or your secret store instead. Re-run your local secret scanner before resubmitting.\"\n",
+             agent_hint_default = \"A `NoSecretStrings` gate detected secret-shaped material in your commit. Remove any literal API keys, tokens, or credentials and reference them via env vars or your secret store instead. Re-run your local secret scanner before resubmitting.\"\n\
+             \n\
+             [[integration_merge_verifiers]]\n\
+             name       = \"policy_no_secret_merge\"\n\
+             image      = \"raxis-verifier-starter\"\n\
+             command    = \"{vb}\"\n\
+             timeout    = \"30s\"\n\
+             on_failure = \"block_merge\"\n\
+             applies_to = \"all\"\n\
+             artifact   = \"/raxis/reports/policy-no-secret-merge.json\"\n\
+             artifact_max_bytes = 1048576\n\
+             \n\
+             [integration_merge_verifiers.hints]\n\
+             purpose = \"Policy-scoped integration verifier coverage for every realistic e2e merged tree.\"\n",
             vb = synthetic_verifier.display(),
         );
         // The comment markers MUST be present.
@@ -4064,6 +4221,7 @@ mod tests {
             // byte-for-byte stable.
             "INV-WITNESS-AGENT-HINT-RESOLUTION-TIERS-01",
             "tier-2 fallback for the `agent_hint` resolution chain",
+            "policy_no_secret_merge",
         ] {
             assert!(
                 gate_block.contains(needle),
@@ -4083,6 +4241,10 @@ mod tests {
         let row = &gates[0];
         assert_eq!(
             row.get("gate_type").and_then(|t| t.as_str()),
+            Some("NoSecretStrings"),
+        );
+        assert_eq!(
+            row.get("claim_type").and_then(|t| t.as_str()),
             Some("NoSecretStrings"),
         );
         // verifier_command must carry the synthetic path verbatim
@@ -4109,6 +4271,24 @@ mod tests {
             "agent_hint_default must reference the gate by name so \
              the resolved tier-2 critique is gate-self-identifying \
              when surfaced to the agent",
+        );
+        let merge_verifiers = parsed
+            .get("integration_merge_verifiers")
+            .and_then(|v| v.as_array())
+            .expect("runtime gate block parses to an [[integration_merge_verifiers]] array");
+        assert_eq!(
+            merge_verifiers.len(),
+            1,
+            "exactly one policy integration verifier row"
+        );
+        let merge_row = &merge_verifiers[0];
+        assert_eq!(
+            merge_row.get("name").and_then(|t| t.as_str()),
+            Some("policy_no_secret_merge"),
+        );
+        assert_eq!(
+            merge_row.get("command").and_then(|t| t.as_str()),
+            Some(synthetic_verifier.to_string_lossy().as_ref()),
         );
     }
 

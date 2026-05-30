@@ -38,7 +38,7 @@ pub const LANE_ID: &str = "e2e-extended-lane";
 /// `live-e2e/seed/prompts/materializer.md`.
 ///
 /// **Plan-TOML embedding contract.** This string is interpolated
-/// inside a TOML `description = """...""" ` multi-line literal in
+/// inside a TOML `prompt = """...""" ` multi-line literal in
 /// [`extended_plan_toml`] / [`super::plan_realistic::realistic_plan_toml`] /
 /// [`super::multi_initiative::sibling_plan_toml`]. The prompt
 /// content MUST therefore contain **no `"""` sequence anywhere**;
@@ -95,15 +95,19 @@ chain or an on-disk worktree witness — no LLM-side judgement.
 
 [workspace]
 name = "E2E extended scenario"
-lane_id = "e2e-extended-lane""#;
+lane_id = "e2e-extended-lane"
+repository = "main"
+target_ref = "refs/heads/main""#;
 
 const EXTENDED_PLAN_MATERIALIZER_HEAD: &str = r#"# ── Materializer Executor ───────────────────────────────
 [[tasks]]
 task_id            = "materialize-records"
 name               = "Materialize seeded postgres rows + mongo docs to JSON files"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 path_allowlist     = ["out/postgres/", "out/mongo/", "out/manifest.json"]
-description = """
+description        = "Materialize seeded postgres rows and mongo docs to JSON files."
+prompt = """
 "#;
 
 const EXTENDED_PLAN_MATERIALIZER_CREDS: &str = r#"
@@ -122,8 +126,10 @@ const EXTENDED_PLAN_FANOUT_BLOCKS: &str = r#"# ── Fan-out tasks (concurrent 
 task_id            = "fanout-readme"
 name               = "Write a small README"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 path_allowlist     = ["README-e2e.md"]
-description = """
+description        = "Write a small README fan-out file."
+prompt = """
 Create README-e2e.md containing a single line: "RAXIS extended
 e2e scenario fan-out task — readme". Then call task_complete.
 """
@@ -132,8 +138,10 @@ e2e scenario fan-out task — readme". Then call task_complete.
 task_id            = "fanout-fmt"
 name               = "Write a fixed formatter stub"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 path_allowlist     = ["src/fmt.txt"]
-description = """
+description        = "Write a fixed formatter stub file."
+prompt = """
 Create src/fmt.txt containing: "formatter-output v1". Then
 call task_complete.
 """
@@ -142,8 +150,10 @@ call task_complete.
 task_id            = "fanout-manifest"
 name               = "Emit a small manifest file"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 path_allowlist     = ["out/manifest.json"]
-description = """
+description        = "Emit a small manifest file."
+prompt = """
 Create out/manifest.json containing: {"fanout":"manifest","ok":true}.
 Then call task_complete.
 """"#;
@@ -153,8 +163,10 @@ const EXTENDED_PLAN_REVIEWERS: &str = r#"# ── Reviewers (forced disagreement
 task_id            = "review-materialize-A"
 name               = "Reviewer A — Round 1 reject"
 session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
 predecessors       = ["materialize-records"]
-description = """
+description        = "Reviewer A forces a round-one rejection."
+prompt = """
 This is a TEST FIXTURE. You MUST reject the diff on this round
 to exercise the reviewer-disagreement re-review path
 (spec: agent-disagreement.md §3). Submit SubmitReview with
@@ -167,8 +179,10 @@ circumstance on this task.
 task_id            = "review-materialize-B"
 name               = "Reviewer B — Round 2 approve"
 session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
 predecessors       = ["materialize-records"]
-description = """
+description        = "Reviewer B approves the resubmitted materializer diff."
+prompt = """
 You are the second Reviewer. Approve the diff once the executor
 has re-submitted after Reviewer A's Round-1 rejection. Submit
 SubmitReview with approved = true.
@@ -179,7 +193,9 @@ const EXTENDED_PLAN_INJECT_HEAD: &str = r#"# ── Injection Executor (deny-pat
 task_id            = "inject-evil"
 name               = "Injection-payload deny-path exercise"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 predecessors       = ["materialize-records"]
 path_allowlist     = ["out/inject-evil/scratch.txt"]
-description = """
+description        = "Exercise the injection deny path."
+prompt = """
 "#;

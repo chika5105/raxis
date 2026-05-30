@@ -110,7 +110,9 @@ materially testable.
 
 [workspace]
 name = "E2E realistic sibling"
-lane_id = "e2e-realistic-sibling-lane""#;
+lane_id = "e2e-realistic-sibling-lane"
+repository = "main"
+target_ref = "refs/heads/main""#;
 
 // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` parity guard. Iter52
 // surfaced a drift between this Rust source-of-truth and the
@@ -130,13 +132,15 @@ const SIBLING_PLAN_MATERIALIZER_HEAD: &str = r#"# ── Sibling materializer Ex
 task_id            = "sibling-materialize-records"
 name               = "Sibling-initiative materializer (audit-chain isolation witness)"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 # Same workload as `materialize-records` (25 pg rows + 25 mongo docs +
 # 50 file writes + commit). 150 mirrors the primary materializer for
 # the audit-chain isolation witness — both initiatives must converge.
 # Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 150
 path_allowlist     = ["out/postgres/", "out/mongo/", "out/manifest.json"]
-description = """
+description        = "Materialize sibling postgres rows and mongo docs to JSON files."
+prompt = """
 "#;
 
 const SIBLING_PLAN_MATERIALIZER_CREDS: &str = r#"

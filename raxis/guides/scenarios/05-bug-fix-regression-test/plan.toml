@@ -10,6 +10,8 @@ regression_test writes a #[test] that calls safe_div(1, 0) and
 [workspace]
 name = "Bug Fix Regression Test"
 lane_id     = "regression-fix-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "regression_test"
@@ -32,8 +34,8 @@ prompt             = """
 [[tasks.verifiers]]
 name        = "cargo_build"
 image       = "raxis-verifier-rust-starter"
-command     = ["cargo", "build", "--locked"]
-timeout_ms  = 120_000
+command     = "cargo build --locked"
+timeout     = "2m"
 on_failure  = "block_review"
 
 # ── fixer (depends on regression_test) ─────────────────────────────────────
@@ -56,8 +58,8 @@ prompt             = """
 [[tasks.verifiers]]
 name        = "cargo_test"
 image       = "raxis-verifier-rust-starter"
-command     = ["cargo", "test", "--locked"]
-timeout_ms  = 180_000
+command     = "cargo test --locked"
+timeout     = "3m"
 on_failure  = "block_review"
 
 [orchestrator]

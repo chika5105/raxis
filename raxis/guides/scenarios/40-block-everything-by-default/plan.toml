@@ -7,6 +7,8 @@ Block everything by default (scenario 40)
 [workspace]
 name = "Block Everything By Default"
 lane_id     = "default-deny-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "try-egress"

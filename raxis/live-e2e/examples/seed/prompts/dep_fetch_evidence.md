@@ -1,213 +1,55 @@
-# dep-fetch-evidence Executor task
+# Dependency fetch evidence task
 
-You are the RAXIS `dep-fetch-evidence` executor. Your job is to
-make two network round-trips from inside the executor VM, then
-commit a small JSON evidence file so a downstream witness can
-verify both succeeded:
+Create a small evidence bundle for a realistic dependency/network workflow.
+Use normal HTTP and package-manager clients. RAXIS will enforce the allowed
+egress behind the scenes.
 
-1. A single, real HTTPS GET against the IANA `example.com` page
-   using the Python standard library.
-2. A real `pip install` against PyPI for a small pure-Python
-   package, with a verifiable per-wheel SHA256 manifest.
+## Goal
 
-## Endpoint pinning (DO NOT change these constants)
+Write `out/deps/install-evidence.json` with evidence for:
 
-The evidence file you commit will be byte-checked against these
-constants by the harness witness. Use them verbatim.
+1. Fetching `https://example.com/` once.
+2. Installing the small Python package `certifi` into an output-local target
+   directory.
 
-```
-TARGET_URL              = https://example.com/
-TARGET_HOST             = example.com
-TARGET_PORT             = 443
-EXPECTED_BODY_SUBSTRING = Example Domain
-EVIDENCE_FILE_PATH      = out/deps/install-evidence.json
+The final JSON should include enough information for a reviewer to verify what
+happened without re-running the network calls.
 
-PIP_PACKAGE             = certifi
-PIP_TARGET_DIR          = out/deps/_pip
-PIP_REPORT_PATH         = out/deps/_pip-report.json
-```
+## Required shape
 
-`example.com` is the IANA-reserved example domain (RFC 2606). The
-body is stable across years and contains the literal string
-`Example Domain` inside its `<h1>` tag.
+Top-level fields:
 
-`certifi` is the canonical pure-Python TLS root-bundle package
-maintained by the Python community. It is a single small wheel
-(~165 KiB) with no native code, no transitive deps, and a stable
-package layout. We pick it because:
+- `target_url`
+- `target_host`
+- `target_port`
+- `http_status`
+- `body_size_bytes`
+- `body_sha256`
+- `body_contains_example_domain`
+- `transport`
+- `pip_install`
 
-* It is widely-mirrored, so the install path is reliable.
-* It is pure-Python, so the install never needs a compiler.
-* It has zero runtime side-effects when imported.
+`pip_install` should include:
 
-## Step-by-step (run inside the executor VM)
+- `requested`
+- `target_dir`
+- `report_path`
+- `success`
+- `installed`
 
-You may **only** write under `out/deps/`. Your path_allowlist is
-restricted to that directory.
+Each `installed` entry should include:
 
-1. **Make the directory.**
-   ```bash
-   mkdir -p out/deps
-   ```
+- `name`
+- `version`
+- `sha256`
+- `url`
 
-2. **Issue the example.com request via Python stdlib `http.client`.**
-   Use a here-doc with a fresh Python invocation. Write the
-   parsed HTTPS evidence to a temp file in `out/deps/`.
+## Boundaries
 
-   ```bash
-   python3 - <<'PY'
-   import hashlib, http.client, json, ssl, time
-   conn = http.client.HTTPSConnection("example.com", 443,
-                                     timeout=20,
-                                     context=ssl.create_default_context())
-   conn.request("GET", "/", headers={"User-Agent": "raxis-e2e-dep-fetch-evidence/1"})
-   resp = conn.getresponse()
-   body = resp.read()
-   conn.close()
-   evidence = {
-       "target_url":                 "https://example.com/",
-       "target_host":                "example.com",
-       "target_port":                443,
-       "http_status":                resp.status,
-       "body_size_bytes":            len(body),
-       "body_sha256":                hashlib.sha256(body).hexdigest(),
-       "body_contains_example_domain": (b"Example Domain" in body),
-       "fetched_at_unix":            int(time.time()),
-       "transport":                  "https",
-   }
-   with open("out/deps/_fetch-evidence.partial.json", "w", encoding="utf-8") as fh:
-       json.dump(evidence, fh, indent=2, sort_keys=True)
-   PY
-   ```
+- Allowed external hosts are `example.com`, `pypi.org`, and
+  `files.pythonhosted.org`.
+- Keep temporary scripts and scratch files out of the repository unless they
+  are under `out/deps/`.
+- Commit only the evidence artifacts under `out/deps/`.
 
-   Notes:
-   - The request **must** succeed (`http_status == 200`). If DNS
-     fails or the `HTTPSConnection.request` call raises for any reason, that
-     is a hard evidence failure. Do **not** catch the exception, do
-     not write `install-evidence.json`, and do not synthesize
-     placeholder values such as `http_status: null`.
-   - `body_contains_example_domain` MUST be `true`. If the body
-     came back empty or did not contain the pinned substring, you
-     are looking at a captive-portal-style intercept; treat that
-     as a hard error.
-
-3. **Run `pip install` against PyPI with `--report` for the
-   per-wheel SHA256 manifest.** Use the system `python3 -m pip`
-   so we exercise the standard pip code path (which uses
-   `urllib3` against `pypi.org` then downloads from
-   `files.pythonhosted.org`):
-
-   ```bash
-   python3 -m pip install \
-     --quiet \
-     --disable-pip-version-check \
-     --no-input \
-     --no-cache-dir \
-     --target=out/deps/_pip \
-     --report=out/deps/_pip-report.json \
-     certifi
-   ```
-
-   Notes:
-   - `--target=out/deps/_pip` keeps every installed file under
-     your path_allowlist.
-   - `--no-cache-dir` keeps pip from writing to
-     `~/.cache/pip/`, which is outside your path_allowlist —
-     without this flag pip will try and fail. It also forces a
-     real download every run.
-   - `--report=out/deps/_pip-report.json` emits a JSON report per
-     PEP 658 with one `install` entry per wheel, including
-     `download_info.archive_info.hash = "sha256=…"`. That is the
-     manifest the witness verifies.
-   - `--no-input` prevents pip from blocking on an interactive
-     prompt (auth, EULA, etc.) — pip MUST run unattended in the
-     executor VM.
-
-4. **Merge the example.com evidence + pip-install report into the
-   final evidence JSON.** This is one Python invocation so the
-   pinned path is written atomically:
-
-   ```bash
-   python3 - <<'PY'
-   import json, pathlib
-
-   fetch = json.loads(pathlib.Path("out/deps/_fetch-evidence.partial.json").read_text())
-   report = json.loads(pathlib.Path("out/deps/_pip-report.json").read_text())
-
-   installed = []
-   for entry in report.get("install", []):
-       meta = entry.get("metadata") or {}
-       arc  = (entry.get("download_info") or {}).get("archive_info") or {}
-       sha  = ""
-       raw  = arc.get("hash") or ""
-       if isinstance(raw, str) and raw.startswith("sha256="):
-           sha = raw.split("=", 1)[1].lower()
-       installed.append({
-           "name":    (meta.get("name") or "").lower(),
-           "version": meta.get("version") or "",
-           "sha256":  sha,
-           "url":     (entry.get("download_info") or {}).get("url") or "",
-       })
-
-   fetch["pip_install"] = {
-       "requested":  ["certifi"],
-       "target_dir": "out/deps/_pip",
-       "report_path": "out/deps/_pip-report.json",
-       "success":    bool(installed),
-       "installed":  installed,
-   }
-
-   with open("out/deps/install-evidence.json", "w", encoding="utf-8") as fh:
-       json.dump(fetch, fh, indent=2, sort_keys=True)
-       fh.write("\n")
-   PY
-   ```
-
-5. **Verify the file you wrote.**
-   ```bash
-   cat out/deps/install-evidence.json
-   ```
-   The witness will parse this JSON and assert (HTTPS arm):
-   - `http_status == 200`
-   - `body_contains_example_domain == true`
-   - `body_size_bytes > 0`
-   - `body_sha256` is a 64-char lowercase hex string.
-
-   Then (pip-install arm):
-   - `pip_install.success == true`
-   - `pip_install.installed` contains at least one entry whose
-     `name == "certifi"`.
-   - Every `pip_install.installed[*].sha256` is a 64-char
-     lowercase hex string.
-   If any of these assertions would fail, stop before committing.
-   A missing evidence file is easier for the operator to debug than
-   a committed diagnostic JSON that looks like a completed contract.
-
-6. **Commit the evidence file.**
-   ```bash
-   git add out/deps/install-evidence.json
-   git commit -m "chore(dep-fetch-evidence): record example.com + pip-install evidence"
-   ```
-   The commit message **must not** name any host outside
-   `example.com`, `pypi.org`, or `files.pythonhosted.org`.
-
-   You do NOT need to commit `_pip/` or `_pip-report.json`. They
-   are intermediate artifacts; only `install-evidence.json` is
-   the contract.
-
-7. **Call `task_complete`** with a one-line summary that includes
-   the example.com HTTP status and the certifi version that was
-   installed, e.g.
-   `"example.com fetch ok: status=200 body_size=1256; certifi installed: 2024.x.x"`.
-
-## What this task is **not**
-
-- It is **not** a generic egress test. Do not contact any host
-  outside `{example.com, pypi.org, files.pythonhosted.org}`.
-- It is **not** a retry harness. If a request fails for a
-  non-policy reason (transport timeout, etc.), `task_complete`
-  once with the diagnostic — do not loop.
-- It is **not** a build step. Do not pip-install anything
-  other than `certifi`, and do not run `pip install` against
-  any index other than the default (`pypi.org`). The witness
-  pins the package set and the egress hosts.
+Complete the task with the HTTP status, package version, and evidence path.

@@ -1,166 +1,163 @@
 # `[[tasks.verifiers]]` — per-task verifier declarations
 
-> **Topic:** Plan reference | **Time to read:** ~3 min | **Complexity:** ⭐⭐⭐ Advanced
+> **Topic:** Plan reference | **Time to read:** ~3 min | **Complexity:** Advanced
 
-`[[tasks.verifiers]]` declares mechanical verifiers the kernel runs
-on a task's output. A verifier is a small image (e.g.,
-`raxis-verifier-rust-starter`) that the kernel boots, runs against
-the worktree, and listens for a `WitnessSubmission` over the
-verifier socket. The witness is a content-addressed result the
-merge can be gated on.
+`[[tasks.verifiers]]` declares mechanical checks for one executor
+task's output. The kernel runs these checks after the executor
+submits `CompleteTask` and before downstream reviewer activation.
 
-The block is **optional**. Tasks without verifiers complete based
-on the agent's `CompleteTask` alone; tasks with verifiers wait for
-each declared verifier to emit a witness before transitioning.
+This is different from:
+
+| Surface | Scope | Runs against | Typical use |
+|---|---|---|---|
+| `[[tasks.verifiers]]` | One task in `plan.toml` | That task's evaluation commit | Lint, unit tests, generated artifact checks |
+| `[[plan.integration_merge_verifiers]]` | One initiative in `plan.toml` | Candidate merged tree | End-to-end tests for this plan |
+| `[[integration_merge_verifiers]]` | Active `policy.toml` | Candidate merged tree | Operator-mandated global pre-merge checks |
+| `[[gates]]` | Active `policy.toml` with selectors | Matching task/path/hook context | Policy invariants such as no secrets |
+
+The block is optional. Tasks without verifiers can proceed from
+executor completion into reviewer activation according to the DAG.
 
 ---
 
-## Field reference
+## Field Reference
 
 Each `[[tasks.verifiers]]` block declares one verifier.
 
 | Field | Type | Required | Effect |
 |---|---|---|---|
-| `name` | `String` | yes | Verifier alias, must match a `[[gates]] gate_type` in policy or a kernel-canonical verifier (e.g. `raxis-verifier-symbol-index`). |
-| `gate_type` | `String` | yes | Class label for the witness (`TestPass`, `LintClean`, `BuildOK`, `Coverage`, custom labels). The merge gate consults this. |
-| `image` | `String` | optional | OCI image alias for the verifier VM. Falls back to the kernel-canonical starter for the language family. |
-| `command` | `String` | optional | Command the verifier runs. Defaults to the image's entrypoint. |
-| `max_wall_seconds` | `u32` | optional | Per-run wall-clock cap. Beyond this the kernel kills the verifier and emits an `Inconclusive` witness. |
-| `gate_on` | `String` | optional, default `"Pass"` | Verdict the merge requires. One of `"Pass"` (verifier emitted Pass), `"PassOrInconclusive"` (Pass or Inconclusive — Fail still blocks), `"Always"` (the witness must exist regardless of verdict). |
+| `name` | `String` | yes | Stable verifier id. Use lower snake case, e.g. `cargo_test` or `no_secret_strings`. If it corresponds to a policy gate, use the policy gate's `gate_type`. |
+| `image` | `String` | yes | Verifier VM image alias, usually `raxis-verifier-starter` or a policy-published verifier image. |
+| `command` | `String` | yes | Shell command run inside the verifier workspace. |
+| `timeout` | `String` | yes | Wall-clock cap such as `"30s"`, `"10m"`, or `"1h"`. |
+| `on_failure` | `String` | optional, default `"block_review"` | `block_review` prevents reviewer activation until repaired. `warn_only` records an audit/dashboard warning but does not block review. |
+| `artifact` | `String` | optional | Verifier-produced artifact path. Must be under `/raxis/...`. |
+| `artifact_max_bytes` | `u64` | optional | Maximum accepted artifact size. |
+| `allowed_egress` | `Array<String>` | optional | Domains the verifier may reach when network is explicitly enabled by the verifier runtime. |
+| `[tasks.verifiers.env]` | table | optional | Non-secret verifier environment. Keys starting with `RAXIS_` are reserved for kernel-injected values. |
+| `[tasks.verifiers.hints]` | table | optional | Operator hints echoed into verifier/audit metadata. |
+
+Legacy fields such as `gate_type`, `gate_on`, `timeout_ms`, and
+`max_wall_seconds` are intentionally not part of the canonical
+schema. Use `name`, `timeout`, and `on_failure`.
 
 ---
 
-## Example — cargo test gate
+## Example — Cargo Test Before Review
 
 ```toml
 [[tasks]]
 task_id            = "implementer"
+prompt             = """Complete Implementer according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
-path_allowlist     = ["src/"]
-description        = """Add the new feature."""
+path_allowlist     = ["src/", "tests/"]
+description        = "Add the new feature."
 
 [[tasks.verifiers]]
-name             = "cargo-test"
-gate_type        = "TestPass"
-image            = "raxis-verifier-rust-starter"
-command          = "cargo test --workspace --all-features"
-max_wall_seconds = 600
-gate_on          = "Pass"
+name       = "cargo_test"
+image      = "raxis-verifier-rust-starter"
+command    = "cargo test --workspace --all-features --locked"
+timeout    = "10m"
+on_failure = "block_review"
+artifact   = "/raxis/cargo-test.json"
 ```
 
-The kernel boots the rust-starter image, runs `cargo test` in the
-worktree, and waits for a `WitnessSubmission`. The verifier
-reports `Pass` if the test command exits 0, `Fail` otherwise.
-`gate_on = "Pass"` means the merge waits for a Pass.
+If the verifier fails, the reviewer does not spawn. The kernel keeps
+the task in `GatesPending`, records the non-pass witness, resolves an
+operator-safe `agent_hint` from the verifier body or gate defaults, and
+uses the existing gate-fixup retry path to hand concise repair feedback
+back to the executor. The retry remains bounded by the task's retry
+ceilings and the witness is visible in the dashboard before another
+executor attempt starts.
 
-## Example — lint gate
+## Example — Audit-Only Warning
 
 ```toml
 [[tasks.verifiers]]
-name      = "cargo-clippy"
-gate_type = "LintClean"
-image     = "raxis-verifier-rust-starter"
-command   = "cargo clippy --workspace --all-features --all-targets -- -Dwarnings"
-gate_on   = "Pass"
+name       = "coverage_delta"
+image      = "raxis-verifier-rust-starter"
+command    = "raxis-verify-coverage --baseline-ref refs/heads/main"
+timeout    = "20m"
+on_failure = "warn_only"
+artifact   = "/raxis/coverage.json"
 ```
 
-Lint failures block the merge; lint successes allow it.
+`warn_only` is useful when the check should be visible in the audit
+chain and dashboard but should not block reviewer activation.
 
-## Example — coverage gate
+## Example — Policy Gate Reference
+
+If the active `policy.toml` declares:
+
+```toml
+[[gates]]
+gate_type        = "NoSecretStrings"
+verifier_command = "/opt/homebrew/bin/raxis-verifier-no-secrets"
+satisfies        = ["NoSecretStrings"]
+```
+
+then the task verifier should use the same `name` when the plan wants
+the task-level check to line up with the policy invariant:
 
 ```toml
 [[tasks.verifiers]]
-name             = "coverage-delta"
-gate_type        = "Coverage"
-image            = "raxis-verifier-rust-starter"
-command          = "raxis-verify-coverage --baseline-ref refs/heads/main"
-max_wall_seconds = 1800
-gate_on          = "Pass"
+name       = "NoSecretStrings"
+image      = "raxis-verifier-starter"
+command    = "raxis-verifier-no-secrets"
+timeout    = "30s"
+on_failure = "block_review"
 ```
 
-The verifier emits a witness whose body includes the coverage
-delta. The merge gate parses it; the operator's policy decides
-what threshold counts as Pass.
-
-## Example — symbol-index (kernel-canonical, auto-injected)
-
-```toml
-# Note: V2 auto-injects this verifier across the touched-set whenever
-# a plan changes >1 file under any /src or /lib path. Operators
-# rarely declare it explicitly. To DISABLE auto-injection (NOT
-# recommended), declare a stub verifier with the same name and a
-# no-op command.
-```
+The dashboard Plan Builder surfaces active and draft policy gates as
+selectable verifier names so this connection is visible while
+authoring.
 
 ---
 
-## How a witness flows
+## Lifecycle
 
 ```mermaid
 flowchart TD
-    complete["Executor submits CompleteTask"] --> snapshot["Kernel snapshots worktree<br/>verifier_evaluation_sha"]
-    snapshot --> spawn["For each [[tasks.verifiers]]<br/>spawn verifier VM from image"]
-    spawn --> env["Stamp verifier env<br/>RAXIS_VERIFIER_TOKEN<br/>RAXIS_TASK_ID<br/>RAXIS_GATE_TYPE<br/>RAXIS_EVALUATION_SHA<br/>RAXIS_KERNEL_SOCKET"]
-    env --> run["Run verifier command"]
-    run --> submit["Verifier submits WitnessSubmission"]
-    submit --> record["Kernel writes witness/<sha><br/>and indexes witness_records.result_class"]
-    record --> gate["merge_gate checks latest witness<br/>for task_id + gate_type"]
-    gate --> pass{"gate_on satisfied?"}
-    pass -->|yes| merge["Merge may proceed"]
-    pass -->|no| fail["FAIL_VERIFIER_GATE"]
+    complete["Executor submits CompleteTask"] --> snapshot["Kernel snapshots task evaluation SHA"]
+    snapshot --> queued["Verifier run queued"]
+    queued --> spawned["Verifier spawned in isolated runtime"]
+    spawned --> running["Command runs against task workspace"]
+    running --> witness["Verifier submits WitnessSubmission"]
+    witness --> record["Kernel records witness + artifact metadata"]
+    record --> route{"on_failure and result"}
+    route -->|Pass| review["Reviewer activation may proceed"]
+    route -->|Fail + block_review| repair["Executor repair retry"]
+    route -->|Fail + warn_only| warn["Audit/dashboard warning, review may proceed"]
 ```
 
+Every witness carries `initiative_id`, `task_id`, `evaluation_sha`,
+verifier name, verifier run id, verifier identity, result class, and a
+clear failure reason when the verifier provides one. The dashboard starts
+from `verifier_run_tokens`, so it also shows no-witness terminal states:
+`Pending -> Pass/Fail/Inconclusive`, or `SpawnFailed`, `ProcessFailed`,
+`Timeout`, `ConfigInvalid`, `BudgetExhausted`, and `CapExceeded`. This
+matters operationally: `Pending` means "still waiting"; the other states
+mean the verifier lifecycle itself failed and the operator can debug the
+spawn/runtime path directly.
+
+The same source and hook labels are attached everywhere:
+
+| Source | Hook | Meaning |
+|---|---|---|
+| `task_verifier` | `complete_task` | `[[tasks.verifiers]]` for one executor commit |
+| `plan_integration_verifier` | `integration_merge` | `[[plan.integration_merge_verifiers]]` for this plan's candidate merged tree |
+| `policy_integration_verifier` | `integration_merge` | `[[integration_merge_verifiers]]` from active `policy.toml` |
+| `policy_gate` | `intent` or the gate hook | Operator policy gate verifier |
+
 ---
 
-## Witness verdicts
-
-| `result_class` | Meaning |
-|---|---|
-| `Pass` | The check succeeded. |
-| `Fail` | The check failed; merge blocked. |
-| `Inconclusive` | The check could not run cleanly (verifier crashed, OOM, timeout). The kernel emits the witness with this class so the audit chain has the evidence; the gate's `gate_on` decides if Inconclusive blocks the merge. |
-
----
-
-## Common failure modes
+## Common Failure Modes
 
 | Symptom | Fix |
 |---|---|
-| `FAIL_VERIFIER_NOT_DECLARED` | The `name` doesn't match any policy `[[gates]]` entry. Add the gate; re-sign policy. |
-| `FAIL_VERIFIER_IMAGE_NOT_DECLARED` | `image` references a `[[vm_images]]` alias that doesn't exist. |
-| Verifier runs but no witness submitted | The verifier crashed before connecting to `RAXIS_KERNEL_SOCKET`. Inspect `<data-dir>/runtime/verifier-<task>-<name>.log`. |
-| `FAIL_VERIFIER_GATE` blocks merge | A verifier emitted `Fail`. Look at the witness body via `raxis witnesses <task> --gate <name>` to understand why. |
-| Verifier hits `max_wall_seconds` | The `Inconclusive` class is emitted; merge depends on `gate_on`. Either raise the cap or fix the verifier's runtime. |
-
----
-
-## Reference: relevant CLI + env (verifier-side)
-
-| Surface | Purpose |
-|---|---|
-| `raxis witnesses <task_id> [--gate <name>] [--result Pass\|Fail\|Inconclusive]` | Inspect witnesses for one task. |
-| `raxis verifiers` | List currently-running verifier subprocess tokens. |
-| `RAXIS_VERIFIER_TOKEN` | Single-use token the verifier sends back in WitnessSubmission. |
-| `RAXIS_TASK_ID` | Echoes into the witness for attribution. |
-| `RAXIS_GATE_TYPE` | Echoes into the witness for gate matching. |
-| `RAXIS_EVALUATION_SHA` | The kernel-snapshotted commit-ish the verifier ran against. |
-| `RAXIS_KERNEL_SOCKET` | UDS the verifier connects to. |
-| `RAXIS_WORKTREE_ROOT` | Worktree path provisioned for the verifier. |
-
----
-
-## Variations
-
-- **No verifiers.** Drop the block entirely; the task completes on
-  agent `CompleteTask` alone.
-- **Multiple verifiers per task.** List several
-  `[[tasks.verifiers]]` blocks; all run in parallel; the merge
-  waits for all of them.
-- **Inconclusive-tolerant.** `gate_on = "PassOrInconclusive"` —
-  useful for flaky verifiers (network-bound, slow infra) where
-  occasional inconclusivity shouldn't block.
-- **Always-on audit.** `gate_on = "Always"` — the merge requires
-  the witness exists but doesn't care about verdict. Useful for
-  pure-evidence gates (e.g., "record the SBOM" without blocking on
-  it).
+| Verifier name does not appear connected to policy | Use the `gate_type` from `[[gates]]` as `[[tasks.verifiers]].name`, or keep it plan-local if it is not a policy invariant. |
+| `timeout` rejected | Use duration strings such as `"30s"` or `"10m"`, not `timeout_ms`. |
+| Artifact rejected | Keep artifacts under `/raxis/...` and set `artifact_max_bytes` when the output can be large. |
+| Verifier cannot spawn | Check image alias, command availability, host capacity, and verifier runtime limits. The dashboard should show the spawn failure reason directly. |
+| Verifier needs network | Prefer no network. If unavoidable, declare egress explicitly and ensure the runtime enforces it fail-closed. |

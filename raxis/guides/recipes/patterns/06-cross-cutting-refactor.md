@@ -72,6 +72,7 @@ description = "Migrate to tokio 1.40 across auth/api/db modules"
 [workspace]
 name        = "tokio-bump"
 lane_id     = "default"
+repository  = "main"
 target_ref  = "refs/heads/main"
 
 # Three Executors, each owns its own module's source AND
@@ -84,7 +85,8 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/auth/", "tests/auth/", "Cargo.toml", "auth/Cargo.toml"]
 predecessors       = []
-description        = """Bump tokio to 1.40 in auth/Cargo.toml. Update src/auth/ for any breaking-change adjustments."""
+description        = "Bump Auth"
+prompt             = """Bump tokio to 1.40 in auth/Cargo.toml. Update src/auth/ for any breaking-change adjustments."""
 
 [[tasks]]
 task_id            = "bump-api"
@@ -92,7 +94,8 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/api/", "tests/api/", "api/Cargo.toml"]
 predecessors       = []
-description        = """Bump tokio to 1.40 in api/Cargo.toml."""
+description        = "Bump Api"
+prompt             = """Bump tokio to 1.40 in api/Cargo.toml."""
 
 [[tasks]]
 task_id            = "bump-db"
@@ -100,11 +103,14 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/db/", "tests/db/", "db/Cargo.toml"]
 predecessors       = []
-description        = """Bump tokio to 1.40 in db/Cargo.toml."""
+description        = "Bump Db"
+prompt             = """Bump tokio to 1.40 in db/Cargo.toml."""
 
 # One Reviewer per Executor (panel optional — see pattern 02).
 [[tasks]]
 task_id            = "review-auth"
+description        = "Review Auth"
+prompt             = """Complete Review Auth according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/", "auth/Cargo.toml"]
@@ -112,6 +118,8 @@ predecessors       = ["bump-auth"]
 
 [[tasks]]
 task_id            = "review-api"
+description        = "Review Api"
+prompt             = """Complete Review Api according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/api/", "api/Cargo.toml"]
@@ -119,6 +127,8 @@ predecessors       = ["bump-api"]
 
 [[tasks]]
 task_id            = "review-db"
+description        = "Review Db"
+prompt             = """Complete Review Db according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/db/", "db/Cargo.toml"]

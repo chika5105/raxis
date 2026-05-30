@@ -5,6 +5,8 @@
 `clone_strategy` controls **how much of the repo** the kernel
 provisions into the agent's worktree. The right choice is a
 trade-off between worktree size, clone latency, and read access.
+It is required on every `[[tasks]]` block; the kernel does not
+silently choose one for you.
 
 ---
 
@@ -13,10 +15,10 @@ trade-off between worktree size, clone latency, and read access.
 | Strategy | What's downloaded | Read access | Use when |
 |---|---|---|---|
 | `full` | Everything: tree + every blob + history | Anything in the repo | Small repos. **Orchestrators always.** |
-| `blobless` | Tree structure + blobs on demand | Anything (lazy) | **V2 default.** Large repos; agents needing broad read access. |
+| `blobless` | Tree structure + blobs on demand | Anything (lazy) | Recommended for large repos and agents needing broad read access. |
 | `sparse` | Only paths matching `path_allowlist` + `path_export_globs` | Only the cone | Narrow-scope Executors in large monorepos. |
 
-`blobless` is the recommended default — it keeps clone latency low
+`blobless` is the recommended common choice — it keeps clone latency low
 without restricting read access. `sparse` is for the cases where
 you need to *enforce* read narrowness (e.g. a security-sensitive
 Reviewer).
@@ -52,6 +54,7 @@ path_allowlist     = ["src/auth/"]
 path_export_globs  = ["src/types/auth/*.rs"]   # read-only paths to include
 predecessors       = []
 description        = """Implement the auth handler."""
+prompt             = """Implement the auth handler, commit the change, and submit CompleteTask."""
 ```
 
 The kernel provisions a worktree that contains:
@@ -73,6 +76,7 @@ clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]
 predecessors       = ["implementer"]
 description        = """Review the auth handler."""
+prompt             = """Review the auth handler and approve only if it is correct and safe."""
 ```
 
 The Reviewer needs to read across the codebase to verify the change
@@ -90,6 +94,7 @@ clone_strategy     = "full"
 path_allowlist     = ["src/"]
 predecessors       = []
 description        = """Refactor the entire src/ tree."""
+prompt             = """Refactor the entire src/ tree, commit the change, and submit CompleteTask."""
 ```
 
 For small repos (< 100 MB) `full` is fine. The clone latency is
@@ -102,7 +107,7 @@ negligible and there's no on-demand blob fetch round-trip.
 | Repo size | Read scope | Write scope | Strategy |
 |---|---|---|---|
 | Small (< 100 MB) | Anything | Anything | `full` |
-| Medium / Large | Broad reads | Narrow writes | `blobless` (default) |
+| Medium / Large | Broad reads | Narrow writes | `blobless` |
 | Monorepo (GB+) | Narrow reads | Narrow writes | `sparse` + `path_export_globs` |
 | Any | Read-only audit | None / minimal | `blobless` (Reviewer) |
 
@@ -178,8 +183,8 @@ URL. All git traffic transits the kernel's git proxy.
 
 ## Variations
 
-- **Default to blobless.** Don't fight the V2 default; switch to
-  `sparse` only when you measurably benefit.
+- **Prefer blobless first.** It is usually the best starting point;
+  switch to `sparse` only when you measurably benefit.
 - **Reviewer = blobless.** Reviewers want broad read access but
   don't write much; `blobless` is almost always right.
 - **CI integration.** `path_export_globs` lets sparse Executors

@@ -7,6 +7,8 @@ Budget exceeded graceful stop (scenario 49)
 [workspace]
 name = "Budget Exceeded Graceful Stop"
 lane_id     = "tiny-budget-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [budget]
 max_tokens          = 500

@@ -5,11 +5,11 @@
 [meta]
 epoch         = 1
 signed_by     = "f8dda84490292405b8790e813205320d"
-signed_at     = 1779809040
+signed_at     = 1780006630
 
 [authority]
-authority_pubkey = "e78923524f7362dbd9194192253c20630779d9a021e460fd7c7e2c3af3d67003"
-quality_pubkey   = "5cb0ed4460df74835874ff0e58c6b1f9ca84d4e06c95ab9a377ef8abc0377d2b"
+authority_pubkey = "12867b9052adbb61d783f4176f6d01c60bb0161832a02fa271ab1e94e92be250"
+quality_pubkey   = "1b053fbc3e6afae2d00a35382a91bcc8dc9dffcbe84faf118751159dda5a5b8d"
 
 [escalation_policy]
 timeout_secs         = 3600
@@ -21,7 +21,7 @@ quarantine_threshold = 3
 default_ttl_secs       = 86400
 max_ttl_secs           = 604800
 # Placeholder — REPLACE before creating sessions. See cli-ceremony.md §4.2.
-allowed_worktree_roots = ["/var/folders/5k/xmsl1wbx4gzgphrgtbqhvgkc0000gn/T/.tmpHz376s/worktrees"]
+allowed_worktree_roots = ["/var/folders/5k/xmsl1wbx4gzgphrgtbqhvgkc0000gn/T/.tmpOMcGff/worktrees"]
 
 [delegations]
 max_ttl_secs = 86400
@@ -52,12 +52,12 @@ permitted_ops      = [
 kind = "Standard"
 display_name = "realism-e2e-operator"
 pubkey_hex = "e72c28fe718e3a30afc47438da779d508d2dad5a265fafeb4f377e1d57fb098c"
-not_before = 1779722640
-not_after = 1811345040
+not_before = 1779920230
+not_after = 1811542630
 warn_before_expiry_days = 30
 grace_period_days = 7
 permitted_ops = ["CreateInitiative", "ApprovePlan", "AbortInitiative", "RotateEpoch", "OperatorCertInstall"]
-self_sig_hex = "aca22432c6b8f995448a3788d78b74dad79aa6b86573f456bb0a8b028dd0b4f2f58377af9772f84522dd10994ab2bb74f02c9221ebcd2bc5c60e7741e6c75f05"
+self_sig_hex = "0e262e6c3cd21f8ff75ea20c6126a57fda7b8d2b5d65cb5a09acc9f8d83c393bd6a8c33f7bb90b43ad6f8b2464c28c30ab037854b2031e246c7585a17b57870d"
 
 [[lanes]]
 lane_id              = "default"
@@ -108,6 +108,10 @@ binary_path              = "/Users/jinanwachikafavour/raxis/raxis/target/release
 spawn_timeout_secs       = 30
 respawn_backoff_ms       = 1000
 max_consecutive_respawns = 5
+planner_model_orchestrator_chain = ["claude-3-haiku-20240307", "gemini-2.5-flash", "gpt-5.3-codex"]
+planner_model_executor_chain     = ["claude-3-haiku-20240307", "gemini-2.5-flash", "gpt-5.3-codex"]
+planner_model_executor_rotate_primary = true
+planner_model_reviewer_chain     = ["gpt-5.3-codex", "claude-3-haiku-20240307", "gemini-2.5-flash"]
 
 # `example.com` admits the iter65 dep-fetch-evidence task's
 # one HTTPS GET via Path A3; the witness in
@@ -123,13 +127,33 @@ max_consecutive_respawns = 5
 # example.com fetch, and the witness verifies the install
 # via the `--report` JSON (wheel sha256 + package version).
 [egress]
-domains = ["api.anthropic.com", "example.com", "pypi.org", "files.pythonhosted.org"]
+domains = ["api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com", "example.com", "pypi.org", "files.pythonhosted.org"]
 patterns = []
 
 [[providers]]
 provider_id           = "anthropic-realism-e2e"
 kind                  = "Anthropic"
 credentials_file      = "anthropic-realism-e2e.toml"
+inference_timeout_ms  = 120000
+data_fetch_timeout_ms = 30000
+pricing.input_tokens_per_dollar      = 200000
+pricing.output_tokens_per_dollar     = 50000
+pricing.cache_read_tokens_per_dollar = 2000000
+
+[[providers]]
+provider_id           = "gemini-realism-e2e"
+kind                  = "Gemini"
+credentials_file      = "gemini-realism-e2e.toml"
+inference_timeout_ms  = 120000
+data_fetch_timeout_ms = 30000
+pricing.input_tokens_per_dollar      = 200000
+pricing.output_tokens_per_dollar     = 50000
+pricing.cache_read_tokens_per_dollar = 2000000
+
+[[providers]]
+provider_id           = "openai-realism-e2e"
+kind                  = "OpenAI"
+credentials_file      = "openai-realism-e2e.toml"
 inference_timeout_ms  = 120000
 data_fetch_timeout_ms = 30000
 pricing.input_tokens_per_dollar      = 200000
@@ -212,6 +236,7 @@ otlp_max_inflight   = 4
 # kernel's gate-then-merge ordering contract.
 [[gates]]
 gate_type        = "NoSecretStrings"
+claim_type       = "NoSecretStrings"
 verifier_command = "/Users/jinanwachikafavour/raxis/raxis/target/release/raxis-verifier-no-secrets"
 max_wall_seconds = 30
 max_memory_bytes = 268435456
@@ -225,3 +250,16 @@ network_allowed  = false
 # build before the verifier was migrated to the typestate SDK).
 # Required at policy load whenever `[gate_fixup].enabled = true`.
 agent_hint_default = "A `NoSecretStrings` gate detected secret-shaped material in your commit. Remove any literal API keys, tokens, or credentials and reference them via env vars or your secret store instead. Re-run your local secret scanner before resubmitting."
+
+[[integration_merge_verifiers]]
+name       = "policy_no_secret_merge"
+image      = "raxis-verifier-starter"
+command    = "/Users/jinanwachikafavour/raxis/raxis/target/release/raxis-verifier-no-secrets"
+timeout    = "30s"
+on_failure = "block_merge"
+applies_to = "all"
+artifact   = "/raxis/reports/policy-no-secret-merge.json"
+artifact_max_bytes = 1048576
+
+[integration_merge_verifiers.hints]
+purpose = "Policy-scoped integration verifier coverage for every realistic e2e merged tree."

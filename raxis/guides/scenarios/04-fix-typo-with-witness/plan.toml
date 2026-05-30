@@ -9,6 +9,8 @@ The fixer Executor restores `pub fn add(...)` in src/lib.rs; the
 [workspace]
 name = "Fix Typo With Witness"
 lane_id     = "fix-typo-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "fixer"
@@ -31,8 +33,8 @@ prompt             = """
 [[tasks.verifiers]]
 name        = "cargo_build"
 image       = "raxis-verifier-rust-starter"
-command     = ["cargo", "build", "--release", "--locked"]
-timeout_ms  = 180_000
+command     = "cargo build --release --locked"
+timeout     = "3m"
 on_failure  = "block_review"
 
 [orchestrator]

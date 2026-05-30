@@ -56,6 +56,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "credential",
     "kernel",
     "submit",
+    "tools",
     "providers",
     "repo",
     "status",
@@ -89,6 +90,7 @@ const PLAN_SUBCOMMANDS: &[&str] = &["approve", "reject", "validate", "fmt", "ini
 /// Currently exposes only `plan`; future sub-commands (`policy`,
 /// `operator-cert`) will plug in here without a third rename.
 const SUBMIT_SUBCOMMANDS: &[&str] = &["plan"];
+const TOOLS_SUBCOMMANDS: &[&str] = &["add", "attach", "validate", "test"];
 const INITIATIVE_SUBCOMMANDS: &[&str] = &["abort", "list", "quarantine", "show", "watch"];
 const OPERATOR_SUBCOMMANDS: &[&str] = &["quarantine-plans-by"];
 const TASK_SUBCOMMANDS: &[&str] = &["abort", "resume", "retry", "outputs"];
@@ -379,6 +381,20 @@ fn run() -> Result<(), CliError> {
                 ))),
             }
         }
+        "tools" => {
+            let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
+            match sub2 {
+                "add" => commands::tools::run_add(&flags, &rest[1..]),
+                "attach" => commands::tools::run_attach(&flags, &rest[1..]),
+                "validate" => commands::tools::run_validate(&flags, &rest[1..]),
+                "test" => commands::tools::run_test(&flags, &rest[1..]),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "tools sub-command",
+                    sub2,
+                    TOOLS_SUBCOMMANDS,
+                ))),
+            }
+        }
         "credential" => {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
@@ -591,6 +607,31 @@ SUBCOMMANDS:
         plan-bundle-sealing.md §8.1). There is no intermediate
         `plan.sig` file. The default is `--dry-run`; pass `--no-dry-run`
         to commit the bundle to the kernel.
+
+    tools add --plan <plan.toml> --profile <name> --name <tool>
+              --description <text>
+              (--command <abs-path> [--command-arg <arg>...] | --command-json '[...]')
+              [--locality guest_subprocess|host_subprocess|host_mcp|remote_mcp]
+              [--tool-schema '<json>' | --tool-schema-file <path>]
+        Add a profile-scoped custom tool declaration to plan.toml.
+        Tool Schema accepts full JSON Schema or a shorthand object such
+        as '{{"query":"string","limit?":{{"type":"integer"}}}}'. This is
+        local-only plan authoring; the signed plan and kernel admission
+        remain the authority.
+
+    tools attach --plan <plan.toml> --task <task_id> --profile <name>
+        Attach an existing tool profile to an Executor task by updating
+        the task's `profiles = [...]` list.
+
+    tools validate <plan.toml>
+        Validate profile-scoped custom tools, Tool Schema, byte caps,
+        locality, and task profile references.
+
+    tools test --plan <plan.toml> --profile <name> --tool <tool>
+               [--input-json '<json>' | --input-file <path>]
+        Locally dry-run one declared adapter with JSON stdin. This
+        helps operators debug adapters before signing a plan; it does
+        not grant runtime authority.
 
     plan approve <initiative_id>
         Approve a pending initiative, admitting all tasks to the scheduler.
@@ -1150,6 +1191,7 @@ mod catalog_consistency_tests {
             ("credential", CREDENTIAL_SUBCOMMANDS),
             ("kernel", KERNEL_SUBCOMMANDS),
             ("submit", SUBMIT_SUBCOMMANDS),
+            ("tools", TOOLS_SUBCOMMANDS),
             ("auth", AUTH_SUBCOMMANDS),
             ("providers", PROVIDERS_SUBCOMMANDS),
             ("repo", REPO_SUBCOMMANDS),
@@ -1188,6 +1230,7 @@ mod catalog_consistency_tests {
             ("\"credential\" => {", CREDENTIAL_SUBCOMMANDS),
             ("\"kernel\" => {", KERNEL_SUBCOMMANDS),
             ("\"submit\" => {", SUBMIT_SUBCOMMANDS),
+            ("\"tools\" => {", TOOLS_SUBCOMMANDS),
             ("\"providers\" => {", PROVIDERS_SUBCOMMANDS),
             ("\"repo\" => {", REPO_SUBCOMMANDS),
             ("\"auth\" => {", AUTH_SUBCOMMANDS),

@@ -125,11 +125,17 @@ What a Reviewer's `path_allowlist` does today:
 ```toml
 [[tasks]]
 task_id            = "ex"
+clone_strategy     = "blobless"
+description        = "Ex"
+prompt             = """Complete Ex according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
 path_allowlist     = ["src/auth/"]
 
 [[tasks]]
 task_id            = "rev"
+clone_strategy     = "blobless"
+description        = "Rev"
+prompt             = """Complete Rev according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
 predecessors       = ["ex"]
 path_allowlist     = ["src/auth/"]            # OK — read scope = Executor's write scope

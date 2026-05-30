@@ -73,6 +73,7 @@ members = [
     "crates/worktree-staging",
     "crates/session-spawn",
     "crates/image-cache",
+    "crates/tool-authoring",
     "crates/ksb",
     "crates/planner-core",
     "crates/planner-orchestrator",

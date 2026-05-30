@@ -596,6 +596,13 @@ mod tests {
             max_consecutive_respawns: max_respawns,
             planner_max_turns_default: None,
             planner_max_turns_step_default: None,
+            planner_model_orchestrator: None,
+            planner_model_executor: None,
+            planner_model_reviewer: None,
+            planner_model_orchestrator_chain: Vec::new(),
+            planner_model_executor_chain: Vec::new(),
+            planner_model_reviewer_chain: Vec::new(),
+            planner_model_executor_rotate_primary: false,
         }
     }
 

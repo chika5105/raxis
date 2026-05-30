@@ -8,6 +8,8 @@ Quarantine a bad plan (scenario 45)
 [workspace]
 name = "Quarantine A Bad Plan"
 lane_id     = "bad-plan-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "escapes-the-jail"

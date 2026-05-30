@@ -22,9 +22,12 @@ The greeter task writes a small markdown file (HELLO.md) at the
 [workspace]
 name = "Hello World"
 lane_id     = "hello-world-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 # ── Greeter ───────────────────────────────────────────────────────────────────
-# `clone_strategy = "blobless"` is the V2 default. `path_allowlist = ["./"]`
+# `clone_strategy = "blobless"` is the recommended lightweight choice here.
+# `path_allowlist = ["./"]`
 # permits the Executor to touch every file at the repo root (we only
 # need HELLO.md for this scenario, but a leading `./` is the canonical
 # "everything" expression).

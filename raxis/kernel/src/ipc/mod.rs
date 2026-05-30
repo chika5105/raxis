@@ -14,6 +14,7 @@
 pub mod auth;
 pub mod cid_blocklist;
 pub mod context;
+pub mod custom_tools;
 pub mod log;
 pub mod operator;
 pub mod operator_ergonomics;

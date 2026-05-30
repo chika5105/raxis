@@ -14,23 +14,55 @@ The pattern is always the same:
 2. Add a tiny adapter executable that reads JSON from stdin and writes a
    `ToolOutput` JSON object to stdout.
 3. Declare one operation per custom tool in `plan.toml`.
-4. Attach the profile only to Executor tasks that need that operation.
+4. Attach the profile, or a small set of profiles, only to Executor
+   tasks that need those operations.
+
+The agent never gets the broad tool substrate. It sees only the
+operation-specific tool name and schema. MCP discovery, server URLs,
+credentials, host sockets, and vendor account routing stay in the
+operator-controlled adapter.
+
+The shipped runtime supports four localities:
+
+- `guest_subprocess`: run the tool inside the Executor VM.
+- `host_subprocess`: run one host-owned adapter from the kernel.
+- `host_mcp`: run one host-owned adapter that talks to a local MCP server.
+- `remote_mcp`: run one host-owned adapter that talks to a remote MCP
+  service.
+
+For the host-owned localities, the Executor VM still receives only the
+tool name and JSON input. The kernel looks up the signed declaration,
+runs the adapter, audits the invocation, and returns the bounded result.
 
 ## Rules
 
 - Declare tools under `[[profiles.<name>.custom_tool]]` in `plan.toml`.
-- Assign the profile to Executor tasks with `profile = "<name>"`.
+- Assign one or more profiles to Executor tasks with
+  `profiles = ["repo_tools", "db_tools"]`.
 - Use one operation per tool, such as `unity_build_player`, not a
   generic `mcp_call`.
-- Use an absolute command path inside the executor image or installed
-  tool bundle.
+- Use an absolute command path. For `guest_subprocess`, the path is
+  inside the executor image. For host-owned localities, the path is on
+  the kernel host.
 - Pass model input as JSON on stdin and return a `ToolOutput` JSON
   envelope on stdout.
 - Keep `timeout_seconds` small. The hard cap is 300 seconds.
+- Set `stdin_max_bytes`, `stdout_max_bytes`, and `stderr_max_bytes`
+  when a tool can produce large payloads. RAXIS also enforces hard
+  upper bounds so a tool cannot become a memory-pressure path.
 - Do not attach custom tools to Reviewer or Orchestrator profiles.
 - Avoid generic bridge tools such as `mcp_call`, `run_any_script`, or
   `browser_click_anywhere`. Make the operation name specific enough to
   review in a plan.
+- Every invocation is audited as `CustomToolInvoked` by default. No
+  extra notification route or dashboard setting is required.
+
+Host-owned adapters run with a cleared environment. RAXIS sets only
+non-secret context variables such as `RAXIS_CUSTOM_TOOL_NAME`,
+`RAXIS_CUSTOM_TOOL_LOCALITY`, `RAXIS_SESSION_ID`, `RAXIS_TASK_ID`, and
+`RAXIS_INITIATIVE_ID`. Keep tokens and vendor credentials in host-owned
+config, OS keychain, or your adapter's secure store, not in the guest
+environment.
 
 ## Existing script
 
@@ -75,6 +107,7 @@ command = [
   "/opt/raxis-tools/docs-mcp",
   "search",
 ]
+execution_locality = "host_mcp"
 timeout_seconds = 15
 
 [profiles.docs_tools.custom_tool.schema]
@@ -96,7 +129,9 @@ maximum = 10
 
 Use this when an existing local service already exposes one safe
 operation. The wrapper should call only the pinned endpoint and should
-not expose arbitrary URLs to the Executor.
+not expose arbitrary URLs to the Executor. If the service must remain on
+the host or behind a vendor network, keep that connection in the adapter
+and return only the bounded operation result to RAXIS.
 
 ```toml
 [profiles.preview_tools]
@@ -110,6 +145,7 @@ command = [
   "POST",
   "http://127.0.0.1:8877/render-preview",
 ]
+execution_locality = "host_subprocess"
 timeout_seconds = 20
 
 [profiles.preview_tools.custom_tool.schema]
@@ -140,6 +176,7 @@ inherits_from = "Executor"
 name = "vendor_lookup_ticket"
 description = "Read one work item from a configured vendor MCP bridge."
 command = ["/usr/local/bin/raxis-vendor-mcp-bridge", "issues", "lookup"]
+execution_locality = "remote_mcp"
 timeout_seconds = 15
 
 [profiles.vendor_tools.custom_tool.schema]
@@ -162,6 +199,7 @@ inherits_from = "Executor"
 name = "unity_list_scenes"
 description = "List scenes known to the local Unity Editor MCP adapter."
 command = ["/usr/local/bin/raxis-tool-mcp", "unity", "list-scenes"]
+execution_locality = "host_mcp"
 timeout_seconds = 5
 
 [profiles.unity_mobile.custom_tool.schema]
@@ -172,6 +210,7 @@ additionalProperties = false
 name = "unity_build_player"
 description = "Build one Unity player target through the local MCP adapter."
 command = ["/usr/local/bin/raxis-tool-mcp", "unity", "build-player"]
+execution_locality = "host_mcp"
 timeout_seconds = 60
 
 [profiles.unity_mobile.custom_tool.schema]
@@ -195,7 +234,7 @@ Assign it to an Executor:
 task_id = "build-mobile-demo"
 description = "Build the mobile demo artifact."
 session_agent_type = "Executor"
-profile = "unity_mobile"
+profiles          = ["unity_mobile"]
 clone_strategy = "blobless"
 path_allowlist = ["Assets/", "ProjectSettings/"]
 predecessors = []
@@ -228,14 +267,36 @@ For recoverable tool errors, return `is_error: true`:
 
 ## Validate
 
-Use the dashboard **Tool Builder** to draft and validate the profile, or
-validate the complete plan from the CLI:
+Use the dashboard **Plan Builder** to draft and validate profiles, or use
+the CLI when you are already editing `plan.toml`:
 
 ```bash
+raxis tools add \
+  --plan plan.toml \
+  --profile repo_tools \
+  --name repo_symbol_search \
+  --description "Search repository symbols with ripgrep." \
+  --command /usr/bin/rg \
+  --command-arg --json \
+  --tool-schema '{"query":"string","limit?":{"type":"integer","minimum":1,"maximum":20}}'
+
+raxis tools attach --plan plan.toml --task build-mobile-demo --profile repo_tools
+raxis tools validate plan.toml
+raxis tools test --plan plan.toml --profile repo_tools --tool repo_symbol_search --input-json '{"query":"Raxis"}'
 raxis plan validate plan.toml
 raxis submit plan plan.toml --no-dry-run
 ```
 
+`--tool-schema` is RAXIS' normalized model-facing schema. It accepts a
+full JSON Schema object or a small shorthand object where each property
+maps to a type string or property object. RAXIS then renders the
+provider-safe TOML schema that the kernel stamps into the Executor's
+tool bundle. The adapter can be written in any language; the translation
+layer is just the executable in `command`.
+
 The kernel remains the authority. Admission rejects task-level custom
 tools, Reviewer/Orchestrator tools, inherited name collisions, malformed
-commands, invalid names, and timeouts above the policy cap.
+commands, invalid names, zero byte caps, and timeouts above the policy
+cap. At runtime the wrapper rejects schema mismatches and oversized
+payloads before the tool runs, records the invocation in the audit chain,
+then forwards the bounded tool result back to the agent.

@@ -7,6 +7,8 @@ Reviewer rejects round 1, accepts round 2.
 [workspace]
 name = "Reviewer Rejection Then Pass"
 lane_id     = "reject-pass-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "implement"

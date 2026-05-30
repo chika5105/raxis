@@ -1130,6 +1130,34 @@ pub enum AuditEventKind {
         sequence_number: u64,
     },
 
+    /// Custom-tool subprocess invocation metadata. The kernel emits
+    /// this from a planner-socket report, not from operator policy,
+    /// so every configured tool call is auditable by default without
+    /// requiring a notification route or dashboard toggle.
+    CustomToolInvoked {
+        tool_name: String,
+        profile_name: String,
+        execution_locality: String,
+        outcome: String,
+        duration_ms: u64,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+        timeout_ms: u64,
+        command_argv_sha256: String,
+        stdin_bytes_total: u64,
+        stdin_sha256: String,
+        stdout_bytes_total: u64,
+        stdout_bytes_captured: u64,
+        stdout_sha256: String,
+        stdout_truncated: bool,
+        stderr_bytes_total: u64,
+        stderr_bytes_captured: u64,
+        stderr_sha256: String,
+        stderr_truncated: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+
     /// **V2 (Step 30 + integration-merge.md §7).** Emitted when the
     /// kernel admits an `IntentKind::IntegrationMerge` and updates
     /// `initiatives.current_sha` to `commit_sha` (Phase 1 of the
@@ -4400,6 +4428,11 @@ pub enum AuditEventKind {
         /// Operator-supplied disposition for the verifier's
         /// witness (`fail_initiative`, `warn_only`, `retry_task`).
         on_failure: String,
+        /// Durable source classification (`policy_gate`,
+        /// `task_verifier`, `integration_verifier`, ...).
+        gate_source: String,
+        /// Lifecycle hook that caused this verifier run.
+        gate_hook: String,
     },
     /// The verifier VM exited. Pairs with the latest
     /// `VerifierVmSpawned` for the same `verifier_run_id`.
@@ -4679,6 +4712,7 @@ impl AuditEventKind {
             Self::TaskStateChanged { .. } => "TaskStateChanged",
             Self::IntentAccepted { .. } => "IntentAccepted",
             Self::IntentRejected { .. } => "IntentRejected",
+            Self::CustomToolInvoked { .. } => "CustomToolInvoked",
             Self::IntegrationMergeCompleted { .. } => "IntegrationMergeCompleted",
             Self::MergeFastForwardFailed { .. } => "MergeFastForwardFailed",
             Self::PushAttempted { .. } => "PushAttempted",
@@ -5789,6 +5823,8 @@ mod credential_proxy_kind_tests {
             oci_digest: "deadbeef".to_owned(),
             command: "<builtin>".to_owned(),
             on_failure: "warn_only".to_owned(),
+            gate_source: "task_verifier".to_owned(),
+            gate_hook: "complete_task".to_owned(),
         };
         assert_eq!(kind.as_str(), "VerifierVmSpawned");
         let v = serde_json::to_value(&kind).expect("serialises");
@@ -5803,6 +5839,8 @@ mod credential_proxy_kind_tests {
         assert_eq!(v["oci_digest"], serde_json::json!("deadbeef"));
         assert_eq!(v["command"], serde_json::json!("<builtin>"));
         assert_eq!(v["on_failure"], serde_json::json!("warn_only"));
+        assert_eq!(v["gate_source"], serde_json::json!("task_verifier"));
+        assert_eq!(v["gate_hook"], serde_json::json!("complete_task"));
     }
 
     #[test]

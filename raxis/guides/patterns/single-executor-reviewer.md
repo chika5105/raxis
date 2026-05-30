@@ -31,23 +31,17 @@
 ## The Plan
 
 ```toml
+[plan.initiative]
+description = """
+Add IP-based rate limiting to POST /auth/login. Max 10 requests per minute per IP.
+Return 429 Too Many Requests with a Retry-After header when exceeded.
+"""
+
 [workspace]
 name        = "Add rate limiting to the auth API"
 lane_id     = "auth-work"
-description = """
-  Add IP-based rate limiting to POST /auth/login. Max 10 requests per minute per IP.
-  Return 429 Too Many Requests with a Retry-After header when exceeded.
-"""
-
-# ── Orchestrator ──────────────────────────────────────────────────────────────
-# Coordinates the initiative. Merges the Executor's commit after the Reviewer
-# approves. Uses full clone because it must merge across the full tree.
-[[tasks]]
-task_id             = "orchestrator"
-session_agent_type  = "Orchestrator"
-clone_strategy      = "full"
-path_allowlist      = ["src/auth/"]          # must be a superset of all sub-tasks
-cross_cutting_artifacts = ["Cargo.lock"]     # files the Orchestrator may touch during merge
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 # ── Executor ──────────────────────────────────────────────────────────────────
 # Implements the feature. Sparse clone: only downloads src/auth/ — fast for
@@ -61,6 +55,7 @@ path_allowlist      = ["src/auth/"]
 predecessors        = []                     # starts immediately
 max_crash_retries   = 2                      # VM crash budget (OOM, panic, etc.)
 max_review_rejections = 2                    # quality rejection budget
+description         = "Implement rate limiting"
 prompt             = """
   Implement IP-based rate limiting on POST /auth/login.
   - 10 requests per minute per IP using a sliding window
@@ -79,6 +74,7 @@ session_agent_type  = "Reviewer"
 clone_strategy      = "blobless"             # needs to read the full src/auth/ tree
 path_allowlist      = ["src/auth/"]          # must match (or be subset of) the Executor's
 predecessors        = ["rate_limit_implementer"]
+description         = "Review rate limiting"
 prompt             = """
   Review the rate limiting implementation for:
   1. Correctness: does the sliding window logic match the spec?
@@ -86,6 +82,9 @@ prompt             = """
   3. Test coverage: are the happy path and the 429 case both tested?
   Approve if all three criteria are met. Reject with a specific critique if not.
 """
+
+[orchestrator]
+cross_cutting_artifacts = ["Cargo.lock"]     # files the Orchestrator may touch during merge
 ```
 
 ---

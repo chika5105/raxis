@@ -61,6 +61,7 @@ raxis-canonical-images = { workspace = true }
 # kitchen-sink binary, and the operator dashboard is operator-tier
 # tooling, not a kernel-side dep.
 raxis-dashboard        = { workspace = true }
+raxis-tool-authoring   = { path = "../crates/tool-authoring" }
 # `raxis doctor cache prune` (image-cache.md §8) consumes the
 # production resolver's `prune_unreferenced` walker over both
 # `images/sha256/` and `blobs/sha256/`. The CLI builds a fresh

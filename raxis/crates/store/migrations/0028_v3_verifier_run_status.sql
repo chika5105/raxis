@@ -1,0 +1,6 @@
+-- Migration 28 is rendered from crates/store/src/migration.rs so table
+-- identifiers stay type-safe. This mirror is documentation for operators
+-- inspecting the migration directory.
+--
+-- Adds verifier-run terminal status metadata to verifier_run_tokens:
+--   status, failure_reason.

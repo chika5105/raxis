@@ -55,6 +55,8 @@ description = "Implement the SAML auth flow"
 [workspace]
 name        = "saml-flow"
 lane_id     = "default"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 # Single Executor. Writes inside its path_allowlist; commits via
 # SingleCommit; closes with CompleteTask.
@@ -65,7 +67,8 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/auth/saml/", "tests/auth/saml/"]
 predecessors       = []
-description        = """Implement SAML SSO per spec/saml.md."""
+description        = "Implementer"
+prompt             = """Implement SAML SSO per spec/saml.md."""
 
 # Three Reviewers, all reviewing `implementer`. Each has a narrow
 # `description` (its remit) but its predecessors and path_allowlist
@@ -78,7 +81,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/saml/", "tests/auth/saml/"]
 predecessors       = ["implementer"]
-description        = """Security review: confirm the implementation matches the threat model in spec/saml-threat-model.md. Reject on any unmitigated finding."""
+description        = "Review Security"
+prompt             = """Security review: confirm the implementation matches the threat model in spec/saml-threat-model.md. Reject on any unmitigated finding."""
 
 [[tasks]]
 task_id            = "review-spec-conformance"
@@ -86,7 +90,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/saml/", "tests/auth/saml/"]
 predecessors       = ["implementer"]
-description        = """Confirm conformance with spec/saml.md sections 3-7. Reject on any deviation."""
+description        = "Review Spec Conformance"
+prompt             = """Confirm conformance with spec/saml.md sections 3-7. Reject on any deviation."""
 
 [[tasks]]
 task_id            = "review-tests"
@@ -94,7 +99,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/saml/", "tests/auth/saml/"]
 predecessors       = ["implementer"]
-description        = """Confirm tests cover happy path, malformed assertion, replay, and missing audience cases. Reject if any case missing."""
+description        = "Review Tests"
+prompt             = """Confirm tests cover happy path, malformed assertion, replay, and missing audience cases. Reject if any case missing."""
 
 [orchestrator]
 cross_cutting_artifacts = []
@@ -147,16 +153,18 @@ round.
 
 A Reviewer's verdict is a planner judgment. If you also need a
 mechanical pre-condition (e.g., test coverage threshold), declare
-it as a verifier on the **Executor** with `gate = "pre_review"`:
+it as a verifier on the **Executor** with `on_failure = "block_review"`:
 
 ```toml
 [[tasks.verifiers]]
-id           = "test-coverage-check"
-gate         = "pre_review"
-required     = true
+name       = "test_coverage_check"
+image      = "raxis-verifier-starter"
+command    = "raxis-verify-coverage --baseline-ref refs/heads/main"
+timeout    = "10m"
+on_failure = "block_review"
 ```
 
-`pre_review` verifiers run between `CompleteTask` and Reviewer
+Per-task verifiers run between `CompleteTask` and Reviewer
 activation. A failure prevents the Reviewers from spawning at all
 (the Executor must fix its commit first).
 
@@ -175,7 +183,7 @@ intent; the verifier substrate doesn't apply there.
 | `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED` | Remove `vm_image` from the Reviewer task. The Reviewer image is kernel-canonical. |
 | Panel size > lane's `max_concurrent_tasks` | Reviewers queue; total wall-clock grows but correctness unaffected. |
 | `review_reject_count` increments by N rather than 1 per round | Bug; should be exactly one. File upstream with the audit slice (`raxis log <init> --kind ReviewRejected --json`). |
-| All three reviewers approve in seconds | Either the work was tiny or the planner is rubber-stamping (bad system prompt; tighten the Reviewer's `description`). |
+| All three reviewers approve in seconds | Either the work was tiny or the planner is rubber-stamping (bad system prompt; tighten the Reviewer's `prompt`). |
 | Reviewer tries to write a file | Rejected with `FAIL_POLICY_VIOLATION`. Reviewers have no write authority. |
 
 ---

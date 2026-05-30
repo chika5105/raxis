@@ -7,6 +7,8 @@ Bump serde to ~1.0.200 and verify build still passes.
 [workspace]
 name = "Dependency Bump"
 lane_id     = "depbump-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "bump"

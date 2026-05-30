@@ -52,6 +52,7 @@ pub mod setup;
 pub mod status;
 pub mod submit;
 pub mod task;
+pub mod tools;
 pub mod top;
 pub mod verifiers;
 pub mod verify_chain;

@@ -165,6 +165,13 @@ pub const TASK_CREDENTIAL_SUBSTITUTION_CANARY: &str =
 /// `body_contains_example_domain=true`.
 pub const TASK_DEP_FETCH_EVIDENCE: &str = super::dep_fetch_evidence::TASK_DEP_FETCH_EVIDENCE;
 
+/// Tooling / MCP custom-tool executor task id. This is the
+/// dashboard-visible counterpart to the standalone
+/// `tooling-mcp-unity` live-e2e slice: the task runs inside the
+/// full realistic primary initiative, receives an Executor-only
+/// custom-tool profile, and commits evidence under `out/tools/`.
+pub const TASK_TOOLING_MCP_UNITY: &str = super::tooling_mcp_evidence::TASK_TOOLING_MCP_UNITY;
+
 /// Transparent-proxy real-scripts executor task id (P3-10).
 ///
 /// Companion to `service-round-trip`: the executor is handed a
@@ -281,6 +288,13 @@ pub const CREDENTIAL_SUBSTITUTION_CANARY_PROMPT_MD: &str =
 pub const DEP_FETCH_EVIDENCE_PROMPT_MD: &str =
     include_str!("../../../live-e2e/seed/prompts/dep_fetch_evidence.md");
 
+/// Tooling / MCP custom-tool prompt. Drives the executor through
+/// three operation-specific custom tools that model a Unity Editor
+/// MCP adapter and writes a bounded evidence file under
+/// `out/tools/`.
+pub const TOOLING_MCP_UNITY_PROMPT_MD: &str =
+    include_str!("../../../live-e2e/seed/prompts/tooling_mcp_unity_primary.md");
+
 // ---------------------------------------------------------------------------
 // Plan-TOML builder.
 // ---------------------------------------------------------------------------
@@ -298,8 +312,11 @@ pub fn realistic_plan_toml() -> String {
     let transparent_rt = TRANSPARENT_PROXY_REALSCRIPTS_PROMPT_MD;
     let cred_sub = CREDENTIAL_SUBSTITUTION_CANARY_PROMPT_MD;
     let dep_fetch = DEP_FETCH_EVIDENCE_PROMPT_MD;
+    let tooling_mcp = TOOLING_MCP_UNITY_PROMPT_MD;
     let mut s = String::new();
     s.push_str(REALISTIC_PLAN_HEADER);
+    s.push_str("\n\n");
+    s.push_str(REALISTIC_PLAN_TOOLING_MCP_PROFILE);
     s.push_str("\n\n");
     s.push_str(REALISTIC_PLAN_MATERIALIZER_HEAD);
     s.push_str(materializer);
@@ -325,6 +342,7 @@ pub fn realistic_plan_toml() -> String {
     s.push_str(REALISTIC_PLAN_ALLOWLIST_POSITIVE_HEAD);
     s.push_str(allowlist);
     s.push_str("\n\"\"\"\n");
+    s.push_str(REALISTIC_PLAN_ALLOWLIST_POSITIVE_VERIFIER);
     s.push_str("\n\n");
     s.push_str(REALISTIC_PLAN_SERVICE_ROUND_TRIP_HEAD);
     s.push_str(service_rt);
@@ -343,6 +361,10 @@ pub fn realistic_plan_toml() -> String {
     s.push_str("\n\n");
     s.push_str(REALISTIC_PLAN_DEP_FETCH_EVIDENCE_HEAD);
     s.push_str(dep_fetch);
+    s.push_str("\n\"\"\"\n");
+    s.push_str("\n\n");
+    s.push_str(REALISTIC_PLAN_TOOLING_MCP_UNITY_HEAD);
+    s.push_str(tooling_mcp);
     s.push_str("\n\"\"\"\n");
     s
 }
@@ -365,13 +387,175 @@ Cloud connections (S3 / GCP / Azure) are explicitly out of scope.
 
 [workspace]
 name = "E2E realistic scenario"
-lane_id = "e2e-realistic-lane""#;
+lane_id = "e2e-realistic-lane"
+repository = "main"
+target_ref = "refs/heads/main"
+
+[[plan.integration_merge_verifiers]]
+name       = "plan_no_secret_merge"
+image      = "raxis-verifier-starter"
+command    = "/Users/jinanwachikafavour/raxis/raxis/target/release/raxis-verifier-no-secrets"
+timeout    = "30s"
+on_failure = "block_merge"
+applies_to = "all"
+artifact   = "/raxis/reports/plan-no-secret-merge.json"
+artifact_max_bytes = 1048576
+
+[plan.integration_merge_verifiers.hints]
+purpose = "Plan-scoped integration verifier coverage for the realistic e2e merged tree.""#;
+
+const REALISTIC_PLAN_TOOLING_MCP_PROFILE: &str = r#"# -- Executor profile: bounded Unity MCP adapter tools ----
+[profiles.unity_mcp_tools]
+role = "Executor"
+
+[[profiles.unity_mcp_tools.custom_tool]]
+name        = "unity_list_scenes"
+description = "List scenes through a bounded Unity Editor MCP adapter."
+command     = ["/usr/bin/python3", "-c", '''
+import json
+import os
+import sys
+
+raw = sys.stdin.read()
+try:
+    params = json.loads(raw) if raw.strip() else {}
+except Exception as exc:
+    print(json.dumps({"content": f"invalid JSON input: {exc}", "is_error": True}))
+    raise SystemExit(0)
+if not isinstance(params, dict):
+    params = {}
+method = sys.argv[1] if len(sys.argv) > 1 else "unity.listScenes"
+os.makedirs("out/tools", exist_ok=True)
+with open("out/tools/_unity_mcp_tool_calls.jsonl", "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"method": method, "request": params}, sort_keys=True) + "\n")
+result = {
+    "adapter": "unity-editor-mcp-fixture",
+    "mcp_method": method,
+    "request": params,
+    "bounded_capability": {
+        "timeout_seconds": 5,
+        "generic_mcp": False,
+    },
+    "scenes": [
+        "Assets/Scenes/Main.unity",
+        "Assets/Scenes/CombatArena.unity",
+    ],
+    "active": "Assets/Scenes/Main.unity",
+}
+print(json.dumps({"content": json.dumps(result, sort_keys=True), "is_error": False}))
+''', "unity.listScenes"]
+execution_locality = "host_mcp"
+timeout_seconds = 5
+
+[profiles.unity_mcp_tools.custom_tool.schema]
+type = "object"
+additionalProperties = false
+
+[profiles.unity_mcp_tools.custom_tool.schema.properties.include_disabled]
+type = "boolean"
+
+[[profiles.unity_mcp_tools.custom_tool]]
+name        = "unity_run_playmode_tests"
+description = "Run bounded Unity playmode tests through a local MCP adapter."
+command     = ["/usr/bin/python3", "-c", '''
+import json
+import os
+import sys
+
+raw = sys.stdin.read()
+try:
+    params = json.loads(raw) if raw.strip() else {}
+except Exception as exc:
+    print(json.dumps({"content": f"invalid JSON input: {exc}", "is_error": True}))
+    raise SystemExit(0)
+if not isinstance(params, dict):
+    params = {}
+method = sys.argv[1] if len(sys.argv) > 1 else "unity.runPlaymodeTests"
+os.makedirs("out/tools", exist_ok=True)
+with open("out/tools/_unity_mcp_tool_calls.jsonl", "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"method": method, "request": params}, sort_keys=True) + "\n")
+result = {
+    "adapter": "unity-editor-mcp-fixture",
+    "mcp_method": method,
+    "request": params,
+    "bounded_capability": {
+        "timeout_seconds": 5,
+        "generic_mcp": False,
+    },
+    "filter": params.get("filter", "all"),
+    "passed": 12,
+    "failed": 0,
+    "duration_ms": 824,
+}
+print(json.dumps({"content": json.dumps(result, sort_keys=True), "is_error": False}))
+''', "unity.runPlaymodeTests"]
+execution_locality = "host_mcp"
+timeout_seconds = 5
+
+[profiles.unity_mcp_tools.custom_tool.schema]
+type = "object"
+additionalProperties = false
+
+[profiles.unity_mcp_tools.custom_tool.schema.properties.filter]
+type = "string"
+maxLength = 80
+
+[[profiles.unity_mcp_tools.custom_tool]]
+name        = "unity_build_player"
+description = "Build the Unity mobile player through a bounded MCP adapter."
+command     = ["/usr/bin/python3", "-c", '''
+import json
+import os
+import sys
+
+raw = sys.stdin.read()
+try:
+    params = json.loads(raw) if raw.strip() else {}
+except Exception as exc:
+    print(json.dumps({"content": f"invalid JSON input: {exc}", "is_error": True}))
+    raise SystemExit(0)
+if not isinstance(params, dict):
+    params = {}
+method = sys.argv[1] if len(sys.argv) > 1 else "unity.buildPlayer"
+os.makedirs("out/tools", exist_ok=True)
+with open("out/tools/_unity_mcp_tool_calls.jsonl", "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"method": method, "request": params}, sort_keys=True) + "\n")
+result = {
+    "adapter": "unity-editor-mcp-fixture",
+    "mcp_method": method,
+    "request": params,
+    "bounded_capability": {
+        "timeout_seconds": 5,
+        "generic_mcp": False,
+    },
+    "target": params.get("target", "unknown"),
+    "scene": params.get("scene", "unknown"),
+    "artifact": "Builds/iOS/RaxisDemo.ipa",
+    "duration_ms": 1432,
+}
+print(json.dumps({"content": json.dumps(result, sort_keys=True), "is_error": False}))
+''', "unity.buildPlayer"]
+execution_locality = "host_mcp"
+timeout_seconds = 5
+
+[profiles.unity_mcp_tools.custom_tool.schema]
+type = "object"
+additionalProperties = false
+
+[profiles.unity_mcp_tools.custom_tool.schema.properties.target]
+type = "string"
+enum = ["ios", "android"]
+
+[profiles.unity_mcp_tools.custom_tool.schema.properties.scene]
+type = "string"
+maxLength = 160"#;
 
 const REALISTIC_PLAN_MATERIALIZER_HEAD: &str = r#"# ── Materializer Executor (re-used from extended scenario) ──
 [[tasks]]
 task_id            = "materialize-records"
 name               = "Materialize seeded postgres rows + mongo docs to JSON files"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 # 25 postgres rows + 25 mongo docs + 50 file writes + commit + verify.
 # `DEFAULT_PLANNER_MAX_TURNS` was bumped 20→50→100 specifically because
 # this task reproducibly exhausted lower budgets at iter25 + iter31.
@@ -379,7 +563,8 @@ session_agent_type = "Executor"
 # retry cycles. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 150
 path_allowlist     = ["out/postgres/", "out/mongo/", "out/manifest.json"]
-description = """
+description        = "Materialize seeded postgres rows and mongo docs to JSON files."
+prompt = """
 "#;
 
 const REALISTIC_PLAN_MATERIALIZER_CREDS: &str = r#"
@@ -398,6 +583,7 @@ const REALISTIC_PLAN_XFILE_HEAD: &str = r#"# ── Cross-file refactor Executor
 task_id            = "xfile-refactor"
 name               = "Cross-file rename across Rust / TS / Python"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 # Mechanical cross-file rename across 3 language trees: read, edit,
 # run the full smoke check, commit. Keep enough headroom for one
 # focused correction loop without encouraging open-ended exploration.
@@ -406,7 +592,8 @@ session_agent_type = "Executor"
 # executor commits.
 max_turns          = 80
 path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/", "Cargo.lock"]
-description = """
+description        = "Cross-file rename across Rust, TypeScript, and Python."
+prompt = """
 "#;
 
 const REALISTIC_PLAN_LINT_DEFECT_HEAD: &str = r#"# ── Lint-defect Executor (P3-3) ─────────────────────────
@@ -414,6 +601,7 @@ const REALISTIC_PLAN_LINT_DEFECT_HEAD: &str = r#"# ── Lint-defect Executor (
 task_id            = "lint-defect"
 name               = "Introduce exactly one real Python lint defect (iter55 pin)"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 predecessors       = ["xfile-refactor"]
 # Single-edit task: open `py-pkg/src/sample_py/greet.py` (iter55
 # pin — see prompt), append an unused `import os`, commit. Trivially
@@ -425,7 +613,8 @@ predecessors       = ["xfile-refactor"]
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 35
 path_allowlist     = ["py-pkg/"]
-description = """
+description        = "Introduce exactly one real Python lint defect."
+prompt = """
 "#;
 
 // ── Per-language Lint-runner Executors (captures language-scoped lint output) ──
@@ -492,6 +681,7 @@ const REALISTIC_PLAN_LINT_RUNNER_PYTHON: &str = r#"# ── Lint-runner Executor
 task_id            = "lint-runner-python"
 name               = "Capture python -m ruff check output for the Python Reviewer panel"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 predecessors       = ["lint-defect"]
 # Iter55 per-language split (supersedes the iter54-N cold-start
 # bump on the monolithic `lint-runner` task — that task is gone,
@@ -513,7 +703,8 @@ predecessors       = ["lint-defect"]
 # 90, retry #2 → 120. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 60
 path_allowlist     = ["out/lint/", "py-pkg/"]
-description = """
+description        = "Capture Python ruff output for the reviewer panel."
+prompt = """
 You are the RAXIS lint-runner-python executor. The diff from
 `lint-defect` is already committed on the working branch; your
 job is to surface the strict-Python-lint verdict (`ruff check`
@@ -591,6 +782,7 @@ const REALISTIC_PLAN_LINT_RUNNER_RUST: &str = r#"# ── Lint-runner Executor �
 task_id            = "lint-runner-rust"
 name               = "Capture cargo clippy + fmt output for the Rust Reviewer"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 predecessors       = ["lint-defect"]
 # Iter55 per-language split. Scope: ONE language (Rust). Budget:
 # 60 turns — same sizing rationale as `lint-runner-python` (see
@@ -617,7 +809,8 @@ max_turns          = 60
 # matching expansion: ruff / eslint / prettier / tsc do not produce
 # workspace-root artefacts, so their narrower allowlists stay tight.
 path_allowlist     = ["out/lint/", "rust-crate/", "Cargo.lock"]
-description = """
+description        = "Capture Rust cargo fmt and clippy output for the reviewer."
+prompt = """
 You are the RAXIS lint-runner-rust executor. Your job is to
 surface the strict-Rust-lint verdict (`cargo fmt --all --
 --check` + `cargo clippy --all-targets -- -D warnings`) to the
@@ -681,6 +874,7 @@ const REALISTIC_PLAN_LINT_RUNNER_JS: &str = r#"# ── Lint-runner Executor —
 task_id            = "lint-runner-js"
 name               = "Capture eslint + prettier + tsc output for the JS / TS Reviewer"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 predecessors       = ["lint-defect"]
 # Iter55 per-language split. Scope: ONE language (TypeScript /
 # JavaScript). Budget: 60 turns — same sizing rationale as
@@ -690,7 +884,8 @@ predecessors       = ["lint-defect"]
 # Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 60
 path_allowlist     = ["out/lint/", "ts-pkg/"]
-description = """
+description        = "Capture JavaScript and TypeScript lint output for the reviewer."
+prompt = """
 You are the RAXIS lint-runner-js executor. Your job is to
 surface the strict-JS-lint verdict (`npx --no-install eslint
 --max-warnings 0` + `npx --no-install prettier --check` +
@@ -756,6 +951,7 @@ const REALISTIC_PLAN_LINT_REVIEWERS: &str = r#"# ── Lint-defect Reviewers (P
 task_id            = "review-lint-defect-A"
 name               = "Reviewer A — substantive review of lint-defect diff (Python pair)"
 session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
 predecessors       = ["lint-runner-python"]
 # Reviewer is mechanical: read_file the captured artifact, observe the
 # raxis_check_sh_exit_code sentinel line, decide. The Reviewer VM image
@@ -768,7 +964,8 @@ predecessors       = ["lint-runner-python"]
 # (`INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`) elasticating
 # further on round-2 if needed. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 30
-description = """
+description        = "Reviewer A reads Python lint output and rules on the defect."
+prompt = """
 You are the FIRST Reviewer in a panel reviewing the rich-
 multilang-001 Python lint-defect pipeline. The upstream
 `lint-defect` Executor introduced exactly one real Python lint
@@ -813,12 +1010,14 @@ basenames (`greet.py`) verbatim.
 task_id            = "review-lint-defect-B"
 name               = "Reviewer B — substantive review of lint-defect diff (Python pair)"
 session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
 predecessors       = ["lint-runner-python"]
 # Same shape + budget as Reviewer A — mechanical read_file + decide.
 # Iter55: 10 → 30 reviewer-ceiling bump (see Reviewer A comment).
 # Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 30
-description = """
+description        = "Reviewer B reads Python lint output and rules on the defect."
+prompt = """
 You are the SECOND Reviewer in a panel reviewing the rich-
 multilang-001 Python lint-defect pipeline. The
 `lint-runner-python` Executor has committed
@@ -858,6 +1057,7 @@ the Round-1 rejection.
 task_id            = "review-lint-defect-rust"
 name               = "Reviewer — Rust lint-runner (single, rubber-stamp on clean)"
 session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
 predecessors       = ["lint-runner-rust"]
 # Single-Reviewer fan-in for the Rust child (Option C). Same
 # mechanical read_file + decide shape as the dual pair on
@@ -867,7 +1067,8 @@ predecessors       = ["lint-runner-rust"]
 # the executor's capture wrapper itself misbehaves. Per
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 30
-description = """
+description        = "Reviewer reads Rust lint output and rules on the capture."
+prompt = """
 You are the sole Reviewer for the `lint-runner-rust` Executor.
 The captured artifact at `out/lint/check-rust.txt` carries the
 stdout + stderr of `cargo fmt --check` + `cargo clippy --all-targets
@@ -888,12 +1089,14 @@ image ships only `raxis-planner` + `ripgrep` per
 task_id            = "review-lint-defect-js"
 name               = "Reviewer — JS / TS lint-runner (single, rubber-stamp on clean)"
 session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
 predecessors       = ["lint-runner-js"]
 # Single-Reviewer fan-in for the JS / TS child (Option C). Same
 # mechanical read_file + decide shape. Per
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 30
-description = """
+description        = "Reviewer reads JavaScript and TypeScript lint output and rules on the capture."
+prompt = """
 You are the sole Reviewer for the `lint-runner-js` Executor.
 The captured artifact at `out/lint/check-js.txt` carries the
 stdout + stderr of `npx eslint --max-warnings 0` + `prettier
@@ -918,6 +1121,7 @@ const REALISTIC_PLAN_ALLOWLIST_POSITIVE_HEAD: &str = r#"# ── Positive path-a
 task_id            = "allowlist-positive-codegen"
 name               = "Generate a build-meta file into target/codegen/"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 # Trivial single-file generation task; write build_meta.txt under the
 # allowlisted path, commit. ~5 turns natural; iter55 budget audit
 # bumps the ceiling 15 → 25 for retry headroom (the `-f` flag on
@@ -926,14 +1130,30 @@ session_agent_type = "Executor"
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 25
 path_allowlist     = ["target/codegen/"]
-description = """
+description        = "Generate a build metadata file under target/codegen."
+prompt = """
 "#;
+
+const REALISTIC_PLAN_ALLOWLIST_POSITIVE_VERIFIER: &str = r#"
+
+  [[tasks.verifiers]]
+  name       = "no_secret_strings"
+  image      = "raxis-verifier-starter"
+  command    = "/Users/jinanwachikafavour/raxis/raxis/target/release/raxis-verifier-no-secrets"
+  timeout    = "30s"
+  on_failure = "block_review"
+  artifact   = "/raxis/reports/no-secret-strings.json"
+  artifact_max_bytes = 1048576
+
+  [tasks.verifiers.hints]
+  purpose = "Per-task verifier coverage for the realistic e2e allowlist task.""#;
 
 const REALISTIC_PLAN_SERVICE_ROUND_TRIP_HEAD: &str = r#"# -- Service-evidence round-trip Executor (P3-9) ----------
 [[tasks]]
 task_id            = "service-round-trip"
 name               = "Round-trip every configured backing service + commit canonical outputs"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 predecessors       = ["allowlist-positive-codegen"]
 # Round-trip 4 service proxies (postgres + mongodb + redis + smtp) and
 # commit one canonical output file per service. ~12 turns per service
@@ -942,7 +1162,8 @@ predecessors       = ["allowlist-positive-codegen"]
 # Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 60
 path_allowlist     = ["out/services/"]
-description = """
+description        = "Round-trip configured backing services and commit canonical outputs."
+prompt = """
 "#;
 
 // `upstream_host_port` for the redis + smtp variants is mandatory in
@@ -990,6 +1211,7 @@ const REALISTIC_PLAN_TRANSPARENT_PROXY_HEAD: &str = r#"# -- Service-integrity re
 task_id            = "transparent-proxy-realscripts"
 name               = "Run stock-Python service-integrity scripts; commit per-service outputs"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 predecessors       = ["service-round-trip"]
 # Run 4 stock-Python service-integrity scripts + the run_all_services.sh
 # wrapper, commit per-service outputs + last_run_summary.txt. ~10 turns
@@ -997,7 +1219,8 @@ predecessors       = ["service-round-trip"]
 # Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 60
 path_allowlist     = ["out/services/", "scripts/last_run_summary.txt"]
-description = """
+description        = "Run stock service-integrity scripts and commit per-service outputs."
+prompt = """
 "#;
 
 // `upstream_host_port` mirrors `REALISTIC_PLAN_SERVICE_ROUND_TRIP_CREDS`.
@@ -1049,6 +1272,7 @@ const REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_HEAD: &str = r#"# -- Credential-sub
 task_id            = "credential-substitution-canary"
 name               = "Authenticate via operator-staged FAKE .env creds; proxy substitutes real creds upstream"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 predecessors       = ["service-round-trip"]
 # Multi-step task: parse .env for DATABASE_USER/PASSWORD/NAME, parse
 # host:port from $DATABASE_URL, open a psycopg2 connection through
@@ -1061,7 +1285,8 @@ predecessors       = ["service-round-trip"]
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 40
 path_allowlist     = ["out/services/postgres-fake-creds.txt"]
-description = """
+description        = "Authenticate through the postgres proxy using staged fake credentials."
+prompt = """
 "#;
 
 const REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_CREDS: &str = r#"
@@ -1126,6 +1351,7 @@ const REALISTIC_PLAN_DEP_FETCH_EVIDENCE_HEAD: &str = r#"# -- Dep-fetch-evidence 
 task_id            = "dep-fetch-evidence"
 name               = "Fetch example.com over HTTPS + pip install certifi from PyPI"
 session_agent_type = "Executor"
+clone_strategy     = "blobless"
 # iter69 — bumped from 30 → 90 to absorb the additional pip
 # install arm (multi-host: pypi.org → files.pythonhosted.org).
 # Happy path is ~8 turns; the 11× headroom covers planner
@@ -1133,7 +1359,26 @@ session_agent_type = "Executor"
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 90
 path_allowlist     = ["out/deps/"]
-description = """
+description        = "Fetch example.com and install certifi through mediated egress."
+prompt = """
+"#;
+
+const REALISTIC_PLAN_TOOLING_MCP_UNITY_HEAD: &str = r#"# -- Tooling / MCP custom tools Executor ----------------
+[[tasks]]
+task_id            = "tooling-mcp-unity"
+name               = "Call bounded Unity MCP adapter tools and commit evidence"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+profiles          = ["unity_mcp_tools"]
+# Three custom-tool calls + one JSON evidence file + commit. The
+# profile timeout is 5s per tool; 40 turns gives enough budget for
+# a correction loop without turning BYO tooling into open-ended
+# automation. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` and
+# invariant 5's bounded-capability discipline.
+max_turns          = 40
+path_allowlist     = ["out/tools/"]
+description        = "Call bounded Unity MCP adapter tools and commit evidence."
+prompt = """
 "#;
 
 // ---------------------------------------------------------------------------
@@ -1172,6 +1417,7 @@ mod tests {
             TASK_TRANSPARENT_PROXY_REALSCRIPTS,
             TASK_CREDENTIAL_SUBSTITUTION_CANARY,
             TASK_DEP_FETCH_EVIDENCE,
+            TASK_TOOLING_MCP_UNITY,
         ] {
             assert!(
                 ids.contains(&needle),
@@ -1187,6 +1433,42 @@ mod tests {
             !ids.contains(&"lint-runner"),
             "monolithic `lint-runner` MUST NOT appear after the iter55 \
              per-language split; got {ids:?}",
+        );
+
+        let allowlist_task = tasks
+            .iter()
+            .find(|t| t.get("task_id").and_then(|id| id.as_str()) == Some(TASK_ALLOWLIST_POSITIVE))
+            .expect("allowlist-positive-codegen task present");
+        let task_verifiers = allowlist_task
+            .get("verifiers")
+            .and_then(|v| v.as_array())
+            .expect("allowlist-positive-codegen carries per-task verifiers");
+        let no_secret_task_gate = task_verifiers
+            .iter()
+            .find(|v| v.get("name").and_then(|n| n.as_str()) == Some("no_secret_strings"))
+            .expect("per-task no_secret_strings verifier present");
+        assert_eq!(
+            no_secret_task_gate
+                .get("on_failure")
+                .and_then(|v| v.as_str()),
+            Some("block_review"),
+            "per-task verifier must block reviewer activation until evidence passes",
+        );
+        let plan_merge_verifiers = v
+            .get("plan")
+            .and_then(|p| p.get("integration_merge_verifiers"))
+            .and_then(|v| v.as_array())
+            .expect("realistic plan carries plan integration verifiers");
+        let plan_no_secret_merge = plan_merge_verifiers
+            .iter()
+            .find(|v| v.get("name").and_then(|n| n.as_str()) == Some("plan_no_secret_merge"))
+            .expect("plan_no_secret_merge integration verifier present");
+        assert_eq!(
+            plan_no_secret_merge
+                .get("on_failure")
+                .and_then(|v| v.as_str()),
+            Some("block_merge"),
+            "plan integration verifier must block target-ref advancement until evidence passes",
         );
 
         let lane = v
@@ -1210,6 +1492,77 @@ mod tests {
             &xfile_allowlist[..],
             &["rust-crate/", "ts-pkg/", "py-pkg/", "Cargo.lock"],
             "xfile-refactor must admit the root Cargo.lock generated by scripts/check.sh"
+        );
+
+        let tooling = tasks
+            .iter()
+            .find(|t| t.get("task_id").and_then(|id| id.as_str()) == Some(TASK_TOOLING_MCP_UNITY))
+            .expect("tooling-mcp-unity task present");
+        assert_eq!(
+            tooling.get("session_agent_type").and_then(|v| v.as_str()),
+            Some("Executor")
+        );
+        let tooling_profiles: Vec<&str> = tooling
+            .get("profiles")
+            .and_then(|v| v.as_array())
+            .expect("tooling-mcp-unity profiles present")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(&tooling_profiles[..], &["unity_mcp_tools"]);
+        let tooling_allowlist: Vec<&str> = tooling
+            .get("path_allowlist")
+            .and_then(|v| v.as_array())
+            .expect("tooling-mcp-unity path_allowlist present")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            &tooling_allowlist[..],
+            &["out/tools/"],
+            "tooling-mcp-unity may only commit its evidence directory"
+        );
+
+        let profiles = v
+            .get("profiles")
+            .and_then(|p| p.as_table())
+            .expect("[profiles] table present");
+        let unity_profile = profiles
+            .get("unity_mcp_tools")
+            .and_then(|p| p.as_table())
+            .expect("[profiles.unity_mcp_tools] present");
+        assert_eq!(
+            unity_profile.get("role").and_then(|v| v.as_str()),
+            Some("Executor")
+        );
+        let custom_tools = unity_profile
+            .get("custom_tool")
+            .and_then(|v| v.as_array())
+            .expect("unity_mcp_tools custom_tool array present");
+        let custom_tool_names: Vec<&str> = custom_tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(
+            &custom_tool_names[..],
+            &[
+                "unity_list_scenes",
+                "unity_run_playmode_tests",
+                "unity_build_player",
+            ],
+            "profile must expose operation-specific tools only"
+        );
+        assert!(
+            !custom_tool_names
+                .iter()
+                .any(|name| matches!(*name, "mcp_call" | "mcp_discover" | "run_any_script")),
+            "tooling profile must not expose generic MCP or script launchers"
+        );
+        assert!(
+            custom_tools.iter().all(
+                |tool| tool.get("execution_locality").and_then(|v| v.as_str()) == Some("host_mcp")
+            ),
+            "Unity MCP tools must exercise the kernel-owned host_mcp locality"
         );
     }
 
@@ -1352,15 +1705,15 @@ mod tests {
             );
 
             // Prompt must reference the per-child capture path.
-            let desc = runner
-                .get("description")
+            let prompt = runner
+                .get("prompt")
                 .and_then(|d| d.as_str())
-                .unwrap_or_else(|| panic!("`{runner_id}` description present"));
+                .unwrap_or_else(|| panic!("`{runner_id}` prompt present"));
             assert!(
-                desc.contains(capture_path),
+                prompt.contains(capture_path),
                 "`{runner_id}` prompt MUST reference its capture path \
-                 `{capture_path}` verbatim; got desc of len {}",
-                desc.len(),
+                 `{capture_path}` verbatim; got prompt of len {}",
+                prompt.len(),
             );
 
             // Reviewer fan-in.
@@ -1413,21 +1766,22 @@ mod tests {
                 .iter()
                 .find(|t| t.get("task_id").and_then(|i| i.as_str()) == Some(*reviewer_task_id))
                 .unwrap_or_else(|| panic!("reviewer task `{reviewer_task_id}` present"));
-            let desc = reviewer
-                .get("description")
+            let prompt = reviewer
+                .get("prompt")
                 .and_then(|d| d.as_str())
-                .unwrap_or_else(|| panic!("`{reviewer_task_id}` description present"));
+                .unwrap_or_else(|| panic!("`{reviewer_task_id}` prompt present"));
 
             assert!(
-                desc.contains(capture_path),
+                prompt.contains(capture_path),
                 "`{reviewer_task_id}` prompt MUST reference the \
                  per-language captured artifact `{capture_path}` verbatim \
                  — that's the only path the Reviewer's read_file can \
                  target; got prompt of len {}",
-                desc.len(),
+                prompt.len(),
             );
             assert!(
-                !desc.contains("run `scripts/check.sh`") && !desc.contains("run scripts/check.sh"),
+                !prompt.contains("run `scripts/check.sh`")
+                    && !prompt.contains("run scripts/check.sh"),
                 "`{reviewer_task_id}` prompt MUST NOT tell the Reviewer \
                  to run scripts/check.sh — the Reviewer VM image \
                  (raxis-reviewer-core) ships only raxis-planner + ripgrep \
@@ -1437,7 +1791,7 @@ mod tests {
             // split — guard against a regression that drops back to
             // it on any per-language Reviewer.
             assert!(
-                !desc.contains("out/lint/check-output.txt"),
+                !prompt.contains("out/lint/check-output.txt"),
                 "`{reviewer_task_id}` prompt MUST NOT reference the OLD \
                  monolithic capture path `out/lint/check-output.txt` \
                  (gone since iter55 per-language split)",

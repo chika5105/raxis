@@ -33,7 +33,7 @@ boots.
 | Strategy | Downloads | Use when |
 |---|---|---|
 | `full` | Everything | Small repos; **Orchestrators always**. |
-| `blobless` | Tree structure + blobs on access | Large repos; agents needing broad read access. **V2 default.** |
+| `blobless` | Tree structure + blobs on access | Large repos; agents needing broad read access. Recommended for most Executors and Reviewers. |
 | `sparse` | Only `path_allowlist` paths | Narrow-scope Executors in large monorepos. |
 
 > **Rule:** Orchestrators must never use `sparse`. Git's 3-way merge
@@ -134,17 +134,19 @@ required = ["target", "scene"]
 additionalProperties = false
 ```
 
-Then assign the profile to an Executor task:
+Then assign one or more profiles to an Executor task:
 
 ```toml
 [[tasks]]
 task_id = "build-mobile-demo"
 session_agent_type = "Executor"
-profile = "unity_mobile"
+profiles          = ["unity_mobile"]
 ```
 
 The kernel validates the signed plan, resolves profile inheritance, and
-stamps only the effective tool bundle into matching Executor sessions.
+stamps only the merged effective tool bundle into matching Executor
+sessions. If a task references multiple profiles, tool names must remain
+unique across the merged set.
 Reviewer and Orchestrator sessions never receive custom tools. Existing
 scripts, stdio MCP servers, local HTTP services, commercial tool
 bridges, Unity, and Blender integrations fit this model by wrapping

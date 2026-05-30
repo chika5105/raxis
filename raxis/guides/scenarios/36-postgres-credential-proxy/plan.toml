@@ -7,6 +7,8 @@ Postgres credential proxy (scenario 36)
 [workspace]
 name = "Postgres Credential Proxy"
 lane_id     = "pg-cred-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "query-users"

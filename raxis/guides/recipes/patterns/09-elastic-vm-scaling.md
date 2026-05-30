@@ -86,6 +86,8 @@ description = "Cross-cutting type-system refactor"
 [workspace]
 name        = "ts-refactor"
 lane_id     = "default"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id              = "compile-types"
@@ -93,7 +95,8 @@ session_agent_type   = "Executor"
 clone_strategy       = "blobless"
 path_allowlist       = ["crates/types/"]
 predecessors         = []
-description          = """Recompile every dependent type. Should not need extra cores."""
+description        = "Compile Types"
+prompt             = """Recompile every dependent type. Should not need extra cores."""
 
 # Pin baseline regardless of scale-up signals.
 elastic              = false
@@ -117,7 +120,8 @@ session_agent_type   = "Executor"
 clone_strategy       = "sparse"
 path_allowlist       = ["src/", "tests/"]
 predecessors         = ["compile-types"]
-description          = """Apply the merge across N files, expects bursty memory."""
+description        = "Wide Fanout Merge"
+prompt             = """Apply the merge across N files, expects bursty memory."""
 
 # Plan can NARROW — never widen — the policy.
 min_vcpus            = 4

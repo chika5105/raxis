@@ -10,6 +10,8 @@ Two Executors run in parallel against disjoint sub-trees: auth_module
 [workspace]
 name = "Parallel Decomposition"
 lane_id     = "parallel-decomp-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "auth_module"

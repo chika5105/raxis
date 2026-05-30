@@ -30,7 +30,6 @@ const NAV_GROUPS: { label: string; links: NavLink[] }[] = [
   {
     label: "Learn",
     links: [
-      { href: "/plan-builder", label: "Plan builder" },
       { href: "/docs/guides/recipes/ops/20-bring-your-own-tools", label: "BYO tools" },
       { href: ASK_GOOGLE_RAXIS_HREF, label: "Ask Google about RAXIS", external: true },
       { href: "/paradigm", label: "Paradigm" },

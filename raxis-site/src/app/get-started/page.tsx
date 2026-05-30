@@ -234,8 +234,8 @@ raxis doctor`}</CommandBlock>
             <Link href={dashboardTourHref} className="btn btn-primary">
               Open dashboard tour
             </Link>
-            <Link href="/plan-builder" className="btn btn-ghost">
-              Try the website plan builder
+            <Link href={firstInitiativeHref} className="btn btn-ghost">
+              Run the first initiative
             </Link>
           </div>
         </div>
@@ -246,7 +246,7 @@ raxis doctor`}</CommandBlock>
           <h2 className="h-section">Next useful stops</h2>
           <div className="mt-8 grid gap-4 md:grid-cols-3">
             <NextLink href={installVerifyHref} title="Install and verify" />
-            <NextLink href="/plan-builder" title="Plan builder" />
+            <NextLink href={firstInitiativeHref} title="First initiative" />
             <NextLink href={dashboardTourHref} title="Dashboard tour" />
           </div>
         </div>

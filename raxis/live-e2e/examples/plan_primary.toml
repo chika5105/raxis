@@ -17,6 +17,167 @@ Cloud connections (S3 / GCP / Azure) are explicitly out of scope.
 [workspace]
 name = "E2E realistic scenario"
 lane_id = "e2e-realistic-lane"
+repository = "main"
+target_ref = "refs/heads/main"
+
+[[plan.integration_merge_verifiers]]
+name       = "plan_no_secret_merge"
+image      = "raxis-verifier-starter"
+command    = "/Users/jinanwachikafavour/raxis/raxis/target/release/raxis-verifier-no-secrets"
+timeout    = "30s"
+on_failure = "block_merge"
+applies_to = "all"
+artifact   = "/raxis/reports/plan-no-secret-merge.json"
+artifact_max_bytes = 1048576
+
+[plan.integration_merge_verifiers.hints]
+purpose = "Plan-scoped integration verifier coverage for the realistic e2e merged tree."
+
+# -- Executor profile: bounded Unity MCP adapter tools ----
+[profiles.unity_mcp_tools]
+role = "Executor"
+
+[[profiles.unity_mcp_tools.custom_tool]]
+name        = "unity_list_scenes"
+description = "List scenes through a bounded Unity Editor MCP adapter."
+command     = ["/usr/bin/python3", "-c", '''
+import json
+import os
+import sys
+
+raw = sys.stdin.read()
+try:
+    params = json.loads(raw) if raw.strip() else {}
+except Exception as exc:
+    print(json.dumps({"content": f"invalid JSON input: {exc}", "is_error": True}))
+    raise SystemExit(0)
+if not isinstance(params, dict):
+    params = {}
+method = sys.argv[1] if len(sys.argv) > 1 else "unity.listScenes"
+os.makedirs("out/tools", exist_ok=True)
+with open("out/tools/_unity_mcp_tool_calls.jsonl", "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"method": method, "request": params}, sort_keys=True) + "\n")
+result = {
+    "adapter": "unity-editor-mcp-fixture",
+    "mcp_method": method,
+    "request": params,
+    "bounded_capability": {
+        "timeout_seconds": 5,
+        "generic_mcp": False,
+    },
+    "scenes": [
+        "Assets/Scenes/Main.unity",
+        "Assets/Scenes/CombatArena.unity",
+    ],
+    "active": "Assets/Scenes/Main.unity",
+}
+print(json.dumps({"content": json.dumps(result, sort_keys=True), "is_error": False}))
+''', "unity.listScenes"]
+execution_locality = "host_mcp"
+timeout_seconds = 5
+
+[profiles.unity_mcp_tools.custom_tool.schema]
+type = "object"
+additionalProperties = false
+
+[profiles.unity_mcp_tools.custom_tool.schema.properties.include_disabled]
+type = "boolean"
+
+[[profiles.unity_mcp_tools.custom_tool]]
+name        = "unity_run_playmode_tests"
+description = "Run bounded Unity playmode tests through a local MCP adapter."
+command     = ["/usr/bin/python3", "-c", '''
+import json
+import os
+import sys
+
+raw = sys.stdin.read()
+try:
+    params = json.loads(raw) if raw.strip() else {}
+except Exception as exc:
+    print(json.dumps({"content": f"invalid JSON input: {exc}", "is_error": True}))
+    raise SystemExit(0)
+if not isinstance(params, dict):
+    params = {}
+method = sys.argv[1] if len(sys.argv) > 1 else "unity.runPlaymodeTests"
+os.makedirs("out/tools", exist_ok=True)
+with open("out/tools/_unity_mcp_tool_calls.jsonl", "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"method": method, "request": params}, sort_keys=True) + "\n")
+result = {
+    "adapter": "unity-editor-mcp-fixture",
+    "mcp_method": method,
+    "request": params,
+    "bounded_capability": {
+        "timeout_seconds": 5,
+        "generic_mcp": False,
+    },
+    "filter": params.get("filter", "all"),
+    "passed": 12,
+    "failed": 0,
+    "duration_ms": 824,
+}
+print(json.dumps({"content": json.dumps(result, sort_keys=True), "is_error": False}))
+''', "unity.runPlaymodeTests"]
+execution_locality = "host_mcp"
+timeout_seconds = 5
+
+[profiles.unity_mcp_tools.custom_tool.schema]
+type = "object"
+additionalProperties = false
+
+[profiles.unity_mcp_tools.custom_tool.schema.properties.filter]
+type = "string"
+maxLength = 80
+
+[[profiles.unity_mcp_tools.custom_tool]]
+name        = "unity_build_player"
+description = "Build the Unity mobile player through a bounded MCP adapter."
+command     = ["/usr/bin/python3", "-c", '''
+import json
+import os
+import sys
+
+raw = sys.stdin.read()
+try:
+    params = json.loads(raw) if raw.strip() else {}
+except Exception as exc:
+    print(json.dumps({"content": f"invalid JSON input: {exc}", "is_error": True}))
+    raise SystemExit(0)
+if not isinstance(params, dict):
+    params = {}
+method = sys.argv[1] if len(sys.argv) > 1 else "unity.buildPlayer"
+os.makedirs("out/tools", exist_ok=True)
+with open("out/tools/_unity_mcp_tool_calls.jsonl", "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"method": method, "request": params}, sort_keys=True) + "\n")
+result = {
+    "adapter": "unity-editor-mcp-fixture",
+    "mcp_method": method,
+    "request": params,
+    "bounded_capability": {
+        "timeout_seconds": 5,
+        "generic_mcp": False,
+    },
+    "target": params.get("target", "unknown"),
+    "scene": params.get("scene", "unknown"),
+    "artifact": "Builds/iOS/RaxisDemo.ipa",
+    "duration_ms": 1432,
+}
+print(json.dumps({"content": json.dumps(result, sort_keys=True), "is_error": False}))
+''', "unity.buildPlayer"]
+execution_locality = "host_mcp"
+timeout_seconds = 5
+
+[profiles.unity_mcp_tools.custom_tool.schema]
+type = "object"
+additionalProperties = false
+
+[profiles.unity_mcp_tools.custom_tool.schema.properties.target]
+type = "string"
+enum = ["ios", "android"]
+
+[profiles.unity_mcp_tools.custom_tool.schema.properties.scene]
+type = "string"
+maxLength = 160
 
 # ── Materializer Executor (re-used from extended scenario) ──
 [[tasks]]
@@ -30,7 +191,8 @@ session_agent_type = "Executor"
 # retry cycles. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 150
 path_allowlist     = ["out/postgres/", "out/mongo/", "out/manifest.json"]
-description = """
+description = "Materialize Records"
+prompt = """
 # Materializer Executor prompt — extended e2e scenario
 
 > Loaded verbatim into the `materialize-records` Executor task per
@@ -108,7 +270,7 @@ cat > /tmp/materialize.py <<'PY'
 # files. Designed to need at most one tool call from the planner:
 # write + run + verify in a single bash invocation. (Triple-double-
 # quoted module / function docstrings are intentionally avoided —
-# this prompt is embedded into a TOML multi-line-string description
+# this prompt is embedded into a TOML multi-line-string prompt
 # block by `multi_initiative.rs`, so a sequence of three quote
 # characters would terminate the enclosing string early.)
 from __future__ import annotations
@@ -280,7 +442,8 @@ session_agent_type = "Executor"
 # executor commits.
 max_turns          = 80
 path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/", "Cargo.lock"]
-description = """
+description = "Xfile Refactor"
+prompt = """
 # Cross-file refactor Executor prompt — extended e2e realistic scenario
 
 > Loaded verbatim into the `xfile-refactor` Executor task per the
@@ -381,7 +544,8 @@ predecessors       = ["xfile-refactor"]
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 35
 path_allowlist     = ["py-pkg/"]
-description = """
+description = "Lint Defect"
+prompt = """
 # Lint-defect Executor prompt — extended e2e realistic scenario
 
 > Loaded verbatim into the `lint-defect` Executor task per the
@@ -502,7 +666,8 @@ predecessors       = ["lint-defect"]
 # 90, retry #2 → 120. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 60
 path_allowlist     = ["out/lint/", "py-pkg/"]
-description = """
+description = "Lint Runner Python"
+prompt = """
 You are the RAXIS lint-runner-python executor. The diff from
 `lint-defect` is already committed on the working branch; your
 job is to surface the strict-Python-lint verdict (`ruff check`
@@ -606,7 +771,8 @@ max_turns          = 60
 # matching expansion: ruff / eslint / prettier / tsc do not produce
 # workspace-root artefacts, so their narrower allowlists stay tight.
 path_allowlist     = ["out/lint/", "rust-crate/", "Cargo.lock"]
-description = """
+description = "Lint Runner Rust"
+prompt = """
 You are the RAXIS lint-runner-rust executor. Your job is to
 surface the strict-Rust-lint verdict (`cargo fmt --all --
 --check` + `cargo clippy --all-targets -- -D warnings`) to the
@@ -679,7 +845,8 @@ predecessors       = ["lint-defect"]
 # Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 60
 path_allowlist     = ["out/lint/", "ts-pkg/"]
-description = """
+description = "Lint Runner Js"
+prompt = """
 You are the RAXIS lint-runner-js executor. Your job is to
 surface the strict-JS-lint verdict (`npx --no-install eslint
 --max-warnings 0` + `npx --no-install prettier --check` +
@@ -757,7 +924,8 @@ predecessors       = ["lint-runner-python"]
 # (`INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`) elasticating
 # further on round-2 if needed. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 30
-description = """
+description = "Review Lint Defect A"
+prompt = """
 You are the FIRST Reviewer in a panel reviewing the rich-
 multilang-001 Python lint-defect pipeline. The upstream
 `lint-defect` Executor introduced exactly one real Python lint
@@ -807,7 +975,8 @@ predecessors       = ["lint-runner-python"]
 # Iter55: 10 → 30 reviewer-ceiling bump (see Reviewer A comment).
 # Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 30
-description = """
+description = "Review Lint Defect B"
+prompt = """
 You are the SECOND Reviewer in a panel reviewing the rich-
 multilang-001 Python lint-defect pipeline. The
 `lint-runner-python` Executor has committed
@@ -856,7 +1025,8 @@ predecessors       = ["lint-runner-rust"]
 # the executor's capture wrapper itself misbehaves. Per
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 30
-description = """
+description = "Review Lint Defect Rust"
+prompt = """
 You are the sole Reviewer for the `lint-runner-rust` Executor.
 The captured artifact at `out/lint/check-rust.txt` carries the
 stdout + stderr of `cargo fmt --check` + `cargo clippy --all-targets
@@ -882,7 +1052,8 @@ predecessors       = ["lint-runner-js"]
 # mechanical read_file + decide shape. Per
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 30
-description = """
+description = "Review Lint Defect Js"
+prompt = """
 You are the sole Reviewer for the `lint-runner-js` Executor.
 The captured artifact at `out/lint/check-js.txt` carries the
 stdout + stderr of `npx eslint --max-warnings 0` + `prettier
@@ -915,7 +1086,8 @@ session_agent_type = "Executor"
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 25
 path_allowlist     = ["target/codegen/"]
-description = """
+description = "Allowlist Positive Codegen"
+prompt = """
 # Positive path-allowlist Executor prompt — extended e2e realistic scenario
 
 > Loaded verbatim into the `allowlist-positive-codegen` Executor
@@ -977,6 +1149,18 @@ the INV-TASK-PATH-01 invariant against real executor behaviour.
 
 """
 
+  [[tasks.verifiers]]
+  name       = "no_secret_strings"
+  image      = "raxis-verifier-starter"
+  command    = "/Users/jinanwachikafavour/raxis/raxis/target/release/raxis-verifier-no-secrets"
+  timeout    = "30s"
+  on_failure = "block_review"
+  artifact   = "/raxis/reports/no-secret-strings.json"
+  artifact_max_bytes = 1048576
+
+  [tasks.verifiers.hints]
+  purpose = "Per-task verifier coverage for the realistic e2e allowlist task."
+
 
 # -- Service-evidence round-trip Executor (P3-9) ----------
 [[tasks]]
@@ -991,7 +1175,8 @@ predecessors       = ["allowlist-positive-codegen"]
 # Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 60
 path_allowlist     = ["out/services/"]
-description = """
+description = "Service Round Trip"
+prompt = """
 # Service round-trip Executor prompt — extended e2e realistic scenario
 
 > Loaded verbatim into the `service-round-trip` Executor task per
@@ -1356,7 +1541,8 @@ predecessors       = ["service-round-trip"]
 # Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 60
 path_allowlist     = ["out/services/", "scripts/last_run_summary.txt"]
-description = """
+description = "Transparent Proxy Realscripts"
+prompt = """
 # Service-integrity real-scripts Executor prompt
 
 We have a small collection of Python scripts in `scripts/` that
@@ -1484,7 +1670,8 @@ predecessors       = ["service-round-trip"]
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 40
 path_allowlist     = ["out/services/postgres-fake-creds.txt"]
-description = """
+description = "Credential Substitution Canary"
+prompt = """
 # Credential-substitution canary — Executor prompt
 
 You are continuing work on the rich-multilang-001 service-integration
@@ -1580,7 +1767,8 @@ session_agent_type = "Executor"
 # `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 90
 path_allowlist     = ["out/deps/"]
-description = """
+description = "Dep Fetch Evidence"
+prompt = """
 # dep-fetch-evidence Executor task
 
 You are the RAXIS `dep-fetch-evidence` executor. Your job is to
@@ -1794,5 +1982,100 @@ restricted to that directory.
   other than `certifi`, and do not run `pip install` against
   any index other than the default (`pypi.org`). The witness
   pins the package set and the egress hosts.
+
+"""
+
+
+# -- Tooling / MCP custom tools Executor ----------------
+[[tasks]]
+task_id            = "tooling-mcp-unity"
+name               = "Call bounded Unity MCP adapter tools and commit evidence"
+session_agent_type = "Executor"
+profiles          = ["unity_mcp_tools"]
+# Three custom-tool calls + one JSON evidence file + commit. The
+# profile timeout is 5s per tool; 40 turns gives enough budget for
+# a correction loop without turning BYO tooling into open-ended
+# automation. Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` and
+# invariant 5's bounded-capability discipline.
+max_turns          = 40
+path_allowlist     = ["out/tools/"]
+description = "Tooling Mcp Unity"
+prompt = """
+# Tooling / MCP custom-tool smoke prompt
+
+You are the tooling-mcp-unity Executor. This task proves that a
+Raxis plan can give an Executor a small set of bounded, operator-
+declared tools that wrap an existing local MCP-style service.
+
+The profile attached to this task exposes three custom tools:
+
+* `unity_list_scenes`
+* `unity_run_playmode_tests`
+* `unity_build_player`
+
+These model a Unity Editor MCP adapter. They are operation-specific
+tools; there is intentionally no generic `mcp_call`, no discovery
+tool, and no broad script runner. Use the three tools directly.
+
+## Required tool calls
+
+Call the tools in this order:
+
+1. `unity_list_scenes` with `{ "include_disabled": false }`
+2. `unity_run_playmode_tests` with `{ "filter": "smoke" }`
+3. `unity_build_player` with:
+
+   ```json
+   {
+     "target": "ios",
+     "scene": "Assets/Scenes/Main.unity"
+   }
+   ```
+
+Do not synthesize or guess the outputs. Use the tool responses.
+
+## Evidence file
+
+Create `out/tools/unity-mcp-smoke.json`. The file must be valid
+JSON and must include:
+
+* the adapter name `unity-editor-mcp-fixture`
+* one record for each custom tool call
+* the raw content returned by each custom tool
+* the Unity MCP method names:
+  `unity.listScenes`, `unity.runPlaymodeTests`, and
+  `unity.buildPlayer`
+* the scene `Assets/Scenes/Main.unity`
+* a playmode result showing `failed` equals `0`
+* the build artifact `Builds/iOS/RaxisDemo.ipa`
+
+A simple shape is:
+
+```json
+{
+  "adapter": "unity-editor-mcp-fixture",
+  "tool_calls": [
+    { "tool": "unity_list_scenes", "content": "<raw tool content>" },
+    { "tool": "unity_run_playmode_tests", "content": "<raw tool content>" },
+    { "tool": "unity_build_player", "content": "<raw tool content>" }
+  ]
+}
+```
+
+## Commit
+
+After writing the evidence file:
+
+1. `git add out/tools/unity-mcp-smoke.json`
+2. `git commit -m "test: capture bounded unity mcp tool evidence"`
+3. Call `task_complete` with a short summary.
+
+## Constraints
+
+* Only write under `out/tools/`.
+* Do not edit source files, configs, credentials, scripts, or docs.
+* Do not make network requests.
+* Do not run Unity, Blender, or a package manager. The custom tools
+  are the entire integration surface for this task.
 
 """

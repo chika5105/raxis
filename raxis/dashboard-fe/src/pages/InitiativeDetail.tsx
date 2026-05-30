@@ -26,6 +26,8 @@ import {
   isIntegrationMergeTask,
   isTerminalFailureState,
   taskDisplayId,
+  toneClasses,
+  type StateBadgeTone,
 } from "@/lib/state-color";
 import {
   StatusFilterPills,
@@ -43,7 +45,7 @@ import {
   serializeStatusParam,
   toggleStatus,
 } from "@/lib/status-filter";
-import type { TaskView, WorktreeSnapshotView } from "@/types/api";
+import type { DagNode, TaskView, WorktreeSnapshotView } from "@/types/api";
 
 /// Project an initiative's `TaskView[]` payload onto the
 /// minimal `DagGraphNode[]` shape the embedded DAG renderer
@@ -138,6 +140,12 @@ export function InitiativeDetailPage() {
     refetchInterval: 4_000,
     enabled: id.length > 0,
   });
+  const dagQ = useQuery({
+    queryKey: ["initiative-dag", id],
+    queryFn: ({ signal }) => dashboardApi.initiatives.dag(id, signal),
+    refetchInterval: 4_000,
+    enabled: id.length > 0,
+  });
 
   // Per-task-state counts for the legend. Computed even when the
   // query is pending so hook order stays stable; the early returns
@@ -153,6 +161,9 @@ export function InitiativeDetailPage() {
   if (q.isPending) return <PageSpinner />;
   if (q.error) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
   const init = q.data;
+  const integrationDagNodes = dagQ.data?.nodes ?? [];
+  const dagGraphNodes = dagQ.data?.nodes ?? mapTasksToDagNodes(init.tasks);
+  const dagEdges = dagQ.data?.edges ?? init.edges;
   const focusedTask =
     selectedTask && init.tasks.find((t) => t.task_id === selectedTask);
   const activeSet = new Set(activeStatuses);
@@ -208,6 +219,7 @@ export function InitiativeDetailPage() {
       <InitiativeIntegrationState
         initiativeId={init.initiative_id}
         tasks={init.tasks}
+        dagNodes={integrationDagNodes}
       />
 
       {/* Clickable status legend — drives a URL-stored `?status=`
@@ -260,16 +272,14 @@ export function InitiativeDetailPage() {
           <Empty title="This initiative has no tasks." />
         ) : (
           <DagGraph
-            // iter69: forwarded via `mapTasksToDagNodes` so the
-            // bridge is pinned by a unit test. Pre-iter69 this
-            // mapping stripped `is_active`, so every actively-
-            // executing task rendered as a static `Admitted`
-            // chip in the embedded DAG even though the tasks
-            // list (which reads the field directly) showed it
-            // Running. See
-            // `INV-DASHBOARD-RUNNING-STATE-VISIBLE-01`.
-            nodes={mapTasksToDagNodes(init.tasks)}
-            edges={init.edges}
+            // Prefer the dedicated DAG endpoint when available: it
+            // carries per-node witness / integration gate summaries
+            // that the initiative task list intentionally omits.
+            // Fallback stays on `mapTasksToDagNodes` so the page
+            // degrades to the old task-only DAG if that side query
+            // fails.
+            nodes={dagGraphNodes}
+            edges={dagEdges}
             onSelect={setSelectedTask}
             onActivate={(taskId) => navigate(`/tasks/${taskId}`)}
             selected={selectedTask}
@@ -653,13 +663,19 @@ function ReviewRetryPill({
 function InitiativeIntegrationState({
   initiativeId,
   tasks,
+  dagNodes,
 }: {
   initiativeId: string;
   tasks: TaskView[];
+  dagNodes: DagNode[];
 }) {
   const integrationTask = useMemo(
     () => tasks.find((t) => isIntegrationMergeTask(t.task_id, initiativeId)),
     [initiativeId, tasks],
+  );
+  const integrationNode = useMemo(
+    () => dagNodes.find((n) => isIntegrationMergeTask(n.task_id, initiativeId)),
+    [dagNodes, initiativeId],
   );
   const q = useQuery({
     queryKey: ["initiative", initiativeId, "integration-merge-snapshots"],
@@ -685,29 +701,131 @@ function InitiativeIntegrationState({
     snapshots.find((s) => s.trigger === "PreGc") ??
     snapshots[0] ??
     null;
+  const gates = integrationNode?.gate_verdict_summary ?? [];
+  const pendingGates = gates.filter((gate) => gate.latest_verdict === "Pending");
+  const failedGates = gates.filter((gate) => gateTone(gate.latest_verdict) === "bad");
+  const displayState =
+    integrationTask.is_active && integrationTask.state === "Admitted"
+      ? "Running"
+      : integrationTask.state;
+  const awaitingGates =
+    displayState === "GatesPending" ||
+    (gates.length > 0 && pendingGates.length > 0 && !finalSnapshot);
 
   return (
     <section className="card p-4">
       <header className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h2 className="text-sm font-semibold text-ink">
-            Main after integration merge
+            Integration merge
           </h2>
           <p className="text-xs text-ink-muted">
-            Final main-root snapshot captured by the synthetic merge task.
+            Candidate merge, pre-merge gates, target-ref advancement, and final main snapshot.
           </p>
         </div>
-        <Link
-          to={`/tasks/${integrationTask.task_id}`}
-          className="btn text-xs py-1"
-        >
-          Open merge task
-        </Link>
+        <div className="flex items-center gap-2">
+          <StateBadge
+            state={displayState}
+            pulse={integrationTask.is_active || displayState === "Running"}
+          />
+          <Link
+            to={`/tasks/${integrationTask.task_id}`}
+            className="btn text-xs py-1"
+          >
+            Open merge task
+          </Link>
+        </div>
       </header>
 
-      {q.isPending ? (
+      <div
+        className={clsx(
+          "mt-3 rounded border p-3 text-sm",
+          awaitingGates
+            ? "border-warn/40 bg-warn-muted/10"
+            : isTerminalFailureState(displayState) || failedGates.length > 0
+              ? "border-bad/40 bg-bad-muted/10"
+              : finalSnapshot || displayState === "Completed"
+                ? "border-ok/40 bg-ok-muted/10"
+                : "border-info/40 bg-info-muted/10",
+        )}
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="font-medium text-ink">
+              {integrationStatusTitle(displayState, gates.length, pendingGates.length, finalSnapshot !== null)}
+            </div>
+            <p className="mt-1 text-xs text-ink-muted leading-relaxed">
+              {integrationStatusCopy(displayState, gates.length, pendingGates.length, finalSnapshot !== null)}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-1 text-[11px]">
+            <span className="badge bg-panel border-edge text-ink-muted">
+              candidate submitted
+            </span>
+            {gates.length > 0 ? (
+              <span
+                className={clsx(
+                  "badge",
+                  pendingGates.length > 0
+                    ? toneClasses("warn")
+                    : failedGates.length > 0
+                      ? toneClasses("bad")
+                      : toneClasses("ok"),
+                )}
+              >
+                {pendingGates.length > 0
+                  ? `${pendingGates.length}/${gates.length} gates pending`
+                  : failedGates.length > 0
+                    ? `${failedGates.length}/${gates.length} gates failed`
+                    : `${gates.length}/${gates.length} gates passed`}
+              </span>
+            ) : (
+              <span className="badge bg-panel border-edge text-ink-muted">
+                no pre-merge gates
+              </span>
+            )}
+            <span
+              className={clsx(
+                "badge",
+                finalSnapshot || displayState === "Completed"
+                  ? toneClasses("ok")
+                  : toneClasses("muted"),
+              )}
+            >
+              {finalSnapshot ? "snapshot captured" : "snapshot pending"}
+            </span>
+          </div>
+        </div>
+
+        {gates.length > 0 && (
+          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+            {gates.map((gate) => (
+              <div
+                key={`${gate.gate_source}:${gate.gate_hook}:${gate.gate_type}`}
+                className="rounded border border-edge bg-panel px-2.5 py-2 text-xs"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <Mono className="truncate">{gate.gate_type}</Mono>
+                  <span className={clsx("badge", toneClasses(gateTone(gate.latest_verdict)))}>
+                    {gate.latest_verdict}
+                  </span>
+                </div>
+                <div className="mt-1 flex flex-wrap gap-1 text-[10px] text-ink-subtle">
+                  <span>{mergeGateSourceLabel(gate.gate_source)}</span>
+                  <span>·</span>
+                  <span>{mergeGateHookLabel(gate.gate_hook)}</span>
+                  <span>·</span>
+                  <span>{fmtRelative(gate.recorded_at)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {q.isPending && !finalSnapshot ? (
         <div className="mt-3 text-xs text-ink-subtle">
-          Loading merge snapshot...
+          Checking for final merge snapshot…
         </div>
       ) : q.error ? (
         <div className="mt-3">
@@ -715,14 +833,100 @@ function InitiativeIntegrationState({
         </div>
       ) : finalSnapshot ? (
         <IntegrationSnapshotSummary snapshot={finalSnapshot} />
+      ) : awaitingGates ? (
+        <div className="mt-3 rounded border border-edge bg-panel px-3 py-2 text-xs text-ink-muted">
+          The final main-root snapshot is intentionally absent until the blocking
+          integration gates pass and the kernel advances the target ref.
+        </div>
       ) : (
         <Empty
           title="No merge snapshot recorded yet."
-          hint="The final main-root state appears here once integration merge captures its worktree snapshot."
+          hint="The final main-root state appears here once the orchestrator submits IntegrationMerge and the kernel captures the merged worktree."
         />
       )}
     </section>
   );
+}
+
+function integrationStatusTitle(
+  state: string,
+  gateCount: number,
+  pendingCount: number,
+  hasSnapshot: boolean,
+): string {
+  if (state === "Completed" || hasSnapshot) return "Merge complete";
+  if (isTerminalFailureState(state)) return "Merge failed";
+  if (state === "GatesPending" || pendingCount > 0) {
+    return gateCount > 0
+      ? "Merge submitted; awaiting pre-merge gates"
+      : "Merge submitted; gate decision pending";
+  }
+  if (state === "Running") return "Merge is running";
+  if (state === "Admitted") return "Waiting for orchestrator merge submission";
+  return "Integration merge is in progress";
+}
+
+function integrationStatusCopy(
+  state: string,
+  gateCount: number,
+  pendingCount: number,
+  hasSnapshot: boolean,
+): string {
+  if (state === "Completed" || hasSnapshot) {
+    return "The kernel accepted the merge, advanced the target ref, and captured the final main-root snapshot.";
+  }
+  if (isTerminalFailureState(state)) {
+    return "The integration merge path reached a terminal failure. Open the merge task for the failure reason and witness timeline.";
+  }
+  if (state === "GatesPending" || pendingCount > 0) {
+    return gateCount > 0
+      ? "The orchestrator submitted IntegrationMerge. The kernel is holding target-ref advancement until the listed blocking gates finish."
+      : "The orchestrator submitted IntegrationMerge. The kernel has paused before target-ref advancement while gate state is reconciled.";
+  }
+  if (state === "Running") {
+    return "The kernel is processing the submitted merge candidate and will either spawn gates, advance the target ref, or surface a failure.";
+  }
+  return "The synthetic integration task is admitted. It will move once the orchestrator submits the final IntegrationMerge intent.";
+}
+
+function gateTone(verdict: string): StateBadgeTone {
+  switch (verdict) {
+    case "Pass":
+      return "ok";
+    case "Pending":
+      return "warn";
+    case "Inconclusive":
+      return "warn";
+    case "Fail":
+    case "SpawnFailed":
+    case "ProcessFailed":
+    case "Timeout":
+    case "ConfigInvalid":
+    case "BudgetExhausted":
+    case "CapExceeded":
+      return "bad";
+    default:
+      return "muted";
+  }
+}
+
+function mergeGateSourceLabel(source: string | undefined): string {
+  switch (source) {
+    case "plan_integration_verifier":
+      return "Plan gate";
+    case "policy_integration_verifier":
+      return "Policy gate";
+    case "integration_verifier":
+      return "Integration gate";
+    case "policy_gate":
+      return "Policy invariant";
+    default:
+      return source ?? "Gate";
+  }
+}
+
+function mergeGateHookLabel(hook: string | undefined): string {
+  return hook === "integration_merge" ? "IntegrationMerge" : (hook ?? "Hook");
 }
 
 function IntegrationSnapshotSummary({

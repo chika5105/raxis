@@ -4,7 +4,8 @@
 //! a planner-role binary can:
 //!
 //! 1. Read a model id from the kernel-stamped `RAXIS_MODEL_ID` env
-//!    var (or fall back to a role-canonical default).
+//!    var, or read an ordered `RAXIS_MODEL_CHAIN` fallback list
+//!    (or fall back to a role-canonical default).
 //! 2. Validate the id against the V2 known-model registry.
 //! 3. Surface deprecation warnings to stderr at planner-boot so the
 //!    operator sees them in `initiative watch`.
@@ -38,6 +39,14 @@
 use std::env;
 
 use thiserror::Error;
+
+/// Env var for a single planner model id. Used when no fallback
+/// chain is declared.
+pub const MODEL_ID_ENV: &str = "RAXIS_MODEL_ID";
+/// Env var for a comma-separated planner model fallback chain.
+/// First entry is primary; later entries are attempted only for
+/// retryable provider failures.
+pub const MODEL_CHAIN_ENV: &str = "RAXIS_MODEL_CHAIN";
 
 // ---------------------------------------------------------------------------
 // ProviderId + KnownModel
@@ -261,6 +270,12 @@ pub enum ProviderModelError {
     /// operator-side typo is visible.
     #[error("RAXIS_MODEL_ID is set but empty")]
     EmptyModelEnv,
+    /// `RAXIS_MODEL_CHAIN` was present but empty.
+    #[error("RAXIS_MODEL_CHAIN is set but empty")]
+    EmptyModelChainEnv,
+    /// `RAXIS_MODEL_CHAIN` contained an empty comma-separated entry.
+    #[error("RAXIS_MODEL_CHAIN contains an empty entry")]
+    EmptyModelChainEntry,
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +306,33 @@ pub fn resolve_model_from_env() -> Result<&'static KnownModel, ProviderModelErro
     resolve_model_from_env_fn(|k| env::var(k).ok())
 }
 
+/// Resolve an ordered model fallback chain from the kernel-stamped
+/// environment. `RAXIS_MODEL_CHAIN` is comma-separated and takes
+/// precedence over `RAXIS_MODEL_ID`; absence falls back to the
+/// single-model resolver for backward compatibility.
+pub fn resolve_model_chain_from_env_fn<F>(
+    env: F,
+) -> Result<Vec<&'static KnownModel>, ProviderModelError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match env(MODEL_CHAIN_ENV) {
+        Some(raw) if raw.trim().is_empty() => Err(ProviderModelError::EmptyModelChainEnv),
+        Some(raw) => {
+            let mut out = Vec::new();
+            for part in raw.split(',') {
+                let model_id = part.trim();
+                if model_id.is_empty() {
+                    return Err(ProviderModelError::EmptyModelChainEntry);
+                }
+                out.push(validate_model_id(model_id)?);
+            }
+            Ok(out)
+        }
+        None => resolve_model_from_env_fn(env).map(|model| vec![model]),
+    }
+}
+
 /// Test-friendly variant of [`resolve_model_from_env`] that takes
 /// a closure `&str -> Option<String>` instead of the live process
 /// environment.
@@ -298,7 +340,7 @@ pub fn resolve_model_from_env_fn<F>(env: F) -> Result<&'static KnownModel, Provi
 where
     F: Fn(&str) -> Option<String>,
 {
-    let raw = env("RAXIS_MODEL_ID");
+    let raw = env(MODEL_ID_ENV);
     let id = match raw {
         Some(s) if s.is_empty() => return Err(ProviderModelError::EmptyModelEnv),
         Some(s) => s,
@@ -410,6 +452,36 @@ mod tests {
         .unwrap();
         assert_eq!(m.name, "claude-3-haiku-20240307");
         assert!(m.deprecated.is_some());
+    }
+
+    #[test]
+    fn resolves_model_chain_from_env() {
+        let models = resolve_model_chain_from_env_fn(|k| match k {
+            MODEL_CHAIN_ENV => {
+                Some("gemini-2.5-flash, gpt-5.3-codex, claude-3-haiku-20240307".to_owned())
+            }
+            _ => None,
+        })
+        .unwrap();
+        let names: Vec<&str> = models.iter().map(|m| m.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "gemini-2.5-flash",
+                "gpt-5.3-codex",
+                "claude-3-haiku-20240307",
+            ]
+        );
+    }
+
+    #[test]
+    fn model_chain_rejects_empty_entries() {
+        let err = resolve_model_chain_from_env_fn(|k| match k {
+            MODEL_CHAIN_ENV => Some("gemini-2.5-flash,,gpt-5.3-codex".to_owned()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(matches!(err, ProviderModelError::EmptyModelChainEntry));
     }
 
     #[test]

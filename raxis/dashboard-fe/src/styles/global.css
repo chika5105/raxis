@@ -255,7 +255,14 @@
   }
 
   html {
-    font-size: 16px;
+    /*
+     * Operator default scale. The dashboard is dense by design, but
+     * production triage needs readable tables and timelines without
+     * requiring browser zoom on every fresh session. Keep this modest:
+     * it lifts rem-based type/spacing globally while preserving the
+     * compact, work-focused layout.
+     */
+    font-size: 16.75px;
   }
 
   body {

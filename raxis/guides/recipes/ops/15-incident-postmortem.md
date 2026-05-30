@@ -201,8 +201,9 @@ Common follow-ups:
 - **Policy hardening** — tighten a lane's
   `[host_capacity].cpu_high_water_pct` so the watchdog reaps
   earlier.
-- **Plan template changes** — every plan now must include
-  `[[tasks.verifiers]]` for `pre_admit` linting.
+- **Plan template changes** — sensitive executor tasks now include
+  `[[tasks.verifiers]]` with `on_failure = "block_review"` for
+  mechanical linting before reviewer activation.
 - **Runbook update** — capture the new pattern into the relevant
   recipe (e.g., "for this gap_kind, run X").
 - **Operator training** — walk the team through the timeline.

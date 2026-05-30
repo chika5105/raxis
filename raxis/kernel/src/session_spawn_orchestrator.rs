@@ -79,6 +79,9 @@ use thiserror::Error;
 
 use crate::initiatives::lifecycle as kernel_lifecycle;
 
+const PLANNER_MODEL_ID_ENV: &str = "RAXIS_MODEL_ID";
+const PLANNER_MODEL_CHAIN_ENV: &str = "RAXIS_MODEL_CHAIN";
+
 /// env-var name carrying the
 /// operator-authored seed prompt to the spawned planner binary.
 ///
@@ -871,6 +874,12 @@ async fn spawn_orchestrator_for_initiative(
     );
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     stamp_capability_manifest_env(&mut env, "orchestrator", "canonical", None);
+    stamp_planner_model_env_or_insert(
+        &mut env,
+        policy.gateway(),
+        raxis_types::SessionAgentType::Orchestrator,
+        None,
+    );
     if let Some(data_dir) = &spawn_ctx.data_dir {
         let sock = data_dir.join("sockets").join("planner.sock");
         env.insert(
@@ -2064,20 +2073,12 @@ pub fn spawn_planner_dispatcher(
             let (agent_type, session_initiative_id) = row?;
             // Mode A (Orchestrator) requires `sessions.initiative_id` to
             // be populated — the orchestrator-spawn path always sets it.
-            // Mode B (Executor/Reviewer), however, must NOT depend on
-            // `sessions.initiative_id`: the executor-spawn path does
-            // not currently populate the column, so the canonical
-            // source of truth for the initiative binding of a worker
-            // session is the `subtask_activations.initiative_id`
-            // column on the row that holds this session_id (the
-            // schema enforces `Active` rows always carry a non-null
-            // `session_id`, and the row is created by the same
-            // `activate_subtask` transaction that booted the VM).
-            // Without this distinction Mode B never fires for the
-            // realistic-scenario executors (iter27 reproduced the
-            // exact iter15/iter20 deadlock — 4 sessions revoked,
-            // 0 `worker_post_exit_respawn_trigger` events,
-            // kernel CPU 0% with `Active` activation rows stranded).
+            // Worker sessions now carry the same immutable back-edge so
+            // host-owned custom tools, audit events, and dashboard queries
+            // can attribute a revoked worker session from the session row
+            // alone. Mode B still reads `subtask_activations` below because
+            // that row is the per-attempt source of truth for task_id,
+            // activation_state, retry counters, and evaluation_sha.
             if agent_type == raxis_types::SessionAgentType::Orchestrator.as_sql_str() {
                 let initiative_id = session_initiative_id;
                 if initiative_id.is_empty() {
@@ -2306,13 +2307,9 @@ pub fn spawn_planner_dispatcher(
             // Find the Active activation row bound to THIS session
             // (not just any active row on the initiative — a
             // sibling executor on the same initiative is its own
-            // story). The activation row is also the canonical
-            // source of truth for the worker's initiative binding
-            // — `sessions.initiative_id` is empty on executor /
-            // reviewer rows by current spawn-path convention, but
-            // the activation row's `initiative_id` is NOT NULL by
-            // schema and was set in the same transaction that
-            // booted the VM.
+            // story). The activation row remains the canonical
+            // per-attempt source for the worker's task binding and
+            // carries the same `initiative_id` as the session row.
             let row: Option<(String, String)> = conn
                 .query_row(
                     &format!(
@@ -4787,6 +4784,79 @@ fn stamp_capability_manifest_env(
     }
 }
 
+fn stable_model_chain_rotation(task_id: &str, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in task_id.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (hash as usize) % len
+}
+
+fn model_chain_for_role(
+    gateway: &raxis_policy::GatewaySection,
+    session_agent_type: raxis_types::SessionAgentType,
+) -> Vec<String> {
+    let (chain, single) = match session_agent_type {
+        raxis_types::SessionAgentType::Orchestrator => (
+            &gateway.planner_model_orchestrator_chain,
+            gateway.planner_model_orchestrator.as_deref(),
+        ),
+        raxis_types::SessionAgentType::Executor => (
+            &gateway.planner_model_executor_chain,
+            gateway.planner_model_executor.as_deref(),
+        ),
+        raxis_types::SessionAgentType::Reviewer => (
+            &gateway.planner_model_reviewer_chain,
+            gateway.planner_model_reviewer.as_deref(),
+        ),
+    };
+    let filtered_chain: Vec<String> = chain
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if !filtered_chain.is_empty() {
+        return filtered_chain;
+    }
+    single
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(|model| vec![model.to_owned()])
+        .unwrap_or_default()
+}
+
+fn stamp_planner_model_env_or_insert(
+    env: &mut BTreeMap<String, String>,
+    gateway: Option<&raxis_policy::GatewaySection>,
+    session_agent_type: raxis_types::SessionAgentType,
+    task_id: Option<&str>,
+) {
+    let Some(gateway) = gateway else {
+        return;
+    };
+    let mut chain = model_chain_for_role(gateway, session_agent_type);
+    if chain.is_empty() {
+        return;
+    }
+    if matches!(session_agent_type, raxis_types::SessionAgentType::Executor)
+        && gateway.planner_model_executor_rotate_primary
+    {
+        if let Some(task_id) = task_id {
+            let offset = stable_model_chain_rotation(task_id, chain.len());
+            chain.rotate_left(offset);
+        }
+    }
+    env.entry(PLANNER_MODEL_CHAIN_ENV.to_owned())
+        .or_insert_with(|| chain.join(","));
+    env.entry(PLANNER_MODEL_ID_ENV.to_owned())
+        .or_insert_with(|| chain[0].clone());
+}
+
 /// Free-function helper: spawn the Executor / Reviewer VM for a
 /// V2 sub-task activation directly through `SessionSpawnService`.
 ///
@@ -5080,6 +5150,16 @@ pub async fn spawn_executor_for_task(
             "canonical"
         },
         None,
+    );
+    let session_agent_type = match agent_kind {
+        ExecutorAgentKind::Executor => raxis_types::SessionAgentType::Executor,
+        ExecutorAgentKind::Reviewer => raxis_types::SessionAgentType::Reviewer,
+    };
+    stamp_planner_model_env_or_insert(
+        &mut env,
+        policy.gateway(),
+        session_agent_type,
+        Some(task_id),
     );
     if let Some(data_dir) = &spawn_ctx.data_dir {
         let sock = data_dir.join("sockets").join("planner.sock");
@@ -6100,6 +6180,13 @@ mod tests {
             max_consecutive_respawns: 5,
             planner_max_turns_default: d,
             planner_max_turns_step_default: None,
+            planner_model_orchestrator: None,
+            planner_model_executor: None,
+            planner_model_reviewer: None,
+            planner_model_orchestrator_chain: Vec::new(),
+            planner_model_executor_chain: Vec::new(),
+            planner_model_reviewer_chain: Vec::new(),
+            planner_model_executor_rotate_primary: false,
         }
     }
 
@@ -6117,7 +6204,89 @@ mod tests {
             max_consecutive_respawns: 5,
             planner_max_turns_default: d,
             planner_max_turns_step_default: step,
+            planner_model_orchestrator: None,
+            planner_model_executor: None,
+            planner_model_reviewer: None,
+            planner_model_orchestrator_chain: Vec::new(),
+            planner_model_executor_chain: Vec::new(),
+            planner_model_reviewer_chain: Vec::new(),
+            planner_model_executor_rotate_primary: false,
         }
+    }
+
+    #[test]
+    fn planner_model_env_stamps_role_specific_policy_models() {
+        let mut gateway = gateway_with_default(None);
+        gateway.planner_model_orchestrator = Some("claude-3-haiku-20240307".to_owned());
+        gateway.planner_model_executor = Some("gemini-2.5-flash".to_owned());
+        gateway.planner_model_reviewer = Some("gpt-5.3-codex".to_owned());
+
+        let mut env = BTreeMap::new();
+        stamp_planner_model_env_or_insert(
+            &mut env,
+            Some(&gateway),
+            raxis_types::SessionAgentType::Executor,
+            Some("task-a"),
+        );
+        assert_eq!(
+            env.get(PLANNER_MODEL_ID_ENV).map(String::as_str),
+            Some("gemini-2.5-flash")
+        );
+        assert_eq!(
+            env.get(PLANNER_MODEL_CHAIN_ENV).map(String::as_str),
+            Some("gemini-2.5-flash")
+        );
+
+        env.insert(PLANNER_MODEL_ID_ENV.to_owned(), "test-override".to_owned());
+        stamp_planner_model_env_or_insert(
+            &mut env,
+            Some(&gateway),
+            raxis_types::SessionAgentType::Reviewer,
+            Some("review-a"),
+        );
+        assert_eq!(
+            env.get(PLANNER_MODEL_ID_ENV).map(String::as_str),
+            Some("test-override"),
+            "explicit caller env remains the highest-precedence test seam",
+        );
+    }
+
+    #[test]
+    fn planner_model_env_rotates_executor_fallback_chain_by_task() {
+        let mut gateway = gateway_with_default(None);
+        gateway.planner_model_executor_chain = vec![
+            "claude-3-haiku-20240307".to_owned(),
+            "gemini-2.5-flash".to_owned(),
+            "gpt-5.3-codex".to_owned(),
+        ];
+        gateway.planner_model_executor_rotate_primary = true;
+
+        let mut env_a = BTreeMap::new();
+        stamp_planner_model_env_or_insert(
+            &mut env_a,
+            Some(&gateway),
+            raxis_types::SessionAgentType::Executor,
+            Some("materialize-records"),
+        );
+        let mut env_b = BTreeMap::new();
+        stamp_planner_model_env_or_insert(
+            &mut env_b,
+            Some(&gateway),
+            raxis_types::SessionAgentType::Executor,
+            Some("xfile-refactor"),
+        );
+
+        let chain_a = env_a
+            .get(PLANNER_MODEL_CHAIN_ENV)
+            .expect("chain stamped for first executor");
+        let chain_b = env_b
+            .get(PLANNER_MODEL_CHAIN_ENV)
+            .expect("chain stamped for second executor");
+        assert_ne!(
+            chain_a, chain_b,
+            "different task ids should rotate the same fallback set so \
+             live e2e exercises multiple provider primaries",
+        );
     }
 
     /// Helper: `TaskPlanFields` with only `max_turns` overridden.

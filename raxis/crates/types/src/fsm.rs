@@ -394,12 +394,13 @@ impl SessionAgentType {
 /// is checked by `kernel/src/initiatives/lifecycle.rs::
 /// validate_sparse_orchestrator_exclusion` at approve_plan time.
 ///
-/// **Why `blobless` is the V2 default.** It is uniformly safer than
-/// `sparse` (works for every agent type including Orchestrators) and
-/// strictly cheaper than `full` for the common case of repos with binary
-/// blobs (build artifacts, vendored deps, fixtures). Operators who know
-/// their repo is small enough to clone in full opt in to `full`; operators
-/// with a known narrow path scope opt in to `sparse`.
+/// **Why `blobless` is the recommended common choice.** It is uniformly
+/// safer than `sparse` (works for every agent type including
+/// Orchestrators) and strictly cheaper than `full` for the common case
+/// of repos with binary blobs (build artifacts, vendored deps,
+/// fixtures). Plans must still declare `clone_strategy` explicitly so
+/// runtime admission, CLI validation, and Plan Builder validation all
+/// evaluate the same TOML bytes.
 ///
 /// **Auto-configuration of sparse.** When `sparse` is selected, the kernel
 /// auto-derives the sparse-checkout path set from the task's

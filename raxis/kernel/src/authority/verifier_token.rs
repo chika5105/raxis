@@ -37,6 +37,9 @@ pub struct ValidatedVerifierToken {
     pub task_id: String,
     pub gate_type: String,
     pub evaluation_sha: String,
+    pub gate_source: String,
+    pub gate_hook: String,
+    pub verifier_on_failure: Option<String>,
 }
 
 /// Result of an atomic "issue unless already active" attempt.
@@ -108,6 +111,7 @@ pub fn issue_verifier_token_unless_active(
     gate_type: &str,
     evaluation_sha: &str,
     ttl_secs: u64,
+    metadata: VerifierRunMetadata<'_>,
     store: &Store,
 ) -> Result<IssueVerifierTokenOutcome, AuthorityError> {
     let now = unix_now_secs();
@@ -141,8 +145,10 @@ pub fn issue_verifier_token_unless_active(
         &format!(
             "INSERT INTO {VRT}
                 (verifier_run_id, task_id, gate_type, evaluation_sha,
-                 token_hash, issued_at, expires_at, consumed)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)"
+                 token_hash, issued_at, expires_at, consumed,
+                 gate_source, gate_hook, verifier_image_alias,
+                 verifier_command, verifier_on_failure)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12)"
         ),
         rusqlite::params![
             run_id,
@@ -151,12 +157,95 @@ pub fn issue_verifier_token_unless_active(
             evaluation_sha,
             &token_hash,
             now,
-            expires_at
+            expires_at,
+            metadata.gate_source,
+            metadata.gate_hook,
+            metadata.verifier_image_alias,
+            metadata.verifier_command,
+            metadata.verifier_on_failure,
         ],
     )
     .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 
     Ok(IssueVerifierTokenOutcome::Issued { raw_token })
+}
+
+/// Persist a terminal verifier-run row for failures that happen before
+/// the verifier can receive a bearer token.
+///
+/// This is deliberately separate from `issue_verifier_token_unless_active`:
+/// no verifier process will ever see the generated token, so the row is
+/// inserted as already consumed. The dashboard can still show the failed
+/// gate with its source/hook/provenance instead of leaving the task as an
+/// opaque "waiting on witness" state.
+pub fn record_terminal_verifier_run(
+    run_id: &str,
+    task_id: &str,
+    gate_type: &str,
+    evaluation_sha: &str,
+    status: &str,
+    failure_reason: &str,
+    metadata: VerifierRunMetadata<'_>,
+    store: &Store,
+) -> Result<(), AuthorityError> {
+    let (_raw_token, token_hash) = generate_verifier_token()?;
+    let now = unix_now_secs();
+    let conn = store.lock_sync();
+    conn.execute(
+        &format!(
+            "INSERT INTO {VRT}
+                (verifier_run_id, task_id, gate_type, evaluation_sha,
+                 token_hash, issued_at, expires_at, consumed, consumed_at,
+                 gate_source, gate_hook, verifier_image_alias,
+                 verifier_command, verifier_on_failure, status, failure_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 1, ?6,
+                     ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+        ),
+        rusqlite::params![
+            run_id,
+            task_id,
+            gate_type,
+            evaluation_sha,
+            &token_hash,
+            now,
+            metadata.gate_source,
+            metadata.gate_hook,
+            metadata.verifier_image_alias,
+            metadata.verifier_command,
+            metadata.verifier_on_failure,
+            status,
+            failure_reason,
+        ],
+    )
+    .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
+    Ok(())
+}
+
+/// Operator-visible provenance stamped onto `verifier_run_tokens`.
+///
+/// This is deliberately metadata, not authority. The token remains bound by
+/// `(task_id, gate_type, evaluation_sha)`; the extra fields let the witness
+/// handler and dashboard route the result without guessing from names.
+#[derive(Debug, Clone, Copy)]
+pub struct VerifierRunMetadata<'a> {
+    pub gate_source: &'a str,
+    pub gate_hook: &'a str,
+    pub verifier_image_alias: Option<&'a str>,
+    pub verifier_command: Option<&'a str>,
+    pub verifier_on_failure: Option<&'a str>,
+}
+
+#[cfg(test)]
+impl<'a> VerifierRunMetadata<'a> {
+    fn default_for_tests() -> Self {
+        Self {
+            gate_source: "policy_gate",
+            gate_hook: "intent",
+            verifier_image_alias: None,
+            verifier_command: None,
+            verifier_on_failure: None,
+        }
+    }
 }
 
 /// Validate a raw token presented by a verifier subprocess.
@@ -212,17 +301,31 @@ pub fn validate_verifier_token_row_in_tx(
     let token_hash = sha256_hex(&raw_bytes);
     let now = unix_now_secs();
 
-    let (run_id, task_id, gate_type, evaluation_sha, expires_at, consumed): (
+    let (
+        run_id,
+        task_id,
+        gate_type,
+        evaluation_sha,
+        expires_at,
+        consumed,
+        gate_source,
+        gate_hook,
+        verifier_on_failure,
+    ): (
         String,
         String,
         String,
         String,
         i64,
         i64,
+        String,
+        String,
+        Option<String>,
     ) = conn
         .query_row(
             &format!(
-                "SELECT verifier_run_id, task_id, gate_type, evaluation_sha, expires_at, consumed
+                "SELECT verifier_run_id, task_id, gate_type, evaluation_sha, expires_at, consumed,
+                        gate_source, gate_hook, verifier_on_failure
                    FROM {VRT}
                   WHERE token_hash=?1"
             ),
@@ -235,6 +338,9 @@ pub fn validate_verifier_token_row_in_tx(
                     r.get(3)?,
                     r.get(4)?,
                     r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
                 ))
             },
         )
@@ -255,6 +361,9 @@ pub fn validate_verifier_token_row_in_tx(
         task_id,
         gate_type,
         evaluation_sha,
+        gate_source,
+        gate_hook,
+        verifier_on_failure,
     })
 }
 
@@ -281,16 +390,32 @@ pub fn consume_verifier_token_by_run_id(
     verifier_run_id: &str,
     store: &Store,
 ) -> Result<(), AuthorityError> {
+    mark_verifier_run_terminal_by_run_id(verifier_run_id, "SpawnFailed", None, store)
+}
+
+/// Mark a verifier run terminal when the verifier cannot produce a
+/// witness row (spawn failure, process failure, timeout).
+///
+/// This keeps the active-token dedupe guard correct while also giving
+/// dashboards a concrete terminal state instead of an endless Pending
+/// run with no witness row.
+pub fn mark_verifier_run_terminal_by_run_id(
+    verifier_run_id: &str,
+    status: &str,
+    failure_reason: Option<&str>,
+    store: &Store,
+) -> Result<(), AuthorityError> {
     let now = unix_now_secs();
     let conn = store.lock_sync();
     conn.execute(
         &format!(
             "UPDATE {VRT}
-                SET consumed = 1, consumed_at = ?1
-              WHERE verifier_run_id = ?2
+                SET consumed = 1, consumed_at = ?1,
+                    status = ?2, failure_reason = ?3
+              WHERE verifier_run_id = ?4
                 AND consumed = 0"
         ),
-        rusqlite::params![now, verifier_run_id],
+        rusqlite::params![now, status, failure_reason, verifier_run_id],
     )
     .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
     Ok(())
@@ -308,6 +433,19 @@ pub fn consume_verifier_token_in_tx(
     conn: &rusqlite::Connection,
     raw_token: &str,
 ) -> Result<(), AuthorityError> {
+    consume_verifier_token_in_tx_with_status(conn, raw_token, None)
+}
+
+/// Consume a verifier token and optionally stamp the final witness
+/// result class on the run row. `witness_records` remains the source
+/// of truth for accepted verifier evidence; the status mirror exists
+/// so the dashboard can render terminal no-witness states with the
+/// same field.
+pub fn consume_verifier_token_in_tx_with_status(
+    conn: &rusqlite::Connection,
+    raw_token: &str,
+    status: Option<&str>,
+) -> Result<(), AuthorityError> {
     let raw_bytes = hex::decode(raw_token).map_err(|_| AuthorityError::TokenMismatch)?;
     let token_hash = sha256_hex(&raw_bytes);
     let now = unix_now_secs();
@@ -315,9 +453,14 @@ pub fn consume_verifier_token_in_tx(
     let rows = conn
         .execute(
             &format!(
-                "UPDATE {VRT} SET consumed=1, consumed_at=?1 WHERE token_hash=?2 AND consumed=0"
+                "UPDATE {VRT}
+                    SET consumed = 1,
+                        consumed_at = ?1,
+                        status = COALESCE(?2, status)
+                  WHERE token_hash = ?3
+                    AND consumed = 0"
             ),
-            rusqlite::params![now, &token_hash],
+            rusqlite::params![now, status, &token_hash],
         )
         .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 
@@ -375,6 +518,9 @@ mod tests {
                 task_id: "task-bind".to_owned(),
                 gate_type: "coverage".to_owned(),
                 evaluation_sha: "abc123".to_owned(),
+                gate_source: "policy_gate".to_owned(),
+                gate_hook: "intent".to_owned(),
+                verifier_on_failure: None,
             }
         );
     }
@@ -390,6 +536,7 @@ mod tests {
             "coverage",
             "sha-dedupe",
             60,
+            VerifierRunMetadata::default_for_tests(),
             &store,
         )
         .unwrap();
@@ -404,6 +551,7 @@ mod tests {
             "coverage",
             "sha-dedupe",
             60,
+            VerifierRunMetadata::default_for_tests(),
             &store,
         )
         .unwrap();
@@ -437,6 +585,7 @@ mod tests {
             "lint",
             "sha-consumed",
             60,
+            VerifierRunMetadata::default_for_tests(),
             &store,
         )
         .unwrap()
@@ -452,6 +601,7 @@ mod tests {
             "lint",
             "sha-consumed",
             60,
+            VerifierRunMetadata::default_for_tests(),
             &store,
         )
         .unwrap();

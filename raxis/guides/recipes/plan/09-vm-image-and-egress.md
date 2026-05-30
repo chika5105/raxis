@@ -32,6 +32,8 @@ will forward outbound traffic to.
 ```toml
 [[tasks]]
 task_id            = "rust-build"
+description        = "Rust Build"
+prompt             = """Complete Rust Build according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
@@ -43,6 +45,8 @@ vm_image           = "rust-toolchain-2026-05"
 ```toml
 [[tasks]]
 task_id            = "node-build"
+description        = "Node Build"
+prompt             = """Complete Node Build according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
@@ -73,6 +77,8 @@ path_allowlist     = ["src/"]
 ```toml
 [[tasks]]
 task_id            = "fetch-deps-and-build"
+description        = "Fetch Deps And Build"
+prompt             = """Complete Fetch Deps And Build according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/", "Cargo.lock"]
@@ -88,6 +94,8 @@ allowed_egress     = [
 ```toml
 [[tasks]]
 task_id            = "lint-only"
+description        = "Lint Only"
+prompt             = """Complete Lint Only according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]

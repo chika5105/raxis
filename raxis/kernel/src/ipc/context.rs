@@ -35,6 +35,7 @@ use crate::session_spawn_orchestrator::{ExecutorSpawnContext, OrchestratorSpawn}
 /// Shared, read-only context for all IPC handlers.
 /// All fields are `Arc`-wrapped so each connection task gets a cheap clone.
 /// The `store` is behind `Store` which itself contains a `tokio::sync::Mutex`.
+#[derive(Clone)]
 pub struct HandlerContext {
     /// Validated policy bundle, behind an `ArcSwap` so the kernel can flip
     /// the visible epoch in-process from `policy_manager::advance_epoch`

@@ -275,6 +275,10 @@ fn ipc_message_variant_name(msg: &IpcMessage) -> &'static str {
         IpcMessage::KernelTproxyAdmissionResponse(_) => "KernelTproxyAdmissionResponse",
         IpcMessage::DnsResolveRequest(_) => "DnsResolveRequest",
         IpcMessage::KernelDnsResolveResponse(_) => "KernelDnsResolveResponse",
+        IpcMessage::CustomToolInvocation(_) => "CustomToolInvocation",
+        IpcMessage::CustomToolExecution(_) => "CustomToolExecution",
+        IpcMessage::KernelCustomToolInvocationAck(_) => "KernelCustomToolInvocationAck",
+        IpcMessage::KernelCustomToolExecutionResponse(_) => "KernelCustomToolExecutionResponse",
     }
 }
 

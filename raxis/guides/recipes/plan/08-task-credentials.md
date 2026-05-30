@@ -32,6 +32,8 @@ Each `[[tasks.credentials]]` block declares one proxy.
 ```toml
 [[tasks]]
 task_id            = "db_migrator"
+description        = "Db Migrator"
+prompt             = """Complete Db Migrator according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["migrations/"]

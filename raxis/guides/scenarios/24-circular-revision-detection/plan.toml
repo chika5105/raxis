@@ -7,6 +7,8 @@ Circular revision detection (scenario 24)
 [workspace]
 name = "Circular Revision Detection"
 lane_id     = "circular-revision-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "ping-pong"

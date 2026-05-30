@@ -47,9 +47,10 @@ Sharp prompts produce sharp agents. A description should answer:
 4. **What's the non-goal?** ("Don't change the existing auth flow")
 5. **Where do dependencies live?** ("Redis client is in src/auth/redis.rs")
 
-Each `[[tasks]]` block then narrows further with its own
-`description`; the initiative-level prompt is the **shared
-context** every agent inherits.
+Each `[[tasks]]` block then narrows further with a short
+`description` for operator-facing surfaces and a required `prompt`
+for the task-specific agent instructions. The initiative-level
+description is the **shared context** every agent inherits.
 
 ### Bad examples (avoid)
 
@@ -91,8 +92,9 @@ flowchart TD
 
 The agent never sees `plan.toml` raw; the kernel composes a
 structured system prompt that includes (a) the initiative
-description, (b) the per-task description, (c) the path allowlist,
-(d) the credential proxy info, etc.
+description, (b) the per-task prompt, (c) the path allowlist,
+(d) the credential proxy info, etc. The per-task `description`
+stays a short dashboard/audit summary.
 
 ---
 

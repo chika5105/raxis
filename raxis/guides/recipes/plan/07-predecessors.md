@@ -45,14 +45,26 @@ parser only reads `predecessors`.
 ```toml
 [[tasks]]
 task_id      = "design"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+description        = "Design"
+prompt             = """Complete Design according to this plan's acceptance criteria."""
 predecessors = []
 
 [[tasks]]
 task_id      = "implement"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+description        = "Implement"
+prompt             = """Complete Implement according to this plan's acceptance criteria."""
 predecessors = ["design"]
 
 [[tasks]]
 task_id      = "test"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+description        = "Test"
+prompt             = """Complete Test according to this plan's acceptance criteria."""
 predecessors = ["implement"]
 ```
 
@@ -64,18 +76,34 @@ predecessors = ["implement"]
 ```toml
 [[tasks]]
 task_id      = "shared_setup"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+description        = "Shared Setup"
+prompt             = """Complete Shared Setup according to this plan's acceptance criteria."""
 predecessors = []
 
 [[tasks]]
 task_id      = "frontend"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+description        = "Frontend"
+prompt             = """Complete Frontend according to this plan's acceptance criteria."""
 predecessors = ["shared_setup"]
 
 [[tasks]]
 task_id      = "backend"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+description        = "Backend"
+prompt             = """Complete Backend according to this plan's acceptance criteria."""
 predecessors = ["shared_setup"]
 
 [[tasks]]
 task_id      = "integration_test"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+description        = "Integration Test"
+prompt             = """Complete Integration Test according to this plan's acceptance criteria."""
 predecessors = ["frontend", "backend"]   # waits for BOTH
 ```
 
@@ -88,18 +116,34 @@ logical-AND.
 ```toml
 [[tasks]]
 task_id      = "implementer"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+description        = "Implementer"
+prompt             = """Complete Implementer according to this plan's acceptance criteria."""
 predecessors = []
 
 [[tasks]]
 task_id      = "reviewer_correctness"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+description        = "Reviewer Correctness"
+prompt             = """Complete Reviewer Correctness according to this plan's acceptance criteria."""
 predecessors = ["implementer"]
 
 [[tasks]]
 task_id      = "reviewer_style"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+description        = "Reviewer Style"
+prompt             = """Complete Reviewer Style according to this plan's acceptance criteria."""
 predecessors = ["implementer"]
 
 [[tasks]]
 task_id      = "reviewer_security"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+description        = "Reviewer Security"
+prompt             = """Complete Reviewer Security according to this plan's acceptance criteria."""
 predecessors = ["implementer"]
 ```
 

@@ -32,9 +32,10 @@ use thiserror::Error;
 
 use raxis_ksb::{
     Capabilities, ConcurrencyCapabilityView, CredentialPort, DagRow, ExecutorCapabilities,
-    InitiativeCapabilityView, IntegrationMergeCapabilityView, IntegrationMergeExecutorSha,
-    KsbSnapshot, OrchestratorCapabilities, PendingEscalation, ReviewerCapabilities,
-    ReviewerVerdict, SessionCapabilityView, TaskCapabilityView, KSB_SCHEMA_VERSION,
+    GateStatusView, InitiativeCapabilityView, IntegrationMergeCapabilityView,
+    IntegrationMergeExecutorSha, KsbSnapshot, OrchestratorCapabilities, PendingEscalation,
+    ReviewerCapabilities, ReviewerVerdict, SessionCapabilityView, TaskCapabilityView,
+    KSB_SCHEMA_VERSION,
 };
 use raxis_store::Table;
 use raxis_types::SessionAgentType;
@@ -222,6 +223,23 @@ pub fn assemble_ksb_snapshot(
     // ── Pending escalations scoped to this initiative ────────────
     let pending_escalations = read_pending_escalations(conn, inputs.initiative_id)?;
 
+    // ── Gate / witness lifecycle posture ─────────────────────────
+    // Keep gate visibility role-scoped: the orchestrator sees the
+    // initiative-wide gate feed so it can distinguish "reviewer work
+    // remains" from "verifier/integration gate is running"; executor /
+    // reviewer sessions only see their own task id, avoiding sibling
+    // leakage. The dashboard has a richer UI projection; this KSB view
+    // is intentionally compact and action-shaped for the model.
+    let gate_statuses = match inputs.role {
+        KsbRole::Orchestrator => {
+            read_gate_statuses_for_initiative(conn, inputs.initiative_id, None)?
+        }
+        KsbRole::Executor | KsbRole::Reviewer => match inputs.task_id {
+            Some(tid) => read_gate_statuses_for_initiative(conn, inputs.initiative_id, Some(tid))?,
+            None => Vec::new(),
+        },
+    };
+
     // ── Reviewer verdicts scoped to this initiative ──────────────
     // Closes `INV-PLANNER-ORCH-RETRY-ON-REJECT-01`
     // (`specs/invariants.md §10`): the orchestrator NNSP directs
@@ -324,6 +342,7 @@ pub fn assemble_ksb_snapshot(
         base_sha,
         reviewer_verdicts,
         pending_escalations,
+        gate_statuses,
         credential_ports: inputs.credential_ports.clone(),
         capabilities,
         last_critique,
@@ -913,6 +932,95 @@ fn extract_critique_for_reviewer(last_critique: &str, reviewer_task_id: &str) ->
         }
     }
     latest.unwrap_or("").to_owned()
+}
+
+/// Compact verifier / witness lifecycle feed for the KSB.
+///
+/// The dashboard has richer projections, but the planner needs one
+/// low-token block that answers "what gate is pending or failed right now?"
+/// without reverse-engineering from task FSM state. We start from
+/// `verifier_run_tokens` (not `witness_records`) so pending/spawn-failed
+/// runs are visible before a witness row can exist. Latest row wins per
+/// `(task_id, gate_source, gate_hook, gate_type)` so old retry attempts do
+/// not distract the model from the current gate posture.
+fn read_gate_statuses_for_initiative(
+    conn: &Connection,
+    initiative_id: &str,
+    task_scope: Option<&str>,
+) -> Result<Vec<GateStatusView>, rusqlite::Error> {
+    use std::collections::BTreeMap;
+
+    let task_filter = if task_scope.is_some() {
+        " AND v.task_id = ?2"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT v.task_id, v.gate_type, \
+                COALESCE(v.gate_source, 'policy_gate') AS gate_source, \
+                COALESCE(v.gate_hook, 'intent') AS gate_hook, \
+                v.evaluation_sha, \
+                COALESCE(w.result_class, v.status, 'Pending') AS latest_verdict, \
+                COALESCE(v.failure_reason, '') AS failure_reason, \
+                COALESCE(w.recorded_at, v.consumed_at, v.issued_at) AS observed_at \
+           FROM {vrt} AS v \
+           JOIN {tasks} AS t ON t.task_id = v.task_id \
+           LEFT JOIN {witnesses} AS w ON w.verifier_run_id = v.verifier_run_id \
+          WHERE t.initiative_id = ?1{task_filter} \
+          ORDER BY v.task_id ASC, v.gate_source ASC, v.gate_hook ASC, \
+                   v.gate_type ASC, observed_at ASC, v.verifier_run_id ASC",
+        vrt = Table::VerifierRunTokens.as_str(),
+        tasks = Table::Tasks.as_str(),
+        witnesses = Table::WitnessRecords.as_str(),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut latest: BTreeMap<String, GateStatusView> = BTreeMap::new();
+
+    if let Some(task_id) = task_scope {
+        let rows = stmt.query_map(
+            rusqlite::params![initiative_id, task_id],
+            gate_status_from_row,
+        )?;
+        for row in rows {
+            upsert_gate_status(&mut latest, row?);
+        }
+    } else {
+        let rows = stmt.query_map(rusqlite::params![initiative_id], gate_status_from_row)?;
+        for row in rows {
+            upsert_gate_status(&mut latest, row?);
+        }
+    }
+
+    Ok(latest.into_values().collect())
+}
+
+fn gate_status_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GateStatusView> {
+    let failure_reason: String = row.get(6)?;
+    Ok(GateStatusView {
+        task_id: row.get(0)?,
+        gate_type: row.get(1)?,
+        gate_source: row.get(2)?,
+        gate_hook: row.get(3)?,
+        evaluation_sha: row.get(4)?,
+        verdict: row.get(5)?,
+        failure_reason: if failure_reason.is_empty() {
+            None
+        } else {
+            Some(failure_reason)
+        },
+        observed_at: row.get::<_, i64>(7)?.max(0),
+    })
+}
+
+fn upsert_gate_status(
+    latest: &mut std::collections::BTreeMap<String, GateStatusView>,
+    status: GateStatusView,
+) {
+    let key = format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        status.task_id, status.gate_source, status.gate_hook, status.gate_type
+    );
+    latest.insert(key, status);
 }
 
 fn read_pending_escalations(
@@ -1514,6 +1622,7 @@ pub fn fallback_snapshot(initiative_id: &str, task_id: Option<&str>, role: KsbRo
         base_sha: String::new(),
         reviewer_verdicts: Vec::new(),
         pending_escalations: Vec::new(),
+        gate_statuses: Vec::new(),
         credential_ports: Vec::new(),
         // Slice C — fallback snapshot omits the capabilities
         // envelope; the LLM falls through to its NNSP defaults.
@@ -1713,6 +1822,85 @@ mod tests {
         assert!(rendered.contains("target_ref=refs/heads/feature/typed-enum"));
         assert!(rendered.contains("- src/lib.rs"));
         assert!(rendered.contains("Land the typed enum"));
+    }
+
+    #[test]
+    fn gate_status_projection_latest_run_wins_and_carries_failure_reason() {
+        let (store, _dir) = fresh_store();
+        let conn = store.lock_sync();
+        conn.execute(
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at)
+                 VALUES ('init-gates', 'Executing', '{{}}', 'sha', 1)"
+            ),
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor, policy_epoch,
+                     admitted_at, transitioned_at, evaluation_sha)
+                 VALUES ('task-a', 'init-gates', 'lane-0', 'GatesPending',
+                         'kernel', 1, 1, 1,
+                         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')"
+            ),
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO verifier_run_tokens
+                (verifier_run_id, task_id, gate_type, evaluation_sha, token_hash,
+                 issued_at, expires_at, consumed, consumed_at, gate_source,
+                 gate_hook, status, failure_reason)
+             VALUES
+                ('run-old', 'task-a', 'NoSecretStrings',
+                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'hash-old',
+                 10, 100, 1, 20, 'task_verifier', 'complete_task',
+                 'Fail', 'old failure'),
+                ('run-new', 'task-a', 'NoSecretStrings',
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'hash-new',
+                 30, 130, 0, NULL, 'task_verifier', 'complete_task',
+                 'Pending', NULL),
+                ('run-bad', 'task-a', 'TypeCheck',
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'hash-bad',
+                 40, 140, 1, 40, 'plan_integration_verifier', 'integration_merge',
+                 'ConfigInvalid', 'missing verifier binary')",
+            [],
+        )
+        .unwrap();
+
+        let rows = read_gate_statuses_for_initiative(&conn, "init-gates", Some("task-a")).unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "latest status should collapse duplicate gate runs"
+        );
+        let no_secret = rows
+            .iter()
+            .find(|r| r.gate_type == "NoSecretStrings")
+            .expect("NoSecretStrings row");
+        assert_eq!(no_secret.verdict, "Pending");
+        assert_eq!(
+            no_secret.evaluation_sha,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        assert!(
+            no_secret.failure_reason.is_none(),
+            "newer pending run must not inherit old failure reason"
+        );
+        let type_check = rows
+            .iter()
+            .find(|r| r.gate_type == "TypeCheck")
+            .expect("TypeCheck row");
+        assert_eq!(type_check.gate_source, "plan_integration_verifier");
+        assert_eq!(type_check.gate_hook, "integration_merge");
+        assert_eq!(type_check.verdict, "ConfigInvalid");
+        assert_eq!(
+            type_check.failure_reason.as_deref(),
+            Some("missing verifier binary")
+        );
     }
 
     #[test]
@@ -2699,6 +2887,7 @@ mod tests {
                 repository_id: OrchestratorPlanFields::DEFAULT_REPOSITORY_ID.to_owned(),
                 elastic: None,
                 max_concurrent_admissions: 5,
+                integration_merge_verifiers: Vec::new(),
             },
         );
         for (tid, kind) in &[
@@ -2930,6 +3119,7 @@ mod tests {
                 repository_id: OrchestratorPlanFields::DEFAULT_REPOSITORY_ID.to_owned(),
                 elastic: None,
                 max_concurrent_admissions: 4,
+                integration_merge_verifiers: Vec::new(),
             },
         );
         // Two executor tasks so the projection has something to

@@ -19,9 +19,11 @@
 // messages and vice versa.
 
 use raxis_types::{
-    DnsResolveRequest, DnsResolveResponse, EscalationRequest, EscalationResponse, IntentRequest,
-    IntentResponse, OperatorRequest, OperatorResponse, PlannerExitOutcome, PlannerFetchRequest,
-    PlannerFetchResponse, TproxyAdmissionRequest, TproxyAdmissionResponse, WitnessSubmission,
+    CustomToolExecutionRequest, CustomToolExecutionResponse, CustomToolInvocationAck,
+    CustomToolInvocationRequest, DnsResolveRequest, DnsResolveResponse, EscalationRequest,
+    EscalationResponse, IntentRequest, IntentResponse, OperatorRequest, OperatorResponse,
+    PlannerExitOutcome, PlannerFetchRequest, PlannerFetchResponse, TproxyAdmissionRequest,
+    TproxyAdmissionResponse, WitnessSubmission,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -68,6 +70,18 @@ pub enum IpcMessage {
     /// canonical Orchestrator and Reviewer guests).
     PlannerFetchRequest(PlannerFetchRequest),
 
+    /// **Planner → kernel.** Bounded metadata for one custom-tool
+    /// subprocess invocation. Custom tools execute in the executor VM,
+    /// but the kernel owns the audit chain, so this report lands before
+    /// the model receives the tool result.
+    CustomToolInvocation(CustomToolInvocationRequest),
+
+    /// **Planner → kernel.** Request to execute a custom tool whose runtime
+    /// locality is host-owned (`host_subprocess`, `host_mcp`, or
+    /// `remote_mcp`). The kernel resolves the signed declaration and returns
+    /// [`Self::KernelCustomToolExecutionResponse`] only after auditing.
+    CustomToolExecution(CustomToolExecutionRequest),
+
     // -----------------------------------------------------------------------
     // Planner socket — outbound (kernel → planner)
     // peripherals.md §3.1
@@ -84,6 +98,12 @@ pub enum IpcMessage {
     /// `request_id` echoes the planner's correlation id from the
     /// request.
     KernelPlannerFetchResponse(PlannerFetchResponse),
+
+    /// Kernel acknowledgement of a [`Self::CustomToolInvocation`].
+    KernelCustomToolInvocationAck(CustomToolInvocationAck),
+
+    /// Kernel response to a [`Self::CustomToolExecution`].
+    KernelCustomToolExecutionResponse(CustomToolExecutionResponse),
 
     /// **Planner → kernel — `INV-FAILURE-REASON-CONCRETE-01`.** The
     /// planner-core driver emits this notice immediately before

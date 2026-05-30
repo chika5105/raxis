@@ -509,6 +509,20 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
     }
     r.ok("path_allowlist entries pass V2-format syntax checks");
 
+    // ── Step 8: custom tools and profile attachments ─────────────────────
+    let tool_report = raxis_tool_authoring::validate_plan_tools(text);
+    for warning in tool_report.warnings {
+        r.lines.push(format!("[WARN] custom tools: {warning}"));
+    }
+    if let Some(error) = tool_report.errors.first() {
+        r.fail("custom tools", error.clone());
+        return r;
+    }
+    r.ok(&format!(
+        "custom tools: {} declaration(s) pass authoring checks",
+        tool_report.tool_count
+    ));
+
     r
 }
 

@@ -18,6 +18,7 @@
 // via ipc/handlers/witness.rs.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::process::Stdio;
@@ -30,8 +31,12 @@ use rusqlite::OptionalExtension;
 use tokio::process::Command;
 
 use raxis_audit_tools::AuditSink;
-use raxis_policy::{PolicyBundle, VerifierRuntimeConfig};
+use raxis_policy::{
+    IntegrationMergeVerifierEntry, IntegrationMergeVerifierOnFailure, PolicyBundle,
+    TaskVerifierEntry, TaskVerifierOnFailure, VerifierRuntimeConfig,
+};
 use raxis_store::{Store, Table};
+use sha2::{Digest, Sha256};
 
 use super::GateError;
 use crate::authority::verifier_token;
@@ -69,6 +74,84 @@ pub fn task_cumulative_verifier_seconds(task_id: &str) -> u64 {
         .ok()
         .and_then(|m| m.get(task_id).copied())
         .unwrap_or(0)
+}
+
+fn resolve_and_verify_binary(
+    gate_type: &str,
+    config: &VerifierConfig,
+) -> Result<(PathBuf, Option<String>), GateError> {
+    let raw = &config.verifier_binary_path;
+    if !raw.is_absolute() {
+        return Err(GateError::SpawnFailed {
+            gate_type: gate_type.to_owned(),
+            reason: format!(
+                "verifier_command `{}` is not absolute; production verifier \
+                 commands must be pinned host paths.",
+                raw.display()
+            ),
+        });
+    }
+    let canonical = fs::canonicalize(raw).map_err(|e| GateError::SpawnFailed {
+        gate_type: gate_type.to_owned(),
+        reason: format!("canonicalize verifier_command `{}`: {e}", raw.display()),
+    })?;
+    let meta = fs::metadata(&canonical).map_err(|e| GateError::SpawnFailed {
+        gate_type: gate_type.to_owned(),
+        reason: format!("stat verifier_command `{}`: {e}", canonical.display()),
+    })?;
+    if !meta.is_file() {
+        return Err(GateError::SpawnFailed {
+            gate_type: gate_type.to_owned(),
+            reason: format!(
+                "verifier_command `{}` is not a regular file",
+                canonical.display()
+            ),
+        });
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return Err(GateError::SpawnFailed {
+                gate_type: gate_type.to_owned(),
+                reason: format!(
+                    "verifier_command `{}` is not executable",
+                    canonical.display()
+                ),
+            });
+        }
+    }
+
+    let actual_digest = if config.verifier_binary_sha256.is_some() {
+        let bytes = fs::read(&canonical).map_err(|e| GateError::SpawnFailed {
+            gate_type: gate_type.to_owned(),
+            reason: format!("read verifier_command `{}`: {e}", canonical.display()),
+        })?;
+        let digest = Sha256::digest(&bytes);
+        Some(hex::encode(digest))
+    } else {
+        None
+    };
+
+    if let (Some(expected), Some(actual)) = (
+        config.verifier_binary_sha256.as_deref(),
+        actual_digest.as_deref(),
+    ) {
+        if !expected.eq_ignore_ascii_case(actual) {
+            return Err(GateError::SpawnFailed {
+                gate_type: gate_type.to_owned(),
+                reason: format!(
+                    "verifier_command `{}` sha256 mismatch: expected {}, got {}",
+                    canonical.display(),
+                    expected,
+                    actual
+                ),
+            });
+        }
+    }
+
+    Ok((canonical, actual_digest))
 }
 
 /// Record a verifier's elapsed wall-time against its task's
@@ -198,6 +281,10 @@ async fn read_task_initiative_id(store: &Store, task_id: &str) -> Result<String,
 pub struct VerifierConfig {
     /// Absolute path to the gate-type-specific verifier binary.
     pub verifier_binary_path: PathBuf,
+    /// Optional SHA-256 digest of the verifier binary bytes. When
+    /// present, spawn verifies the executable on disk before issuing a
+    /// verifier token so audit can attribute the exact binary.
+    pub verifier_binary_sha256: Option<String>,
     /// TTL for the verifier run token.
     pub verifier_token_ttl_secs: u64,
     /// CPU-second hard limit (RLIMIT_CPU).
@@ -210,6 +297,12 @@ pub struct VerifierConfig {
     pub max_concurrent_verifiers: usize,
     /// Path to the kernel operator socket (planner.sock is separate).
     pub kernel_socket_path: String,
+    /// Durable provenance for dashboard/audit surfaces.
+    pub gate_source: String,
+    pub gate_hook: String,
+    pub verifier_image_alias: Option<String>,
+    pub verifier_command: Option<String>,
+    pub verifier_on_failure: Option<String>,
 
     /// iter63-followups.md Item 1 — operator-authored hints
     /// from the gate's `[[gates]] hints` table. Injected into the
@@ -233,6 +326,7 @@ impl VerifierConfig {
         let gate = policy.gates().iter().find(|g| g.gate_type == gate_type)?;
         Some(Self {
             verifier_binary_path: PathBuf::from(&gate.verifier_command),
+            verifier_binary_sha256: gate.verifier_sha256.clone(),
             verifier_token_ttl_secs: 300, // 5 min default
             verifier_cpu_secs: gate.max_wall_seconds as u64,
             verifier_memory_bytes: gate.max_memory_bytes,
@@ -243,10 +337,126 @@ impl VerifierConfig {
                 .join("planner.sock")
                 .display()
                 .to_string(),
+            gate_source: "policy_gate".to_owned(),
+            gate_hook: policy_gate_hook_label(gate),
+            verifier_image_alias: Some("mechanical-verifier".to_owned()),
+            verifier_command: Some(gate.verifier_command.clone()),
+            verifier_on_failure: Some("block".to_owned()),
             hints: gate.hints.clone(),
             verifier_runtime: policy.verifier_runtime(),
         })
     }
+
+    pub fn from_task_verifier(
+        policy: &PolicyBundle,
+        entry: &TaskVerifierEntry,
+        data_dir: &Path,
+    ) -> Result<Self, GateError> {
+        let verifier_binary_path = parse_verifier_command_path(&entry.command)?;
+        let timeout_secs = raxis_policy::parse_verifier_timeout_secs(&entry.timeout)
+            .ok_or_else(|| {
+                GateError::PolicyMisconfigured(format!(
+                    "task verifier `{}` has invalid timeout `{}`",
+                    entry.name, entry.timeout
+                ))
+            })?
+            .max(1);
+        let on_failure = match entry.on_failure {
+            TaskVerifierOnFailure::BlockReview => "block_review",
+            TaskVerifierOnFailure::WarnOnly => "warn_only",
+        };
+        Ok(Self {
+            verifier_binary_path,
+            verifier_binary_sha256: None,
+            verifier_token_ttl_secs: 300,
+            verifier_cpu_secs: timeout_secs as u64,
+            verifier_memory_bytes: 512 * 1024 * 1024,
+            verifier_max_wall_secs: timeout_secs as u64 + 10,
+            max_concurrent_verifiers: DEFAULT_MAX_CONCURRENT_VERIFIERS,
+            kernel_socket_path: data_dir
+                .join("sockets")
+                .join("planner.sock")
+                .display()
+                .to_string(),
+            gate_source: "task_verifier".to_owned(),
+            gate_hook: "complete_task".to_owned(),
+            verifier_image_alias: Some(entry.image.clone()),
+            verifier_command: Some(entry.command.clone()),
+            verifier_on_failure: Some(on_failure.to_owned()),
+            hints: entry.hints.clone(),
+            verifier_runtime: policy.verifier_runtime(),
+        })
+    }
+
+    pub fn from_integration_merge_verifier(
+        policy: &PolicyBundle,
+        entry: &IntegrationMergeVerifierEntry,
+        data_dir: &Path,
+        gate_source: &'static str,
+    ) -> Result<Self, GateError> {
+        let verifier_binary_path = parse_verifier_command_path(&entry.command)?;
+        let timeout_secs = raxis_policy::parse_verifier_timeout_secs(&entry.timeout)
+            .ok_or_else(|| {
+                GateError::PolicyMisconfigured(format!(
+                    "integration merge verifier `{}` has invalid timeout `{}`",
+                    entry.name, entry.timeout
+                ))
+            })?
+            .max(1);
+        let on_failure = match entry.on_failure {
+            IntegrationMergeVerifierOnFailure::BlockMerge => "block_merge",
+            IntegrationMergeVerifierOnFailure::WarnOnly => "warn_only",
+        };
+        Ok(Self {
+            verifier_binary_path,
+            verifier_binary_sha256: None,
+            verifier_token_ttl_secs: 300,
+            verifier_cpu_secs: timeout_secs as u64,
+            verifier_memory_bytes: 512 * 1024 * 1024,
+            verifier_max_wall_secs: timeout_secs as u64 + 10,
+            max_concurrent_verifiers: DEFAULT_MAX_CONCURRENT_VERIFIERS,
+            kernel_socket_path: data_dir
+                .join("sockets")
+                .join("planner.sock")
+                .display()
+                .to_string(),
+            gate_source: gate_source.to_owned(),
+            gate_hook: "integration_merge".to_owned(),
+            verifier_image_alias: Some(entry.image.clone()),
+            verifier_command: Some(entry.command.clone()),
+            verifier_on_failure: Some(on_failure.to_owned()),
+            hints: entry.hints.clone(),
+            verifier_runtime: policy.verifier_runtime(),
+        })
+    }
+}
+
+fn policy_gate_hook_label(gate: &raxis_policy::GateEntry) -> String {
+    if gate.selectors.hooks.is_empty() {
+        return "intent".to_owned();
+    }
+    gate.selectors.hooks.join(",")
+}
+
+fn parse_verifier_command_path(command: &str) -> Result<PathBuf, GateError> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err(GateError::PolicyMisconfigured(
+            "task verifier command must not be empty".to_owned(),
+        ));
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err(GateError::PolicyMisconfigured(format!(
+            "task verifier command `{trimmed}` must be a single absolute executable path in the host-subprocess runner"
+        )));
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(GateError::PolicyMisconfigured(format!(
+            "task verifier command `{trimmed}` must be absolute"
+        )));
+    }
+    Ok(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +512,77 @@ pub async fn spawn_verifier_with_audit(
     store: &Store,
     audit: Option<std::sync::Arc<dyn AuditSink>>,
 ) -> Result<String, GateError> {
+    let (verifier_binary_path, verifier_binary_digest) = match resolve_and_verify_binary(
+        gate_type, config,
+    ) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            let verifier_run_id = uuid::Uuid::new_v4().to_string();
+            let failure_reason = err.to_string();
+            let store_for_status = store.clone();
+            let run_id_for_status = verifier_run_id.clone();
+            let task_id_for_status = task_id.to_owned();
+            let gate_type_for_status = gate_type.to_owned();
+            let evaluation_sha_for_status = evaluation_sha.to_owned();
+            let gate_source = config.gate_source.clone();
+            let gate_hook = config.gate_hook.clone();
+            let verifier_image_alias = config.verifier_image_alias.clone();
+            let verifier_command = config.verifier_command.clone();
+            let verifier_on_failure = config.verifier_on_failure.clone();
+            match tokio::task::spawn_blocking(move || {
+                let metadata = verifier_token::VerifierRunMetadata {
+                    gate_source: gate_source.as_str(),
+                    gate_hook: gate_hook.as_str(),
+                    verifier_image_alias: verifier_image_alias.as_deref(),
+                    verifier_command: verifier_command.as_deref(),
+                    verifier_on_failure: verifier_on_failure.as_deref(),
+                };
+                verifier_token::record_terminal_verifier_run(
+                    &run_id_for_status,
+                    &task_id_for_status,
+                    &gate_type_for_status,
+                    &evaluation_sha_for_status,
+                    "ConfigInvalid",
+                    &failure_reason,
+                    metadata,
+                    &store_for_status,
+                )
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"VerifierPreSpawnFailureRecordFailed\",\
+                             \"task_id\":\"{task_id}\",\"gate_type\":\"{gate_type}\",\
+                             \"verifier_run_id\":\"{verifier_run_id}\",\"reason\":\"{e}\"}}",
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"VerifierPreSpawnFailureRecordJoinFailed\",\
+                             \"task_id\":\"{task_id}\",\"gate_type\":\"{gate_type}\",\
+                             \"verifier_run_id\":\"{verifier_run_id}\",\"reason\":\"{e}\"}}",
+                        );
+                }
+            }
+            let initiative_id = read_task_initiative_id(store, task_id).await.ok();
+            if let Some(sink) = audit.as_ref() {
+                let _ = sink.emit(
+                    AuditEventKind::VerifierProcessFailed {
+                        task_id: task_id.to_owned(),
+                        exit_code: None,
+                        gate_type: gate_type.to_owned(),
+                    },
+                    None,
+                    Some(task_id),
+                    initiative_id.as_deref(),
+                );
+            }
+            return Err(err);
+        }
+    };
+
     // Step 0: one active mechanical verifier per
     // `(task_id, gate_type, evaluation_sha)`.
     //
@@ -372,13 +653,26 @@ pub async fn spawn_verifier_with_audit(
         let gate_type_owned = gate_type.to_owned();
         let evaluation_sha_owned = evaluation_sha.to_owned();
         let ttl = config.verifier_token_ttl_secs;
+        let gate_source = config.gate_source.clone();
+        let gate_hook = config.gate_hook.clone();
+        let verifier_image_alias = config.verifier_image_alias.clone();
+        let verifier_command = config.verifier_command.clone();
+        let verifier_on_failure = config.verifier_on_failure.clone();
         match tokio::task::spawn_blocking(move || {
+            let metadata = verifier_token::VerifierRunMetadata {
+                gate_source: gate_source.as_str(),
+                gate_hook: gate_hook.as_str(),
+                verifier_image_alias: verifier_image_alias.as_deref(),
+                verifier_command: verifier_command.as_deref(),
+                verifier_on_failure: verifier_on_failure.as_deref(),
+            };
             verifier_token::issue_verifier_token_unless_active(
                 &run_id_owned,
                 &task_id_owned,
                 &gate_type_owned,
                 &evaluation_sha_owned,
                 ttl,
+                metadata,
                 &store_clone,
             )
         })
@@ -416,8 +710,10 @@ pub async fn spawn_verifier_with_audit(
             let store_for_cleanup = store.clone();
             let run_id_for_cleanup = verifier_run_id.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                verifier_token::consume_verifier_token_by_run_id(
+                verifier_token::mark_verifier_run_terminal_by_run_id(
                     &run_id_for_cleanup,
+                    "ProcessFailed",
+                    Some("task initiative lookup failed before verifier spawn"),
                     &store_for_cleanup,
                 )
             })
@@ -438,9 +734,12 @@ pub async fn spawn_verifier_with_audit(
         Err(e) => {
             let store_for_cleanup = store.clone();
             let run_id_for_cleanup = verifier_run_id.clone();
+            let reason = format!("serialise operator hints to JSON: {e}");
             let _ = tokio::task::spawn_blocking(move || {
-                verifier_token::consume_verifier_token_by_run_id(
+                verifier_token::mark_verifier_run_terminal_by_run_id(
                     &run_id_for_cleanup,
+                    "ConfigInvalid",
+                    Some(reason.as_str()),
                     &store_for_cleanup,
                 )
             })
@@ -454,7 +753,7 @@ pub async fn spawn_verifier_with_audit(
     };
 
     // Step 4: Build spawn envelope environment (scrubbed — env_clear() first).
-    let mut cmd = Command::new(&config.verifier_binary_path);
+    let mut cmd = Command::new(&verifier_binary_path);
     cmd.env_clear()
         .env("RAXIS_VERIFIER_TOKEN", &raw_token)
         .env("RAXIS_TASK_ID", task_id)
@@ -527,9 +826,12 @@ pub async fn spawn_verifier_with_audit(
         Err(e) => {
             let store_for_cleanup = store.clone();
             let run_id_for_cleanup = verifier_run_id.clone();
+            let reason = e.to_string();
             let _ = tokio::task::spawn_blocking(move || {
-                verifier_token::consume_verifier_token_by_run_id(
+                verifier_token::mark_verifier_run_terminal_by_run_id(
                     &run_id_for_cleanup,
+                    "SpawnFailed",
+                    Some(reason.as_str()),
                     &store_for_cleanup,
                 )
             })
@@ -559,16 +861,28 @@ pub async fn spawn_verifier_with_audit(
             verifier_run_id: verifier_run_id.clone(),
             task_id: task_id.to_owned(),
             initiative_id: initiative_id.clone(),
-            image_alias: "mechanical-verifier".to_owned(),
-            oci_digest: String::new(),
-            command: config.verifier_binary_path.display().to_string(),
-            on_failure: "record_witness".to_owned(),
+            image_alias: config
+                .verifier_image_alias
+                .clone()
+                .unwrap_or_else(|| "mechanical-verifier".to_owned()),
+            oci_digest: verifier_binary_digest.clone().unwrap_or_default(),
+            command: config
+                .verifier_command
+                .clone()
+                .unwrap_or_else(|| verifier_binary_path.display().to_string()),
+            on_failure: config
+                .verifier_on_failure
+                .clone()
+                .unwrap_or_else(|| "record_witness".to_owned()),
+            gate_source: config.gate_source.clone(),
+            gate_hook: config.gate_hook.clone(),
         };
         crate::gates::verifier_audit::emit_vm_spawned(sink.as_ref(), &audit_ctx);
     }
 
     let run_id_clone = verifier_run_id.clone();
     let task_id_clone = task_id.to_owned();
+    let store_for_watcher = store.clone();
     // iter63 — hard wall-clock kill: enforce the MIN of the
     // gate-declared timeout (config.verifier_max_wall_secs) and the
     // policy-bundle ceiling (verifier_runtime.max_verifier_wall_seconds).
@@ -632,8 +946,25 @@ pub async fn spawn_verifier_with_audit(
                         );
                     }
                 }
+                if !status.success() {
+                    let store_for_status = store_for_watcher.clone();
+                    let run_id_for_status = run_id_clone.clone();
+                    let reason = exit_code
+                        .map(|c| format!("verifier process exited with status {c}"))
+                        .unwrap_or_else(|| "verifier process terminated without exit code".into());
+                    let _ = tokio::task::spawn_blocking(move || {
+                        verifier_token::mark_verifier_run_terminal_by_run_id(
+                            &run_id_for_status,
+                            "ProcessFailed",
+                            Some(reason.as_str()),
+                            &store_for_status,
+                        )
+                    })
+                    .await;
+                }
             }
             Ok(Err(e)) => {
+                let wait_error = e.to_string();
                 if let Some(sink) = audit_for_watcher.as_ref() {
                     crate::gates::verifier_audit::emit_vm_exited(
                         sink.as_ref(),
@@ -655,9 +986,21 @@ pub async fn spawn_verifier_with_audit(
                         Some(&initiative_id_clone),
                     );
                 }
+                let store_for_status = store_for_watcher.clone();
+                let run_id_for_status = run_id_clone.clone();
+                let reason_for_status = wait_error.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    verifier_token::mark_verifier_run_terminal_by_run_id(
+                        &run_id_for_status,
+                        "ProcessFailed",
+                        Some(reason_for_status.as_str()),
+                        &store_for_status,
+                    )
+                })
+                .await;
                 eprintln!(
                     "{{\"level\":\"warn\",\"event\":\"VerifierWaitError\",\
-                     \"verifier_run_id\":\"{run_id_clone}\",\"reason\":\"{e}\"}}"
+                     \"verifier_run_id\":\"{run_id_clone}\",\"reason\":\"{wait_error}\"}}"
                 );
             }
             Err(_elapsed) => {
@@ -704,6 +1047,18 @@ pub async fn spawn_verifier_with_audit(
                         Some(&initiative_id_clone),
                     );
                 }
+                let store_for_status = store_for_watcher.clone();
+                let run_id_for_status = run_id_clone.clone();
+                let reason = format!("verifier exceeded wall-clock budget of {wall_seconds}s");
+                let _ = tokio::task::spawn_blocking(move || {
+                    verifier_token::mark_verifier_run_terminal_by_run_id(
+                        &run_id_for_status,
+                        "Timeout",
+                        Some(reason.as_str()),
+                        &store_for_status,
+                    )
+                })
+                .await;
                 eprintln!(
                     "{{\"level\":\"warn\",\"event\":\"VerifierWallClockTimeout\",\
                      \"verifier_run_id\":\"{run_id_clone}\",\
@@ -743,9 +1098,12 @@ pub async fn spawn_verifier_with_audit(
 //     decremented when the child exits (delta-checked, not absolute,
 //     because ACTIVE_VERIFIERS is a process-global that other tests
 //     could be holding > 0 concurrently).
-//   - A spawn failure (non-existent binary) does NOT leak the counter:
-//     ACTIVE_VERIFIERS is incremented AFTER `cmd.spawn()` succeeds, so a
-//     spawn-time error returns Err without bumping the counter.
+//   - A spawn failure (non-existent binary) does NOT leak the counter
+//     and DOES leave a terminal verifier_run_tokens row:
+//     ACTIVE_VERIFIERS is incremented only after binary validation,
+//     while pre-spawn validation failures are recorded as consumed
+//     `ConfigInvalid` rows so the dashboard never shows an endless
+//     pending gate with no provenance.
 //   - The wall-clock kill path actually terminates a long-running child:
 //     we spawn `/bin/sleep 60` with `verifier_max_wall_secs = 1` and
 //     observe the counter dropping back to its prior value within
@@ -825,12 +1183,18 @@ mod integration {
     fn config_for(verifier_binary: &Path) -> VerifierConfig {
         VerifierConfig {
             verifier_binary_path: verifier_binary.to_path_buf(),
+            verifier_binary_sha256: None,
             verifier_token_ttl_secs: 60,
             verifier_cpu_secs: 30,
             verifier_memory_bytes: 1 << 30, // 1 GiB
             verifier_max_wall_secs: 30,
             max_concurrent_verifiers: DEFAULT_MAX_CONCURRENT_VERIFIERS,
             kernel_socket_path: "/tmp/raxis-test-no-such-socket.sock".to_owned(),
+            gate_source: "policy_gate".to_owned(),
+            gate_hook: "intent".to_owned(),
+            verifier_image_alias: Some("mechanical-verifier".to_owned()),
+            verifier_command: Some(verifier_binary.display().to_string()),
+            verifier_on_failure: Some("block".to_owned()),
             hints: BTreeMap::new(),
             verifier_runtime: VerifierRuntimeConfig::default(),
         }
@@ -963,14 +1327,34 @@ mod integration {
             other => panic!("expected SpawnFailed, got {other:?}"),
         }
 
-        // The counter must be EXACTLY at baseline. Allow a brief
-        // settling window in case a concurrent test was decrementing
-        // simultaneously, but the count must never EXCEED baseline as a
-        // result of THIS call.
         let counter = active_verifier_count();
         assert!(
             counter <= baseline,
             "spawn-failure leaked the counter: baseline={baseline}, current={counter}"
+        );
+
+        let conn = store.lock().await;
+        let (status, failure_reason): (String, Option<String>) = conn
+            .query_row(
+                &format!(
+                    "SELECT status, failure_reason
+                       FROM {VERIFIER_RUN_TOKENS}
+                      WHERE task_id = ?1 AND gate_type = 'test-gate'"
+                ),
+                rusqlite::params![&task_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("pre-spawn failure must persist a verifier_run_tokens row");
+        assert_eq!(
+            status, "ConfigInvalid",
+            "pre-spawn binary validation failures should be visible as terminal config failures",
+        );
+        assert!(
+            failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("canonicalize verifier_command"),
+            "operator-facing failure_reason should identify the failed binary validation step; got {failure_reason:?}",
         );
     }
 
@@ -1002,9 +1386,9 @@ mod integration {
         }
 
         // Critical invariant: the cap check happens BEFORE token
-        // issuance. If it didn't, every cap-exceeded spawn would still
-        // burn a row in verifier_run_tokens, and on a busy kernel the
-        // table would fill with orphan rows that never get consumed.
+        // issuance. Unlike config failures, cap-exceeded is a
+        // concurrency throttle rather than a concrete verifier run, so
+        // it must not burn a durable row.
         let conn = store.lock().await;
         let row_count: i64 = conn
             .query_row(
@@ -1816,6 +2200,7 @@ mod stub_round_trip {
         let _ = std::fs::remove_file(&socket_path);
         let cfg = VerifierConfig {
             verifier_binary_path: stub_bin.clone(),
+            verifier_binary_sha256: None,
             verifier_token_ttl_secs: 60,
             verifier_cpu_secs: 30,
             verifier_memory_bytes: 1 << 30,
@@ -1826,6 +2211,11 @@ mod stub_round_trip {
             verifier_max_wall_secs: 5,
             max_concurrent_verifiers: DEFAULT_MAX_CONCURRENT_VERIFIERS,
             kernel_socket_path: socket_path.display().to_string(),
+            gate_source: "policy_gate".to_owned(),
+            gate_hook: "intent".to_owned(),
+            verifier_image_alias: Some("mechanical-verifier".to_owned()),
+            verifier_command: Some(stub_bin.display().to_string()),
+            verifier_on_failure: Some("block".to_owned()),
             hints: BTreeMap::new(),
             verifier_runtime: VerifierRuntimeConfig::default(),
         };
@@ -2040,12 +2430,18 @@ mod stub_round_trip {
 
         let cfg = VerifierConfig {
             verifier_binary_path: stub_bin.clone(),
+            verifier_binary_sha256: None,
             verifier_token_ttl_secs: 60,
             verifier_cpu_secs: 30,
             verifier_memory_bytes: 1 << 30,
             verifier_max_wall_secs: 5,
             max_concurrent_verifiers: DEFAULT_MAX_CONCURRENT_VERIFIERS,
             kernel_socket_path: socket_path.display().to_string(),
+            gate_source: "policy_gate".to_owned(),
+            gate_hook: "intent".to_owned(),
+            verifier_image_alias: Some("mechanical-verifier".to_owned()),
+            verifier_command: Some(stub_bin.display().to_string()),
+            verifier_on_failure: Some("block".to_owned()),
             hints: BTreeMap::new(),
             verifier_runtime: VerifierRuntimeConfig::default(),
         };
@@ -2198,12 +2594,18 @@ mod stub_round_trip {
 
         let cfg = VerifierConfig {
             verifier_binary_path: stub_bin.clone(),
+            verifier_binary_sha256: None,
             verifier_token_ttl_secs: 60,
             verifier_cpu_secs: 30,
             verifier_memory_bytes: 1 << 30,
             verifier_max_wall_secs: 5,
             max_concurrent_verifiers: DEFAULT_MAX_CONCURRENT_VERIFIERS,
             kernel_socket_path: socket_path.display().to_string(),
+            gate_source: "policy_gate".to_owned(),
+            gate_hook: "intent".to_owned(),
+            verifier_image_alias: Some("mechanical-verifier".to_owned()),
+            verifier_command: Some(stub_bin.display().to_string()),
+            verifier_on_failure: Some("block".to_owned()),
             hints: BTreeMap::new(),
             verifier_runtime: VerifierRuntimeConfig::default(),
         };

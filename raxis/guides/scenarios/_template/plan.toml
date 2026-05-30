@@ -16,6 +16,8 @@ One-paragraph natural-language description of the work this plan
 [workspace]
 name = "Scenario template"
 lane_id     = "scenario-template-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 # ── Executor ──────────────────────────────────────────────────────────────────
 # Replace this stub with one [[tasks]] block per Executor your scenario

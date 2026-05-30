@@ -8,6 +8,8 @@ draft writes a rough docs/spec.md; refine adds structure and
 [workspace]
 name = "Sequential Refinement"
 lane_id     = "seq-refine-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "draft"

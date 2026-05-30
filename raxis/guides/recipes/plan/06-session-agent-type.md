@@ -82,6 +82,7 @@ You cannot declare it; declaring `session_agent_type =
 ```toml
 [[tasks]]
 task_id            = "implementer"
+prompt             = """Complete Implementer according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/auth/"]
@@ -90,6 +91,7 @@ description        = """Implement rate limiting on /auth/login."""
 
 [[tasks]]
 task_id            = "code_reviewer"
+prompt             = """Complete Code Reviewer according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]
@@ -102,6 +104,8 @@ description        = """Review src/auth/rate_limit.rs for correctness + style.""
 ```toml
 [[tasks]]
 task_id            = "frontend"
+description        = "Frontend"
+prompt             = """Complete Frontend according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["frontend/"]
@@ -109,6 +113,8 @@ predecessors       = []
 
 [[tasks]]
 task_id            = "backend"
+description        = "Backend"
+prompt             = """Complete Backend according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["backend/"]
@@ -123,23 +129,32 @@ merges their commits into the target branch.
 ```toml
 [[tasks]]
 task_id            = "implementer"
+clone_strategy     = "blobless"
+description        = "Implementer"
+prompt             = """Complete Implementer according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
 ...
 
 [[tasks]]
 task_id            = "correctness_reviewer"
+clone_strategy     = "blobless"
+prompt             = """Complete Correctness Reviewer according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
 predecessors       = ["implementer"]
 description        = """Review for correctness."""
 
 [[tasks]]
 task_id            = "style_reviewer"
+clone_strategy     = "blobless"
+prompt             = """Complete Style Reviewer according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
 predecessors       = ["implementer"]
 description        = """Review for style + idioms."""
 
 [[tasks]]
 task_id            = "security_reviewer"
+clone_strategy     = "blobless"
+prompt             = """Complete Security Reviewer according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
 predecessors       = ["implementer"]
 description        = """Review for security."""

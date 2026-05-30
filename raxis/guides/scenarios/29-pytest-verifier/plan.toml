@@ -7,6 +7,8 @@ Pytest verifier (scenario 29)
 [workspace]
 name = "Pytest Verifier"
 lane_id     = "pytest-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "extend"

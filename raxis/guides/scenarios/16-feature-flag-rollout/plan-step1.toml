@@ -7,13 +7,16 @@ Feature flag rollout (scenario 16)
 [workspace]
 name = "Feature Flag Rollout"
 lane_id     = "ff-wire-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "wire"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-description = """
+description        = "Wire"
+prompt             = """
   In src/main.rs, parse config/flags.json (read only) and branch on
   `new_pricing`. If true, print "new", else print "legacy". Commit.
 """

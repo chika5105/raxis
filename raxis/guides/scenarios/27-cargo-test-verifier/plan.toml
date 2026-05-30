@@ -7,6 +7,8 @@ Cargo test verifier (scenario 27)
 [workspace]
 name = "Cargo Test Verifier"
 lane_id     = "cargo-test-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "extend"

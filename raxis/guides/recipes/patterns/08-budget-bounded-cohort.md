@@ -51,6 +51,8 @@ description = "Reformat all crates with the new rustfmt rules"
 [workspace]
 name        = "rustfmt-bulk"
 lane_id     = "bulk-refactor"   # <-- the lane carries the constraint
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 # Twelve fan-out Executors — predecessor-free.
 [[tasks]]
@@ -59,6 +61,8 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["crates/a/"]
 predecessors       = []
+description        = "Format crate a"
+prompt             = """Apply the new rustfmt rules to crates/a/ and commit the result."""
 
 # ... repeat for crates b through l ...
 
@@ -68,6 +72,8 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["crates/l/"]
 predecessors       = []
+description        = "Format crate l"
+prompt             = """Apply the new rustfmt rules to crates/l/ and commit the result."""
 
 # Twelve Reviewers — one per Executor.
 [[tasks]]
@@ -76,6 +82,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["crates/a/"]
 predecessors       = ["fmt-crate-a"]
+description        = "Review crate a formatting"
+prompt             = """Review the crates/a/ formatting change and approve only if it is limited to rustfmt output."""
 
 # ... repeat ...
 

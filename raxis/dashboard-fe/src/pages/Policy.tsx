@@ -29,6 +29,7 @@ import { PageSpinner, Spinner } from "@/components/Spinner";
 import { fmtAbsolute, shortFingerprint, shortSha } from "@/lib/format";
 import { getStoredProfile } from "@/lib/auth-store";
 import { ensureTomlLanguage, raxisMonacoTheme } from "@/lib/monaco-toml";
+import { readPolicyDraft, writePolicyDraft } from "@/lib/policy-draft";
 import { useTheme } from "@/lib/theme-context";
 import {
   CanvasLayout,
@@ -127,15 +128,25 @@ patterns = []`,
   {
     title: "Witness gate",
     category: "Safety",
-    purpose: "Attach a verifier that must pass before integration merge can advance.",
-    fields: ["[[gates]]", "gate_type", "verifier_command", "network_allowed"],
+    purpose: "Attach an operator-mandated invariant with typed claims, selector scope, and pinned verifier identity.",
+    fields: ["[[gates]]", "gate_type", "satisfies", "verifier_command", "verifier_sha256", "gates.selectors"],
     snippet: `[[gates]]
 gate_type        = "NoSecretStrings"
 verifier_command = "/opt/homebrew/bin/raxis-verifier-no-secrets"
+verifier_sha256  = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 max_wall_seconds = 30
 max_memory_bytes = 268435456
 network_allowed  = false
-agent_hint_default = "A verifier found secret-shaped material. Remove literal credentials and resubmit."`,
+satisfies        = ["NoSecretStrings"]
+agent_hint_default = "A verifier found secret-shaped material. Remove literal credentials and resubmit."
+
+[gates.selectors]
+workspaces       = ["checkout-api"]
+lane_ids         = ["default"]
+path_globs       = ["src/**", "Cargo.toml"]
+task_agent_types = ["Executor"]
+environments     = ["staging"]
+hooks            = ["complete_task"]`,
   },
   {
     title: "Host capacity",
@@ -216,6 +227,51 @@ environment = "staging"`,
 ];
 
 const ENVIRONMENT_RECOMMENDATION_KEY = "raxis.policy.environmentRecommendationDismissed.v1";
+const POLICY_BUILDER_UI_STORAGE_KEY = "raxis.dashboard.policyBuilderUi.v1";
+
+type PolicyBuilderRightTab = "validate" | "apply" | "recovery";
+
+interface PolicyBuilderUiDraft {
+  version: 1;
+  featureCategory: PolicyFeatureCategory | "All";
+  rightTab: PolicyBuilderRightTab;
+}
+
+function readPolicyBuilderUiDraft(): PolicyBuilderUiDraft | null {
+  if (typeof window === "undefined" || !window.localStorage) return null;
+  try {
+    const raw = window.localStorage.getItem(POLICY_BUILDER_UI_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PolicyBuilderUiDraft>;
+    if (parsed.version !== 1) return null;
+    const featureCategory =
+      parsed.featureCategory === "Authority" ||
+      parsed.featureCategory === "Execution" ||
+      parsed.featureCategory === "Network" ||
+      parsed.featureCategory === "Providers" ||
+      parsed.featureCategory === "Safety" ||
+      parsed.featureCategory === "Operations"
+        ? parsed.featureCategory
+        : "All";
+    const rightTab =
+      parsed.rightTab === "apply" || parsed.rightTab === "recovery"
+        ? parsed.rightTab
+        : "validate";
+    return { version: 1, featureCategory, rightTab };
+  } catch {
+    return null;
+  }
+}
+
+function writePolicyBuilderUiDraft(draft: PolicyBuilderUiDraft) {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    window.localStorage.setItem(POLICY_BUILDER_UI_STORAGE_KEY, JSON.stringify(draft));
+  } catch {
+    // Local builder UI persistence is convenience-only. The active
+    // signed policy epoch remains the source of truth.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // PolicyPage — read-only viewer (unchanged from original)
@@ -333,17 +389,22 @@ export function PolicyBuilderPage() {
     enabled: canWrite,
   });
 
-  const [draft, setDraft] = useState<string | null>(null);
+  const [draft, setDraft] = useState<string | null>(() => readPolicyDraft());
   const [sig, setSig] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [advancement, setAdvancement] = useState<PolicyAdvancement | null>(null);
   const [draftHash, setDraftHash] = useState<string>("");
-  const [featureCategory, setFeatureCategory] = useState<PolicyFeatureCategory | "All">("All");
+  const persistedUi = useMemo(() => readPolicyBuilderUiDraft(), []);
+  const [featureCategory, setFeatureCategory] = useState<PolicyFeatureCategory | "All">(
+    persistedUi?.featureCategory ?? "All",
+  );
   const [validation, setValidation] = useState<BuilderValidationResponse | null>(null);
   const [validationBusy, setValidationBusy] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
-  const [rightTab, setRightTab] = useState<"validate" | "apply" | "recovery">("validate");
+  const [rightTab, setRightTab] = useState<PolicyBuilderRightTab>(
+    persistedUi?.rightTab ?? "validate",
+  );
   const [environmentRecommendationDismissed, setEnvironmentRecommendationDismissed] =
     useState(() => {
       if (typeof window === "undefined" || !window.localStorage) return false;
@@ -355,8 +416,20 @@ export function PolicyBuilderPage() {
   }, [toml.data, draft]);
 
   useEffect(() => {
+    writePolicyDraft(draft);
+  }, [draft]);
+
+  useEffect(() => {
     if (draft != null) void sha256Hex(draft).then(setDraftHash);
   }, [draft]);
+
+  useEffect(() => {
+    writePolicyBuilderUiDraft({
+      version: 1,
+      featureCategory,
+      rightTab,
+    });
+  }, [featureCategory, rightTab]);
 
   const visibleFeatures = useMemo(
     () =>

@@ -7,6 +7,8 @@ Golangci lint verifier (scenario 30)
 [workspace]
 name = "Golangci Lint Verifier"
 lane_id     = "golangci-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "extend"

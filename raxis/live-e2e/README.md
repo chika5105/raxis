@@ -63,15 +63,16 @@ Commit the `git diff raxis/live-e2e/examples/` alongside the
 fix-loop diff with the convention
 `live-e2e(examples): refresh from <iter_label> (initiative <primary_id_8> + <sibling_id_8>)`.
 
-The Anthropic credential file (`examples/credentials/anthropic.env.placeholder`)
-is the ONLY credential file in the bundle that carries a
-placeholder value. The real `ANTHROPIC-API-DEV-KEY` MUST NEVER be
-checked in:
+The provider placeholder files
+(`examples/credentials/{anthropic,gemini,openai}.env.placeholder`)
+document the live provider key shapes. Real provider keys
+(`ANTHROPIC-API-DEV-KEY`, `GEMINI-API-DEV-KEY`, and
+`OPEN-AI-API-DEV-KEY`) MUST NEVER be checked in:
 
 * `INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01`
   (`specs/invariants.md §11.10`) is the formal statement.
-* The refresh hook rewrites `anthropic.env.placeholder` from a
-  hardcoded template, NOT from the loaded key value.
+* The refresh hook rewrites every provider placeholder from a
+  hardcoded template, NOT from the loaded key values.
 * `kernel_driver::assert_no_real_anthropic_key` scans
   `examples/credentials/` for `sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{20,}`
   at end-of-refresh and panics with a copy-pastable remediation
@@ -1017,6 +1018,14 @@ transparent-proxy witness in **two** modes:
 
 For an interactive live run where the dashboard should remain
 available after either success or failure, add keep-alive:
+
+The realistic run exercises a three-provider cheap-model chain by
+default. Orchestrators start on `claude-3-haiku-20240307`, reviewers
+start on `gpt-5.3-codex`, and executor primaries rotate by task across
+Anthropic, Gemini, and OpenAI; every executor keeps the other two
+models as retryable fallbacks. Before launching, ensure `raxis/.env`
+contains non-empty `ANTHROPIC-API-DEV-KEY`, `GEMINI-API-DEV-KEY`, and
+`OPEN-AI-API-DEV-KEY` lines.
 
 ```bash
 RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 \

@@ -65,6 +65,8 @@ description = "Migrate from deprecated `tracing::trace!` to `tracing::debug!`"
 [workspace]
 name        = "log-level-migration"
 lane_id     = "default"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 # CANARY: change exactly one call site, with a perf-benchmark
 # verifier that catches a regression before merge.
@@ -74,15 +76,15 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/auth/session.rs"]
 predecessors       = []
-description        = """Replace deprecated `trace!` with `debug!` in src/auth/session.rs ONLY. Verify with the `bench-auth` verifier."""
+description        = "Canary Auth"
+prompt             = """Replace deprecated `trace!` with `debug!` in src/auth/session.rs ONLY. Verify with the `bench-auth` verifier."""
 
   [[tasks.verifiers]]
-  name        = "bench-auth"
-  image_alias = "raxis-verifier-bench-auth"
-  command     = ["bench", "--filter", "session_create"]
-  gate        = "pre_merge"
-  on_failure  = "block"
-  timeout_secs = 120
+  name       = "bench_auth"
+  image      = "raxis-verifier-bench-auth"
+  command    = "bench --filter session_create"
+  timeout    = "2m"
+  on_failure = "block_review"
 
 [[tasks]]
 task_id            = "review-canary"
@@ -90,7 +92,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/session.rs"]
 predecessors       = ["canary-auth"]
-description        = """Verify only one call site changed and the bench delta is in range."""
+description        = "Review Canary"
+prompt             = """Verify only one call site changed and the bench delta is in range."""
 
 # BROAD: every other call site, only after the canary is merged
 # AND the bench verifier produced a passing witness.
@@ -100,7 +103,8 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/", "tests/"]
 predecessors       = ["review-canary"]
-description        = """Replace ALL remaining `trace!` call sites with `debug!`. Reuse the migration documented in canary-auth."""
+description        = "Broad Replace"
+prompt             = """Replace ALL remaining `trace!` call sites with `debug!`. Reuse the migration documented in canary-auth."""
 
 [[tasks]]
 task_id            = "review-broad"
@@ -108,7 +112,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/", "tests/"]
 predecessors       = ["broad-replace"]
-description        = """Sample-check that the broad replacement matches the canary's pattern, no `trace!` remains."""
+description        = "Review Broad"
+prompt             = """Sample-check that the broad replacement matches the canary's pattern, no `trace!` remains."""
 
 [orchestrator]
 cross_cutting_artifacts = []
@@ -128,26 +133,20 @@ flowchart LR
 
 ---
 
-## What `pre_merge` actually gates
+## What the canary verifier gates
 
-`[[tasks.verifiers]] gate = "pre_merge"` runs **at the
-Orchestrator's `IntegrationMerge` admission** for the canary's
-sub-task. The kernel:
+`[[tasks.verifiers]] on_failure = "block_review"` runs before the
+Reviewer activates for the canary's sub-task. The kernel:
 
-1. Computes the canary's candidate merge tree (just the canary's
-   Executor commit on the workspace base).
-2. Runs `bench-auth` against that tree (kernel-isolated verifier
-   image, no planner mediation).
-3. If `on_failure = "block"` and the verifier non-passes,
-   admission rejects with
-   `FAIL_TASK_VERIFIER_BLOCKED { name: "bench-auth" }`.
-4. If pass, the witness is recorded in `WitnessRecorded` and the
-   merge proceeds.
+1. Snapshots the canary executor's evaluation SHA.
+2. Runs `bench_auth` against that task workspace.
+3. If `on_failure = "block_review"` and the verifier non-passes,
+   reviewer activation is held and the executor must repair.
+4. If pass, the witness is recorded and the canary reviewer may run.
 
 The crucial property: `broad-replace` cannot start until
-`review-canary` reports `Completed`, which only happens after the
-canary's `IntegrationMerge` succeeds — which requires the
-`bench-auth` verifier to have passed. So the broad change is
+`review-canary` reports `Completed`, and that reviewer cannot run
+until the canary verifier has passed. So the broad change is
 **transitively** gated on the verifier's witness.
 
 ---
@@ -201,7 +200,7 @@ The canary "tax" is ~2 units for ~13 units of risky work — a
 | `FAIL_TASK_VERIFIER_BLOCKED` on canary `IntegrationMerge` | The verifier rejected the canary commit. | Inspect the witness: `raxis log <init> --kind WitnessRecorded --json | rg bench-auth`. The witness contains the verifier's stderr/stdout. Either revise the canary or raise the verifier's threshold. |
 | Verifier passes but reviewer rejects | Two independent gates. The Reviewer evaluates the diff against the Executor's brief; the verifier evaluates a runtime property. Both must pass. | Address the Reviewer's critique; verifier already approved. |
 | Want to skip the canary in production | Don't. The canary is the operator-side guarantee that the broad task's risk has been characterised. Removing it reverts to "broad change with no early-abort". | Live with the tax. |
-| Verifier image not found | `image_alias` doesn't resolve in `policy.toml`'s `[[vm_images]]`. | Publish the image first — see [`ops/09-publish-verifier-image`](../ops/09-publish-verifier-image.md). |
+| Verifier image not found | `image` doesn't resolve to an installed verifier image in `policy.toml`'s `[[vm_images]]`. | Publish the image first — see [`ops/09-publish-verifier-image`](../ops/09-publish-verifier-image.md). |
 
 ---
 

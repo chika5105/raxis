@@ -22,7 +22,9 @@
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_store::{Store, Table};
-use raxis_types::{unix_now_secs, CloneStrategy, InitiativeState, SessionAgentType, TaskState};
+use raxis_types::{
+    unix_now_secs, BlockReason, CloneStrategy, InitiativeState, SessionAgentType, TaskState,
+};
 
 use crate::authority::keys::AuthorityError;
 use crate::initiatives::plan_registry::{PlanRegistry, TaskKey, TaskPlanFields};
@@ -119,8 +121,10 @@ pub enum LifecycleError {
 
     /// **V2 (Step 27) — `INVALID_PLAN_SCHEMA` clone-strategy family.**
     /// A `[[tasks]]` block declares either:
+    ///   * a missing required `clone_strategy`, OR
     ///   * an unknown `clone_strategy` value (must be one of `full`,
     ///     `blobless`, `sparse`), OR
+    ///   * a missing required `session_agent_type`, OR
     ///   * an unknown `session_agent_type` (must be one of
     ///     `Executor`, `Reviewer` for plan-declared tasks; see also
     ///     `OrchestratorTaskNotPermitted` below for the
@@ -144,6 +148,10 @@ pub enum LifecycleError {
     ///     `session_agent_type = "Orchestrator"` (V2: the Orchestrator
     ///     session is auto-created by the kernel from the kernel-bundled
     ///     `raxis-orchestrator-core` image; operators do not declare it).
+    ///   * `"missing_clone_strategy"` — the field is required; there
+    ///     is no runtime default.
+    ///   * `"missing_agent_type"` — the field is required; there is no
+    ///     runtime default.
     #[error("plan clone-strategy invalid (rule={rule}, task={offending_task}): {suggestion}")]
     PlanCloneStrategyInvalid {
         rule: &'static str,
@@ -859,10 +867,11 @@ pub fn approve_plan(
     // kernel-owned uniqueness boundary; `[workspace].name` is the
     // stable dashboard label.
     let _workspace_name = parse_plan_workspace_name(&plan_toml_str)?;
-    // Read `[workspace] target_ref` (or `None`
-    // for plans that don't override the operator default).
+    // Read required `[workspace] target_ref`. The plan carries the
+    // branch it intends to advance; policy may still lock it to the
+    // operator default, but runtime admission no longer invents one.
     let plan_target_ref_raw = parse_plan_workspace_target_ref(&plan_toml_str)?;
-    // Raxis 0.2 — read `[workspace] repository` (or default to `main`).
+    // Raxis 0.2 — read required `[workspace] repository`.
     // This selects the managed source repository under
     // `<data_dir>/repositories/<id>` for every spawn / merge path.
     let plan_repository_id = parse_plan_workspace_repository(&plan_toml_str)?;
@@ -899,6 +908,7 @@ pub fn approve_plan(
     // image resolution against `[[vm_images]]`, hard-cap timeout
     // enforcement) run at IntegrationMerge admission (Check 5d).
     validate_plan_integration_merge_verifiers(&plan_pre_merge_verifiers, &plan_tasks)?;
+    orchestrator_fields.integration_merge_verifiers = plan_pre_merge_verifiers.clone();
     // V2 `credential-proxy.md §3` shift-left: any
     // `[[tasks.credentials]]` block declaring an unknown
     // `proxy_type` (or a structurally malformed entry — already
@@ -1087,6 +1097,7 @@ pub fn approve_plan(
             // preserves the scaffold/park behaviour of the role binary.
             description: pt.description.clone(),
             custom_tools_json: pt.custom_tools_json.clone(),
+            task_verifiers: pt.task_verifiers.clone(),
             // V2 `v2-deep-spec.md §Step 12` — retry ceilings.
             // `None` here means the operator omitted the field;
             // the `RetrySubTask` admission path substitutes the
@@ -1687,6 +1698,7 @@ pub fn repopulate_plan_registry(
                     // a zero-length description through restart.
                     description: pt.description,
                     custom_tools_json: pt.custom_tools_json,
+                    task_verifiers: pt.task_verifiers,
                     // V2 `v2-deep-spec.md §Step 12` — re-hydrate the
                     // operator-declared retry ceilings. `None`
                     // preserves "operator omitted the field"
@@ -1731,21 +1743,27 @@ pub fn repopulate_plan_registry(
         // aborting registry rebuild for the whole kernel.
         match parse_plan_orchestrator(&plan_str) {
             Ok(mut orch) => {
-                // Re-resolve the
-                // per-initiative `target_ref` against the *current*
+                // Re-resolve the per-initiative `target_ref` against the *current*
                 // policy. We deliberately re-resolve rather than
                 // persist the value at admission time so an operator
                 // who tightens `[git] target_ref_locked` between
                 // restarts surfaces the lock at hot-restart with the
                 // same `LifecycleError::PlanTargetRefInvalid` they
-                // would have seen at admission. A re-resolution
-                // failure logs and proceeds with the
-                // policy-default target_ref so the registry stays
-                // populated and the operator's next
-                // `IntegrationMerge` is the surface that hard-fails
-                // (and surfaces the actual lock error) rather than a
-                // silent boot-time skip.
-                let plan_tr = parse_plan_workspace_target_ref(&plan_str).ok().flatten();
+                // would have seen at admission. Re-resolution is
+                // fail-closed: a malformed stored plan is skipped
+                // instead of silently pointing the initiative at
+                // policy/default refs.
+                let plan_tr = match parse_plan_workspace_target_ref(&plan_str) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"plan_registry_repopulate\",\
+                             \"initiative_id\":\"{init_id}\",\
+                             \"reason\":\"target_ref_parse_failed_at_restart: {e}\"}}",
+                        );
+                        continue;
+                    }
+                };
                 orch.target_ref = match resolve_target_ref(
                     plan_tr.as_deref(),
                     policy_default_target_ref,
@@ -1754,22 +1772,35 @@ pub fn repopulate_plan_registry(
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!(
-                            "{{\"level\":\"warn\",\"event\":\"plan_registry_repopulate\",\
+                            "{{\"level\":\"error\",\"event\":\"plan_registry_repopulate\",\
                              \"initiative_id\":\"{init_id}\",\
                              \"reason\":\"target_ref_resolution_failed_at_restart: {e}\"}}",
                         );
-                        policy_default_target_ref.to_owned()
+                        continue;
                     }
                 };
                 orch.repository_id = match parse_plan_workspace_repository(&plan_str) {
                     Ok(id) => id,
                     Err(e) => {
                         eprintln!(
-                            "{{\"level\":\"warn\",\"event\":\"plan_registry_repopulate\",\
+                            "{{\"level\":\"error\",\"event\":\"plan_registry_repopulate\",\
                              \"initiative_id\":\"{init_id}\",\
                              \"reason\":\"repository_resolution_failed_at_restart: {e}\"}}",
                         );
-                        crate::managed_repositories::DEFAULT_REPOSITORY_ID.to_owned()
+                        continue;
+                    }
+                };
+                orch.integration_merge_verifiers = match parse_plan_integration_merge_verifiers(
+                    &plan_str,
+                ) {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        eprintln!(
+                                "{{\"level\":\"warn\",\"event\":\"plan_registry_repopulate\",\
+                             \"initiative_id\":\"{init_id}\",\
+                             \"reason\":\"integration_merge_verifiers_resolution_failed_at_restart: {e}\"}}",
+                            );
+                        Vec::new()
                     }
                 };
                 registry.insert_orchestrator(&init_id, orch);
@@ -1896,18 +1927,19 @@ pub fn abort_initiative(
     let tx = conn.transaction()?;
 
     // Snapshot the about-to-be-cancelled tasks' (lane_id, task_id,
-    // prior_state) triples BEFORE the bulk UPDATE — `lane_id` is
-    // needed for `release_budget_in_tx`, `prior_state` is needed
-    // for the per-task `TaskStateChanged from → Cancelled` audit
-    // emit post-commit per `INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01`,
-    // and `task_id` is needed for both. Snapshot order matches the
+    // prior_state, policy_epoch) tuples BEFORE the bulk UPDATE —
+    // `lane_id` is needed for `release_budget_in_tx`,
+    // `prior_state` and `policy_epoch` are needed for the per-task
+    // `TaskStateChanged from → Cancelled` audit emit post-commit
+    // per `INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01`, and
+    // `task_id` is needed for both. Snapshot order matches the
     // bulk UPDATE's WHERE clause so the snapshot and the cancel
     // set are identical even under a concurrent operator double-
     // abort (the second tx finds zero rows and the snapshot is
     // empty).
-    let task_snapshot: Vec<(String, String, String)> = {
+    let task_snapshot: Vec<(String, String, String, i64)> = {
         let mut stmt = tx.prepare(&format!(
-            "SELECT lane_id, task_id, state FROM {TASKS}
+            "SELECT lane_id, task_id, state, policy_epoch FROM {TASKS}
               WHERE initiative_id=?1 AND state NOT IN ({terminal_not_in})"
         ))?;
         let rows = stmt.query_map(rusqlite::params![initiative_id], |r| {
@@ -1915,6 +1947,7 @@ pub fn abort_initiative(
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
             ))
         })?;
         rows.filter_map(Result::ok).collect()
@@ -1950,11 +1983,17 @@ pub fn abort_initiative(
             "UPDATE {TASKS}
                 SET state='{cancel_state}',
                     transitioned_at=?1,
-                    actor=?2
-              WHERE initiative_id=?3
+                    actor=?2,
+                    block_reason=?3
+              WHERE initiative_id=?4
                 AND state NOT IN ({terminal_not_in})"
         ),
-        rusqlite::params![now, &actor_desc, initiative_id],
+        rusqlite::params![
+            now,
+            &actor_desc,
+            BlockReason::OperatorAbort.as_sql_str(),
+            initiative_id
+        ],
     )?;
 
     // Release the lane reservation for every task we just cancelled —
@@ -1966,7 +2005,7 @@ pub fn abort_initiative(
     // sub-task that pushes the cumulative reservation over the
     // ceiling). Idempotent on rows == 0 (a Cancelled-pre-tx task
     // that had not yet reserved is safely a no-op).
-    for (lane_id, task_id, _) in &task_snapshot {
+    for (lane_id, task_id, _, _) in &task_snapshot {
         crate::scheduler::budget::release_budget_in_tx(&tx, lane_id, task_id)
             .map_err(|e| LifecycleError::PlanInvalid {
                 reason: format!(
@@ -1997,13 +2036,13 @@ pub fn abort_initiative(
     //    log only and never rolls back the SQL state, mirroring the
     //    `transition_task_with_audit` discipline.
     if let Some(audit) = audit {
-        for (_, task_id, prior_state) in &task_snapshot {
+        for (_, task_id, prior_state, policy_epoch) in &task_snapshot {
             let kind = raxis_audit_tools::AuditEventKind::TaskStateChanged {
                 task_id: task_id.clone(),
                 from_state: prior_state.clone(),
                 to_state: TaskState::Cancelled.as_sql_str().to_owned(),
                 actor: format!("operator:{aborted_by}"),
-                policy_epoch: 0,
+                policy_epoch: (*policy_epoch).max(0) as u64,
             };
             if let Err(e) = audit.emit(kind, None, Some(task_id), Some(initiative_id)) {
                 eprintln!(
@@ -2096,7 +2135,13 @@ pub fn abort_task(
     let actor = TransitionActor::Operator {
         fingerprint: aborted_by.to_owned(),
     };
-    let record = transition_task_in_tx(&tx, task_id, TaskState::Aborted, None, actor)?;
+    let record = transition_task_in_tx(
+        &tx,
+        task_id,
+        TaskState::Aborted,
+        Some(BlockReason::OperatorAbort.as_sql_str()),
+        actor,
+    )?;
     crate::scheduler::budget::release_budget_in_tx(&tx, &lane_id, task_id).map_err(|e| {
         LifecycleError::PlanInvalid {
             reason: format!(
@@ -2224,12 +2269,6 @@ struct PlanTask {
     /// `[[tasks]]` block that declares `session_agent_type = "Orchestrator"`
     /// regardless of clone strategy.
     session_agent_type: SessionAgentType,
-    /// Optional plan profile. Executor profiles can carry
-    /// `[[profiles.<name>.custom_tool]]` declarations; the kernel
-    /// resolves the effective profile at approval and stamps only
-    /// the task-local bundle into that Executor VM.
-    profile: Option<String>,
-
     // ── §2.5.8 path-scope fields (in-memory only) ──────────────────────
     /// Glob patterns this task may touch. **Default `[]` (deny everything)**.
     path_allowlist: Vec<String>,
@@ -2306,22 +2345,24 @@ struct PlanTask {
     ///   with `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`.
     vm_image: String,
 
-    /// **`[[plan.tasks.X]] description` + `prompt`.**
+    /// **`[[tasks]] description` + `prompt`.**
     /// Operator-authored seed prompt for the Executor / Reviewer agent.
     /// **REQUIRED** at admission: the parser rejects plans whose
-    /// `[[tasks]]` block omits or empty-strings `description` with the
-    /// same `FAIL_PLAN_PARSE_ERROR` class as missing `task_id`.
-    /// Rationale: a plan that reaches activation with no human summary
-    /// would spawn an agent with no operator-visible task purpose.
-    /// `prompt` is preferred for the primary model instruction in
-    /// 0.2.0; legacy plans that omit `prompt` keep using
-    /// `description` as the instruction for compatibility.
+    /// `[[tasks]]` block omits or empty-strings either field.
+    /// `description` is the short human/dashboard summary; `prompt` is
+    /// the model instruction body. The kernel combines both into the
+    /// signed per-session prompt so there is one canonical plan shape
+    /// across CLI, dashboard, and runtime admission.
     /// Strings beyond 64 KiB are also rejected at validation time to
     /// bound the env-var footprint passed to the substrate
     /// (`execve(2)` `ARG_MAX` ~128 KiB on Linux).
     description: String,
     /// JSON bundle of effective custom tools for this task, if any.
     custom_tools_json: Option<String>,
+
+    /// Canonical per-task verifier declarations from
+    /// `[[tasks.verifiers]]`.
+    task_verifiers: Vec<raxis_policy::TaskVerifierEntry>,
 
     // ── V2 elastic-vm-scaling.md §2.2 — per-task elastic knobs ─────
     /// **V2 `elastic-vm-scaling.md §2.2`** — operator opt-out from
@@ -2345,7 +2386,8 @@ struct PlanTask {
 }
 
 /// Parse `[[tasks]]` array from plan TOML.
-/// Required: `task_id`.
+/// Required: `task_id`, `description`, `prompt`, `clone_strategy`,
+///           `session_agent_type`.
 /// Optional: `name` (defaults to `task_id`),
 ///           `predecessors` (defaults to empty list).
 /// **V2 §Step 28 — `lane_id` is intentionally NOT defaulted here.** A
@@ -2359,9 +2401,9 @@ struct PlanTask {
 /// §2.5.8 path-scope fields: all optional; defaults are deny-everything,
 /// no-export, no-override (matching the spec's locked-down defaults).
 /// Non-array values for the array-typed fields silently fall back to
-/// the default — same conservative behaviour as `predecessors`. The
-/// signing tool is the gate that catches operator typos; the kernel
-/// does not re-validate plan shape beyond what's necessary for safety.
+/// the default — same conservative behaviour as `predecessors`. Required
+/// authority-bearing fields are strict here so the signed plan admitted
+/// by the kernel is the same effective shape shown by Plan Builder.
 fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
     let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| LifecycleError::PlanInvalid {
         reason: format!("TOML parse error: {e}"),
@@ -2411,68 +2453,129 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        // V2 §Step 27 — typed clone strategy. We carry the *raw* string
-        // through to the validator (`validate_clone_strategy_v2_format`)
-        // so the diagnostic can name the offending string verbatim. We
-        // don't decode here so a malformed value reports
-        // `unknown_clone_strategy` at validation time, not as a silent
-        // fallback to the default. Operators who omit the key get the
-        // V2 default (`Blobless`).
-        let clone_strategy_raw = entry
-            .get("clone_strategy")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        let session_agent_type_raw = entry
-            .get("session_agent_type")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-
-        let clone_strategy = match clone_strategy_raw.as_deref() {
-            None => CloneStrategy::Blobless,
-            Some(s) => match CloneStrategy::from_sql_str(s) {
-                Some(strategy) => strategy,
-                None => {
-                    return Err(LifecycleError::PlanCloneStrategyInvalid {
-                        rule: "unknown_clone_strategy",
-                        offending_task: task_id.clone(),
-                        suggestion: format!(
-                            "value `{s}` is not a valid clone_strategy. \
-                         Valid values: full, blobless, sparse. \
-                         (V2 default: blobless.)",
-                        ),
-                    })
-                }
-            },
+        // V2 §Step 27 — typed clone strategy. This is now explicit in
+        // every plan. The old parser default (`blobless`) made runtime
+        // and Plan Builder disagree about the same TOML bytes.
+        let clone_strategy_raw = match entry.get("clone_strategy") {
+            Some(toml::Value::String(s)) if !s.trim().is_empty() => s.trim().to_owned(),
+            Some(toml::Value::String(_)) => {
+                return Err(LifecycleError::PlanCloneStrategyInvalid {
+                    rule: "missing_clone_strategy",
+                    offending_task: task_id.clone(),
+                    suggestion: "clone_strategy is required. Use one of: full, blobless, sparse."
+                        .to_owned(),
+                });
+            }
+            Some(v) => {
+                return Err(LifecycleError::PlanCloneStrategyInvalid {
+                    rule: "invalid_clone_strategy_type",
+                    offending_task: task_id.clone(),
+                    suggestion: format!(
+                        "clone_strategy must be a TOML string, got {:?}. Use one of: full, blobless, sparse.",
+                        v.type_str()
+                    ),
+                });
+            }
+            None => {
+                return Err(LifecycleError::PlanCloneStrategyInvalid {
+                    rule: "missing_clone_strategy",
+                    offending_task: task_id.clone(),
+                    suggestion: "clone_strategy is required. Use one of: full, blobless, sparse."
+                        .to_owned(),
+                });
+            }
         };
-        let session_agent_type = match session_agent_type_raw.as_deref() {
-            None => SessionAgentType::Executor,
-            Some(s) => match SessionAgentType::from_sql_str(s) {
-                Some(t) => t,
-                None => {
-                    return Err(LifecycleError::PlanCloneStrategyInvalid {
-                        rule: "unknown_agent_type",
-                        offending_task: task_id.clone(),
-                        suggestion: format!(
-                            "value `{s}` is not a valid session_agent_type. \
-                         Valid values: Executor, Reviewer. \
-                         (Orchestrator is auto-created by the kernel and \
-                         must not appear in [[tasks]].)",
-                        ),
-                    })
-                }
-            },
-        };
-        let profile = match entry.get("profile") {
-            None => None,
-            Some(toml::Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_owned()),
-            Some(_) => {
-                return Err(LifecycleError::PlanInvalid {
-                    reason: format!(
-                        "[[tasks]] (task `{task_id}`) profile must be a non-empty TOML string"
+        let session_agent_type_raw = match entry.get("session_agent_type") {
+            Some(toml::Value::String(s)) if !s.trim().is_empty() => s.trim().to_owned(),
+            Some(toml::Value::String(_)) | None => {
+                return Err(LifecycleError::PlanCloneStrategyInvalid {
+                    rule: "missing_agent_type",
+                    offending_task: task_id.clone(),
+                    suggestion: "session_agent_type is required. Use Executor or Reviewer; the kernel creates Orchestrator sessions automatically."
+                        .to_owned(),
+                });
+            }
+            Some(v) => {
+                return Err(LifecycleError::PlanCloneStrategyInvalid {
+                    rule: "invalid_agent_type",
+                    offending_task: task_id.clone(),
+                    suggestion: format!(
+                        "session_agent_type must be a TOML string, got {:?}. Use Executor or Reviewer.",
+                        v.type_str()
                     ),
                 });
             }
         };
+
+        let clone_strategy = match CloneStrategy::from_sql_str(&clone_strategy_raw) {
+            Some(strategy) => strategy,
+            None => {
+                return Err(LifecycleError::PlanCloneStrategyInvalid {
+                    rule: "unknown_clone_strategy",
+                    offending_task: task_id.clone(),
+                    suggestion: format!(
+                        "value `{clone_strategy_raw}` is not a valid clone_strategy. \
+                         Valid values: full, blobless, sparse."
+                    ),
+                })
+            }
+        };
+        let session_agent_type = match SessionAgentType::from_sql_str(&session_agent_type_raw) {
+            Some(t) => t,
+            None => {
+                return Err(LifecycleError::PlanCloneStrategyInvalid {
+                    rule: "unknown_agent_type",
+                    offending_task: task_id.clone(),
+                    suggestion: format!(
+                        "value `{session_agent_type_raw}` is not a valid session_agent_type. \
+                         Valid values: Executor, Reviewer. \
+                         (Orchestrator is auto-created by the kernel and \
+                         must not appear in [[tasks]].)"
+                    ),
+                })
+            }
+        };
+        if entry.get("profile").is_some() {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task_id}`) uses deprecated `profile`; use `profiles = [\"...\"]`"
+                ),
+            });
+        }
+        match entry.get("profiles") {
+            None => {}
+            Some(toml::Value::Array(values)) => {
+                let mut seen = std::collections::HashSet::new();
+                for value in values {
+                    match value {
+                        toml::Value::String(s) if !s.trim().is_empty() => {
+                            let profile = s.trim().to_owned();
+                            if !seen.insert(profile.clone()) {
+                                return Err(LifecycleError::PlanInvalid {
+                                    reason: format!(
+                                        "[[tasks]] (task `{task_id}`) declares duplicate profile {profile:?}"
+                                    ),
+                                });
+                            }
+                        }
+                        _ => {
+                            return Err(LifecycleError::PlanInvalid {
+                                reason: format!(
+                                    "[[tasks]] (task `{task_id}`) profiles must be an array of non-empty TOML strings"
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+            Some(_) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) profiles must be an array of non-empty TOML strings"
+                    ),
+                });
+            }
+        }
 
         // V2 `credential-proxy.md §3` — parse the optional
         // `[[tasks.credentials]]` sub-array. The parser is strict: a
@@ -2489,15 +2592,14 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             }
         })?;
 
+        let task_verifiers = parse_task_verifiers_for_task(entry, &task_id)?;
+
         // V2.5 §13 — `vm_image` selects the operator-published
         // [[vm_images]] alias for this task. Empty string means
         // "operator omitted the field"; the validator decides
-        // whether that's permitted (Reviewer must omit; Executor
-        // can fall back to [default_executor_image] or be
-        // admitted with no alias for V1 compatibility). Non-string
-        // values silently fall back to empty so the validator can
-        // emit the same diagnostic shape as the other Step 17
-        // checks.
+        // whether that's permitted for the current role. Non-string
+        // values silently fall back to empty so the validator can emit
+        // the same diagnostic shape as the other Step 17 checks.
         let vm_image = entry
             .get("vm_image")
             .and_then(|v| v.as_str())
@@ -2509,7 +2611,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             return Err(LifecycleError::PlanInvalid {
                 reason: format!(
                     "[[tasks]] (task `{task_id}`) uses deprecated `context`; \
-                     use `prompt` for the executor/reviewer instructions. \
+                     use required `prompt` for the executor/reviewer instructions. \
                      `description` should stay as the short human summary."
                 ),
             });
@@ -2550,9 +2652,8 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
                 return Err(LifecycleError::PlanInvalid {
                     reason: format!(
                         "[[tasks]] (task `{task_id}`) is missing \
-                         required `description` field — operator \
-                         must declare what the agent should do \
-                        "
+                         required `description` field — provide the \
+                         short dashboard/audit summary"
                     ),
                 });
             }
@@ -2561,8 +2662,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             return Err(LifecycleError::PlanInvalid {
                 reason: format!(
                     "[[tasks]] (task `{task_id}`) `description` is \
-                     empty — operator must declare what the agent \
-                     should do"
+                     empty — provide the short dashboard/audit summary"
                 ),
             });
         }
@@ -2577,7 +2677,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             });
         }
         let prompt_raw = match entry.get("prompt") {
-            Some(toml::Value::String(s)) => Some(s.trim_end().to_owned()),
+            Some(toml::Value::String(s)) => s.trim_end().to_owned(),
             Some(_) => {
                 return Err(LifecycleError::PlanInvalid {
                     reason: format!(
@@ -2586,35 +2686,36 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
                     ),
                 });
             }
-            None => None,
+            None => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) is missing required `prompt` field — \
+                         `description` is only the short summary; `prompt` carries the \
+                         executor/reviewer instructions"
+                    ),
+                });
+            }
         };
-        if let Some(prompt) = prompt_raw.as_ref() {
-            if prompt.is_empty() {
-                return Err(LifecycleError::PlanInvalid {
-                    reason: format!(
-                        "[[tasks]] (task `{task_id}`) `prompt` is empty — \
-                         either omit it to use `description`, or provide \
-                         the executor/reviewer instructions"
-                    ),
-                });
-            }
-            if prompt.len() > MAX_TASK_DESCRIPTION_BYTES {
-                return Err(LifecycleError::PlanInvalid {
-                    reason: format!(
-                        "[[tasks]] (task `{task_id}`) prompt \
-                         is {bytes} bytes, exceeds cap {cap}",
-                        bytes = prompt.len(),
-                        cap = MAX_TASK_DESCRIPTION_BYTES,
-                    ),
-                });
-            }
+        if prompt_raw.is_empty() {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task_id}`) `prompt` is empty — provide \
+                     the executor/reviewer instructions"
+                ),
+            });
         }
-        let agent_description = match prompt_raw {
-            Some(prompt) => {
-                format!("Task summary:\n{description_raw}\n\nPrimary instructions:\n{prompt}")
-            }
-            None => description_raw,
-        };
+        if prompt_raw.len() > MAX_TASK_DESCRIPTION_BYTES {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task_id}`) prompt \
+                     is {bytes} bytes, exceeds cap {cap}",
+                    bytes = prompt_raw.len(),
+                    cap = MAX_TASK_DESCRIPTION_BYTES,
+                ),
+            });
+        }
+        let agent_description =
+            format!("Task summary:\n{description_raw}\n\nPrimary instructions:\n{prompt_raw}");
         let custom_tools_json =
             crate::initiatives::custom_tools_validator::custom_tool_bundle_json_for_task(
                 plan_toml,
@@ -2763,11 +2864,11 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             path_scope_override,
             clone_strategy,
             session_agent_type,
-            profile,
             credentials,
             vm_image,
             description: agent_description,
             custom_tools_json,
+            task_verifiers,
             max_crash_retries,
             max_review_rejections,
             max_turns,
@@ -2907,6 +3008,7 @@ fn parse_plan_orchestrator(
         // produce a well-formed struct.
         target_ref: crate::initiatives::OrchestratorPlanFields::DEFAULT_TARGET_REF.to_owned(),
         repository_id: crate::initiatives::OrchestratorPlanFields::DEFAULT_REPOSITORY_ID.to_owned(),
+        integration_merge_verifiers: Vec::new(),
         elastic,
         max_concurrent_admissions,
     })
@@ -3092,12 +3194,8 @@ fn parse_plan_workspace_name(plan_toml: &str) -> Result<String, LifecycleError> 
 }
 
 /// ** ** Parse the plan-side
-/// `[workspace] target_ref` field — the per-initiative override
-/// for the git ref the kernel's IntegrationMerge handler advances.
-/// Returns `Ok(None)` when the plan omits the field (the typical
-/// default; the resolver falls back to the operator's
-/// `[git] default_target_ref` and ultimately to the hardcoded
-/// `"refs/heads/main"`).
+/// `[workspace] target_ref` field — the explicit git ref the kernel's
+/// IntegrationMerge handler advances.
 /// Surfaces structural-shape errors (non-string, wrong section
 /// nesting) through `LifecycleError::PlanInvalid` so the operator
 /// diagnostic shows the malformed-section context.
@@ -3108,11 +3206,18 @@ fn parse_plan_workspace_target_ref(plan_toml: &str) -> Result<Option<String>, Li
 
     let workspace = match doc.get("workspace").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None => return Ok(None),
+        None => {
+            return Err(LifecycleError::PlanInvalid {
+                reason: "[workspace] table is required and must declare target_ref".to_owned(),
+            });
+        }
     };
 
     match workspace.get("target_ref") {
-        None => Ok(None),
+        None => Err(LifecycleError::PlanInvalid {
+            reason: "[workspace] target_ref is required; use a fully-qualified branch ref such as \"refs/heads/main\""
+                .to_owned(),
+        }),
         Some(v) => {
             let s = v.as_str().ok_or_else(|| LifecycleError::PlanInvalid {
                 reason: format!(
@@ -3123,7 +3228,7 @@ fn parse_plan_workspace_target_ref(plan_toml: &str) -> Result<Option<String>, Li
             if s.is_empty() {
                 return Err(LifecycleError::PlanInvalid {
                     reason: "[workspace] target_ref is the empty string \
-                             (omit the field to apply the policy default)"
+                             (set a fully-qualified branch ref such as \"refs/heads/main\")"
                         .to_owned(),
                 });
             }
@@ -3132,18 +3237,26 @@ fn parse_plan_workspace_target_ref(plan_toml: &str) -> Result<Option<String>, Li
     }
 }
 
-/// Parse and validate `[workspace] repository`, the Raxis 0.2 managed
-/// repository id. Missing field defaults to `"main"` for full
-/// compatibility with every V2.0/V2.1 plan and the historical
-/// `<data_dir>/repositories/main` convention.
+/// Parse and validate required `[workspace] repository`, the Raxis 0.2
+/// managed repository id.
 fn parse_plan_workspace_repository(plan_toml: &str) -> Result<String, LifecycleError> {
     let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| LifecycleError::PlanInvalid {
         reason: format!("TOML parse error: {e}"),
     })?;
 
-    let workspace = doc.get("workspace").and_then(|v| v.as_table());
-    let raw = match workspace.and_then(|t| t.get("repository")) {
-        None => None,
+    let workspace = doc
+        .get("workspace")
+        .and_then(|v| v.as_table())
+        .ok_or_else(|| LifecycleError::PlanInvalid {
+            reason: "[workspace] table is required and must declare repository".to_owned(),
+        })?;
+    let raw = match workspace.get("repository") {
+        None => {
+            return Err(LifecycleError::PlanInvalid {
+                reason: "[workspace] repository is required; use a path-safe repository id such as \"main\""
+                    .to_owned(),
+            });
+        }
         Some(toml::Value::String(s)) => Some(s.as_str()),
         Some(other) => {
             return Err(LifecycleError::PlanInvalid {
@@ -3159,7 +3272,7 @@ fn parse_plan_workspace_repository(plan_toml: &str) -> Result<String, LifecycleE
         LifecycleError::PlanInvalid {
             reason: format!(
                 "[workspace] repository is invalid: {reason}; valid example: \
-                 repository = \"api\". Omit the field to use \"main\"."
+                 repository = \"api\"."
             ),
         }
     })
@@ -3233,11 +3346,11 @@ fn parse_plan_workspace_max_concurrent_admissions(
 }
 
 /// ** INV-PLAN-POLICY-PRECEDENCE-01.**
-/// Resolve the per-initiative `target_ref` from the plan +
-/// policy + hardcoded fallback per the precedence table:
-/// 1. `[workspace] target_ref` from `plan.toml` (if present),
-/// 2. else `[git] default_target_ref` from `policy.toml`,
-/// 3. else `"refs/heads/main"`.
+/// Resolve the per-initiative `target_ref` from the explicit plan value
+/// and the active policy lock:
+/// 1. `[workspace] target_ref` from `plan.toml` is required.
+/// 2. `[git] target_ref_locked = true` may restrict it to the policy
+///    default.
 ///    **Locked-field enforcement.** When the active policy has
 ///    `[git] target_ref_locked = true`, any plan-declared override
 ///    that differs from `[git] default_target_ref` is rejected with
@@ -3255,7 +3368,13 @@ pub(crate) fn resolve_target_ref(
     locked: bool,
 ) -> Result<String, LifecycleError> {
     match plan_value {
-        None => Ok(policy_default.to_owned()),
+        None => Err(LifecycleError::PlanTargetRefInvalid {
+            rule: "missing",
+            plan_value: None,
+            policy_value: policy_default.to_owned(),
+            suggestion: "[workspace] target_ref is required; use a fully-qualified branch ref such as \"refs/heads/main\""
+                .to_owned(),
+        }),
         Some(plan_ref) => {
             raxis_policy::validate_target_ref_format(plan_ref).map_err(|reason| {
                 LifecycleError::PlanTargetRefInvalid {
@@ -3980,7 +4099,7 @@ fn validate_sparse_orchestrator_exclusion(tasks: &[PlanTask]) -> Result<(), Life
                      git's 3-way tree traversal cannot complete safely \
                      against a sparse-checkout-trimmed working tree. \
                      Use `clone_strategy = \"full\"` or `\"blobless\"` for \
-                     Orchestrator-class tasks (V2 default: blobless)."
+                     Orchestrator-class tasks."
                     .to_owned(),
             });
         }
@@ -4270,14 +4389,10 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
 /// **before** the `BEGIN TRANSACTION`.
 /// * **Pro:** A bad plan is rejected before the kernel mutates any
 ///   on-disk state — no rollback scar, no half-state.
-/// * **Pro:** Keeps `parse_plan_tasks` purely structural, so it can be
-///   reused at recovery (`repopulate_plan_registry`) for V1 plans whose
-///   bytes were approved before V2 syntax existed. Recovery uses
-///   `parse_plan_tasks` only, so legacy plans continue to round-trip.
-/// * **Con:** A V1 plan reapproved against a V2 kernel would fail.
-///   This is intentional and documented at
-///   `v2-deep-spec.md §Step 19` (the V2 wire is the canonical V2
-///   syntax — operators must `plan prepare && policy sign` again).
+/// * **Pro:** Keeps `parse_plan_tasks` purely structural while all
+///   admission invariants stay in one shift-left validation phase.
+///   The V2 wire shape is canonical; old plan TOML must be prepared
+///   again instead of being silently coerced at runtime.
 /// # Test obligation
 /// Each branch of the `reason` taxonomy MUST be exercised by a unit
 /// test in this module. See `validate_path_allowlist_v2_format_*` tests.
@@ -4818,6 +4933,215 @@ fn path_allowlist_entry_violation(entry: &str) -> Option<&'static str> {
     None
 }
 
+fn parse_task_verifiers_for_task(
+    entry: &toml::Value,
+    task_id: &str,
+) -> Result<Vec<raxis_policy::TaskVerifierEntry>, LifecycleError> {
+    let Some(verifiers) = entry.get("verifiers") else {
+        return Ok(Vec::new());
+    };
+    let array = verifiers
+        .as_array()
+        .ok_or_else(|| LifecycleError::PlanInvalid {
+            reason: format!("[[tasks.verifiers]] (task `{task_id}`) must be an array of tables"),
+        })?;
+    let mut out = Vec::with_capacity(array.len());
+    let mut seen = std::collections::HashSet::new();
+    for (idx, verifier) in array.iter().enumerate() {
+        let table = verifier
+            .as_table()
+            .ok_or_else(|| LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks.verifiers]][{idx}] (task `{task_id}`) must be a TOML table"
+                ),
+            })?;
+        let read = |field: &str| -> Result<String, LifecycleError> {
+            table
+                .get(field)
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks.verifiers]][{idx}] (task `{task_id}`) missing required `{field}`"
+                    ),
+                })
+        };
+        let name = read("name")?;
+        if !raxis_policy::is_valid_verifier_name(&name) {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks.verifiers]][{idx}] (task `{task_id}`) name `{name}` must match [a-z][a-z0-9_]{{0,31}}"
+                ),
+            });
+        }
+        if !seen.insert(name.clone()) {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks.verifiers]] (task `{task_id}`) declares duplicate verifier `{name}`"
+                ),
+            });
+        }
+        let image = read("image")?;
+        let command = read("command")?;
+        let timeout = read("timeout")?;
+        raxis_policy::parse_verifier_timeout_secs(&timeout).ok_or_else(|| {
+            LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks.verifiers]][{idx}] (task `{task_id}`) timeout `{timeout}` invalid"
+                ),
+            }
+        })?;
+        let on_failure = match table
+            .get("on_failure")
+            .and_then(|v| v.as_str())
+            .unwrap_or("block_review")
+        {
+            "block_review" => raxis_policy::TaskVerifierOnFailure::BlockReview,
+            "warn_only" => raxis_policy::TaskVerifierOnFailure::WarnOnly,
+            other => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks.verifiers]][{idx}] (task `{task_id}`) on_failure `{other}` invalid; valid values: block_review, warn_only"
+                    ),
+                });
+            }
+        };
+        let artifact = table
+            .get("artifact")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        if let Some(path) = artifact.as_deref() {
+            if !path.starts_with("/raxis/")
+                || path.len() > raxis_policy::VERIFIER_ARTIFACT_MAX_PATH_CHARS
+            {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks.verifiers]][{idx}] (task `{task_id}`) artifact must be an absolute /raxis/... path within {} chars",
+                        raxis_policy::VERIFIER_ARTIFACT_MAX_PATH_CHARS,
+                    ),
+                });
+            }
+        }
+        let artifact_max_bytes = match table.get("artifact_max_bytes") {
+            None => None,
+            Some(toml::Value::Integer(v)) if *v >= 0 => Some(*v as u64),
+            Some(_) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks.verifiers]][{idx}] (task `{task_id}`) artifact_max_bytes must be a non-negative integer"
+                    ),
+                });
+            }
+        };
+        let env = match table.get("env") {
+            None => std::collections::HashMap::new(),
+            Some(toml::Value::Table(values)) => {
+                let mut out = std::collections::HashMap::new();
+                for (key, value) in values {
+                    let Some(value) = value.as_str() else {
+                        return Err(LifecycleError::PlanInvalid {
+                            reason: format!(
+                                "[[tasks.verifiers]][{idx}] (task `{task_id}`) env.{key} must be a string"
+                            ),
+                        });
+                    };
+                    if key.starts_with(raxis_policy::RAXIS_RESERVED_ENV_PREFIX) {
+                        return Err(LifecycleError::PlanInvalid {
+                            reason: format!(
+                                "[[tasks.verifiers]][{idx}] (task `{task_id}`) env key `{key}` uses reserved RAXIS_ prefix"
+                            ),
+                        });
+                    }
+                    out.insert(key.clone(), value.to_owned());
+                }
+                out
+            }
+            Some(_) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks.verifiers]][{idx}] (task `{task_id}`) env must be a TOML table"
+                    ),
+                });
+            }
+        };
+        if env.len() > raxis_policy::VERIFIER_ENV_MAX_ENTRIES {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks.verifiers]][{idx}] (task `{task_id}`) env declares {} entries; max is {}",
+                    env.len(),
+                    raxis_policy::VERIFIER_ENV_MAX_ENTRIES,
+                ),
+            });
+        }
+        let env_bytes: usize = env.iter().map(|(k, v)| k.len() + v.len()).sum();
+        if env_bytes > raxis_policy::VERIFIER_ENV_MAX_TOTAL_BYTES {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks.verifiers]][{idx}] (task `{task_id}`) env totals {env_bytes} bytes; max is {}",
+                    raxis_policy::VERIFIER_ENV_MAX_TOTAL_BYTES,
+                ),
+            });
+        }
+        let allowed_egress = verifier
+            .get("allowed_egress")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let hints = match table.get("hints") {
+            None => std::collections::BTreeMap::new(),
+            Some(toml::Value::Table(values)) => {
+                let mut out = std::collections::BTreeMap::new();
+                for (key, value) in values {
+                    out.insert(
+                        key.clone(),
+                        toml_value_to_json(value).map_err(|e| LifecycleError::PlanInvalid {
+                            reason: format!(
+                                "[[tasks.verifiers]][{idx}] (task `{task_id}`) hints.{key}: {e}"
+                            ),
+                        })?,
+                    );
+                }
+                out
+            }
+            Some(_) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks.verifiers]][{idx}] (task `{task_id}`) hints must be a TOML table"
+                    ),
+                });
+            }
+        };
+        raxis_policy::validate_verifier_hints("[[tasks.verifiers]]", &name, &hints).map_err(
+            |e| LifecycleError::PlanInvalid {
+                reason: e.to_string(),
+            },
+        )?;
+        out.push(raxis_policy::TaskVerifierEntry {
+            name,
+            image,
+            command,
+            timeout,
+            on_failure,
+            artifact,
+            artifact_max_bytes,
+            env,
+            allowed_egress,
+            hints,
+        });
+    }
+    Ok(out)
+}
+
+fn toml_value_to_json(value: &toml::Value) -> Result<serde_json::Value, String> {
+    serde_json::to_value(value).map_err(|e| format!("could not convert TOML value to JSON: {e}"))
+}
+
 /// Read an optional TOML field as a `Vec<String>`. Missing field, wrong
 /// type, or non-string array entries all fall back to the empty vec —
 /// matching the original `predecessors` parsing semantics.
@@ -4897,6 +5221,10 @@ fn parse_optional_u32_field(
 mod tests {
     use super::*;
 
+    fn canonical_task_fixture(plan_toml: &str) -> String {
+        ensure_task_required_fields(plan_toml)
+    }
+
     #[test]
     fn parse_plan_tasks_requires_task_id() {
         // Entry without task_id must produce PlanInvalid error.
@@ -4908,7 +5236,7 @@ mod tests {
     #[test]
     fn parse_plan_tasks_empty_array_ok() {
         let toml = "[meta]\nversion = 1\n[[tasks]]\ntask_id = \"t1\"\ndescription = \"do thing\"\n";
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].task_id, "t1");
     }
@@ -4920,7 +5248,7 @@ mod tests {
         // path replaces this with the workspace-root value after
         // `validate_single_lane_propagation` accepts the plan.
         let toml = "[[tasks]]\ntask_id = \"t2\"\ndescription = \"do thing\"\n";
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks[0].lane_id, "");
     }
 
@@ -4936,14 +5264,14 @@ task_id = "t1"
 lane_id = "rogue-lane"
 description = "do thing"
 "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks[0].lane_id, "rogue-lane");
     }
 
     #[test]
     fn parse_plan_tasks_name_defaults_to_task_id() {
         let toml = "[[tasks]]\ntask_id = \"t3\"\ndescription = \"do thing\"\n";
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks[0].name, "t3");
     }
 
@@ -4960,7 +5288,7 @@ description = "do thing"
         // No `description` field at all: parser must reject with a
         // structured PlanInvalid that names both the task and the
         // missing field, in the same shape as missing `task_id`.
-        let toml = "[[tasks]]\ntask_id = \"t1\"\n";
+        let toml = "[[tasks]]\ntask_id = \"t1\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\nprompt = \"do thing\"\n";
         let err = parse_plan_tasks(toml).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -4977,7 +5305,7 @@ description = "do thing"
     fn parse_plan_tasks_rejects_empty_description() {
         // Empty / whitespace-only descriptions are functionally
         // equivalent to missing — reject both with the same shape.
-        let toml = "[[tasks]]\ntask_id = \"t1\"\ndescription = \"   \"\n";
+        let toml = "[[tasks]]\ntask_id = \"t1\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\ndescription = \"   \"\nprompt = \"do thing\"\n";
         let err = parse_plan_tasks(toml).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -4990,7 +5318,7 @@ description = "do thing"
     fn parse_plan_tasks_rejects_non_string_description() {
         // Type errors must surface a precise diagnostic, not a
         // silent fallback to empty.
-        let toml = "[[tasks]]\ntask_id = \"t1\"\ndescription = 42\n";
+        let toml = "[[tasks]]\ntask_id = \"t1\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\ndescription = 42\nprompt = \"do thing\"\n";
         let err = parse_plan_tasks(toml).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -5008,7 +5336,7 @@ prompt = """
 Write HELLO.md with the exact text: hello from alex.
 """
 "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert!(
             tasks[0]
                 .description
@@ -5028,6 +5356,8 @@ Write HELLO.md with the exact text: hello from alex.
         let toml = r#"[[tasks]]
 task_id = "t1"
 description = "Create a greeting file."
+session_agent_type = "Executor"
+clone_strategy = "blobless"
 context = "Write HELLO.md."
 "#;
         let err = parse_plan_tasks(toml).unwrap_err();
@@ -5047,6 +5377,8 @@ context = "Write HELLO.md."
         let toml = r#"[[tasks]]
 task_id = "t1"
 description = "Create a greeting file."
+session_agent_type = "Executor"
+clone_strategy = "blobless"
 prompt = "   "
 "#;
         let err = parse_plan_tasks(toml).unwrap_err();
@@ -5074,7 +5406,7 @@ prompt = "   "
         task_id     = "t-default"
         description = "exercise lockdown defaults"
         "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert!(
             tasks[0].path_allowlist.is_empty(),
             "default allowlist must deny everything"
@@ -5101,7 +5433,7 @@ prompt = "   "
         description    = "exercise allowlist ordering"
         path_allowlist = ["src/", "tests/", "README.md"]
         "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks[0].path_allowlist, vec!["src/", "tests/", "README.md"]);
     }
 
@@ -5113,9 +5445,112 @@ prompt = "   "
         path_export_to_successors = true
         path_export_globs         = ["src/ipc/**"]
         "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert!(tasks[0].path_export_to_successors);
         assert_eq!(tasks[0].path_export_globs, vec!["src/ipc/**"]);
+    }
+
+    #[test]
+    fn parse_plan_tasks_reads_canonical_task_verifiers() {
+        let toml = r#"[[tasks]]
+        task_id            = "implementation"
+        description        = "exercise per-task verifier parser"
+        session_agent_type = "Executor"
+        clone_strategy     = "blobless"
+        prompt             = "exercise per-task verifier parser"
+
+        [[tasks.verifiers]]
+        name               = "cargo_test"
+        image              = "raxis-verifier-rust-starter"
+        command            = "cargo test --workspace --locked"
+        timeout            = "10m"
+        on_failure         = "block_review"
+        artifact           = "/raxis/cargo-test.json"
+        artifact_max_bytes = 1048576
+        allowed_egress     = ["crates.io"]
+
+        [tasks.verifiers.env]
+        CI = "true"
+
+        [tasks.verifiers.hints]
+        toolchain = "stable"
+        "#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        let verifiers = &tasks[0].task_verifiers;
+        assert_eq!(verifiers.len(), 1);
+        let verifier = &verifiers[0];
+        assert_eq!(verifier.name, "cargo_test");
+        assert_eq!(verifier.image, "raxis-verifier-rust-starter");
+        assert_eq!(verifier.command, "cargo test --workspace --locked");
+        assert_eq!(verifier.timeout, "10m");
+        assert_eq!(
+            verifier.on_failure,
+            raxis_policy::TaskVerifierOnFailure::BlockReview
+        );
+        assert_eq!(verifier.artifact.as_deref(), Some("/raxis/cargo-test.json"));
+        assert_eq!(verifier.artifact_max_bytes, Some(1_048_576));
+        assert_eq!(verifier.allowed_egress, vec!["crates.io".to_owned()]);
+        assert_eq!(verifier.env.get("CI"), Some(&"true".to_owned()));
+        assert_eq!(
+            verifier.hints.get("toolchain"),
+            Some(&serde_json::json!("stable"))
+        );
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_legacy_task_verifier_schema() {
+        let toml = r#"[[tasks]]
+        task_id     = "legacy"
+        description = "legacy verifier schema must not parse silently"
+        session_agent_type = "Executor"
+        clone_strategy = "blobless"
+        prompt = "legacy verifier schema must not parse silently"
+
+        [[tasks.verifiers]]
+        name             = "cargo-test"
+        gate_type        = "TestPass"
+        image            = "raxis-verifier-rust-starter"
+        command          = "cargo test --workspace"
+        max_wall_seconds = 600
+        gate_on          = "Pass"
+        "#;
+        let err = parse_plan_tasks(toml).expect_err("legacy gate_type/gate_on schema must fail");
+        match err {
+            LifecycleError::PlanInvalid { reason } => {
+                assert!(
+                    reason.contains("name `cargo-test`")
+                        || reason.contains("missing required `timeout`"),
+                    "unexpected error: {reason}"
+                );
+            }
+            other => panic!("expected PlanInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_warn_only_verifier_with_unsafe_artifact_path() {
+        let toml = r#"[[tasks]]
+        task_id     = "warn"
+        description = "warn-only verifier still has artifact discipline"
+        session_agent_type = "Executor"
+        clone_strategy = "blobless"
+        prompt = "warn-only verifier still has artifact discipline"
+
+        [[tasks.verifiers]]
+        name       = "lint_warn"
+        image      = "raxis-verifier-rust-starter"
+        command    = "cargo clippy"
+        timeout    = "30s"
+        on_failure = "warn_only"
+        artifact   = "/tmp/lint.json"
+        "#;
+        let err = parse_plan_tasks(toml).expect_err("artifact path outside /raxis must fail");
+        match err {
+            LifecycleError::PlanInvalid { reason } => {
+                assert!(reason.contains("artifact must be an absolute /raxis/... path"));
+            }
+            other => panic!("expected PlanInvalid, got {other:?}"),
+        }
     }
 
     #[test]
@@ -5125,7 +5560,7 @@ prompt = "   "
         description         = "exercise path scope override"
         path_scope_override = true
         "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert!(tasks[0].path_scope_override);
     }
 
@@ -5140,7 +5575,7 @@ prompt = "   "
         description    = "exercise non-string array entries"
         path_allowlist = ["src/", 123, "ok.rs"]
         "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks[0].path_allowlist, vec!["src/", "ok.rs"]);
     }
 
@@ -5165,11 +5600,11 @@ prompt = "   "
             path_scope_override: false,
             clone_strategy: CloneStrategy::Blobless,
             session_agent_type: SessionAgentType::Executor,
-            profile: None,
             credentials: vec![],
             vm_image: String::new(),
             description: String::new(),
             custom_tools_json: None,
+            task_verifiers: Vec::new(),
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -5355,11 +5790,11 @@ prompt = "   "
             path_scope_override: false,
             clone_strategy: CloneStrategy::Blobless,
             session_agent_type: SessionAgentType::Executor,
-            profile: None,
             credentials: vec![],
             vm_image: String::new(),
             description: String::new(),
             custom_tools_json: None,
+            task_verifiers: Vec::new(),
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -5566,11 +6001,11 @@ prompt = "   "
             path_scope_override: false,
             clone_strategy: CloneStrategy::Blobless,
             session_agent_type: SessionAgentType::Executor,
-            profile: None,
             credentials: vec![],
             vm_image: String::new(),
             description: String::new(),
             custom_tools_json: None,
+            task_verifiers: Vec::new(),
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -5659,7 +6094,7 @@ description = "test"
 max_crash_retries = 5
 max_review_rejections = 7
 "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].max_crash_retries, Some(5));
         assert_eq!(tasks[0].max_review_rejections, Some(7));
@@ -5678,7 +6113,7 @@ max_review_rejections = 7
 task_id = "t1"
 description = "test"
 "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(
             tasks[0].max_crash_retries, None,
             "omitted max_crash_retries must yield None, not Some(0)"
@@ -5698,7 +6133,7 @@ description = "test"
 max_crash_retries = 0
 max_review_rejections = 0
 "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(
             tasks[0].max_crash_retries,
             Some(0),
@@ -5715,7 +6150,7 @@ task_id = "t1"
 description = "test"
 max_crash_retries = -1
 "#;
-        let err = parse_plan_tasks(toml).unwrap_err();
+        let err = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap_err();
         match err {
             LifecycleError::PlanInvalid { reason } => {
                 assert!(
@@ -5739,7 +6174,7 @@ task_id = "t1"
 description = "test"
 max_review_rejections = "three"
 "#;
-        let err = parse_plan_tasks(toml).unwrap_err();
+        let err = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap_err();
         match err {
             LifecycleError::PlanInvalid { reason } => {
                 assert!(
@@ -5761,7 +6196,7 @@ max_review_rejections = "three"
         // parser must NOT silently overflow into i64 ⇒ u32 conversion
         // failure.
         let toml = format!(
-            "[[tasks]]\ntask_id = \"t1\"\ndescription = \"x\"\n\
+            "[[tasks]]\ntask_id = \"t1\"\ndescription = \"x\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\nprompt = \"x\"\n\
              max_crash_retries = {}\n",
             u32::MAX,
         );
@@ -5775,7 +6210,7 @@ max_review_rejections = "three"
         // overflow rejection so a future widening to u64 doesn't
         // silently let pathological values past validation.
         let toml = format!(
-            "[[tasks]]\ntask_id = \"t1\"\ndescription = \"x\"\n\
+            "[[tasks]]\ntask_id = \"t1\"\ndescription = \"x\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\nprompt = \"x\"\n\
              max_crash_retries = {}\n",
             (u32::MAX as i64) + 1,
         );
@@ -5798,10 +6233,15 @@ max_review_rejections = "three"
     // ── V2 §Step 27 — clone_strategy / session_agent_type parsing ───────
 
     #[test]
-    fn parse_plan_tasks_omitted_clone_strategy_defaults_to_blobless() {
-        let toml = "[[tasks]]\ntask_id = \"t1\"\ndescription = \"do thing\"\n";
-        let tasks = parse_plan_tasks(toml).unwrap();
-        assert_eq!(tasks[0].clone_strategy, CloneStrategy::Blobless);
+    fn parse_plan_tasks_rejects_omitted_clone_strategy() {
+        let toml = "[[tasks]]\ntask_id = \"t1\"\ndescription = \"do thing\"\nsession_agent_type = \"Executor\"\nprompt = \"do thing\"\n";
+        let err = parse_plan_tasks(toml).unwrap_err();
+        match err {
+            LifecycleError::PlanCloneStrategyInvalid { rule, .. } => {
+                assert_eq!(rule, "missing_clone_strategy");
+            }
+            other => panic!("expected missing clone_strategy rejection, got {other:?}"),
+        }
     }
 
     #[test]
@@ -5812,7 +6252,7 @@ task_id = "t1"
 description = "do thing"
 clone_strategy = "full"
 "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks[0].clone_strategy, CloneStrategy::Full);
     }
 
@@ -5824,7 +6264,7 @@ task_id = "t1"
 description = "do thing"
 clone_strategy = "sparse"
 "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks[0].clone_strategy, CloneStrategy::Sparse);
     }
 
@@ -5836,7 +6276,7 @@ task_id = "t1"
 description = "do thing"
 clone_strategy = "treeless"
 "#;
-        let err = parse_plan_tasks(toml).unwrap_err();
+        let err = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap_err();
         match err {
             LifecycleError::PlanCloneStrategyInvalid {
                 rule,
@@ -5855,10 +6295,16 @@ clone_strategy = "treeless"
     }
 
     #[test]
-    fn parse_plan_tasks_omitted_session_agent_type_defaults_to_executor() {
-        let toml = "[[tasks]]\ntask_id = \"t1\"\ndescription = \"do thing\"\n";
-        let tasks = parse_plan_tasks(toml).unwrap();
-        assert_eq!(tasks[0].session_agent_type, SessionAgentType::Executor);
+    fn parse_plan_tasks_rejects_omitted_session_agent_type() {
+        let toml =
+            "[[tasks]]\ntask_id = \"t1\"\ndescription = \"do thing\"\nclone_strategy = \"blobless\"\nprompt = \"do thing\"\n";
+        let err = parse_plan_tasks(toml).unwrap_err();
+        match err {
+            LifecycleError::PlanCloneStrategyInvalid { rule, .. } => {
+                assert_eq!(rule, "missing_agent_type");
+            }
+            other => panic!("expected missing session_agent_type rejection, got {other:?}"),
+        }
     }
 
     #[test]
@@ -5869,7 +6315,7 @@ task_id = "t1"
 description = "do thing"
 session_agent_type = "Reviewer"
 "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks[0].session_agent_type, SessionAgentType::Reviewer);
     }
 
@@ -5887,7 +6333,7 @@ task_id = "t1"
 description = "do thing"
 session_agent_type = "Orchestrator"
 "#;
-        let tasks = parse_plan_tasks(toml).unwrap();
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks[0].session_agent_type, SessionAgentType::Orchestrator);
     }
 
@@ -5899,7 +6345,7 @@ task_id = "t1"
 description = "do thing"
 session_agent_type = "Coordinator"
 "#;
-        let err = parse_plan_tasks(toml).unwrap_err();
+        let err = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap_err();
         match err {
             LifecycleError::PlanCloneStrategyInvalid {
                 rule,
@@ -5931,11 +6377,11 @@ session_agent_type = "Coordinator"
             path_scope_override: false,
             clone_strategy: strategy,
             session_agent_type: agent,
-            profile: None,
             credentials: vec![],
             vm_image: String::new(),
             description: String::new(),
             custom_tools_json: None,
+            task_verifiers: Vec::new(),
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -6699,11 +7145,11 @@ description = "do thing"
             path_scope_override: false,
             clone_strategy: CloneStrategy::Full,
             session_agent_type: SessionAgentType::Executor,
-            profile: None,
             credentials: Vec::new(),
             vm_image: String::new(),
             description: String::new(),
             custom_tools_json: None,
+            task_verifiers: Vec::new(),
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -7204,29 +7650,36 @@ target_ref = "refs/heads/raxis/feature"
     }
 
     #[test]
-    fn parse_plan_workspace_target_ref_missing_returns_none() {
-        let toml = "[workspace]\nlane_id = \"default\"\n";
-        let r = parse_plan_workspace_target_ref(toml).unwrap();
-        assert_eq!(r, None);
+    fn parse_plan_workspace_target_ref_missing_rejects() {
+        let toml =
+            "[workspace]\nname = \"fixture\"\nlane_id = \"default\"\nrepository = \"main\"\n";
+        let err = parse_plan_workspace_target_ref(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("target_ref"),
+            "missing target_ref must name field, got {err:?}"
+        );
     }
 
     #[test]
-    fn parse_plan_workspace_repository_defaults_to_main() {
-        let toml = "[workspace]\nlane_id = \"default\"\n";
-        let r = parse_plan_workspace_repository(toml).unwrap();
-        assert_eq!(r, crate::managed_repositories::DEFAULT_REPOSITORY_ID);
+    fn parse_plan_workspace_repository_missing_rejects() {
+        let toml = "[workspace]\nname = \"fixture\"\nlane_id = \"default\"\ntarget_ref = \"refs/heads/main\"\n";
+        let err = parse_plan_workspace_repository(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("repository"),
+            "missing repository must name field, got {err:?}"
+        );
     }
 
     #[test]
     fn parse_plan_workspace_repository_reads_safe_id() {
-        let toml = "[workspace]\nlane_id = \"default\"\nrepository = \"api-service\"\n";
+        let toml = "[workspace]\nname = \"fixture\"\nlane_id = \"default\"\ntarget_ref = \"refs/heads/main\"\nrepository = \"api-service\"\n";
         let r = parse_plan_workspace_repository(toml).unwrap();
         assert_eq!(r, "api-service");
     }
 
     #[test]
     fn parse_plan_workspace_repository_rejects_path_escape() {
-        let toml = "[workspace]\nlane_id = \"default\"\nrepository = \"../api\"\n";
+        let toml = "[workspace]\nname = \"fixture\"\nlane_id = \"default\"\ntarget_ref = \"refs/heads/main\"\nrepository = \"../api\"\n";
         let err = parse_plan_workspace_repository(toml).unwrap_err();
         assert!(
             err.to_string().contains("repository"),
@@ -7236,7 +7689,7 @@ target_ref = "refs/heads/raxis/feature"
 
     #[test]
     fn parse_plan_workspace_target_ref_rejects_empty_string() {
-        let toml = "[workspace]\nlane_id = \"default\"\ntarget_ref = \"\"\n";
+        let toml = "[workspace]\nname = \"fixture\"\nlane_id = \"default\"\nrepository = \"main\"\ntarget_ref = \"\"\n";
         let err = parse_plan_workspace_target_ref(toml).unwrap_err();
         assert!(
             matches!(err, LifecycleError::PlanInvalid { .. }),
@@ -7387,9 +7840,17 @@ max_concurrent_admissions   = 7
     }
 
     #[test]
-    fn resolve_target_ref_falls_back_to_policy_default_when_plan_omits() {
-        let resolved = resolve_target_ref(None, "refs/heads/main", false).unwrap();
-        assert_eq!(resolved, "refs/heads/main");
+    fn resolve_target_ref_rejects_missing_plan_value() {
+        let err = resolve_target_ref(None, "refs/heads/main", false).unwrap_err();
+        match err {
+            LifecycleError::PlanTargetRefInvalid {
+                rule, plan_value, ..
+            } => {
+                assert_eq!(rule, "missing");
+                assert!(plan_value.is_none());
+            }
+            other => panic!("expected missing target_ref rejection, got {other:?}"),
+        }
     }
 
     #[test]
@@ -7526,35 +7987,37 @@ max_concurrent_admissions   = 7
     }
 
     /// V2 §Step 28 — every signed plan needs `[workspace] lane_id`.
-    /// Tests that don't explicitly exercise the missing/override
-    /// workspace-lane error paths use this helper to prepend the
-    /// canonical default block. Tests that DO want to exercise those
-    /// rejection paths use `seed_draft_initiative_raw` directly.
+    /// Tests that don't explicitly exercise missing workspace fields use
+    /// this helper to prepend the canonical required block. Tests that DO
+    /// want to exercise those rejection paths use
+    /// `seed_draft_initiative_raw` directly.
     fn ensure_workspace_lane(plan_toml: &str) -> String {
         // Detect either `[workspace]` or `[ workspace ]` (whitespace
         // around the table name). The bytes-substring check is good
         // enough — TOML test fixtures here are hand-authored and
         // never embed the literal sequence inside a string value.
-        let with_workspace =
-            if plan_toml.contains("[workspace]") || plan_toml.contains("[ workspace ]") {
-                plan_toml.to_owned()
-            } else {
-                format!(
-                "[workspace]\nname = \"Kernel fixture plan\"\nlane_id = \"default\"\n\n{plan_toml}"
+        let with_workspace = if plan_toml.contains("[workspace]")
+            || plan_toml.contains("[ workspace ]")
+        {
+            plan_toml.to_owned()
+        } else {
+            format!(
+                "[workspace]\nname = \"Kernel fixture plan\"\nlane_id = \"default\"\nrepository = \"main\"\ntarget_ref = \"refs/heads/main\"\n\n{plan_toml}"
             )
-            };
+        };
         let with_workspace = ensure_workspace_name(&with_workspace);
+        let with_workspace = ensure_workspace_repository(&with_workspace);
+        let with_workspace = ensure_workspace_target_ref(&with_workspace);
         // `[plan.initiative]
         // description` is REQUIRED. If the test author didn't add
         // one, splice in a deterministic placeholder (and the
         // surrounding `[plan.initiative]` table when missing).
         let with_initiative_description = ensure_plan_initiative_description(&with_workspace);
-        // Every `[[tasks]]` block
-        // must declare a non-empty `description`. Inject a
-        // deterministic placeholder per task that lacks one so
-        // legacy unit-test fixtures continue to validate without
-        // being individually rewritten.
-        ensure_task_descriptions(&with_initiative_description)
+        // Every `[[tasks]]` block must declare the canonical required
+        // task fields. Inject deterministic placeholders per task that
+        // lacks one so unit-test fixtures can stay focused on the
+        // lifecycle behaviour they assert.
+        ensure_task_required_fields(&with_initiative_description)
     }
 
     /// Splice `[workspace] name = "<placeholder>"` into older unit
@@ -7572,6 +8035,46 @@ max_concurrent_admissions   = 7
             format!(
                 "[workspace]\n\
                  name = \"Kernel fixture plan\"\n\n\
+                 {plan_toml}",
+            )
+        }
+    }
+
+    /// Splice `[workspace] repository = "main"` into focused unit
+    /// fixtures that predate explicit managed-repository selection.
+    fn ensure_workspace_repository(plan_toml: &str) -> String {
+        if has_field_in_dotted_table(plan_toml, "workspace", "repository") {
+            return plan_toml.to_owned();
+        }
+        let header = "[workspace]";
+        if let Some(idx) = plan_toml.find(header) {
+            let mut s = plan_toml.to_owned();
+            s.insert_str(idx + header.len(), "\nrepository = \"main\"");
+            s
+        } else {
+            format!(
+                "[workspace]\n\
+                 repository = \"main\"\n\n\
+                 {plan_toml}",
+            )
+        }
+    }
+
+    /// Splice `[workspace] target_ref = "refs/heads/main"` into
+    /// focused unit fixtures that are not testing target-ref admission.
+    fn ensure_workspace_target_ref(plan_toml: &str) -> String {
+        if has_field_in_dotted_table(plan_toml, "workspace", "target_ref") {
+            return plan_toml.to_owned();
+        }
+        let header = "[workspace]";
+        if let Some(idx) = plan_toml.find(header) {
+            let mut s = plan_toml.to_owned();
+            s.insert_str(idx + header.len(), "\ntarget_ref = \"refs/heads/main\"");
+            s
+        } else {
+            format!(
+                "[workspace]\n\
+                 target_ref = \"refs/heads/main\"\n\n\
                  {plan_toml}",
             )
         }
@@ -7603,14 +8106,12 @@ max_concurrent_admissions   = 7
         }
     }
 
-    /// for every
-    /// `[[tasks]]` array element that lacks a `description = "..."`
-    /// line, splice `description = "<test fixture>"` immediately
-    /// after the header. We assume the test plans are simple and
-    /// follow the convention that each `[[tasks]]` line stands
-    /// alone on its own line (true for every fixture in the kernel
-    /// tree).
-    fn ensure_task_descriptions(plan_toml: &str) -> String {
+    /// For every `[[tasks]]` array element that lacks canonical
+    /// required fields, splice deterministic fixture values immediately
+    /// after the header. We assume the test plans are simple and follow
+    /// the convention that each `[[tasks]]` line stands alone on its own
+    /// line (true for every fixture in the kernel tree).
+    fn ensure_task_required_fields(plan_toml: &str) -> String {
         let mut out = String::with_capacity(plan_toml.len() + 256);
         let mut lines = plan_toml.lines().peekable();
         while let Some(line) = lines.next() {
@@ -7625,6 +8126,9 @@ max_concurrent_admissions   = 7
             // anywhere in that span, leave the block alone.
             let mut peek_buf = Vec::new();
             let mut has_description = false;
+            let mut has_prompt = false;
+            let mut has_clone_strategy = false;
+            let mut has_session_agent_type = false;
             while let Some(nxt) = lines.peek() {
                 let nt = nxt.trim();
                 if nt.starts_with('[') && !nt.starts_with("[[") {
@@ -7640,11 +8144,38 @@ max_concurrent_admissions   = 7
                         has_description = true;
                     }
                 }
+                if nt.starts_with("prompt") {
+                    let after = nt.trim_start_matches("prompt").trim_start();
+                    if after.starts_with('=') {
+                        has_prompt = true;
+                    }
+                }
+                if nt.starts_with("clone_strategy") {
+                    let after = nt.trim_start_matches("clone_strategy").trim_start();
+                    if after.starts_with('=') {
+                        has_clone_strategy = true;
+                    }
+                }
+                if nt.starts_with("session_agent_type") {
+                    let after = nt.trim_start_matches("session_agent_type").trim_start();
+                    if after.starts_with('=') {
+                        has_session_agent_type = true;
+                    }
+                }
                 peek_buf.push((*nxt).to_owned());
                 lines.next();
             }
+            if !has_session_agent_type {
+                out.push_str("session_agent_type = \"Executor\"\n");
+            }
+            if !has_clone_strategy {
+                out.push_str("clone_strategy = \"blobless\"\n");
+            }
             if !has_description {
                 out.push_str("description = \"test fixture: exercise the planner harness\"\n");
+            }
+            if !has_prompt {
+                out.push_str("prompt = \"test fixture: perform the focused lifecycle task\"\n");
             }
             for buffered in peek_buf {
                 out.push_str(&buffered);
@@ -7687,18 +8218,23 @@ max_concurrent_admissions   = 7
         seed_draft_initiative_raw(store, &plan_with_lane, sk)
     }
 
-    /// Like `seed_draft_initiative` but persists the plan TOML
-    /// verbatim — used by tests that need to assert the
-    /// `validate_single_lane_propagation` error paths
-    /// (`missing_workspace_lane`, `empty_workspace_lane`,
-    /// `single_lane_propagation`).
+    /// Like `seed_draft_initiative` but preserves the workspace-lane and
+    /// initiative-description surfaces. It still fills unrelated
+    /// canonical fixture fields (`workspace.name`, `repository`,
+    /// `target_ref`, and required task fields) so tests can focus on the
+    /// rejection path they are asserting without drifting back to legacy
+    /// plan defaults.
     fn seed_draft_initiative_raw(
         store: &Store,
         plan_toml: &str,
         sk: &SigningKey,
     ) -> (String, Vec<u8>) {
         let initiative_id = "init-test".to_owned();
-        let plan_bytes = plan_toml.as_bytes().to_vec();
+        let with_workspace_name = ensure_workspace_name(plan_toml);
+        let with_workspace_repository = ensure_workspace_repository(&with_workspace_name);
+        let with_workspace_target_ref = ensure_workspace_target_ref(&with_workspace_repository);
+        let with_task_fields = ensure_task_required_fields(&with_workspace_target_ref);
+        let plan_bytes = with_task_fields.as_bytes().to_vec();
         let signing_input = raxis_crypto::plan::plan_signing_input(&plan_bytes);
         let sig_bytes = sk.sign(&signing_input).to_bytes().to_vec();
         let plan_sha = raxis_crypto::plan::plan_artifact_sha256(&plan_bytes);
@@ -9100,24 +9636,29 @@ name = "fixture"
 
     // ── task / orchestrator descriptions ─
 
-    /// `[[tasks.X]] description` lands verbatim in the in-memory plan
-    /// registry so `handle_activate_sub_task` can stamp it into
-    /// `RAXIS_PLANNER_TASK_PROMPT` at spawn time. We pin verbatim
-    /// round-trip semantics here because the kernel does no template
-    /// substitution — the bytes the operator signed are the bytes
-    /// the agent observes.
+    /// `[[tasks]] description` is the short dashboard summary and
+    /// `prompt` is the agent instruction body. The in-memory registry
+    /// stores the canonical planner payload so `handle_activate_sub_task`
+    /// can stamp one coherent `RAXIS_PLANNER_TASK_PROMPT` at spawn time
+    /// without falling back to legacy description-as-prompt semantics.
     #[test]
     fn approve_plan_propagates_task_description_into_registry() {
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [[tasks]]
-            task_id     = "with-prompt"
-            description = "Add a /healthz endpoint that returns 200 OK"
+            task_id      = "with-prompt"
+            description  = "Health endpoint"
+            clone_strategy = "blobless"
+            session_agent_type = "Executor"
+            prompt = "Add a /healthz endpoint that returns 200 OK"
 
             [[tasks]]
             task_id      = "second"
-            description  = "Run the integration test against /healthz"
+            description  = "Health endpoint integration test"
+            clone_strategy = "blobless"
+            session_agent_type = "Executor"
+            prompt = "Run the integration test against /healthz"
             predecessors = ["with-prompt"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -9133,16 +9674,18 @@ name = "fixture"
             .get(&TaskKey::new(&init_id, "with-prompt"))
             .expect("registry must contain with-prompt");
         assert_eq!(
-            with_prompt.description, "Add a /healthz endpoint that returns 200 OK",
-            "task description must be stored verbatim — kernel does no template substitution",
+            with_prompt.description,
+            "Task summary:\nHealth endpoint\n\nPrimary instructions:\nAdd a /healthz endpoint that returns 200 OK",
+            "registry stores the canonical summary-plus-prompt planner payload",
         );
 
         let second = registry
             .get(&TaskKey::new(&init_id, "second"))
             .expect("registry must contain second");
         assert_eq!(
-            second.description, "Run the integration test against /healthz",
-            "every task's description must round-trip verbatim, not be coerced",
+            second.description,
+            "Task summary:\nHealth endpoint integration test\n\nPrimary instructions:\nRun the integration test against /healthz",
+            "every task must use prompt as the instruction body",
         );
     }
 
@@ -9887,14 +10430,19 @@ predecessors       = ["build-svc"]
             );
         }
 
-        let actor: String = conn
+        let (actor, block_reason): (String, Option<String>) = conn
             .query_row(
-                &format!("SELECT actor FROM {TASKS} WHERE task_id = 'build-svc'"),
+                &format!("SELECT actor, block_reason FROM {TASKS} WHERE task_id = 'build-svc'"),
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
         assert_eq!(actor, "operator:op");
+        assert_eq!(
+            block_reason.as_deref(),
+            Some(BlockReason::OperatorAbort.as_sql_str()),
+            "initiative abort must leave a durable operator-abort reason on cancelled tasks",
+        );
     }
 
     /// `INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01` /
@@ -9964,6 +10512,7 @@ predecessors       = ["build-svc"]
                 from_state,
                 to_state,
                 actor,
+                policy_epoch,
                 ..
             } => {
                 assert_eq!(
@@ -9977,6 +10526,10 @@ predecessors       = ["build-svc"]
                 assert!(
                     actor.starts_with("operator:"),
                     "actor MUST be `operator:<fingerprint>` for operator-driven aborts; got {actor}"
+                );
+                assert_eq!(
+                    *policy_epoch, 1,
+                    "TaskStateChanged audit must preserve the cancelled task's policy epoch",
                 );
             }
             _ => unreachable!(),
@@ -10068,6 +10621,20 @@ predecessors       = ["build-svc"]
             }
             _ => unreachable!(),
         }
+
+        let block_reason: Option<String> = store
+            .lock_sync()
+            .query_row(
+                &format!("SELECT block_reason FROM {TASKS} WHERE task_id='t-abort-paired'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            block_reason.as_deref(),
+            Some(BlockReason::OperatorAbort.as_sql_str()),
+            "single-task abort must persist an operator-abort reason",
+        );
     }
 
     // V2.5 deletion: the V1 `create_initiative` two-INSERT
@@ -10099,7 +10666,7 @@ task_id     = "t-zero-turns"
 description = "should be rejected at admission"
 max_turns   = 0
 "#;
-        let err = parse_plan_tasks(toml).unwrap_err();
+        let err = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("max_turns"),
@@ -10128,7 +10695,8 @@ task_id     = "t-one-turn"
 description = "minimum admissible budget"
 max_turns   = 1
 "#;
-        let tasks = parse_plan_tasks(toml).expect("max_turns = 1 MUST be admissible");
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml))
+            .expect("max_turns = 1 MUST be admissible");
         assert_eq!(tasks.len(), 1);
         assert_eq!(
             tasks[0].max_turns,
@@ -10149,7 +10717,8 @@ version = 1
 task_id     = "t-omitted"
 description = "no per-task override; defer to policy / compiled fallback"
 "#;
-        let tasks = parse_plan_tasks(toml).expect("omitted max_turns is admissible");
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml))
+            .expect("omitted max_turns is admissible");
         assert_eq!(
             tasks[0].max_turns, None,
             "omitted `max_turns` MUST parse as `None`, NOT `Some(default)` — \
@@ -10180,7 +10749,7 @@ description    = "zero-step retry MUST fail admission"
 max_turns      = 30
 max_turns_step = 0
 "#;
-        let err = parse_plan_tasks(toml).unwrap_err();
+        let err = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("max_turns_step"),
@@ -10211,7 +10780,8 @@ description    = "minimum admissible step"
 max_turns      = 30
 max_turns_step = 1
 "#;
-        let tasks = parse_plan_tasks(toml).expect("max_turns_step = 1 MUST be admissible");
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml))
+            .expect("max_turns_step = 1 MUST be admissible");
         assert_eq!(tasks.len(), 1);
         assert_eq!(
             tasks[0].max_turns_step,
@@ -10234,7 +10804,8 @@ task_id     = "t-step-omitted"
 description = "no per-task step override; defer to policy / derived default"
 max_turns   = 30
 "#;
-        let tasks = parse_plan_tasks(toml).expect("omitted max_turns_step is admissible");
+        let tasks = parse_plan_tasks(&canonical_task_fixture(toml))
+            .expect("omitted max_turns_step is admissible");
         assert_eq!(
             tasks[0].max_turns_step, None,
             "omitted `max_turns_step` MUST parse as `None`, NOT `Some(default)` — \
@@ -10277,11 +10848,11 @@ mod env_consistency_tests {
             path_scope_override: false,
             clone_strategy: CloneStrategy::Full,
             session_agent_type: SessionAgentType::Executor,
-            profile: None,
             credentials: creds,
             vm_image: String::new(),
             description: String::new(),
             custom_tools_json: None,
+            task_verifiers: Vec::new(),
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -10435,11 +11006,11 @@ mod vm_image_admission_tests {
             path_scope_override: false,
             clone_strategy: CloneStrategy::Blobless,
             session_agent_type: agent,
-            profile: None,
             credentials: Vec::new(),
             vm_image: vm_image.to_owned(),
             description: String::new(),
             custom_tools_json: None,
+            task_verifiers: Vec::new(),
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,

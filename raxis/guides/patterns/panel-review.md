@@ -31,17 +31,17 @@
 ## The Plan
 
 ```toml
+[plan.initiative]
+description = """
+Implement the payment processing module and require independent security,
+correctness, and style reviewers before merge.
+"""
+
 [workspace]
 name    = "Implement payment processing module"
 lane_id = "payments-work"
-
-# ── Orchestrator ──────────────────────────────────────────────────────────────
-[[tasks]]
-task_id            = "orchestrator"
-session_agent_type = "Orchestrator"
-clone_strategy     = "full"
-path_allowlist     = ["src/payments/"]
-cross_cutting_artifacts = ["Cargo.lock"]
+repository = "main"
+target_ref = "refs/heads/main"
 
 # ── Executor ──────────────────────────────────────────────────────────────────
 [[tasks]]
@@ -52,6 +52,7 @@ path_allowlist     = ["src/payments/"]
 predecessors         = []
 max_crash_retries     = 2
 max_review_rejections = 1   # low tolerance: payment code quality must be high
+description        = "Implement payments"
 prompt             = """
   Implement the payment processing module in src/payments/.
   Requirements are in docs/specs/payments-spec.md (read-only, already in the repo).
@@ -68,6 +69,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/payments/"]
 predecessors         = ["payments_implementer"]    # same dependency → activates in parallel
+description        = "Security review"
 prompt             = """
   Review src/payments/ for security issues:
   - Is card data ever logged or written to disk?
@@ -83,6 +85,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/payments/"]
 predecessors         = ["payments_implementer"]    # same dependency → also activates in parallel
+description        = "Correctness review"
 prompt             = """
   Review src/payments/ for functional correctness:
   - Does charge() handle declined cards correctly?
@@ -98,6 +101,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/payments/"]
 predecessors         = ["payments_implementer"]    # all three share the same predecessors
+description        = "Style review"
 prompt             = """
   Review src/payments/ for code quality:
   - Are public functions documented with rustdoc?
@@ -105,6 +109,9 @@ prompt             = """
   - Are there any unwrap() calls on payment-critical paths?
   Approve if the code is maintainable and follows project conventions.
 """
+
+[orchestrator]
+cross_cutting_artifacts = ["Cargo.lock"]
 ```
 
 ---
@@ -209,6 +216,10 @@ Good: `security_reviewer` checks for data leakage; `correctness_reviewer` checks
 # WRONG — this makes them serial, not parallel
 [[tasks]]
 task_id    = "reviewer_b"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+description        = "Reviewer B"
+prompt             = """Complete Reviewer B according to this plan's acceptance criteria."""
 predecessors = ["reviewer_a"]   # ← defeats the purpose of a panel
 ```
 For sequential review chains, this is valid — but it's not a panel anymore.

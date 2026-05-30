@@ -14,6 +14,8 @@ materially testable.
 [workspace]
 name = "E2E realistic sibling"
 lane_id = "e2e-realistic-sibling-lane"
+repository = "main"
+target_ref = "refs/heads/main"
 
 # ── Sibling materializer Executor (P3-6) ────────────────
 [[tasks]]
@@ -26,7 +28,8 @@ session_agent_type = "Executor"
 # Per `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
 max_turns          = 150
 path_allowlist     = ["out/postgres/", "out/mongo/", "out/manifest.json"]
-description = """
+description = "Sibling Materialize Records"
+prompt = """
 # Materializer Executor prompt — extended e2e scenario
 
 > Loaded verbatim into the `materialize-records` Executor task per
@@ -104,7 +107,7 @@ cat > /tmp/materialize.py <<'PY'
 # files. Designed to need at most one tool call from the planner:
 # write + run + verify in a single bash invocation. (Triple-double-
 # quoted module / function docstrings are intentionally avoided —
-# this prompt is embedded into a TOML multi-line-string description
+# this prompt is embedded into a TOML multi-line-string prompt
 # block by `multi_initiative.rs`, so a sequence of three quote
 # characters would terminate the enclosing string early.)
 from __future__ import annotations

@@ -18,7 +18,8 @@ reference. Other recipes drill deeper into individual fields.
 | `clone_strategy` | `String` | yes | One of `"full"`, `"blobless"`, `"sparse"`. Reviewers can use `full` or `blobless`; Executors prefer `blobless` or `sparse`; sparse on Orchestrators is rejected. |
 | `path_allowlist` | `Vec<String>` | yes | Which paths the agent may **write**. See *path_allowlist rules* recipe for the precise semantics. |
 | `predecessors` | `Vec<String>` | yes (may be empty) | List of `task_id`s that MUST reach `Completed` before this task activates. Empty list = activates immediately. |
-| `description` | `String` (multi-line OK) | yes | Concrete brief the agent will execute. Distinct from `[plan.initiative].description`; sharper, task-scoped. |
+| `description` | `String` | yes | Short human-readable task summary for dashboards, logs, and audit pivots. Keep it brief. |
+| `prompt` | `String` (multi-line OK) | yes | The precise task-scoped instruction body the agent executes. Do not put the main instructions in `description`. |
 | `vm_image` | `String` | optional | `[[vm_images]] name` to use. Omit to use `[default_executor_image]` or the kernel-canonical starter. **Reviewers cannot declare this**; the Reviewer image is kernel-canonical. |
 | `allowed_egress` | `Vec<String>` | optional | Per-task egress allowlist (host suffix list). Subset of any `[[vm_images]] egress_allowlist` and policy `[egress] domains`. |
 | `path_export_globs` | `Vec<String>` | optional | Globs matching files this task expects to *read* outside its `path_allowlist`. Used by the Orchestrator's clone-shape decision. |
@@ -49,6 +50,8 @@ description = """Add IP rate limiting to /auth/login."""
 [workspace]
 name    = "Rate limit /auth/login"
 lane_id = "auth-work"
+repository = "main"
+target_ref = "refs/heads/main"
 
 [[tasks]]
 task_id            = "rate_limit_implementer"
@@ -56,7 +59,8 @@ session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/auth/"]
 predecessors       = []
-description        = """
+description        = "Implement rate limiting"
+prompt             = """
   Implement IP-based rate limiting on POST /auth/login.
   - 10 req/min/IP, sliding window
   - Return 429 + Retry-After
@@ -70,7 +74,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]            # subset (or equal) to Executor's
 predecessors       = ["rate_limit_implementer"]
-description        = """
+description        = "Review rate limiting"
+prompt             = """
   Review src/auth/rate_limit.rs for:
   - correct sliding-window math (off-by-one, race conditions)
   - resource exhaustion (Redis key TTLs, memory bound)

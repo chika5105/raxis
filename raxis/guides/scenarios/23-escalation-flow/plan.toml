@@ -7,6 +7,8 @@ Escalation flow (scenario 23)
 [workspace]
 name = "Escalation Flow"
 lane_id     = "escalation-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "impossible"

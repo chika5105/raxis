@@ -131,12 +131,18 @@ pub struct TaskPlanFields {
     pub description: String,
 
     /// JSON-encoded custom-tool bundle resolved from this task's
-    /// `profile = "..."` declaration. `None` means the task has no
-    /// operator tool profile or the profile has no effective tools.
+    /// `profiles = [...]` declaration. `None` means the task has no
+    /// operator tool profiles or those profiles have no effective tools.
     /// The session-spawn path stamps this only into Executor
     /// sessions; Reviewer and Orchestrator sessions never receive
     /// operator-defined custom tools.
     pub custom_tools_json: Option<String>,
+
+    /// Canonical `[[tasks.verifiers]]` declarations sourced from the
+    /// signed plan. These are per-task checks that run against this
+    /// task's evaluation commit, distinct from policy-wide gates and
+    /// plan-level integration merge verifiers.
+    pub task_verifiers: Vec<raxis_policy::TaskVerifierEntry>,
 
     /// V2 `v2-deep-spec.md §Step 12` — operator-declared ceiling on
     /// **VM-crash retries** for this sub-task. Read by
@@ -332,6 +338,7 @@ impl Default for TaskPlanFields {
             vm_image: String::new(),
             description: String::new(),
             custom_tools_json: None,
+            task_verifiers: Vec::new(),
             max_crash_retries: None,
             max_review_rejections: None,
             max_turns: None,
@@ -428,35 +435,33 @@ pub struct OrchestratorPlanFields {
     /// validator regression.
     pub description: String,
 
-    /// V2 `integration-merge.md §1.2` — fully-qualified
-    /// ref name that this initiative's `IntegrationMerge` advances.
-    /// Resolved at `approve_plan` time by `resolve_target_ref` from
-    /// the chain `[workspace] target_ref` (plan) → `[git]
-    /// default_target_ref` (policy) → hardcoded fallback
-    /// `"refs/heads/main"`. The `[git] target_ref_locked` policy
-    /// knob can pin the value at admission time.
+    /// V2 `integration-merge.md §1.2` — fully-qualified ref name that
+    /// this initiative's `IntegrationMerge` advances. Sourced from the
+    /// required plan-side `[workspace] target_ref`; `[git]
+    /// target_ref_locked` can restrict that explicit value to the policy
+    /// default at admission time.
     /// Always non-empty after `approve_plan`. The integration-merge
     /// handler reads this verbatim into
     /// `commit_merge_to_target_ref(...)` so the host-side
     /// fast-forward advances the operator-configured branch instead
     /// of always touching `refs/heads/main`.
-    /// **Default `"refs/heads/main"`.** Used both for V1 plans (no
-    /// `[workspace]` section), test fixtures that
-    /// `..Default::default()`-spread, and the `Default` impl. The
-    /// kernel never reaches the integration-merge fast-forward path
-    /// for an initiative whose registry entry was never populated
-    /// (the lookup returns `None` and the caller fails closed); the
-    /// non-empty default exists so any caller that *does* find an
-    /// entry can advance to a real ref without a panic.
+    /// **Default `"refs/heads/main"`.** Used only by `Default`-spread
+    /// unit fixtures and defensive in-memory construction. Production
+    /// admission rejects plans that omit `[workspace] target_ref`.
     pub target_ref: String,
 
-    /// Raxis 0.2 managed repository id selected by
-    /// `[workspace] repository`. The default is `"main"`, which maps
-    /// to the historical `<data_dir>/repositories/main` path. The
-    /// lifecycle parser validates this as a single path-safe segment at
-    /// admission time, so spawn / merge paths can derive the source repo
-    /// without stringly path manipulation.
+    /// Raxis 0.2 managed repository id selected by required
+    /// `[workspace] repository`. The lifecycle parser validates this as
+    /// a single path-safe segment at admission time, so spawn / merge
+    /// paths can derive the source repo without stringly path
+    /// manipulation.
     pub repository_id: String,
+
+    /// Plan-source `[[plan.integration_merge_verifiers]]` entries
+    /// sealed with the initiative. These run at `IntegrationMerge`
+    /// time against the orchestrator's candidate merged tree and are
+    /// distinct from policy-source `[[integration_merge_verifiers]]`.
+    pub integration_merge_verifiers: Vec<raxis_policy::IntegrationMergeVerifierEntry>,
 
     /// V2 `elastic-vm-scaling.md §2.2` — initiative-level toggle
     /// for upward VM-resource scaling. Sourced from
@@ -518,13 +523,14 @@ pub struct OrchestratorPlanFields {
 }
 
 impl OrchestratorPlanFields {
-    /// V2 `integration-merge.md §1.2` — `target_ref` fallback used by
-    /// the `Default` impl and by callers that explicitly want the V2
-    /// historical default. Pinned at the data layer so tests cannot
-    /// drift to a different default by mistake.
+    /// `Default`-impl target ref for unit fixtures and defensive
+    /// in-memory construction. Production plan admission requires an
+    /// explicit `[workspace] target_ref`.
     pub const DEFAULT_TARGET_REF: &'static str = "refs/heads/main";
 
-    /// Raxis 0.2 default managed repository id.
+    /// `Default`-impl managed repository id for unit fixtures and
+    /// defensive in-memory construction. Production plan admission
+    /// requires an explicit `[workspace] repository`.
     pub const DEFAULT_REPOSITORY_ID: &'static str =
         crate::managed_repositories::DEFAULT_REPOSITORY_ID;
 
@@ -552,6 +558,7 @@ impl Default for OrchestratorPlanFields {
             description: String::new(),
             target_ref: Self::DEFAULT_TARGET_REF.to_owned(),
             repository_id: Self::DEFAULT_REPOSITORY_ID.to_owned(),
+            integration_merge_verifiers: Vec::new(),
             elastic: None,
             max_concurrent_admissions: Self::DEFAULT_MAX_CONCURRENT_ADMISSIONS,
         }
@@ -790,16 +797,17 @@ mod tests {
             "default export globs must be empty"
         );
         assert!(!f.path_scope_override, "default override must be false");
-        // V2 §Step 27 defaults — `Blobless` is uniformly safe for every
-        // agent type and uniformly cheaper than `Full` for repos with
-        // binary blobs.
+        // `Default` fixtures use Blobless because it is uniformly safe
+        // for every agent type and cheaper than Full for repos with
+        // binary blobs. Production plan admission still requires the
+        // field explicitly.
         assert_eq!(
             f.clone_strategy,
             CloneStrategy::Blobless,
             "default clone_strategy must be Blobless (V2 §Step 27)"
         );
-        // Plan-declared tasks default to Executor; the Orchestrator
-        // is auto-created at admission per `planner-harness.md §4.8`.
+        // Test fixtures default to Executor; production plan admission
+        // requires `session_agent_type` explicitly.
         assert_eq!(
             f.session_agent_type,
             SessionAgentType::Executor,
@@ -963,8 +971,8 @@ mod tests {
 
     #[test]
     fn orchestrator_default_has_empty_artifacts() {
-        // Pin the V1 backward-compat default: an explicitly-inserted
-        // empty `OrchestratorPlanFields` must mean "no cross-cutting
+        // Pin the defensive in-memory default: an explicitly-inserted
+        // empty `OrchestratorPlanFields` means "no cross-cutting
         // artifacts" (degenerate hybrid → pure union of sub-task
         // allowlists), never "match everything".
         let f = OrchestratorPlanFields::default();
@@ -1025,6 +1033,7 @@ mod tests {
             max_vcpus: None,
             min_memory_mb: None,
             max_memory_mb: None,
+            task_verifiers: Vec::new(),
         };
         r.insert(TaskKey::new("init-A", "t1"), f.clone());
         let snapshot = r.tasks_in_initiative("init-A");

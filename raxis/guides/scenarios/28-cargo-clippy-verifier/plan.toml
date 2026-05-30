@@ -7,6 +7,8 @@ Cargo clippy verifier (scenario 28)
 [workspace]
 name = "Cargo Clippy Verifier"
 lane_id     = "clippy-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "lint-clean"

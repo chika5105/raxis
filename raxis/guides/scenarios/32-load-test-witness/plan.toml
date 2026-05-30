@@ -7,6 +7,8 @@ Load test witness (scenario 32)
 [workspace]
 name = "Load Test Witness"
 lane_id     = "loadtest-lane"
+repository  = "main"
+target_ref  = "refs/heads/main"
 
 [[tasks]]
 task_id            = "build"

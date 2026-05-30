@@ -58,22 +58,17 @@ not through any message channel.
 ## The Plan (2-Round Debate)
 
 ```toml
+[plan.initiative]
+description = """
+Two architects debate the auth module design before an Executor implements it.
+The debate covers JWT vs session tokens, Redis vs in-memory state, and token refresh.
+"""
+
 [workspace]
 name    = "Auth module design debate"
 lane_id = "auth-design"
-description = """
-  Two architects debate the auth module design before an Executor implements it.
-  The debate covers: JWT vs session tokens, Redis vs in-memory state, and
-  token refresh strategy. Two rounds, then synthesis, then implementation.
-"""
-
-# ── Orchestrator ──────────────────────────────────────────────────────────────
-[[tasks]]
-task_id            = "orchestrator"
-session_agent_type = "Orchestrator"
-clone_strategy     = "full"                  # MUST be full or blobless; never sparse
-path_allowlist     = ["docs/design/", "src/auth/"]
-cross_cutting_artifacts = ["Cargo.lock"]
+repository = "main"
+target_ref = "refs/heads/main"
 
 # ── Round 1: Initial Positions ────────────────────────────────────────────────
 
@@ -83,6 +78,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"              # needs to READ the full repo for context
 path_allowlist     = ["docs/design/proposal-a-r1.md"]   # can only WRITE this file
 predecessors         = []
+description        = "JWT proposal round 1"
 prompt             = """
   You are Architect A, advocating for a JWT-based, stateless auth design.
   Read the existing codebase in src/ for context.
@@ -100,6 +96,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/proposal-b-r1.md"]
 predecessors         = ["proposer_a_r1"]       # waits until A's proposal is merged
+description        = "Session proposal round 1"
 prompt             = """
   You are Architect B, advocating for a session-based, stateful auth design.
   Read docs/design/proposal-a-r1.md carefully — understand A's position before responding.
@@ -116,6 +113,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/proposal-a-r2.md"]
 predecessors         = ["proposer_b_r1"]       # waits for B's round-1 counter-proposal
+description        = "JWT rebuttal round 2"
 prompt             = """
   You are Architect A. Read both round-1 proposals:
     - docs/design/proposal-a-r1.md  (your initial position)
@@ -132,6 +130,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/proposal-b-r2.md"]
 predecessors         = ["proposer_a_r2"]
+description        = "Session rebuttal round 2"
 prompt             = """
   You are Architect B. Read all three prior proposals:
     - docs/design/proposal-a-r1.md
@@ -150,6 +149,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/final-design.md"]
 predecessors         = ["proposer_a_r2", "proposer_b_r2"]   # waits for BOTH round-2 proposals
+description        = "Synthesize final design"
 prompt             = """
   You are the Design Synthesizer. Read all four debate proposals:
     - docs/design/proposal-a-r1.md
@@ -173,6 +173,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/final-design.md"]
 predecessors         = ["design_synthesizer"]
+description        = "Review final design"
 prompt             = """
   Review docs/design/final-design.md before implementation begins.
   Check for: logical inconsistencies, missing failure modes, security antipatterns,
@@ -191,6 +192,7 @@ predecessors         = ["design_reviewer"]     # depends on Reviewer, not Synthe
                                              # (Reviewer is the last gate before impl)
 max_crash_retries     = 2
 max_review_rejections = 2
+description        = "Implement auth design"
 prompt             = """
   Implement the auth module as specified in docs/design/final-design.md.
   You have read access to the full repository. Your write access is scoped to src/auth/.
@@ -206,6 +208,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]
 predecessors         = ["auth_implementer"]
+description        = "Review auth implementation"
 prompt             = """
   Review the auth implementation in src/auth/ against the design in
   docs/design/final-design.md. Verify the implementation matches the design decisions.

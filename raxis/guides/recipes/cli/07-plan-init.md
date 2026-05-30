@@ -42,13 +42,15 @@ Produces:
 [plan.initiative]
 description = """
 TODO: one-paragraph natural-language description of the work this plan
-represents. The Orchestrator and Executor agents read this verbatim
-as part of their boot prompt.
+represents. The Orchestrator receives this as initiative guidance; task
+instructions live in each task's required `prompt`.
 """
 
 [workspace]
 name    = "Add rate limiting"
 lane_id = "auth-work"
+repository = "main"
+target_ref = "refs/heads/main"
 
 [[tasks]]
 task_id            = "implementer"
@@ -56,7 +58,8 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = []
-description        = """TODO: concrete two-to-five-sentence brief."""
+description        = "Implement rate limiting"
+prompt             = """TODO: concrete two-to-five-sentence executor instructions."""
 
 [[tasks]]
 task_id            = "reviewer"
@@ -64,7 +67,8 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = ["implementer"]
-description        = """TODO: review criteria."""
+description        = "Review rate limiting"
+prompt             = """TODO: review criteria and acceptance checks."""
 
 [orchestrator]
 cross_cutting_artifacts = []

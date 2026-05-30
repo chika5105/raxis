@@ -102,8 +102,9 @@ pub use cmdline_env::{
     CMDLINE_ENV_TOKEN,
 };
 pub use custom_tools::{
-    load_custom_tools, parse_custom_tool_bundle_json, read_custom_tool_decls_from_env_fn,
-    validate_custom_tool, CustomToolBundle, CustomToolDecl, CustomToolError, SubprocessTool,
+    load_custom_tools, load_custom_tools_with_audit, parse_custom_tool_bundle_json,
+    read_custom_tool_decls_from_env_fn, validate_custom_tool, CustomToolAuditEmitter,
+    CustomToolBundle, CustomToolDecl, CustomToolError, SubprocessTool,
 };
 pub use dispatch::{DispatchConfig, DispatchError, DispatchLoop, DispatchOutcome};
 pub use driver::{
