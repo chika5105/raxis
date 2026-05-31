@@ -1732,6 +1732,11 @@ impl DashboardData for KernelDashboardData {
                 );
                 let initiative_display_name =
                     initiative_name_for_id_opt(&conn, owning.initiative_id.as_deref())?;
+                let fallback_tokens = session_list_token_fallback(
+                    self.task_llm_capture.as_ref(),
+                    &owning,
+                    &s.session_id,
+                );
                 let view = SessionView {
                     session_id: s.session_id,
                     role,
@@ -1759,8 +1764,6 @@ impl DashboardData for KernelDashboardData {
                     latest_annotation: None,
                     env: Vec::new(),
                 };
-                let fallback_tokens =
-                    session_list_token_fallback(self.task_llm_capture.as_ref(), &owning);
                 // Keep the list and detail pages semantically aligned:
                 // the list normally surfaces the kernel-persisted
                 // task counters, but orchestrator/coordinator rows can
@@ -1840,10 +1843,11 @@ impl DashboardData for KernelDashboardData {
         // coordinator tasks; this fallback closes that gap
         // without changing kernel admission semantics. See
         // `cumulative_tokens_for_task` for the full rationale.
-        let fallback_tokens = owning
-            .task_id
-            .as_deref()
-            .and_then(|tid| cumulative_tokens_for_task(self.task_llm_capture.as_ref(), tid));
+        let fallback_tokens = session_list_token_fallback(
+            self.task_llm_capture.as_ref(),
+            &owning,
+            s.session_id.as_str(),
+        );
         let role = semantic_agent_type_for_session(
             &conn,
             s.session_id.as_str(),
@@ -4790,23 +4794,10 @@ pub(crate) fn cumulative_tokens_for_task(
     let mut total_out: u64 = 0;
     let mut any_usage = false;
     for r in &recs {
-        let Ok(body) = serde_json::from_str::<serde_json::Value>(&r.body) else {
-            continue;
-        };
-        let Some(usage) = body.get("usage").and_then(|v| v.as_object()) else {
+        let Some((in_tok, out_tok)) = usage_tokens_from_llm_turn(r) else {
             continue;
         };
         any_usage = true;
-        let in_tok = usage
-            .get("input_tokens")
-            .or_else(|| usage.get("prompt_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let out_tok = usage
-            .get("output_tokens")
-            .or_else(|| usage.get("completion_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
         total_in = total_in.saturating_add(in_tok);
         total_out = total_out.saturating_add(out_tok);
     }
@@ -4816,17 +4807,64 @@ pub(crate) fn cumulative_tokens_for_task(
     Some((total_in, total_out))
 }
 
+pub(crate) fn cumulative_tokens_for_task_session(
+    capture: Option<&Arc<TaskLlmCapture>>,
+    task_id: &str,
+    session_id: &str,
+) -> Option<(u64, u64)> {
+    let cap = capture?;
+    let recs = cap.tail(task_id, usize::MAX);
+    if recs.is_empty() {
+        return None;
+    }
+    let mut total_in: u64 = 0;
+    let mut total_out: u64 = 0;
+    let mut any_usage = false;
+    for r in &recs {
+        if r.session_id.as_deref() != Some(session_id) {
+            continue;
+        }
+        let Some((in_tok, out_tok)) = usage_tokens_from_llm_turn(r) else {
+            continue;
+        };
+        any_usage = true;
+        total_in = total_in.saturating_add(in_tok);
+        total_out = total_out.saturating_add(out_tok);
+    }
+    if !any_usage {
+        return None;
+    }
+    Some((total_in, total_out))
+}
+
+fn usage_tokens_from_llm_turn(r: &LlmTurnRecord) -> Option<(u64, u64)> {
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(&r.body) else {
+        return None;
+    };
+    let usage = body.get("usage").and_then(|v| v.as_object())?;
+    let in_tok = usage
+        .get("input_tokens")
+        .or_else(|| usage.get("prompt_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let out_tok = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    Some((in_tok, out_tok))
+}
+
 fn session_list_token_fallback(
     capture: Option<&Arc<TaskLlmCapture>>,
     owning_task: &SessionOwningTask,
+    session_id: &str,
 ) -> Option<(u64, u64)> {
     if owning_task.input_tokens != 0 || owning_task.output_tokens != 0 {
         return None;
     }
-    owning_task
-        .task_id
-        .as_deref()
-        .and_then(|task_id| cumulative_tokens_for_task(capture, task_id))
+    let task_id = owning_task.task_id.as_deref()?;
+    cumulative_tokens_for_task_session(capture, task_id, session_id)
 }
 
 /// iter69 — fold the `owning_task_for_session` projection plus
@@ -8327,10 +8365,18 @@ task_id = "task-a"
     }
 
     fn mk_rec(body: String, at_ms: u64) -> crate::LlmTurnRecord {
+        mk_rec_for_session(body, at_ms, Some("sess-a"))
+    }
+
+    fn mk_rec_for_session(
+        body: String,
+        at_ms: u64,
+        session_id: Option<&str>,
+    ) -> crate::LlmTurnRecord {
         crate::LlmTurnRecord {
             at_ms,
             task_id: "task-a".into(),
-            session_id: Some("sess-a".into()),
+            session_id: session_id.map(str::to_owned),
             fetch_id: format!("f{at_ms}"),
             status_code: Some(200),
             latency_ms: 10,
@@ -8466,10 +8512,37 @@ task_id = "task-a"
             output_tokens: 0,
         };
 
-        let (in_tok, out_tok) = session_list_token_fallback(Some(&cap), &owning).unwrap();
+        let (in_tok, out_tok) = session_list_token_fallback(Some(&cap), &owning, "sess-a").unwrap();
 
         assert_eq!(in_tok, 42);
         assert_eq!(out_tok, 7);
+    }
+
+    #[test]
+    fn session_list_token_fallback_prefers_this_session_over_task_total() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap =
+            crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default()).unwrap();
+        cap.append(
+            "task-a",
+            mk_rec_for_session(anthropic_turn_body(10, 1), 1, Some("sess-a")),
+        )
+        .unwrap();
+        cap.append(
+            "task-a",
+            mk_rec_for_session(anthropic_turn_body(90, 9), 2, Some("sess-b")),
+        )
+        .unwrap();
+        let owning = SessionOwningTask {
+            initiative_id: Some("init-a".into()),
+            task_id: Some("task-a".into()),
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+
+        let (in_tok, out_tok) = session_list_token_fallback(Some(&cap), &owning, "sess-a").unwrap();
+
+        assert_eq!((in_tok, out_tok), (10, 1));
     }
 
     #[test]
@@ -8486,7 +8559,7 @@ task_id = "task-a"
             output_tokens: 3,
         };
 
-        assert!(session_list_token_fallback(Some(&cap), &owning).is_none());
+        assert!(session_list_token_fallback(Some(&cap), &owning, "sess-a").is_none());
     }
 
     /// End-to-end of the orchestrator-session token-visibility
