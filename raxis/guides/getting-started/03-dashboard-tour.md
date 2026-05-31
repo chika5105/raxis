@@ -93,6 +93,9 @@ Use Plan Builder before submitting a new initiative. It provides:
 - A canvas-native task DAG. Drag from one task card edge to another to
   add a dependency; the second task's `predecessors` field updates in
   `plan.toml`.
+- Compact add actions. **Add executor**, **Add reviewer**, **Review
+  pair**, and **Fan-out** create nodes without stealing the whole
+  canvas; click a card when you are ready to edit it.
 - Inline task editors for description, prompt, role, clone strategy,
   path allowlist, egress, runtime limits, VM image, tool profiles,
   credential bindings, and verifier gates.
@@ -100,10 +103,28 @@ Use Plan Builder before submitting a new initiative. It provides:
   TOML edits update the canvas; clearing TOML clears the plan.
 - Drawers for plan setup, model routing, tool profiles, credential
   setup, and integration verifiers.
+- Smooth source/canvas reveal. Changing a card scrolls the
+  `plan.toml` panel to the edited section; editing valid TOML scrolls
+  the canvas toward the changed task.
 - Draft persistence in browser storage so an accidental navigation does
   not discard work.
 - **Validate**, which runs the draft through the same policy/DAG checks
   the kernel uses at admission and returns next-step commands.
+
+The fastest successful path is:
+
+1. Open **Plan setup** and set workspace name, repository name, lane id,
+   and target ref.
+2. Open **Model routing** and make sure every Executor/Reviewer alias has
+   at least one provider:model entry. Add fallbacks only from providers
+   the active policy publishes.
+3. Open **Tool profiles**, **Credential setup**, and **Verifiers** before
+   attaching those references to task cards.
+4. Add executor/reviewer cards and drag edges for dependencies.
+5. Keep the `plan.toml` panel open while you edit; it is the artifact the
+   CLI will submit.
+6. Click **Validate**, fix the highlighted fields, then copy or download
+   the plan.
 
 Plan Builder is a helper, not an authority boundary. The CLI still
 signs and submits the canonical bundle:
@@ -221,8 +242,26 @@ mid-walk; see [`raxis/crates/dashboard/src/routes/git.rs`](../../crates/dashboar
 
 Policy Builder is the post-genesis policy workbench. Use it after the
 kernel is healthy to inspect the active policy, discover the available
-policy sections, append known-good snippets, check the draft hash, and
-click **Validate with kernel** before signing.
+policy controls, append known-good sections, check the draft hash, and
+click **Validate with kernel** before signing. The feature library and
+draft panes scroll independently so you can keep the active policy
+context visible while composing changes.
+
+Think of policy as the security envelope and plan as one initiative
+inside that envelope:
+
+- Permissions narrow by intersection. A plan can choose from policy
+  allowed VM images, models, tools, credentials, egress hosts, lanes, and
+  repositories; it cannot invent new authority.
+- Protections accumulate by union. Policy-required approvals, gates, and
+  verifier hooks still apply even if the plan adds its own reviewers or
+  verifiers.
+- Ceilings use the smaller value. Cost, turn, memory, vCPU, and timeout
+  requests cannot exceed policy limits.
+- Floors use the larger value. Minimum reviewer counts, approval counts,
+  and mandatory evidence requirements cannot be weakened by a plan.
+- Locked policy fields win completely. If a policy locks `target_ref`,
+  conflicting plans are rejected instead of silently redirected.
 
 It also makes the environment decision visible: RAXIS supports multiple
 environment labels in one kernel, but for staging/prod boundaries the

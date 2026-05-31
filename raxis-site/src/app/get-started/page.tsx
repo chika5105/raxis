@@ -222,6 +222,7 @@ raxis doctor`}</CommandBlock>
               body="When health is degraded, the dashboard points you at raxis doctor, supervisor status, and the right logs."
             />
           </div>
+          <DashboardWorkflow />
           <div className="mt-8 space-y-6">
             <DashboardShot
               src="/images/dashboard-plan-builder.png"
@@ -420,6 +421,42 @@ function DashboardFeature({ title, body }: { title: string; body: string }) {
         {title}
       </h3>
       <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">{body}</p>
+    </div>
+  );
+}
+
+function DashboardWorkflow() {
+  const steps = [
+    "Open Plan Builder and fill Plan setup with workspace, repository, lane, and target ref.",
+    "Choose model routes with at least one provider:model entry, then add ordered fallbacks when policy allows them.",
+    "Define shared tool profiles, credential names, and verifier checks before attaching them to executor tasks.",
+    "Add executor and reviewer cards, drag edges for handoffs, and keep plan.toml open as the synchronized source.",
+    "Click Validate, fix the exact fields reported by draft/kernel checks, then copy or download plan.toml for CLI submission.",
+  ];
+
+  return (
+    <div className="mt-8 rounded-lg border border-[var(--rule)] bg-[var(--bg)] p-5">
+      <div className="flex flex-wrap items-baseline justify-between gap-3">
+        <h3 className="text-base font-semibold leading-tight text-[var(--fg)]">
+          Recommended dashboard flow
+        </h3>
+        <span className="font-mono text-xs uppercase tracking-[0.08em] text-[var(--soft)]">
+          Build → validate → submit
+        </span>
+      </div>
+      <ol className="mt-5 grid gap-3 md:grid-cols-2 lg:grid-cols-5">
+        {steps.map((step, index) => (
+          <li
+            key={step}
+            className="rounded-lg border border-[var(--rule)] bg-[var(--surface)] p-4 text-sm leading-relaxed text-[var(--muted)]"
+          >
+            <span className="mb-2 block font-mono text-xs text-[var(--accent)]">
+              {String(index + 1).padStart(2, "0")}
+            </span>
+            {step}
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }

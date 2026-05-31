@@ -15,6 +15,7 @@ export default function HomePage() {
       <Hero />
       <FastStart />
       <DemoVideo />
+      <OperatorWorkbench />
       <EnterpriseBlocker />
       <WhatItDoes />
       <Paradigm />
@@ -234,6 +235,89 @@ function DemoVideo() {
         </div>
         <div className="min-w-0">
           <DemoPlayer />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function OperatorWorkbench() {
+  const features = [
+    {
+      title: "Draw the initiative",
+      body: "Build the task DAG directly, add executors and reviewers, connect handoffs, and keep the generated plan.toml visible as the source of truth.",
+    },
+    {
+      title: "Attach governed runtime",
+      body: "Choose model fallback chains, shared tool profiles, credential bindings, and plan verifiers without turning those choices into hidden authority.",
+    },
+    {
+      title: "Validate before signing",
+      body: "Run draft checks and kernel validation from the same surface, then copy or download the exact plan the CLI will submit.",
+    },
+  ];
+
+  return (
+    <section id="dashboard" className="border-b border-[var(--rule)] bg-[var(--surface)]">
+      <div className="mx-auto max-w-5xl px-4 py-16 sm:px-6 sm:py-20">
+        <div className="grid gap-10 lg:grid-cols-[0.85fr_1.15fr] lg:items-center">
+          <div>
+            <p className="eyebrow mb-4">Operator workbench</p>
+            <h2 className="h-section">
+              Build the plan visually. Keep the TOML honest.
+            </h2>
+            <p className="mt-5 leading-relaxed text-[var(--muted)]">
+              RAXIS is not a black-box agent runner. The dashboard now gives
+              operators a single place to draft governed work, inspect policy,
+              validate gates, and keep enough evidence visible to debug a live
+              or historical run.
+            </p>
+            <div className="mt-7 flex flex-wrap gap-3">
+              <Link href="/get-started" className="btn btn-primary">
+                Run the guided setup
+              </Link>
+              <Link
+                href="/docs/guides/getting-started/03-dashboard-tour"
+                className="btn btn-ghost"
+              >
+                Open dashboard tour
+              </Link>
+            </div>
+          </div>
+          <figure className="overflow-hidden rounded-2xl border border-[var(--rule)] bg-[var(--bg)] shadow-[var(--shadow-soft)]">
+            <a
+              href="/images/dashboard-plan-builder.png"
+              target="_blank"
+              rel="noreferrer"
+              className="block"
+            >
+              <Image
+                src="/images/dashboard-plan-builder.png"
+                alt="RAXIS Plan Builder showing a task DAG, setup panes, and synchronized plan.toml"
+                width={2880}
+                height={2000}
+                sizes="(min-width: 1024px) 560px, calc(100vw - 2rem)"
+                unoptimized
+                className="h-auto w-full"
+              />
+            </a>
+            <figcaption className="border-t border-[var(--rule)] px-4 py-3 text-sm text-[var(--muted)]">
+              Plan Builder: DAG first, synchronized TOML always visible.
+            </figcaption>
+          </figure>
+        </div>
+        <div className="mt-8 grid gap-4 md:grid-cols-3">
+          {features.map((feature) => (
+            <div
+              key={feature.title}
+              className="rounded-xl border border-[var(--rule)] bg-[var(--bg)] p-5"
+            >
+              <h3 className="h-sub">{feature.title}</h3>
+              <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
+                {feature.body}
+              </p>
+            </div>
+          ))}
         </div>
       </div>
     </section>
@@ -552,7 +636,7 @@ function ExploreMore() {
   const items = [
     {
       title: "Architecture",
-      body: "How the kernel, gateways, VM isolation, credential proxies, witnesses, and dashboard fit together.",
+      body: "How the kernel, VM isolation, credential proxies, mediated networking, witnesses, and dashboard fit together.",
       href: "/reference",
       cta: "Read the reference",
     },
