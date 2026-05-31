@@ -177,6 +177,7 @@ fn read_and_project_view(
         },
         crash_retry_count: crash_u,
         review_reject_count: review_u,
+        review_aggregate_verdict: None,
         max_crash_retries: max_crash,
         max_review_rejections: max_review,
     };
@@ -373,6 +374,7 @@ fn explicit_transaction_isolates_reads_from_concurrent_writer() {
         prior_activation_state: Some("Failed"),
         crash_retry_count: u32::try_from(post_commit).unwrap_or(0),
         review_reject_count: 0,
+        review_aggregate_verdict: None,
         max_crash_retries: 3,
         max_review_rejections: 2,
     });

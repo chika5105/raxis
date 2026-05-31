@@ -4077,6 +4077,21 @@ fn increment_executor_review_reject_count(
     Ok(affected)
 }
 
+fn clear_executor_review_repair_feedback(
+    executor_task_id: &str,
+    store: &Store,
+) -> Result<usize, rusqlite::Error> {
+    let conn = store.lock_sync();
+    conn.execute(
+        &format!(
+            "UPDATE {TASKS}
+                SET last_critique = NULL
+              WHERE task_id = ?1"
+        ),
+        rusqlite::params![executor_task_id],
+    )
+}
+
 /// V2 §Step 12 — bump the executor's *current* (`terminated_at IS NULL`)
 /// `subtask_activations.crash_retry_count` by one, **inside the supplied
 /// transaction** so the bump is atomic with the surrounding FSM
@@ -4645,6 +4660,22 @@ fn handle_submit_review(
                     eprintln!(
                         "{{\"level\":\"warn\",\
                          \"event\":\"ReviewRejectCounterIncrementFailed\",\
+                         \"executor_task_id\":\"{predecessor}\",\
+                         \"reviewer_task_id\":\"{reviewer_task_id}\",\
+                         \"error\":\"{e}\"}}",
+                    );
+                }
+            }
+        } else if matches!(
+            outcome.verdict,
+            crate::initiatives::review_aggregation::AggregateReviewVerdict::AllPassed,
+        ) {
+            match clear_executor_review_repair_feedback(predecessor.as_str(), store) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"ReviewRepairFeedbackClearFailed\",\
                          \"executor_task_id\":\"{predecessor}\",\
                          \"reviewer_task_id\":\"{reviewer_task_id}\",\
                          \"error\":\"{e}\"}}",
@@ -7723,6 +7754,7 @@ async fn handle_retry_sub_task(
         let store_arc = Arc::clone(&ctx.store);
         let task_id_clone = task_id_owned.clone();
         let initiative_id_clone = initiative_id.clone();
+        let plan_registry = Arc::clone(&ctx.plan_registry);
         // iter44: clone the hub into the closure so each rejection
         // branch inside the SQL transaction can emit a labelled
         // `IntentAdmitPredicateEvaluatedTotal` increment alongside
@@ -7789,6 +7821,34 @@ async fn handle_retry_sub_task(
                                 TaskState::Admitted));
                 }
             };
+            let review_aggregate_verdict =
+                if prior_state == "Completed" && review_reject_count > 0 {
+                    use crate::initiatives::review_aggregation::{
+                        compute_aggregate_review_outcome_with_conn, AgentTypeFilter,
+                    };
+                    match compute_aggregate_review_outcome_with_conn(
+                        &task_id_clone,
+                        &tx,
+                        Some(AgentTypeFilter {
+                            plan_registry: plan_registry.as_ref(),
+                            initiative_id: initiative_id_clone.as_str(),
+                            reviewer_task_id: "<retry_subtask_admit>",
+                        }),
+                    ) {
+                        Ok(outcome) => Some(outcome.verdict.wire_str().to_owned()),
+                        Err(e) => {
+                            eprintln!(
+                                "{{\"level\":\"warn\",\
+                                 \"event\":\"RetrySubTaskAggregateReadFailed\",\
+                                 \"task_id\":\"{task_id_clone}\",\
+                                 \"error\":\"{e}\"}}",
+                            );
+                            Some("unknown".to_owned())
+                        }
+                    }
+                } else {
+                    None
+                };
             // `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` —
             // `agent-disagreement.md §3.6` Option A, extended at
             // iter48 to cover `PendingActivation`.
@@ -7872,6 +7932,7 @@ async fn handle_retry_sub_task(
                 prior_activation_state: Some(prior_state.as_str()),
                 crash_retry_count:      u32::try_from(crash_retry_count).unwrap_or(u32::MAX),
                 review_reject_count:    u32::try_from(review_reject_count).unwrap_or(u32::MAX),
+                review_aggregate_verdict: review_aggregate_verdict.as_deref(),
                 max_crash_retries,
                 max_review_rejections,
             };
@@ -7919,6 +7980,20 @@ async fn handle_retry_sub_task(
                                  \"review_reject_count\":{review_reject_count},\
                                  \"admit_set\":\"Failed | Completed+review_reject_count>0\",\
                                  \"hint\":\"if prior_state=PendingActivation and review_reject_count>0, the orchestrator's correct next intent is ActivateSubTask against the existing pending row (per INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01); audit-chain anchor: prior ExecutorRespawnFromReviewRejection for prior_activation_id\"}}",
+                            );
+                            emit_admit(false, crate::observability::ADMIT_REASON_RETRY_INADMISSIBLE);
+                            return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
+                        }
+                        R::ReviewAggregateNotRejected { verdict } => {
+                            eprintln!(
+                                "{{\"level\":\"warn\",\
+                                 \"event\":\"RetrySubTaskRejectedReviewAggregateResolved\",\
+                                 \"task_id\":\"{task_id_clone}\",\
+                                 \"prior_activation_id\":\"{prior_activation_id}\",\
+                                 \"prior_state\":\"{prior_state}\",\
+                                 \"review_reject_count\":{review_reject_count},\
+                                 \"aggregate_verdict\":\"{verdict}\",\
+                                 \"hint\":\"review_reject_count is cumulative history; retry_subtask is admissible only while aggregate=AtLeastOneRejected\"}}",
                             );
                             emit_admit(false, crate::observability::ADMIT_REASON_RETRY_INADMISSIBLE);
                             return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
@@ -11776,7 +11851,6 @@ mod tests {
                 ("revB", raxis_types::SessionAgentType::Reviewer),
             ],
         );
-
         // First reviewer rejects.
         let req_a =
             make_submit_review_request("revA", Some(false), Some("missing input validation"));
@@ -12124,6 +12198,14 @@ mod tests {
                 ("revB", raxis_types::SessionAgentType::Reviewer),
             ],
         );
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!("UPDATE {TASKS} SET last_critique = ?1 WHERE task_id = 'exe1'"),
+                rusqlite::params!["[Reviewer revA]: stale prior-round critique\n\n"],
+            )
+            .unwrap();
+        }
 
         // First reviewer approves — aggregator must still be Pending,
         // NO audit emission expected.
@@ -12189,6 +12271,10 @@ mod tests {
             }
             _ => unreachable!("filtered above"),
         }
+        assert!(
+            read_last_critique(&store, "exe1").is_none(),
+            "AllPassed aggregation MUST clear stale executor repair feedback"
+        );
     }
 
     /// V2 gap §12.2 — single Reviewer approving terminates the
@@ -13682,6 +13768,64 @@ mod tests {
             ],
         )
         .unwrap();
+        if review_count > 0 {
+            let reviewer_task_id = retry_fixture_reviewer_task_id(task_id);
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at,
+                         actual_cost, review_verdict, last_critique)
+                     VALUES (?1, ?2, 'default', ?3, 'kernel',
+                             1, ?4, ?4, 0, ?5, ?6)"
+                ),
+                rusqlite::params![
+                    &reviewer_task_id,
+                    initiative_id,
+                    TaskState::Completed.as_sql_str(),
+                    prior_now,
+                    raxis_types::ReviewVerdict::Rejected.as_sql_str(),
+                    format!("[Reviewer {reviewer_task_id}]: fixture rejection\n\n"),
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASK_DAG_EDGES}
+                        (initiative_id, predecessor_task_id, successor_task_id,
+                         predecessor_satisfied)
+                     VALUES (?1, ?2, ?3, 1)"
+                ),
+                rusqlite::params![initiative_id, task_id, &reviewer_task_id],
+            )
+            .unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {SUBTASK_ACTIVATIONS}
+                        (activation_id, task_id, initiative_id,
+                         activation_state, session_id, evaluation_sha,
+                         crash_retry_count, review_reject_count,
+                         created_at, activated_at, terminated_at)
+                     VALUES (?1, ?2, ?3, 'Completed', NULL, NULL,
+                             0, 0, ?4, ?4, ?4)"
+                ),
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    &reviewer_task_id,
+                    initiative_id,
+                    prior_now,
+                ],
+            )
+            .unwrap();
+            registry.insert(
+                crate::initiatives::plan_registry::TaskKey::new(initiative_id, &reviewer_task_id),
+                crate::initiatives::plan_registry::TaskPlanFields {
+                    description: "retry fixture reviewer".to_owned(),
+                    session_agent_type: raxis_types::SessionAgentType::Reviewer,
+                    ..Default::default()
+                },
+            );
+        }
         drop(conn);
         registry.insert(
             crate::initiatives::plan_registry::TaskKey::new(initiative_id, task_id),
@@ -13693,6 +13837,34 @@ mod tests {
             },
         );
         prior_activation_id
+    }
+
+    fn retry_fixture_reviewer_task_id(executor_task_id: &str) -> String {
+        format!("{executor_task_id}-reviewer-fixture")
+    }
+
+    fn mark_retry_fixture_reviewer_rejected(store: &Store, executor_task_id: &str) {
+        let reviewer_task_id = retry_fixture_reviewer_task_id(executor_task_id);
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        conn.execute(
+            &format!(
+                "UPDATE {TASKS}
+                    SET state = ?1,
+                        transitioned_at = ?2,
+                        review_verdict = ?3,
+                        last_critique = ?4
+                  WHERE task_id = ?5"
+            ),
+            rusqlite::params![
+                TaskState::Completed.as_sql_str(),
+                now,
+                raxis_types::ReviewVerdict::Rejected.as_sql_str(),
+                format!("[Reviewer {reviewer_task_id}]: fixture rejection\n\n"),
+                &reviewer_task_id,
+            ],
+        )
+        .unwrap();
     }
 
     /// `iter48`-shaped seed: the executor's most-recent activation
@@ -15173,6 +15345,8 @@ mod tests {
                 rusqlite::params![TaskState::Completed.as_sql_str(), now],
             )
             .unwrap();
+            drop(conn);
+            mark_retry_fixture_reviewer_rejected(&store_for_flip1, "exe-monotonic");
         })
         .await
         .unwrap();
@@ -15223,6 +15397,8 @@ mod tests {
                 rusqlite::params![TaskState::Completed.as_sql_str(), now],
             )
             .unwrap();
+            drop(conn);
+            mark_retry_fixture_reviewer_rejected(&store_for_flip2, "exe-monotonic");
         })
         .await
         .unwrap();
@@ -15345,6 +15521,14 @@ mod tests {
                     rusqlite::params![uuid::Uuid::new_v4().to_string(), reviewer, now],
                 )
                 .unwrap();
+                registry_for_seed.insert(
+                    crate::initiatives::plan_registry::TaskKey::new("init-retry", reviewer),
+                    crate::initiatives::plan_registry::TaskPlanFields {
+                        description: "retry reactivation reviewer".to_owned(),
+                        session_agent_type: raxis_types::SessionAgentType::Reviewer,
+                        ..Default::default()
+                    },
+                );
             }
         })
         .await

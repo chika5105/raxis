@@ -5606,15 +5606,7 @@ fn aggregate_review_state(
         .iter()
         .all(|v| is_approved_review_verdict(&v.verdict))
     {
-        let critique = own_critique.or_else(|| {
-            reviewer_verdicts
-                .iter()
-                .rev()
-                .map(|v| v.critique.trim())
-                .find(|c| !c.is_empty())
-                .map(str::to_owned)
-        });
-        return (Some("Approved".to_owned()), critique);
+        return (Some("Approved".to_owned()), None);
     }
     (None, own_critique)
 }

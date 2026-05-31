@@ -18,9 +18,9 @@
 //!      `raxis_ksb::TaskCapabilityView::retry_inadmissible_reason`.
 //!
 //! The parity contract is: given the same `(prior_state,
-//! crash_retry_count, review_reject_count, max_crash_retries,
-//! max_review_rejections)` tuple, both call paths MUST return the
-//! same answer. The witness test `kernel/tests/
+//! crash_retry_count, review_reject_count, current aggregate review
+//! verdict, max_crash_retries, max_review_rejections)` tuple, both
+//! call paths MUST return the same answer. The witness test `kernel/tests/
 //! ksb_capabilities_parity.rs` pins this by driving a fixture
 //! through both paths and asserting the booleans agree across the
 //! product of admit / reject inputs.
@@ -118,6 +118,19 @@ pub enum RetryInadmissibleReason {
         /// Plan-effective ceiling.
         max_review_rejections: u32,
     },
+    /// A completed activation carries a non-zero historical
+    /// `review_reject_count`, but the current reviewer aggregate no
+    /// longer calls for a retry. This closes the stale-counter loop:
+    /// once a repair round has reached `AllPassed`, a non-zero
+    /// cumulative counter remains useful for budget history but MUST
+    /// NOT keep advertising `retry_subtask` as admissible.
+    ///
+    /// Wire counterpart: `eprintln
+    /// "RetrySubTaskRejectedReviewAggregateResolved"`.
+    ReviewAggregateNotRejected {
+        /// Current kernel-computed aggregate verdict wire string.
+        verdict: String,
+    },
 }
 
 impl RetryInadmissibleReason {
@@ -148,6 +161,10 @@ impl RetryInadmissibleReason {
                 format!(
                     "review_reject_count {review_reject_count} >= max_review_rejections {max_review_rejections}"
                 ),
+            RetryInadmissibleReason::ReviewAggregateNotRejected { verdict } =>
+                format!(
+                    "aggregate {verdict}; retry_subtask requires aggregate=AtLeastOneRejected for review retries"
+                ),
         }
     }
 
@@ -159,7 +176,8 @@ impl RetryInadmissibleReason {
     pub fn observability_lexeme(&self) -> &'static str {
         match self {
             RetryInadmissibleReason::NoPriorActivation => "unknown_lane",
-            RetryInadmissibleReason::NotRetryable { .. } => "retry_inadmissible",
+            RetryInadmissibleReason::NotRetryable { .. }
+            | RetryInadmissibleReason::ReviewAggregateNotRejected { .. } => "retry_inadmissible",
             RetryInadmissibleReason::CrashCeiling { .. }
             | RetryInadmissibleReason::ReviewCeiling { .. } => "budget_exhausted",
         }
@@ -182,6 +200,14 @@ pub struct RetryAdmitInputs<'a> {
     pub crash_retry_count: u32,
     /// Most-recent activation's `review_reject_count`.
     pub review_reject_count: u32,
+    /// Kernel-computed aggregate reviewer verdict for the task at the
+    /// time this predicate is evaluated. `Some("AtLeastOneRejected")`
+    /// is required for the `Completed + review_reject_count > 0`
+    /// review-retry path. `None` is allowed for legacy tests and
+    /// crash retries, but production call sites SHOULD pass `Some`
+    /// when the prior state is `Completed` and the review counter is
+    /// non-zero.
+    pub review_aggregate_verdict: Option<&'a str>,
     /// Plan-effective `max_crash_retries` (kernel default substituted
     /// when the plan omits the field).
     pub max_crash_retries: u32,
@@ -300,6 +326,17 @@ pub fn admit_retry_subtask_check(inputs: &RetryAdmitInputs<'_>) -> AdmitOutcome 
             review_reject_count: inputs.review_reject_count,
         });
     }
+    if allow_from_review_rejection {
+        if let Some(verdict) = inputs.review_aggregate_verdict {
+            if verdict != "AtLeastOneRejected" {
+                return AdmitOutcome::Inadmissible(
+                    RetryInadmissibleReason::ReviewAggregateNotRejected {
+                        verdict: verdict.to_owned(),
+                    },
+                );
+            }
+        }
+    }
     if inputs.crash_retry_count >= inputs.max_crash_retries {
         return AdmitOutcome::Inadmissible(RetryInadmissibleReason::CrashCeiling {
             crash_retry_count: inputs.crash_retry_count,
@@ -328,6 +365,7 @@ mod tests {
             prior_activation_state: Some("Failed"),
             crash_retry_count: 0,
             review_reject_count: 0,
+            review_aggregate_verdict: None,
             max_crash_retries: 3,
             max_review_rejections: 2,
         }
@@ -343,9 +381,42 @@ mod tests {
         let inputs = RetryAdmitInputs {
             prior_activation_state: Some("Completed"),
             review_reject_count: 1,
+            review_aggregate_verdict: Some("AtLeastOneRejected"),
             ..base()
         };
         assert_eq!(admit_retry_subtask_check(&inputs), AdmitOutcome::Admissible);
+    }
+
+    #[test]
+    fn rejects_completed_review_counter_when_aggregate_has_recovered() {
+        let inputs = RetryAdmitInputs {
+            prior_activation_state: Some("Completed"),
+            review_reject_count: 1,
+            review_aggregate_verdict: Some("AllPassed"),
+            ..base()
+        };
+        assert_eq!(
+            admit_retry_subtask_check(&inputs),
+            AdmitOutcome::Inadmissible(RetryInadmissibleReason::ReviewAggregateNotRejected {
+                verdict: "AllPassed".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
+    fn rejects_completed_review_counter_when_aggregate_is_still_pending() {
+        let inputs = RetryAdmitInputs {
+            prior_activation_state: Some("Completed"),
+            review_reject_count: 1,
+            review_aggregate_verdict: Some("AwaitingReviewerVerdicts"),
+            ..base()
+        };
+        assert_eq!(
+            admit_retry_subtask_check(&inputs),
+            AdmitOutcome::Inadmissible(RetryInadmissibleReason::ReviewAggregateNotRejected {
+                verdict: "AwaitingReviewerVerdicts".to_owned(),
+            }),
+        );
     }
 
     #[test]
@@ -532,6 +603,11 @@ mod tests {
         }
         .human()
         .starts_with("review_reject_count 2"));
+        assert!(RetryInadmissibleReason::ReviewAggregateNotRejected {
+            verdict: "AllPassed".to_owned(),
+        }
+        .human()
+        .starts_with("aggregate AllPassed"));
     }
 
     #[test]
@@ -544,6 +620,13 @@ mod tests {
             RetryInadmissibleReason::NotRetryable {
                 prior_state: "Active".to_owned(),
                 review_reject_count: 0,
+            }
+            .observability_lexeme(),
+            "retry_inadmissible",
+        );
+        assert_eq!(
+            RetryInadmissibleReason::ReviewAggregateNotRejected {
+                verdict: "AllPassed".to_owned(),
             }
             .observability_lexeme(),
             "retry_inadmissible",

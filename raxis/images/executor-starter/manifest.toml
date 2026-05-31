@@ -24,7 +24,8 @@ zstd_version      = "1.5.5"
 
 # Pre-baked lint toolchain pins
 # (`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01`,
-# `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`).
+# `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`,
+# `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01`).
 #
 # These are documentary fields — the kernel does not consume them
 # at boot. They exist so an operator auditing the manifest can
@@ -41,5 +42,5 @@ prettier_version = "3.3.3"
 typescript_version = "5.6.3"
 tsx_version = "4.19.2"
 typescript_eslint_parser_version = "8.15.0"
-rust_toolchain = "debian-bookworm-apt"
-rust_packages = ["rustc", "cargo", "rustfmt", "rust-clippy"]
+rust_toolchain = "1.85.1"
+rust_components = ["rustfmt", "clippy"]

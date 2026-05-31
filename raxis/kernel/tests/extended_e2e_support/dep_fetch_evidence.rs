@@ -421,7 +421,12 @@ impl PipInstallEntry {
             .get("sha256")
             .and_then(|x| x.as_str())
             .ok_or("missing or non-string `sha256`")?
-            .to_owned();
+            .trim();
+        let sha256 = sha256
+            .strip_prefix("sha256=")
+            .or_else(|| sha256.strip_prefix("sha256:"))
+            .unwrap_or(sha256)
+            .to_ascii_lowercase();
         if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(format!(
                 "`sha256` is not a 64-char lowercase hex string (got len={}, value={sha256:?})",
@@ -894,6 +899,41 @@ mod tests {
                 }
             ],
         })
+    }
+
+    #[test]
+    fn evidence_with_pip_style_sha256_prefix_satisfies() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("out").join("deps");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pip = valid_pip_install_block();
+        let mut pip = pip.as_object().cloned().unwrap();
+        pip.insert(
+            "installed".to_owned(),
+            serde_json::json!([
+                {
+                    "name": PIP_PACKAGE_NAME,
+                    "version": "2024.7.4",
+                    "sha256": format!("sha256={}", "a".repeat(64)),
+                    "url": "https://files.pythonhosted.org/packages/.../certifi-2024.7.4-py3-none-any.whl",
+                }
+            ]),
+        );
+        std::fs::write(
+            dir.join("install-evidence.json"),
+            serde_json::to_string(&serde_json::json!({
+                "http_status": 200,
+                "body_size_bytes": 42,
+                "body_sha256": "0".repeat(64),
+                "body_contains_example_domain": true,
+                "pip_install": serde_json::Value::Object(pip),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let w = witness_for(tmp.path(), "sess-exec-1");
+        let chain = full_chain("sess-exec-1");
+        assert!(w.satisfied_by(&chain), "{}", w.diagnostic(&chain));
     }
 
     #[test]

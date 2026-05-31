@@ -2186,17 +2186,18 @@ the LLM consults.
 
 **Pre-installed lint toolchain (canonical-only,
 `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01` +
-`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`).** Symmetric to the
-Rust toolchain (`cargo` + `rustc` + `rustfmt` + `clippy` from the
-starter image's distro packages), the starter image pre-bakes the
+`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01` +
+`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01`).** Symmetric across the
+language tasks, the starter image pre-bakes a pinned Rust toolchain
+(`cargo` + `rustc` + `rustfmt` + `clippy` via rustup) alongside the
 Python and JavaScript / TypeScript
 lint stacks the realistic-scenario per-language
 `lint-runner-{python,rust,js}` tasks drive:
 
 | Language   | Tool                  | Pinned version | Resolved via                              |
 | ---------- | --------------------- | -------------- | ----------------------------------------- |
-| Rust       | `cargo fmt --check`   | Debian bookworm package set | `/usr/bin/cargo` + `/usr/bin/rustfmt` (already baked) |
-| Rust       | `cargo clippy`        | Debian bookworm package set | `/usr/bin/cargo` + `/usr/bin/cargo-clippy` (already baked) |
+| Rust       | `cargo fmt --check`   | `1.85.1` | `/root/.cargo/bin/cargo` + `/root/.cargo/bin/rustfmt`; build-time smoke crate proves `std` is present |
+| Rust       | `cargo clippy`        | `1.85.1` | `/root/.cargo/bin/cargo` + `/root/.cargo/bin/cargo-clippy`; `verify.sh` asserts `libstd`, `libcore`, and `libtest` rlibs |
 | Python     | `python -m ruff check`/`format --check` | `ruff==0.7.4` | `pip3 --break-system-packages` into system site-packages; `python -m ruff` resolves through the same import path the seed `ruff.toml` targets. CLI shim at `/usr/local/bin/ruff` |
 | JavaScript | `npx --no-install eslint --max-warnings 0`   | `eslint@9.15.0`     | `npm install -g` global node_modules; `/usr/bin/eslint` shim |
 | JavaScript | `npx --no-install prettier --check`          | `prettier@3.3.3`    | `npm install -g`; `/usr/bin/prettier` shim |
@@ -2224,8 +2225,9 @@ Pin policy: every linter is `name@<exact-version>`; the
 Containerfile MUST NEVER use `pip install ruff` or `npm install
 -g eslint` without a pinned suffix, and `verify.sh` cross-checks
 the bake against the documented pins by asserting the matching
-`.dist-info` (Python) and `node_modules/<pkg>/package.json` (JS)
-trees exist in the rootfs. `manifest.toml` mirrors the pinned
+`.dist-info` (Python), `node_modules/<pkg>/package.json` (JS), and
+rustup std/test sysroot (Rust) trees exist in the rootfs.
+`manifest.toml` mirrors the pinned
 versions in a documentary `[lint_toolchain]` table so an
 operator auditing a built image can answer "which ruff /
 eslint / prettier / tsc shipped here?" without re-running
@@ -2265,10 +2267,12 @@ Full schema and redaction rules: [`canonical-images.md §6`](canonical-images.md
 
 **Rust toolchain network posture
 (`INV-EXECUTOR-IMAGE-RUST-TOOLCHAIN-01`).** The executor
-starter image bakes Debian's `rustc`, `cargo`, `rustfmt`, and
-`rust-clippy` packages. It intentionally does not carry rustup's
-full toolchain tree: that made the executor initramfs too large
-for the guest boot envelope. Raxis no longer stamps
+starter image bakes rustup toolchain `1.85.1` with the minimal
+profile plus `rustfmt` and `clippy`. The bake runs a tiny crate
+through `cargo fmt` and `cargo clippy --all-targets`, and the
+post-export verifier asserts `libcore`, `libstd`, and `libtest`
+are present, so a missing sysroot fails before the live e2e can
+misclassify it as a reviewer rejection. Raxis no longer stamps
 `CARGO_NET_OFFLINE=true` at PID-1 boot: that env var teaches the
 model the wrong global lesson ("networking is unavailable") and
 can make it give up even when the task legitimately needs a fetch.

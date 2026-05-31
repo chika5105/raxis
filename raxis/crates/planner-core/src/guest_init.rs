@@ -2088,7 +2088,7 @@ pub const EXECUTOR_RUSTUP_TOOLCHAIN_ENV: &str = "RUSTUP_TOOLCHAIN";
 const EXECUTOR_HOME_DEFAULT: &str = "/root";
 const EXECUTOR_RUSTUP_HOME_DEFAULT: &str = "/root/.rustup";
 const EXECUTOR_CARGO_HOME_DEFAULT: &str = "/root/.cargo";
-const EXECUTOR_RUSTUP_TOOLCHAIN_DEFAULT: &str = "stable";
+const EXECUTOR_RUSTUP_TOOLCHAIN_DEFAULT: &str = "1.85.1";
 
 /// Install executor Rust toolchain environment defaults before
 /// any shell tool can spawn `cargo`, `rustfmt`, or `clippy`.
@@ -2190,7 +2190,7 @@ mod rustup_env_default_tests {
             );
             assert_eq!(
                 std::env::var(EXECUTOR_RUSTUP_TOOLCHAIN_ENV).unwrap(),
-                "stable"
+                "1.85.1"
             );
         });
     }

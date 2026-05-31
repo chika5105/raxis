@@ -1331,6 +1331,8 @@ fn read_executor_task_capability_views(
         }
         out.push(build_task_capability_view(
             conn,
+            registry,
+            initiative_id,
             &task_id,
             fields.effective_max_crash_retries(),
             fields.effective_max_review_rejections(),
@@ -1522,7 +1524,14 @@ fn build_task_capability_view_for_single(
         // when a plan omits the field. See
         // `plan_registry::TaskPlanFields::effective_*`.
         .unwrap_or((3, 2));
-    build_task_capability_view(conn, task_id, max_crash, max_review)
+    build_task_capability_view(
+        conn,
+        registry,
+        initiative_id,
+        task_id,
+        max_crash,
+        max_review,
+    )
 }
 
 /// Build a [`TaskCapabilityView`] for `task_id`, sourcing the
@@ -1531,6 +1540,8 @@ fn build_task_capability_view_for_single(
 /// `retry_admissible` (parity with the IPC handler).
 fn build_task_capability_view(
     conn: &Connection,
+    registry: &PlanRegistry,
+    initiative_id: &str,
     task_id: &str,
     max_crash: u32,
     max_review: u32,
@@ -1548,6 +1559,25 @@ fn build_task_capability_view(
     let (prior_state, crash, review) = row.unwrap_or_default();
     let crash_u = u32::try_from(crash).unwrap_or(0);
     let review_u = u32::try_from(review).unwrap_or(0);
+    let review_aggregate_verdict =
+        if prior_state == TaskState::Completed.as_sql_str() && review_u > 0 {
+            Some(
+                compute_aggregate_review_outcome_with_conn(
+                    task_id,
+                    conn,
+                    Some(AgentTypeFilter {
+                        plan_registry: registry,
+                        initiative_id,
+                        reviewer_task_id: "<ksb_retry_admit>",
+                    }),
+                )?
+                .verdict
+                .wire_str()
+                .to_owned(),
+            )
+        } else {
+            None
+        };
     let admit_inputs = RetryAdmitInputs {
         prior_activation_state: if prior_state.is_empty() {
             None
@@ -1556,6 +1586,7 @@ fn build_task_capability_view(
         },
         crash_retry_count: crash_u,
         review_reject_count: review_u,
+        review_aggregate_verdict: review_aggregate_verdict.as_deref(),
         max_crash_retries: max_crash,
         max_review_rejections: max_review,
     };

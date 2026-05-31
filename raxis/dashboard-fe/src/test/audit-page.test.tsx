@@ -222,4 +222,40 @@ describe("<AuditPage>", () => {
       );
     });
   });
+
+  it("keeps the search input focused while a backend filter refetch is pending", async () => {
+    const listSpy = vi
+      .spyOn(dashboardApi.audit, "list")
+      .mockResolvedValueOnce([row({ seq: 1, event_kind: "KernelBooted" })])
+      .mockImplementationOnce(() => new Promise<AuditEntryView[]>(() => {}));
+    vi.spyOn(dashboardApi.audit, "chainStatus").mockResolvedValue({
+      status: "ok",
+      last_verified_seq: 1,
+      total_records: 1,
+      segment_count: 1,
+      verified_at_ms: 1_700_000_000_000,
+      last_error: null,
+      fresh: true,
+    });
+    vi.spyOn(dashboardApi.initiatives, "list").mockResolvedValue([]);
+
+    renderAudit("/audit");
+
+    expect(await screen.findByText("KernelBooted")).toBeInTheDocument();
+    const searchInput = screen.getByPlaceholderText(
+      "Event name, payload text, task...",
+    );
+    searchInput.focus();
+    fireEvent.change(searchInput, { target: { value: "tool" } });
+
+    expect(searchInput).toHaveFocus();
+    expect(screen.getByDisplayValue("tool")).toBe(searchInput);
+    expect(screen.queryByText("Loading audit chain…")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(listSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ search: "tool" }),
+        expect.anything(),
+      );
+    });
+  });
 });

@@ -17,12 +17,9 @@ fi
 
 # Required binaries: language toolchains.
 for required in \
-    "/usr/local/bin/raxis-planner-executor" \
-    "/sbin/init" \
+    "/usr/local/bin/raxis-executor" \
+    "/init" \
     "/bin/bash" \
-    "/usr/bin/cargo" \
-    "/usr/bin/cargo-clippy" \
-    "/usr/bin/clippy-driver" \
     "/usr/bin/git" \
     "/usr/bin/curl" \
     "/usr/bin/rg" \
@@ -31,10 +28,8 @@ for required in \
     "/usr/sbin/nft" \
     "/usr/bin/node" \
     "/usr/bin/python3" \
-    "/usr/bin/rustc" \
-    "/usr/bin/rustfmt" \
     "/usr/bin/make"; do
-    if [ ! -e "$ROOTFS$required" ]; then
+    if [ ! -e "$ROOTFS$required" ] && [ ! -L "$ROOTFS$required" ]; then
         echo "verify: missing required file $required" >&2
         exit 1
     fi
@@ -160,17 +155,72 @@ done
 #
 # The realistic-scenario `lint-runner-rust` task invokes the standard
 # Cargo subcommands (`cargo fmt --check`, `cargo clippy ...`). The
-# image intentionally uses Debian's distro packages here instead of
-# rustup: rustup's full toolchain tree made the initramfs exceed the
-# guest boot envelope, so executor VMs panicked before planner vsock
-# could bind. The required runtime contract is the binaries being on
-# PATH, not the presence of rustup itself.
-for rust_bin in cargo rustc rustfmt cargo-clippy clippy-driver; do
-    if [ ! -e "$ROOTFS/usr/bin/$rust_bin" ]; then
-        echo "verify: missing /usr/bin/$rust_bin — \
+# image intentionally uses a pinned rustup toolchain here instead of
+# Debian bookworm's distro packages: the distro cargo/rustc are too
+# old for the realistic e2e lockfile v4 and can misclassify image
+# defects as task-level reviewer failures.
+RUST_TOOLCHAIN_VERSION="1.85.1"
+
+for rust_bin in rustup cargo rustc rustfmt cargo-clippy clippy-driver; do
+    if [ ! -e "$ROOTFS/root/.cargo/bin/$rust_bin" ]; then
+        echo "verify: missing /root/.cargo/bin/$rust_bin — \
 INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED. Remediation: \
 re-bake the executor-starter rootfs; the Containerfile installs \
-the distro Rust packages rustc/cargo/rustfmt/rust-clippy." >&2
+rustup toolchain $RUST_TOOLCHAIN_VERSION with rustfmt and clippy." >&2
+        exit 1
+    fi
+    if [ ! -e "$ROOTFS/usr/local/bin/$rust_bin" ] \
+        && [ ! -L "$ROOTFS/usr/local/bin/$rust_bin" ]; then
+        echo "verify: missing /usr/local/bin/$rust_bin — \
+INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED. Remediation: \
+re-bake the executor-starter rootfs so the pinned rustup shim is \
+visible on a normal PATH inside executor VMs." >&2
+        exit 1
+    fi
+done
+
+RUST_TOOLCHAIN_DIR="$(ls -d \
+    "$ROOTFS/root/.rustup/toolchains/${RUST_TOOLCHAIN_VERSION}-"* \
+    2>/dev/null | head -n1)"
+if [ -z "$RUST_TOOLCHAIN_DIR" ]; then
+    echo "verify: missing /root/.rustup/toolchains/${RUST_TOOLCHAIN_VERSION}-* — \
+INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED. Remediation: \
+re-bake the executor-starter rootfs so rustup installs the pinned \
+toolchain payload." >&2
+    exit 1
+fi
+
+for rust_payload in \
+    "bin/cargo" \
+    "bin/rustc" \
+    "bin/rustfmt" \
+    "bin/cargo-clippy" \
+    "bin/clippy-driver"; do
+    if [ ! -e "$RUST_TOOLCHAIN_DIR/$rust_payload" ]; then
+        echo "verify: missing ${RUST_TOOLCHAIN_DIR#$ROOTFS/}/$rust_payload — \
+INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED. Remediation: \
+re-bake the executor-starter rootfs so the pinned rustup toolchain \
+contains cargo, rustc, rustfmt, and clippy." >&2
+        exit 1
+    fi
+done
+
+RUST_TARGET_LIBDIR="$(ls -d \
+    "$RUST_TOOLCHAIN_DIR/lib/rustlib/"*"/lib" \
+    2>/dev/null | head -n1)"
+if [ -z "$RUST_TARGET_LIBDIR" ]; then
+    echo "verify: missing rustup target libdir under ${RUST_TOOLCHAIN_DIR#$ROOTFS/}/lib/rustlib — \
+INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED. Remediation: \
+re-bake the executor-starter rootfs; the Rust std/test sysroot is absent." >&2
+    exit 1
+fi
+
+for crate_glob in "libcore-*.rlib" "libstd-*.rlib" "libtest-*.rlib"; do
+    if ! ls "$RUST_TARGET_LIBDIR"/$crate_glob >/dev/null 2>&1; then
+        echo "verify: missing $crate_glob under ${RUST_TARGET_LIBDIR#$ROOTFS/} — \
+INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED. Remediation: \
+re-bake the executor-starter rootfs; cargo/clippy would fail with \
+\"can't find crate for std/test\" inside the VM." >&2
         exit 1
     fi
 done

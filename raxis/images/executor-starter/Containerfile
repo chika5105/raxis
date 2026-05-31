@@ -40,7 +40,6 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     ca-certificates \
     coreutils \
     curl \
-    cargo \
     fd-find \
     findutils \
     git \
@@ -54,9 +53,6 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     nftables \
     procps \
     ripgrep \
-    rust-clippy \
-    rustc \
-    rustfmt \
     sed \
     tar \
     unzip \
@@ -79,6 +75,44 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
 # are unconditionally enabled because the kernel-side `EgressTier`
 # selection is the cgroup that decides whether they are
 # load-bearing.
+
+# Pinned Rust toolchain.
+#
+# Debian bookworm's distro cargo/rustc are intentionally conservative
+# (cargo 1.65 / rustc 1.63 today). That is too old for the realistic
+# e2e seed's lockfile v4 and has produced misleading task-level
+# review failures that look like code defects while the real problem
+# is an incomplete/obsolete toolchain. Ship a minimal rustup toolchain
+# instead, pin the exact channel, and compile a tiny crate during the
+# image build so missing `std` / `test` crates fail before an agent VM
+# ever boots.
+ENV RUST_TOOLCHAIN_VERSION=1.85.1
+ENV RUSTUP_HOME=/root/.rustup
+ENV CARGO_HOME=/root/.cargo
+ENV PATH=/root/.cargo/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh \
+    && sh /tmp/rustup-init.sh -y --no-modify-path \
+        --profile minimal \
+        --default-toolchain "${RUST_TOOLCHAIN_VERSION}" \
+        --component rustfmt \
+        --component clippy \
+    && rm -f /tmp/rustup-init.sh \
+    && rustc --version \
+    && cargo --version \
+    && rustfmt --version \
+    && cargo clippy --version \
+    && for rust_bin in rustup cargo rustc rustfmt cargo-clippy clippy-driver; do \
+        ln -sf "/root/.cargo/bin/${rust_bin}" "/usr/local/bin/${rust_bin}"; \
+    done \
+    && mkdir -p /tmp/raxis-rust-smoke/src \
+    && printf '[package]\nname = "raxis-rust-smoke"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\n' \
+        > /tmp/raxis-rust-smoke/Cargo.toml \
+    && printf '#[must_use]\npub fn greet(name: &str) -> String {\n    format!("Hello, {name}")\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn uses_std_and_test_crates() {\n        assert_eq!(super::greet("RAXIS"), "Hello, RAXIS");\n    }\n}\n' \
+        > /tmp/raxis-rust-smoke/src/lib.rs \
+    && cargo fmt --manifest-path /tmp/raxis-rust-smoke/Cargo.toml --all -- --check \
+    && cargo clippy --manifest-path /tmp/raxis-rust-smoke/Cargo.toml --all-targets -- -D warnings \
+    && rm -rf /tmp/raxis-rust-smoke
 
 # Node 20 LTS via NodeSource.
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
@@ -176,13 +210,12 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 #
 # This mirrors how `cargo fmt --check` + `cargo clippy` work for
 # the parallel `lint-runner-rust` task: the starter image carries
-# the distro Rust toolchain and the seed crate's `[dependencies]`
-# is empty, so `cargo` runs
-# against the pre-baked binaries without ever needing network
-# access. The Python side reaches the same shape by pinning ruff
-# at image-bake time into system site-packages; `python -m ruff`
-# from the task body then resolves through the same import path
-# the seed `ruff.toml` already targets.
+# a pinned rustup toolchain and the seed crate's `[dependencies]`
+# is empty, so `cargo` runs against the pre-baked std/test sysroot
+# without ever needing network access. The Python side reaches the
+# same shape by pinning ruff at image-bake time into system
+# site-packages; `python -m ruff` from the task body then resolves
+# through the same import path the seed `ruff.toml` already targets.
 #
 # Pin policy: NEVER `latest`; the version bump is an explicit,
 # auditable diff against this file. The choice of 0.7.4
@@ -206,7 +239,7 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 RUN GOARCH="$(dpkg --print-architecture)" \
     && curl -fsSL "https://go.dev/dl/go1.22.0.linux-${GOARCH}.tar.gz" \
         | tar -C /usr/local -xzf -
-ENV PATH=/usr/local/go/bin:$PATH
+ENV PATH=/root/.cargo/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # GitHub CLI — pin the apt source's `arch=` to the build platform so
 # `apt-get install gh` resolves the matching binary. NodeSource +
@@ -222,7 +255,7 @@ RUN GH_ARCH="$(dpkg --print-architecture)" \
     && apt-get update && apt-get install --no-install-recommends -y gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Note: `raxis-planner-executor` (the role's PID-1 entry point) is
+# Note: `raxis-executor` (the role's PID-1 entry point) is
 # **NOT** copied in by this Containerfile. The planner binary is
 # overlaid onto the baked rootfs by `cargo xtask images bake --role
 # executor-starter` after this image is exported. Keeping the two

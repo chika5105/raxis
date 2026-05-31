@@ -44,6 +44,7 @@ struct ParityCase {
     prior_activation_state: Option<&'static str>,
     crash_retry_count: u32,
     review_reject_count: u32,
+    review_aggregate_verdict: Option<&'static str>,
     max_crash_retries: u32,
     max_review_rejections: u32,
     /// Reference verdict, computed by hand from the spec
@@ -61,6 +62,7 @@ fn parity_matrix() -> Vec<ParityCase> {
             prior_activation_state: Some("Failed"),
             crash_retry_count: 0,
             review_reject_count: 0,
+            review_aggregate_verdict: None,
             max_crash_retries: 3,
             max_review_rejections: 2,
             expected_admissible: true,
@@ -70,6 +72,7 @@ fn parity_matrix() -> Vec<ParityCase> {
             prior_activation_state: Some("Completed"),
             crash_retry_count: 0,
             review_reject_count: 1,
+            review_aggregate_verdict: Some("AtLeastOneRejected"),
             max_crash_retries: 3,
             max_review_rejections: 2,
             expected_admissible: true,
@@ -79,6 +82,7 @@ fn parity_matrix() -> Vec<ParityCase> {
             prior_activation_state: Some("Completed"),
             crash_retry_count: 0,
             review_reject_count: 0,
+            review_aggregate_verdict: None,
             max_crash_retries: 3,
             max_review_rejections: 2,
             expected_admissible: false,
@@ -88,6 +92,7 @@ fn parity_matrix() -> Vec<ParityCase> {
             prior_activation_state: Some("Active"),
             crash_retry_count: 0,
             review_reject_count: 0,
+            review_aggregate_verdict: None,
             max_crash_retries: 3,
             max_review_rejections: 2,
             expected_admissible: false,
@@ -97,6 +102,7 @@ fn parity_matrix() -> Vec<ParityCase> {
             prior_activation_state: Some("PendingActivation"),
             crash_retry_count: 0,
             review_reject_count: 0,
+            review_aggregate_verdict: None,
             max_crash_retries: 3,
             max_review_rejections: 2,
             expected_admissible: false,
@@ -123,6 +129,7 @@ fn parity_matrix() -> Vec<ParityCase> {
             prior_activation_state: Some("PendingActivation"),
             crash_retry_count: 0,
             review_reject_count: 1,
+            review_aggregate_verdict: None,
             max_crash_retries: 3,
             max_review_rejections: 2,
             expected_admissible: false,
@@ -138,6 +145,7 @@ fn parity_matrix() -> Vec<ParityCase> {
             prior_activation_state: Some("Active"),
             crash_retry_count: 0,
             review_reject_count: 1,
+            review_aggregate_verdict: None,
             max_crash_retries: 3,
             max_review_rejections: 2,
             expected_admissible: false,
@@ -147,6 +155,7 @@ fn parity_matrix() -> Vec<ParityCase> {
             prior_activation_state: None,
             crash_retry_count: 0,
             review_reject_count: 0,
+            review_aggregate_verdict: None,
             max_crash_retries: 3,
             max_review_rejections: 2,
             expected_admissible: false,
@@ -156,6 +165,7 @@ fn parity_matrix() -> Vec<ParityCase> {
             prior_activation_state: Some("Failed"),
             crash_retry_count: 3,
             review_reject_count: 0,
+            review_aggregate_verdict: None,
             max_crash_retries: 3,
             max_review_rejections: 2,
             expected_admissible: false,
@@ -165,6 +175,7 @@ fn parity_matrix() -> Vec<ParityCase> {
             prior_activation_state: Some("Completed"),
             crash_retry_count: 0,
             review_reject_count: 2,
+            review_aggregate_verdict: Some("AtLeastOneRejected"),
             max_crash_retries: 3,
             max_review_rejections: 2,
             expected_admissible: false,
@@ -174,15 +185,27 @@ fn parity_matrix() -> Vec<ParityCase> {
             prior_activation_state: Some("Completed"),
             crash_retry_count: 0,
             review_reject_count: 1,
+            review_aggregate_verdict: Some("AtLeastOneRejected"),
             max_crash_retries: 3,
             max_review_rejections: 2,
             expected_admissible: true,
+        },
+        ParityCase {
+            label: "completed-with-stale-rejection-but-all-passed",
+            prior_activation_state: Some("Completed"),
+            crash_retry_count: 0,
+            review_reject_count: 1,
+            review_aggregate_verdict: Some("AllPassed"),
+            max_crash_retries: 3,
+            max_review_rejections: 2,
+            expected_admissible: false,
         },
         ParityCase {
             label: "failed-just-below-crash-ceiling",
             prior_activation_state: Some("Failed"),
             crash_retry_count: 2,
             review_reject_count: 0,
+            review_aggregate_verdict: None,
             max_crash_retries: 3,
             max_review_rejections: 2,
             expected_admissible: true,
@@ -220,6 +243,7 @@ fn predicate_and_ksb_view_agree_across_admission_matrix() {
             prior_activation_state: case.prior_activation_state,
             crash_retry_count: case.crash_retry_count,
             review_reject_count: case.review_reject_count,
+            review_aggregate_verdict: case.review_aggregate_verdict,
             max_crash_retries: case.max_crash_retries,
             max_review_rejections: case.max_review_rejections,
         };
@@ -325,6 +349,12 @@ fn inadmissible_reason_lexemes_are_stable_across_revisions() {
             },
             "review_reject_count",
         ),
+        (
+            RetryInadmissibleReason::ReviewAggregateNotRejected {
+                verdict: "AllPassed".to_owned(),
+            },
+            "aggregate",
+        ),
     ];
     for (reason, leading) in cases {
         let human = reason.human();
@@ -363,6 +393,10 @@ fn observability_lexemes_remain_in_closed_set() {
         RetryInadmissibleReason::ReviewCeiling {
             review_reject_count: 0,
             max_review_rejections: 0,
+        }
+        .observability_lexeme(),
+        RetryInadmissibleReason::ReviewAggregateNotRejected {
+            verdict: "AllPassed".to_owned(),
         }
         .observability_lexeme(),
     ];

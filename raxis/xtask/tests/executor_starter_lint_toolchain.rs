@@ -73,10 +73,12 @@ fn verify_sh_path() -> PathBuf {
 fn build_base_rootfs_fixture(dst: &Path) {
     fs::create_dir_all(dst).expect("create fixture root");
     for rel in [
-        "usr/local/bin/raxis-planner-executor",
+        "usr/local/bin/raxis-executor",
         "bin/bash",
         "usr/bin/git",
         "usr/bin/curl",
+        "usr/bin/rg",
+        "usr/local/bin/fd",
         "usr/bin/wget",
         "usr/sbin/nft",
         "usr/bin/node",
@@ -95,13 +97,11 @@ fn build_base_rootfs_fixture(dst: &Path) {
         fs::set_permissions(&p, perms).unwrap();
     }
     install_base_python_shim(dst);
-    // `/sbin/init` is symlinked from the dev-stage pipeline; we
+    // `/init` is symlinked from the dev-stage pipeline; we
     // emulate that here so the loop in verify.sh accepting either
     // a regular file or a symlink passes.
-    let sbin = dst.join("sbin");
-    fs::create_dir_all(&sbin).unwrap();
-    std::os::unix::fs::symlink("../usr/local/bin/raxis-planner-executor", sbin.join("init"))
-        .expect("symlink /sbin/init");
+    std::os::unix::fs::symlink("/usr/local/bin/raxis-executor", dst.join("init"))
+        .expect("symlink /init");
     install_rust_toolchain(dst);
 }
 
@@ -165,13 +165,15 @@ exit 0\n"
     fs::set_permissions(&python, perms).unwrap();
 }
 
-/// Drop the stable rustup layout the verifier expects under the
-/// fixture: rustup shims in `/root/.cargo/bin` and the stable
-/// payload under `/root/.rustup/toolchains/stable-*`.
+/// Drop the pinned rustup layout the verifier expects under the
+/// fixture: rustup shims in `/root/.cargo/bin`, PATH-visible
+/// symlinks in `/usr/local/bin`, and the pinned payload under
+/// `/root/.rustup/toolchains/1.85.1-*`.
 fn install_rust_toolchain(rootfs: &Path) {
     for bin in [
         "rustup",
         "cargo",
+        "rustc",
         "rustfmt",
         "cargo-clippy",
         "clippy-driver",
@@ -182,10 +184,33 @@ fn install_rust_toolchain(rootfs: &Path) {
         let mut perms = fs::metadata(&p).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&p, perms).unwrap();
+
+        let visible = rootfs.join("usr/local/bin").join(bin);
+        fs::create_dir_all(visible.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(format!("/root/.cargo/bin/{bin}"), &visible)
+            .unwrap_or_else(|err| panic!("symlink usr/local/bin/{bin}: {err}"));
     }
-    let cargo = rootfs.join("root/.rustup/toolchains/stable-aarch64-unknown-linux-gnu/bin/cargo");
-    fs::create_dir_all(cargo.parent().unwrap()).unwrap();
-    fs::write(&cargo, b"#!/bin/sh\nexit 0\n").unwrap();
+    let toolchain = rootfs.join("root/.rustup/toolchains/1.85.1-aarch64-unknown-linux-gnu");
+    for rel in [
+        "bin/cargo",
+        "bin/rustc",
+        "bin/rustfmt",
+        "bin/cargo-clippy",
+        "bin/clippy-driver",
+    ] {
+        let p = toolchain.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, b"#!/bin/sh\nexit 0\n").unwrap();
+    }
+    let libdir = toolchain.join("lib/rustlib/aarch64-unknown-linux-gnu/lib");
+    fs::create_dir_all(&libdir).unwrap();
+    for lib in [
+        "libcore-testhash.rlib",
+        "libstd-testhash.rlib",
+        "libtest-testhash.rlib",
+    ] {
+        fs::write(libdir.join(lib), b"!<arch>\n").unwrap();
+    }
 }
 
 /// Drop the pinned JS toolchain layout under the fixture: global
@@ -575,7 +600,55 @@ fn inv_executor_image_lint_toolchain_rust_01_missing_stable_payload_fails_closed
         out.contains("INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED"),
         "{out}",
     );
-    assert!(out.contains("/root/.rustup/toolchains/stable-*"), "{out}");
+    assert!(out.contains("/root/.rustup/toolchains/1.85.1-*"), "{out}");
+}
+
+#[test]
+fn inv_executor_image_lint_toolchain_rust_01_missing_std_rlib_fails_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rootfs = tmp.path();
+    build_base_rootfs_fixture(rootfs);
+    install_ruff(rootfs, "0.7.4");
+    install_js_toolchain(rootfs, JS_PACKAGES, JS_SHIMS);
+    let libdir = rootfs
+        .join("root/.rustup/toolchains/1.85.1-aarch64-unknown-linux-gnu")
+        .join("lib/rustlib/aarch64-unknown-linux-gnu/lib");
+    fs::remove_file(libdir.join("libstd-testhash.rlib")).unwrap();
+
+    let (code, out) = run_verify(rootfs);
+    assert_ne!(code, 0, "verify.sh must reject missing Rust std rlib");
+    assert!(
+        out.contains("INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED"),
+        "{out}",
+    );
+    assert!(
+        out.contains("libstd-*.rlib") && out.contains("can't find crate for std/test"),
+        "remediation must name the missing std/test sysroot failure: {out}",
+    );
+}
+
+#[test]
+fn inv_executor_image_lint_toolchain_rust_01_missing_test_rlib_fails_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rootfs = tmp.path();
+    build_base_rootfs_fixture(rootfs);
+    install_ruff(rootfs, "0.7.4");
+    install_js_toolchain(rootfs, JS_PACKAGES, JS_SHIMS);
+    let libdir = rootfs
+        .join("root/.rustup/toolchains/1.85.1-aarch64-unknown-linux-gnu")
+        .join("lib/rustlib/aarch64-unknown-linux-gnu/lib");
+    fs::remove_file(libdir.join("libtest-testhash.rlib")).unwrap();
+
+    let (code, out) = run_verify(rootfs);
+    assert_ne!(code, 0, "verify.sh must reject missing Rust test rlib");
+    assert!(
+        out.contains("INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01 VIOLATED"),
+        "{out}",
+    );
+    assert!(
+        out.contains("libtest-*.rlib") && out.contains("can't find crate for std/test"),
+        "remediation must name the missing std/test sysroot failure: {out}",
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -644,11 +717,14 @@ fn lint_toolchain_pins_agree_across_containerfile_manifest_and_verifier() {
     // ── Rust toolchain ────────────────────────────────────────
     let manifest_rust_toolchain = extract_manifest_field(&manifest, "rust_toolchain")
         .expect("manifest.toml must declare [lint_toolchain] rust_toolchain");
-    assert_eq!(manifest_rust_toolchain, "stable");
+    assert_eq!(manifest_rust_toolchain, "1.85.1");
     assert!(
-        containerfile.contains("rustup default stable")
-            && containerfile.contains("rustup component add rustfmt clippy"),
-        "Containerfile must install stable rustup with rustfmt/clippy components",
+        containerfile.contains("RUST_TOOLCHAIN_VERSION=1.85.1")
+            && containerfile.contains("--component rustfmt")
+            && containerfile.contains("--component clippy")
+            && containerfile.contains("ln -sf \"/root/.cargo/bin/${rust_bin}\" \"/usr/local/bin/${rust_bin}\"")
+            && containerfile.contains("cargo clippy --manifest-path /tmp/raxis-rust-smoke/Cargo.toml"),
+        "Containerfile must install pinned rustup with rustfmt/clippy components, expose PATH-visible shims, and run the smoke crate",
     );
     assert!(
         verify.contains("INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-RUST-01"),

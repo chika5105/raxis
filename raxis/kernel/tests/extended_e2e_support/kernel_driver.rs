@@ -873,10 +873,15 @@ pub fn require_canonical_images() {
             .iter()
             .filter(|bin| !entries.contains_key(**bin))
             .collect();
+        let required_globs = required_globs_for_canonical_role(role);
+        let missing_globs: Vec<&&'static str> = required_globs
+            .iter()
+            .filter(|pat| !cpio_entries_match_simple_glob(&entries, pat))
+            .collect();
         assert!(
-            missing.is_empty(),
+            missing.is_empty() && missing_globs.is_empty(),
             "canonical {role} image is a stub — missing {n} required \
-             binar{plural} from {img}:\n{lines}\n\
+             binar{plural} / payload path{payload_plural} from {img}:\n{lines}\n{glob_lines}\n\
              \n\
              This usually means the image was produced by an obsolete \
              partial pipeline or the role taxonomy skipped its Containerfile \
@@ -888,10 +893,16 @@ pub fn require_canonical_images() {
              (the iter-12/merge-orchestrator failure mode). Remediation:\n  \
              cargo xtask images bake --role {xtask_role}\n\
              then re-run this test.",
-            n = missing.len(),
+            n = missing.len() + missing_globs.len(),
             plural = if missing.len() == 1 { "y" } else { "ies" },
+            payload_plural = if missing_globs.len() == 1 { "" } else { "s" },
             img = img.display(),
             lines = missing
+                .iter()
+                .map(|b| format!("  - {b}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            glob_lines = missing_globs
                 .iter()
                 .map(|b| format!("  - {b}"))
                 .collect::<Vec<_>>()
@@ -935,6 +946,18 @@ fn required_binaries_for_canonical_role(role: &str) -> &'static [&'static str] {
             "usr/bin/bash",
             "usr/bin/python3",
             "usr/bin/git",
+            "root/.cargo/bin/cargo",
+            "root/.cargo/bin/rustup",
+            "root/.cargo/bin/rustc",
+            "root/.cargo/bin/rustfmt",
+            "root/.cargo/bin/cargo-clippy",
+            "root/.cargo/bin/clippy-driver",
+            "usr/local/bin/rustup",
+            "usr/local/bin/cargo",
+            "usr/local/bin/rustc",
+            "usr/local/bin/rustfmt",
+            "usr/local/bin/cargo-clippy",
+            "usr/local/bin/clippy-driver",
             "usr/local/bin/raxis-executor",
         ],
         // Orchestrator performs semantic integration-merge work. A
@@ -951,6 +974,28 @@ fn required_binaries_for_canonical_role(role: &str) -> &'static [&'static str] {
             "unknown canonical role {other:?}; \
                          expected one of: orchestrator-core, \
                          executor-starter, reviewer-core"
+        ),
+    }
+}
+
+/// Per-role payload globs that are architecture/hash-dependent in the
+/// packed cpio. The executor Rust toolchain is the load-bearing example:
+/// rustup names the toolchain `1.85.1-<target>` and hashes the std/test
+/// rlibs. Literal-path preflight would either be host-arch-specific or
+/// stale on every Rust patch bump, so keep a tiny `*` matcher here.
+fn required_globs_for_canonical_role(role: &str) -> &'static [&'static str] {
+    match role {
+        "executor-starter" => &[
+            "root/.rustup/toolchains/1.85.1-*/bin/cargo",
+            "root/.rustup/toolchains/1.85.1-*/bin/rustc",
+            "root/.rustup/toolchains/1.85.1-*/lib/rustlib/*/lib/libcore-*.rlib",
+            "root/.rustup/toolchains/1.85.1-*/lib/rustlib/*/lib/libstd-*.rlib",
+            "root/.rustup/toolchains/1.85.1-*/lib/rustlib/*/lib/libtest-*.rlib",
+        ],
+        "orchestrator-core" | "reviewer-core" => &[],
+        other => panic!(
+            "unknown canonical role {other:?}; \
+             expected one of: orchestrator-core, executor-starter, reviewer-core"
         ),
     }
 }
@@ -1117,6 +1162,41 @@ fn cpio_passes_preflight(img: &Path, role: &str) -> bool {
     required_binaries_for_canonical_role(role)
         .iter()
         .all(|b| entries.contains_key(*b))
+        && required_globs_for_canonical_role(role)
+            .iter()
+            .all(|pat| cpio_entries_match_simple_glob(&entries, pat))
+}
+
+fn cpio_entries_match_simple_glob(
+    entries: &std::collections::BTreeMap<String, crate::common::cpio_inspect::CpioEntry>,
+    pattern: &str,
+) -> bool {
+    entries
+        .keys()
+        .any(|entry| simple_glob_match(pattern, entry.as_str()))
+}
+
+fn simple_glob_match(pattern: &str, value: &str) -> bool {
+    let mut rest = value;
+    let mut first = true;
+    for part in pattern.split('*') {
+        if part.is_empty() {
+            first = false;
+            continue;
+        }
+        if first && !pattern.starts_with('*') {
+            let Some(stripped) = rest.strip_prefix(part) else {
+                return false;
+            };
+            rest = stripped;
+        } else if let Some(idx) = rest.find(part) {
+            rest = &rest[idx + part.len()..];
+        } else {
+            return false;
+        }
+        first = false;
+    }
+    pattern.ends_with('*') || rest.is_empty()
 }
 
 /// Walk ancestors of `CARGO_MANIFEST_DIR` looking for a `Cargo.toml`

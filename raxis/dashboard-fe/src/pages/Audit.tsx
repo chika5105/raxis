@@ -105,6 +105,7 @@ export function AuditPage() {
     initialPageParam: undefined as number | undefined,
     getNextPageParam: (last: AuditEntryView[]) =>
       last.length === PAGE_SIZE ? last[last.length - 1].seq : undefined,
+    placeholderData: (previous) => previous,
   });
 
   const initiatives = useQuery({
