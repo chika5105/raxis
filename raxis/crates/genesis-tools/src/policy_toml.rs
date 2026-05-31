@@ -142,10 +142,10 @@ const DEFAULT_LANE_PRIORITY: u8 = 100;
 /// `127.0.0.1` and port `9820` is the documented spec default
 /// (well above the privileged-port ceiling). Operators who want
 /// the dashboard off explicitly set `enabled = false` in epoch 2.
-/// **Why enabled by default (vs. `[gateway]` which is commented):**
+/// **Why enabled by default (vs. model providers which are commented):**
 /// the dashboard's authentication is challenge-response over the
 /// kernel's existing operator key, so it carries no out-of-band
-/// secrets to provision. `[gateway]` is commented because it
+/// secrets to provision. Provider routing is commented because it
 /// requires real provider credentials under
 /// `<data_dir>/providers/` before it can do anything useful.
 const DEFAULT_DASHBOARD_BIND_ADDRESS: &str = "127.0.0.1";
@@ -387,12 +387,12 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
     )
     .expect("String write_fmt is infallible");
 
-    // [gateway] + [[providers]] — OPTIONAL. We emit them as commented
+    // [model_routing] + [[providers]] — OPTIONAL. We emit them as commented
     // template blocks so operators get a working starting point without
     // forcing them to know the schema upfront. A kernel started against a
-    // genesis policy with no `[gateway]` boots cleanly; it just cannot
+    // genesis policy with no `[model_routing]` boots cleanly; it just cannot
     // dispatch FetchRequests until the operator advances the policy with
-    // a real `[gateway]` and at least one `[[providers]]`.
+    // real `[model_routing]` and at least one `[[providers]]`.
     // **Why commented vs. omitted entirely?** A commented template is
     // self-documenting: an operator running `cat policy.toml` sees the
     // full schema in front of them. Omitting the section would force them
@@ -401,19 +401,15 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
     // hand-edited policy.toml files with subtle errors.
     out.push_str(
         "# ── External provider integration (OPTIONAL) ──────────────────────────\n\
-         # Uncomment the [gateway] block and at least one [[providers]] entry to\n\
+         # Uncomment the [model_routing] block and at least one [[providers]] entry to\n\
          # enable inference / data-fetch. Provider credentials live separately\n\
          # under <data_dir>/providers/<credentials_file> (mode 0600); the kernel\n\
          # NEVER reads provider credentials directly. See peripherals.md §3.2.\n\
          #\n\
-         # [gateway]\n\
-         # binary_path              = \"/usr/local/bin/raxis-gateway\"\n\
-         # spawn_timeout_secs       = 5\n\
-         # respawn_backoff_ms       = 1000\n\
-         # max_consecutive_respawns = 5\n\
-         # planner_model_orchestrator = \"claude-haiku-4-5\"\n\
-         # planner_model_executor     = \"claude-haiku-4-5\"\n\
-         # planner_model_reviewer     = \"claude-haiku-4-5\"\n\
+         # [model_routing]\n\
+         # orchestrator_model = \"claude-haiku-4-5\"\n\
+         # executor_model     = \"claude-haiku-4-5\"\n\
+         # reviewer_model     = \"claude-haiku-4-5\"\n\
          #\n\
          # [[providers]]\n\
          # provider_id           = \"anthropic-prod\"\n\
@@ -583,7 +579,7 @@ mod tests {
     fn dashboard_section_is_emitted_with_enabled_true_and_loopback_defaults() {
         // Pinned because a fresh operator should get a working
         // dashboard out of the box. If a future change demotes the
-        // section to commented-template (the `[gateway]` style) or
+        // section to commented-template (the `[model_routing]` style) or
         // removes it entirely, this test surfaces the regression
         // immediately.
         let (op_pk, op_fp, cert) = fixture_operator_identity();

@@ -151,7 +151,7 @@ pub const DEFAULT_WORKSPACE_PATH: &str = "/workspace";
 /// turn ceiling does not unbound LLM spend.
 /// Operators who want a tighter ceiling (e.g. CI runs against
 /// known-easy tasks) set `RAXIS_PLANNER_MAX_TURNS=<n>` per-spawn
-/// or `[gateway].planner_max_turns_default = <n>` in policy.
+/// or `[model_routing].planner_max_turns_default = <n>` in policy.
 /// Operators who want a looser ceiling for exploratory
 /// long-horizon planning sessions set the env var higher; the
 /// token-cap ceiling (`RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL` /

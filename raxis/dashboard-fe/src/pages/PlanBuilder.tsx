@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+/* eslint-disable react-refresh/only-export-components */
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
 import { useQuery } from "@tanstack/react-query";
 import Editor from "@monaco-editor/react";
 
@@ -6,6 +15,7 @@ import { ApiError, dashboardApi } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
 import { PlanCanvas } from "@/components/builder/PlanCanvas";
 import { Spinner } from "@/components/Spinner";
+import { Tooltip } from "@/components/Tooltip";
 import { ensureTomlLanguage, raxisMonacoTheme } from "@/lib/monaco-toml";
 import { readPolicyDraft } from "@/lib/policy-draft";
 import { useTheme } from "@/lib/theme-context";
@@ -46,6 +56,19 @@ type BuilderDrawer =
   | "credentials"
   | "verifiers"
   | null;
+type PlanTomlRevealTarget =
+  | { kind: "plan" }
+  | { kind: "workspace" }
+  | { kind: "orchestrator" }
+  | { kind: "models"; alias?: string }
+  | { kind: "tools"; profileId?: string }
+  | { kind: "credentials"; name?: string }
+  | { kind: "verifiers"; name?: string }
+  | { kind: "task"; taskId: string };
+type CanvasRevealState = { taskId: string; version: number };
+type PlanTomlEditor = Parameters<
+  NonNullable<ComponentProps<typeof Editor>["onMount"]>
+>[0];
 type ProviderKind =
   | "anthropic"
   | "openai"
@@ -419,6 +442,9 @@ export function PlanBuilderPage() {
   const { theme } = useTheme();
   const monacoTheme = raxisMonacoTheme(theme);
   const persistedDraft = useMemo(() => readPlanBuilderDraft(), []);
+  const sourceEditorRef = useRef<PlanTomlEditor | null>(null);
+  const sourceRevealRequestRef = useRef(0);
+  const canvasRevealVersionRef = useRef(0);
   const [planEnabled, setPlanEnabled] = useState(
     persistedDraft?.planEnabled ?? true,
   );
@@ -443,6 +469,7 @@ export function PlanBuilderPage() {
   );
   const [drawer, setDrawer] = useState<BuilderDrawer>(persistedDraft?.drawer ?? null);
   const [sourceOpen, setSourceOpen] = useState(persistedDraft?.sourceOpen ?? true);
+  const [canvasReveal, setCanvasReveal] = useState<CanvasRevealState | null>(null);
   const [validationOpen, setValidationOpen] = useState(false);
   const [filename, setFilename] = useState(persistedDraft?.filename ?? "plan.toml");
   const [arrangeVersion, setArrangeVersion] = useState(0);
@@ -557,12 +584,97 @@ export function PlanBuilderPage() {
     return "ready";
   }, [localIssues, planEnabled]);
 
+  const revealGeneratedToml = useCallback(
+    (target: PlanTomlRevealTarget, textOverride?: string) => {
+      if (!sourceOpen) return;
+      const fallbackText = textOverride ?? tomlText;
+      const fallbackLineNumber = findPlanTomlLine(fallbackText, target);
+      const requestId = sourceRevealRequestRef.current + 1;
+      sourceRevealRequestRef.current = requestId;
+
+      const reveal = (attempt = 0) => {
+        if (sourceRevealRequestRef.current !== requestId) return;
+        const editor = sourceEditorRef.current;
+        if (!editor) {
+          if (attempt < 8) window.setTimeout(() => reveal(attempt + 1), 70);
+          return;
+        }
+        const model = editor.getModel();
+        if (!model) {
+          if (attempt < 8) window.setTimeout(() => reveal(attempt + 1), 70);
+          return;
+        }
+        const lineNumber =
+          findPlanTomlLine(model.getValue() ?? fallbackText, target) ?? fallbackLineNumber;
+        if (!lineNumber) return;
+        const endColumn = model.getLineMaxColumn(lineNumber) ?? 1;
+        editor.revealLineInCenter(lineNumber, 1);
+        editor.setSelection({
+          startLineNumber: lineNumber,
+          startColumn: 1,
+          endLineNumber: lineNumber,
+          endColumn,
+        });
+      };
+
+      window.setTimeout(() => reveal(), 40);
+    },
+    [sourceOpen, tomlText],
+  );
+
+  const revealCanvasFromToml = useCallback(
+    (target: PlanTomlRevealTarget | null, nextTasks: TaskDraft[]) => {
+      if (!target) return;
+      if (target.kind === "task") {
+        if (!nextTasks.some((task) => task.id === target.taskId)) return;
+        setSelectedTaskId(target.taskId);
+        const version = canvasRevealVersionRef.current + 1;
+        canvasRevealVersionRef.current = version;
+        setCanvasReveal({ taskId: target.taskId, version });
+        return;
+      }
+
+      if (
+        target.kind === "plan" ||
+        target.kind === "workspace" ||
+        target.kind === "orchestrator"
+      ) {
+        setDrawer("plan");
+      } else if (target.kind === "models") {
+        setDrawer("models");
+      } else if (target.kind === "tools") {
+        setDrawer("tools");
+      } else if (target.kind === "credentials") {
+        setDrawer("credentials");
+      } else if (target.kind === "verifiers") {
+        setDrawer("verifiers");
+      }
+    },
+    [],
+  );
+
+  const toggleDrawer = (nextDrawer: Exclude<BuilderDrawer, null>, target: PlanTomlRevealTarget) => {
+    setDrawer((open) => (open === nextDrawer ? null : nextDrawer));
+    if (planEnabled) revealGeneratedToml(target);
+  };
+
+  const openDrawer = (nextDrawer: Exclude<BuilderDrawer, null>, target: PlanTomlRevealTarget) => {
+    setDrawer(nextDrawer);
+    if (planEnabled) revealGeneratedToml(target);
+  };
+
+  const selectTask = (taskId: string | null) => {
+    setSelectedTaskId(taskId);
+    if (taskId) revealGeneratedToml({ kind: "task", taskId });
+  };
+
   const syncFromState = (
     nextPlan: PlanBasics,
     nextTasks: TaskDraft[],
     nextToolProfiles = toolProfiles,
     nextModelRoutes = modelRoutes,
     nextPlanVerifiers = planVerifiers,
+    revealTarget?: PlanTomlRevealTarget,
   ) => {
     setPlanEnabled(true);
     setPlan(nextPlan);
@@ -570,46 +682,95 @@ export function PlanBuilderPage() {
     setToolProfiles(nextToolProfiles);
     setModelRoutes(nextModelRoutes);
     setPlanVerifiers(nextPlanVerifiers);
-    setTomlText(renderPlan({
+    const nextToml = renderPlan({
       plan: nextPlan,
       tasks: nextTasks,
       toolProfiles: nextToolProfiles,
       modelRoutes: nextModelRoutes,
       planVerifiers: nextPlanVerifiers,
-    }));
+    });
+    setTomlText(nextToml);
+    if (revealTarget) revealGeneratedToml(revealTarget, nextToml);
     setParseStatus({ kind: "synced", message: "Canvas and TOML are in sync." });
     setKernelValidation(null);
     setKernelError(null);
   };
 
   const updatePlan = (patch: Partial<PlanBasics>) => {
-    syncFromState({ ...plan, ...patch }, tasks);
+    const target: PlanTomlRevealTarget =
+      "initiative" in patch
+        ? { kind: "plan" }
+        : "crossCuttingArtifacts" in patch
+          ? { kind: "orchestrator" }
+          : { kind: "workspace" };
+    syncFromState(
+      { ...plan, ...patch },
+      tasks,
+      toolProfiles,
+      modelRoutes,
+      planVerifiers,
+      target,
+    );
   };
 
-  const updateTasks = (updater: (prev: TaskDraft[]) => TaskDraft[]) => {
+  const updateTasks = (
+    updater: (prev: TaskDraft[]) => TaskDraft[],
+    revealTarget?: PlanTomlRevealTarget,
+  ) => {
     const next = updater(tasks);
-    syncFromState(planEnabled ? plan : initialPlan, next);
+    syncFromState(
+      planEnabled ? plan : initialPlan,
+      next,
+      toolProfiles,
+      modelRoutes,
+      planVerifiers,
+      revealTarget,
+    );
   };
 
   const updateToolProfiles = (
     updater: (prev: ToolProfileDraft[]) => ToolProfileDraft[],
   ) => {
     const next = updater(toolProfiles);
-    syncFromState(planEnabled ? plan : initialPlan, tasks, next);
+    const changedProfileId = firstChangedKey(toolProfiles, next, (profile) => profile.id);
+    syncFromState(
+      planEnabled ? plan : initialPlan,
+      tasks,
+      next,
+      modelRoutes,
+      planVerifiers,
+      { kind: "tools", profileId: changedProfileId },
+    );
   };
 
   const updatePlanVerifiers = (
     updater: (prev: PlanVerifierDraft[]) => PlanVerifierDraft[],
   ) => {
     const next = updater(planVerifiers);
-    syncFromState(planEnabled ? plan : initialPlan, tasks, toolProfiles, modelRoutes, next);
+    const changedVerifierName = firstChangedKey(planVerifiers, next, (verifier) => verifier.name);
+    syncFromState(
+      planEnabled ? plan : initialPlan,
+      tasks,
+      toolProfiles,
+      modelRoutes,
+      next,
+      { kind: "verifiers", name: changedVerifierName },
+    );
   };
 
   const updateModelRoutes = (
     updater: (prev: ModelRouteDraft[]) => ModelRouteDraft[],
   ) => {
     const next = updater(modelRoutes);
-    syncFromState(planEnabled ? plan : initialPlan, tasks, toolProfiles, next);
+    const changedAlias = firstChangedKey(modelRoutes, next, (route) => route.alias);
+    syncFromState(
+      planEnabled ? plan : initialPlan,
+      tasks,
+      toolProfiles,
+      next,
+      planVerifiers,
+      { kind: "models", alias: changedAlias },
+    );
   };
 
   const updateCredentialSetups = (
@@ -621,11 +782,18 @@ export function PlanBuilderPage() {
   };
 
   const updateTask = (taskId: string, patch: Partial<TaskDraft>) => {
-    updateTasks((prev) =>
-      prev.map((task) =>
-        task.id === taskId ? normalizeTask({ ...task, ...patch }) : task,
-      ),
+    const revealTaskId =
+      typeof patch.id === "string" && patch.id.trim() ? patch.id.trim() : taskId;
+    updateTasks(
+      (prev) =>
+        prev.map((task) =>
+          task.id === taskId ? normalizeTask({ ...task, ...patch }) : task,
+        ),
+      { kind: "task", taskId: revealTaskId },
     );
+    if (revealTaskId !== taskId && selectedTaskId === taskId) {
+      setSelectedTaskId(revealTaskId);
+    }
   };
 
   const updatePredecessors = (taskId: string, predecessors: string) => {
@@ -646,12 +814,14 @@ export function PlanBuilderPage() {
         setSelectedTaskId(null);
       }
       return next;
-    });
+    }, selectedTaskId && selectedTaskId !== taskId
+      ? { kind: "task", taskId: selectedTaskId }
+      : undefined);
   };
 
   const addTask = (agentType: AgentType) => {
     const next = makeTask(agentType, tasks);
-    updateTasks((prev) => [...prev, next]);
+    updateTasks((prev) => [...prev, next], { kind: "task", taskId: next.id });
   };
 
   const addReviewPair = () => {
@@ -663,7 +833,7 @@ export function PlanBuilderPage() {
       predecessors: executor.id,
       paths: executor.paths,
     });
-    updateTasks((prev) => [...prev, executor, reviewer]);
+    updateTasks((prev) => [...prev, executor, reviewer], { kind: "task", taskId: executor.id });
   };
 
   const addFanOut = () => {
@@ -691,7 +861,7 @@ export function PlanBuilderPage() {
       predecessors: `${first.id}, ${second.id}`,
       paths: "src/api/, src/ui/",
     });
-    updateTasks((prev) => [...prev, first, second, reviewer]);
+    updateTasks((prev) => [...prev, first, second, reviewer], { kind: "task", taskId: first.id });
   };
 
   const clearToml = () => {
@@ -736,6 +906,8 @@ export function PlanBuilderPage() {
     }
     try {
       const parsed = parsePlanToml(next);
+      const cursorLine = sourceEditorRef.current?.getPosition()?.lineNumber ?? null;
+      const revealTarget = cursorLine ? inferPlanTomlTargetFromLine(next, cursorLine) : null;
       setPlanEnabled(true);
       setPlan(parsed.plan);
       setTasks(parsed.tasks);
@@ -745,6 +917,7 @@ export function PlanBuilderPage() {
       setSelectedTaskId((prev) =>
         prev && parsed.tasks.some((t) => t.id === prev) ? prev : null,
       );
+      revealCanvasFromToml(revealTarget, parsed.tasks);
       setParseStatus({
         kind: "synced",
         message: "Valid TOML parsed back into the canvas.",
@@ -791,7 +964,7 @@ export function PlanBuilderPage() {
               type="button"
               className="btn text-xs py-1"
               disabled={!planEnabled}
-              onClick={() => setDrawer((open) => (open === "plan" ? null : "plan"))}
+              onClick={() => toggleDrawer("plan", { kind: "plan" })}
             >
               {drawer === "plan" ? "Hide setup" : "Plan setup"}
             </button>
@@ -799,7 +972,7 @@ export function PlanBuilderPage() {
               type="button"
               className="btn text-xs py-1"
               disabled={!planEnabled}
-              onClick={() => setDrawer((open) => (open === "models" ? null : "models"))}
+              onClick={() => toggleDrawer("models", { kind: "models" })}
             >
               {drawer === "models" ? "Hide routing" : "Model routing"}
             </button>
@@ -807,7 +980,7 @@ export function PlanBuilderPage() {
               type="button"
               className="btn text-xs py-1"
               disabled={!planEnabled}
-              onClick={() => setDrawer((open) => (open === "tools" ? null : "tools"))}
+              onClick={() => toggleDrawer("tools", { kind: "tools" })}
             >
               {drawer === "tools" ? "Hide profiles" : "Tool profiles"}
             </button>
@@ -815,7 +988,7 @@ export function PlanBuilderPage() {
               type="button"
               className="btn text-xs py-1"
               disabled={!planEnabled}
-              onClick={() => setDrawer((open) => (open === "verifiers" ? null : "verifiers"))}
+              onClick={() => toggleDrawer("verifiers", { kind: "verifiers" })}
             >
               {drawer === "verifiers" ? "Hide verifiers" : "Verifiers"}
             </button>
@@ -823,7 +996,7 @@ export function PlanBuilderPage() {
               type="button"
               className="btn text-xs py-1"
               disabled={!planEnabled}
-              onClick={() => setDrawer((open) => (open === "credentials" ? null : "credentials"))}
+              onClick={() => toggleDrawer("credentials", { kind: "credentials" })}
             >
               {drawer === "credentials" ? "Hide credentials" : "Credentials"}
             </button>
@@ -925,14 +1098,16 @@ export function PlanBuilderPage() {
               credentialSetups={credentialSetups}
               policyGateRefs={policyGateRefs}
               selectedTaskId={selectedTaskId}
+              revealTaskId={canvasReveal?.taskId ?? null}
+              revealVersion={canvasReveal?.version ?? 0}
               arrangeVersion={arrangeVersion}
-              onSelectTask={setSelectedTaskId}
+              onSelectTask={selectTask}
               onUpdateTask={updateTask}
               onRemoveTask={removeTask}
               onUpdatePredecessors={updatePredecessors}
               onAddTask={addTask}
-              onOpenToolProfiles={() => setDrawer("tools")}
-              onOpenCredentialSetup={() => setDrawer("credentials")}
+              onOpenToolProfiles={() => openDrawer("tools", { kind: "tools" })}
+              onOpenCredentialSetup={() => openDrawer("credentials", { kind: "credentials" })}
               canRemoveTask={tasks.length > 0}
             />
           ) : (
@@ -948,17 +1123,18 @@ export function PlanBuilderPage() {
               <div className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      className="inline-grid h-7 w-7 place-items-center rounded-md border border-edge-strong bg-panel text-ink-muted transition-colors hover:border-accent hover:bg-panel-high hover:text-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-                      aria-label="Collapse generated plan.toml"
-                      aria-expanded={sourceOpen}
-                      aria-controls="generated-plan-toml-panel"
-                      title="Collapse generated plan.toml"
-                      onClick={() => setSourceOpen(false)}
-                    >
-                      <SourcePanelIcon open />
-                    </button>
+                    <Tooltip content="Collapse generated plan.toml" side="bottom" align="start">
+                      <button
+                        type="button"
+                        className="inline-grid h-7 w-7 place-items-center rounded-md border border-edge-strong bg-panel text-ink-muted transition-colors hover:border-accent hover:bg-panel-high hover:text-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                        aria-label="Collapse generated plan.toml"
+                        aria-expanded={sourceOpen}
+                        aria-controls="generated-plan-toml-panel"
+                        onClick={() => setSourceOpen(false)}
+                      >
+                        <SourcePanelIcon open />
+                      </button>
+                    </Tooltip>
                     <div className="min-w-0">
                       <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">
                         Generated plan.toml
@@ -986,18 +1162,23 @@ export function PlanBuilderPage() {
                 </button>
               </div>
             </div>
-            <div className="flex-1 min-h-0">
+            <div className="flex-1 h-full min-h-0 overflow-hidden">
               <Editor
                 value={tomlText}
                 language="toml"
                 beforeMount={ensureTomlLanguage}
                 theme={monacoTheme}
+                onMount={(editor) => {
+                  sourceEditorRef.current = editor;
+                }}
                 onChange={handleTomlChange}
                 options={{
                   minimap: { enabled: false },
                   fontSize: 12,
                   lineNumbersMinChars: 3,
-                  scrollBeyondLastLine: false,
+                  scrollBeyondLastLine: true,
+                  smoothScrolling: true,
+                  padding: { top: 12, bottom: 96 },
                   wordWrap: "on",
                   wrappingIndent: "same",
                   tabSize: 2,
@@ -1008,21 +1189,26 @@ export function PlanBuilderPage() {
           </aside>
         ) : (
           <aside className="shrink-0 border-l border-edge bg-panel-raised max-xl:border-l-0 max-xl:border-t">
-            <button
-              type="button"
-              className="flex h-full min-h-[320px] w-12 items-center justify-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-ink-muted transition-colors hover:bg-panel-high hover:text-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent max-xl:min-h-0 max-xl:h-11 max-xl:w-full"
-              aria-label="Show generated plan.toml"
-              aria-expanded={sourceOpen}
-              aria-controls="generated-plan-toml-panel"
-              title="Show generated plan.toml"
-              onClick={() => setSourceOpen(true)}
+            <Tooltip
+              content="Show generated plan.toml"
+              side="left"
+              className="h-full max-xl:h-11"
             >
-              <SourcePanelIcon open={false} />
-              <span className="hidden xl:block" style={{ writingMode: "vertical-rl" }}>
-                plan.toml
-              </span>
-              <span className="xl:hidden">Show generated plan.toml</span>
-            </button>
+              <button
+                type="button"
+                className="flex h-full min-h-[320px] w-12 items-center justify-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-ink-muted transition-colors hover:bg-panel-high hover:text-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent max-xl:min-h-0 max-xl:h-11 max-xl:w-full"
+                aria-label="Show generated plan.toml"
+                aria-expanded={sourceOpen}
+                aria-controls="generated-plan-toml-panel"
+                onClick={() => setSourceOpen(true)}
+              >
+                <SourcePanelIcon open={false} />
+                <span className="hidden xl:block" style={{ writingMode: "vertical-rl" }}>
+                  plan.toml
+                </span>
+                <span className="xl:hidden">Show generated plan.toml</span>
+              </button>
+            </Tooltip>
           </aside>
         )}
       </div>
@@ -1829,13 +2015,14 @@ function PlanVerifiersDrawer({
             </div>
             <div className="mt-1 flex flex-wrap gap-1.5">
               {policyGateRefs.slice(0, 8).map((gate) => (
-                <span
+                <Tooltip
                   key={`${gate.source}:${gate.name}`}
-                  className="badge max-w-full border-warn bg-warn-muted text-warn"
-                  title={`${gate.source} policy${gate.claimTypes.length ? ` • satisfies ${gate.claimTypes.join(", ")}` : ""}`}
+                  content={`${gate.source} policy${gate.claimTypes.length ? ` • satisfies ${gate.claimTypes.join(", ")}` : ""}`}
                 >
-                  {gate.name}
-                </span>
+                  <span className="badge max-w-full border-warn bg-warn-muted text-warn">
+                    {gate.name}
+                  </span>
+                </Tooltip>
               ))}
             </div>
           </div>
@@ -2290,22 +2477,23 @@ function DrawerCloseButton({
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      className="inline-grid h-7 w-7 place-items-center rounded-md border border-edge-strong bg-panel text-ink-muted transition-colors hover:border-accent hover:bg-panel-high hover:text-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-      aria-label={label}
-      title={label}
-      onClick={onClick}
-    >
-      <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" aria-hidden>
-        <path
-          d="M4 8h8"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-        />
-      </svg>
-    </button>
+    <Tooltip content={label} side="bottom" align="end">
+      <button
+        type="button"
+        className="inline-grid h-7 w-7 place-items-center rounded-md border border-edge-strong bg-panel text-ink-muted transition-colors hover:border-accent hover:bg-panel-high hover:text-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        aria-label={label}
+        onClick={onClick}
+      >
+        <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" aria-hidden>
+          <path
+            d="M4 8h8"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+          />
+        </svg>
+      </button>
+    </Tooltip>
   );
 }
 
@@ -2506,9 +2694,11 @@ function ParseStatusPill({ status }: { status: ParseStatus }) {
         ? "border-bad bg-bad/10 text-bad"
         : "border-edge bg-panel text-ink-muted";
   return (
-    <span className={`badge text-[10px] ${tone}`} title={status.message}>
-      {status.kind === "synced" ? "Synced" : status.kind === "error" ? "Parse error" : "Empty"}
-    </span>
+    <Tooltip content={status.message} side="bottom" align="end">
+      <span className={`badge text-[10px] ${tone}`}>
+        {status.kind === "synced" ? "Synced" : status.kind === "error" ? "Parse error" : "Empty"}
+      </span>
+    </Tooltip>
   );
 }
 
@@ -3454,6 +3644,192 @@ function emitToolSchema(lines: string[], profile: string, schemaJson: string) {
   }
 }
 
+function findPlanTomlLine(text: string, target: PlanTomlRevealTarget) {
+  const lines = text.split(/\r?\n/);
+  if (target.kind === "plan") return findExactHeaderLine(lines, "[plan.initiative]");
+  if (target.kind === "workspace") return findExactHeaderLine(lines, "[workspace]");
+  if (target.kind === "orchestrator") return findExactHeaderLine(lines, "[orchestrator]");
+  if (target.kind === "task") return findTaskHeaderLine(lines, target.taskId);
+  if (target.kind === "models") return findProviderAliasLine(lines, target.alias);
+  if (target.kind === "tools") return findProfileLine(lines, target.profileId);
+  if (target.kind === "credentials") return findCredentialLine(lines, target.name);
+  if (target.kind === "verifiers") return findPlanVerifierLine(lines, target.name);
+  return null;
+}
+
+function firstChangedKey<T>(previous: T[], next: T[], key: (item: T) => string) {
+  const previousByKey = new Map(previous.map((item) => [key(item), JSON.stringify(item)]));
+  for (const item of next) {
+    const itemKey = key(item);
+    if (!itemKey.trim()) continue;
+    if (previousByKey.get(itemKey) !== JSON.stringify(item)) return itemKey;
+  }
+  return next.map(key).find((itemKey) => itemKey.trim().length > 0);
+}
+
+function inferPlanTomlTargetFromLine(
+  text: string,
+  lineNumber: number,
+): PlanTomlRevealTarget | null {
+  const lines = text.split(/\r?\n/);
+  const lineIndex = Math.max(0, Math.min(lines.length - 1, lineNumber - 1));
+  const taskStart = findLastLineIndex(lines, lineIndex, (line) => line.trim() === "[[tasks]]");
+  const nextTaskStart =
+    taskStart >= 0
+      ? findNextLineIndex(lines, taskStart + 1, (line) => line.trim() === "[[tasks]]")
+      : -1;
+  const nextNonTaskHeader =
+    taskStart >= 0
+      ? findNextLineIndex(
+          lines,
+          taskStart + 1,
+          (line) => isTomlHeaderLine(line) && !isTaskNestedHeader(line),
+        )
+      : -1;
+  const taskEnd =
+    nextTaskStart < 0
+      ? nextNonTaskHeader
+      : nextNonTaskHeader < 0
+        ? nextTaskStart
+        : Math.min(nextTaskStart, nextNonTaskHeader);
+  if (taskStart >= 0 && (taskEnd < 0 || lineIndex < taskEnd)) {
+    const id = readString(
+      lines.slice(taskStart, taskEnd < 0 ? undefined : taskEnd).join("\n"),
+      "task_id",
+    );
+    if (id) return { kind: "task", taskId: id };
+  }
+
+  const verifierStart = findLastLineIndex(
+    lines,
+    lineIndex,
+    (line) => line.trim() === "[[plan.integration_merge_verifiers]]",
+  );
+  if (verifierStart >= 0) {
+    const nextHeader = findNextLineIndex(lines, verifierStart + 1, isTomlHeaderLine);
+    if (nextHeader < 0 || lineIndex < nextHeader) {
+      const name = readString(lines.slice(verifierStart, nextHeader < 0 ? undefined : nextHeader).join("\n"), "name");
+      return { kind: "verifiers", name: name ?? undefined };
+    }
+  }
+
+  for (let index = lineIndex; index >= 0; index -= 1) {
+    const line = lines[index].trim();
+    if (!isTomlHeaderLine(line)) continue;
+    if (line === "[plan.initiative]") return { kind: "plan" };
+    if (line === "[workspace]") return { kind: "workspace" };
+    if (line === "[orchestrator]") return { kind: "orchestrator" };
+    if (line.startsWith("[provider_aliases.")) {
+      return { kind: "models", alias: dynamicHeaderName(line, "provider_aliases") ?? undefined };
+    }
+    if (line.startsWith("[profiles.") || line.startsWith("[[profiles.")) {
+      return { kind: "tools", profileId: dynamicHeaderName(line, "profiles") ?? undefined };
+    }
+    if (line === "[[permitted_credentials]]" || line === "[[credential_files]]") {
+      return { kind: "credentials" };
+    }
+  }
+  return null;
+}
+
+function findExactHeaderLine(lines: string[], header: string) {
+  const index = lines.findIndex((line) => line.trim() === header);
+  return index >= 0 ? index + 1 : null;
+}
+
+function findTaskHeaderLine(lines: string[], taskId: string) {
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].trim() !== "[[tasks]]") continue;
+    const nextTask = findNextLineIndex(
+      lines,
+      index + 1,
+      (line) => isTomlHeaderLine(line) && !isTaskNestedHeader(line),
+    );
+    const block = lines.slice(index, nextTask < 0 ? undefined : nextTask).join("\n");
+    if (readString(block, "task_id") === taskId) return index + 1;
+  }
+  return null;
+}
+
+function findProviderAliasLine(lines: string[], alias?: string) {
+  return findDynamicHeaderLine(lines, "provider_aliases", alias);
+}
+
+function findProfileLine(lines: string[], profileId?: string) {
+  return findDynamicHeaderLine(lines, "profiles", profileId);
+}
+
+function findCredentialLine(lines: string[], name?: string) {
+  if (!name) return findExactHeaderLine(lines, "[[permitted_credentials]]");
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].trim() !== "[[permitted_credentials]]") continue;
+    const next = findNextLineIndex(lines, index + 1, isTomlHeaderLine);
+    const block = lines.slice(index, next < 0 ? undefined : next).join("\n");
+    if (readString(block, "name") === name) return index + 1;
+  }
+  return findExactHeaderLine(lines, "[[permitted_credentials]]");
+}
+
+function findPlanVerifierLine(lines: string[], name?: string) {
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].trim() !== "[[plan.integration_merge_verifiers]]") continue;
+    if (!name) return index + 1;
+    const next = findNextLineIndex(lines, index + 1, isTomlHeaderLine);
+    const block = lines.slice(index, next < 0 ? undefined : next).join("\n");
+    if (readString(block, "name") === name) return index + 1;
+  }
+  return null;
+}
+
+function findDynamicHeaderLine(lines: string[], prefix: string, name?: string) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const headerName = dynamicHeaderName(lines[index].trim(), prefix);
+    if (!headerName) continue;
+    if (!name || headerName === name) return index + 1;
+  }
+  return null;
+}
+
+function dynamicHeaderName(line: string, prefix: string) {
+  const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(
+    `^\\[\\[?${escapedPrefix}\\.(?:"((?:\\\\.|[^"])*)"|([A-Za-z0-9_-]+))(?:\\.|\\]|\\]\\])`,
+  ).exec(line);
+  return match ? unescapeToml(match[1] ?? match[2] ?? "") : null;
+}
+
+function isTomlHeaderLine(line: string) {
+  const trimmed = line.trim();
+  return /^\[\[?[^\]]+\]\]?$/.test(trimmed);
+}
+
+function isTaskNestedHeader(line: string) {
+  const trimmed = line.trim();
+  return trimmed.startsWith("[[tasks.");
+}
+
+function findLastLineIndex(
+  lines: string[],
+  startIndex: number,
+  predicate: (line: string) => boolean,
+) {
+  for (let index = startIndex; index >= 0; index -= 1) {
+    if (predicate(lines[index])) return index;
+  }
+  return -1;
+}
+
+function findNextLineIndex(
+  lines: string[],
+  startIndex: number,
+  predicate: (line: string) => boolean,
+) {
+  for (let index = startIndex; index < lines.length; index += 1) {
+    if (predicate(lines[index])) return index;
+  }
+  return -1;
+}
+
 function parsePlanToml(text: string): {
   plan: PlanBasics;
   tasks: TaskDraft[];
@@ -4016,6 +4392,8 @@ function downloadText(filename: string, text: string) {
 }
 
 export const __planBuilderTest = {
+  findPlanTomlLine,
+  inferPlanTomlTargetFromLine,
   parsePlanToml,
   renderPlan,
   validatePlan,

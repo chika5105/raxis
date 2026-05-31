@@ -890,6 +890,8 @@ export interface PolicySnapshotView {
   policy_sha256: string;
   signed_by: string;
   signed_at: number;
+  git_default_target_ref: string;
+  git_target_ref_locked: boolean;
   operators: PolicyOperatorView[];
   notification_routes: Record<string, string[]>;
 }

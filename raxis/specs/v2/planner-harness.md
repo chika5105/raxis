@@ -1382,7 +1382,7 @@ synthesis would exhaust the token cap long before the turn ceiling.
 Both bounds fire independently.
 
 Per-task (`[[tasks]] max_turns = N` in the plan TOML) and policy
-(`[gateway].planner_max_turns_default = N` in `policy.toml`)
+(`[model_routing].planner_max_turns_default = N` in `policy.toml`)
 overrides exist for plans that mix Reviewer (~5 turns) and
 materializer-Executor (~150 turns) tasks in one initiative. See
 [`v2-deep-spec.md §Step 12`](v2-deep-spec.md) for the full precedence chain and
@@ -1457,7 +1457,7 @@ where:
   above. Constant across attempts for the same task.
 * `step` = resolved per-task `max_turns_step`. Precedence:
   per-task `[[tasks]].max_turns_step = Some(N)` → per-policy
-  `[gateway].planner_max_turns_step_default = Some(d)` → derived
+  `[model_routing].planner_max_turns_step_default = Some(d)` → derived
   default `max(round_up_to_5(base / 2), 10)`. `max_turns_step = 0`
   is rejected at the plan parser (a zero step degenerates the
   resolver back to a constant budget and masks the cold-start

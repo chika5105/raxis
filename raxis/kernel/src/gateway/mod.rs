@@ -26,13 +26,13 @@
 //!    child with the same env shape (Phase A.4 contract), emits
 //!    `GatewaySpawned { token_prefix, binary_path, attempt }`.
 //!
-//! # No `[gateway]` section
+//! # No model providers
 //!
-//! If `policy.gateway()` is `None` the kernel runs in degraded mode:
-//! the supervisor task starts but immediately exits, logging that no
-//! gateway was configured. Subsequent FetchRequests will fail-closed
-//! at the kernel-side `gateway::*` adapter (planned for Phase B); for
-//! now this only affects the kernel boot log.
+//! If policy declares no model providers, the kernel runs in degraded
+//! mode: the supervisor task starts but immediately exits, logging that
+//! no gateway was configured. Subsequent FetchRequests fail-closed at
+//! the kernel-side `gateway::*` adapter. Gateway process wiring is
+//! kernel-owned runtime config, not signed operator policy.
 
 pub mod accept;
 pub mod client;

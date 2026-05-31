@@ -74,19 +74,15 @@ static_dir   = "/Users/jinanwachikafavour/raxis/raxis/dashboard-fe/dist"
 jwt_ttl_secs = 86400
 
 # ── External provider integration (OPTIONAL) ──────────────────────────
-# Uncomment the [gateway] block and at least one [[providers]] entry to
+# Uncomment the [model_routing] block and at least one [[providers]] entry to
 # enable inference / data-fetch. Provider credentials live separately
 # under <data_dir>/providers/<credentials_file> (mode 0600); the kernel
 # NEVER reads provider credentials directly. See peripherals.md §3.2.
 #
-# [gateway]
-# binary_path              = "/usr/local/bin/raxis-gateway"
-# spawn_timeout_secs       = 5
-# respawn_backoff_ms       = 1000
-# max_consecutive_respawns = 5
-# planner_model_orchestrator = "claude-haiku-4-5"
-# planner_model_executor     = "claude-haiku-4-5"
-# planner_model_reviewer     = "claude-haiku-4-5"
+# [model_routing]
+# orchestrator_model = "claude-haiku-4-5"
+# executor_model     = "claude-haiku-4-5"
+# reviewer_model     = "claude-haiku-4-5"
 #
 # [[providers]]
 # provider_id           = "anthropic-prod"
@@ -105,16 +101,12 @@ jwt_ttl_secs = 86400
 # # pricing.cache_read_tokens_per_dollar    = 2000000  # $0.50 / 1M cache hit
 # # pricing.cache_creation_tokens_per_dollar = 160000  # $6.25 / 1M cache write
 
-# ── [gateway] + [[providers]] + [egress] + [[lanes]] (realism-e2e) ──
-[gateway]
-binary_path              = "/Users/jinanwachikafavour/raxis/raxis/target/release/raxis-gateway"
-spawn_timeout_secs       = 30
-respawn_backoff_ms       = 1000
-max_consecutive_respawns = 5
-planner_model_orchestrator_chain = ["claude-haiku-4-5", "gemini-2.5-flash", "gpt-5.3-codex"]
-planner_model_executor_chain     = ["claude-haiku-4-5", "gemini-2.5-flash", "gpt-5.3-codex"]
-planner_model_executor_rotate_primary = true
-planner_model_reviewer_chain     = ["gpt-5.3-codex", "claude-haiku-4-5", "gemini-2.5-flash"]
+# ── [model_routing] + [[providers]] + [egress] + [[lanes]] (realism-e2e) ──
+[model_routing]
+orchestrator_chain = ["claude-haiku-4-5", "gemini-2.5-flash", "gpt-5.3-codex"]
+executor_chain     = ["claude-haiku-4-5", "gemini-2.5-flash", "gpt-5.3-codex"]
+executor_rotate_primary = true
+reviewer_chain     = ["gpt-5.3-codex", "claude-haiku-4-5", "gemini-2.5-flash"]
 
 # `example.com` admits the iter65 dep-fetch-evidence task's
 # one HTTPS GET via Path A3; the witness in

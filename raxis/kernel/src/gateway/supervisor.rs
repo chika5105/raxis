@@ -22,10 +22,30 @@ use std::time::Duration;
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_crypto::token::try_random_array;
-use raxis_policy::GatewaySection;
 use thiserror::Error;
 use tokio::process::{Child, Command};
 use tokio::sync::oneshot;
+
+pub const GATEWAY_BINARY_ENV: &str = "RAXIS_GATEWAY_BINARY";
+pub const GATEWAY_RESPAWN_BACKOFF_MS_ENV: &str = "RAXIS_GATEWAY_RESPAWN_BACKOFF_MS";
+pub const GATEWAY_MAX_CONSECUTIVE_RESPAWNS_ENV: &str = "RAXIS_GATEWAY_MAX_CONSECUTIVE_RESPAWNS";
+
+#[derive(Debug, Clone)]
+pub struct GatewayRuntimeConfig {
+    pub binary_path: String,
+    pub respawn_backoff_ms: u64,
+    pub max_consecutive_respawns: u32,
+}
+
+impl GatewayRuntimeConfig {
+    pub fn from_runtime_env() -> Self {
+        Self {
+            binary_path: runtime_gateway_binary_path(),
+            respawn_backoff_ms: parse_env_u64(GATEWAY_RESPAWN_BACKOFF_MS_ENV, 1000).max(1),
+            max_consecutive_respawns: parse_env_u32(GATEWAY_MAX_CONSECUTIVE_RESPAWNS_ENV, 5).max(1),
+        }
+    }
+}
 
 /// Why the supervisor stopped. `main.rs` uses this to choose the
 /// subsequent log + audit shape (no exit-code branching needed; the
@@ -40,9 +60,8 @@ pub enum SupervisorShutdown {
     /// was the last spawn attempt; it has exited (or been killed) by
     /// the time this variant returns.
     Quarantined { reason: String, total_attempts: u32 },
-    /// The kernel was booted without a `[gateway]` policy section.
-    /// The supervisor logged the situation and returned immediately;
-    /// no child was ever spawned.
+    /// The kernel was booted without any approved model providers, so
+    /// no gateway subprocess is needed for this runtime.
     NoGatewayConfigured,
 }
 
@@ -63,14 +82,12 @@ pub enum SupervisorError {
 
 /// Spawn the gateway subprocess and supervise it until either:
 /// (a) `shutdown_rx` fires (kernel shutting down), OR
-/// (b) `gateway_section.max_consecutive_respawns` is exceeded.
+/// (b) `runtime_config.max_consecutive_respawns` is exceeded.
 ///
-/// `gateway_section` is borrowed from the kernel's `Arc<PolicyBundle>`;
-/// taking a reference rather than an owned copy lets the supervisor
-/// observe an epoch-advanced policy by re-borrowing on each spawn — for
-/// v1 we don't reload the binary path mid-supervisor (epoch advance
-/// only sends an `EpochAdvanced` IPC frame to the running gateway, per
-/// the spec), but the design keeps the door open.
+/// `runtime_config` is kernel-owned process configuration, not signed
+/// operator policy. The policy may approve model providers and model
+/// routing, but it never gets to pick the host binary path, token,
+/// socket, or respawn mechanics for the trusted gateway subprocess.
 ///
 /// The `audit` sink is used for `GatewaySpawned` / `GatewayCrashed` /
 /// `GatewayQuarantined` records.
@@ -82,19 +99,19 @@ pub enum SupervisorError {
 /// `fetch()` callers see `GatewayCallError::Unavailable` instead of
 /// hanging on the soon-to-be-torn-down stream.
 pub async fn spawn_and_supervise(
-    gateway_section: Option<GatewaySection>,
+    runtime_config: Option<GatewayRuntimeConfig>,
     data_dir: PathBuf,
     socket_path: PathBuf,
     audit: Arc<dyn AuditSink>,
     client: Arc<crate::gateway::client::GatewayClient>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) -> SupervisorShutdown {
-    let mut cfg = match gateway_section {
+    let mut cfg = match runtime_config {
         Some(c) => c,
         None => {
             eprintln!(
                 "{{\"level\":\"info\",\"event\":\"gateway_supervisor_no_config\",\
-                 \"action\":\"degraded_mode\"}}"
+                 \"action\":\"no_model_providers\"}}"
             );
             return SupervisorShutdown::NoGatewayConfigured;
         }
@@ -413,6 +430,35 @@ fn mint_token() -> Result<String, SupervisorError> {
     Ok(hex::encode(bytes))
 }
 
+fn parse_env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn parse_env_u32(name: &str, default: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
+fn runtime_gateway_binary_path() -> String {
+    if let Ok(raw) = std::env::var(GATEWAY_BINARY_ENV) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|parent| parent.join("raxis-gateway")))
+        .unwrap_or_else(|| PathBuf::from("raxis-gateway"))
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Spawn a single child. Tokio Command + Stdio inherited so the
 /// gateway's stderr lands on the kernel's stderr in real time
 /// (operators tail one stream, not two).
@@ -588,21 +634,11 @@ mod tests {
 
     use raxis_test_support::FakeAuditSink;
 
-    fn fake_section(binary_path: &str, max_respawns: u32, backoff_ms: u64) -> GatewaySection {
-        GatewaySection {
+    fn fake_section(binary_path: &str, max_respawns: u32, backoff_ms: u64) -> GatewayRuntimeConfig {
+        GatewayRuntimeConfig {
             binary_path: binary_path.to_owned(),
-            spawn_timeout_secs: 1,
             respawn_backoff_ms: backoff_ms,
             max_consecutive_respawns: max_respawns,
-            planner_max_turns_default: None,
-            planner_max_turns_step_default: None,
-            planner_model_orchestrator: None,
-            planner_model_executor: None,
-            planner_model_reviewer: None,
-            planner_model_orchestrator_chain: Vec::new(),
-            planner_model_executor_chain: Vec::new(),
-            planner_model_reviewer_chain: Vec::new(),
-            planner_model_executor_rotate_primary: false,
         }
     }
 
@@ -647,7 +683,7 @@ mod tests {
             .count()
     }
 
-    // ── No [gateway] section ─────────────────────────────────────────
+    // ── No runtime gateway config ────────────────────────────────────
 
     #[tokio::test]
     async fn no_gateway_section_returns_immediately_with_no_audit_events() {

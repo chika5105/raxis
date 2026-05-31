@@ -306,18 +306,14 @@ if [ "$SKIP_PROVIDER" -eq 0 ]; then
     unset provider_key
     unset escaped_provider_key
 
-    if ! grep -Eq '^[[:space:]]*\[gateway\][[:space:]]*$' "$policy"; then
-        log "Adding gateway policy block"
+    if ! grep -Eq '^[[:space:]]*\[model_routing\][[:space:]]*$' "$policy"; then
+        log "Adding model routing policy block"
         cat >> "$policy" <<EOF
 
-[gateway]
-binary_path              = "$(brew --prefix raxis)/bin/raxis-gateway"
-spawn_timeout_secs       = 5
-respawn_backoff_ms       = 1000
-max_consecutive_respawns = 5
-planner_model_orchestrator = "claude-haiku-4-5"
-planner_model_executor     = "claude-haiku-4-5"
-planner_model_reviewer     = "claude-haiku-4-5"
+[model_routing]
+orchestrator_model = "claude-haiku-4-5"
+executor_model     = "claude-haiku-4-5"
+reviewer_model     = "claude-haiku-4-5"
 EOF
     fi
 

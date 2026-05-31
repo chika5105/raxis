@@ -65,15 +65,13 @@ pub(crate) struct RawPolicy {
     #[serde(default)]
     pub(crate) egress: EgressSection,
 
-    /// `[gateway]` — supervisor config for the kernel-spawned `raxis-gateway`
-    /// subprocess. **Optional** in v1: a kernel without a `[gateway]` section
-    /// boots and serves operator IPC, but no `FetchRequest` can be dispatched
-    /// (any planner asking for an inference call will receive a deferred
-    /// failure). Operators who run RAXIS without an LLM workflow (audit-only,
-    /// or with a planner that talks to providers via some out-of-band path)
-    /// can omit this section entirely.
+    /// `[model_routing]` — operator-owned model routing and fallback policy.
+    ///
+    /// This deliberately does NOT include gateway subprocess wiring. The
+    /// gateway binary, spawn timeout, respawn backoff, and process token are
+    /// Raxis-owned runtime mechanics, not signed business policy.
     #[serde(default)]
-    pub(crate) gateway: Option<GatewaySection>,
+    pub(crate) model_routing: Option<ModelRoutingSection>,
 
     /// `[[providers]]` — declarative catalogue of model / data providers the
     /// gateway is permitted to forward requests to. Provider credentials
@@ -2427,61 +2425,29 @@ pub(crate) fn derive_default_provider_egress_grants(
 }
 
 // ---------------------------------------------------------------------------
-// Gateway supervisor config — `[gateway]`
-// Spec ref: peripherals.md §3.2 "Spawn model" — the kernel spawns one
-// `raxis-gateway` subprocess at boot and supervises it (respawns on crash;
-// new gateway_process_token issued on each spawn). The single-gateway
-// model is justified by tokio's async multiplexing: one process can fan
-// out to thousands of concurrent HTTP requests over the gateway UDS. No
-// pool needed.
+// Model routing policy — `[model_routing]`
 // ---------------------------------------------------------------------------
 
-/// `[gateway]` — gateway subprocess supervisor parameters.
+/// `[model_routing]` — operator-owned model primary/fallback policy.
 /// ```toml
-/// [gateway]
-/// binary_path             = "/usr/local/bin/raxis-gateway"
-/// spawn_timeout_secs      = 5     # how long the kernel waits for GatewayReady
-/// respawn_backoff_ms      = 1000  # initial back-off between respawns; doubles
-/// max_consecutive_respawns = 5    # circuit-breaker: too many crashes → quarantine
+/// [model_routing]
+/// orchestrator_chain = ["claude-haiku-4-5"]
+/// executor_chain     = ["claude-haiku-4-5", "gemini-2.5-flash"]
+/// reviewer_chain     = ["gpt-5.3-codex"]
 /// ```
-/// All fields except `binary_path` have defaults so most operators only
-/// need `binary_path = "..."`. The kernel re-validates `binary_path` at
-/// spawn time (not at policy validate time), since the binary file may
-/// be added or replaced after the policy artifact is signed.
+///
+/// This section answers the CISO/business question "which model stack may
+/// each agent role use, in which fallback order, and with what liveness
+/// ceiling?" It intentionally excludes gateway process management: gateway
+/// binary discovery, respawn backoff, tokens, and sockets are kernel-owned
+/// runtime mechanics and must never be signed operator policy.
 #[derive(Debug, Clone, Deserialize)]
-pub struct GatewaySection {
-    /// Absolute path to the `raxis-gateway` binary. The kernel
-    /// `Command::new(binary_path)` at boot. MUST be absolute (validated at
-    /// PolicyBundle::validate time) so PATH-based hijacks are impossible.
-    pub binary_path: String,
-
-    /// Maximum seconds to wait for `GatewayMessage::GatewayReady` after
-    /// spawning. If the gateway does not handshake in time, the kernel
-    /// terminates the child and treats it as a crash for the respawn loop.
-    /// Default: 5 seconds.
-    #[serde(default = "default_gateway_spawn_timeout_secs")]
-    pub spawn_timeout_secs: u64,
-
-    /// Initial back-off (in milliseconds) between respawn attempts after a
-    /// crash. Doubles each consecutive crash up to a hard cap of 60 s.
-    /// Default: 1000 ms.
-    #[serde(default = "default_gateway_respawn_backoff_ms")]
-    pub respawn_backoff_ms: u64,
-
-    /// After this many consecutive respawns within the back-off window the
-    /// kernel quarantines the gateway slot — no further respawns until the
-    /// operator either restarts the kernel OR triggers a manual respawn via
-    /// `raxis-cli gateway restart` (planned for v2). FetchRequests issued
-    /// while quarantined return `error: "GatewayUnavailable"`.
-    /// Default: 5 respawns.
-    #[serde(default = "default_gateway_max_consecutive_respawns")]
-    pub max_consecutive_respawns: u32,
-
+pub struct ModelRoutingSection {
     /// **V2.7 — `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.** Operator-supplied
     /// default `max_turns` for any planner session whose per-task plan
     /// entry omits `max_turns`. Resolution precedence (per-spawn):
     /// 1. `[[tasks]].max_turns` from the parsed plan (per-task override).
-    /// 2. `[gateway].planner_max_turns_default` (this field — policy default).
+    /// 2. `[model_routing].planner_max_turns_default` (this field).
     /// 3. Compiled fallback `raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS`
     ///    (currently 100; bumped 20→50→100 across iter25 / iter31 to fit
     ///    the historical worst-case Executor task — see
@@ -2512,7 +2478,7 @@ pub struct GatewaySection {
     /// **Resolution precedence** (per-spawn):
     /// 1. `[[tasks]].max_turns_step` from the parsed plan (per-task
     ///    override).
-    /// 2. `[gateway].planner_max_turns_step_default` (this field —
+    /// 2. `[model_routing].planner_max_turns_step_default` (this field —
     ///    policy default).
     /// 3. Derived default `max(round_up_to_5(base/2), 10)` so
     ///    cold-start retries still get a useful step even on plans
@@ -2537,56 +2503,46 @@ pub struct GatewaySection {
     /// selection so host environment variables cannot silently
     /// reroute inference.
     #[serde(default)]
-    pub planner_model_orchestrator: Option<String>,
+    pub orchestrator_model: Option<String>,
 
     /// Optional model id stamped into Executor sessions as
     /// `RAXIS_MODEL_ID`.
     #[serde(default)]
-    pub planner_model_executor: Option<String>,
+    pub executor_model: Option<String>,
 
     /// Optional model id stamped into Reviewer sessions as
     /// `RAXIS_MODEL_ID`.
     #[serde(default)]
-    pub planner_model_reviewer: Option<String>,
+    pub reviewer_model: Option<String>,
 
     /// Optional ordered fallback chain stamped into Orchestrator
     /// sessions as `RAXIS_MODEL_CHAIN`. First element is primary;
     /// subsequent elements are attempted only for retryable provider
     /// failures. When present, this chain takes precedence over the
-    /// single `planner_model_orchestrator` field.
+    /// single `orchestrator_model` field.
     #[serde(default)]
-    pub planner_model_orchestrator_chain: Vec<String>,
+    pub orchestrator_chain: Vec<String>,
 
     /// Optional ordered fallback chain stamped into Executor
     /// sessions as `RAXIS_MODEL_CHAIN`.
     #[serde(default)]
-    pub planner_model_executor_chain: Vec<String>,
+    pub executor_chain: Vec<String>,
 
     /// Optional ordered fallback chain stamped into Reviewer
     /// sessions as `RAXIS_MODEL_CHAIN`.
     #[serde(default)]
-    pub planner_model_reviewer_chain: Vec<String>,
+    pub reviewer_chain: Vec<String>,
 
     /// When true, Executor sessions rotate the
-    /// `planner_model_executor_chain` primary by stable task id while
+    /// `executor_chain` primary by stable task id while
     /// keeping the same set of fallback models. This is primarily a
     /// live-e2e diversification knob: concurrent executors exercise
     /// different provider primaries instead of stampeding one vendor.
     #[serde(default)]
-    pub planner_model_executor_rotate_primary: bool,
+    pub executor_rotate_primary: bool,
 }
 
-fn default_gateway_spawn_timeout_secs() -> u64 {
-    5
-}
-fn default_gateway_respawn_backoff_ms() -> u64 {
-    1000
-}
-fn default_gateway_max_consecutive_respawns() -> u32 {
-    5
-}
-
-fn validate_gateway_role_models(
+fn validate_model_routing_role_models(
     role: &str,
     single_model: Option<&str>,
     model_chain: &[String],
@@ -2598,7 +2554,7 @@ fn validate_gateway_role_models(
     for model in model_chain {
         if model.trim().is_empty() {
             return Err(PolicyError::MalformedArtifact(format!(
-                "[gateway].planner_model_{role}_chain contains an empty model id; \
+                "[model_routing].{role}_chain contains an empty model id; \
                  declare at least one non-empty model for every planner role"
             )));
         }
@@ -2606,8 +2562,8 @@ fn validate_gateway_role_models(
     }
     if single.is_none() && !chain_has_model {
         return Err(PolicyError::MalformedArtifact(format!(
-            "[gateway] must declare planner_model_{role} or \
-             planner_model_{role}_chain with at least one model"
+            "[model_routing] must declare {role}_model or \
+             {role}_chain with at least one model"
         )));
     }
     Ok(())
@@ -4708,9 +4664,10 @@ pub struct PolicyBundle {
     /// false` or when `[[providers]]` is empty.
     default_provider_egress_grants: Vec<DefaultProviderEgressGrant>,
 
-    /// Optional `[gateway]` config. `None` = kernel runs without a
-    /// gateway subprocess (no inference / fetch capability).
-    gateway: Option<GatewaySection>,
+    /// Optional `[model_routing]` config. Required whenever model
+    /// providers are declared. Gateway process supervision is not stored
+    /// here; it is kernel-owned runtime configuration.
+    model_routing: Option<ModelRoutingSection>,
 
     /// `[[providers]]` entries, validated for unique IDs and per-field
     /// caps. Empty `Vec` is permitted (matches `gateway = None`).
@@ -5151,47 +5108,55 @@ impl PolicyBundle {
             .map(|r| (r.role_id.clone(), r.ceiling.clone()))
             .collect();
 
-        // Validate `[gateway]` if present.
-        if let Some(g) = &raw.gateway {
-            if !std::path::Path::new(&g.binary_path).is_absolute() {
+        // Validate `[model_routing]` if present. Model routing is the
+        // operator-owned policy surface. Gateway subprocess supervision is
+        // kernel-owned runtime config and is rejected before this point if
+        // it appears as `[gateway]`.
+        if let Some(routing) = &raw.model_routing {
+            if routing.planner_max_turns_default == Some(0) {
+                return Err(PolicyError::MalformedArtifact(
+                    "[model_routing].planner_max_turns_default must be > 0".to_owned(),
+                ));
+            }
+            if routing.planner_max_turns_step_default == Some(0) {
+                return Err(PolicyError::MalformedArtifact(
+                    "[model_routing].planner_max_turns_step_default must be > 0".to_owned(),
+                ));
+            }
+            validate_model_routing_role_models(
+                "orchestrator",
+                routing.orchestrator_model.as_deref(),
+                &routing.orchestrator_chain,
+            )?;
+            validate_model_routing_role_models(
+                "executor",
+                routing.executor_model.as_deref(),
+                &routing.executor_chain,
+            )?;
+            validate_model_routing_role_models(
+                "reviewer",
+                routing.reviewer_model.as_deref(),
+                &routing.reviewer_chain,
+            )?;
+        }
+
+        // Validate `[[lanes]]` entries. A duplicate lane id is
+        // ambiguous at admission time because `lane_config()` returns
+        // the first matching row; fail policy load instead of letting
+        // later policy text silently lose.
+        let mut seen_lane_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for lane in &raw.lanes {
+            if lane.lane_id.trim().is_empty() {
+                return Err(PolicyError::MalformedArtifact(
+                    "[[lanes]] lane_id must be a non-empty string".to_owned(),
+                ));
+            }
+            if !seen_lane_ids.insert(&lane.lane_id) {
                 return Err(PolicyError::MalformedArtifact(format!(
-                    "[gateway] binary_path must be absolute (got {:?}); \
-                     relative paths are rejected to prevent PATH-based hijacks",
-                    g.binary_path
+                    "[[lanes]] lane_id={:?} is duplicated; IDs must be unique",
+                    lane.lane_id
                 )));
             }
-            if g.spawn_timeout_secs == 0 {
-                return Err(PolicyError::MalformedArtifact(
-                    "[gateway] spawn_timeout_secs must be > 0".to_owned(),
-                ));
-            }
-            if g.respawn_backoff_ms == 0 {
-                return Err(PolicyError::MalformedArtifact(
-                    "[gateway] respawn_backoff_ms must be > 0".to_owned(),
-                ));
-            }
-            if g.max_consecutive_respawns == 0 {
-                return Err(PolicyError::MalformedArtifact(
-                    "[gateway] max_consecutive_respawns must be > 0 — set to 1 \
-                     to disable auto-respawn rather than 0"
-                        .to_owned(),
-                ));
-            }
-            validate_gateway_role_models(
-                "orchestrator",
-                g.planner_model_orchestrator.as_deref(),
-                &g.planner_model_orchestrator_chain,
-            )?;
-            validate_gateway_role_models(
-                "executor",
-                g.planner_model_executor.as_deref(),
-                &g.planner_model_executor_chain,
-            )?;
-            validate_gateway_role_models(
-                "reviewer",
-                g.planner_model_reviewer.as_deref(),
-                &g.planner_model_reviewer_chain,
-            )?;
         }
 
         // Validate `[[providers]]` entries.
@@ -5574,6 +5539,15 @@ impl PolicyBundle {
             ));
         }
 
+        if !raw.providers.is_empty() && raw.model_routing.is_none() {
+            return Err(PolicyError::MalformedArtifact(
+                "[model_routing] is required when [[providers]] are declared; \
+                 choose at least one primary/fallback model for orchestrator, \
+                 executor, and reviewer roles"
+                    .to_owned(),
+            ));
+        }
+
         // V2 — pre-compute the implicit-provider-grant projection
         // ahead of the `Self` move (`raw.providers` is consumed by
         // the struct expression below).
@@ -5615,7 +5589,7 @@ impl PolicyBundle {
             egress_implicit_provider_grants: raw.egress.implicit_provider_grants,
             egress_deny_provider: raw.egress.deny_provider,
             default_provider_egress_grants,
-            gateway: raw.gateway,
+            model_routing: raw.model_routing,
             providers: raw.providers,
             plan_signing: {
                 if let Some(section) = raw.plan_signing.as_ref() {
@@ -6084,7 +6058,7 @@ impl PolicyBundle {
             max_session_ttl: Duration::from_secs(0),
             allowed_worktree_roots: Vec::new(),
             max_delegation_ttl: Duration::from_secs(0),
-            gateway: None,
+            model_routing: None,
             providers: Vec::new(),
             plan_signing: None,
             plan_bundle_limits: None,
@@ -6463,12 +6437,13 @@ impl PolicyBundle {
         self.egress_patterns.clone()
     }
 
-    // ── Gateway supervisor config ───────────────────────────────────────────
+    // ── Model routing policy ───────────────────────────────────────────────
 
-    /// Optional `[gateway]` config. `None` if the policy omits the section
-    /// (kernel runs without a gateway subprocess; no inference dispatch).
-    pub fn gateway(&self) -> Option<&GatewaySection> {
-        self.gateway.as_ref()
+    /// Optional `[model_routing]` config. `None` means no model routing
+    /// policy is active; policy validation rejects that shape whenever
+    /// model providers are declared.
+    pub fn model_routing(&self) -> Option<&ModelRoutingSection> {
+        self.model_routing.as_ref()
     }
 
     // ── Plan-signing freshness / replay-protection ──────────────────────────
@@ -6498,8 +6473,7 @@ impl PolicyBundle {
     // ── Provider catalogue ──────────────────────────────────────────────────
 
     /// All `[[providers]]` entries in declaration order. Empty `&[]` if the
-    /// policy declares no providers (paired with `gateway() == None` in the
-    /// degraded "no-LLM" deployment).
+    /// policy declares no providers.
     pub fn providers(&self) -> &[ProviderEntry] {
         &self.providers
     }
@@ -6743,7 +6717,7 @@ mod tests {
             max_session_ttl: Duration::from_secs(0),
             allowed_worktree_roots: roots.into_iter().map(str::to_owned).collect(),
             max_delegation_ttl: Duration::from_secs(0),
-            gateway: None,
+            model_routing: None,
             providers: Vec::new(),
             plan_signing: None,
             plan_bundle_limits: None,
@@ -6862,11 +6836,11 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — `[gateway]` and `[[providers]]` validation (Phase A.3 / T0.3).
+// Tests — `[model_routing]` and `[[providers]]` validation (Phase A.3 / T0.3).
 // ---------------------------------------------------------------------------
-// These cover every fail-closed branch in the gateway / providers
+// These cover every fail-closed branch in the model-routing / providers
 // validation block of `PolicyBundle::validate`. Each test constructs a
-// minimal-but-loadable TOML document, mutates the gateway/providers
+// minimal-but-loadable TOML document, mutates the model-routing/providers
 // section, and asserts the expected outcome via the public `load_policy`
 // (since we want the *whole* parse + validate path under test, not just
 // individual field checks).
@@ -6977,189 +6951,143 @@ priority             = 100
     const LLM_PRICING_BLOCK: &str = "  pricing.input_tokens_per_dollar  = 200000\n\
           pricing.output_tokens_per_dollar = 50000\n";
 
-    const GATEWAY_ROLE_MODELS_BLOCK: &str = "planner_model_orchestrator = \"claude-haiku-4-5\"\n\
-planner_model_executor     = \"gemini-2.5-flash\"\n\
-planner_model_reviewer     = \"gpt-5.3-codex\"\n";
+    pub(super) const MODEL_ROUTING_BLOCK: &str = "\n[model_routing]\n\
+orchestrator_model = \"claude-haiku-4-5\"\n\
+executor_model     = \"gemini-2.5-flash\"\n\
+reviewer_model     = \"gpt-5.3-codex\"\n";
+
+    pub(super) fn minimal_policy_with_model_routing_toml() -> String {
+        let mut t = minimal_policy_toml();
+        t.push_str(MODEL_ROUTING_BLOCK);
+        t
+    }
 
     // ── No-section happy path ─────────────────────────────────────────────
 
     #[test]
-    fn policy_without_gateway_or_providers_loads_cleanly() {
-        // Genesis policy template has both sections COMMENTED OUT. The
-        // kernel must boot fine without them — operators who don't need
-        // an LLM workflow ship like this.
+    fn policy_without_model_routing_or_providers_loads_cleanly() {
+        // Genesis policy template has model routing and providers omitted.
+        // The kernel must boot fine for audit-only/operator-only workflows.
         let bundle = write_and_load(&minimal_policy_toml())
-            .expect("genesis-template policy must load even without [gateway]");
-        assert!(bundle.gateway().is_none(), "no [gateway] section → None");
+            .expect("genesis-template policy must load without model providers");
+        assert!(
+            bundle.model_routing().is_none(),
+            "no [model_routing] section → None"
+        );
         assert!(
             bundle.providers().is_empty(),
             "no [[providers]] → empty slice"
         );
     }
 
-    // ── [gateway] happy path + accessor ───────────────────────────────────
-
     #[test]
-    fn gateway_section_with_defaults_round_trips_through_loader() {
+    fn gateway_section_is_rejected_as_runtime_config() {
         let mut t = minimal_policy_toml();
         t.push_str("\n[gateway]\nbinary_path = \"/usr/local/bin/raxis-gateway\"\n");
-        t.push_str(GATEWAY_ROLE_MODELS_BLOCK);
-        let bundle = write_and_load(&t).expect("valid [gateway] must load");
-        let g = bundle
-            .gateway()
-            .expect("gateway() returns Some after [gateway]");
-        assert_eq!(g.binary_path, "/usr/local/bin/raxis-gateway");
-        // Defaults applied:
-        assert_eq!(g.spawn_timeout_secs, 5);
-        assert_eq!(g.respawn_backoff_ms, 1000);
-        assert_eq!(g.max_consecutive_respawns, 5);
+        let err = write_and_load(&t).expect_err("[gateway] is kernel runtime config");
+        let s = format!("{err}");
+        assert!(
+            s.contains("FAIL_POLICY_RUNTIME_SECTION_FORBIDDEN") && s.contains("[gateway]"),
+            "error must name forbidden runtime section; got: {s}"
+        );
+    }
+
+    // ── [model_routing] happy path + accessor ─────────────────────────────
+
+    #[test]
+    fn model_routing_accepts_per_role_models() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[model_routing]\n\
+             orchestrator_model = \"claude-haiku-4-5\"\n\
+             executor_model     = \"gemini-2.5-flash\"\n\
+             reviewer_model     = \"gpt-5.3-codex\"\n",
+        );
+        let bundle = write_and_load(&t).expect("valid [model_routing] must load");
+        let routing = bundle
+            .model_routing()
+            .expect("model routing section loaded");
         assert_eq!(
-            g.planner_model_orchestrator.as_deref(),
+            routing.orchestrator_model.as_deref(),
             Some("claude-haiku-4-5")
         );
-        assert_eq!(
-            g.planner_model_executor.as_deref(),
-            Some("gemini-2.5-flash")
-        );
-        assert_eq!(g.planner_model_reviewer.as_deref(), Some("gpt-5.3-codex"));
-        assert!(g.planner_model_orchestrator_chain.is_empty());
-        assert!(g.planner_model_executor_chain.is_empty());
-        assert!(g.planner_model_reviewer_chain.is_empty());
-        assert!(!g.planner_model_executor_rotate_primary);
+        assert_eq!(routing.executor_model.as_deref(), Some("gemini-2.5-flash"));
+        assert_eq!(routing.reviewer_model.as_deref(), Some("gpt-5.3-codex"));
     }
 
     #[test]
-    fn gateway_section_accepts_per_role_planner_models() {
+    fn model_routing_accepts_per_role_model_chains() {
         let mut t = minimal_policy_toml();
         t.push_str(
-            "\n[gateway]\n\
-             binary_path = \"/usr/local/bin/raxis-gateway\"\n\
-             planner_model_orchestrator = \"claude-haiku-4-5\"\n\
-             planner_model_executor     = \"gemini-2.5-flash\"\n\
-             planner_model_reviewer     = \"gpt-5.3-codex\"\n",
+            "\n[model_routing]\n\
+             orchestrator_chain = [\"claude-haiku-4-5\", \"gemini-2.5-flash\", \"gpt-5.3-codex\"]\n\
+             executor_chain = [\"claude-haiku-4-5\", \"gemini-2.5-flash\", \"gpt-5.3-codex\"]\n\
+             reviewer_chain = [\"gpt-5.3-codex\", \"claude-haiku-4-5\", \"gemini-2.5-flash\"]\n\
+             executor_rotate_primary = true\n",
         );
-        let bundle = write_and_load(&t).expect("valid [gateway] must load");
-        let g = bundle.gateway().expect("gateway section loaded");
+        let bundle = write_and_load(&t).expect("valid [model_routing] must load");
+        let routing = bundle
+            .model_routing()
+            .expect("model routing section loaded");
         assert_eq!(
-            g.planner_model_orchestrator.as_deref(),
-            Some("claude-haiku-4-5")
-        );
-        assert_eq!(
-            g.planner_model_executor.as_deref(),
-            Some("gemini-2.5-flash")
-        );
-        assert_eq!(g.planner_model_reviewer.as_deref(), Some("gpt-5.3-codex"));
-    }
-
-    #[test]
-    fn gateway_section_accepts_per_role_planner_model_chains() {
-        let mut t = minimal_policy_toml();
-        t.push_str(
-            "\n[gateway]\n\
-             binary_path = \"/usr/local/bin/raxis-gateway\"\n\
-             planner_model_orchestrator_chain = [\"claude-haiku-4-5\", \"gemini-2.5-flash\", \"gpt-5.3-codex\"]\n\
-             planner_model_executor_chain = [\"claude-haiku-4-5\", \"gemini-2.5-flash\", \"gpt-5.3-codex\"]\n\
-             planner_model_reviewer_chain = [\"gpt-5.3-codex\", \"claude-haiku-4-5\", \"gemini-2.5-flash\"]\n\
-             planner_model_executor_rotate_primary = true\n",
-        );
-        let bundle = write_and_load(&t).expect("valid [gateway] must load");
-        let g = bundle.gateway().expect("gateway section loaded");
-        assert_eq!(
-            g.planner_model_executor_chain,
+            routing.executor_chain,
             vec![
                 "claude-haiku-4-5".to_owned(),
                 "gemini-2.5-flash".to_owned(),
                 "gpt-5.3-codex".to_owned(),
             ]
         );
-        assert!(g.planner_model_executor_rotate_primary);
+        assert!(routing.executor_rotate_primary);
     }
 
     #[test]
-    fn gateway_section_requires_model_for_every_planner_role() {
+    fn providers_require_model_routing() {
+        let mut t = minimal_policy_toml();
+        t.push_str(&format!(
+            "\n[[providers]]\n\
+             provider_id           = \"anthropic-prod\"\n\
+             kind                  = \"Anthropic\"\n\
+             credentials_file      = \"anthropic-prod.toml\"\n\
+             {LLM_PRICING_BLOCK}\n"
+        ));
+        let err = write_and_load(&t).expect_err("provider policy must choose model routing");
+        let s = format!("{err}");
+        assert!(
+            s.contains("[model_routing]") && s.contains("[[providers]]"),
+            "error must explain missing model routing; got: {s}"
+        );
+    }
+
+    #[test]
+    fn model_routing_requires_model_for_every_planner_role() {
         let mut t = minimal_policy_toml();
         t.push_str(
-            "\n[gateway]\n\
-             binary_path = \"/usr/local/bin/raxis-gateway\"\n\
-             planner_model_orchestrator = \"claude-haiku-4-5\"\n\
-             planner_model_executor     = \"gemini-2.5-flash\"\n",
+            "\n[model_routing]\n\
+             orchestrator_model = \"claude-haiku-4-5\"\n\
+             executor_model     = \"gemini-2.5-flash\"\n",
         );
         let err = write_and_load(&t).expect_err("reviewer model must be required");
         let s = format!("{err}");
         assert!(
-            s.contains("planner_model_reviewer"),
+            s.contains("reviewer_model") || s.contains("reviewer_chain"),
             "error must name missing reviewer model; got: {s}"
         );
     }
 
     #[test]
-    fn gateway_section_rejects_empty_model_chain_entry() {
+    fn model_routing_rejects_empty_model_chain_entry() {
         let mut t = minimal_policy_toml();
         t.push_str(
-            "\n[gateway]\n\
-             binary_path = \"/usr/local/bin/raxis-gateway\"\n\
-             planner_model_orchestrator_chain = [\"claude-haiku-4-5\", \"\"]\n\
-             planner_model_executor           = \"gemini-2.5-flash\"\n\
-             planner_model_reviewer           = \"gpt-5.3-codex\"\n",
+            "\n[model_routing]\n\
+             orchestrator_chain = [\"claude-haiku-4-5\", \"\"]\n\
+             executor_model     = \"gemini-2.5-flash\"\n\
+             reviewer_model     = \"gpt-5.3-codex\"\n",
         );
         let err = write_and_load(&t).expect_err("empty model chain entry must be rejected");
         let s = format!("{err}");
         assert!(
-            s.contains("planner_model_orchestrator_chain") && s.contains("empty model id"),
+            s.contains("orchestrator_chain") && s.contains("empty model id"),
             "error must name empty chain entry; got: {s}"
-        );
-    }
-
-    // ── [gateway] negative cases ──────────────────────────────────────────
-
-    #[test]
-    fn relative_gateway_binary_path_is_rejected() {
-        // Defence-in-depth: a relative path would let `Command::new` resolve
-        // via $PATH, opening a hijack window. The validator MUST reject.
-        let mut t = minimal_policy_toml();
-        t.push_str("\n[gateway]\nbinary_path = \"raxis-gateway\"\n");
-        let err = write_and_load(&t).expect_err("relative path must fail");
-        assert!(
-            format!("{err}").contains("must be absolute"),
-            "error must explain WHY rejected; got: {err}"
-        );
-    }
-
-    #[test]
-    fn zero_spawn_timeout_is_rejected() {
-        let mut t = minimal_policy_toml();
-        t.push_str(
-            "\n[gateway]\n\
-             binary_path        = \"/usr/local/bin/raxis-gateway\"\n\
-             planner_model_orchestrator = \"claude-haiku-4-5\"\n\
-             planner_model_executor     = \"gemini-2.5-flash\"\n\
-             planner_model_reviewer     = \"gpt-5.3-codex\"\n\
-             spawn_timeout_secs = 0\n",
-        );
-        let err = write_and_load(&t).expect_err("zero spawn_timeout must fail");
-        assert!(format!("{err}").contains("spawn_timeout_secs"));
-    }
-
-    #[test]
-    fn zero_max_consecutive_respawns_is_rejected_with_explicit_one_hint() {
-        // We require ≥ 1 because a "0" would silently disable supervision —
-        // operators who want that should set 1, not 0. The error spells
-        // this out so the operator gets the right answer in one read.
-        let mut t = minimal_policy_toml();
-        t.push_str(
-            "\n[gateway]\n\
-             binary_path              = \"/usr/local/bin/raxis-gateway\"\n\
-             planner_model_orchestrator = \"claude-haiku-4-5\"\n\
-             planner_model_executor     = \"gemini-2.5-flash\"\n\
-             planner_model_reviewer     = \"gpt-5.3-codex\"\n\
-             max_consecutive_respawns = 0\n",
-        );
-        let err = write_and_load(&t).expect_err("zero respawn cap must fail");
-        let s = format!("{err}");
-        assert!(s.contains("max_consecutive_respawns"));
-        assert!(
-            s.contains("set to 1"),
-            "error should hint operator to use 1, not 0; got: {s}"
         );
     }
 
@@ -7167,7 +7095,7 @@ planner_model_reviewer     = \"gpt-5.3-codex\"\n";
 
     #[test]
     fn provider_entry_with_only_required_fields_uses_defaults() {
-        let mut t = minimal_policy_toml();
+        let mut t = minimal_policy_with_model_routing_toml();
         t.push_str(&format!(
             "\n[[providers]]\n\
              provider_id      = \"anthropic-prod\"\n\
@@ -7190,7 +7118,7 @@ planner_model_reviewer     = \"gpt-5.3-codex\"\n";
 
     #[test]
     fn provider_lookup_returns_none_for_unknown_id() {
-        let mut t = minimal_policy_toml();
+        let mut t = minimal_policy_with_model_routing_toml();
         t.push_str(&format!(
             "\n[[providers]]\n\
              provider_id      = \"anthropic-prod\"\n\
@@ -7218,6 +7146,38 @@ planner_model_reviewer     = \"gpt-5.3-codex\"\n";
         }
         let err = write_and_load(&t).expect_err("dup ids must fail");
         assert!(format!("{err}").contains("duplicated"));
+    }
+
+    #[test]
+    fn duplicate_lane_id_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[lanes]]\n\
+             lane_id              = \"default\"\n\
+             max_concurrent_tasks = 8\n\
+             max_cost_per_epoch   = 100000\n\
+             priority             = 50\n",
+        );
+        let err = write_and_load(&t).expect_err("duplicate lane ids must fail");
+        let s = format!("{err}");
+        assert!(
+            s.contains("[[lanes]]") && s.contains("duplicated"),
+            "error must name duplicate lane id; got: {s}"
+        );
+    }
+
+    #[test]
+    fn empty_lane_id_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[lanes]]\n\
+             lane_id              = \"\"\n\
+             max_concurrent_tasks = 8\n\
+             max_cost_per_epoch   = 100000\n\
+             priority             = 50\n",
+        );
+        let err = write_and_load(&t).expect_err("empty lane id must fail");
+        assert!(format!("{err}").contains("lane_id must be a non-empty string"));
     }
 
     #[test]
@@ -7368,7 +7328,7 @@ planner_model_reviewer     = \"gpt-5.3-codex\"\n";
     /// load cleanly — it's the central use case for this knob.
     #[test]
     fn stream_idle_timeout_120s_loads_cleanly_for_reasoning_models() {
-        let mut t = minimal_policy_toml();
+        let mut t = minimal_policy_with_model_routing_toml();
         t.push_str(&format!(
             "\n[[providers]]\n\
              provider_id            = \"openai-o1\"\n\
@@ -7387,7 +7347,7 @@ planner_model_reviewer     = \"gpt-5.3-codex\"\n";
     /// for every existing policy.toml in the wild.
     #[test]
     fn stream_idle_timeout_absent_field_is_none() {
-        let mut t = minimal_policy_toml();
+        let mut t = minimal_policy_with_model_routing_toml();
         t.push_str(&format!(
             "\n[[providers]]\n\
              provider_id      = \"p1\"\n\
@@ -7410,7 +7370,7 @@ planner_model_reviewer     = \"gpt-5.3-codex\"\n";
         // NOTE: unknown kinds are NOT in `LLM_PROVIDER_KINDS`, so they
         // MUST NOT carry a pricing block (validator rejects pricing on
         // non-LLM kinds — see §2.5).
-        let mut t = minimal_policy_toml();
+        let mut t = minimal_policy_with_model_routing_toml();
         t.push_str(
             "\n[[providers]]\n\
              provider_id      = \"future-vendor\"\n\
@@ -7429,7 +7389,7 @@ planner_model_reviewer     = \"gpt-5.3-codex\"\n";
 
     #[test]
     fn sidecar_provider_with_required_fields_loads() {
-        let mut t = minimal_policy_toml();
+        let mut t = minimal_policy_with_model_routing_toml();
         t.push_str(&format!(
             "\n[[providers]]\n\
              provider_id              = \"kombai\"\n\
@@ -7651,7 +7611,7 @@ planner_model_reviewer     = \"gpt-5.3-codex\"\n";
     /// `provider().pricing` decodes verbatim.
     #[test]
     fn llm_provider_with_full_pricing_decodes_round_trip() {
-        let mut t = minimal_policy_toml();
+        let mut t = minimal_policy_with_model_routing_toml();
         t.push_str(
             "\n[[providers]]\n\
              provider_id      = \"anthropic-prod\"\n\
@@ -10544,7 +10504,9 @@ mod environment_tests {
 #[cfg(test)]
 mod implicit_provider_grants_tests {
     use super::*;
-    use crate::bundle::gateway_providers_tests::minimal_policy_toml_for_tests;
+    use crate::bundle::gateway_providers_tests::{
+        minimal_policy_toml_for_tests, minimal_policy_with_model_routing_toml,
+    };
     use crate::load_policy;
 
     /// 32-byte hex secret used by sidecar-provider fixtures.
@@ -10585,11 +10547,15 @@ mod implicit_provider_grants_tests {
         )
     }
 
+    fn provider_policy_toml_for_tests() -> String {
+        minimal_policy_with_model_routing_toml()
+    }
+
     // ─── Projection: kind → FQDN ──────────────────────────────────────────
 
     #[test]
     fn anthropic_provider_synthesises_api_anthropic_com_grant() {
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(&provider_block("anthropic-prod", "Anthropic"));
         let bundle = write_and_load(&t).expect("policy must load");
         let grants = bundle.default_provider_egress_grants();
@@ -10601,7 +10567,7 @@ mod implicit_provider_grants_tests {
 
     #[test]
     fn openai_provider_synthesises_api_openai_com_grant() {
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(&provider_block("openai-prod", "OpenAI"));
         let bundle = write_and_load(&t).expect("policy must load");
         let grants = bundle.default_provider_egress_grants();
@@ -10611,7 +10577,7 @@ mod implicit_provider_grants_tests {
 
     #[test]
     fn gemini_provider_synthesises_generativelanguage_grant() {
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(&provider_block("gemini-prod", "Gemini"));
         let bundle = write_and_load(&t).expect("policy must load");
         let grants = bundle.default_provider_egress_grants();
@@ -10621,7 +10587,7 @@ mod implicit_provider_grants_tests {
 
     #[test]
     fn bedrock_provider_synthesises_bedrock_runtime_grant() {
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(&provider_block("bedrock-prod", "Bedrock"));
         let bundle = write_and_load(&t).expect("policy must load");
         let grants = bundle.default_provider_egress_grants();
@@ -10634,7 +10600,7 @@ mod implicit_provider_grants_tests {
 
     #[test]
     fn http_sidecar_provider_synthesises_endpoint_host_grant() {
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(&sidecar_block("kombai", "http://127.0.0.1:9100"));
         let bundle = write_and_load(&t).expect("policy must load");
         let grants = bundle.default_provider_egress_grants();
@@ -10648,7 +10614,7 @@ mod implicit_provider_grants_tests {
         // Forward-compat: validator accepts unknown kinds; the
         // implicit grant just skips them. Operator MUST add an
         // explicit `[egress] domains` entry.
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(
             "\n[[providers]]\n\
              provider_id      = \"future-vendor\"\n\
@@ -10666,7 +10632,7 @@ mod implicit_provider_grants_tests {
 
     #[test]
     fn multiple_providers_yield_one_grant_per_provider() {
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(&provider_block("anthropic-prod", "Anthropic"));
         t.push_str(&provider_block("openai-prod", "OpenAI"));
         let bundle = write_and_load(&t).expect("policy must load");
@@ -10680,7 +10646,7 @@ mod implicit_provider_grants_tests {
 
     #[test]
     fn effective_domains_union_explicit_first_then_implicit() {
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(
             "\n[egress]\n\
              domains = [\"explicit.example.com\"]\n\
@@ -10707,7 +10673,7 @@ mod implicit_provider_grants_tests {
         // Operator double-declares api.anthropic.com explicitly +
         // via implicit grant — effective list has it ONCE, in the
         // operator-declared position.
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(
             "\n[egress]\n\
              domains = [\"api.anthropic.com\"]\n",
@@ -10720,7 +10686,7 @@ mod implicit_provider_grants_tests {
 
     #[test]
     fn effective_domains_dedup_is_case_insensitive() {
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(
             "\n[egress]\n\
              domains = [\"API.Anthropic.COM\"]\n",
@@ -10739,7 +10705,7 @@ mod implicit_provider_grants_tests {
 
     #[test]
     fn implicit_provider_grants_false_yields_empty_grants() {
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(
             "\n[egress]\n\
              implicit_provider_grants = false\n\
@@ -10758,7 +10724,7 @@ mod implicit_provider_grants_tests {
     fn implicit_provider_grants_false_with_no_explicit_egress_is_rejected() {
         // Opt-out + zero explicit egress + at least one provider =
         // unreachable provider. Validator rejects at load time.
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(
             "\n[egress]\n\
              implicit_provider_grants = false\n",
@@ -10790,7 +10756,7 @@ mod implicit_provider_grants_tests {
 
     #[test]
     fn deny_provider_excludes_named_provider_from_grants() {
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(
             "\n[egress]\n\
              deny_provider = [\"openai-prod\"]\n",
@@ -10810,7 +10776,7 @@ mod implicit_provider_grants_tests {
     fn deny_provider_referencing_unknown_id_is_rejected() {
         // Typo in deny_provider would silently fail to opt out;
         // validator must catch this at load time.
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(
             "\n[egress]\n\
              deny_provider = [\"typo-not-a-real-provider\"]\n",
@@ -10844,7 +10810,7 @@ mod implicit_provider_grants_tests {
         // The most common operator config: declare `[[providers]]`
         // without ever writing an `[egress]` block. Defaults MUST
         // grant the provider FQDN.
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(&provider_block("anthropic-prod", "Anthropic"));
         let bundle = write_and_load(&t).expect("default-egress policy must load");
         assert!(
@@ -10862,7 +10828,7 @@ mod implicit_provider_grants_tests {
 
     #[test]
     fn sidecar_endpoint_extraction_handles_https_and_paths() {
-        let mut t = minimal_policy_toml_for_tests();
+        let mut t = provider_policy_toml_for_tests();
         t.push_str(&sidecar_block(
             "vendor",
             "https://sidecar.internal.example/api",

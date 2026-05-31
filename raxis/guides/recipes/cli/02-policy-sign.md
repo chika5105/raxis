@@ -63,9 +63,10 @@ sidecar shape.
 bundle until `raxis epoch advance --policy <path> --sig <path>`
 commits the signed artifact.
 
-### Sections that also require a kernel restart
+### Runtime changes that also require a kernel restart
 
-- `[gateway]` — the gateway supervisor is wired at boot.
+- `RAXIS_GATEWAY_BINARY` / installed `raxis-gateway` binary — gateway
+  supervisor wiring is runtime state, not policy.
 - `[host_capacity] required_min_fd_limit` — RLIMIT is set at boot.
 
 For everything else, signed epoch advance is sufficient.

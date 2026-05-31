@@ -84,7 +84,7 @@ pub const PLANNER_KSB_ENV: &str = "RAXIS_PLANNER_KSB";
 /// Per-session
 /// hard turn ceiling for the in-VM planner dispatch loop. Kernel stamps
 /// the value resolved by the per-task `max_turns` precedence chain
-/// (per-task → `[gateway].planner_max_turns_default` → compiled
+/// (per-task → `[model_routing].planner_max_turns_default` → compiled
 /// `raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS`). The driver reads
 /// it at boot and folds into `DispatchConfig::max_turns`; the dispatch
 /// loop terminates with `Outcome::TurnsExceeded` on hit.

@@ -253,7 +253,7 @@ fn full_session_lifecycle() {
     seed_main_repository(&data_dir);
 
     // ── §7.3c — Now bring up the daemon kernel. It re-reads the
-    //    (mutated) policy.toml at boot, so `[gateway]` and
+    //    (mutated) policy.toml at boot, so `[model_routing]` and
     //    `[[providers]]` go live on this spawn.
     let install_dir = extended_e2e_support::kernel_driver::resolved_install_dir();
     let mut kernel = spawn_kernel_normal(&kernel_bin, data_dir.clone(), &install_dir);
@@ -434,7 +434,7 @@ fn require_gcp_adc() {
     );
 }
 
-/// Resolve the gateway binary for `[gateway].binary_path`.
+/// Resolve the runtime gateway binary path.
 ///
 /// Source-tree runs auto-build `target/release/raxis-gateway` before
 /// policy injection so a stale operator-provided env var cannot make
@@ -632,14 +632,22 @@ fn spawn_kernel_normal(kernel_bin: &Path, data_dir: PathBuf, install_dir: &Path)
     use std::process::{Command as ProcCommand, Stdio};
     use std::sync::{Arc, Mutex};
 
-    let mut child = ProcCommand::new(kernel_bin)
-        .env("RAXIS_DATA_DIR", &data_dir)
+    let gateway_binary_marker = data_dir.join("runtime").join("gateway-binary.path");
+    let mut cmd = ProcCommand::new(kernel_bin);
+    cmd.env("RAXIS_DATA_DIR", &data_dir)
         // Surface the canonical-image install root explicitly so the
         // kernel does not silently fall back to `data_dir` (which
         // would never contain `images/raxis-*-core-<v>.img`). This
         // is the first env-var the kernel reads on boot
         // (`canonical_images_preflight::verify_canonical_images_at_boot`).
-        .env("RAXIS_INSTALL_DIR", install_dir)
+        .env("RAXIS_INSTALL_DIR", install_dir);
+    if let Ok(path) = std::fs::read_to_string(&gateway_binary_marker) {
+        cmd.env(
+            extended_e2e_support::kernel_driver::ENV_GATEWAY_BINARY,
+            path.trim(),
+        );
+    }
+    let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -677,7 +685,7 @@ fn spawn_kernel_normal(kernel_bin: &Path, data_dir: PathBuf, install_dir: &Path)
 }
 
 /// Mutate `<data_dir>/policy/policy.toml` (written by bootstrap with
-/// `[gateway]` / `[[providers]]` blocks COMMENTED OUT — see
+/// `[model_routing]` / `[[providers]]` blocks COMMENTED OUT — see
 /// `crates/genesis-tools::render_genesis_policy_toml`) to enable the
 /// gateway against the just-built `raxis-gateway` binary and a
 /// single Anthropic provider.
@@ -739,12 +747,21 @@ fn mutate_dashboard_block_in_policy(body: &mut String) {
 }
 
 fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
+    let runtime_dir = data_dir.join("runtime");
+    std::fs::create_dir_all(&runtime_dir)
+        .unwrap_or_else(|e| panic!("create {}: {e}", runtime_dir.display()));
+    std::fs::write(
+        runtime_dir.join("gateway-binary.path"),
+        gateway_binary.display().to_string(),
+    )
+    .unwrap_or_else(|e| panic!("write gateway binary marker: {e}"));
+
     let policy_path = data_dir.join("policy").join("policy.toml");
     let mut body = std::fs::read_to_string(&policy_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", policy_path.display()));
     assert!(
-        !body.contains("\n[gateway]\n"),
-        "policy.toml already has a [gateway] block; bootstrap template changed",
+        !body.contains("\n[model_routing]\n"),
+        "policy.toml already has a [model_routing] block; bootstrap template changed",
     );
 
     // ── [dashboard] block mutation — the genesis template already
@@ -764,15 +781,11 @@ fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
     mutate_dashboard_block_in_policy(&mut body);
 
     let injected = format!(
-        "\n# ── [gateway] + [[providers]] + [egress] + [[lanes]] injected by full_e2e_session_lifecycle ──\n\
-         [gateway]\n\
-         binary_path              = \"{gw}\"\n\
-         spawn_timeout_secs       = 30\n\
-         respawn_backoff_ms       = 1000\n\
-         max_consecutive_respawns = 5\n\
-         planner_model_orchestrator = \"claude-haiku-4-5\"\n\
-         planner_model_executor     = \"claude-haiku-4-5\"\n\
-         planner_model_reviewer     = \"claude-haiku-4-5\"\n\
+        "\n# ── [model_routing] + [[providers]] + [egress] + [[lanes]] injected by full_e2e_session_lifecycle ──\n\
+         [model_routing]\n\
+         orchestrator_model = \"claude-haiku-4-5\"\n\
+         executor_model     = \"claude-haiku-4-5\"\n\
+         reviewer_model     = \"claude-haiku-4-5\"\n\
          \n\
          # Gateway-side domain allowlist re-validation per peripherals.md §3.2.\n\
          # Without this section the gateway rejects every dispatched URL with\n\
@@ -806,7 +819,6 @@ fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          max_concurrent_tasks = 8\n\
          max_cost_per_epoch   = 100000\n\
          priority             = 100\n",
-        gw = gateway_binary.display(),
     );
     body.push_str(&injected);
 
@@ -1239,7 +1251,7 @@ fn read_json_blocking(stream: &mut UnixStream) -> Value {
 ///     `[plan].name` / `[plan.gateway]` blocks — those keys are NOT
 ///     part of the kernel's plan parser surface (they are inert if
 ///     included). The provider/model pinning happens via the policy
-///     `[gateway]` + `[[providers]]` blocks (`peripherals.md §3.2`),
+///     `[model_routing]` + `[[providers]]` blocks (`peripherals.md §3.2`),
 ///     which the test injects in `enable_gateway_in_policy` below. The
 ///     spec is updated alongside this test to reflect the parser shape.
 ///     The verifier section is intentionally omitted in this iteration:

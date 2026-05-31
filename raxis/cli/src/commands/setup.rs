@@ -20,7 +20,7 @@
 //      conservative budget + concurrency defaults, an empty
 //      `[[vm_images]]` block (operator fills in OCI digests
 //      after picking images), and the genesis-required
-//      `[gateway]` and `[host_capacity]` sections.
+//      `[model_routing]` and `[host_capacity]` sections.
 //   3. Runs `raxis plan init --template feature` against
 //      `<data_dir>/plan/plan.toml` (delegating to
 //      `commands::plan_init`) so the operator has a valid
@@ -641,16 +641,12 @@ max_concurrent_vms     = {max_concurrency}
 disk_full_behavior     = "halt_admit"
 
 # ──────────────────────────────────────────────────────────────────────
-# §3. Gateway (subprocess that brokers all model-API egress)
+# §3. Model routing (which models may serve each planner role)
 # ──────────────────────────────────────────────────────────────────────
-[gateway]
-binary_path             = "/usr/local/bin/raxis-gateway"
-spawn_timeout_secs      = 30
-respawn_backoff_ms      = 1000
-max_consecutive_respawns = 5
-planner_model_orchestrator = "claude-haiku-4-5"
-planner_model_executor     = "claude-haiku-4-5"
-planner_model_reviewer     = "claude-haiku-4-5"
+[model_routing]
+orchestrator_model = "claude-haiku-4-5"
+executor_model     = "claude-haiku-4-5"
+reviewer_model     = "claude-haiku-4-5"
 
 # ──────────────────────────────────────────────────────────────────────
 # §4. Egress allowlist for in-VM tasks (npm registries, package

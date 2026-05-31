@@ -44,7 +44,7 @@ The canonical section list comes straight from
 
 ```mermaid
 flowchart TD
-    Policy["<b>policy.toml</b><br/><hr/>[sessions] — TTL & concurrency caps<br/>[budget] — admission cost + LLM token caps<br/>[operators] — Ed25519 signing keys + permitted<br/>[[gates]] — verifier binaries per claim type<br/>[[lanes]] — budget lane definitions<br/>[claim_requirements] — path → required claim types<br/>[egress] — fetch proxy allow-list<br/>[[providers]] — LLM provider catalogue (optional)<br/>[delegations] — role ceilings + max TTL<br/>[gateway] — gateway proxy config (optional)"]
+    Policy["<b>policy.toml</b><br/><hr/>[sessions] — TTL & concurrency caps<br/>[budget] — admission cost + LLM token caps<br/>[operators] — Ed25519 signing keys + permitted<br/>[[gates]] — verifier binaries per claim type<br/>[[lanes]] — budget lane definitions<br/>[claim_requirements] — path → required claim types<br/>[egress] — fetch proxy allow-list<br/>[[providers]] — LLM provider catalogue (optional)<br/>[model_routing] — role primary/fallback models<br/>[delegations] — role ceilings + max TTL"]
 ```
 
 **`[[custom_tools]]` does NOT live in `policy.toml`.** It is

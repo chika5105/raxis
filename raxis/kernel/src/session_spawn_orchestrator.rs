@@ -685,7 +685,7 @@ async fn spawn_orchestrator_for_initiative(
     // per-initiative (no per-task crash counter), so `attempt = 1` is
     // the only legal value here — progressive scaling never fires for
     // orchestrator spawns.
-    let planner_max_turns_resolved = resolve_planner_max_turns_for(None, policy.gateway(), 1);
+    let planner_max_turns_resolved = resolve_planner_max_turns_for(None, policy.model_routing(), 1);
     let ksb_fut = {
         let store_for_ksb = Arc::clone(store);
         let registry_for_ksb = Arc::clone(plan_registry);
@@ -876,7 +876,7 @@ async fn spawn_orchestrator_for_initiative(
     stamp_capability_manifest_env(&mut env, "orchestrator", "canonical", None);
     stamp_planner_model_env_or_insert(
         &mut env,
-        policy.gateway(),
+        policy.model_routing(),
         raxis_types::SessionAgentType::Orchestrator,
         None,
     );
@@ -905,7 +905,7 @@ async fn spawn_orchestrator_for_initiative(
     // stamp for the planner hard turn ceiling. Orchestrator spawns
     // pass `task_fields = None` (orchestrator is per-initiative,
     // not per-task) so the resolution short-circuits the per-task
-    // arm and uses `[gateway].planner_max_turns_default` first,
+    // arm and uses `[model_routing].planner_max_turns_default` first,
     // then the compiled `DEFAULT_PLANNER_MAX_TURNS`. Pre-V2.7
     // kernel revisions inherited the value from the kernel's
     // parent process env which left a per-task override mechanism
@@ -1009,7 +1009,7 @@ async fn spawn_orchestrator_for_initiative(
         // no credential proxies and no egress" — its job is pure
         // coordination over the planner-socket IPC. LLM calls go
         // through `IpcMessage::PlannerFetchRequest` (kernel
-        // dispatches to gateway), and INV-PROVIDER-04 ensures
+        // dispatches to model_routing), and INV-PROVIDER-04 ensures
         // every model client supports the
         // `KernelMediatedHttpFetch` substrate via the
         // `with_http_fetch` constructor.
@@ -3654,9 +3654,9 @@ fn populate_token_cap_env_or_insert(
 /// task.
 pub(crate) fn resolve_planner_max_turns_base_for(
     task_fields: Option<&crate::initiatives::TaskPlanFields>,
-    gateway: Option<&raxis_policy::GatewaySection>,
+    model_routing: Option<&raxis_policy::ModelRoutingSection>,
 ) -> (u32, &'static str) {
-    let policy_default = gateway.and_then(|g| g.planner_max_turns_default);
+    let policy_default = model_routing.and_then(|r| r.planner_max_turns_default);
     match task_fields {
         Some(tf) => tf.effective_max_turns(policy_default),
         None => match policy_default {
@@ -3713,13 +3713,13 @@ pub(crate) fn resolve_planner_max_turns_hard_ceiling() -> u32 {
 /// `max_turns` (see [`resolve_planner_max_turns_base_for`]).
 pub(crate) fn resolve_planner_max_turns_step_for(
     task_fields: Option<&crate::initiatives::TaskPlanFields>,
-    gateway: Option<&raxis_policy::GatewaySection>,
+    model_routing: Option<&raxis_policy::ModelRoutingSection>,
     base: u32,
 ) -> (u32, &'static str) {
     if let Some(s) = task_fields.and_then(|tf| tf.max_turns_step) {
         return (s, "task");
     }
-    if let Some(d) = gateway.and_then(|g| g.planner_max_turns_step_default) {
+    if let Some(d) = model_routing.and_then(|r| r.planner_max_turns_step_default) {
         return (d, "policy");
     }
     (derive_default_max_turns_step(base), "derived-default")
@@ -3807,11 +3807,11 @@ impl From<ResolvedPlannerMaxTurns> for raxis_ksb::MaxTurnsScalingView {
 /// truth for the resolution).
 pub(crate) fn resolve_planner_max_turns_for(
     task_fields: Option<&crate::initiatives::TaskPlanFields>,
-    gateway: Option<&raxis_policy::GatewaySection>,
+    model_routing: Option<&raxis_policy::ModelRoutingSection>,
     attempt: u32,
 ) -> ResolvedPlannerMaxTurns {
-    let (base, base_source) = resolve_planner_max_turns_base_for(task_fields, gateway);
-    let (step, step_source) = resolve_planner_max_turns_step_for(task_fields, gateway, base);
+    let (base, base_source) = resolve_planner_max_turns_base_for(task_fields, model_routing);
+    let (step, step_source) = resolve_planner_max_turns_step_for(task_fields, model_routing, base);
     let hard_ceiling = resolve_planner_max_turns_hard_ceiling();
     let attempt_idx = attempt.max(1);
     let scaled = base.saturating_add(step.saturating_mul(attempt_idx.saturating_sub(1)));
@@ -4797,21 +4797,21 @@ fn stable_model_chain_rotation(task_id: &str, len: usize) -> usize {
 }
 
 fn model_chain_for_role(
-    gateway: &raxis_policy::GatewaySection,
+    model_routing: &raxis_policy::ModelRoutingSection,
     session_agent_type: raxis_types::SessionAgentType,
 ) -> Vec<String> {
     let (chain, single) = match session_agent_type {
         raxis_types::SessionAgentType::Orchestrator => (
-            &gateway.planner_model_orchestrator_chain,
-            gateway.planner_model_orchestrator.as_deref(),
+            &model_routing.orchestrator_chain,
+            model_routing.orchestrator_model.as_deref(),
         ),
         raxis_types::SessionAgentType::Executor => (
-            &gateway.planner_model_executor_chain,
-            gateway.planner_model_executor.as_deref(),
+            &model_routing.executor_chain,
+            model_routing.executor_model.as_deref(),
         ),
         raxis_types::SessionAgentType::Reviewer => (
-            &gateway.planner_model_reviewer_chain,
-            gateway.planner_model_reviewer.as_deref(),
+            &model_routing.reviewer_chain,
+            model_routing.reviewer_model.as_deref(),
         ),
     };
     let filtered_chain: Vec<String> = chain
@@ -4832,19 +4832,19 @@ fn model_chain_for_role(
 
 fn stamp_planner_model_env_or_insert(
     env: &mut BTreeMap<String, String>,
-    gateway: Option<&raxis_policy::GatewaySection>,
+    model_routing: Option<&raxis_policy::ModelRoutingSection>,
     session_agent_type: raxis_types::SessionAgentType,
     task_id: Option<&str>,
 ) {
-    let Some(gateway) = gateway else {
+    let Some(model_routing) = model_routing else {
         return;
     };
-    let mut chain = model_chain_for_role(gateway, session_agent_type);
+    let mut chain = model_chain_for_role(model_routing, session_agent_type);
     if chain.is_empty() {
         return;
     }
     if matches!(session_agent_type, raxis_types::SessionAgentType::Executor)
-        && gateway.planner_model_executor_rotate_primary
+        && model_routing.executor_rotate_primary
     {
         if let Some(task_id) = task_id {
             let offset = stable_model_chain_rotation(task_id, chain.len());
@@ -5157,7 +5157,7 @@ pub async fn spawn_executor_for_task(
     };
     stamp_planner_model_env_or_insert(
         &mut env,
-        policy.gateway(),
+        policy.model_routing(),
         session_agent_type,
         Some(task_id),
     );
@@ -5233,7 +5233,7 @@ pub async fn spawn_executor_for_task(
     let attempt_for_resolver = crash_retry_count_for_attempt.saturating_add(1);
     let planner_max_turns_resolved = resolve_planner_max_turns_for(
         task_fields_for_max_turns.as_ref(),
-        policy.gateway(),
+        policy.model_routing(),
         attempt_for_resolver,
     );
     populate_planner_max_turns_env_or_insert(
@@ -6168,63 +6168,55 @@ mod tests {
     // through. Pinning the resolver pins both surfaces by construction.
     // ─────────────────────────────────────────────────────────────────
 
-    /// Helper: minimal `GatewaySection` with only the
+    /// Helper: minimal `ModelRoutingSection` with only the
     /// `planner_max_turns_default` field varying. The other fields
     /// are inert for this resolver — `resolve_planner_max_turns_for`
     /// reads only `planner_max_turns_default`.
-    fn gateway_with_default(d: Option<u32>) -> raxis_policy::GatewaySection {
-        raxis_policy::GatewaySection {
-            binary_path: "/bin/raxis-gateway".to_owned(),
-            spawn_timeout_secs: 5,
-            respawn_backoff_ms: 1000,
-            max_consecutive_respawns: 5,
+    fn model_routing_with_default(d: Option<u32>) -> raxis_policy::ModelRoutingSection {
+        raxis_policy::ModelRoutingSection {
             planner_max_turns_default: d,
             planner_max_turns_step_default: None,
-            planner_model_orchestrator: None,
-            planner_model_executor: None,
-            planner_model_reviewer: None,
-            planner_model_orchestrator_chain: Vec::new(),
-            planner_model_executor_chain: Vec::new(),
-            planner_model_reviewer_chain: Vec::new(),
-            planner_model_executor_rotate_primary: false,
+            orchestrator_model: None,
+            executor_model: None,
+            reviewer_model: None,
+            orchestrator_chain: Vec::new(),
+            executor_chain: Vec::new(),
+            reviewer_chain: Vec::new(),
+            executor_rotate_primary: false,
         }
     }
 
-    /// V3 helper: `GatewaySection` with both the per-policy
+    /// V3 helper: `ModelRoutingSection` with both the per-policy
     /// `planner_max_turns_default` AND the
     /// `planner_max_turns_step_default` knobs varying.
-    fn gateway_with_default_and_step(
+    fn model_routing_with_default_and_step(
         d: Option<u32>,
         step: Option<u32>,
-    ) -> raxis_policy::GatewaySection {
-        raxis_policy::GatewaySection {
-            binary_path: "/bin/raxis-gateway".to_owned(),
-            spawn_timeout_secs: 5,
-            respawn_backoff_ms: 1000,
-            max_consecutive_respawns: 5,
+    ) -> raxis_policy::ModelRoutingSection {
+        raxis_policy::ModelRoutingSection {
             planner_max_turns_default: d,
             planner_max_turns_step_default: step,
-            planner_model_orchestrator: None,
-            planner_model_executor: None,
-            planner_model_reviewer: None,
-            planner_model_orchestrator_chain: Vec::new(),
-            planner_model_executor_chain: Vec::new(),
-            planner_model_reviewer_chain: Vec::new(),
-            planner_model_executor_rotate_primary: false,
+            orchestrator_model: None,
+            executor_model: None,
+            reviewer_model: None,
+            orchestrator_chain: Vec::new(),
+            executor_chain: Vec::new(),
+            reviewer_chain: Vec::new(),
+            executor_rotate_primary: false,
         }
     }
 
     #[test]
     fn planner_model_env_stamps_role_specific_policy_models() {
-        let mut gateway = gateway_with_default(None);
-        gateway.planner_model_orchestrator = Some("claude-haiku-4-5".to_owned());
-        gateway.planner_model_executor = Some("gemini-2.5-flash".to_owned());
-        gateway.planner_model_reviewer = Some("gpt-5.3-codex".to_owned());
+        let mut model_routing = model_routing_with_default(None);
+        model_routing.orchestrator_model = Some("claude-haiku-4-5".to_owned());
+        model_routing.executor_model = Some("gemini-2.5-flash".to_owned());
+        model_routing.reviewer_model = Some("gpt-5.3-codex".to_owned());
 
         let mut env = BTreeMap::new();
         stamp_planner_model_env_or_insert(
             &mut env,
-            Some(&gateway),
+            Some(&model_routing),
             raxis_types::SessionAgentType::Executor,
             Some("task-a"),
         );
@@ -6240,7 +6232,7 @@ mod tests {
         env.insert(PLANNER_MODEL_ID_ENV.to_owned(), "test-override".to_owned());
         stamp_planner_model_env_or_insert(
             &mut env,
-            Some(&gateway),
+            Some(&model_routing),
             raxis_types::SessionAgentType::Reviewer,
             Some("review-a"),
         );
@@ -6253,25 +6245,25 @@ mod tests {
 
     #[test]
     fn planner_model_env_rotates_executor_fallback_chain_by_task() {
-        let mut gateway = gateway_with_default(None);
-        gateway.planner_model_executor_chain = vec![
+        let mut model_routing = model_routing_with_default(None);
+        model_routing.executor_chain = vec![
             "claude-haiku-4-5".to_owned(),
             "gemini-2.5-flash".to_owned(),
             "gpt-5.3-codex".to_owned(),
         ];
-        gateway.planner_model_executor_rotate_primary = true;
+        model_routing.executor_rotate_primary = true;
 
         let mut env_a = BTreeMap::new();
         stamp_planner_model_env_or_insert(
             &mut env_a,
-            Some(&gateway),
+            Some(&model_routing),
             raxis_types::SessionAgentType::Executor,
             Some("materialize-records"),
         );
         let mut env_b = BTreeMap::new();
         stamp_planner_model_env_or_insert(
             &mut env_b,
-            Some(&gateway),
+            Some(&model_routing),
             raxis_types::SessionAgentType::Executor,
             Some("xfile-refactor"),
         );
@@ -6303,8 +6295,8 @@ mod tests {
     #[test]
     fn inv_planner_max_turns_precedence_01_per_task_wins_over_policy() {
         let task = task_with_max_turns(Some(7));
-        let gw = gateway_with_default(Some(42));
-        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
+        let routing = model_routing_with_default(Some(42));
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&routing), 1);
         assert_eq!(
             r.effective, 7,
             "per-task `max_turns = Some(7)` MUST win over policy default 42"
@@ -6322,8 +6314,8 @@ mod tests {
     #[test]
     fn inv_planner_max_turns_precedence_01_policy_wins_over_compiled() {
         let task = task_with_max_turns(None);
-        let gw = gateway_with_default(Some(42));
-        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
+        let routing = model_routing_with_default(Some(42));
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&routing), 1);
         assert_eq!(
             r.effective, 42,
             "policy default 42 MUST win when per-task is None"
@@ -6341,8 +6333,8 @@ mod tests {
     #[test]
     fn inv_planner_max_turns_precedence_01_compiled_default_when_both_absent() {
         let task = task_with_max_turns(None);
-        let gw = gateway_with_default(None);
-        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
+        let routing = model_routing_with_default(None);
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&routing), 1);
         assert_eq!(
             r.effective,
             crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
@@ -6364,8 +6356,8 @@ mod tests {
     #[test]
     fn inv_planner_max_turns_precedence_01_orchestrator_path_ignores_task_arm() {
         // Policy wins (compiled would be 100, policy is 33).
-        let gw_with_policy = gateway_with_default(Some(33));
-        let r = resolve_planner_max_turns_for(None, Some(&gw_with_policy), 1);
+        let routing_with_policy = model_routing_with_default(Some(33));
+        let r = resolve_planner_max_turns_for(None, Some(&routing_with_policy), 1);
         assert_eq!(r.effective, 33);
         assert_eq!(
             r.base_source, "policy",
@@ -6373,8 +6365,8 @@ mod tests {
         );
 
         // No policy ⇒ compiled fallback.
-        let gw_no_policy = gateway_with_default(None);
-        let r = resolve_planner_max_turns_for(None, Some(&gw_no_policy), 1);
+        let routing_no_policy = model_routing_with_default(None);
+        let r = resolve_planner_max_turns_for(None, Some(&routing_no_policy), 1);
         assert_eq!(
             r.effective,
             crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
@@ -6382,7 +6374,7 @@ mod tests {
         assert_eq!(r.base_source, "compiled-default",
             "orchestrator-spawn path MUST fall through to compiled-default when both task and policy are absent");
 
-        // No gateway at all ⇒ also compiled fallback.
+        // No model-routing policy at all ⇒ also compiled fallback.
         let r = resolve_planner_max_turns_for(None, None, 1);
         assert_eq!(
             r.effective,
@@ -6421,8 +6413,8 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_attempt_1_equals_base() {
         let task = task_with_max_turns_and_step(Some(30), Some(30));
-        let gw = gateway_with_default(None);
-        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
+        let routing = model_routing_with_default(None);
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&routing), 1);
         assert_eq!(
             r.effective, 30,
             "attempt = 1 MUST return base unchanged; got {r:?}"
@@ -6437,10 +6429,10 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_base_30_step_30_three_attempts() {
         let task = task_with_max_turns_and_step(Some(30), Some(30));
-        let gw = gateway_with_default(None);
-        let a1 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
-        let a2 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
-        let a3 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 3);
+        let routing = model_routing_with_default(None);
+        let a1 = resolve_planner_max_turns_for(Some(&task), Some(&routing), 1);
+        let a2 = resolve_planner_max_turns_for(Some(&task), Some(&routing), 2);
+        let a3 = resolve_planner_max_turns_for(Some(&task), Some(&routing), 3);
         assert_eq!(a1.effective, 30, "attempt 1 ⇒ base; got {a1:?}");
         assert_eq!(a2.effective, 60, "attempt 2 ⇒ base + step; got {a2:?}");
         assert_eq!(a3.effective, 90, "attempt 3 ⇒ base + 2*step; got {a3:?}");
@@ -6451,12 +6443,12 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_clamps_at_hard_ceiling() {
         let task = task_with_max_turns_and_step(Some(100), Some(100));
-        let gw = gateway_with_default(None);
-        let r1 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
-        let r2 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
-        let r3 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 3);
-        let r4 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 4);
-        let r5 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 5);
+        let routing = model_routing_with_default(None);
+        let r1 = resolve_planner_max_turns_for(Some(&task), Some(&routing), 1);
+        let r2 = resolve_planner_max_turns_for(Some(&task), Some(&routing), 2);
+        let r3 = resolve_planner_max_turns_for(Some(&task), Some(&routing), 3);
+        let r4 = resolve_planner_max_turns_for(Some(&task), Some(&routing), 4);
+        let r5 = resolve_planner_max_turns_for(Some(&task), Some(&routing), 5);
         assert_eq!(r1.effective, 100);
         assert_eq!(r2.effective, 200);
         assert_eq!(
@@ -6474,10 +6466,10 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_derived_step_default() {
         let task = task_with_max_turns_and_step(Some(50), None);
-        let gw = gateway_with_default(None);
-        let a1 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
-        let a2 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
-        let a3 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 3);
+        let routing = model_routing_with_default(None);
+        let a1 = resolve_planner_max_turns_for(Some(&task), Some(&routing), 1);
+        let a2 = resolve_planner_max_turns_for(Some(&task), Some(&routing), 2);
+        let a3 = resolve_planner_max_turns_for(Some(&task), Some(&routing), 3);
         assert_eq!(
             a1.step, 25,
             "base=50 ⇒ derived step max(round_up_to_5(25), 10) = 25"
@@ -6493,8 +6485,8 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_derived_step_min_10() {
         let task = task_with_max_turns_and_step(Some(5), None);
-        let gw = gateway_with_default(None);
-        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
+        let routing = model_routing_with_default(None);
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&routing), 2);
         assert_eq!(
             r.step, 10,
             "base=5 ⇒ derived step max(round_up_to_5(2), 10) = 10"
@@ -6524,8 +6516,8 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_policy_step_default_wins_over_derived() {
         let task = task_with_max_turns_and_step(Some(40), None);
-        let gw = gateway_with_default_and_step(None, Some(7));
-        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
+        let routing = model_routing_with_default_and_step(None, Some(7));
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&routing), 2);
         assert_eq!(
             r.step, 7,
             "policy `planner_max_turns_step_default = Some(7)` MUST win over derived default"
@@ -6538,8 +6530,8 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_per_task_step_wins_over_policy() {
         let task = task_with_max_turns_and_step(Some(40), Some(3));
-        let gw = gateway_with_default_and_step(None, Some(7));
-        let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
+        let routing = model_routing_with_default_and_step(None, Some(7));
+        let r = resolve_planner_max_turns_for(Some(&task), Some(&routing), 2);
         assert_eq!(
             r.step, 3,
             "per-task `max_turns_step = Some(3)` MUST win over policy default 7"

@@ -17,6 +17,7 @@
  * Keyboard: [ toggles left pane, ] toggles right pane (Figma/VS Code
  * convention) — only fires when no input/textarea is focused.
  */
+/* eslint-disable react-refresh/only-export-components */
 
 import {
   useCallback,
@@ -25,6 +26,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
+
+import { Tooltip } from "@/components/Tooltip";
 
 export interface CanvasLayoutProps {
   /** Toolbar shown at the very top of the canvas area (full width). */
@@ -40,6 +43,12 @@ export interface CanvasLayoutProps {
   leftPaneStorageKey?: string;
   /** Whether the left pane starts open. Default true. */
   leftPaneDefaultOpen?: boolean;
+  /**
+   * When true, the left pane content is responsible for its own scroll
+   * container. Use this for inspectors/palettes with sticky internal
+   * controls so the layout does not create nested vertical scroll regions.
+   */
+  leftPaneOwnsScroll?: boolean;
 
   // --- Center canvas ---
   /** Main content — DAG graph, Monaco editor, form area, etc. */
@@ -53,6 +62,12 @@ export interface CanvasLayoutProps {
   rightPaneWidth?: number;
   rightPaneStorageKey?: string;
   rightPaneDefaultOpen?: boolean;
+  /**
+   * When true, the right pane content is responsible for its own scroll
+   * container. This avoids the "scroll jail" feeling caused by nested pane
+   * and inspector scrollbars.
+   */
+  rightPaneOwnsScroll?: boolean;
 }
 
 function usePaneOpen(key: string | undefined, defaultOpen: boolean) {
@@ -92,6 +107,7 @@ export function CanvasLayout({
   leftPaneWidth = 260,
   leftPaneStorageKey,
   leftPaneDefaultOpen = true,
+  leftPaneOwnsScroll = false,
   children,
   canvasClassName = "",
   rightPane,
@@ -99,6 +115,7 @@ export function CanvasLayout({
   rightPaneWidth = 340,
   rightPaneStorageKey,
   rightPaneDefaultOpen = true,
+  rightPaneOwnsScroll = false,
 }: CanvasLayoutProps) {
   const [leftOpen, toggleLeft] = usePaneOpen(leftPaneStorageKey, leftPaneDefaultOpen);
   const [rightOpen, toggleRight] = usePaneOpen(rightPaneStorageKey, rightPaneDefaultOpen);
@@ -129,7 +146,7 @@ export function CanvasLayout({
       )}
 
       {/* Three-pane body */}
-      <div className="flex flex-1 min-h-0 overflow-hidden">
+      <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden">
         {/* ── Left pane ─────────────────────────────────── */}
         {leftPane && (
           <PaneSide
@@ -138,6 +155,7 @@ export function CanvasLayout({
             onToggle={toggleLeft}
             title={leftPaneTitle}
             width={leftPaneWidth}
+            contentOwnsScroll={leftPaneOwnsScroll}
           >
             {leftPane}
           </PaneSide>
@@ -158,6 +176,7 @@ export function CanvasLayout({
             onToggle={toggleRight}
             title={rightPaneTitle}
             width={rightPaneWidth}
+            contentOwnsScroll={rightPaneOwnsScroll}
           >
             {rightPane}
           </PaneSide>
@@ -177,16 +196,25 @@ interface PaneSideProps {
   onToggle: () => void;
   title: string;
   width: number;
+  contentOwnsScroll?: boolean;
   children: ReactNode;
 }
 
-function PaneSide({ side, open, onToggle, title, width, children }: PaneSideProps) {
+function PaneSide({
+  side,
+  open,
+  onToggle,
+  title,
+  width,
+  contentOwnsScroll = false,
+  children,
+}: PaneSideProps) {
   const borderClass = side === "left" ? "border-r" : "border-l";
   const isLeft = side === "left";
 
   return (
     <div
-      className={`relative shrink-0 flex flex-col ${borderClass} border-edge bg-panel-raised transition-all duration-200`}
+      className={`relative shrink-0 flex min-h-0 flex-col ${borderClass} border-edge bg-panel-raised transition-all duration-200`}
       style={{ width: open ? width : 0, minWidth: open ? width : 0 }}
     >
       {/* Content — clipped when collapsing */}
@@ -199,38 +227,56 @@ function PaneSide({ side, open, onToggle, title, width, children }: PaneSideProp
           <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">
             {title}
           </span>
-          <button
-            type="button"
-            onClick={onToggle}
-            aria-label={`Collapse ${title}`}
-            title={`Collapse (${isLeft ? "[" : "]"})`}
-            className="p-0.5 rounded text-ink-subtle hover:text-ink hover:bg-panel-high transition-colors"
+          <Tooltip
+            content={`Collapse (${isLeft ? "[" : "]"})`}
+            side={isLeft ? "right" : "left"}
           >
-            <ChevronIcon side={side} collapsed={false} />
-          </button>
+            <button
+              type="button"
+              onClick={onToggle}
+              aria-label={`Collapse ${title}`}
+              className="p-0.5 rounded text-ink-subtle hover:text-ink hover:bg-panel-high transition-colors"
+            >
+              <ChevronIcon side={side} collapsed={false} />
+            </button>
+          </Tooltip>
         </div>
 
-        {/* Scrollable pane body */}
-        <div className="flex-1 min-h-0 overflow-y-auto scroll-thin">
+        {/* Pane body. Some builder panes own their internal scroll so sticky
+            controls and long forms do not fight a parent scrollbar. */}
+        <div
+          className={
+            contentOwnsScroll
+              ? "flex-1 min-h-0 overflow-hidden"
+              : "flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-thin pb-4"
+          }
+        >
           {children}
         </div>
       </div>
 
       {/* Collapsed toggle tab — sits outside the panel at its edge */}
       {!open && (
-        <button
-          type="button"
-          onClick={onToggle}
-          aria-label={`Expand ${title}`}
-          title={`Expand (${isLeft ? "[" : "]"})`}
-          className={`absolute top-1/2 -translate-y-1/2 z-10 flex items-center gap-1 px-1.5 py-3 text-[10px] font-semibold uppercase tracking-wider rounded border border-edge bg-panel-raised shadow-soft text-ink-muted hover:text-ink hover:border-accent transition-colors ${
+        <Tooltip
+          content={`Expand (${isLeft ? "[" : "]"})`}
+          side={isLeft ? "right" : "left"}
+          className={`absolute top-1/2 -translate-y-1/2 z-10 ${
             isLeft ? "-right-7 rounded-l-none" : "-left-7 rounded-r-none"
           }`}
-          style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}
         >
-          <ChevronIcon side={side} collapsed={true} />
-          <span>{title}</span>
-        </button>
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-label={`Expand ${title}`}
+            className={`flex items-center gap-1 px-1.5 py-3 text-[10px] font-semibold uppercase tracking-wider rounded border border-edge bg-panel-raised shadow-soft text-ink-muted hover:text-ink hover:border-accent transition-colors ${
+              isLeft ? "rounded-l-none" : "rounded-r-none"
+            }`}
+            style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}
+          >
+            <ChevronIcon side={side} collapsed={true} />
+            <span>{title}</span>
+          </button>
+        </Tooltip>
       )}
     </div>
   );
@@ -435,12 +481,11 @@ export function CollapsibleSection({
           <path d="M2 4L6 8L10 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
-      <div
-        ref={bodyRef}
-        className={`overflow-hidden transition-all duration-200 ${open ? "max-h-[9999px]" : "max-h-0"}`}
-      >
-        <div className="px-3 pb-3">{children}</div>
-      </div>
+      {open && (
+        <div ref={bodyRef} className="px-3 pb-3">
+          {children}
+        </div>
+      )}
     </div>
   );
 }

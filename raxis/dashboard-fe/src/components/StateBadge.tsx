@@ -7,6 +7,8 @@ import {
 } from "@/lib/state-color";
 import clsx from "clsx";
 
+import { Tooltip } from "@/components/Tooltip";
+
 interface StateBadgeProps {
   state: string | null | undefined;
   /// Optional pulsing dot for live/running states. When omitted,
@@ -28,19 +30,17 @@ interface StateBadgeProps {
 /// composition is `(tone-coloured pill) + (glyph) + (label)`. The
 /// glyph is the third axis of disambiguation alongside colour and
 /// label so that two states sharing a tone (e.g. `Aborted` and
-/// `Cancelled` both `block`) remain visually distinct on
-/// colour-blindness filters and on tinted monitors. Hover surfaces
-/// the canonical operator-facing description via `title=`.
+/// `Cancelled` both `block`) remain visually distinct on colour-blindness
+/// filters and on tinted monitors.
 export function StateBadge({ state, pulse, className }: StateBadgeProps) {
   const label = state ?? "unknown";
   const tone = stateTone(label);
   const glyph = stateGlyph(label);
   const description = stateDescription(label);
   const shouldPulse = pulse ?? stateShouldPulse(label);
-  return (
+  const badge = (
     <span
       className={clsx("badge", toneClasses(tone), className)}
-      title={description || undefined}
     >
       {shouldPulse && (
         <span className="pulse-dot mr-1.5" aria-hidden="true" />
@@ -51,4 +51,6 @@ export function StateBadge({ state, pulse, className }: StateBadgeProps) {
       {label}
     </span>
   );
+  if (!description) return badge;
+  return <Tooltip content={description}>{badge}</Tooltip>;
 }

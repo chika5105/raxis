@@ -2191,6 +2191,8 @@ impl DashboardData for KernelDashboardData {
                     policy_sha256: bundle.policy_sha256().to_owned(),
                     signed_by: bundle.signed_by().to_owned(),
                     signed_at: bundle.signed_at(),
+                    git_default_target_ref: bundle.git_default_target_ref().to_owned(),
+                    git_target_ref_locked: bundle.git_target_ref_locked(),
                     operators,
                     notification_routes: routes,
                 })
@@ -4775,6 +4777,7 @@ fn provider_from_model_id(model: &str) -> Option<String> {
 /// be indistinguishable from "no turns yet" and would suppress
 /// the kernel-persisted values that ARE the truth for executor /
 /// reviewer sessions, so we return `None` rather than `Some((0,0))`.
+#[cfg(test)]
 pub(crate) fn cumulative_tokens_for_task(
     capture: Option<&Arc<TaskLlmCapture>>,
     task_id: &str,

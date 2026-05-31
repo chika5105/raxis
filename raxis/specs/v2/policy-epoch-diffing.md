@@ -170,7 +170,7 @@ configurable by operators — it is part of the kernel binary.
 | `[lanes]` | `BudgetPolicy` |
 | `[admission_weights]` | `BudgetPolicy` |
 | `[[providers]]` | `ProviderPolicy` |
-| `[gateway]` | `ProviderPolicy` |
+| `[model_routing]` | `ProviderPolicy` |
 | `[escalation_classes]` | `EscalationPolicy` |
 | `[auth]` | `AuthPolicy` |
 | `[witness_gates]` | `WitnessPolicy` |

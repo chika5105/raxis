@@ -19,14 +19,15 @@ pub mod loader;
 pub mod observability;
 
 pub use bundle::{
-    DefaultExecutorImageConfig, ElasticConfig, EnvironmentConfig, GateEntry, GatewaySection,
-    HostCapacityConfig, IntegrationMergeVerifierAppliesTo, IntegrationMergeVerifierEntry,
-    IntegrationMergeVerifierOnFailure, IsolationConfig, LaneEntry, NotificationChannel,
-    NotificationChannelKind, NotificationRoute, OperatorEntry, PermittedCredentialConfig,
-    PlanBundleLimitsSection, PlanSigningSection, PolicyBundle, ProviderEntry, ProviderPricing,
-    SleepCapsSection, TaskVerifierEntry, TaskVerifierOnFailure, TokenCapsSection, VmImageConfig,
-    INBOX_FILENAME, KNOWN_AUDIT_EVENT_KINDS, MAX_DATA_FETCH_TIMEOUT_MS, MAX_INFERENCE_TIMEOUT_MS,
-    MAX_RESPONSE_BYTES_CEILING, MIN_GUEST_LINUX_KERNEL_MAJOR, MIN_GUEST_LINUX_KERNEL_MINOR,
+    DefaultExecutorImageConfig, ElasticConfig, EnvironmentConfig, GateEntry, HostCapacityConfig,
+    IntegrationMergeVerifierAppliesTo, IntegrationMergeVerifierEntry,
+    IntegrationMergeVerifierOnFailure, IsolationConfig, LaneEntry, ModelRoutingSection,
+    NotificationChannel, NotificationChannelKind, NotificationRoute, OperatorEntry,
+    PermittedCredentialConfig, PlanBundleLimitsSection, PlanSigningSection, PolicyBundle,
+    ProviderEntry, ProviderPricing, SleepCapsSection, TaskVerifierEntry, TaskVerifierOnFailure,
+    TokenCapsSection, VmImageConfig, INBOX_FILENAME, KNOWN_AUDIT_EVENT_KINDS,
+    MAX_DATA_FETCH_TIMEOUT_MS, MAX_INFERENCE_TIMEOUT_MS, MAX_RESPONSE_BYTES_CEILING,
+    MIN_GUEST_LINUX_KERNEL_MAJOR, MIN_GUEST_LINUX_KERNEL_MINOR,
     PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS, PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING,
     PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING, PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING,
     PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS, RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME,

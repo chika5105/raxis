@@ -1370,6 +1370,10 @@ pub fn spawn_kernel_normal(
     let mut cmd = ProcCommand::new(kernel_bin);
     cmd.env("RAXIS_DATA_DIR", &data_dir)
         .env("RAXIS_INSTALL_DIR", install_dir);
+    let gateway_binary_marker = data_dir.join("runtime").join("gateway-binary.path");
+    if let Ok(path) = std::fs::read_to_string(&gateway_binary_marker) {
+        cmd.env(ENV_GATEWAY_BINARY, path.trim());
+    }
     if std::env::var_os("RAXIS_PLANNER_IPC_IDLE_TIMEOUT_SECS").is_none() {
         cmd.env("RAXIS_PLANNER_IPC_IDLE_TIMEOUT_SECS", "300");
     }
@@ -1406,24 +1410,29 @@ pub fn spawn_kernel_normal(
 }
 
 pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
+    let runtime_dir = data_dir.join("runtime");
+    std::fs::create_dir_all(&runtime_dir)
+        .unwrap_or_else(|e| panic!("create {}: {e}", runtime_dir.display()));
+    std::fs::write(
+        runtime_dir.join("gateway-binary.path"),
+        gateway_binary.display().to_string(),
+    )
+    .unwrap_or_else(|e| panic!("write gateway binary marker: {e}"));
+
     let policy_path = data_dir.join("policy").join("policy.toml");
     let mut body = std::fs::read_to_string(&policy_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", policy_path.display()));
     assert!(
-        !body.contains("\n[gateway]\n"),
-        "policy.toml already has a [gateway] block; bootstrap template changed",
+        !body.contains("\n[model_routing]\n"),
+        "policy.toml already has a [model_routing] block; bootstrap template changed",
     );
     let injected = format!(
-        "\n# ── [gateway] + [[providers]] + [egress] + [[lanes]] (realism-e2e) ──\n\
-         [gateway]\n\
-         binary_path              = \"{gw}\"\n\
-         spawn_timeout_secs       = 30\n\
-         respawn_backoff_ms       = 1000\n\
-         max_consecutive_respawns = 5\n\
-         planner_model_orchestrator_chain = [\"{orch_model}\", \"{gemini_model}\", \"{review_model}\"]\n\
-         planner_model_executor_chain     = [\"{orch_model}\", \"{gemini_model}\", \"{review_model}\"]\n\
-         planner_model_executor_rotate_primary = true\n\
-         planner_model_reviewer_chain     = [\"{review_model}\", \"{orch_model}\", \"{gemini_model}\"]\n\
+        "\n# ── [model_routing] + [[providers]] + [egress] + [[lanes]] (realism-e2e) ──\n\
+         [model_routing]\n\
+         orchestrator_chain = [\"{orch_model}\", \"{gemini_model}\", \"{review_model}\"]\n\
+         executor_chain     = [\"{orch_model}\", \"{gemini_model}\", \"{review_model}\"]\n\
+         executor_rotate_primary = true\n\
+         reviewer_chain     = [\"{review_model}\", \"{orch_model}\", \"{gemini_model}\"]\n\
          \n\
          # `example.com` admits the iter65 dep-fetch-evidence task's\n\
          # one HTTPS GET via Path A3; the witness in\n\
@@ -1505,7 +1514,6 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          max_concurrent_tasks = 8\n\
          max_cost_per_epoch   = 100000\n\
          priority             = 100\n",
-        gw = gateway_binary.display(),
         orch_model = E2E_ORCHESTRATOR_MODEL_ID,
         gemini_model = E2E_GEMINI_MODEL_ID,
         review_model = E2E_REVIEWER_MODEL_ID,

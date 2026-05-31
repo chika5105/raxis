@@ -29,6 +29,7 @@ import {
 } from "@xyflow/react";
 import dagre from "dagre";
 
+import { Tooltip } from "@/components/Tooltip";
 import type {
   CredentialDraft,
   CredentialProxyType,
@@ -102,6 +103,8 @@ export interface PlanCanvasProps {
   credentialSetups: CredentialSetupDraft[];
   policyGateRefs: PolicyGateRef[];
   selectedTaskId: string | null;
+  revealTaskId?: string | null;
+  revealVersion?: number;
   arrangeVersion: number;
   canRemoveTask: boolean;
   onSelectTask: (taskId: string | null) => void;
@@ -606,20 +609,9 @@ function InlineTaskEditor({
       onDoubleClick={(event) => event.stopPropagation()}
       onWheel={(event) => {
         event.stopPropagation();
-        const target = event.target as HTMLElement | null;
-        if (target?.closest("[data-task-scroll-region]")) return;
-        const scrollRegion = event.currentTarget.querySelector<HTMLElement>(
-          "[data-task-scroll-region]",
-        );
-        if (!scrollRegion) return;
-        scrollRegion.scrollTop += event.deltaY;
-        scrollRegion.scrollLeft += event.deltaX;
       }}
     >
-      <div
-        className="task-card-drag-handle shrink-0 cursor-grab border-b border-edge bg-panel-raised px-4 py-3 active:cursor-grabbing"
-        title="Drag task card"
-      >
+      <div className="task-card-drag-handle shrink-0 cursor-grab border-b border-edge bg-panel-raised px-4 py-3 active:cursor-grabbing">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">
@@ -635,64 +627,66 @@ function InlineTaskEditor({
             >
               {task.agentType || "Role required"}
             </span>
-            <button
-              type="button"
-              className="nodrag nopan nowheel inline-grid h-7 w-7 place-items-center rounded-md border border-bad/30 bg-panel text-bad transition-colors hover:bg-bad/10 disabled:cursor-not-allowed disabled:border-edge disabled:text-ink-subtle disabled:hover:bg-panel focus:outline-none focus-visible:ring-2 focus-visible:ring-bad"
-              aria-label="Delete task card"
-              title={canRemove ? "Delete task card" : "A plan needs at least one task"}
-              disabled={!canRemove}
-              onPointerDown={(event) => event.stopPropagation()}
-              onMouseDown={handleRemoveMouseDown}
-              onClick={handleRemoveClick}
-            >
-              <svg
-                className="h-3.5 w-3.5"
-                viewBox="0 0 16 16"
-                fill="none"
-                aria-hidden
+            <Tooltip content={canRemove ? "Delete task card" : "A plan needs at least one task"}>
+              <button
+                type="button"
+                className="nodrag nopan nowheel inline-grid h-7 w-7 place-items-center rounded-md border border-bad/30 bg-panel text-bad transition-colors hover:bg-bad/10 disabled:cursor-not-allowed disabled:border-edge disabled:text-ink-subtle disabled:hover:bg-panel focus:outline-none focus-visible:ring-2 focus-visible:ring-bad"
+                aria-label="Delete task card"
+                disabled={!canRemove}
+                onPointerDown={(event) => event.stopPropagation()}
+                onMouseDown={handleRemoveMouseDown}
+                onClick={handleRemoveClick}
               >
-                <path
-                  d="M6 2.75h4M3.75 4.75h8.5M5 4.75l.5 8.25h5l.5-8.25M7 7v4M9 7v4"
-                  stroke="currentColor"
-                  strokeWidth="1.55"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
-            <button
-              type="button"
-              className="nodrag nopan nowheel inline-grid h-7 w-7 place-items-center rounded-md border border-edge-strong bg-panel text-ink-muted transition-colors hover:border-accent hover:bg-panel-high hover:text-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-              aria-label="Collapse task card"
-              title="Collapse task card"
-              onPointerDown={(event) => event.stopPropagation()}
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onCollapse();
-              }}
-            >
-              <svg
-                className="h-3.5 w-3.5"
-                viewBox="0 0 16 16"
-                fill="none"
-                aria-hidden
+                <svg
+                  className="h-3.5 w-3.5"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  aria-hidden
+                >
+                  <path
+                    d="M6 2.75h4M3.75 4.75h8.5M5 4.75l.5 8.25h5l.5-8.25M7 7v4M9 7v4"
+                    stroke="currentColor"
+                    strokeWidth="1.55"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            </Tooltip>
+            <Tooltip content="Collapse task card">
+              <button
+                type="button"
+                className="nodrag nopan nowheel inline-grid h-7 w-7 place-items-center rounded-md border border-edge-strong bg-panel text-ink-muted transition-colors hover:border-accent hover:bg-panel-high hover:text-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                aria-label="Collapse task card"
+                onPointerDown={(event) => event.stopPropagation()}
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onCollapse();
+                }}
               >
-                <path
-                  d="M4 8h8"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                />
-              </svg>
-            </button>
+                <svg
+                  className="h-3.5 w-3.5"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  aria-hidden
+                >
+                  <path
+                    d="M4 8h8"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+            </Tooltip>
           </div>
         </div>
       </div>
 
       <div
         data-task-scroll-region
-        className="nodrag nopan nowheel flex-1 overflow-y-auto overscroll-contain scroll-thin p-4 space-y-3"
+        className="nodrag nopan nowheel flex-1 overflow-y-auto overscroll-contain scroll-thin p-4 pb-8 space-y-3 [touch-action:pan-y]"
         onPointerDown={(event) => event.stopPropagation()}
       >
         <div className="grid grid-cols-[1fr_8.5rem] gap-2">
@@ -1314,7 +1308,7 @@ interface NodeRect {
   height: number;
 }
 
-interface FlowRect extends NodeRect {}
+type FlowRect = NodeRect;
 
 interface EdgeEndpoint {
   x: number;
@@ -1695,14 +1689,13 @@ function DeletableEdge({
       />
       {!isGate && (
         <EdgeLabelRenderer>
-          <button
-            className="nodrag nopan flex items-center justify-center rounded-full border border-edge-strong bg-panel-raised text-[9px] font-bold text-ink-muted opacity-0 transition-opacity hover:bg-bad/10 hover:text-bad"
+          <Tooltip
+            content="Remove dependency"
+            className="nodrag nopan opacity-0 transition-opacity"
             style={{
               position: "absolute",
               transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
               pointerEvents: "all",
-              width: 20,
-              height: 20,
             }}
             onMouseEnter={(event) => {
               event.currentTarget.style.opacity = "1";
@@ -1710,16 +1703,20 @@ function DeletableEdge({
             onMouseLeave={(event) => {
               event.currentTarget.style.opacity = "0";
             }}
-            onClick={(event) => {
-              event.stopPropagation();
-              void deleteElements({ edges: [{ id }] });
-            }}
-            title="Remove dependency"
-            aria-label="Remove dependency"
-            type="button"
           >
-            ×
-          </button>
+            <button
+              className="flex items-center justify-center rounded-full border border-edge-strong bg-panel-raised text-[9px] font-bold text-ink-muted transition-colors hover:bg-bad/10 hover:text-bad"
+              style={{ width: 20, height: 20 }}
+              onClick={(event) => {
+                event.stopPropagation();
+                void deleteElements({ edges: [{ id }] });
+              }}
+              aria-label="Remove dependency"
+              type="button"
+            >
+              ×
+            </button>
+          </Tooltip>
         </EdgeLabelRenderer>
       )}
     </>
@@ -1734,21 +1731,25 @@ function GateNode({ data }: NodeProps<Node<GateNodeData>>) {
         ? "border-warn bg-warn-muted text-warn"
         : "border-info bg-info-muted text-info";
   return (
-    <div
-      className="rounded-lg border border-dashed border-ok/70 bg-panel-raised px-3 py-2 text-ink shadow-soft"
-      style={{ width: GATE_NODE_W, minHeight: GATE_NODE_H }}
-      title={data.parentTaskId ? `${data.badge} for ${data.parentTaskId}` : data.badge}
+    <Tooltip
+      content={data.parentTaskId ? `${data.badge} for ${data.parentTaskId}` : data.badge}
+      side="bottom"
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="truncate font-mono text-xs font-semibold">{data.title}</div>
-          <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-ink-muted">
-            {data.subtitle}
+      <div
+        className="rounded-lg border border-dashed border-ok/70 bg-panel-raised px-3 py-2 text-ink shadow-soft"
+        style={{ width: GATE_NODE_W, minHeight: GATE_NODE_H }}
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="truncate font-mono text-xs font-semibold">{data.title}</div>
+            <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-ink-muted">
+              {data.subtitle}
+            </div>
           </div>
+          <span className={`badge shrink-0 text-[9px] ${toneClass}`}>{data.badge}</span>
         </div>
-        <span className={`badge shrink-0 text-[9px] ${toneClass}`}>{data.badge}</span>
       </div>
-    </div>
+    </Tooltip>
   );
 }
 
@@ -1775,6 +1776,8 @@ function PlanCanvasInner({
   credentialSetups,
   policyGateRefs,
   selectedTaskId,
+  revealTaskId,
+  revealVersion = 0,
   arrangeVersion,
   canRemoveTask,
   onSelectTask,
@@ -1970,6 +1973,17 @@ function PlanCanvasInner({
       }),
     );
   }, [selectedTaskId]);
+
+  useEffect(() => {
+    if (!revealTaskId || revealVersion === 0) return;
+    const timeout = window.setTimeout(() => {
+      const position = positionsRef.current.get(revealTaskId);
+      if (!position) return;
+      const rect = nodeRect(getInternalNode(revealTaskId)) ?? nodeRectAt(position);
+      revealFlowRect(rect, canvasRef.current, flowToScreenPosition, getViewport, setViewport);
+    }, 40);
+    return () => window.clearTimeout(timeout);
+  }, [flowToScreenPosition, getInternalNode, getViewport, revealTaskId, revealVersion, setViewport]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     setRfNodes((nodes) => applyNodeChanges(changes, nodes) as BuilderNode[]);

@@ -1481,19 +1481,20 @@ mod edge_cases {
     }
 
     #[test]
-    fn bootstrapped_policy_loads_with_no_gateway_section() {
-        // The genesis policy template emits `[gateway]` and `[[providers]]`
-        // as commented blocks. A freshly-bootstrapped kernel must therefore
-        // load policy.toml with `gateway() == None` and `providers() == &[]`
-        // — the no-LLM degraded mode mentioned in the spec.
+    fn bootstrapped_policy_loads_with_no_model_providers() {
+        // The genesis policy template emits `[model_routing]` and
+        // `[[providers]]` as commented blocks. A freshly-bootstrapped
+        // kernel must therefore load policy.toml with
+        // `model_routing() == None` and `providers() == &[]` — the
+        // no-LLM degraded mode mentioned in the spec.
         let (tmp, config) = fresh_env_with_good_cert();
         run_inner(&config).expect("bootstrap");
 
         let (bundle, _, _) = raxis_policy::load_policy(&tmp.path().join("policy/policy.toml"))
             .expect("genesis policy must load");
         assert!(
-            bundle.gateway().is_none(),
-            "genesis template must NOT activate [gateway]; operator must opt in"
+            bundle.model_routing().is_none(),
+            "genesis template must NOT activate [model_routing]; operator must opt in"
         );
         assert!(
             bundle.providers().is_empty(),

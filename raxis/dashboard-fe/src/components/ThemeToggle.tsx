@@ -15,6 +15,7 @@
 
 import clsx from "clsx";
 
+import { Tooltip } from "@/components/Tooltip";
 import { useTheme } from "@/lib/theme-context";
 
 interface ThemeToggleProps {
@@ -25,27 +26,28 @@ export function ThemeToggle({ className }: ThemeToggleProps) {
   const { theme, toggleTheme } = useTheme();
   const nextLabel = theme === "dark" ? "light" : "dark";
   return (
-    <button
-      type="button"
-      onClick={toggleTheme}
-      title={`Switch to ${nextLabel} mode`}
-      aria-label={`Switch to ${nextLabel} mode`}
-      // We deliberately do NOT advertise the `pressed` state via
-      // aria-pressed because that misrepresents the affordance —
-      // the button isn't a stateful toggle in the sense AT
-      // expects (e.g. "filter on / filter off"); it's a single
-      // action that swaps the global theme.
-      className={clsx(
-        "inline-flex items-center justify-center w-7 h-7 rounded-md",
-        "border border-edge-strong bg-panel-raised text-ink-muted",
-        "hover:bg-panel-high hover:text-ink hover:border-accent",
-        "focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent",
-        "transition-colors",
-        className,
-      )}
-    >
-      {theme === "dark" ? <SunIcon /> : <MoonIcon />}
-    </button>
+    <Tooltip content={`Switch to ${nextLabel} mode`} side="bottom" align="end">
+      <button
+        type="button"
+        onClick={toggleTheme}
+        aria-label={`Switch to ${nextLabel} mode`}
+        // We deliberately do NOT advertise the `pressed` state via
+        // aria-pressed because that misrepresents the affordance —
+        // the button isn't a stateful toggle in the sense AT
+        // expects (e.g. "filter on / filter off"); it's a single
+        // action that swaps the global theme.
+        className={clsx(
+          "inline-flex items-center justify-center w-7 h-7 rounded-md",
+          "border border-edge-strong bg-panel-raised text-ink-muted",
+          "hover:bg-panel-high hover:text-ink hover:border-accent",
+          "focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent",
+          "transition-colors",
+          className,
+        )}
+      >
+        {theme === "dark" ? <SunIcon /> : <MoonIcon />}
+      </button>
+    </Tooltip>
   );
 }
 

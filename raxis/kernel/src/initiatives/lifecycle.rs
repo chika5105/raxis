@@ -1110,14 +1110,14 @@ pub fn approve_plan(
             // the operator-declared per-task hard turn ceiling into
             // the in-memory PlanRegistry. `None` preserves "operator
             // omitted" semantics so `effective_max_turns` can fall
-            // through to `[gateway].planner_max_turns_default` and
+            // through to `[model_routing].planner_max_turns_default` and
             // then `DEFAULT_PLANNER_MAX_TURNS` at session-spawn time.
             max_turns: pt.max_turns,
             // V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` —
             // propagate the operator-declared progressive scaling
             // step. `None` preserves "operator omitted" semantics so
             // the resolver can fall through to the policy default
-            // (`[gateway].planner_max_turns_step_default`) and then
+            // (`[model_routing].planner_max_turns_step_default`) and then
             // the derived `max(base/2, 10)` default at spawn time.
             max_turns_step: pt.max_turns_step,
             // V2 `elastic-vm-scaling.md §2.2` — propagate the
@@ -2298,7 +2298,7 @@ struct PlanTask {
     /// **V2.7 — `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.**
     /// Operator-declared per-task hard turn ceiling for the planner
     /// dispatch loop. `None` ⇒ fall through to
-    /// `[gateway].planner_max_turns_default` (policy) and then the
+    /// `[model_routing].planner_max_turns_default` (policy) and then the
     /// compiled `DEFAULT_PLANNER_MAX_TURNS` (100). `Some(0)` is
     /// rejected at parse time (a 0-turn budget is never useful).
     /// See `TaskPlanFields::max_turns` /
@@ -2311,7 +2311,7 @@ struct PlanTask {
     /// resolves the effective per-attempt budget as
     /// `min(base + (attempt - 1) * step, hard_ceiling)`.
     /// `None` ⇒ fall through to
-    /// `[gateway].planner_max_turns_step_default` (policy) and then
+    /// `[model_routing].planner_max_turns_step_default` (policy) and then
     /// the derived default `max(round_up_to_5(base/2), 10)`.
     /// `Some(0)` is rejected at parse time — a zero step degenerates
     /// the resolver back to a constant budget and masks the
@@ -2745,7 +2745,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
         // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` — per-task hard
         // turn ceiling. Same parse shape as the retry-ceiling fields
         // (Option<u32>, structural-only, no policy cross-check) — the
-        // resolution against `[gateway].planner_max_turns_default` and
+        // resolution against `[model_routing].planner_max_turns_default` and
         // the compiled `DEFAULT_PLANNER_MAX_TURNS` happens at
         // session-spawn time, not at parse time. Reject `Some(0)`
         // here: a 0-turn budget would terminate the dispatch loop
@@ -10792,7 +10792,7 @@ max_turns_step = 1
 
     /// Omitted `max_turns_step` ⇒ `None` ⇒ the spawn-time resolver
     /// falls through to the policy default
-    /// (`[gateway].planner_max_turns_step_default`) or the
+    /// (`[model_routing].planner_max_turns_step_default`) or the
     /// derived-default formula (`max(round_up_to_5(base/2), 10)`).
     #[test]
     fn inv_planner_max_turns_progressive_on_retry_01_parser_admits_omitted_step() {

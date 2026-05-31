@@ -476,9 +476,9 @@ bearing kernel concern with **three mutually exclusive paths**:
       `Some(0)` is rejected at admission (a 0-turn budget would
       terminate the dispatch loop before the first model call and
       is never useful).
-   2. `[gateway].planner_max_turns_default = N` in `policy.toml`
+   2. `[model_routing].planner_max_turns_default = N` in `policy.toml`
       wins when per-task is omitted. Parsed into
-      `crates/policy/src/bundle.rs::GatewaySection::planner_max_turns_default`.
+      `crates/policy/src/bundle.rs::ModelRoutingSection::planner_max_turns_default`.
       Lets an org pin a tighter / looser cap globally without
       touching every plan.
    3. Compiled `DEFAULT_PLANNER_MAX_TURNS = 100` wins when both
@@ -541,7 +541,7 @@ bearing kernel concern with **three mutually exclusive paths**:
    * `base` = the V2.7-resolved per-task → per-policy → compiled
      `max_turns`.
    * `step` = per-task `[[tasks]].max_turns_step` → per-policy
-     `[gateway].planner_max_turns_step_default` → derived default
+     `[model_routing].planner_max_turns_step_default` → derived default
      `max(round_up_to_5(base / 2), 10)`. `max_turns_step = 0` is
      rejected at the plan parser.
    * `hard_ceiling` = `RAXIS_PLANNER_MAX_TURNS_HARD_CEILING` env

@@ -582,9 +582,17 @@ fn spawn_kernel_normal(kernel_bin: &Path, data_dir: PathBuf, install_dir: &Path)
     use std::process::{Command as ProcCommand, Stdio};
     use std::sync::{Arc, Mutex};
 
-    let mut child = ProcCommand::new(kernel_bin)
-        .env("RAXIS_DATA_DIR", &data_dir)
-        .env("RAXIS_INSTALL_DIR", install_dir)
+    let gateway_binary_marker = data_dir.join("runtime").join("gateway-binary.path");
+    let mut cmd = ProcCommand::new(kernel_bin);
+    cmd.env("RAXIS_DATA_DIR", &data_dir)
+        .env("RAXIS_INSTALL_DIR", install_dir);
+    if let Ok(path) = std::fs::read_to_string(&gateway_binary_marker) {
+        cmd.env(
+            extended_e2e_support::kernel_driver::ENV_GATEWAY_BINARY,
+            path.trim(),
+        );
+    }
+    let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -617,23 +625,28 @@ fn spawn_kernel_normal(kernel_bin: &Path, data_dir: PathBuf, install_dir: &Path)
 }
 
 fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
+    let runtime_dir = data_dir.join("runtime");
+    std::fs::create_dir_all(&runtime_dir)
+        .unwrap_or_else(|e| panic!("create {}: {e}", runtime_dir.display()));
+    std::fs::write(
+        runtime_dir.join("gateway-binary.path"),
+        gateway_binary.display().to_string(),
+    )
+    .unwrap_or_else(|e| panic!("write gateway binary marker: {e}"));
+
     let policy_path = data_dir.join("policy").join("policy.toml");
     let mut body = std::fs::read_to_string(&policy_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", policy_path.display()));
     assert!(
-        !body.contains("\n[gateway]\n"),
-        "policy.toml already has a [gateway] block; bootstrap template changed",
+        !body.contains("\n[model_routing]\n"),
+        "policy.toml already has a [model_routing] block; bootstrap template changed",
     );
     let injected = format!(
-        "\n# ── [gateway] + [[providers]] + [egress] + [[lanes]] (extended-e2e) ──\n\
-         [gateway]\n\
-         binary_path              = \"{gw}\"\n\
-         spawn_timeout_secs       = 30\n\
-         respawn_backoff_ms       = 1000\n\
-         max_consecutive_respawns = 5\n\
-         planner_model_orchestrator = \"claude-haiku-4-5\"\n\
-         planner_model_executor     = \"claude-haiku-4-5\"\n\
-         planner_model_reviewer     = \"claude-haiku-4-5\"\n\
+        "\n# ── [model_routing] + [[providers]] + [egress] + [[lanes]] (extended-e2e) ──\n\
+         [model_routing]\n\
+         orchestrator_model = \"claude-haiku-4-5\"\n\
+         executor_model     = \"claude-haiku-4-5\"\n\
+         reviewer_model     = \"claude-haiku-4-5\"\n\
          \n\
          [egress]\n\
          domains = [\"api.anthropic.com\"]\n\
@@ -665,7 +678,6 @@ fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          max_concurrent_tasks = 8\n\
          max_cost_per_epoch   = 100000\n\
          priority             = 100\n",
-        gw = gateway_binary.display(),
     );
     body.push_str(&injected);
 

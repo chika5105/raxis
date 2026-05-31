@@ -97,7 +97,7 @@ matching arm wins:
 | Arm | Source | Wins when | Resulting `source` log label |
 |---|---|---|---|
 | 1 | `[[tasks]] max_turns = N` in the plan TOML | the activating task declares `max_turns` | `task` |
-| 2 | `[gateway].planner_max_turns_default = N` in `policy.toml` | per-task is omitted, policy default is set | `policy` |
+| 2 | `[model_routing].planner_max_turns_default = N` in `policy.toml` | per-task is omitted, policy default is set | `policy` |
 | 3 | compiled-in `DEFAULT_PLANNER_MAX_TURNS = 100` | both per-task and policy default are omitted | `compiled-default` |
 
 Each spawn emits a structured `PlannerMaxTurnsResolved` log line on
@@ -128,7 +128,7 @@ Negative values are rejected by the existing TOML shape check.
   ≥150) plus three Reviewers that judge a single diff (need ≤5).
   Put the per-task value on each `[[tasks]]` entry that needs to
   diverge from the default.
-- **Policy `[gateway].planner_max_turns_default`** is the right knob
+- **Policy `[model_routing].planner_max_turns_default`** is the right knob
   for org-wide ceiling adjustments (e.g. CI plans with `= 5` for
   fail-fast smoke runs). Per-task overrides still win.
 - **Compiled `100`** is the safe blanket default — calibrated
@@ -165,7 +165,7 @@ where:
   `max_turns`.
 * `step` precedence (mirrors the `base` chain):
   1. `[[tasks]].max_turns_step = N` in the plan TOML.
-  2. `[gateway].planner_max_turns_step_default = N` in `policy.toml`.
+  2. `[model_routing].planner_max_turns_step_default = N` in `policy.toml`.
   3. Derived default: `max(round_up_to_5(base / 2), 10)` (e.g.
      `base = 30` ⇒ derived step `15`; `base = 100` ⇒ derived step
      `50`; `base = 5` ⇒ derived step `10` (floor)).
@@ -304,7 +304,7 @@ HOME=/root
 - **Local mock provider.** Set `RAXIS_PLANNER_BASE_URL` (in the
   policy provider entry, which propagates) to a local mock; useful
   for offline tests.
-- **Tight turn cap.** Set `[gateway].planner_max_turns_default = 5`
+- **Tight turn cap.** Set `[model_routing].planner_max_turns_default = 5`
   in policy (a kernel-side override) to keep agents from running
   away in dev. The env var stamping happens automatically.
 - **Don't stamp manually.** Operators never set these env vars by

@@ -297,9 +297,9 @@ take the fast-path admission — `INV-WITNESS-VERIFIER-LIVE-E2E-
 EXERCISED-01` coverage is then DROPPED for that run.
 
 The live-e2e harness now auto-builds the latest release
-`raxis-gateway` before injecting `[gateway].binary_path` into the
-bootstrapped policy. This prevents the old failure mode where
-`RAXIS_GATEWAY_BINARY` pointed at a stale binary. Set
+`raxis-gateway`, passes it through `RAXIS_GATEWAY_BINARY`, and
+injects provider plus `[model_routing]` policy. This prevents the old
+failure mode where `RAXIS_GATEWAY_BINARY` pointed at a stale binary. Set
 `RAXIS_E2E_SKIP_GATEWAY_AUTO_BUILD=1` only when validating a
 packaged/system-installed gateway, and pair it with an explicit
 `RAXIS_GATEWAY_BINARY=/absolute/path/to/raxis-gateway`.

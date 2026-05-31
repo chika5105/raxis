@@ -158,14 +158,10 @@ fi
 
 cat >> "$RAXIS_DATA_DIR/policy/policy.toml" <<EOF
 
-[gateway]
-binary_path              = "$(brew --prefix raxis)/bin/raxis-gateway"
-spawn_timeout_secs       = 5
-respawn_backoff_ms       = 1000
-max_consecutive_respawns = 5
-planner_model_orchestrator = "claude-haiku-4-5"
-planner_model_executor     = "claude-haiku-4-5"
-planner_model_reviewer     = "claude-haiku-4-5"
+[model_routing]
+orchestrator_model = "claude-haiku-4-5"
+executor_model     = "claude-haiku-4-5"
+reviewer_model     = "claude-haiku-4-5"
 
 [[providers]]
 provider_id              = "anthropic-prod"
@@ -180,7 +176,7 @@ EOF
 ```
 
 Every planner role must have at least one selected model. For higher
-availability, use the ordered `planner_model_<role>_chain` fields
+availability, use the ordered `<role>_chain` fields
 instead of the single-model fields; the kernel attempts configured
 fallbacks on provider/model availability failures while still
 rejecting malformed requests fail-closed.

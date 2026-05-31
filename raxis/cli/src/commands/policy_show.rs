@@ -44,7 +44,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use raxis_policy::{
-    load_policy, GatewaySection, NotificationChannel, NotificationChannelKind, PolicyBundle,
+    load_policy, ModelRoutingSection, NotificationChannel, NotificationChannelKind, PolicyBundle,
 };
 use raxis_store::open_ro;
 use raxis_store::views::policy_history;
@@ -275,7 +275,7 @@ fn render_human<W: Write>(
     render_section_operators(out, bundle);
     render_section_gates(out, bundle);
     render_section_egress(out, bundle);
-    render_section_gateway(out, bundle.gateway());
+    render_section_model_routing(out, bundle.model_routing());
     render_section_providers(out, bundle);
     render_section_notifications(out, bundle);
 
@@ -339,26 +339,54 @@ fn render_section_egress<W: Write>(out: &mut W, bundle: &PolicyBundle) {
     }
 }
 
-fn render_section_gateway<W: Write>(out: &mut W, gw: Option<&GatewaySection>) {
-    let _ = writeln!(out, "\nGateway:");
-    match gw {
+fn render_section_model_routing<W: Write>(out: &mut W, routing: Option<&ModelRoutingSection>) {
+    let _ = writeln!(out, "\nModel routing:");
+    match routing {
         None => {
             let _ = writeln!(
                 out,
-                "  (not configured — kernel runs with no inference / fetch)"
+                "  (not configured — kernel runs with no model providers)"
             );
         }
-        Some(g) => {
-            let _ = writeln!(out, "  binary_path:              {}", g.binary_path);
-            let _ = writeln!(out, "  spawn_timeout_secs:       {}", g.spawn_timeout_secs);
-            let _ = writeln!(out, "  respawn_backoff_ms:       {}", g.respawn_backoff_ms);
+        Some(r) => {
             let _ = writeln!(
                 out,
-                "  max_consecutive_respawns: {}",
-                g.max_consecutive_respawns
+                "  orchestrator:             {}",
+                format_model_choice(r.orchestrator_model.as_deref(), &r.orchestrator_chain)
             );
+            let _ = writeln!(
+                out,
+                "  executor:                 {}",
+                format_model_choice(r.executor_model.as_deref(), &r.executor_chain)
+            );
+            let _ = writeln!(
+                out,
+                "  reviewer:                 {}",
+                format_model_choice(r.reviewer_model.as_deref(), &r.reviewer_chain)
+            );
+            let _ = writeln!(
+                out,
+                "  executor_rotate_primary:  {}",
+                r.executor_rotate_primary
+            );
+            if let Some(max) = r.planner_max_turns_default {
+                let _ = writeln!(out, "  planner_max_turns_default:      {max}");
+            }
+            if let Some(step) = r.planner_max_turns_step_default {
+                let _ = writeln!(out, "  planner_max_turns_step_default: {step}");
+            }
         }
     }
+}
+
+fn format_model_choice(single: Option<&str>, chain: &[String]) -> String {
+    if !chain.is_empty() {
+        return chain.join(" → ");
+    }
+    single
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or("<not configured>")
+        .to_owned()
 }
 
 fn render_section_providers<W: Write>(out: &mut W, bundle: &PolicyBundle) {
@@ -498,12 +526,17 @@ fn render_json<W: Write>(
         })
         .collect();
 
-    let gateway_v: serde_json::Value = match bundle.gateway() {
-        Some(g) => serde_json::json!({
-            "binary_path":              g.binary_path,
-            "spawn_timeout_secs":       g.spawn_timeout_secs,
-            "respawn_backoff_ms":       g.respawn_backoff_ms,
-            "max_consecutive_respawns": g.max_consecutive_respawns,
+    let model_routing_v: serde_json::Value = match bundle.model_routing() {
+        Some(r) => serde_json::json!({
+            "planner_max_turns_default":      r.planner_max_turns_default,
+            "planner_max_turns_step_default": r.planner_max_turns_step_default,
+            "orchestrator_model":             r.orchestrator_model,
+            "executor_model":                 r.executor_model,
+            "reviewer_model":                 r.reviewer_model,
+            "orchestrator_chain":             r.orchestrator_chain,
+            "executor_chain":                 r.executor_chain,
+            "reviewer_chain":                 r.reviewer_chain,
+            "executor_rotate_primary":        r.executor_rotate_primary,
         }),
         None => serde_json::Value::Null,
     };
@@ -556,7 +589,7 @@ fn render_json<W: Write>(
         "operators":        ops_v,
         "gates":            gates_v,
         "egress_domains":   bundle.egress_domains(),
-        "gateway":          gateway_v,
+        "model_routing":    model_routing_v,
         "providers":        providers_v,
         "notifications": {
             "channels":         channels_v,

@@ -210,9 +210,9 @@ export function Shell({ children }: ShellProps) {
   }, [profile]);
 
   return (
-    <div className="min-h-screen flex bg-panel">
+    <div className="h-screen min-h-0 overflow-hidden flex bg-panel">
       {/* Sidebar */}
-      <aside className="w-56 shrink-0 border-r border-edge bg-panel-raised flex flex-col">
+      <aside className="w-56 shrink-0 min-h-0 border-r border-edge bg-panel-raised flex flex-col">
         <div className="p-4 border-b border-edge flex items-center gap-2">
           <img src="/raxis-logo.svg" alt="Raxis" className="w-7 h-7 rounded" />
           <div>
@@ -224,7 +224,7 @@ export function Shell({ children }: ShellProps) {
             </div>
           </div>
         </div>
-        <nav className="flex-1 overflow-y-auto scroll-thin py-3">
+        <nav className="flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-thin py-3">
           {NAV.map((section) => (
             <div key={section.label} className="mb-4">
               <div className="px-4 py-1 text-[10px] uppercase tracking-wider text-ink-subtle font-semibold">
@@ -340,7 +340,10 @@ export function Shell({ children }: ShellProps) {
             // operators see restart-in-flight warnings.
             <div className="flex flex-col h-full min-h-0">
               {profile && <KernelLifecycleBanner />}
-              <div className="flex-1 min-h-0" data-testid="dashboard-route-frame">
+              <div
+                className="flex-1 min-h-0 min-w-0 flex flex-col"
+                data-testid="dashboard-route-frame"
+              >
                 {children}
               </div>
             </div>

@@ -149,9 +149,8 @@ raxis providers status
 - **Single-provider tight install.** One `[[providers]]`,
   one credential. Most demos use exactly this shape.
 - **Tiered fallback.** Three providers in order — primary,
-  secondary, tertiary. The gateway's circuit-breaker layout makes
-  this transparent; configure with three entries and a route in
-  `[gateway]`.
-- **Dev (no inference).** Omit `[gateway]` and `[[providers]]`
+  secondary, tertiary. Configure with three `[[providers]]` entries
+  and ordered role chains in `[model_routing]`.
+- **Dev (no inference).** Omit `[model_routing]` and `[[providers]]`
   entirely. The kernel boots; sessions can be created; LLM-bearing
   intents fail at the gateway level. Useful for verifier-only tests.

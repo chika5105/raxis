@@ -109,7 +109,7 @@ flowchart TD
 | Cap operator/lane spend | [`policy/06-budget-section`](policy/06-budget-section.md) |
 | Define a lane and its concurrency | [`policy/07-lanes-section`](policy/07-lanes-section.md) |
 | Tie operators to roles | [`policy/08-operators-section`](policy/08-operators-section.md) |
-| Configure the kernel's egress proxy | [`policy/09-gateway-section`](policy/09-gateway-section.md) |
+| Configure role model routing | [`policy/09-model-routing-section`](policy/09-model-routing-section.md) |
 | Configure LLM providers | [`policy/10-providers-section`](policy/10-providers-section.md) |
 | Publish a VM image alias | [`policy/11-vm-images-section`](policy/11-vm-images-section.md) |
 | Tune host CPU/RAM/disk caps | [`policy/12-host-capacity`](policy/12-host-capacity.md) |
@@ -223,7 +223,7 @@ flowchart TD
 | 06 | [`budget-section`](policy/06-budget-section.md) | `[[budget]]` |
 | 07 | [`lanes-section`](policy/07-lanes-section.md) | `[[lanes]]` |
 | 08 | [`operators-section`](policy/08-operators-section.md) | `[[operators]]` |
-| 09 | [`gateway-section`](policy/09-gateway-section.md) | `[gateway]` (egress proxy) |
+| 09 | [`model-routing`](policy/09-model-routing-section.md) | `[model_routing]` (role model selection) |
 | 10 | [`providers-section`](policy/10-providers-section.md) | `[[providers]]` (LLM providers) |
 | 11 | [`vm-images-section`](policy/11-vm-images-section.md) | `[[vm_images]]` |
 | 12 | [`host-capacity`](policy/12-host-capacity.md) | `[host_capacity]` |

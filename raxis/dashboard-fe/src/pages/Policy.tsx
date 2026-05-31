@@ -16,7 +16,7 @@
  * All existing logic is preserved. Only the layout changes.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { useQuery } from "@tanstack/react-query";
 import Editor from "@monaco-editor/react";
 import { Link } from "react-router-dom";
@@ -26,10 +26,11 @@ import { CopyButton } from "@/components/CopyButton";
 import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
 import { PageSpinner, Spinner } from "@/components/Spinner";
+import { InfoTooltip, Tooltip } from "@/components/Tooltip";
 import { fmtAbsolute, shortFingerprint, shortSha } from "@/lib/format";
 import { getStoredProfile } from "@/lib/auth-store";
 import { ensureTomlLanguage, raxisMonacoTheme } from "@/lib/monaco-toml";
-import { readPolicyDraft, writePolicyDraft } from "@/lib/policy-draft";
+import { mergePolicySnippet, readPolicyDraft, writePolicyDraft } from "@/lib/policy-draft";
 import { useTheme } from "@/lib/theme-context";
 import {
   CanvasLayout,
@@ -54,7 +55,7 @@ type PolicyFeatureCategory =
   | "Authority"
   | "Execution"
   | "Network"
-  | "Providers"
+  | "Models"
   | "Safety"
   | "Operations";
 
@@ -62,6 +63,7 @@ interface PolicyFeature {
   title: string;
   category: PolicyFeatureCategory;
   purpose: string;
+  info?: string;
   fields: string[];
   snippet?: string;
 }
@@ -75,12 +77,21 @@ const POLICY_FEATURES: PolicyFeature[] = [
     title: "Admin operator permissions",
     category: "Authority",
     purpose: "Grant the operator abilities needed for dashboard admin actions such as credential reveal and epoch advance.",
+    info: "Operator permissions are authority-bearing. Grant them deliberately, then rotate the policy epoch so the kernel commits the new envelope.",
     fields: ["[[operators.entries]]", "permitted_ops", "OperatorCertInstall", "RotateEpoch"],
+  },
+  {
+    title: "Policy / plan boundary",
+    category: "Authority",
+    purpose: "Make the envelope rule explicit: permissions narrow by intersection, protections accumulate by union, ceilings take the smaller value, floors take the larger value, and locked fields reject conflicting plans.",
+    info: "Use this as the review rule for every control here. A plan can be more specific, but it cannot grant itself authority the policy did not publish.",
+    fields: ["policy ∩ plan", "policy ∪ plan", "ceilings", "floors", "locked fields"],
   },
   {
     title: "Managed lane",
     category: "Execution",
-    purpose: "Register the lane that plan.toml references in [workspace].lane_id and cap concurrent tasks.",
+    purpose: "Create or update an execution lane that plan.toml can reference. Lanes are the CISO-friendly way to cap concurrency, spend, and priority by work class.",
+    info: "Plans must choose a lane that policy already declares. Duplicate lane IDs are rejected because they make admission ambiguous.",
     fields: ["[[lanes]]", "lane_id", "max_concurrent_tasks", "max_cost_per_epoch"],
     snippet: `[[lanes]]
 lane_id              = "default"
@@ -89,25 +100,10 @@ max_cost_per_epoch   = 10000
 priority             = 100`,
   },
   {
-    title: "Gateway and turn budgets",
-    category: "Providers",
-    purpose: "Configure the kernel-spawned gateway and default planner turn scaling for retries.",
-    fields: ["[gateway]", "binary_path", "planner_max_turns_default", "planner_max_turns_step_default"],
-    snippet: `[gateway]
-binary_path                    = "/opt/homebrew/bin/raxis-gateway"
-spawn_timeout_secs             = 30
-respawn_backoff_ms             = 1000
-max_consecutive_respawns       = 5
-planner_model_orchestrator     = "claude-haiku-4-5"
-planner_model_executor         = "claude-haiku-4-5"
-planner_model_reviewer         = "claude-haiku-4-5"
-planner_max_turns_default      = 60
-planner_max_turns_step_default = 30`,
-  },
-  {
-    title: "Anthropic provider",
-    category: "Providers",
-    purpose: "Permit inference through the gateway. Credentials stay in providers/anthropic-prod.toml, never policy.toml.",
+    title: "Approved model provider",
+    category: "Models",
+    purpose: "Allow one model provider identity, pricing envelope, timeout, and credential file name. The secret value stays in providers/*.toml, never in policy.toml.",
+    info: "This publishes which vendors may be used. It does not store API keys, and it does not configure the gateway subprocess.",
     fields: ["[[providers]]", "credentials_file", "pricing.*", "timeouts"],
     snippet: `[[providers]]
 provider_id           = "anthropic-prod"
@@ -120,18 +116,32 @@ pricing.output_tokens_per_dollar     = 50000
 pricing.cache_read_tokens_per_dollar = 2000000`,
   },
   {
+    title: "Role model routing",
+    category: "Models",
+    purpose: "Choose the primary and fallback model order for orchestrators, executors, and reviewers. Required whenever providers are declared.",
+    info: "This is business policy: which models may act in each role and in what fallback order. Gateway binary paths, sockets, and respawn behavior are Raxis runtime mechanics and are not policy.",
+    fields: ["[model_routing]", "orchestrator_chain", "executor_chain", "reviewer_chain", "executor_rotate_primary"],
+    snippet: `[model_routing]
+orchestrator_chain = ["claude-haiku-4-5", "gemini-2.5-flash", "gpt-5.3-codex"]
+executor_chain     = ["claude-haiku-4-5", "gemini-2.5-flash", "gpt-5.3-codex"]
+executor_rotate_primary = true
+reviewer_chain     = ["gpt-5.3-codex", "claude-haiku-4-5", "gemini-2.5-flash"]`,
+  },
+  {
     title: "Egress allowlist",
     category: "Network",
-    purpose: "Declare policy-wide domains the transparent proxy may admit. Provider hosts are auto-granted from providers.",
+    purpose: "Declare non-provider domains the transparent proxy may admit. Provider hosts are inferred from approved providers, so the CISO only reviews business egress.",
+    info: "Agents have no direct NIC. This allowlist controls the mediated outbound hosts the kernel may admit beyond model-provider endpoints.",
     fields: ["[egress]", "domains", "patterns"],
     snippet: `[egress]
-domains = ["api.anthropic.com", "example.com"]
+domains = ["example.com"]
 patterns = []`,
   },
   {
     title: "Witness gate",
     category: "Safety",
     purpose: "Attach an operator-mandated invariant with typed claims, selector scope, and pinned verifier identity.",
+    info: "Policy gates are protections: plans cannot disable them. A plan can only add more gates or narrow where work runs.",
     fields: ["[[gates]]", "gate_type", "satisfies", "verifier_command", "verifier_sha256", "gates.selectors"],
     snippet: `[[gates]]
 gate_type        = "NoSecretStrings"
@@ -155,6 +165,7 @@ hooks            = ["complete_task"]`,
     title: "Host capacity",
     category: "Operations",
     purpose: "Set VM concurrency and the file-descriptor floor doctor should enforce before busy sessions run.",
+    info: "These are operational ceilings/floors. Plans cannot exceed capacity ceilings or weaken required host readiness floors.",
     fields: ["[host_capacity]", "max_concurrent_vms", "required_min_fd_limit"],
     snippet: `[host_capacity]
 max_concurrent_vms    = 8
@@ -165,6 +176,7 @@ disk_full_behavior    = "halt_admit"`,
     title: "Plan replay protection",
     category: "Safety",
     purpose: "Bound signed-plan freshness and nonce retention windows.",
+    info: "This prevents stale signed plans from being replayed after the operator intended the window to close.",
     fields: ["[plan_signing]", "max_plan_bundle_age_secs", "nonce_sweep_interval_secs"],
     snippet: `[plan_signing]
 max_plan_bundle_age_secs   = 86400
@@ -176,6 +188,7 @@ nonce_sweep_interval_secs  = 3600`,
     title: "Bundle size limits",
     category: "Safety",
     purpose: "Keep signed plan artifacts bounded so operators cannot accidentally submit huge bundles.",
+    info: "These are ceilings. The plan cannot raise them; the policy keeps validation and audit artifacts bounded.",
     fields: ["[plan_bundle_limits]", "max_artifact_bytes", "max_bundle_bytes"],
     snippet: `[plan_bundle_limits]
 max_artifact_bytes = 1048576
@@ -186,6 +199,7 @@ max_artifact_count = 200`,
     title: "Observability pusher",
     category: "Operations",
     purpose: "Export kernel metrics and spans to local OTel/Grafana during live operations.",
+    info: "Telemetry is visibility, not authority. It should be easy to turn on without changing the agent security envelope.",
     fields: ["[observability]", "metrics", "pusher", "resource"],
     snippet: `[observability]
 enabled = true
@@ -201,9 +215,10 @@ otlp_compression    = "gzip"
 otlp_export_timeout = "10s"`,
   },
   {
-    title: "Git defaults",
+    title: "Target branch policy",
     category: "Execution",
-    purpose: "Set default target ref behavior for plans that do not override it.",
+    purpose: "Set the default target ref and decide whether plans may override it. Locked means a conflicting plan is rejected.",
+    info: "Unlocked fields are defaults: the plan can choose another ref inside policy rules. Locked fields win completely.",
     fields: ["[git]", "default_target_ref", "target_ref_locked"],
     snippet: `[git]
 default_target_ref = "refs/heads/main"
@@ -213,6 +228,7 @@ target_ref_locked  = false`,
     title: "Environment-bound credentials",
     category: "Safety",
     purpose: "Make credentials discoverable and bind them to environment labels used by egress checks.",
+    info: "Policy publishes credential names and expected shape, not secret values. Plans reference these names and cannot invent credentials.",
     fields: ["[environments.<label>]", "[[permitted_credentials]]", "environment"],
     snippet: `[environments.staging]
 description = "Staging services"
@@ -224,7 +240,8 @@ environment = "staging"`,
   {
     title: "Executor image registry",
     category: "Execution",
-    purpose: "Publish operator-approved VM images and choose the default executor image.",
+    purpose: "Publish operator-approved executor VM images and choose the default image. Reviewer and orchestrator images remain Raxis-owned.",
+    info: "VM image aliases are permissions. Plans can choose from approved aliases but cannot introduce an unapproved image.",
     fields: ["[[vm_images]]", "[default_executor_image]", "role_restriction"],
   },
 ];
@@ -240,21 +257,34 @@ interface PolicyBuilderUiDraft {
   rightTab: PolicyBuilderRightTab;
 }
 
+function isPolicyFeatureCategory(value: string): value is PolicyFeatureCategory {
+  return (
+    value === "Authority" ||
+    value === "Execution" ||
+    value === "Network" ||
+    value === "Models" ||
+    value === "Safety" ||
+    value === "Operations"
+  );
+}
+
 function readPolicyBuilderUiDraft(): PolicyBuilderUiDraft | null {
   if (typeof window === "undefined" || !window.localStorage) return null;
   try {
     const raw = window.localStorage.getItem(POLICY_BUILDER_UI_STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<PolicyBuilderUiDraft>;
+    const parsed = JSON.parse(raw) as {
+      version?: unknown;
+      featureCategory?: unknown;
+      rightTab?: unknown;
+    };
     if (parsed.version !== 1) return null;
-    const featureCategory =
-      parsed.featureCategory === "Authority" ||
-      parsed.featureCategory === "Execution" ||
-      parsed.featureCategory === "Network" ||
-      parsed.featureCategory === "Providers" ||
-      parsed.featureCategory === "Safety" ||
-      parsed.featureCategory === "Operations"
-        ? parsed.featureCategory
+    const rawFeatureCategory =
+      typeof parsed.featureCategory === "string" ? parsed.featureCategory : "All";
+    const featureCategory = isPolicyFeatureCategory(rawFeatureCategory)
+      ? rawFeatureCategory
+      : rawFeatureCategory === "Providers"
+        ? "Models"
         : "All";
     const rightTab =
       parsed.rightTab === "apply" || parsed.rightTab === "recovery"
@@ -356,7 +386,9 @@ export function PolicyPage() {
                 readOnly: true,
                 fontSize: 13,
                 minimap: { enabled: false },
-                scrollBeyondLastLine: false,
+                scrollBeyondLastLine: true,
+                smoothScrolling: true,
+                padding: { top: 12, bottom: 96 },
                 automaticLayout: true,
                 tabSize: 2,
                 wordWrap: "on",
@@ -393,6 +425,8 @@ export function PolicyBuilderPage() {
   });
 
   const [draft, setDraft] = useState<string | null>(() => readPolicyDraft());
+  type PolicyEditorInstance = Parameters<NonNullable<ComponentProps<typeof Editor>["onMount"]>>[0];
+  const editorRef = useRef<PolicyEditorInstance | null>(null);
   const [sig, setSig] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -442,12 +476,29 @@ export function PolicyBuilderPage() {
     [featureCategory],
   );
 
-  const appendSnippet = (snippet: string) => {
-    setDraft((prev) => {
-      const base = (prev ?? toml.data ?? "").trimEnd();
-      return `${base}\n\n${snippet.trim()}\n`;
-    });
+  const revealPolicyAnchor = (anchor: string) => {
+    if (!anchor) return;
+    window.setTimeout(() => {
+      const editor = editorRef.current;
+      const model = editor?.getModel?.();
+      if (!editor || !model) return;
+      const lineCount = model.getLineCount();
+      for (let lineNumber = 1; lineNumber <= lineCount; lineNumber += 1) {
+        if (model.getLineContent(lineNumber).includes(anchor)) {
+          editor.revealLineInCenter(lineNumber);
+          editor.setPosition({ lineNumber, column: 1 });
+          editor.focus();
+          return;
+        }
+      }
+    }, 0);
+  };
+
+  const mergeSnippet = (snippet: string) => {
+    const merged = mergePolicySnippet(draft ?? toml.data ?? "", snippet);
+    setDraft(merged.toml);
     setValidation(null);
+    revealPolicyAnchor(merged.anchor);
   };
 
   const dismissEnvironmentRecommendation = () => {
@@ -524,12 +575,15 @@ export function PolicyBuilderPage() {
       <ErrorBox error={toml.error} onRetry={() => toml.refetch()} />
     </div>
   ) : (
-    <div className="flex-1 min-h-0">
+    <div className="flex-1 h-full min-h-0 overflow-hidden">
       <Editor
         height="100%"
         defaultLanguage="toml"
         beforeMount={ensureTomlLanguage}
         theme={monacoTheme}
+        onMount={(editor) => {
+          editorRef.current = editor;
+        }}
         value={draft ?? ""}
         onChange={(v) => {
           setDraft(v ?? "");
@@ -538,7 +592,9 @@ export function PolicyBuilderPage() {
         options={{
           fontSize: 13,
           minimap: { enabled: false },
-          scrollBeyondLastLine: false,
+          scrollBeyondLastLine: true,
+          smoothScrolling: true,
+          padding: { top: 12, bottom: 96 },
           automaticLayout: true,
           tabSize: 2,
           wordWrap: "on",
@@ -552,9 +608,11 @@ export function PolicyBuilderPage() {
       leftPaneTitle="Feature Library"
       leftPaneStorageKey="raxis.builder.policy.leftOpen"
       leftPaneWidth={272}
+      leftPaneOwnsScroll
       rightPaneTitle="Policy Actions"
       rightPaneStorageKey="raxis.builder.policy.rightOpen"
       rightPaneWidth={340}
+      rightPaneOwnsScroll
       headerBar={
         <CanvasHeaderBar>
           <div className="flex items-center gap-2 min-w-0">
@@ -581,14 +639,19 @@ export function PolicyBuilderPage() {
 
           <div className="ml-auto flex items-center gap-2">
             {!environmentRecommendationDismissed && (
-              <button
-                type="button"
-                className="text-[10px] text-info hover:underline"
-                onClick={dismissEnvironmentRecommendation}
-                title="One kernel service per environment is recommended. Click to dismiss."
+              <Tooltip
+                content="One kernel service per environment is recommended. Click to dismiss."
+                side="bottom"
+                align="end"
               >
-                ⓘ Env recommendation
-              </button>
+                <button
+                  type="button"
+                  className="text-[10px] text-info hover:underline"
+                  onClick={dismissEnvironmentRecommendation}
+                >
+                  ⓘ Env recommendation
+                </button>
+              </Tooltip>
             )}
             <Link to="/policy" className="btn text-xs py-1">
               View active
@@ -610,7 +673,7 @@ export function PolicyBuilderPage() {
           visibleFeatures={visibleFeatures}
           canInsert={canWrite && draft !== null}
           onSetCategory={setFeatureCategory}
-          onAppendSnippet={appendSnippet}
+          onAppendSnippet={mergeSnippet}
         />
       }
       canvasClassName="border-l border-r border-edge"
@@ -666,37 +729,58 @@ function PolicyFeatureLibrary({
   onAppendSnippet: (snippet: string) => void;
 }) {
   return (
-    <div className="flex flex-col">
-      <CollapsibleSection title="Browse by category" defaultOpen>
-        <div className="flex flex-wrap gap-1 pt-1">
-          {(["All", "Authority", "Execution", "Network", "Providers", "Safety", "Operations"] as const).map((cat) => (
-            <button
-              key={cat}
-              type="button"
-              className={`text-[10px] font-semibold px-2 py-0.5 rounded border transition-colors ${
-                featureCategory === cat
-                  ? "border-accent bg-accent/15 text-accent"
-                  : "border-edge text-ink-muted hover:border-accent"
-              }`}
-              onClick={() => onSetCategory(cat)}
-            >
-              {cat}
-            </button>
-          ))}
+    <div className="h-full min-h-0 overflow-y-auto overscroll-contain scroll-thin pb-4">
+      <div className="px-3 pt-3 pb-2">
+        <div className="rounded border border-info/30 bg-info-muted p-2 text-xs">
+          <div className="font-semibold text-ink">Org security policy</div>
+          <p className="mt-1 leading-relaxed text-ink-muted">
+            Choose the controls a CISO owns: operators, lanes, approved model
+            providers, egress, gates, credentials, images, and observability.
+            Raxis runtime wiring is managed by the install and supervisor.
+          </p>
         </div>
-      </CollapsibleSection>
+        <div className="mt-2 rounded border border-edge bg-panel-raised p-2 text-[11px] leading-relaxed text-ink-muted">
+          <span className="font-semibold text-ink">Policy is the envelope.</span>{" "}
+          Plans fit inside it: permissions narrow by intersection, protections
+          accumulate by union, ceilings cannot be exceeded, floors cannot be
+          weakened, and locked fields reject conflicting plans.
+        </div>
+      </div>
+
+      <div>
+        <CollapsibleSection title="Browse by category" defaultOpen>
+          <div className="flex flex-wrap gap-1 pt-1">
+            {(["All", "Authority", "Execution", "Network", "Models", "Safety", "Operations"] as const).map((cat) => (
+              <button
+                key={cat}
+                type="button"
+                className={`text-[10px] font-semibold px-2 py-0.5 rounded border transition-colors ${
+                  featureCategory === cat
+                    ? "border-accent bg-accent/15 text-accent"
+                    : "border-edge text-ink-muted hover:border-accent"
+                }`}
+                onClick={() => onSetCategory(cat)}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
+        </CollapsibleSection>
+      </div>
 
       <PaneDivider />
 
-      <div className="flex flex-col gap-1.5 px-3 pb-4 pt-1">
-        {visibleFeatures.map((feature) => (
-          <PolicyFeatureCard
-            key={feature.title}
-            feature={feature}
-            canInsert={canInsert && feature.snippet !== undefined}
-            onInsert={() => { if (feature.snippet) onAppendSnippet(feature.snippet); }}
-          />
-        ))}
+      <div className="px-3 pt-1">
+        <div className="flex flex-col gap-1.5">
+          {visibleFeatures.map((feature) => (
+            <PolicyFeatureCard
+              key={feature.title}
+              feature={feature}
+              canInsert={canInsert && feature.snippet !== undefined}
+              onInsert={() => { if (feature.snippet) onAppendSnippet(feature.snippet); }}
+            />
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -721,6 +805,7 @@ function PolicyFeatureCard({
             {feature.category}
           </div>
         </button>
+        {feature.info && <InfoTooltip content={feature.info} />}
         {feature.snippet && (
           <CopyButton value={feature.snippet} label={`Copy ${feature.title} snippet`} />
         )}
@@ -740,15 +825,20 @@ function PolicyFeatureCard({
       )}
 
       {feature.snippet ? (
-        <button
-          type="button"
-          className="btn w-full justify-center mt-1.5 py-0.5 text-[10px]"
-          disabled={!canInsert}
-          onClick={onInsert}
-          title={canInsert ? "Append snippet to policy.toml draft" : "Load editable policy TOML first"}
+        <Tooltip
+          content={canInsert ? "Add or update this policy block" : "Load editable policy TOML first"}
+          side="bottom"
+          className="mt-1.5 w-full"
         >
-          Append snippet
-        </button>
+          <button
+            type="button"
+            className="btn w-full justify-center py-0.5 text-[10px]"
+            disabled={!canInsert}
+            onClick={onInsert}
+          >
+            Add / update
+          </button>
+        </Tooltip>
       ) : (
         <div className="rounded border border-edge bg-panel-raised px-2 py-1 text-[10px] text-ink-subtle mt-1.5">
           No inline snippet — needs image digests or cert material.
@@ -787,10 +877,10 @@ function PolicyInspector(props: PolicyInspectorProps) {
   const { tabs, activeTab, onTabChange } = props;
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <InspectorTabBar tabs={tabs} active={activeTab} onChange={onTabChange} />
 
-      <div className="flex-1 min-h-0 overflow-y-auto scroll-thin">
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-thin pb-4">
 
         {/* VALIDATE TAB */}
         {activeTab === "validate" && (
@@ -989,6 +1079,39 @@ function PolicySnapshotSection({ snapshot: s }: { snapshot: PolicySnapshotView }
         <StatDl label="Signed by" value={shortFingerprint(s.signed_by)} mono />
         <StatDl label="Signed at" value={fmtAbsolute(Number(s.signed_at))} />
       </dl>
+      <div className="mt-4 rounded border border-edge bg-panel-raised p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-ink-subtle">
+              Target ref policy
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-sm">
+              <Mono>{s.git_default_target_ref}</Mono>
+              <Tooltip
+                content={
+                  s.git_target_ref_locked
+                    ? "Locked policy field: conflicting plan target_ref values are rejected."
+                    : "Unlocked default: plans may request another target ref inside the policy envelope."
+                }
+              >
+                <span
+                  className={
+                    s.git_target_ref_locked
+                      ? "badge border-bad/40 bg-bad/10 text-bad"
+                      : "badge border-ok/40 bg-ok-muted text-ok"
+                  }
+                >
+                  {s.git_target_ref_locked ? "Locked" : "Unlocked"}
+                </span>
+              </Tooltip>
+            </div>
+          </div>
+          <p className="max-w-xl text-xs leading-relaxed text-ink-muted">
+            Locked fields win completely. Unlocked fields act as defaults: the plan can
+            narrow or choose inside the policy envelope, but it cannot expand authority.
+          </p>
+        </div>
+      </div>
       <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
         <div>
           <h3 className="text-xs text-ink-subtle uppercase tracking-wider mb-2">

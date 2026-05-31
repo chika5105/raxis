@@ -238,7 +238,7 @@ pub struct TaskPlanFields {
     /// **Resolution precedence** (mirrors `max_turns`):
     /// 1. `Some(s)` here ⇒ `s` (policy default ignored).
     /// 2. `None` here + `Some(d)` on
-    ///    `GatewaySection::planner_max_turns_step_default` ⇒ `d`.
+    ///    `ModelRoutingSection::planner_max_turns_step_default` ⇒ `d`.
     /// 3. Neither set ⇒ derived default
     ///    `max(round_up_to_5(base / 2), 10)` so cold-start retries
     ///    get a useful step even for plans that never declared one.
@@ -310,7 +310,7 @@ pub const DEFAULT_MAX_REVIEW_REJECTIONS: u32 = 2;
 
 /// V2.7 — kernel-side compiled fallback for `max_turns` resolution
 /// when **both** the per-task plan field AND the
-/// `[gateway].planner_max_turns_default` policy field are absent.
+/// `[model_routing].planner_max_turns_default` policy field are absent.
 /// **Synchronisation contract.** This constant MUST equal
 /// `raxis_planner_core::DEFAULT_PLANNER_MAX_TURNS`. The kernel cannot
 /// `pub use` the planner-core constant directly because the kernel
@@ -371,7 +371,7 @@ impl TaskPlanFields {
     }
 
     /// Resolve [`Self::max_turns`] against the policy-level default
-    /// (`[gateway].planner_max_turns_default`) and the compiled
+    /// (`[model_routing].planner_max_turns_default`) and the compiled
     /// fallback [`DEFAULT_PLANNER_MAX_TURNS`].
     /// **Precedence** (`INV-PLANNER-MAX-TURNS-PRECEDENCE-01`):
     /// 1. `Some(c)` on the per-task field ⇒ `c` (policy default

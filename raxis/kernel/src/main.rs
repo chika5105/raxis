@@ -2062,12 +2062,13 @@ async fn main() {
 
     let ctx = Arc::new(ctx_inner);
 
-    // Step 8.5: Spawn the gateway supervisor. The supervisor runs as a
-    // long-lived tokio task: it spawns one `raxis-gateway` subprocess,
-    // waits for it to exit, applies back-off, respawns. After
-    // `[gateway].max_consecutive_respawns` it emits `GatewayQuarantined`
-    // and stops. If `policy.gateway()` is None, the supervisor logs
-    // and returns `NoGatewayConfigured` immediately (degraded mode).
+    // Step 8.5: Spawn the gateway supervisor when the active policy declares
+    // model providers. The supervisor runs as a long-lived tokio task:
+    // it spawns one kernel-owned `raxis-gateway` subprocess, waits for it
+    // to exit, applies back-off, and respawns. Gateway binary discovery,
+    // sockets, process tokens, and respawn mechanics are runtime-owned, not
+    // signed policy. If no provider is declared, the supervisor returns
+    // `NoGatewayConfigured` immediately.
     //
     // We hold a `oneshot::Sender<()>` so the post-IPC-dispatch shutdown
     // path (step 11 below) can ask the supervisor to kill the child
@@ -2077,14 +2078,18 @@ async fn main() {
     // shutdown the spec mandates.
     let (gateway_shutdown_tx, gateway_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let supervisor_handle = {
-        let gateway_section = policy.load().gateway().cloned();
+        let gateway_config = if policy.load().providers().is_empty() {
+            None
+        } else {
+            Some(gateway::supervisor::GatewayRuntimeConfig::from_runtime_env())
+        };
         let socket_path = data_dir.join("sockets/gateway.sock");
         let data_dir_for_sup = data_dir.clone();
         let audit_for_sup = Arc::clone(&audit);
         let client_for_sup = Arc::clone(&gateway_client);
         tokio::spawn(async move {
             gateway::spawn_and_supervise(
-                gateway_section,
+                gateway_config,
                 data_dir_for_sup,
                 socket_path,
                 audit_for_sup,

@@ -91,12 +91,17 @@ pub async fn handle_propose_defaults(
     let plan_signing = policy.plan_signing();
     let plan_bundle_limits = policy.plan_bundle_limits();
 
-    let gateway = policy.gateway().map(|g| {
+    let model_routing = policy.model_routing().map(|r| {
         json!({
-            "binary_path":              g.binary_path,
-            "spawn_timeout_secs":       g.spawn_timeout_secs,
-            "respawn_backoff_ms":       g.respawn_backoff_ms,
-            "max_consecutive_respawns": g.max_consecutive_respawns,
+            "planner_max_turns_default":      r.planner_max_turns_default,
+            "planner_max_turns_step_default": r.planner_max_turns_step_default,
+            "orchestrator_model":             r.orchestrator_model,
+            "executor_model":                 r.executor_model,
+            "reviewer_model":                 r.reviewer_model,
+            "orchestrator_chain":             r.orchestrator_chain,
+            "executor_chain":                 r.executor_chain,
+            "reviewer_chain":                 r.reviewer_chain,
+            "executor_rotate_primary":        r.executor_rotate_primary,
         })
     });
 
@@ -128,7 +133,7 @@ pub async fn handle_propose_defaults(
             "required_min_fd_limit":   host_capacity.required_min_fd_limit,
             "admission_queue_depth":   host_capacity.admission_queue_depth,
         },
-        "gateway":              gateway,
+        "model_routing":        model_routing,
         "initiative_scope":     initiative_id,
         // V2.4 CLI does not yet implement plan-toml rewriting from
         // these defaults — the V3 `raxis plan prepare` lands the

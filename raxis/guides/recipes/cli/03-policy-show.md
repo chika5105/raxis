@@ -66,7 +66,7 @@ sections are normalised:
 - `[[lanes]]`, `[[operators.entries]]` + embedded
   `[operators.entries.cert]`, `[[gates]]`,
   `[[integration_merge_verifiers]]`.
-- `[gateway]`, `[[providers.entries]]`.
+- `[model_routing]`, `[[providers.entries]]`.
 - `[plan_signing]`, `[plan_bundle_limits]`.
 - `[notifications]`, `[host_capacity]`, `[git]`.
 - `[[vm_images]]`, `[default_executor_image]`.

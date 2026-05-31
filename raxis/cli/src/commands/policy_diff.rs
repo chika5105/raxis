@@ -14,7 +14,7 @@
 //!   * operators (added / removed; permitted_ops set deltas)
 //!   * gates  (added / removed; per-field deltas)
 //!   * egress_domains  (set diff)
-//!   * gateway          (binary_path / timeout / respawn deltas)
+//!   * model_routing    (role model/fallback routing deltas)
 //!   * providers        (added / removed; per-field deltas)
 //!   * notification channels + default routes
 //!
@@ -30,7 +30,7 @@
 //!      bundle, not approve a diff against an invalid file.
 //!   3. **Stable output for tooling.** The JSON form of this diff
 //!      is the contract a CI bot can subscribe to ("alert me on any
-//!      gateway.binary_path change") without re-implementing TOML
+//!      model-routing change") without re-implementing TOML
 //!      parsing.
 //!
 //! # Exit code
@@ -44,7 +44,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use raxis_policy::{
-    load_policy, GateEntry, GatewaySection, LaneEntry, NotificationChannel, OperatorEntry,
+    load_policy, GateEntry, LaneEntry, ModelRoutingSection, NotificationChannel, OperatorEntry,
     PolicyBundle, ProviderEntry,
 };
 
@@ -237,7 +237,7 @@ fn diff_bundles(
     diff_operators(&mut r, left.operators(), right.operators());
     diff_gates(&mut r, left.gates(), right.gates());
     diff_egress(&mut r, left.egress_domains(), right.egress_domains());
-    diff_gateway(&mut r, left.gateway(), right.gateway());
+    diff_model_routing(&mut r, left.model_routing(), right.model_routing());
     diff_providers(&mut r, left.providers(), right.providers());
     diff_notifications(
         &mut r,
@@ -404,62 +404,118 @@ fn diff_egress(r: &mut DiffReport, l: &[String], rs: &[String]) {
     }
 }
 
-fn diff_gateway(r: &mut DiffReport, l: Option<&GatewaySection>, rs: Option<&GatewaySection>) {
+fn diff_model_routing(
+    r: &mut DiffReport,
+    l: Option<&ModelRoutingSection>,
+    rs: Option<&ModelRoutingSection>,
+) {
     match (l, rs) {
         (None, None) => {}
         (Some(_), None) => {
             r.push(
-                "gateway",
+                "model_routing",
                 DiffKind::Removed,
                 "section",
-                "removed (no [gateway] block in right)",
+                "removed (no [model_routing] block in right)",
             );
         }
         (None, Some(_)) => {
             r.push(
-                "gateway",
+                "model_routing",
                 DiffKind::Added,
                 "section",
-                "added (no [gateway] block in left)",
+                "added (no [model_routing] block in left)",
             );
         }
-        (Some(lg), Some(rg)) => {
-            if lg.binary_path != rg.binary_path {
+        (Some(lr), Some(rr)) => {
+            diff_opt_u32(
+                r,
+                "planner_max_turns_default",
+                lr.planner_max_turns_default,
+                rr.planner_max_turns_default,
+            );
+            diff_opt_u32(
+                r,
+                "planner_max_turns_step_default",
+                lr.planner_max_turns_step_default,
+                rr.planner_max_turns_step_default,
+            );
+            diff_opt_string(
+                r,
+                "orchestrator_model",
+                lr.orchestrator_model.as_deref(),
+                rr.orchestrator_model.as_deref(),
+            );
+            diff_opt_string(
+                r,
+                "executor_model",
+                lr.executor_model.as_deref(),
+                rr.executor_model.as_deref(),
+            );
+            diff_opt_string(
+                r,
+                "reviewer_model",
+                lr.reviewer_model.as_deref(),
+                rr.reviewer_model.as_deref(),
+            );
+            diff_string_vec(
+                r,
+                "orchestrator_chain",
+                &lr.orchestrator_chain,
+                &rr.orchestrator_chain,
+            );
+            diff_string_vec(r, "executor_chain", &lr.executor_chain, &rr.executor_chain);
+            diff_string_vec(r, "reviewer_chain", &lr.reviewer_chain, &rr.reviewer_chain);
+            if lr.executor_rotate_primary != rr.executor_rotate_primary {
                 r.push(
-                    "gateway",
+                    "model_routing",
                     DiffKind::Changed,
-                    "binary_path",
-                    format!("{} → {}", lg.binary_path, rg.binary_path),
-                );
-            }
-            if lg.spawn_timeout_secs != rg.spawn_timeout_secs {
-                r.push(
-                    "gateway",
-                    DiffKind::Changed,
-                    "spawn_timeout_secs",
-                    format!("{} → {}", lg.spawn_timeout_secs, rg.spawn_timeout_secs),
-                );
-            }
-            if lg.respawn_backoff_ms != rg.respawn_backoff_ms {
-                r.push(
-                    "gateway",
-                    DiffKind::Changed,
-                    "respawn_backoff_ms",
-                    format!("{} → {}", lg.respawn_backoff_ms, rg.respawn_backoff_ms),
-                );
-            }
-            if lg.max_consecutive_respawns != rg.max_consecutive_respawns {
-                r.push(
-                    "gateway",
-                    DiffKind::Changed,
-                    "max_consecutive_respawns",
+                    "executor_rotate_primary",
                     format!(
                         "{} → {}",
-                        lg.max_consecutive_respawns, rg.max_consecutive_respawns
+                        lr.executor_rotate_primary, rr.executor_rotate_primary
                     ),
                 );
             }
         }
+    }
+}
+
+fn diff_opt_u32(r: &mut DiffReport, label: &'static str, left: Option<u32>, right: Option<u32>) {
+    if left != right {
+        r.push(
+            "model_routing",
+            DiffKind::Changed,
+            label,
+            format!("{left:?} → {right:?}"),
+        );
+    }
+}
+
+fn diff_opt_string(
+    r: &mut DiffReport,
+    label: &'static str,
+    left: Option<&str>,
+    right: Option<&str>,
+) {
+    if left != right {
+        r.push(
+            "model_routing",
+            DiffKind::Changed,
+            label,
+            format!("{left:?} → {right:?}"),
+        );
+    }
+}
+
+fn diff_string_vec(r: &mut DiffReport, label: &'static str, left: &[String], right: &[String]) {
+    if left != right {
+        r.push(
+            "model_routing",
+            DiffKind::Changed,
+            label,
+            format!("[{}] → [{}]", left.join(", "), right.join(", ")),
+        );
     }
 }
 
@@ -717,46 +773,57 @@ mod tests {
     }
 
     #[test]
-    fn diff_gateway_added_when_only_right_has_section() {
-        let g = GatewaySection {
-            binary_path: "/bin/raxis-gateway".to_owned(),
-            spawn_timeout_secs: 5,
-            respawn_backoff_ms: 1000,
-            max_consecutive_respawns: 5,
+    fn diff_model_routing_added_when_only_right_has_section() {
+        let routing = ModelRoutingSection {
             planner_max_turns_default: None,
             planner_max_turns_step_default: None,
+            orchestrator_model: Some("claude-haiku-4-5".to_owned()),
+            executor_model: Some("gemini-2.5-flash".to_owned()),
+            reviewer_model: Some("gpt-5.3-codex".to_owned()),
+            orchestrator_chain: Vec::new(),
+            executor_chain: Vec::new(),
+            reviewer_chain: Vec::new(),
+            executor_rotate_primary: false,
         };
         let mut report = DiffReport::default();
-        diff_gateway(&mut report, None, Some(&g));
+        diff_model_routing(&mut report, None, Some(&routing));
         assert_eq!(report.entries.len(), 1);
         assert_eq!(report.entries[0].kind, DiffKind::Added);
-        assert_eq!(report.entries[0].section, "gateway");
+        assert_eq!(report.entries[0].section, "model_routing");
     }
 
     #[test]
-    fn diff_gateway_changed_per_field() {
-        let l = GatewaySection {
-            binary_path: "/bin/old".to_owned(),
-            spawn_timeout_secs: 5,
-            respawn_backoff_ms: 1000,
-            max_consecutive_respawns: 5,
+    fn diff_model_routing_changed_per_field() {
+        let l = ModelRoutingSection {
             planner_max_turns_default: None,
             planner_max_turns_step_default: None,
+            orchestrator_model: Some("claude-haiku-4-5".to_owned()),
+            executor_model: Some("gemini-2.5-flash".to_owned()),
+            reviewer_model: Some("gpt-5.3-codex".to_owned()),
+            orchestrator_chain: Vec::new(),
+            executor_chain: Vec::new(),
+            reviewer_chain: Vec::new(),
+            executor_rotate_primary: false,
         };
-        let r = GatewaySection {
-            binary_path: "/bin/new".to_owned(),
-            spawn_timeout_secs: 10,
-            respawn_backoff_ms: 1000,
-            max_consecutive_respawns: 5,
-            planner_max_turns_default: None,
+        let r = ModelRoutingSection {
+            planner_max_turns_default: Some(60),
             planner_max_turns_step_default: None,
+            orchestrator_model: Some("claude-haiku-4-5".to_owned()),
+            executor_model: Some("gpt-5.3-codex".to_owned()),
+            reviewer_model: Some("gpt-5.3-codex".to_owned()),
+            orchestrator_chain: Vec::new(),
+            executor_chain: Vec::new(),
+            reviewer_chain: vec!["gpt-5.3-codex".to_owned(), "gemini-2.5-flash".to_owned()],
+            executor_rotate_primary: true,
         };
         let mut report = DiffReport::default();
-        diff_gateway(&mut report, Some(&l), Some(&r));
+        diff_model_routing(&mut report, Some(&l), Some(&r));
         let labels: Vec<&str> = report.entries.iter().map(|e| e.label.as_str()).collect();
-        assert!(labels.contains(&"binary_path"));
-        assert!(labels.contains(&"spawn_timeout_secs"));
-        assert!(!labels.contains(&"respawn_backoff_ms"));
+        assert!(labels.contains(&"planner_max_turns_default"));
+        assert!(labels.contains(&"executor_model"));
+        assert!(labels.contains(&"reviewer_chain"));
+        assert!(labels.contains(&"executor_rotate_primary"));
+        assert!(!labels.contains(&"orchestrator_model"));
     }
 
     #[test]

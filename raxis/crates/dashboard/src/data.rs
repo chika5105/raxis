@@ -1633,6 +1633,13 @@ pub struct PolicySnapshotView {
     pub signed_by: String,
     /// Unix-seconds policy issuance timestamp.
     pub signed_at: i64,
+    /// Policy default Git target ref. Plans may inherit this ref or,
+    /// when [`git_target_ref_locked`] is false, request a different
+    /// ref inside the policy envelope.
+    pub git_default_target_ref: String,
+    /// Whether the default target ref is locked. Locked policy fields
+    /// win completely: a plan targeting another branch is rejected.
+    pub git_target_ref_locked: bool,
     /// Operator entries (display name + fingerprint + role
     /// summary). Pubkey bytes are omitted from the read surface
     /// — operators who need them can query the operator UDS.

@@ -233,7 +233,7 @@ fn release_verifier_slot() {
 /// Mirrors the spec's "in-memory counters that `kernel.db` cannot expose"
 /// (cli-readonly.md §5.1.4). The cap is currently a compile-time
 /// constant; once policy-driven (`max_concurrent_verifiers` in
-/// `[gateway]`-style sections), this accessor will read from the active
+/// a verifier-runtime policy section), this accessor will read from the active
 /// `PolicyBundle` instead — kept as a function so callers don't need to
 /// change.
 pub(crate) fn max_concurrent_verifiers() -> usize {

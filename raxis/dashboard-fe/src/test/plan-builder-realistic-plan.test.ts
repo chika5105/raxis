@@ -41,4 +41,54 @@ describe("Plan Builder realistic e2e plan round-trip", () => {
       "Cloud connections (S3 / GCP / Azure) are explicitly out of scope.",
     );
   });
+
+  it("maps generated TOML sections back to builder surfaces", () => {
+    const parsed = __planBuilderTest.parsePlanToml(primaryPlan);
+    const rendered = __planBuilderTest.renderPlan(parsed);
+    const taskLine = __planBuilderTest.findPlanTomlLine(rendered, {
+      kind: "task",
+      taskId: "materialize-records",
+    });
+    const profileLine = __planBuilderTest.findPlanTomlLine(rendered, {
+      kind: "tools",
+      profileId: "unity_mcp_tools",
+    });
+    const renderedWithModel = __planBuilderTest.renderPlan({
+      ...parsed,
+      modelRoutes: [
+        {
+          alias: "executor",
+          scope: "executor",
+          description: "Executor provider fallback chain.",
+          fallbackBehavior: "attempt_in_order",
+          sessionAffinity: false,
+          rotateExecutorPrimary: true,
+          chain: [
+            {
+              providerKind: "anthropic",
+              providerId: "anthropic",
+              model: "claude-haiku",
+            },
+          ],
+        },
+      ],
+    });
+    const modelLine = __planBuilderTest.findPlanTomlLine(renderedWithModel, {
+      kind: "models",
+      alias: "executor",
+    });
+
+    expect(taskLine).toBeGreaterThan(0);
+    expect(profileLine).toBeGreaterThan(0);
+    expect(modelLine).toBeGreaterThan(0);
+    expect(
+      __planBuilderTest.inferPlanTomlTargetFromLine(rendered, taskLine! + 3),
+    ).toEqual({ kind: "task", taskId: "materialize-records" });
+    expect(
+      __planBuilderTest.inferPlanTomlTargetFromLine(rendered, profileLine! + 1),
+    ).toEqual({ kind: "tools", profileId: "unity_mcp_tools" });
+    expect(
+      __planBuilderTest.inferPlanTomlTargetFromLine(renderedWithModel, modelLine! + 1),
+    ).toEqual({ kind: "models", alias: "executor" });
+  });
 });

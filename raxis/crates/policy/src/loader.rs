@@ -53,6 +53,8 @@ pub fn load_policy(
     let toml_str = std::str::from_utf8(&raw_bytes)
         .map_err(|_| PolicyError::MalformedArtifact("policy.toml is not valid UTF-8".to_owned()))?;
 
+    reject_kernel_runtime_sections(toml_str)?;
+
     let raw: RawPolicy = toml::from_str(toml_str)?;
     let bundle = PolicyBundle::validate(raw)?.with_sha256(actual_sha256.clone());
 
@@ -60,6 +62,20 @@ pub fn load_policy(
     //   1. Verify the Ed25519 signature over these bytes.
     //   2. Store the sha256 in policy_epoch_history.
     Ok((bundle, raw_bytes, actual_sha256))
+}
+
+fn reject_kernel_runtime_sections(toml_str: &str) -> Result<(), PolicyError> {
+    let value: toml::Value = toml::from_str(toml_str)?;
+    if value.get("gateway").is_some() {
+        return Err(PolicyError::MalformedArtifact(
+            "FAIL_POLICY_RUNTIME_SECTION_FORBIDDEN: [gateway] is not a policy section. \
+             Raxis owns gateway subprocess discovery, sockets, tokens, and respawn \
+             behavior as kernel runtime mechanics. Put approved providers in \
+             [[providers]] and role model choices in [model_routing]."
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Compute the SHA-256 fingerprint for an operator public key.

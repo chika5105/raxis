@@ -56,7 +56,7 @@ use serde::{Deserialize, Serialize};
 /// All other variants represent gaps the operator must
 /// triage:
 ///   * `MaxTurnsReached` — bump
-///     `RAXIS_PLANNER_MAX_TURNS` or `[gateway].planner_max_turns_default`
+///     `RAXIS_PLANNER_MAX_TURNS` or `[model_routing].planner_max_turns_default`
 ///     in policy.
 ///   * `MaxTokensReached` — raise the relevant
 ///     `RAXIS_PLANNER_MAX_TOKENS_{INPUT,OUTPUT,TOTAL}_TOTAL`
@@ -121,7 +121,7 @@ pub enum PlannerExitOutcome {
     /// `DispatchConfig::max_turns` without firing a terminal
     /// tool. Operator remedy: raise
     /// `RAXIS_PLANNER_MAX_TURNS` or
-    /// `[gateway].planner_max_turns_default` in policy.
+    /// `[model_routing].planner_max_turns_default` in policy.
     MaxTurnsReached {
         /// Number of turns the dispatch loop actually consumed
         /// (= the `max_turns` ceiling). Stamped onto the
@@ -237,7 +237,7 @@ impl PlannerExitOutcome {
             PlannerExitOutcome::MaxTurnsReached { used, limit } => Some(format!(
                 "{role_str} planner reached max_turns budget ({used} used / {limit} limit) \
                  without submitting a terminal intent — raise RAXIS_PLANNER_MAX_TURNS \
-                 (or `[gateway].planner_max_turns_default` in policy) and retry."
+                 (or `[model_routing].planner_max_turns_default` in policy) and retry."
             )),
             PlannerExitOutcome::MaxTokensReached { which, used, limit } => Some(format!(
                 "{role_str} planner exceeded cumulative max_tokens cap on the {which} axis \
