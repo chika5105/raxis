@@ -690,26 +690,23 @@ export function PlanBuilderPage() {
       planVerifiers: nextPlanVerifiers,
     });
     setTomlText(nextToml);
-    if (revealTarget) revealGeneratedToml(revealTarget, nextToml);
+    if (revealTarget) {
+      revealGeneratedToml(revealTarget, nextToml);
+    } else {
+      sourceRevealRequestRef.current += 1;
+    }
     setParseStatus({ kind: "synced", message: "Canvas and TOML are in sync." });
     setKernelValidation(null);
     setKernelError(null);
   };
 
   const updatePlan = (patch: Partial<PlanBasics>) => {
-    const target: PlanTomlRevealTarget =
-      "initiative" in patch
-        ? { kind: "plan" }
-        : "crossCuttingArtifacts" in patch
-          ? { kind: "orchestrator" }
-          : { kind: "workspace" };
     syncFromState(
       { ...plan, ...patch },
       tasks,
       toolProfiles,
       modelRoutes,
       planVerifiers,
-      target,
     );
   };
 
@@ -732,14 +729,12 @@ export function PlanBuilderPage() {
     updater: (prev: ToolProfileDraft[]) => ToolProfileDraft[],
   ) => {
     const next = updater(toolProfiles);
-    const changedProfileId = firstChangedKey(toolProfiles, next, (profile) => profile.id);
     syncFromState(
       planEnabled ? plan : initialPlan,
       tasks,
       next,
       modelRoutes,
       planVerifiers,
-      { kind: "tools", profileId: changedProfileId },
     );
   };
 
@@ -747,14 +742,12 @@ export function PlanBuilderPage() {
     updater: (prev: PlanVerifierDraft[]) => PlanVerifierDraft[],
   ) => {
     const next = updater(planVerifiers);
-    const changedVerifierName = firstChangedKey(planVerifiers, next, (verifier) => verifier.name);
     syncFromState(
       planEnabled ? plan : initialPlan,
       tasks,
       toolProfiles,
       modelRoutes,
       next,
-      { kind: "verifiers", name: changedVerifierName },
     );
   };
 
@@ -762,14 +755,12 @@ export function PlanBuilderPage() {
     updater: (prev: ModelRouteDraft[]) => ModelRouteDraft[],
   ) => {
     const next = updater(modelRoutes);
-    const changedAlias = firstChangedKey(modelRoutes, next, (route) => route.alias);
     syncFromState(
       planEnabled ? plan : initialPlan,
       tasks,
       toolProfiles,
       next,
       planVerifiers,
-      { kind: "models", alias: changedAlias },
     );
   };
 
@@ -789,7 +780,6 @@ export function PlanBuilderPage() {
         prev.map((task) =>
           task.id === taskId ? normalizeTask({ ...task, ...patch }) : task,
         ),
-      { kind: "task", taskId: revealTaskId },
     );
     if (revealTaskId !== taskId && selectedTaskId === taskId) {
       setSelectedTaskId(revealTaskId);
@@ -3655,16 +3645,6 @@ function findPlanTomlLine(text: string, target: PlanTomlRevealTarget) {
   if (target.kind === "credentials") return findCredentialLine(lines, target.name);
   if (target.kind === "verifiers") return findPlanVerifierLine(lines, target.name);
   return null;
-}
-
-function firstChangedKey<T>(previous: T[], next: T[], key: (item: T) => string) {
-  const previousByKey = new Map(previous.map((item) => [key(item), JSON.stringify(item)]));
-  for (const item of next) {
-    const itemKey = key(item);
-    if (!itemKey.trim()) continue;
-    if (previousByKey.get(itemKey) !== JSON.stringify(item)) return itemKey;
-  }
-  return next.map(key).find((itemKey) => itemKey.trim().length > 0);
 }
 
 function inferPlanTomlTargetFromLine(
