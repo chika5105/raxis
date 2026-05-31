@@ -313,7 +313,11 @@ jobs:
           set -euo pipefail
           test -f dashboard-fe/dist/index.html
           mkdir -p out
-          tar -C dashboard-fe -czf out/raxis-dashboard-fe.tar.gz dist
+          ./release/scripts/package-dashboard-bundle.sh \
+            dashboard-fe/dist \
+            "${RAXIS_VERSION#v}" \
+            out
+          cp out/raxis-dashboard-fe-${RAXIS_VERSION#v}.tar.gz out/raxis-dashboard-fe.tar.gz
 
       - name: upload dashboard frontend artifact
         uses: actions/upload-artifact@v4

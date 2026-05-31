@@ -6,8 +6,9 @@
 # Normative reference: raxis/specs/v2/release-and-distribution.md
 # §5.5 ("Tap update").
 #
-# Inputs (environment variables, ALL required):
+# Inputs (environment variables, ALL required unless noted):
 #   RAXIS_VERSION
+#   RAXIS_REVISION                   optional; Homebrew formula revision
 #   RAXIS_DARWIN_ARM64_URL          RAXIS_DARWIN_ARM64_SHA256
 #   RAXIS_DARWIN_X86_64_URL         RAXIS_DARWIN_X86_64_SHA256
 #   RAXIS_LINUX_ARM64_URL           RAXIS_LINUX_ARM64_SHA256
@@ -118,10 +119,20 @@ for v in "${required_vars[@]}"; do
     esac
 done
 
+revision_line=""
+if [[ -n "${RAXIS_REVISION:-}" && "${RAXIS_REVISION}" != "0" ]]; then
+    if [[ ! "${RAXIS_REVISION}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "render-formula.sh: RAXIS_REVISION must be a positive integer when set" >&2
+        exit 65
+    fi
+    revision_line="  revision ${RAXIS_REVISION}"
+fi
+
 # Substitute. Each @@VAR@@ token in the template is replaced with
 # the env var's value via sed. We use `|` as the sed delimiter
 # because URLs contain `/`.
 out="$(cat "${template}")"
+out="$(printf '%s' "${out}" | sed "s|@@RAXIS_REVISION_LINE@@|${revision_line}|g")"
 for v in "${required_vars[@]}"; do
     value="${!v}"
     # Refuse a value that contains the sed delimiter — would

@@ -101,6 +101,15 @@ esac
 # need the formula methods. The bottle copy omits the bottle block itself
 # to avoid circular sha256s; only the active platform URL needs a real sha.
 render_installed_formula() {
+    revision_line=""
+    if [[ -n "${RAXIS_REVISION:-}" && "${RAXIS_REVISION}" != "0" ]]; then
+        if [[ ! "${RAXIS_REVISION}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "package-homebrew-bottle.sh: RAXIS_REVISION must be a positive integer when set" >&2
+            exit 65
+        fi
+        revision_line="  revision ${RAXIS_REVISION}"
+    fi
+
     awk '
       /^[[:space:]]*bottle do$/ { in_bottle = 1; next }
       in_bottle && /^[[:space:]]*end$/ { in_bottle = 0; next }
@@ -108,6 +117,7 @@ render_installed_formula() {
     ' "${template}" |
         sed \
             -e "s|@@RAXIS_VERSION@@|${formula_version}|g" \
+            -e "s|@@RAXIS_REVISION_LINE@@|${revision_line}|g" \
             -e "s|@@RAXIS_DARWIN_ARM64_URL@@|${release_base_url}/raxis-${release_tag}-darwin-arm64.tar.gz|g" \
             -e "s|@@RAXIS_DARWIN_X86_64_URL@@|${release_base_url}/raxis-${release_tag}-darwin-x86_64.tar.gz|g" \
             -e "s|@@RAXIS_LINUX_ARM64_URL@@|${release_base_url}/raxis-${release_tag}-linux-arm64.tar.gz|g" \

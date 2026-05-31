@@ -12,6 +12,9 @@ flowchart TD
     scripts --> notarize["notarize.sh<br/>codesign, notarize, Gatekeeper check"]
     scripts --> render["render-formula.sh<br/>render Homebrew formula"]
     scripts --> bottles["package-homebrew-bottle.sh<br/>build pourable bottle archives"]
+    scripts --> dashbundle["package-dashboard-bundle.sh<br/>UI-only bundle"]
+    scripts --> dashruntime["replace-dashboard-in-runtime.sh<br/>patch runtime archive UI"]
+    scripts --> dashbottle["replace-dashboard-in-bottle.sh<br/>patch Homebrew bottle UI"]
     release --> templates["templates/"]
     templates --> formula["raxis.rb.tmpl<br/>single complete Homebrew formula"]
     templates --> legacy_kernel["raxis-kernel.rb.tmpl<br/>legacy split formula"]
@@ -69,6 +72,62 @@ bottle-shaped archives for `arm64_tahoe`, `tahoe`,
 
 That complete-bundle rule is intentional. A host-binary-only bottle can
 install cleanly and then fail later when the kernel tries to spawn a VM.
+
+## Dashboard-Only Release Paths
+
+RAXIS now has two dashboard patch lanes so a small React fix does not
+force a full native-binary, guest-kernel, and image rebuild.
+
+### Middle ground: Homebrew formula revision
+
+Use the `dashboard-release` GitHub Actions workflow when the fix should
+reach `brew upgrade raxis` users but the host binaries and canonical
+guest images from a prior full release are still correct.
+
+Inputs:
+
+- `base_version`: the full release tag to patch, for example `v0.2.4`
+- `revision`: the Homebrew formula revision, for example `1`
+
+The workflow:
+
+1. Builds `dashboard-fe` only.
+2. Packages `dashboard-fe/dist` as `raxis-dashboard-fe-<version>-r<N>.tar.gz`.
+3. Downloads the runtime archives and bottles from `base_version`.
+4. Replaces only `share/raxis/dashboard` inside those archives.
+5. Uploads patched archives to `dashboard-<base_version>-r<N>`.
+6. Renders the tap formula with the same core `version`, a Homebrew
+   `revision <N>`, base-release source tarball URLs, and patched-bottle
+   URLs.
+
+This preserves the important release boundary: host binaries, VM images,
+and guest kernel stay byte-for-byte from the full release, while the
+operator dashboard can move on a faster cadence.
+
+### Fastest path: local verified bundle install
+
+Use this for a single operator machine or urgent validation before a
+tap update:
+
+```bash
+npm ci --prefix dashboard-fe
+npm run --prefix dashboard-fe build
+release/scripts/package-dashboard-bundle.sh dashboard-fe/dist local-test /tmp
+SHA=$(shasum -a 256 /tmp/raxis-dashboard-fe-local-test.tar.gz | awk '{print $1}')
+raxis dashboard install-bundle \
+  --from-file /tmp/raxis-dashboard-fe-local-test.tar.gz \
+  --sha256 "$SHA"
+raxis-supervisor stop
+raxis-supervisor start
+```
+
+The CLI verifies the tarball SHA-256, rejects unsafe archive entries,
+installs the bundle under
+`<data_dir>/dashboard/releases/<sha256>/dist`, and points
+`<data_dir>/dashboard/current` at it. New kernel starts prefer that
+data-dir bundle over the packaged Homebrew bundle. The explicit hash is
+intentional: the dashboard is an admin surface, so fast patches still
+need an operator-visible integrity pin.
 
 ## Required GitHub Setup
 
@@ -199,6 +258,7 @@ flowchart TD
     formula["render Formula/raxis.rb"]
     tap["push tap repo"]
     user["brew install raxis"]
+    dashpatch["dashboard-release workflow<br/>dashboard-only revision"]
 
     tag --> gate
     gate --> images_arm
@@ -215,6 +275,7 @@ flowchart TD
     linux --> publish
     bottles --> publish
     publish --> formula --> tap --> user
+    dashboard --> dashpatch --> tap
 ```
 
 The release workflow fails before publishing if a guest runtime bundle

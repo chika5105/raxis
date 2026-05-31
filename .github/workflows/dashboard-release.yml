@@ -1,0 +1,211 @@
+# Dashboard-only release pipeline.
+#
+# This is the middle-ground path between "rebuild every native binary
+# and guest image" and "copy local files by hand". It rebuilds only the
+# Vite dashboard bundle, rewrites the dashboard payload inside the
+# already-published runtime archives / bottles for a base release, and
+# updates the Homebrew formula with a formula `revision`.
+
+name: dashboard-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_version:
+        description: "Base full release tag, e.g. v0.2.4"
+        required: true
+        type: string
+      revision:
+        description: "Homebrew formula revision for this dashboard patch, e.g. 1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dashboard-release-${{ inputs.base_version }}-r${{ inputs.revision }}
+  cancel-in-progress: false
+
+env:
+  HOMEBREW_TAP_REPOSITORY: ${{ vars.HOMEBREW_TAP_REPOSITORY || 'chika5105/homebrew-raxis' }}
+
+jobs:
+  dashboard-patch:
+    name: dashboard patch ${{ inputs.base_version }} r${{ inputs.revision }}
+    runs-on: ubuntu-22.04
+    env:
+      HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+    steps:
+      - name: release gate
+        run: |
+          case "${{ vars.RAXIS_RELEASE_ENABLED || '0' }}" in
+            1|true|TRUE|yes|YES) ;;
+            *)
+              echo "::error::RAXIS_RELEASE_ENABLED must be true/1 to publish dashboard releases"
+              exit 78
+              ;;
+          esac
+
+      - uses: actions/checkout@v4
+
+      - name: validate inputs
+        run: |
+          set -euo pipefail
+          case "${{ inputs.base_version }}" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "::error::base_version must look like vX.Y.Z"
+              exit 64
+              ;;
+          esac
+          if [[ ! "${{ inputs.revision }}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::revision must be a positive integer"
+            exit 64
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: raxis/dashboard-fe/package-lock.json
+
+      - name: build dashboard
+        working-directory: raxis
+        run: |
+          npm ci --prefix dashboard-fe
+          npm run --prefix dashboard-fe build
+
+      - name: package dashboard bundle
+        run: |
+          set -euo pipefail
+          label="${{ inputs.base_version }}-r${{ inputs.revision }}"
+          label="${label#v}"
+          mkdir -p out/dashboard
+          raxis/release/scripts/package-dashboard-bundle.sh \
+            raxis/dashboard-fe/dist \
+            "${label}" \
+            out/dashboard
+
+      - name: download base release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          base="${{ inputs.base_version }}"
+          formula_version="${base#v}"
+          mkdir -p base
+          gh release download "${base}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir base \
+            --pattern "raxis-${base}-*.tar.gz" \
+            --pattern "raxis-${formula_version}.*.bottle.tar.gz"
+          ls -lh base
+
+      - name: replace dashboard inside runtime archives and bottles
+        run: |
+          set -euo pipefail
+          bundle="$(find out/dashboard -name 'raxis-dashboard-fe-*.tar.gz' -print -quit)"
+          mkdir -p patched/runtime patched/bottles
+          for archive in base/raxis-${{ inputs.base_version }}-*.tar.gz; do
+            raxis/release/scripts/replace-dashboard-in-runtime.sh \
+              "${archive}" "${bundle}" patched/runtime
+          done
+          for bottle in base/*.bottle.tar.gz; do
+            RAXIS_REVISION="${{ inputs.revision }}" \
+              raxis/release/scripts/replace-dashboard-in-bottle.sh \
+              "${bottle}" "${bundle}" patched/bottles
+          done
+          ls -lh patched/runtime patched/bottles
+
+      - name: upload dashboard patch release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dashboard-${{ inputs.base_version }}-r${{ inputs.revision }}
+          name: Dashboard patch ${{ inputs.base_version }} r${{ inputs.revision }}
+          body: |
+            Dashboard-only patch for RAXIS ${{ inputs.base_version }}.
+
+            This release rebuilds only the operator dashboard bundle and
+            repackages the existing runtime archives and Homebrew bottles.
+            Host binaries, canonical guest images, and guest kernels come
+            from the base release.
+          overwrite_files: true
+          files: |
+            out/dashboard/*.tar.gz
+            out/dashboard/*.sha256
+            patched/runtime/*.tar.gz
+            patched/bottles/*.bottle.tar.gz
+
+      - name: render Homebrew formula revision
+        run: |
+          set -euo pipefail
+          sha256_file() {
+            shasum -a 256 "$1" | awk '{print $1}'
+          }
+
+          base="${{ inputs.base_version }}"
+          formula_version="${base#v}"
+          base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${base}"
+          patch_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/dashboard-${base}-r${{ inputs.revision }}"
+
+          RAXIS_DARWIN_ARM64_URL="${base_url}/raxis-${base}-darwin-arm64.tar.gz"
+          RAXIS_DARWIN_X86_64_URL="${base_url}/raxis-${base}-darwin-x86_64.tar.gz"
+          RAXIS_LINUX_ARM64_URL="${base_url}/raxis-${base}-linux-arm64.tar.gz"
+          RAXIS_LINUX_X86_64_URL="${base_url}/raxis-${base}-linux-x86_64.tar.gz"
+          RAXIS_DARWIN_ARM64_SHA256="$(sha256_file "base/raxis-${base}-darwin-arm64.tar.gz")"
+          RAXIS_DARWIN_X86_64_SHA256="$(sha256_file "base/raxis-${base}-darwin-x86_64.tar.gz")"
+          RAXIS_LINUX_ARM64_SHA256="$(sha256_file "base/raxis-${base}-linux-arm64.tar.gz")"
+          RAXIS_LINUX_X86_64_SHA256="$(sha256_file "base/raxis-${base}-linux-x86_64.tar.gz")"
+
+          RAXIS_BOTTLE_ROOT_URL="${patch_url}"
+          RAXIS_BOTTLE_DARWIN_ARM64_TAHOE_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.arm64_tahoe.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_X86_64_TAHOE_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.tahoe.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_ARM64_SEQUOIA_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.arm64_sequoia.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_X86_64_SEQUOIA_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.sequoia.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_ARM64_SONOMA_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.arm64_sonoma.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_X86_64_SONOMA_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.sonoma.bottle.tar.gz")"
+          RAXIS_BOTTLE_LINUX_ARM64_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.arm64_linux.bottle.tar.gz")"
+          RAXIS_BOTTLE_LINUX_X86_64_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.x86_64_linux.bottle.tar.gz")"
+          RAXIS_VERSION="${formula_version}"
+          RAXIS_REVISION="${{ inputs.revision }}"
+
+          export RAXIS_DARWIN_ARM64_URL RAXIS_DARWIN_X86_64_URL
+          export RAXIS_LINUX_ARM64_URL RAXIS_LINUX_X86_64_URL
+          export RAXIS_DARWIN_ARM64_SHA256 RAXIS_DARWIN_X86_64_SHA256
+          export RAXIS_LINUX_ARM64_SHA256 RAXIS_LINUX_X86_64_SHA256
+          export RAXIS_BOTTLE_ROOT_URL
+          export RAXIS_BOTTLE_DARWIN_ARM64_TAHOE_SHA256 RAXIS_BOTTLE_DARWIN_X86_64_TAHOE_SHA256
+          export RAXIS_BOTTLE_DARWIN_ARM64_SEQUOIA_SHA256 RAXIS_BOTTLE_DARWIN_X86_64_SEQUOIA_SHA256
+          export RAXIS_BOTTLE_DARWIN_ARM64_SONOMA_SHA256 RAXIS_BOTTLE_DARWIN_X86_64_SONOMA_SHA256
+          export RAXIS_BOTTLE_LINUX_ARM64_SHA256 RAXIS_BOTTLE_LINUX_X86_64_SHA256
+          export RAXIS_VERSION RAXIS_REVISION
+          mkdir -p rendered/Formula
+          raxis/release/scripts/render-formula.sh raxis > rendered/Formula/raxis.rb
+          ruby -c rendered/Formula/raxis.rb
+
+      - name: push Homebrew tap formula revision
+        run: |
+          set -euo pipefail
+          if [[ -z "${HOMEBREW_TAP_DEPLOY_KEY:-}" ]]; then
+            echo "::error::HOMEBREW_TAP_DEPLOY_KEY is required to update the Homebrew tap"
+            exit 78
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${HOMEBREW_TAP_DEPLOY_KEY}" > ~/.ssh/raxis-homebrew-tap
+          chmod 600 ~/.ssh/raxis-homebrew-tap
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/raxis-homebrew-tap -o IdentitiesOnly=yes" \
+            git clone "git@github.com:${HOMEBREW_TAP_REPOSITORY}.git" tap
+          mkdir -p tap/Formula
+          cp rendered/Formula/raxis.rb tap/Formula/raxis.rb
+          git -C tap config user.name "raxis-release-bot"
+          git -C tap config user.email "release-bot@raxis.io"
+          git -C tap add Formula/raxis.rb
+          if git -C tap diff --cached --quiet; then
+            echo "Homebrew tap already up to date"
+            exit 0
+          fi
+          git -C tap commit -m "Update raxis dashboard ${{ inputs.base_version }} r${{ inputs.revision }}"
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/raxis-homebrew-tap -o IdentitiesOnly=yes" \
+            git -C tap push origin HEAD

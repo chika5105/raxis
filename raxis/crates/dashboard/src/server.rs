@@ -8,6 +8,7 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -302,7 +303,7 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
     use crate::routes::*;
     use axum::routing::{get, patch, post};
 
-    let static_dir = state.config.static_dir.clone();
+    let static_dir = resolve_static_dir(&state.config);
 
     // ── Auth + write surface: tighter body limits ────────────────────────
     //
@@ -602,6 +603,16 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .with_state(state)
 }
 
+fn resolve_static_dir(config: &DashboardConfig) -> Option<String> {
+    if let Some(data_dir) = config.data_dir.as_deref() {
+        let current = PathBuf::from(data_dir).join("dashboard").join("current");
+        if current.join("index.html").is_file() {
+            return Some(current.to_string_lossy().into_owned());
+        }
+    }
+    config.static_dir.clone()
+}
+
 /// Catch-all handler for unknown `/api/*` routes.
 ///
 /// Returns the same JSON error envelope every other handler
@@ -879,6 +890,47 @@ mod tests {
         assert!(addr.port() > 0);
         let handle = ServerHandle::spawn(server);
         handle.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn data_dir_dashboard_bundle_overrides_packaged_static_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let packaged = tmp.path().join("packaged");
+        let current = tmp.path().join("data").join("dashboard").join("current");
+        std::fs::create_dir_all(&packaged).expect("packaged dir");
+        std::fs::create_dir_all(&current).expect("current dir");
+        std::fs::write(packaged.join("index.html"), "packaged").expect("packaged index");
+        std::fs::write(current.join("index.html"), "patched").expect("current index");
+
+        let cfg = DashboardConfig {
+            static_dir: Some(packaged.to_string_lossy().into_owned()),
+            data_dir: Some(tmp.path().join("data").to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_static_dir(&cfg).as_deref(),
+            Some(current.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn packaged_static_dir_is_used_when_no_data_dir_bundle_exists() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let packaged = tmp.path().join("packaged");
+        std::fs::create_dir_all(&packaged).expect("packaged dir");
+        std::fs::write(packaged.join("index.html"), "packaged").expect("packaged index");
+
+        let cfg = DashboardConfig {
+            static_dir: Some(packaged.to_string_lossy().into_owned()),
+            data_dir: Some(tmp.path().join("data").to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_static_dir(&cfg).as_deref(),
+            Some(packaged.to_string_lossy().as_ref())
+        );
     }
 
     /// iter69 — unknown `/api/*` routes MUST return a typed

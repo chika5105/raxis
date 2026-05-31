@@ -6,6 +6,7 @@ class Raxis < Formula
   desc     "Runtime Attestation eXchange for Intelligent Systems"
   homepage "https://raxis.io"
   version  "@@RAXIS_VERSION@@"
+@@RAXIS_REVISION_LINE@@
   license  "SSPL-1.0"
 
   bottle do
@@ -127,6 +128,10 @@ class Raxis < Formula
       To serve it, configure policy.toml with:
         [dashboard]
         static_dir = "#{opt_pkgshare}/dashboard"
+      A verified local dashboard-only patch can be installed with:
+        raxis dashboard install-bundle --from-file <bundle.tar.gz> --sha256 <hex>
+      It is stored under #{var}/lib/raxis/dashboard/current and is
+      preferred by new kernel starts over the packaged bundle.
 
       Start the kernel with:
         brew services start raxis

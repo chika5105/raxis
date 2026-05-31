@@ -136,7 +136,7 @@ const AUTH_SUBCOMMANDS: &[&str] = &["sign"];
 /// maintenance ops. `rotate-jwt-secret` is the explicit "kick
 /// everyone out" lever; future entries (e.g. a `clear-revocations`
 /// op for after a kernel forensic event) plug in here.
-const DASHBOARD_SUBCOMMANDS: &[&str] = &["rotate-jwt-secret"];
+const DASHBOARD_SUBCOMMANDS: &[&str] = &["install-bundle", "rotate-jwt-secret"];
 
 // ---------------------------------------------------------------------------
 // Global CLI flags
@@ -466,6 +466,7 @@ fn run() -> Result<(), CliError> {
                 "rotate-jwt-secret" => {
                     commands::dashboard::run_rotate_jwt_secret(&flags, &rest[1..])
                 }
+                "install-bundle" => commands::dashboard::run_install_bundle(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "dashboard sub-command",
                     sub2,
@@ -828,6 +829,13 @@ SUBCOMMANDS:
         only — does NOT open operator.sock and does NOT require
         --operator-key. Spec: self-healing-supervisor.md §10 +
         dashboard-hardening.md §INV-DASHBOARD-JWT-SECRET-PERSISTENT-01.
+
+    dashboard install-bundle --from-file <tar.gz> --sha256 <hex> [--json]
+        Fast dashboard-only patch path. Verifies a dashboard static
+        bundle by SHA-256, installs it under
+        <data-dir>/dashboard/releases/<sha>/dist, and points
+        <data-dir>/dashboard/current at it. New kernel starts prefer
+        this data-dir bundle over the packaged Homebrew bundle.
 
 READ-ONLY OBSERVATION:
 

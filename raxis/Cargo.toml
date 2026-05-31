@@ -192,6 +192,12 @@ chrono      = { version = "0.4", default-features = false, features = ["clock", 
 # system zlib would break that contract.
 flate2      = { version = "1", default-features = false, features = ["rust_backend"] }
 
+# Tar archive reader/writer for dashboard-only release bundles. The
+# CLI verifies the whole `.tar.gz` by SHA-256 before extraction and
+# then rejects absolute paths, `..`, symlinks, and hardlinks before
+# installing the static dashboard bundle under `<data_dir>/dashboard`.
+tar         = "0.4"
+
 # Linux AF_VSOCK socket bindings used by the planner-core
 # `vsock-transport` Cargo feature. Tokio-integrated so the planner's
 # dispatch loop drives reads/writes on the same runtime as the rest of

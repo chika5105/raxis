@@ -247,6 +247,7 @@ Two workflows live under `.github/workflows/`:
 | ---------------------------- | -------------------------------------------- | ------------------------------------------------------ |
 | `build-images.yml`           | every PR + push to `main`                    | Reproducibility check; **no signing**, **no upload**.  |
 | `release.yml`                | tag push matching `v[0-9]+.[0-9]+.[0-9]+*`   | Full signed build, notarize, upload, tap-update when `RAXIS_RELEASE_ENABLED` is enabled. |
+| `dashboard-release.yml`      | manual `workflow_dispatch`                   | Dashboard-only patch release; rebuilds no host binaries or guest images. |
 
 The strict trigger separation means a contributor sending a PR
 cannot cause anything signed-by-RAXIS to be produced. The release
@@ -373,6 +374,55 @@ After all artefacts upload, the `publish` job:
 Tap pushes update the current formula file for the released version;
 previous versions stay accessible via tag history on the tap repo, not
 via separate formula files in `Formula/`.
+
+### §5.6 Dashboard-only patch releases
+
+Dashboard-only fixes are intentionally separated from the full release
+train. A React/UI-only change must not force a rebuild of:
+
+* host binaries,
+* canonical guest images,
+* guest Linux kernels,
+* macOS code-signing and notarization outputs.
+
+The `dashboard-release.yml` workflow is the middle-ground release path.
+It takes a `base_version` (for example `v0.2.4`) and a Homebrew
+`revision` integer. It then:
+
+1. Builds only `dashboard-fe`.
+2. Packages `dashboard-fe/dist` as a standalone
+   `raxis-dashboard-fe-<base>-r<revision>.tar.gz` bundle with a small
+   manifest.
+3. Downloads the complete runtime archives and bottles from the base
+   release.
+4. Replaces only `share/raxis/dashboard` inside those archives.
+5. Publishes the patched assets under
+   `dashboard-<base_version>-r<revision>`.
+6. Renders the Homebrew formula with the same core `version`, a
+   `revision <N>` line, source-fallback URLs still pointing at the base
+   full release, and bottle URLs pointing at the dashboard patch
+   release.
+
+This keeps Homebrew semantics clean: `brew upgrade raxis` can pick up a
+UI-only fix through formula revision, while `raxis --version`, canonical
+image trust anchors, and guest kernels remain tied to the base full
+release.
+
+For urgent local validation, operators may install a verified dashboard
+bundle directly:
+
+```bash
+raxis dashboard install-bundle \
+  --from-file raxis-dashboard-fe-local.tar.gz \
+  --sha256 <64-hex>
+```
+
+The CLI verifies the archive digest, rejects unsafe tar entries, writes
+the bundle under `<data_dir>/dashboard/releases/<sha256>/dist`, and
+updates `<data_dir>/dashboard/current`. New kernel starts prefer that
+data-dir bundle over the packaged static bundle. This is deliberately a
+local operator action with an explicit hash pin; it does not silently
+fetch or serve arbitrary dashboard JavaScript.
 
 ---
 
@@ -721,6 +771,13 @@ and bottle packager validate this service block before publishing.
 When serving the operator dashboard frontend, the operator policy's
 `[dashboard].static_dir` points at
 `$HOMEBREW_PREFIX/share/raxis/dashboard`.
+
+If `<data_dir>/dashboard/current/index.html` exists, the dashboard
+server serves that data-dir bundle ahead of `[dashboard].static_dir`.
+This is the fast UI patch override installed by
+`raxis dashboard install-bundle`; it is scoped to the kernel data dir
+and therefore to the operator's local installation, not to the immutable
+Homebrew runtime bundle.
 
 ### §9.2 Post-install verification
 

@@ -95,6 +95,8 @@ thiserror    = { workspace = true }
 # so subsequent runs can detect drift in inputs without rolling
 # forward stale phases.
 sha2         = { workspace = true }
+flate2       = { workspace = true }
+tar          = { workspace = true }
 # Used by `commands::status::is_pid_alive` for `kill(pid, 0)` —
 # POSIX existence check that doesn't deliver a signal. Already a
 # dev-dep on the workspace; promoted to prod here because the
