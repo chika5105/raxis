@@ -1651,6 +1651,35 @@ pub enum AuditEventKind {
         verdict: String,
     },
 
+    /// V2 Step 22/25 — durable per-Reviewer verdict and repair
+    /// feedback. `ReviewAggregationCompleted` records the
+    /// terminal aggregate state for an Executor; this row records
+    /// the individual Reviewer output that caused or contributed
+    /// to that aggregate.
+    ///
+    /// The kernel also writes rejection feedback into
+    /// `tasks.last_critique` so a retrying Executor can receive the
+    /// repair hint. That column is intentionally mutable lifecycle
+    /// state and is cleared once the repaired round passes. This
+    /// audit event is the immutable forensic copy: dashboards,
+    /// witnesses, and post-mortems must read this row when they
+    /// need to answer "what did the Reviewer tell the Executor?"
+    ReviewerVerdictRecorded {
+        /// Executor task this Reviewer inspected.
+        executor_task_id: String,
+        /// Reviewer task that submitted `IntentKind::SubmitReview`.
+        reviewer_task_id: String,
+        /// Concrete Reviewer VM session that originated the verdict.
+        reviewer_session_id: String,
+        /// Raw boolean from `SubmitReview.approved`.
+        approved: bool,
+        /// Stable string verdict: `"Approved"` / `"Rejected"`.
+        verdict: String,
+        /// Raw Reviewer critique on rejection. Omitted on approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        critique: Option<String>,
+    },
+
     /// V2 §Step 12 + `agent-disagreement.md §3.6` —
     /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` audit anchor.
     ///
@@ -4733,6 +4762,7 @@ impl AuditEventKind {
             Self::GateFixupCompleted { .. } => "GateFixupCompleted",
             Self::WitnessMissingAgentHint { .. } => "WitnessMissingAgentHint",
             Self::ReviewAggregationCompleted { .. } => "ReviewAggregationCompleted",
+            Self::ReviewerVerdictRecorded { .. } => "ReviewerVerdictRecorded",
             Self::ExecutorRespawnFromReviewRejection { .. } => "ExecutorRespawnFromReviewRejection",
             Self::IntentValidationRejected { .. } => "IntentValidationRejected",
             Self::OrchestratorRespawnCeilingExceeded { .. } => "OrchestratorRespawnCeilingExceeded",

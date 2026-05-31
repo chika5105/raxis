@@ -83,20 +83,19 @@
 //!    and finally
 //!    `ReviewAggregationCompleted{executor_task_id, verdict=AllPassed}`.
 //!
-//! 2. **SQLite-side (substantive critique).** The `last_critique`
-//!    column on the executor's `tasks` row is non-empty AND
-//!    contains at least one of the lint-defect target file
-//!    basenames (`greeting.rs`, `greet.ts`, `greet.py`). A
-//!    critique that only says "rejected for vibes" or "the diff
-//!    looks bad" does NOT satisfy this check; the reviewer must
-//!    name the offending file the executor touched.
+//! 2. **Audit-side (substantive critique).** The chain contains
+//!    `ReviewerVerdictRecorded{approved=false}` for the executor
+//!    and the durable critique contains at least one of the
+//!    lint-defect target file basenames (`greeting.rs`, `greet.ts`,
+//!    `greet.py`). A critique that only says "rejected for vibes"
+//!    or "the diff looks bad" does NOT satisfy this check; the
+//!    reviewer must name the offending file the executor touched.
 //!
-//! The SQLite read uses `raxis_store::Table::Tasks.as_str()` per
-//! `INV-STORE-03` (no raw table-name literals).
-//! `tasks.last_critique` is APPEND-only (`COALESCE(last_critique,
-//! '') || ?1`) and the approval path does NOT clear it, so the
-//! round-1 rejection critique survives until the test reads it
-//! after the full scenario completes.
+//! The SQLite read remains as a legacy fallback and uses
+//! `raxis_store::Table::Tasks.as_str()` per `INV-STORE-03` (no raw
+//! table-name literals). `tasks.last_critique` is mutable repair
+//! feedback and can be cleared after a later successful repair; the
+//! audit event is the immutable source of truth.
 //!
 //! ## Why both checks
 //!
@@ -273,6 +272,14 @@ impl ReviewerSubstantiveDisagreementWitness {
                 }) if executor_task_id == self.executor_task_id && verdict == "AllPassed" => {
                     report.saw_aggregation_pass = true;
                 }
+                Some(AuditEventKind::ReviewerVerdictRecorded {
+                    executor_task_id,
+                    approved: false,
+                    critique: Some(critique),
+                    ..
+                }) if executor_task_id == self.executor_task_id => {
+                    record_critique(report, &critique);
+                }
                 _ => {}
             }
         }
@@ -291,14 +298,9 @@ impl ReviewerSubstantiveDisagreementWitness {
                         row.get::<_, Option<String>>(0)
                     })
                     .unwrap_or(None);
-                if let Some(text) = &critique {
-                    for name in LINT_DEFECT_TARGET_BASENAMES {
-                        if text.contains(name) {
-                            report.matched_basenames.push(name);
-                        }
-                    }
+                if let Some(text) = critique.as_deref() {
+                    record_critique(report, text);
                 }
-                report.last_critique = critique;
             }
             Err(e) => {
                 report.error = Some(format!(
@@ -306,6 +308,17 @@ impl ReviewerSubstantiveDisagreementWitness {
                     self.sqlite_path.display(),
                 ));
             }
+        }
+    }
+}
+
+fn record_critique(report: &mut ReviewerSubstantiveReport, text: &str) {
+    if report.last_critique.is_none() {
+        report.last_critique = Some(text.to_owned());
+    }
+    for name in LINT_DEFECT_TARGET_BASENAMES {
+        if text.contains(name) && !report.matched_basenames.contains(name) {
+            report.matched_basenames.push(name);
         }
     }
 }
@@ -330,6 +343,7 @@ mod tests {
                 "ExecutorRespawnFromReviewRejection"
             }
             AuditEventKind::ReviewAggregationCompleted { .. } => "ReviewAggregationCompleted",
+            AuditEventKind::ReviewerVerdictRecorded { .. } => "ReviewerVerdictRecorded",
             _ => "Other",
         }
         .to_owned();
@@ -410,6 +424,26 @@ mod tests {
         )
     }
 
+    fn reviewer_verdict_rejected(
+        seq: u64,
+        executor_task_id: &str,
+        reviewer_task_id: &str,
+        critique: &str,
+    ) -> AuditEvent {
+        ev(
+            seq,
+            AuditEventKind::ReviewerVerdictRecorded {
+                executor_task_id: executor_task_id.to_owned(),
+                reviewer_task_id: reviewer_task_id.to_owned(),
+                reviewer_session_id: format!("sess-{reviewer_task_id}"),
+                approved: false,
+                verdict: "Rejected".to_owned(),
+                critique: Some(critique.to_owned()),
+            },
+            Some(reviewer_task_id),
+        )
+    }
+
     fn seed_tasks_db(tmpdir: &Path, executor_task: &str, critique: Option<&str>) -> PathBuf {
         let db_path = tmpdir.join("kernel.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -459,6 +493,28 @@ mod tests {
         let report = w.evaluate(&clean_chain());
         assert!(report.is_pass(), "expected pass; got {report:#?}");
         assert!(report.matched_basenames.contains(&"greeting.rs"));
+    }
+
+    #[test]
+    fn audit_critique_passes_when_sqlite_repair_feedback_was_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = seed_tasks_db(tmp.path(), "lint-defect", None);
+        let w = witness(&db);
+        let mut chain = clean_chain();
+        chain.insert(
+            1,
+            reviewer_verdict_rejected(
+                1,
+                "lint-defect",
+                TASK_REVIEW_LINT_A,
+                "py-pkg/src/sample_py/greet.py still has an unused import",
+            ),
+        );
+
+        let report = w.evaluate(&chain);
+
+        assert!(report.is_pass(), "expected pass; got {report:#?}");
+        assert_eq!(report.matched_basenames, vec!["greet.py"]);
     }
 
     #[test]

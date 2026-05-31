@@ -4320,6 +4320,7 @@ fn handle_submit_review(
         // true is silently dropped").
         None
     };
+    let raw_rejection_critique = if approved { None } else { req.critique.clone() };
 
     // ── 3 + 4 + 5: predecessor lookup + critique append + FSM transition ──
     //
@@ -4511,8 +4512,32 @@ fn handle_submit_review(
         eprintln!(
             "{{\"level\":\"error\",\"event\":\"AuditEmitFailed\",\
              \"audit_event\":\"IntentAccepted\",\"intent_kind\":\"SubmitReview\",\
-             \"reviewer_task_id\":\"{reviewer_task_id}\",\"reason\":\"{e}\"}}",
+            \"reviewer_task_id\":\"{reviewer_task_id}\",\"reason\":\"{e}\"}}",
         );
+    }
+
+    for predecessor in &predecessors {
+        let verdict = if approved { "Approved" } else { "Rejected" };
+        if let Err(e) = ctx.audit.emit(
+            raxis_audit_tools::AuditEventKind::ReviewerVerdictRecorded {
+                executor_task_id: predecessor.clone(),
+                reviewer_task_id: reviewer_task_id.clone(),
+                reviewer_session_id: session_id.as_str().to_owned(),
+                approved,
+                verdict: verdict.to_owned(),
+                critique: raw_rejection_critique.clone(),
+            },
+            Some(session_id.as_str()),
+            Some(reviewer_task_id.as_str()),
+            initiative_id_audit.as_deref(),
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"AuditEmitFailed\",\
+                 \"audit_event\":\"ReviewerVerdictRecorded\",\
+                 \"reviewer_task_id\":\"{reviewer_task_id}\",\
+                 \"executor_task_id\":\"{predecessor}\",\"reason\":\"{e}\"}}",
+            );
+        }
     }
 
     // ── 6. Step 25 cross-Reviewer aggregation (V2 gap §12.2) ──────────────
@@ -12429,6 +12454,38 @@ mod tests {
                 assert_eq!(triggered_by_reviewer_task_id, "revB");
                 assert_eq!(*reviewer_count, 2);
                 assert_eq!(verdict, "AtLeastOneRejected");
+            }
+            _ => unreachable!(),
+        }
+        let verdict_events: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    raxis_audit_tools::AuditEventKind::ReviewerVerdictRecorded { .. },
+                )
+            })
+            .collect();
+        assert_eq!(
+            verdict_events.len(),
+            2,
+            "each SubmitReview must leave a durable per-reviewer verdict row"
+        );
+        match &verdict_events[1].kind {
+            raxis_audit_tools::AuditEventKind::ReviewerVerdictRecorded {
+                executor_task_id,
+                reviewer_task_id,
+                approved,
+                verdict,
+                critique,
+                ..
+            } => {
+                assert_eq!(executor_task_id, "exe1");
+                assert_eq!(reviewer_task_id, "revB");
+                assert!(!approved);
+                assert_eq!(verdict, "Rejected");
+                assert_eq!(critique.as_deref(), Some("missing test coverage"));
             }
             _ => unreachable!(),
         }

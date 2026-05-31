@@ -1759,14 +1759,17 @@ impl DashboardData for KernelDashboardData {
                     latest_annotation: None,
                     env: Vec::new(),
                 };
-                // List view stays cheap on both fallback channels:
-                // the model fallback reads ONE turn per row and the
-                // token fallback reads ALL turns per row, both of
-                // which would multiply IO by the list cap. The list
-                // surfaces what the kernel has persisted; the detail
-                // page (`get_session`) pays for the per-task ring
-                // tail and renders the richer view.
-                let view = enrich_session_view_with_owning_task(view, owning, None, None, None);
+                let fallback_tokens =
+                    session_list_token_fallback(self.task_llm_capture.as_ref(), &owning);
+                // Keep the list and detail pages semantically aligned:
+                // the list normally surfaces the kernel-persisted
+                // task counters, but orchestrator/coordinator rows can
+                // be clicked before those counters have caught up. In
+                // that narrow zero/zero case, read the bounded
+                // capture-ring sum so operators do not see "0 tokens"
+                // in the list and real usage on the detail page.
+                let view =
+                    enrich_session_view_with_owning_task(view, owning, None, None, fallback_tokens);
                 Ok(enrich_session_view_with_lifecycle_indexed(
                     &audit_index,
                     view,
@@ -4813,6 +4816,19 @@ pub(crate) fn cumulative_tokens_for_task(
     Some((total_in, total_out))
 }
 
+fn session_list_token_fallback(
+    capture: Option<&Arc<TaskLlmCapture>>,
+    owning_task: &SessionOwningTask,
+) -> Option<(u64, u64)> {
+    if owning_task.input_tokens != 0 || owning_task.output_tokens != 0 {
+        return None;
+    }
+    owning_task
+        .task_id
+        .as_deref()
+        .and_then(|task_id| cumulative_tokens_for_task(capture, task_id))
+}
+
 /// iter69 — fold the `owning_task_for_session` projection plus
 /// (optionally) a fallback model from the LLM turn capture into
 /// a partially-built `SessionView`. The fields touched are the
@@ -6974,7 +6990,7 @@ fn extract_reviewer_panel_results_from_rows(
                     }
                 }
             }
-            "SubmitReview" | "ReviewerSubmittedVerdict" => {
+            "SubmitReview" | "ReviewerSubmittedVerdict" | "ReviewerVerdictRecorded" => {
                 let reviewer_task_id = row
                     .task_id
                     .clone()
@@ -8434,6 +8450,43 @@ task_id = "task-a"
         )
         .unwrap();
         assert!(cumulative_tokens_for_task(Some(&cap), "task-a").is_none());
+    }
+
+    #[test]
+    fn session_list_token_fallback_uses_capture_when_persisted_totals_are_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap =
+            crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default()).unwrap();
+        cap.append("task-a", mk_rec(anthropic_turn_body(42, 7), 1))
+            .unwrap();
+        let owning = SessionOwningTask {
+            initiative_id: Some("init-a".into()),
+            task_id: Some("task-a".into()),
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+
+        let (in_tok, out_tok) = session_list_token_fallback(Some(&cap), &owning).unwrap();
+
+        assert_eq!(in_tok, 42);
+        assert_eq!(out_tok, 7);
+    }
+
+    #[test]
+    fn session_list_token_fallback_preserves_kernel_persisted_totals() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap =
+            crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default()).unwrap();
+        cap.append("task-a", mk_rec(anthropic_turn_body(9_999, 4_321), 1))
+            .unwrap();
+        let owning = SessionOwningTask {
+            initiative_id: Some("init-a".into()),
+            task_id: Some("task-a".into()),
+            input_tokens: 12,
+            output_tokens: 3,
+        };
+
+        assert!(session_list_token_fallback(Some(&cap), &owning).is_none());
     }
 
     /// End-to-end of the orchestrator-session token-visibility

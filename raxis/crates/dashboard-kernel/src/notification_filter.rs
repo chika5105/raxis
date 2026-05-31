@@ -244,6 +244,7 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
         | "EscalationConsumed"
         | "WitnessAccepted"
         | "ReviewAggregationCompleted"
+        | "ReviewerVerdictRecorded"
         | "ExecutorRespawnFromReviewRejection"
         | "OperatorApprovedRespawnEscalation"
         | "OperatorDeniedRespawnEscalation"
@@ -441,6 +442,7 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         K::EscalationConsumed { .. } => Some(Medium),
         K::WitnessAccepted { .. } => Some(Medium),
         K::ReviewAggregationCompleted { .. } => Some(Medium),
+        K::ReviewerVerdictRecorded { .. } => Some(Medium),
         // `ExecutorRespawnFromReviewRejection` rides at Medium next to
         // `ReviewAggregationCompleted` — the two events are paired
         // chain anchors for a single Reviewer-rejection round
@@ -1431,6 +1433,7 @@ mod tests {
             ("EscalationConsumed", Medium),
             ("WitnessAccepted", Medium),
             ("ReviewAggregationCompleted", Medium),
+            ("ReviewerVerdictRecorded", Medium),
             ("ExecutorRespawnFromReviewRejection", Medium),
             ("OperatorApprovedRespawnEscalation", Medium),
             ("OperatorDeniedRespawnEscalation", Medium),
