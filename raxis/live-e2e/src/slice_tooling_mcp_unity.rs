@@ -125,6 +125,7 @@ printf '{"content":"generic script wrapper received a bounded request","is_error
 
     let mut registry = build_executor_registry();
     let decl = custom_tool_decl(
+        "repo_tools",
         "repo_codegen_check",
         "Run a pre-existing repository code-generation check wrapper.",
         vec![script_path.display().to_string()],
@@ -209,6 +210,7 @@ fn unity_tool_decls(exe: &Path, socket_path: &Path) -> Vec<CustomToolDecl> {
     };
     vec![
         custom_tool_decl(
+            "unity_mcp_tools",
             "unity_list_scenes",
             "List scenes known to the local Unity Editor MCP adapter.",
             base_command("unity.listScenes"),
@@ -222,6 +224,7 @@ fn unity_tool_decls(exe: &Path, socket_path: &Path) -> Vec<CustomToolDecl> {
             5,
         ),
         custom_tool_decl(
+            "unity_mcp_tools",
             "unity_run_playmode_tests",
             "Run bounded Unity playmode tests through the local MCP adapter.",
             base_command("unity.runPlaymodeTests"),
@@ -235,6 +238,7 @@ fn unity_tool_decls(exe: &Path, socket_path: &Path) -> Vec<CustomToolDecl> {
             10,
         ),
         custom_tool_decl(
+            "unity_mcp_tools",
             "unity_build_player",
             "Build one Unity player target through the local MCP adapter.",
             base_command("unity.buildPlayer"),
@@ -259,6 +263,7 @@ fn unity_tool_decls(exe: &Path, socket_path: &Path) -> Vec<CustomToolDecl> {
 }
 
 fn custom_tool_decl(
+    profile_name: impl Into<String>,
     name: impl Into<String>,
     description: impl Into<String>,
     command: Vec<String>,
@@ -267,6 +272,7 @@ fn custom_tool_decl(
 ) -> CustomToolDecl {
     CustomToolDecl {
         name: name.into(),
+        profile_name: profile_name.into(),
         description: description.into(),
         command,
         execution_locality: "guest_subprocess".to_owned(),

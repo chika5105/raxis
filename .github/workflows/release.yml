@@ -14,10 +14,11 @@
 #
 # Pipeline shape (pinned by the spec):
 #
-#   guest-runtime-arm64 ┐
-#   guest-runtime-x86_64├→ collect-image-metadata ┐
-#   build-dashboard    ─┘                         ├→ build-darwin → notarize ┐
-#                                                 └→ build-linux ───────────────→ publish → tap
+#   release-preflight (wait for required main checks on this SHA)
+#        ├→ guest-runtime-arm64 ┐
+#        ├→ guest-runtime-x86_64├→ collect-image-metadata ┐
+#        └→ build-dashboard    ─┘                         ├→ build-darwin → notarize ┐
+#                                                         └→ build-linux ───────────────→ publish → tap
 #
 # Guest runtime bundles are built inside the release workflow, including
 # a pinned Cloud-Hypervisor-derived Linux guest kernel with Raxis' A3
@@ -63,6 +64,7 @@ on:
 # Release token must be able to upload assets to GitHub Releases.
 # Everything else stays read-only.
 permissions:
+  actions:  read
   contents: write
 
 # Don't run two releases concurrently for the same tag — the tap
@@ -105,6 +107,98 @@ jobs:
           esac
 
   # ────────────────────────────────────────────────────────────
+  # Release preflight. A tag push is an independent GitHub event;
+  # it can start even while the normal `main` build/test workflow
+  # for the same commit is still running or has already failed.
+  # This job makes the dependency explicit: the release SHA must be
+  # reachable from `origin/main`, and the required `main` checks for
+  # this exact SHA must complete successfully before we build signed
+  # images, notarize, upload assets, or update the tap.
+  # ────────────────────────────────────────────────────────────
+  release-preflight:
+    name: release preflight checks
+    needs: [release-gate]
+    if: needs.release-gate.outputs.enabled == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: wait for required main checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git fetch origin +refs/heads/main:refs/remotes/origin/main --tags --force
+
+          release_sha="${GITHUB_SHA}"
+          if git rev-parse -q --verify "refs/tags/${RAXIS_VERSION}^{commit}" >/dev/null; then
+            release_sha="$(git rev-parse "refs/tags/${RAXIS_VERSION}^{commit}")"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            release_sha="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "::error::Manual releases must point at an existing tag. Could not resolve refs/tags/${RAXIS_VERSION}."
+            exit 1
+          fi
+          echo "release version ${RAXIS_VERSION} resolves to ${release_sha}"
+
+          if ! git merge-base --is-ancestor "${release_sha}" origin/main; then
+            echo "::error::Release SHA ${release_sha} is not reachable from origin/main. Refusing to publish a tag that did not pass through main."
+            exit 1
+          fi
+
+          wait_for_workflow() {
+            local workflow="$1"
+            local deadline=$((SECONDS + 7200))
+            local delay=30
+            while true; do
+              local json
+              json="$(gh run list \
+                --repo "${GITHUB_REPOSITORY}" \
+                --workflow "${workflow}" \
+                --branch main \
+                --commit "${release_sha}" \
+                --event push \
+                --limit 1 \
+                --json databaseId,status,conclusion,url 2>/tmp/raxis-gh-run-list.err || true)"
+
+              local count
+              count="$(jq 'length' <<<"${json}" 2>/dev/null || echo 0)"
+              if [ "${count}" -gt 0 ]; then
+                local status conclusion url run_id
+                status="$(jq -r '.[0].status' <<<"${json}")"
+                conclusion="$(jq -r '.[0].conclusion // ""' <<<"${json}")"
+                url="$(jq -r '.[0].url' <<<"${json}")"
+                run_id="$(jq -r '.[0].databaseId' <<<"${json}")"
+                echo "${workflow}: run ${run_id} status=${status} conclusion=${conclusion:-pending} ${url}"
+                if [ "${status}" = "completed" ]; then
+                  if [ "${conclusion}" = "success" ]; then
+                    return 0
+                  fi
+                  echo "::error::Required main check ${workflow} failed for ${release_sha}: ${url}"
+                  exit 1
+                fi
+              else
+                echo "${workflow}: no main push run for ${release_sha} yet"
+                if [ -s /tmp/raxis-gh-run-list.err ]; then
+                  sed 's/^/gh: /' /tmp/raxis-gh-run-list.err
+                fi
+              fi
+
+              if [ "${SECONDS}" -ge "${deadline}" ]; then
+                echo "::error::Timed out waiting for required main check ${workflow} for ${release_sha}"
+                exit 1
+              fi
+              sleep "${delay}"
+            done
+          }
+
+          wait_for_workflow build-images.yml
+          wait_for_workflow spec-graph.yml
+
+  # ────────────────────────────────────────────────────────────
   # Stage 1a: build signed guest runtime bundles in parallel, one
   # GitHub-hosted Linux runner per guest architecture.
   #
@@ -114,7 +208,7 @@ jobs:
   # ────────────────────────────────────────────────────────────
   build-images:
     name:    build guest runtime bundle-${{ matrix.arch }}
-    needs:   [release-gate]
+    needs:   [release-gate, release-preflight]
     if:      needs.release-gate.outputs.enabled == 'true'
     runs-on: ubuntu-22.04
     strategy:
@@ -288,7 +382,7 @@ jobs:
   # ────────────────────────────────────────────────────────────
   build-dashboard:
     name:    build dashboard frontend
-    needs:   [release-gate]
+    needs:   [release-gate, release-preflight]
     if:      needs.release-gate.outputs.enabled == 'true'
     runs-on: ubuntu-22.04
     defaults:
