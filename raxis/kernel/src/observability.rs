@@ -2176,11 +2176,12 @@ mod operator_ipc_tests {
 //
 // **Closed `message_kind` lexicon.** Every dispatched `IpcMessage`
 // variant maps to one of `{ "intent_request", "witness_submission",
-// "escalation_request", "planner_fetch_request", "unexpected" }`.
-// The lexeme is a `snake_case` projection of the request variant
-// name; every non-dispatched variant collapses to `unexpected` so
-// the dashboard's "Messages by kind" panel can pivot on a stable
-// set even as new wire variants are added.
+// "escalation_request", "planner_fetch_request",
+// "custom_tool_invocation", "planner_exit_notice", "unexpected" }`.
+// The lexeme is a `snake_case` projection of the request variant name;
+// every non-dispatched variant collapses to `unexpected` so the
+// dashboard's "Messages by kind" panel can pivot on a stable set even
+// as new wire variants are added.
 //
 // **Inflight semantics.** The dispatcher increments the gauge before
 // calling the handler and decrements it after writing the response
@@ -3044,6 +3045,7 @@ mod substrate_ipc_tests {
             "witness_submission",
             "escalation_request",
             "planner_fetch_request",
+            "custom_tool_invocation",
             "planner_exit_notice",
             "unexpected",
         ];

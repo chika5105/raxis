@@ -502,6 +502,7 @@ pub enum MetricName {
     /// "verifier", "gateway", "unknown" }`), `message_kind` (closed
     /// allow-list = `{ "intent_request", "witness_submission",
     /// "escalation_request", "planner_fetch_request",
+    /// "custom_tool_invocation", "planner_exit_notice",
     /// "unexpected" }`). Wall-clock from frame received → response
     /// frame written. iter44 IPC-bucket override
     /// `[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000]` ms.

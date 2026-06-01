@@ -620,7 +620,8 @@ const ALLOW_LIST: &[(&str, AttrSchema)] = &[
     // iter44 slice 4b — `KernelSubstrateIpc*` family carries a
     // closed `message_kind` lexicon
     // { `intent_request`, `witness_submission`, `escalation_request`,
-    //   `planner_fetch_request`, `planner_exit_notice`, `unexpected` }
+    //   `planner_fetch_request`, `custom_tool_invocation`,
+    //   `planner_exit_notice`, `unexpected` }
     // pinned by
     // `kernel/src/observability.rs::KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET`
     // and the exhaustive match arm in `kernel_substrate_ipc_route`
