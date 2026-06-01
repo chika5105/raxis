@@ -471,7 +471,7 @@ they:
 
 1. Add `[[providers.audit_proxies]]` entry to `policy.toml` with
    `real_url_prefix` matching the endpoint's URL prefix.
-2. Re-sign and push policy via `raxis-cli policy sign` + `raxis-cli epoch advance`.
+2. Re-sign and advance the policy via `raxis policy sign` + `raxis epoch advance`.
 3. Add `[[tasks.audit_proxies]]` to the relevant tasks in `plan.toml`.
 4. Remove the endpoint from the task's `[[tasks.allowed_egress]]` (so Tier 1
    stops admitting it). Re-sign plan.

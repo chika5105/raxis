@@ -5,8 +5,10 @@
 # repo root with `cargo build -p <name> --manifest-path raxis/Cargo.toml`
 # or `cd raxis && cargo build -p <name>`.
 #
-# Workspace layout matches specs/v1/philosophy.md §1.5.
-# All implementation crates are stubs until spec review is complete.
+# Workspace layout matches specs/v1/philosophy.md §1.5. This is the
+# active reference implementation; individual crates may still carry
+# design-only surfaces, but the workspace as a whole is no longer a
+# stub scaffold.
 
 [workspace]
 resolver = "2"

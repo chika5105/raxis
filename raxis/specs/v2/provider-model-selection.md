@@ -953,7 +953,7 @@ All `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` codes prevent the policy
 from loading. This means a misconfigured `[provider_aliases_defaults]`
 cannot break in-flight initiatives — the new policy is rejected;
 the previous policy stays active until the operator fixes and
-re-pushes.
+advances the policy epoch again.
 
 ---
 

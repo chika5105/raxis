@@ -190,14 +190,19 @@ The session row gets `revoked_at = now`. The agent's next intent is rejected wit
 
 ---
 
-## Gap Found: Session Liveness Check
+## Gap Found: Agent Progress Liveness
 
 > [!WARNING]
-> **Proactive session liveness monitoring is spec'd but minimal.**
+> **Agent progress liveness monitoring is spec'd but minimal.**
 >
 > The kernel detects session death reactively (when the next intent fails
 > or the VM process exits). The spec envisions a periodic heartbeat from
 > the agent to the kernel, with a timeout that triggers proactive cleanup.
+>
+> The implemented `runtime/heartbeat.json` is kernel-process liveness:
+> useful for `raxis status`, `raxis doctor`, and supervisor/operator
+> visibility, but not evidence that a specific planner session is still
+> making progress.
 >
 > Currently, if an agent hangs (no crash, no exit, just infinite loop),
 > the session stays active until its TTL expires. The wall-clock session
@@ -219,7 +224,7 @@ The session row gets `revoked_at = now`. The agent's next intent is rejected wit
 | `kernel/src/authority/dispatch_matrix.rs` | V2 static matrix `(IntentKind × SessionAgentType) → Permitted/Denied`; compile-time exhaustiveness |
 | `kernel/src/session_spawn_orchestrator.rs` | V2 orchestrator-driven session spawn for sub-tasks |
 | `crates/session-spawn/` | Isolation backends (microVM/container/process); session.env shape |
-| `crates/runtime/` | `heartbeat.json` schema (kernel-side liveness only — see "Gap Found" above) |
+| `crates/runtime/` | `heartbeat.json` schema (kernel-process liveness only — see "Gap Found" above) |
 | `crates/planner-core/src/driver.rs` | Planner main loop (sees only the rendered system prompt + injected tool descriptors) |
 | `kernel/src/prompt/assembler.rs` | System prompt assembly (kernel-side; planner never sees the assembler) |
 | `crates/types/src/lib.rs` | `SessionId`, `LineageId`, `SessionAgentType` |

@@ -2014,7 +2014,7 @@ async fn main() {
     // (`HandlerContext::disk_watchdog`).
     .with_disk_watchdog(Arc::clone(&disk_watchdog))
     // install the content-addressed immutable
-    // artifact store so policy-push / plan-approve / cert-install
+    // artifact store so policy-epoch-advance / plan-approve / cert-install
     // call sites land their bytes under `<data_dir>/artifacts/`.
     .with_artifact_store(Arc::clone(&artifact_store))
     // share the per-kernel `SidecarRegistry`

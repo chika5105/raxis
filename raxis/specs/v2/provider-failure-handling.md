@@ -544,7 +544,7 @@ state RequestProcessing:
         # alias-resolution → dispatch TOCTOU window). The breaker check
         # in resolve_alias_with_skips above queries key_trust_state; in
         # the time between that query and this dispatch, an operator
-        # could have pushed a compromise revocation against the same
+        # could have advanced policy with a compromise revocation against the same
         # credential. We re-query under BEGIN IMMEDIATE so the
         # post-revocation state is observed atomically.
         creds_state ← BEGIN IMMEDIATE
@@ -554,11 +554,11 @@ state RequestProcessing:
                            AND key_id = model.credential.key_ref;
                       COMMIT
         if creds_state.trust_state == Compromised:
-            # Operator pushed a compromise revocation between alias
+            # Operator advanced policy with a compromise revocation between alias
             # resolution and this point. Treat as fatal-to-request
             # (NOT retriable on a different model — INV-KEY-08 demands
             # immediate session termination, which the
-            # session-termination path triggered by the policy push will
+            # session-termination path triggered by the policy epoch advance will
             # have already enqueued).
             attempts.push(AttemptRecord {
                 model, outcome: ProviderAuth,
@@ -732,7 +732,7 @@ state RequestProcessing:
 
 - Every attempt is audited before the next is dispatched (`INV-PROVIDER-08`). A kernel crash mid-loop loses no audit visibility for completed attempts.
 - Operator session abort (`raxis session abort`) is checked at every loop iteration via the session state lookup that's already part of resolve_alias. Cancellation is observed within at most one in-flight attempt's worker_invoke_timeout_ms.
-- Policy push mid-loop (changes to alias chains, breaker tunables, retry budgets) takes effect on the next iteration. In-flight HTTP calls are not interrupted **except for the credential-compromise case** (§6.1.1): a compromise revocation half-closes the worker UDS for every affected in-flight invocation so the worker drops its upstream HTTPS call within milliseconds.
+- Policy epoch advance mid-loop (changes to alias chains, breaker tunables, retry budgets) takes effect on the next iteration. In-flight HTTP calls are not interrupted **except for the credential-compromise case** (§6.1.1): a compromise revocation half-closes the worker UDS for every affected in-flight invocation so the worker drops its upstream HTTPS call within milliseconds.
 - All sleep happens in the kernel's tokio runtime, not in the Gateway. Gateway workers do nothing during a backoff.
 
 ### 6.1.1 Credential compromise during in-flight invocations (`INV-PROVIDER-09`)
@@ -740,7 +740,7 @@ state RequestProcessing:
 The §6.1 retry loop's synchronous re-check covers the
 alias-resolution → dispatch TOCTOU window, but does NOT cover an
 invocation that has *already been dispatched* to a worker when the
-operator pushes a compromise revocation. That worker is mid-handshake
+operator advances policy with a compromise revocation. That worker is mid-handshake
 or mid-HTTP-call against the provider, holding the now-compromised
 credential bytes in its address space. Without an explicit abort
 mechanism, the in-flight call continues until it returns naturally
@@ -1523,7 +1523,7 @@ Every model named in any `[provider_aliases.<name>] models` entry in `plan.toml`
 
 **Where:** §3.1 policy schema; §3.2 plan schema; `policy-plan-authority.md INV-POLICY-01`.
 
-**Scenario it prevents:** A plan declares `[provider_aliases.cheap] models = ["openai:gpt-3.5-turbo"]` while the operator's policy permits only Anthropic. Without INV-PROVIDER-01, alias resolution would walk the chain, find no breaker state for the unknown model, and dispatch a `GatewayInvoke` against an unauthorized provider. INV-PROVIDER-01 catches this at policy push time.
+**Scenario it prevents:** A plan declares `[provider_aliases.cheap] models = ["openai:gpt-3.5-turbo"]` while the operator's policy permits only Anthropic. Without INV-PROVIDER-01, alias resolution would walk the chain, find no breaker state for the unknown model, and dispatch a `GatewayInvoke` against an unauthorized provider. INV-PROVIDER-01 catches this at policy epoch-advance time.
 
 ### INV-PROVIDER-02 — Circuit breaker state lives in kernel SQLite
 
@@ -1620,7 +1620,7 @@ window to approximately one worker-side EOF-detection latency
 mechanics; [`key-revocation.md §5.2`](key-revocation.md) / `§5.3` (the revocation paths
 that invoke `half_close_invocations_using`).
 
-**Scenario it prevents:** Operator pushes a compromise revocation on
+**Scenario it prevents:** Operator advances policy with a compromise revocation on
 `anthropic-api-key-q4`. Three workers are mid-streaming responses
 that started 30 seconds ago and have an estimated 5 minutes
 remaining. Without INV-PROVIDER-10, all three calls run to
@@ -1749,11 +1749,11 @@ After this phase, the rest of this checklist still describes the V2 default `Htt
 - [ ] Worker crash loop: kill worker 4 times in 60s; verify supervisor stops restarting after 3 crashes; verify `OperatorAttentionRequired { GatewayWorkerCrashLooping }`
 - [ ] All workers dead: kill all workers; verify next request returns `FAIL_GATEWAY_UNREACHABLE` immediately; verify `OperatorAttentionRequired { GatewayPoolExhausted }`
 - [ ] Per-attempt audit immediacy: kill kernel mid-retry-loop after attempt 2's audit but before attempt 3's dispatch; restart; verify `inference_attempts` has rows for attempts 1 and 2; verify retry resumes correctly
-- [ ] Cross-provider credential revocation (rotation): mid-flight policy push revokes Anthropic credential for `rotation`; new resolutions skip Anthropic models; in-flight session continues with stale credential per [`key-revocation.md §6`](key-revocation.md)
-- [ ] Cross-provider credential revocation (compromise): policy push revokes Anthropic credential for `compromise`; in-flight session terminated immediately per `INV-KEY-08`
+- [ ] Cross-provider credential revocation (rotation): mid-flight policy epoch advance revokes Anthropic credential for `rotation`; new resolutions skip Anthropic models; in-flight session continues with stale credential per [`key-revocation.md §6`](key-revocation.md)
+- [ ] Cross-provider credential revocation (compromise): policy epoch advance revokes Anthropic credential for `compromise`; in-flight session terminated immediately per `INV-KEY-08`
 - [ ] Operator manual breaker reset: breaker for opus in Open; `raxis providers reset` → Closed; verify audit `BreakerManuallyReset`; verify next request resolves to opus
-- [ ] Policy push changes alias mid-flight: in-flight session has `alias:architect = [opus, sonnet]`; policy push changes to `[sonnet]`; next request from session uses new chain
-- [ ] Policy push changes retry budget mid-flight: in-flight retry loop running with `total_retry_budget_ms = 60_000`; policy push changes to `30_000`; verify next loop iteration honors new budget
+- [ ] Policy epoch advance changes alias mid-flight: in-flight session has `alias:architect = [opus, sonnet]`; policy epoch advance changes to `[sonnet]`; next request from session uses new chain
+- [ ] Policy epoch advance changes retry budget mid-flight: in-flight retry loop running with `total_retry_budget_ms = 60_000`; policy epoch advance changes to `30_000`; verify next loop iteration honors new budget
 - [ ] Operator session abort during retry: kernel mid-loop on attempt 3; operator runs `raxis session abort`; verify retry loop exits cleanly within one attempt's `worker_invoke_timeout_ms`; verify final audit records the partial attempts plus abort
 
 ---
@@ -1798,7 +1798,7 @@ This section records the seven foundational commitments the provider-failure-han
 
 **Rejected because.** The Kernel-loop approach is structurally superior on five axes:
 
-1. **Per-attempt policy re-evaluation.** Between attempt 1 and attempt 2, the kernel re-checks budget lane (was it just exhausted by a concurrent request?), session state (did the operator cancel?), policy push (did the alias chain just change?), and breaker state (did another concurrent session just trip the breaker?). Gateway-loops would have to poll back to the kernel between sleeps to do any of this, at which point the architecture has reinvented kernel-loop with extra steps.
+1. **Per-attempt policy re-evaluation.** Between attempt 1 and attempt 2, the kernel re-checks budget lane (was it just exhausted by a concurrent request?), session state (did the operator cancel?), policy epoch (did the alias chain just change?), and breaker state (did another concurrent session just trip the breaker?). Gateway-loops would have to poll back to the kernel between sleeps to do any of this, at which point the architecture has reinvented kernel-loop with extra steps.
 2. **Operator cancellation is trivial.** Kernel-loop checks session state on every iteration. With Gateway-loop, cancellation requires a side-channel kill signal during an in-flight sleep, which is racy.
 3. **No background sleeps in the Gateway.** Each `GatewayInvoke` is a clean request-response transaction. Worker crashes mid-sleep are impossible because workers don't sleep.
 4. **Audit immediacy is automatic.** Each `InferenceAttempt` audit row is written before the next dispatch — `INV-PROVIDER-08`. The 60-second silent-loop forensic gap from the original framing simply cannot occur.

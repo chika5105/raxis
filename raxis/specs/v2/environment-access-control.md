@@ -593,7 +593,7 @@ When the policy bundle is admitted ([`policy-plan-authority.md §INV-POLICY-01`]
    underscores; 1–32 characters; matches `^[a-z][a-z0-9_-]{0,31}$`.
    Otherwise: `FAIL_POLICY_ENV_LABEL_INVALID`.
 
-These validations make typos surface at policy push (signed, deliberate,
+These validations make typos surface at policy epoch advance (signed, deliberate,
 audited) rather than silently mis-binding a credential at plan
 submission (where the operator would never notice the binding fell
 through).
@@ -633,7 +633,7 @@ V2.0 implementations MUST treat any of these names in a
 releases will move individual fields out of "reserved" and into
 "normative"; operators upgrading across those releases are responsible
 for verifying the values they set match the new normative semantics
-before re-pushing the policy bundle.
+before advancing the policy bundle again.
 
 ### 5b.5 Permitted-credentials neutrality
 

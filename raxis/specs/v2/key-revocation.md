@@ -61,7 +61,7 @@ revocation_reason        = "compromise"      # "compromise" | "rotation"
 revocation_reference     = "INC-2026-04-15-laptop-theft"
 ```
 
-`id` is operator-chosen; the kernel uses it as the lookup key from a plan's `signing_key_id` header. It MUST be unique within a policy bundle; collisions reject the policy push with `FAIL_DUPLICATE_KEY_ID`.
+`id` is operator-chosen; the kernel uses it as the lookup key from a plan's `signing_key_id` header. It MUST be unique within a policy bundle; collisions reject the policy epoch advance with `FAIL_DUPLICATE_KEY_ID`.
 
 `trust_window_starts_at` is the earliest plan-creation timestamp the key may sign. Plans whose `created_at` predates this are rejected. This protects against backdated plans being signed by a future key.
 
@@ -107,7 +107,7 @@ V2 defines exactly two values for `revocation_reason`. A future version may add 
 
 ## 4. The `key_trust_state` Materialized View
 
-After every successful policy push, the kernel computes a per-epoch trust-state map and persists it. This is what every other validation path reads.
+After every successful policy epoch advance, the kernel computes a per-epoch trust-state map and persists it. This is what every other validation path reads.
 
 ### 4.1 Schema
 
@@ -147,7 +147,7 @@ Inside the same `BEGIN IMMEDIATE` transaction that commits a new policy epoch:
 3. Stash the transition list in a temp table for the reconciliation phase (see §5.2).
 4. Commit.
 
-This is part of the policy-push transaction, so INV-STORE-02 (atomic state changes) holds.
+This is part of the policy epoch-advance transaction, so INV-STORE-02 (atomic state changes) holds.
 
 ### 4.3 Why a materialized view, not "compute on demand"
 
@@ -181,9 +181,9 @@ Within a single `BEGIN IMMEDIATE` transaction:
 7. Continue with the rest of the existing `approve_plan` admission pipeline (path-allowlist intersection check, declared-environment check, etc.).
 8. On admission success, store `sessions.signing_key_id = signing_key_id` and `sessions.admission_policy_epoch = current_policy_epoch`. These two columns are the linchpins of the reconciliation paths (§5.2, §5.3).
 
-### 5.2 Apply-time validation (policy push containing a revocation)
+### 5.2 Apply-time validation (policy epoch advance containing a revocation)
 
-Triggered by an operator pushing `policy.toml` whose epoch advances from N to N+1 and contains at least one new revocation.
+Triggered by an operator advancing `policy.toml` from epoch N to N+1 with at least one new revocation.
 
 Within the same `BEGIN IMMEDIATE` transaction that commits the new policy:
 
@@ -237,12 +237,12 @@ The post-commit teardown is intentionally outside the transaction. We don't want
 
 Triggered by `kernel/src/startup.rs` after policy and audit log are loaded.
 
-This is the path the user specifically asked about — when the kernel boots and discovers it must apply a revocation that may have been pushed while it was down, OR that was pushed and the kernel crashed mid-apply.
+This is the path the user specifically asked about — when the kernel boots and discovers it must apply a revocation that may have been committed while it was down, OR that was committed and the kernel crashed mid-apply.
 
 Sequence:
 
 1. Load current policy bundle; `current_policy_epoch = N`.
-2. Verify `key_trust_state` is populated for epoch N. (If not, the policy push transaction was incomplete; abort startup with `FAIL_INCONSISTENT_POLICY_STATE` — operator must manually re-push.)
+2. Verify `key_trust_state` is populated for epoch N. (If not, the policy epoch-advance transaction was incomplete; abort startup with `FAIL_INCONSISTENT_POLICY_STATE` — operator must manually advance the policy epoch again.)
 3. Read all in-flight sessions:
    ```sql
    SELECT id, signing_key_id, admission_policy_epoch, vsock_cid, plan_artifact_sha256, current_pid
@@ -280,8 +280,8 @@ Sequence:
 
    **Case 4d — `trust_now.state = 'Compromised'`.**
    Terminate regardless of admission epoch. This covers two sub-cases:
-   - The compromise was pushed while the kernel was down; this is the expected reconciliation path.
-   - The compromise was pushed before the crash; teardown was incomplete (case in §5.2 step 7); re-run teardown.
+   - The compromise was committed while the kernel was down; this is the expected reconciliation path.
+   - The compromise was committed before the crash; teardown was incomplete (case in §5.2 step 7); re-run teardown.
    Specifically:
    - If `session.state` is already `'Failed'` and `failure_reason = 'KeyCompromised'` (or `EmergencyKeyCompromised`), the database transition already happened; just re-run teardown per §7.3 step 3 (Immediate for both these reasons).
    - If `session.state` is `Active` / `Paused` / `AwaitingEscalation`, run the full §5.2 step 4 path: UPDATE → audit → enqueue push → teardown via §7.3 (Immediate for KeyCompromised).
@@ -296,11 +296,11 @@ Sequence:
 
 5. Mark reconciliation complete: `INSERT INTO startup_runs (started_at, completed_at, sessions_reviewed, sessions_terminated_count)`.
 
-**The crucial property:** §5.2 and §5.3 are equivalent. Whether a compromise revocation is processed live (operator pushes while kernel runs) or detected on restart (kernel was down when operator pushed), the same audit events, the same FSM transitions, and the same teardown actions occur. This is INV-KEY-05 (reconciliation idempotency).
+**The crucial property:** §5.2 and §5.3 are equivalent. Whether a compromise revocation is processed live (operator advances policy while kernel runs) or detected on restart (kernel was down when the policy epoch advanced), the same audit events, the same FSM transitions, and the same teardown actions occur. This is INV-KEY-05 (reconciliation idempotency).
 
 ### 5.4 Per-intent re-check?
 
-**No.** Once §5.1 admits a session under an Active key, and §5.2/§5.3 leave it running because the key has not been compromised, individual intents do NOT re-verify the signature. The trust state is checked at admission and at every policy push and at every kernel restart. Per-intent re-verification would be wasted CPU.
+**No.** Once §5.1 admits a session under an Active key, and §5.2/§5.3 leave it running because the key has not been compromised, individual intents do NOT re-verify the signature. The trust state is checked at admission, at every policy epoch advance, and at every kernel restart. Per-intent re-verification would be wasted CPU.
 
 The exception: any intent that re-references the plan content (e.g., a future `RefreshPlan` intent, not in V2) would re-verify. V2 has no such intent.
 
@@ -427,7 +427,7 @@ For each new entry, in a single `BEGIN IMMEDIATE` transaction:
 1. INSERT into `emergency_key_revocations` with all entry fields and `applied_at = NOW()`.
 2. Look up `fingerprint_sha256` against current `key_trust_state`:
    - **Match found** (a key with this fingerprint exists in current policy): proceed to step 3.
-   - **No match** (orphan revocation — operator revoked a key not in current policy): record the revocation but no live sessions can be affected. Emit `EmergencyRevocationApplied { fingerprint, applied_to_sessions: 0, orphan: true }`. The revocation will activate immediately if any future policy push introduces a key with this fingerprint (the lookup function in §5.5 always consults emergency table first).
+   - **No match** (orphan revocation — operator revoked a key not in current policy): record the revocation but no live sessions can be affected. Emit `EmergencyRevocationApplied { fingerprint, applied_to_sessions: 0, orphan: true }`. The revocation will activate immediately if any future policy epoch advance introduces a key with this fingerprint (the lookup function in §5.5 always consults emergency table first).
 3. Find affected sessions:
    ```sql
    SELECT s.id, s.vsock_cid, s.current_pid, s.parent_session_id
@@ -533,7 +533,7 @@ The 5-second SIGTERM grace is reserved for operational reasons where the VM is n
 
 For both Immediate and Graceful termination, in order:
 
-1. Within the triggering transaction (whether §5.2 policy push, §5.3 restart reconciliation, or §6.6 emergency apply):
+1. Within the triggering transaction (whether §5.2 policy epoch advance, §5.3 restart reconciliation, or §6.6 emergency apply):
    - UPDATE `sessions.state = 'Failed'`, `sessions.failure_reason = <reason>`, `sessions.terminated_at = NOW()`.
    - INSERT `audit_events (kind = 'SessionTerminated', reason, session_id, ...)` with the full attribution chain (signing_key_id, fingerprint, revocation_reference, authorized_by where applicable, initiative_id, plan_artifact_sha256, policy_epoch).
    - Enqueue `KernelPush::SessionRevoked { reason, ... }` (per [`kernel-push-protocol.md §10.3`](kernel-push-protocol.md) atomicity rules; the push enqueue commits with the state change). For Immediate cases, the planner will be killed before reading the push; the enqueue is for audit completeness and for the rare reconnect-during-teardown case.
@@ -637,7 +637,7 @@ Every `[[plan_signing_keys]]` entry, once committed in any policy epoch, must pe
 
 **Where:** `kernel/src/handlers/policy.rs` (new) — `approve_policy` rejects with `FAIL_KEY_REGISTRY_NOT_APPEND_ONLY` on violation.
 
-**Scenario it prevents:** Operator pushes a new policy with a key removed (perhaps thinking "we don't use that key anymore"). Sessions admitted under the removed key would later look "unsigned" to audit replay, indistinguishable from forgery. With INV-KEY-01, the policy push is rejected.
+**Scenario it prevents:** Operator advances to a new policy with a key removed (perhaps thinking "we don't use that key anymore"). Sessions admitted under the removed key would later look "unsigned" to audit replay, indistinguishable from forgery. With INV-KEY-01, the policy epoch advance is rejected.
 
 ### INV-KEY-02 — Sticky historical trust
 
@@ -653,7 +653,7 @@ When a key transitions to `Compromised` in policy epoch N+1, every session whose
 
 **Where:** §5.2 (apply-time) and §5.3 case 4d (restart-time reconciliation).
 
-**Scenario it prevents:** Attacker steals key K. Operator detects the leak, pushes revocation. Without INV-KEY-03, sessions admitted under K might continue running for hours/days under attacker influence (the attacker can't admit *new* sessions but the existing ones already have execution capability). With INV-KEY-03, the blast radius collapses to "what the agent did before the operator pushed the revocation."
+**Scenario it prevents:** Attacker steals key K. Operator detects the leak and advances policy with a revocation. Without INV-KEY-03, sessions admitted under K might continue running for hours/days under attacker influence (the attacker can't admit *new* sessions but the existing ones already have execution capability). With INV-KEY-03, the blast radius collapses to "what the agent did before the operator committed the revocation."
 
 ### INV-KEY-04 — Rotation is forward-only
 
@@ -669,7 +669,7 @@ Apply-time (§5.2) and restart-time (§5.3) reconciliation produce identical obs
 
 **Where:** §5.2 and §5.3 share helper functions. Tested via crash-injection: kill the kernel between step 6 and step 7 of §5.2; restart; verify §5.3 produces identical final state.
 
-**Scenario it prevents:** Operator pushes revocation; kernel crashes mid-teardown. On restart, the kernel's reconciliation logic differs from the live-apply logic, leaving some sessions in an inconsistent half-terminated state. With INV-KEY-05, the restart path is idempotent with the live-apply path; the final state is the same.
+**Scenario it prevents:** Operator advances policy with a revocation; kernel crashes mid-teardown. On restart, the kernel's reconciliation logic differs from the live-apply logic, leaving some sessions in an inconsistent half-terminated state. With INV-KEY-05, the restart path is idempotent with the live-apply path; the final state is the same.
 
 ### INV-KEY-06 — Replay uses historical trust state for authenticity, current trust state for warnings
 
@@ -687,14 +687,14 @@ Emergency revocations (§6) are append-only at the database level (`emergency_ke
 - deleting the entry from `/var/lib/raxis/emergency_revocations.toml`,
 - deleting the entire `emergency_revocations.toml` file (so the file is absent at next reload),
 - restoring an older `emergency_revocations.toml` from backup,
-- pushing a normal `policy.toml` that omits the revocation,
+- advancing to a normal `policy.toml` that omits the revocation,
 - editing the SQLite database directly (which is not a supported operation regardless),
 
 — removes the revocation from effect. The DB-row state is the authoritative trust signal; the file is the entry vector. Reload-time tampering detection emits `EmergencyRevocationFileTampered` (with `previous_count`, `new_count`, and `missing_fingerprints`) but the missing rows REMAIN APPLIED. No cryptographic signature is required or accepted on emergency revocations; authority comes solely from filesystem permissions.
 
 **Where:** §6.5 (reload protocol; tampering detection without un-application); §6.6 step 1 (INSERT into `emergency_key_revocations`); §6.7 (schema with no DELETE); §6.9 ("cannot un-revoke").
 
-**Scenario it prevents:** (a) An attacker who briefly gains write access to `emergency_revocations.toml` modifies an existing entry to weaken or remove a revocation; even after the operator restores the file, the original revocation remains in effect. (b) An operator regrets their emergency revocation and tries to undo it by editing the file; the kernel keeps the revocation applied and emits `EmergencyRevocationFileTampered`. (c) An attacker pushes a `policy.toml` (with their own valid-looking signature, perhaps after stealing a SECOND key) that doesn't include an emergency-applied revocation; the kernel still treats the key as Compromised because the lookup function consults emergency table first.
+**Scenario it prevents:** (a) An attacker who briefly gains write access to `emergency_revocations.toml` modifies an existing entry to weaken or remove a revocation; even after the operator restores the file, the original revocation remains in effect. (b) An operator regrets their emergency revocation and tries to undo it by editing the file; the kernel keeps the revocation applied and emits `EmergencyRevocationFileTampered`. (c) An attacker advances to a `policy.toml` (with their own valid-looking signature, perhaps after stealing a SECOND key) that doesn't include an emergency-applied revocation; the kernel still treats the key as Compromised because the lookup function consults emergency table first.
 
 ### INV-KEY-08 — Security-driven termination is Immediate (hypervisor stop, no SIGTERM grace)
 
@@ -820,17 +820,17 @@ The classification of `TerminationReason` variants into Immediate vs Graceful is
 
 ### Integration: live revocation
 
-- [ ] Admit 3 sessions under key K (state = Active). Push policy with K → Compromised. Verify all 3 sessions transition to `state = Failed, failure_reason = KeyCompromised` within the policy-push transaction. Verify SIGTERM sent to each VM PID. Verify `KernelPush::SessionRevoked` enqueued for each.
+- [ ] Admit 3 sessions under key K (state = Active). Advance policy with K → Compromised. Verify all 3 sessions transition to `state = Failed, failure_reason = KeyCompromised` within the policy epoch-advance transaction. Verify SIGTERM sent to each VM PID. Verify `KernelPush::SessionRevoked` enqueued for each.
 - [ ] Same scenario but K → Rotated. Verify all 3 sessions remain `state = Active`. Verify subsequent `approve_plan` for a NEW plan signed by K with `created_at > revoked_at` is rejected.
 - [ ] Cascade: Orchestrator session O delegates to Executor sessions E1, E2. Compromise the key both were admitted under (same key for both). Verify O, E1, E2 all terminate. Verify cascade events emitted.
 
 ### Integration: restart reconciliation (the user's scenario)
 
-- [ ] **Crash-mid-apply**: Push policy with K → Compromised. After the policy push transaction commits but BEFORE post-commit teardown runs, SIGKILL the kernel. Restart. Verify §5.3 case 4d sub-path runs SIGTERM on the still-alive VM PID; verify final audit log is byte-identical to the no-crash baseline (idempotency, INV-KEY-05).
-- [ ] **Kernel-down-during-push**: Stop the kernel. Manually push a new policy bundle to the immutable store with K → Compromised and bump `policy_current_epoch`. Restart kernel. Verify §5.3 detects the unprocessed transition, terminates affected sessions, populates `key_trust_state`, and emits the same audit events as the live-apply path.
-- [ ] **Cascade rotation**: Push K → Rotated. Restart kernel. Verify all sessions admitted under K continue running (case 4c, admission_epoch < rotation_epoch). Verify no SecurityViolation emitted.
+- [ ] **Crash-mid-apply**: Advance policy with K → Compromised. After the policy epoch-advance transaction commits but BEFORE post-commit teardown runs, SIGKILL the kernel. Restart. Verify §5.3 case 4d sub-path runs SIGTERM on the still-alive VM PID; verify final audit log is byte-identical to the no-crash baseline (idempotency, INV-KEY-05).
+- [ ] **Kernel-down-during-advance**: Stop the kernel. Manually install a new policy bundle into the immutable store with K → Compromised and bump `policy_current_epoch`. Restart kernel. Verify §5.3 detects the unprocessed transition, terminates affected sessions, populates `key_trust_state`, and emits the same audit events as the live-apply path.
+- [ ] **Cascade rotation**: Advance policy with K → Rotated. Restart kernel. Verify all sessions admitted under K continue running (case 4c, admission_epoch < rotation_epoch). Verify no SecurityViolation emitted.
 - [ ] **The Case 4a horror path**: Manually corrupt the database to remove a `key_trust_state` row for an in-flight session's signing key. Restart kernel. Verify case 4a triggers: `SecurityViolation { kind: KeyVanished }`, session terminated, kernel halts acceptance of new policies.
-- [ ] **Race between admit and revoke**: Operator pushes plan-admission intent for key K at T0; another operator pushes policy with K → Compromised at T0+ε. Verify SQLite serializes the two transactions; the later-committed one observes the earlier's state. If admission commits first, the new session is then terminated by the policy push's reconciliation. If policy push commits first, admission rejects with `FAIL_KEY_COMPROMISED`. Either ordering is acceptable; both are covered.
+- [ ] **Race between admit and revoke**: Operator pushes plan-admission intent for key K at T0; another operator advances policy with K → Compromised at T0+ε. Verify SQLite serializes the two transactions; the later-committed one observes the earlier's state. If admission commits first, the new session is then terminated by the policy epoch advance's reconciliation. If the policy epoch advance commits first, admission rejects with `FAIL_KEY_COMPROMISED`. Either ordering is acceptable; both are covered.
 
 ### Integration: audit replay (INV-KEY-06)
 
@@ -861,7 +861,7 @@ The classification of `TerminationReason` variants into Immediate vs Graceful is
 
 ### Integration: race outcomes (§7.5)
 
-- [ ] **Case A1** (merge committed before revocation, push pending): start IntegrationMerge; commit it; immediately push policy with K → Compromised; verify local main has the merge commit, PushApprovalRequired escalation is auto-canceled, remote is untouched, audit replay flags merge with `RetroactivelyCompromisedKey`.
+- [ ] **Case A1** (merge committed before revocation, push pending): start IntegrationMerge; commit it; immediately advance policy with K → Compromised; verify local main has the merge commit, PushApprovalRequired escalation is auto-canceled, remote is untouched, audit replay flags merge with `RetroactivelyCompromisedKey`.
 - [ ] **Case A2** (merge committed AND pushed before revocation): same as A1 but the push escalation was already approved and executed; verify local main has commit, remote has commit, kernel does NOT attempt unpush, audit log clearly identifies the push as suspect.
 - [ ] **Case B** (revocation committed before merge): hold the merge transaction at BEGIN IMMEDIATE; commit revocation; release merge; verify merge handler reads `sessions.state = Failed` and aborts with `FAIL_SESSION_REVOKED`; no git operation occurs; Orchestrator's clone is preserved.
 
@@ -873,9 +873,9 @@ The classification of `TerminationReason` variants into Immediate vs Graceful is
 
 Treat every revocation as compromise; rotation-without-killing-sessions is operator's problem. Rejected: makes regular key rotation operationally painful, which discourages rotation, which weakens security. The two-reason model costs one TOML field and removes a perverse incentive.
 
-### Alt B — Kill on next intent rather than at policy push
+### Alt B — Kill on next intent rather than at policy epoch advance
 
-When a key is compromised, leave in-flight sessions alone; reject their next intent with `FAIL_REVOKED`. Rejected: the agent can keep doing damage in the inference loop between operator pushing the revocation and the agent emitting its next intent. Inference can take 30+ seconds; that's 30 seconds of attacker-controlled execution. INV-KEY-03 requires SIGTERM at policy-push commit time.
+When a key is compromised, leave in-flight sessions alone; reject their next intent with `FAIL_REVOKED`. Rejected: the agent can keep doing damage in the inference loop between the operator committing the revocation and the agent emitting its next intent. Inference can take 30+ seconds; that's 30 seconds of attacker-controlled execution. INV-KEY-03 requires SIGTERM at policy epoch-advance commit time.
 
 ### Alt C — Soft compromise (warn but don't terminate)
 
@@ -887,7 +887,7 @@ Roll plan-signing keys, main-repo push credentials, gateway provider keys, all i
 
 ### Alt E — Auto-bump policy epoch on revocation only
 
-Operator pushes a "revocation patch" that only contains the revocation, kernel auto-bumps epoch. Rejected: deviates from the "policy is one signed bundle per epoch" model. Forces the kernel to support partial-policy semantics, which complicates diffing and audit replay. Operators who want to revoke quickly can push a one-line-changed policy bundle; that's the same number of operator actions for substantially less kernel complexity.
+Operator submits a "revocation patch" that only contains the revocation, kernel auto-bumps epoch. Rejected: deviates from the "policy is one signed bundle per epoch" model. Forces the kernel to support partial-policy semantics, which complicates diffing and audit replay. Operators who want to revoke quickly can advance a one-line-changed policy bundle; that's the same number of operator actions for substantially less kernel complexity.
 
 ### Alt F — Make `revoked_at` a strict cutoff in compromise mode (only kill sessions admitted after `revoked_at`)
 

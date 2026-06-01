@@ -57,7 +57,6 @@ and invariant/test surface that ships today.
 | [`live-e2e-keep-alive.md`](v3/live-e2e-keep-alive.md) | Implemented dev/test post-mortem keep-alive control. |
 | [`audit-retention.md`](v3/audit-retention.md), [`gdpr-audit-erasure.md`](v3/gdpr-audit-erasure.md), and other non-active V3 docs | Design/deferred unless the header says otherwise. |
 
-Some older design specs use `policy push` as shorthand for a future
-single-command policy deployment surface. The current operator flow is
-explicit: sign or stage the policy artifact, then run
+When these specs say a policy epoch advances, they mean the current
+explicit operator flow: sign or stage the policy artifact, then run
 `raxis epoch advance --policy <path> --sig <path>`.

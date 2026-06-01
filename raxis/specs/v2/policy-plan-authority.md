@@ -1299,7 +1299,7 @@ pre-`IntegrationMerge` verifier hook (`integration-merge.md §4
 Check 5d`) introduce the following failure codes. All `FAIL_POLICY_*`
 codes prevent the policy from loading; in-flight initiatives keep
 running on the previously-loaded policy until the operator fixes
-and re-pushes.
+the policy and advances the epoch again.
 
 | Code | Phase | One-line trigger | Canonical home |
 |---|---|---|---|
@@ -1412,7 +1412,7 @@ The defaultable per-role alias chains live in
 per [`provider-model-selection.md §7.2`](provider-model-selection.md). All `FAIL_POLICY_*` codes
 below prevent the policy from loading; in-flight initiatives are
 unaffected because the previous-loaded policy stays active until the
-operator fixes and re-pushes.
+operator fixes the policy and advances the epoch again.
 
 <!-- spec-graph:cross-ref -->
 
@@ -1526,7 +1526,7 @@ bundled and not operator-published). Operator policy that declares a
 the `epoch advance` flow with a permissive default of
 `["Executor", "Orchestrator", "Verifier"]`, recording a one-time
 `PolicyMigrationApplied { kind: "VmImageDefaultRoleRestriction" }` audit event.
-Operators are advised to tighten the field on their next policy push.
+Operators are advised to tighten the field on their next policy epoch advance.
 This permissive migration is V2-only; V3 may require explicit declaration.
 
 **Why this is in `policy.toml`, not `plan.toml`:** Image safety boundaries are

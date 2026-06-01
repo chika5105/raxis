@@ -50,7 +50,7 @@
 //! | `RAXIS_MODEL_ID`               | no                      | [`crate::DEFAULT_MODEL`]             | Single model id stamped into every request  |
 //! | `RAXIS_MODEL_CHAIN`            | no                      | unset                                | Comma-separated primary + fallback models   |
 //! | `RAXIS_WORKSPACE_PATH`         | no                      | `/workspace`                         | Tool sandbox root                           |
-//! | `RAXIS_PLANNER_MAX_TURNS`      | no                      | `50`                                 | Hard turn ceiling per session               |
+//! | `RAXIS_PLANNER_MAX_TURNS`      | no                      | `100`                                | Hard turn ceiling per session               |
 //! | `RAXIS_PLANNER_MAX_TOKENS`     | no                      | `4096`                               | Per-request `max_tokens`                    |
 //! When `RAXIS_PLANNER_TASK_PROMPT[_PATH]` is **absent or empty**,
 //! the driver returns a hard error before contacting the kernel.

@@ -637,7 +637,7 @@ The response is always pure-function-of-inputs: same `(plan_bytes, current_polic
 | `FAIL_PREPARE_DEFAULT_UPGRADE_REQUIRED { fields }` | At least one annotated field's policy-default value has drifted since the annotation was written, and `--upgrade-defaults` was not passed. | Review the proposed changes (CLI prints the diff); re-run with `--upgrade-defaults` to accept the new defaults. |
 | `FAIL_PLAN_PARSE_ERROR { detail }` | The provided `plan.toml` is not valid TOML, or violates plan schema. | Fix the TOML error. |
 | `FAIL_PLAN_FIELD_NOT_DEFAULTABLE { field }` | The operator placed a `# @raxis-default` annotation on a field NOT in §4.2. | Remove the annotation; the field is operator-owned. |
-| `FAIL_POLICY_DEFAULT_UNRESOLVABLE { field }` | A defaultable field requires a policy value (e.g., `[default_executor_image] alias` for `vm_image`) but the policy does not declare one. | Add the missing policy entry; re-push the policy bundle. |
+| `FAIL_POLICY_DEFAULT_UNRESOLVABLE { field }` | A defaultable field requires a policy value (e.g., `[default_executor_image] alias` for `vm_image`) but the policy does not declare one. | Add the missing policy entry; advance the policy epoch again. |
 | `FAIL_PREPARE_KERNEL_UNREACHABLE { socket_path, errno }` | Phase 3 (IPC) could not establish a connection to the operator socket: socket file does not exist, connection refused, permission denied, or the handshake timed out. Phase 2 (local-pre) MAY have already written §4.5 template insertions to disk per `--offline` semantics below. | Start the kernel daemon; or pass `--offline` to suppress phase 3+ entirely (see §5.7). |
 
 #### 5.4.1 Distinct exit codes
@@ -1767,7 +1767,7 @@ Both events are rate-limited per operator fingerprint to prevent DoS via repeate
 
 `FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST` and `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED` are conceptually parallel to `FAIL_PLAN_REQUIRES_PREPARE` but for the §4.5 explicit-required-fields class — the kernel cannot default the value, so the operator must author it themselves; `plan prepare` provides the template-and-suggestion ergonomic surface.
 
-The `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes fire at policy load and prevent the new policy bytes from being adopted; in-flight initiatives keep running on the previously-loaded policy until the operator fixes and re-pushes.
+The `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes fire at policy load and prevent the new policy bytes from being adopted; in-flight initiatives keep running on the previously-loaded policy until the operator fixes the policy and advances the epoch again.
 
 ---
 
@@ -1883,7 +1883,7 @@ The `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes fir
 - [ ] `setup wizard` phase 6: no language starters selected → wizard skips writing `[default_verifier_images]`; smoke test still passes (symbol-index auto-injection no-op on the trivial plan).
 - [ ] `setup wizard` phase 6: at least one language starter selected → wizard writes the `[[vm_images]]` entry with the release-notes-published `oci_digest`; the second smoke plan (per phase 9) exercises the @-shortcut resolution path AND the auto-injected symbol-index verifier; both `VerifierActivated` and `VerifierCompleted` audit events fire for both verifiers.
 - [ ] `setup wizard` phase 6: image SHA-256 mismatch against the manifest → wizard re-downloads up to 2x; persistent failure aborts the wizard with actionable mitigations.
-- [ ] `setup wizard --add-language <lang>`: re-runs phase 6 only against the named language; appends `[[vm_images]]` entry + `[default_verifier_images].<lang>` row; re-signs the policy; re-pushes; subsequent plans' `image = "@<lang>"` shortcuts resolve.
+- [ ] `setup wizard --add-language <lang>`: re-runs phase 6 only against the named language; appends `[[vm_images]]` entry + `[default_verifier_images].<lang>` row; re-signs the policy; advances the epoch; subsequent plans' `image = "@<lang>"` shortcuts resolve.
 - [ ] `setup wizard` phase 8: detects a missing canonical image (e.g., operator deleted `raxis-verifier-symbol-index-<kver>.img` from `/usr/local/lib/raxis/images/`) → wizard fails with `FAIL_CANONICAL_IMAGE_MISSING { image }` and an actionable mitigation.
 - [ ] `plan prepare` symbol-index auto-injection: Executor task touching source files → verifier injected with the §4.2 canonical entry and annotation; re-running `plan prepare` is a no-op.
 - [ ] `plan prepare` symbol-index auto-injection: Executor task touching ONLY non-source files (e.g., docs-only diff) → no verifier injected.

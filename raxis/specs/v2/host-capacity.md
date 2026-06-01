@@ -92,7 +92,7 @@ admission_queue_limit  = 32
 purpose                = "Nightly batch job; admits up to 32 long-running initiatives"
 ```
 
-Defaults are conservative (small) so a fresh install on modest hardware does not crash. Production deployments tune per host capability. All caps are policy-pushable per [`policy-epoch-diffing.md`](policy-epoch-diffing.md); changing capacity caps advances the policy epoch.
+Defaults are conservative (small) so a fresh install on modest hardware does not crash. Production deployments tune per host capability. All caps are changeable by policy epoch advance per [`policy-epoch-diffing.md`](policy-epoch-diffing.md); changing capacity caps advances the policy epoch.
 
 ---
 
@@ -121,9 +121,9 @@ if initiative.running_vm_count >= max_per_initiative_concurrent_vms:
 
 `AdmissionDeferred` is NOT a failure. It places the request on the admission queue (§10). The session row is created in state `Queued`; no VM is spawned. When capacity frees, the queue is drained and the session transitions to `Active`.
 
-### 4.3 Cap-changing: policy push
+### 4.3 Cap-changing: policy epoch advance
 
-If `max_concurrent_vms` decreases via a policy push and the new cap is below `running_vm_count`, the kernel does NOT terminate any sessions. It simply admits no new ones until natural drain brings the running count under the new cap. This avoids accidentally killing live work via configuration changes. (To kill sessions in a planned reduction, the operator uses `raxis session abort` per session.)
+If `max_concurrent_vms` decreases via a policy epoch advance and the new cap is below `running_vm_count`, the kernel does NOT terminate any sessions. It simply admits no new ones until natural drain brings the running count under the new cap. This avoids accidentally killing live work via configuration changes. (To kill sessions in a planned reduction, the operator uses `raxis session abort` per session.)
 
 If the cap increases, the queued-up intents drain immediately on the next admission scan.
 
@@ -539,7 +539,7 @@ The override mechanism is bounded:
 - `operator_id` MUST be a unique key within `operator_quota_overrides` (duplicate entries cause `approve_policy` to fail with `FAIL_DUPLICATE_OPERATOR_OVERRIDE`).
 - `purpose` MUST be present and non-empty (a forensic-readable rationale; future auditors reviewing why an operator had elevated limits will expect to find it).
 
-`approve_policy` rejects malformed override blocks. The validation runs at policy push time, not at admission time, so misconfiguration is caught early.
+`approve_policy` rejects malformed override blocks. The validation runs at policy epoch-advance time, not at admission time, so misconfiguration is caught early.
 
 #### 10.2.3 Audit visibility
 
@@ -569,7 +569,7 @@ This makes it trivial to audit: "show me every operator who hit their cap, and w
 
 #### 10.2.4 Override changes mid-flight
 
-Overrides are policy-pushable. When `approve_policy` is called with a changed override list:
+Overrides are changeable by policy epoch advance. When `approve_policy` is called with a changed override list:
 
 - New override added: takes effect immediately for new intent admissions; in-flight queued intents from that operator are not re-evaluated (they were admitted under the old cap and continue to count against the new cap until they drain).
 - Existing override's `admission_queue_limit` increased: takes effect immediately; queued intents continue to count, and the operator can submit up to the new cap.
@@ -694,7 +694,7 @@ When multiple initiatives have queued sub-tasks and a VM slot frees, the kernel 
 
 The admission queue is bounded by `admission_queue_depth` (default 64) and a per-operator effective cap. The per-operator effective cap is `admission_queue_per_operator_default` (default 8), unless overridden in `policy.toml` via `[[host_capacity.operator_quota_overrides]]` for a specifically-named operator. Overflow returns `FAIL_ADMISSION_QUEUE_FULL` (global) or `FAIL_PER_OPERATOR_QUEUE_LIMIT` (per-operator) immediately, surfacing the back-pressure to the submitter. The kernel never silently drops queued intents.
 
-Override entries MUST be explicit per `operator_id` (no wildcards), MUST satisfy `1 ≤ admission_queue_limit ≤ admission_queue_depth`, and MUST carry a non-empty `purpose`. `approve_policy` validates these constraints at policy push time and emits `FAIL_INVALID_OPERATOR_OVERRIDE` on violation. Audit events for queueing and rejection record the effective cap AND its source (`Default` or `Override`) so future auditors can reconstruct the policy state under which any decision was made.
+Override entries MUST be explicit per `operator_id` (no wildcards), MUST satisfy `1 ≤ admission_queue_limit ≤ admission_queue_depth`, and MUST carry a non-empty `purpose`. `approve_policy` validates these constraints at policy epoch-advance time and emits `FAIL_INVALID_OPERATOR_OVERRIDE` on violation. Audit events for queueing and rejection record the effective cap AND its source (`Default` or `Override`) so future auditors can reconstruct the policy state under which any decision was made.
 
 **Where:** §10.1, §10.2 (default + override mechanism), §10.2.2 (validation), §10.2.3 (audit visibility).
 
@@ -792,8 +792,8 @@ Override entries MUST be explicit per `operator_id` (no wildcards), MUST satisfy
 - [ ] Override validation — exceeds global queue: `policy.toml` declares `admission_queue_limit = 100` while `admission_queue_depth = 64`; verify `approve_policy` returns `FAIL_INVALID_OPERATOR_OVERRIDE`
 - [ ] Override validation — duplicate operator_id: `policy.toml` declares two override entries for the same `operator_id`; verify `approve_policy` returns `FAIL_DUPLICATE_OPERATOR_OVERRIDE`
 - [ ] Override validation — missing purpose: `policy.toml` declares an override with empty `purpose`; verify `approve_policy` returns `FAIL_INVALID_OPERATOR_OVERRIDE`
-- [ ] Override change — increase mid-flight: operator at default cap 8 has 8 queued; policy push raises override to 16; verify operator can immediately submit 8 more without rejection
-- [ ] Override change — decrease mid-flight: operator at override 32 has 20 queued; policy push lowers override to 8; verify the 20 queued intents continue to drain normally; verify new submissions from that operator return `FAIL_PER_OPERATOR_QUEUE_LIMIT` until count drops below 8
+- [ ] Override change — increase mid-flight: operator at default cap 8 has 8 queued; policy epoch advance raises override to 16; verify operator can immediately submit 8 more without rejection
+- [ ] Override change — decrease mid-flight: operator at override 32 has 20 queued; policy epoch advance lowers override to 8; verify the 20 queued intents continue to drain normally; verify new submissions from that operator return `FAIL_PER_OPERATOR_QUEUE_LIMIT` until count drops below 8
 - [ ] WAL size: induce 1000 write transactions in a tight loop; verify checkpoint runs at threshold; verify WAL doesn't exceed `wal_max_size_mb`
 - [ ] WAL hard cap: stub checkpoint to fail; verify `FAIL_WAL_FULL` returned when WAL exceeds cap
 - [ ] FD limit: launch kernel with `ulimit -n 1024`; verify startup fails with `FAIL_INSUFFICIENT_FD_LIMIT`
@@ -872,7 +872,7 @@ If the kernel is SIGKILL'd:
 
 Each of these is recoverable, but each is observable and each costs operator confidence. The control plane (kernel) must survive at all costs. Strict admission caps ensure host memory always has headroom for the kernel itself.
 
-**Scenario it prevents.** Operator runs a deployment with `max_aggregate_vm_memory_mb = 60 GiB` on a 64 GiB host, expecting overcommit-free operation. Without INV-CAPACITY-01 strictness, an operational mistake (typo'ing `max_aggregate_vm_memory_mb = 600 GiB` in `policy.toml`) silently admits VMs until host memory is exhausted, the OOM-killer takes the kernel, the audit chain breaks at a random point, and a multi-day forensic recovery follows. With strict caps, the typo is caught at policy push (validation against operator-declared `max_host_memory_mb`) or at admission (the kernel refuses to spawn the 17th VM), and the failure is contained.
+**Scenario it prevents.** Operator runs a deployment with `max_aggregate_vm_memory_mb = 60 GiB` on a 64 GiB host, expecting overcommit-free operation. Without INV-CAPACITY-01 strictness, an operational mistake (typo'ing `max_aggregate_vm_memory_mb = 600 GiB` in `policy.toml`) silently admits VMs until host memory is exhausted, the OOM-killer takes the kernel, the audit chain breaks at a random point, and a multi-day forensic recovery follows. With strict caps, the typo is caught at policy epoch advance (validation against operator-declared `max_host_memory_mb`) or at admission (the kernel refuses to spawn the 17th VM), and the failure is contained.
 
 **Operators wanting overcommit.** Not supported in V2. Operators may declare smaller-than-actual `[plan] vm_memory_mb` if they trust their workload to use less, but this is a per-plan opt-in, not a kernel-wide policy.
 

@@ -31,7 +31,7 @@ Each concept guide includes a "Gap Found" section when an implementation gap was
 | Claims & Gates | Planner hardcoded `submitted_claims: vec![]` | 🔴 Critical | **Fixed** — kernel auto-derives from witnesses |
 | Credential Proxies | Per-request audit emit uses `warn!` not hard abort | 🟡 Low | Accepted deviation |
 | Escalations | Cooldown timer not enforced after rejection | 🟡 Medium | Needs implementation |
-| Sessions & Isolation | No proactive liveness monitoring (heartbeat) | 🟡 Medium | Needs implementation |
+| Sessions & Isolation | No agent progress heartbeat for hung sessions; kernel runtime heartbeat exists | 🟡 Medium | Needs implementation |
 
 ---
 
