@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use raxis_gateway::backend::{BackendRequest, BackendResponse};
-use raxis_gateway::{parse_gateway_env, run_gateway_with_backend, Backend};
+use raxis_gateway::{parse_gateway_env, run_gateway_with_backend, Backend, GatewayRunError};
 use raxis_ipc::message::{FetchKind, GatewayMessage};
 use raxis_ipc::{read_frame, write_frame};
 use raxis_test_support::MockBackend;
@@ -107,6 +107,11 @@ SingleCommit     = 10
 IntegrationMerge = 50
 CompleteTask     = 5
 ReportFailure    = 1
+
+[model_routing]
+orchestrator_model = "claude-haiku-4-5"
+executor_model     = "claude-haiku-4-5"
+reviewer_model     = "claude-haiku-4-5"
 
 [[operators.entries]]
 pubkey_fingerprint = "{op_fp}"
@@ -300,6 +305,28 @@ fn spawn_gateway(
     tokio::spawn(async move { run_gateway_with_backend(env, backend).await })
 }
 
+async fn accept_gateway(
+    kernel: &FakeKernel,
+    task: &mut tokio::task::JoinHandle<Result<(), GatewayRunError>>,
+) -> UnixStream {
+    tokio::select! {
+        accepted = kernel.listener.accept() => {
+            let (stream, _addr) = accepted.expect("accept gateway connection");
+            stream
+        }
+        task_result = &mut *task => {
+            match task_result {
+                Ok(Ok(())) => panic!("gateway exited before connecting to fake kernel"),
+                Ok(Err(e)) => panic!("gateway failed before connecting to fake kernel: {e}"),
+                Err(e) => panic!("gateway task panicked before connecting to fake kernel: {e}"),
+            }
+        }
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {
+            panic!("gateway did not connect to fake kernel within 5s")
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -310,13 +337,13 @@ async fn gateway_handshakes_then_returns_mock_response_for_allowed_url() {
     let kernel = FakeKernel::bind();
 
     let backend: Arc<dyn Backend> = Arc::new(MockBackend::default());
-    let task = spawn_gateway(
+    let mut task = spawn_gateway(
         kernel.socket_path.clone(),
         data_dir.path().to_owned(),
         backend,
     );
 
-    let (mut stream, _addr) = kernel.listener.accept().await.expect("accept");
+    let mut stream = accept_gateway(&kernel, &mut task).await;
     drain_handshake(&mut stream).await;
 
     let req = ok_request("https://api.anthropic.com/v1/messages");
@@ -362,13 +389,13 @@ async fn gateway_dispatches_later_fetch_while_first_backend_call_is_blocked() {
     let (release_first_tx, release_first_rx) = oneshot::channel();
     let backend: Arc<dyn Backend> =
         Arc::new(BlockingFirstBackend::new(first_seen_tx, release_first_rx));
-    let task = spawn_gateway(
+    let mut task = spawn_gateway(
         kernel.socket_path.clone(),
         data_dir.path().to_owned(),
         backend,
     );
 
-    let (mut stream, _addr) = kernel.listener.accept().await.expect("accept");
+    let mut stream = accept_gateway(&kernel, &mut task).await;
     drain_handshake(&mut stream).await;
 
     let slow_req = ok_request("https://api.anthropic.com/v1/messages");
@@ -434,18 +461,22 @@ async fn gateway_returns_domain_not_allowed_for_url_outside_egress_allowlist() {
     let kernel = FakeKernel::bind();
 
     let backend: Arc<dyn Backend> = Arc::new(MockBackend::default());
-    let task = spawn_gateway(
+    let mut task = spawn_gateway(
         kernel.socket_path.clone(),
         data_dir.path().to_owned(),
         backend,
     );
 
-    let (mut stream, _addr) = kernel.listener.accept().await.expect("accept");
+    let mut stream = accept_gateway(&kernel, &mut task).await;
     drain_handshake(&mut stream).await;
 
     let req = ok_request("https://evil.example.com/v1/messages");
     write_frame(&mut stream, &req).await.unwrap();
-    let resp: GatewayMessage = read_frame(&mut stream).await.unwrap();
+    let resp: GatewayMessage =
+        tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream))
+            .await
+            .expect("domain-denied response within 5s")
+            .expect("read domain-denied response");
     match resp {
         GatewayMessage::FetchResponse {
             error, status_code, ..
@@ -493,20 +524,24 @@ async fn gateway_returns_invalid_token_when_token_does_not_match_env() {
     let kernel = FakeKernel::bind();
 
     let backend: Arc<dyn Backend> = Arc::new(MockBackend::default());
-    let task = spawn_gateway(
+    let mut task = spawn_gateway(
         kernel.socket_path.clone(),
         data_dir.path().to_owned(),
         backend,
     );
 
-    let (mut stream, _addr) = kernel.listener.accept().await.expect("accept");
+    let mut stream = accept_gateway(&kernel, &mut task).await;
     drain_handshake(&mut stream).await;
 
     // Token differs from GATEWAY_TOKEN by exactly one byte at the end.
     let bad_token = format!("{}1", &GATEWAY_TOKEN[..63]);
     let req = ok_request_with_token("https://api.anthropic.com/v1/messages", bad_token);
     write_frame(&mut stream, &req).await.unwrap();
-    let resp: GatewayMessage = read_frame(&mut stream).await.unwrap();
+    let resp: GatewayMessage =
+        tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream))
+            .await
+            .expect("invalid-token response within 5s")
+            .expect("read invalid-token response");
     match resp {
         GatewayMessage::FetchResponse {
             error, status_code, ..

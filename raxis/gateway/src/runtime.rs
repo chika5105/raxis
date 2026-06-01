@@ -36,6 +36,13 @@ const KERNEL_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// can distinguish "not ready yet" from "stuck forever".
 const KERNEL_HANDSHAKE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Bound the initial gateway → kernel Unix socket connect. A missing
+/// socket normally fails immediately, but a stale/listening socket with
+/// a wedged acceptor or saturated backlog should still become a clear
+/// supervisor-visible startup failure rather than an unbounded pending
+/// gateway process.
+const KERNEL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Hard cap for concurrent upstream dispatch tasks inside the single
 /// gateway process. The architecture remains multiplexed and highly
 /// concurrent, but a runaway kernel/client cannot spawn unbounded
@@ -59,6 +66,8 @@ pub enum GatewayRunError {
         socket: PathBuf,
         source: std::io::Error,
     },
+    #[error("connect to kernel UDS at {socket} timed out after {timeout_ms} ms")]
+    ConnectTimeout { socket: PathBuf, timeout_ms: u128 },
     #[error("write GatewayReady handshake failed: {0}")]
     HandshakeWrite(String),
     #[error("initial policy_view load failed: {0}")]
@@ -133,12 +142,26 @@ pub async fn run_gateway_with_backend(
     );
 
     // Step 2: connect.
-    let mut stream = UnixStream::connect(&env.gateway_socket)
-        .await
-        .map_err(|e| GatewayRunError::Connect {
-            socket: env.gateway_socket.clone(),
-            source: e,
-        })?;
+    let mut stream = match tokio::time::timeout(
+        KERNEL_CONNECT_TIMEOUT,
+        UnixStream::connect(&env.gateway_socket),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => {
+            return Err(GatewayRunError::Connect {
+                socket: env.gateway_socket.clone(),
+                source: e,
+            });
+        }
+        Err(_) => {
+            return Err(GatewayRunError::ConnectTimeout {
+                socket: env.gateway_socket.clone(),
+                timeout_ms: KERNEL_CONNECT_TIMEOUT.as_millis(),
+            });
+        }
+    };
 
     // Step 3: handshake.
     let ready = GatewayMessage::GatewayReady {
