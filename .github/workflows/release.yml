@@ -14,7 +14,7 @@
 #
 # Pipeline shape (pinned by the spec):
 #
-#   release-preflight (wait for required main checks on this SHA)
+#   release-preflight (wait for required main build/test on this SHA)
 #        ├→ guest-runtime-arm64 ┐
 #        ├→ guest-runtime-x86_64├→ collect-image-metadata ┐
 #        └→ build-dashboard    ─┘                         ├→ build-darwin → notarize ┐
@@ -113,7 +113,10 @@ jobs:
   # This job makes the dependency explicit: the release SHA must be
   # reachable from `origin/main`, and the required `main` checks for
   # this exact SHA must complete successfully before we build signed
-  # images, notarize, upload assets, or update the tap.
+  # images, notarize, upload assets, or update the tap. `build-images.yml`
+  # is the always-on main build/test gate and includes strict spec-graph;
+  # the standalone `spec-graph.yml` workflow is path-filtered and may not
+  # exist for code-only commits.
   # ────────────────────────────────────────────────────────────
   release-preflight:
     name: release preflight checks
@@ -196,7 +199,6 @@ jobs:
           }
 
           wait_for_workflow build-images.yml
-          wait_for_workflow spec-graph.yml
 
   # ────────────────────────────────────────────────────────────
   # Stage 1a: build signed guest runtime bundles in parallel, one
