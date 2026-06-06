@@ -236,14 +236,11 @@ fn spawn_deadlock_watcher(data_dir: std::path::PathBuf) {
         .expect("spawn raxis-deadlock-watcher thread");
 }
 
-/// Kernel data directory. Sourced from RAXIS_DATA_DIR env var, defaulting to ~/.raxis.
+/// Kernel data directory. Explicit `RAXIS_DATA_DIR` wins. Homebrew
+/// binaries default to the Homebrew var dir; source builds default
+/// to `~/.raxis`.
 fn data_dir() -> std::path::PathBuf {
-    if let Ok(val) = std::env::var("RAXIS_DATA_DIR") {
-        std::path::PathBuf::from(val)
-    } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
-        std::path::PathBuf::from(home).join(".raxis")
-    }
+    raxis_runtime::data_dir_from_env_or_install_default()
 }
 
 #[tokio::main]

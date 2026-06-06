@@ -1,5 +1,5 @@
 /* `<SystemCredentialsPage>` — top-level page for system-wide
- * credentials (Anthropic API key, other provider keys, etc.).
+ * credentials (provider API keys, gateway upstream keys, etc.).
  *
  * Listing surface: visible to every authenticated operator
  * (`read` or higher) per
@@ -17,7 +17,7 @@
  * (`INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`
  * — silent failure forbidden).
  *
- * Spec: `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01` —
+ * Spec: `INV-DASHBOARD-SYSTEM-CREDENTIAL-SEVERITY-01` —
  * the page renders an explicit warning banner above the
  * credential list reminding the operator that reveals here
  * are Critical-severity audit events.

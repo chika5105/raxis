@@ -2,8 +2,9 @@
  *
  * Renders one row per credential the kernel has bound to the
  * supplied scope (per-initiative OR system-wide). Rows show
- * metadata only — name, proxy type, mount alias, format hint,
- * byte size, SHA-256 prefix, on-disk path. The plaintext is
+ * metadata only — name, proxy type, environment, mount alias,
+ * format hint, byte size, SHA-256 prefix, file/backend metadata,
+ * on-disk path. The plaintext is
  * NEVER fetched on mount; it is fetched on demand through the
  * `Reveal` button, which:
  *
@@ -11,9 +12,8 @@
  *     reveal role (`admin`); the modal is hard-coded to fire
  *     for every reveal so the operator has to click twice —
  *     defence-in-depth against accidental shoulder-surf, with
- *     extra warning copy for system credentials and an
- *     Anthropic-specific banner for the provider key
- *     (`INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`).
+ *     Critical-severity warning copy for system credentials
+ *     (`INV-DASHBOARD-SYSTEM-CREDENTIAL-SEVERITY-01`).
  *   * For operators WITHOUT the reveal role, the click bypasses
  *     the modal and round-trips to the kernel directly so the
  *     kernel can emit a paired `RejectedPermission` audit row
@@ -34,7 +34,7 @@
  *   * `INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01`
  *   * `INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`
  *   * `INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01`
- *   * `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`
+ *   * `INV-DASHBOARD-SYSTEM-CREDENTIAL-SEVERITY-01`
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -100,14 +100,6 @@ export const AUTO_HIDE_SYSTEM_SECS = 15;
 // requiring cert-install authority.
 const REQUIRED_REVEAL_ROLE = "admin";
 
-/// `provider`-typed credentials are gateway-bound system
-/// credentials (Anthropic, OpenAI, etc.). The Anthropic one
-/// is the highest-severity reveal in the system per
-/// `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`.
-function isAnthropicCredential(c: CredentialMetadata): boolean {
-  return /(^|\b)anthropic\b/i.test(c.name);
-}
-
 /// Stable test id helpers — keep tests stable across rebases.
 const TID = {
   list: "credentials-list",
@@ -122,6 +114,8 @@ const TID = {
   hideNowBtn: "credential-hide-now",
   monaco: "credential-monaco",
   countdown: "credential-countdown",
+  criticalPill: "credential-critical-pill",
+  highPill: "credential-high-pill",
 };
 
 // ---------------------------------------------------------------------------
@@ -291,8 +285,8 @@ function CredentialRow({
   operatorHasRevealRole,
 }: CredentialRowProps) {
   const [state, setState] = useState<RowState>({ kind: "masked" });
-  const isAnthropic = isAnthropicCredential(c);
   const isSystem = scope.kind === "system";
+  const revealSeverity = isSystem ? "critical" : "high";
 
   const performReveal = useCredentialRevealCallback(scope, c.name, setState);
 
@@ -358,7 +352,7 @@ function CredentialRow({
     <li
       className="px-4 py-3"
       data-testid={TID.row(c.name)}
-      data-anthropic={isAnthropic ? "true" : undefined}
+      data-reveal-severity={revealSeverity}
       data-state={state.kind}
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -370,19 +364,32 @@ function CredentialRow({
             <span className="badge bg-panel-high text-ink-muted border-edge-strong text-[10px]">
               {c.proxy_type}
             </span>
-            {isAnthropic && (
+            {c.environment ? (
+              <span
+                className="badge bg-info/10 text-info border-info/25 text-[10px]"
+                title={environmentSourceLabel(c.environment_source)}
+              >
+                env: {c.environment}
+                {c.environment_source === "provider_id_suffix" ? " (inferred)" : ""}
+              </span>
+            ) : (
+              <span className="badge bg-panel-high text-ink-subtle border-edge text-[10px]">
+                env: neutral
+              </span>
+            )}
+            {isSystem ? (
               <span
                 className="badge bg-bad/15 text-bad border-bad/30 text-[10px]"
-                data-testid="credential-anthropic-pill"
-                title="Anthropic API key — Critical-severity reveal"
+                data-testid={TID.criticalPill}
+                title="System credential — Critical-severity reveal"
               >
                 CRITICAL
               </span>
-            )}
-            {isSystem && !isAnthropic && (
+            ) : (
               <span
                 className="badge bg-warn/15 text-warn border-warn/30 text-[10px]"
-                title="System credential — high-severity reveal"
+                data-testid={TID.highPill}
+                title="Initiative credential — High-severity reveal"
               >
                 HIGH
               </span>
@@ -392,6 +399,11 @@ function CredentialRow({
             {c.format_hint}
           </div>
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-ink-subtle">
+            {c.provider_kind && (
+              <Meta label="provider">
+                <Mono>{c.provider_kind}</Mono>
+              </Meta>
+            )}
             {c.mount_as && (
               <Meta label="mount_as">
                 <Mono>{c.mount_as}</Mono>
@@ -403,6 +415,20 @@ function CredentialRow({
               </Meta>
             )}
             <Meta label="size">{fmtBytes(c.byte_size)}</Meta>
+            {c.backend_kind && <Meta label="backend">{c.backend_kind}</Meta>}
+            {c.mode_octal && (
+              <Meta label="mode">
+                <Mono>{c.mode_octal}</Mono>
+              </Meta>
+            )}
+            {typeof c.owner_uid === "number" && (
+              <Meta label="uid">
+                <Mono>{c.owner_uid}</Mono>
+              </Meta>
+            )}
+            {typeof c.modified_unix === "number" && c.modified_unix > 0 && (
+              <Meta label="modified">{formatUnix(c.modified_unix)}</Meta>
+            )}
             {c.sha256_prefix && (
               <Meta label="sha256">
                 <Mono>{c.sha256_prefix}…</Mono>
@@ -453,7 +479,6 @@ function CredentialRow({
       {state.kind === "confirming" && (
         <ConfirmModal
           credential={c}
-          isAnthropic={isAnthropic}
           isSystem={isSystem}
           onCancel={() => setState({ kind: "masked" })}
           onConfirm={() => {
@@ -488,7 +513,6 @@ function CredentialRow({
         <RevealedBody
           credential={c}
           reveal={state.reveal}
-          isAnthropic={isAnthropic}
           isSystem={isSystem}
           onHideNow={onHideNow}
         />
@@ -552,13 +576,12 @@ function useCredentialRevealCallback(
 }
 
 // ---------------------------------------------------------------------------
-// Confirm modal — fires for every reveal click. System +
-// Anthropic credentials get extra warning copy.
+// Confirm modal — fires for every reveal click. System credentials get
+// Critical warning copy because they are global authority material.
 // ---------------------------------------------------------------------------
 
 interface ConfirmModalProps {
   credential: CredentialMetadata;
-  isAnthropic: boolean;
   isSystem: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -566,7 +589,6 @@ interface ConfirmModalProps {
 
 function ConfirmModal({
   credential: c,
-  isAnthropic,
   isSystem,
   onConfirm,
   onCancel,
@@ -593,15 +615,13 @@ function ConfirmModal({
       <div className="text-ink-muted">
         This will fetch the plaintext bytes ({fmtBytes(c.byte_size)}) and emit
         an audit-chain row{" "}
-        {isAnthropic ? (
+        {isSystem ? (
           <strong className="text-bad">
-            at <span className="uppercase">Critical</span> severity (Anthropic
-            API key — operator notifications inbox will fire)
+            at <span className="uppercase">Critical</span> severity (system
+            credential — operator notifications inbox will fire)
           </strong>
-        ) : isSystem ? (
-          <strong className="text-warn">at High severity</strong>
         ) : (
-          <span>before the bytes leave the kernel</span>
+          <strong className="text-warn">at High severity</strong>
         )}
         . The plaintext will auto-hide after ~{estSecs} seconds; you can also
         click <strong>Hide now</strong> at any time.
@@ -611,12 +631,12 @@ function ConfirmModal({
           type="button"
           className={clsx(
             "btn",
-            isAnthropic ? "bg-bad text-white hover:bg-bad/90" : "btn-primary",
+            isSystem ? "bg-bad text-white hover:bg-bad/90" : "btn-primary",
           )}
           onClick={onConfirm}
           data-testid={TID.confirmYes}
         >
-          {isAnthropic ? "Reveal Anthropic key" : "Reveal plaintext"}
+          {isSystem ? "Reveal system credential" : "Reveal plaintext"}
         </button>
         <button
           type="button"
@@ -638,7 +658,6 @@ function ConfirmModal({
 interface RevealedBodyProps {
   credential: CredentialMetadata;
   reveal: CredentialReveal;
-  isAnthropic: boolean;
   isSystem: boolean;
   onHideNow: () => void;
 }
@@ -646,7 +665,6 @@ interface RevealedBodyProps {
 function RevealedBody({
   credential: c,
   reveal,
-  isAnthropic,
   isSystem,
   onHideNow,
 }: RevealedBodyProps) {
@@ -654,11 +672,9 @@ function RevealedBody({
   const monacoTheme = raxisMonacoTheme(theme);
   const remaining = useCountdown(reveal.expires_at_unix);
 
-  const bannerTone = isAnthropic
+  const bannerTone = isSystem
     ? "border-bad/40 bg-bad/10 text-bad"
-    : isSystem
-      ? "border-warn/40 bg-warn/10 text-warn"
-      : "border-warn/30 bg-warn/5 text-warn";
+    : "border-warn/30 bg-warn/5 text-warn";
 
   return (
     <div className="mt-3 space-y-2" data-testid="credential-revealed">
@@ -672,7 +688,7 @@ function RevealedBody({
         data-testid={TID.revealedBanner}
       >
         <span className="font-semibold uppercase tracking-wider">
-          {isAnthropic ? "ANTHROPIC KEY VISIBLE" : "PLAINTEXT VISIBLE"}
+          {isSystem ? "SYSTEM CREDENTIAL VISIBLE" : "PLAINTEXT VISIBLE"}
         </span>
         <span data-testid={TID.countdown}>
           auto-hides in {remaining}s
@@ -748,6 +764,21 @@ function Meta({ label, children }: MetaProps) {
       <span className="text-ink-muted">{children}</span>
     </span>
   );
+}
+
+function environmentSourceLabel(source?: string | null): string {
+  switch (source) {
+    case "policy.permitted_credentials":
+      return "Environment from policy [[permitted_credentials]]";
+    case "provider_id_suffix":
+      return "Environment inferred from provider credential name";
+    default:
+      return "Environment metadata";
+  }
+}
+
+function formatUnix(unix: number): string {
+  return new Date(unix * 1000).toLocaleString();
 }
 
 function monacoHeight(byteSize: number): string {

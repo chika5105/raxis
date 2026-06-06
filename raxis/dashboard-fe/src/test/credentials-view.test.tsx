@@ -9,10 +9,9 @@
  *      forbidden by
  *      `INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`.
  *   3. confirming: clicking Reveal as an admin pops a modal
- *      naming the credential + the audit class. Anthropic
- *      credentials get Critical-tier copy; system credentials
- *      get High-tier copy; per-initiative credentials get the
- *      default copy.
+ *      naming the credential + the audit class. System credentials
+ *      get Critical-tier copy; per-initiative credentials get
+ *      High-tier copy.
  *   4. revealing → revealed: confirming the modal POSTs the
  *      reveal endpoint and inserts the plaintext into a
  *      Monaco viewer (mocked to a `<textarea>`).
@@ -92,12 +91,19 @@ function meta(over: Partial<CredentialMetadata> = {}): CredentialMetadata {
   return {
     name:                 "test-pg-dev",
     proxy_type:           "postgres",
+    environment:          "staging",
+    environment_source:   "policy.permitted_credentials",
+    backend_kind:         "file",
+    provider_kind:        null,
     mount_as:             "DATABASE_URL",
     format_hint:          "libpq URL (postgresql://user:pass@host:port/db)",
     upstream_host_port:   "127.0.0.1:5432",
     byte_size:            64,
     sha256_prefix:        "deadbeef",
     loaded_from_path:     "/var/raxis/credentials/test-pg-dev.env",
+    modified_unix:        1_700_000_000,
+    mode_octal:           "0600",
+    owner_uid:            501,
     is_revealable:        true,
     reveal_required_role: "admin",
     ...over,
@@ -141,6 +147,14 @@ describe("<CredentialsView> — masked baseline", () => {
       "data-state",
       "masked",
     );
+    const pgRow = screen.getByTestId("credential-row-test-pg-dev");
+    expect(pgRow).toHaveTextContent(/env: staging/i);
+    expect(pgRow).toHaveTextContent(/backend/i);
+    expect(pgRow).toHaveTextContent(/file/i);
+    expect(pgRow).toHaveTextContent(/mode/i);
+    expect(pgRow).toHaveTextContent(/0600/i);
+    expect(pgRow).toHaveTextContent(/uid/i);
+    expect(pgRow).toHaveTextContent(/501/i);
     expect(screen.getByTestId("credential-row-test-redis")).toHaveAttribute(
       "data-state",
       "masked",
@@ -180,7 +194,7 @@ describe("<CredentialsView> — masked baseline", () => {
     ).toHaveTextContent(/permission denied/i);
   });
 
-  it("renders the system-credential listing as a read operator (Anthropic visible)", async () => {
+  it("renders every system credential as Critical-severity metadata", async () => {
     // INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01:
     // a read operator can list every system credential the
     // kernel uses (planner LLM keys, gateway upstreams, …).
@@ -194,16 +208,32 @@ describe("<CredentialsView> — masked baseline", () => {
           format_hint: "Anthropic provider TOML (api_key = \"…\")",
           upstream_host_port: null,
         }),
+        meta({
+          name: "providers.openai-prod",
+          proxy_type: "provider",
+          environment: "prod",
+          environment_source: "provider_id_suffix",
+          backend_kind: "file",
+          provider_kind: "OpenAI",
+          mount_as: null,
+          format_hint: "OpenAI provider TOML (api_key = \"…\")",
+          upstream_host_port: null,
+        }),
       ),
     );
     renderWithProviders(
       <CredentialsView scope={{ kind: "system" }} operatorRoles={["read"]} />,
     );
-    const row = await screen.findByTestId(
+    const anthropic = await screen.findByTestId(
       "credential-row-providers.anthropic-prod",
     );
-    expect(row).toBeInTheDocument();
-    expect(row).toHaveAttribute("data-anthropic", "true");
+    const openai = screen.getByTestId("credential-row-providers.openai-prod");
+    expect(anthropic).toHaveAttribute("data-reveal-severity", "critical");
+    expect(openai).toHaveAttribute("data-reveal-severity", "critical");
+    expect(openai).toHaveTextContent(/env: prod \(inferred\)/i);
+    expect(openai).toHaveTextContent(/provider/i);
+    expect(openai).toHaveTextContent(/OpenAI/);
+    expect(screen.getAllByTestId("credential-critical-pill")).toHaveLength(2);
     // Header pill calls out the limited role.
     expect(screen.getByTestId("credentials-role-warning")).toHaveTextContent(
       /read-only/i,
@@ -337,14 +367,14 @@ describe("<CredentialsView> — reveal flow", () => {
     );
   });
 
-  it("renders the Critical-severity Anthropic warning copy", async () => {
+  it("renders Critical-severity system credential warning copy for any provider", async () => {
     vi.spyOn(dashboardApi.systemCredentials, "list").mockResolvedValue(
       listOf(
         meta({
-          name: "providers.anthropic",
+          name: "providers.openai",
           proxy_type: "provider",
           mount_as: null,
-          format_hint: "Anthropic provider TOML (api_key = \"…\")",
+          format_hint: "OpenAI provider TOML (api_key = \"…\")",
           upstream_host_port: null,
         }),
       ),
@@ -355,19 +385,17 @@ describe("<CredentialsView> — reveal flow", () => {
     );
 
     fireEvent.click(
-      await screen.findByTestId("credential-reveal-providers.anthropic"),
+      await screen.findByTestId("credential-reveal-providers.openai"),
     );
     const modal = screen.getByTestId("credential-confirm-modal");
     expect(modal).toHaveTextContent(/critical/i);
-    expect(modal).toHaveTextContent(/anthropic/i);
+    expect(modal).toHaveTextContent(/system credential/i);
     expect(screen.getByTestId("credential-confirm-yes")).toHaveTextContent(
-      /reveal anthropic key/i,
+      /reveal system credential/i,
     );
-    // Row carries the data-anthropic flag for spec-conformance
-    // selectors (e.g. e2e harness assertions).
     expect(
-      screen.getByTestId("credential-row-providers.anthropic"),
-    ).toHaveAttribute("data-anthropic", "true");
+      screen.getByTestId("credential-row-providers.openai"),
+    ).toHaveAttribute("data-reveal-severity", "critical");
   });
 
   it("re-masks automatically when wall-clock crosses expires_at_unix", async () => {

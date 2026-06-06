@@ -750,16 +750,26 @@ $HOMEBREW_PREFIX/share/raxis/dashboard/
 $HOMEBREW_PREFIX/etc/raxis/policy.toml.example
 ```
 
-The formula's service block launches
-`/bin/sh -c "ulimit -n 4096 && exec raxis-supervisor start"`, sets
+The formula's service block launches `raxis-supervisor start`, sets
 `PATH` to Homebrew's standard service path, sets `RAXIS_INSTALL_DIR`
 to `$HOMEBREW_PREFIX/share/raxis`, sets `RAXIS_DATA_DIR` to
 Homebrew's persistent `var/lib/raxis`, and sets
 `RAXIS_SUPERVISOR_AUTO_RESTART=1` with
 `RAXIS_SUPERVISOR_KERNEL_BINARY` pointing at the installed
-`raxis-kernel`. The `ulimit` wrapper is required on macOS because
-launchd user services otherwise start with a low file-descriptor soft
-limit that is below the kernel's production floor.
+`raxis-kernel`. The supervisor raises its own file-descriptor soft
+limit before spawning the kernel because launchd user services
+otherwise start below the kernel's production floor.
+
+When a Homebrew-installed `raxis`, `raxis-kernel`, or
+`raxis-supervisor` binary is run manually without `--data-dir` and
+without `RAXIS_DATA_DIR`, it MUST infer the same persistent Homebrew
+state directory from its executable path:
+`$HOMEBREW_PREFIX/var/lib/raxis`. Source builds keep the developer
+default of `~/.raxis`. This keeps `raxis credential ...`,
+`raxis doctor`, the supervisor, and the long-running kernel pointed at
+the same state store in production. `raxis doctor` and `raxis status`
+MUST surface the detected install origin (`homebrew` or `source`) so
+operators can confirm which binary family they are using.
 
 The active tap formula and bottled Cellar formula must both contain this
 full service block. Homebrew writes the installed plist or service unit

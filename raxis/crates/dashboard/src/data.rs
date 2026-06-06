@@ -2106,6 +2106,30 @@ pub struct CredentialMetadata {
     /// per-initiative credentials this mirrors the proxy
     /// declaration.
     pub proxy_type: String,
+    /// Environment label associated with this credential. For
+    /// initiative credentials this is authoritative when sourced from
+    /// policy `[[permitted_credentials]].environment`; for system
+    /// credentials it may be inferred from provider naming until a
+    /// future provider metadata sidecar exists. `None` means neutral /
+    /// unspecified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    /// Human-readable source of the environment label
+    /// (`"policy.permitted_credentials"` or `"provider_id_suffix"`).
+    /// Lets the dashboard avoid presenting inferred labels as
+    /// authority-bearing policy facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_source: Option<String>,
+    /// Credential backend implementation that owns the bytes
+    /// (`"file"` today; Vault/AWS-SM/etc. later).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_kind: Option<String>,
+    /// Provider kind from policy (`Anthropic`, `OpenAI`, `Gemini`,
+    /// `http_sidecar`, custom provider kind, ...), when this row is a
+    /// system provider credential and policy references the same
+    /// credentials file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_kind: Option<String>,
     /// Env-var name the credential is mounted as inside the agent
     /// VM (e.g. `DATABASE_URL`). `None` for system credentials
     /// (gateway-bound, never reaches an agent VM).
@@ -2144,6 +2168,21 @@ pub struct CredentialMetadata {
     /// they're looking at the right file before they reveal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loaded_from_path: Option<String>,
+    /// Unix-seconds file modification time for file-backed
+    /// credentials. Helps operators confirm rotations without
+    /// revealing bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_unix: Option<i64>,
+    /// File mode as a four-digit octal string (for example `"0600"`).
+    /// The FE can highlight loose modes without re-statting the host
+    /// filesystem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_octal: Option<String>,
+    /// Owning uid for file-backed credentials. Useful when the kernel
+    /// service runs under Homebrew/launchd and credentials were written
+    /// from a different shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_uid: Option<u32>,
     /// `true` iff the dashboard has a reveal endpoint for this
     /// credential. Always `true` today (every backend supports
     /// reveal); reserved for future backends (HSM-only) that
@@ -2184,7 +2223,7 @@ pub struct CredentialReveal {
     /// surfaced as `encoding = "base64"` and the `plaintext` field
     /// holds the standard-base64 encoding (no padding stripped).
     ///
-    /// `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01` defence-
+    /// `INV-DASHBOARD-SYSTEM-CREDENTIAL-SEVERITY-01` defence-
     /// in-depth: this field is REDACTED in the manual `Debug` impl
     /// below so a future `tracing::debug!("{reveal:?}")` cannot
     /// accidentally leak the bytes. Serialisation (the only sanctioned
@@ -2209,7 +2248,7 @@ pub struct CredentialReveal {
     pub sha256_prefix: String,
 }
 
-// `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01` defence-in-
+// `INV-DASHBOARD-SYSTEM-CREDENTIAL-SEVERITY-01` defence-in-
 // depth — the manual `Debug` impl REPLACES the value with
 // `<redacted>` so log lines that accidentally interpolate a
 // `CredentialReveal` (`tracing::error!("{reveal:?}")`,

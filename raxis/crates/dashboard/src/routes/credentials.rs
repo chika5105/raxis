@@ -226,9 +226,9 @@ where
 /// Same admin-gate + rate-limit + paired-audit contract as the
 /// per-initiative reveal, BUT the audit row carries
 /// `severity = "critical"` (vs `"high"` for per-initiative). This
-/// pins the notification routing so a system-credential reveal
-/// (Anthropic in particular) surfaces in the operator inbox at
-/// Critical priority — `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`.
+/// pins the notification routing so every system-credential reveal
+/// surfaces in the operator inbox at Critical priority —
+/// `INV-DASHBOARD-SYSTEM-CREDENTIAL-SEVERITY-01`.
 pub async fn reveal_system<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -311,12 +311,19 @@ fn _credential_metadata_compiles() -> CredentialMetadata {
     CredentialMetadata {
         name: String::new(),
         proxy_type: String::new(),
+        environment: None,
+        environment_source: None,
+        backend_kind: None,
+        provider_kind: None,
         mount_as: None,
         format_hint: String::new(),
         upstream_host_port: None,
         byte_size: 0,
         sha256_prefix: None,
         loaded_from_path: None,
+        modified_unix: None,
+        mode_octal: None,
+        owner_uid: None,
         is_revealable: false,
         reveal_required_role: String::new(),
     }
@@ -334,12 +341,19 @@ mod tests {
             metadata: CredentialMetadata {
                 name: name.to_owned(),
                 proxy_type: "postgres".into(),
+                environment: Some("staging".into()),
+                environment_source: Some("policy.permitted_credentials".into()),
+                backend_kind: Some("file".into()),
+                provider_kind: None,
                 mount_as: Some("DATABASE_URL".into()),
                 format_hint: "libpq URL".into(),
                 upstream_host_port: Some("127.0.0.1:5432".into()),
                 byte_size: plaintext.len() as u64,
                 sha256_prefix: Some("aa".repeat(4)),
                 loaded_from_path: Some(format!("/var/raxis/credentials/{name}.env")),
+                modified_unix: Some(1_700_000_000),
+                mode_octal: Some("0600".into()),
+                owner_uid: Some(501),
                 is_revealable: true,
                 reveal_required_role: "admin".into(),
             },
@@ -552,9 +566,9 @@ mod tests {
     }
 
     /// `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`:
-    /// `read`-role MUST be able to list system credentials so the
-    /// Anthropic planner key (and every other gateway-bound
-    /// credential the kernel uses) is operator-auditable. Listing
+    /// `read`-role MUST be able to list system credentials so provider
+    /// keys and every other gateway-bound credential the kernel uses
+    /// are operator-auditable. Listing
     /// returns metadata only — plaintext stays gated behind the
     /// admin-only reveal endpoint. Read-only browse leaves the
     /// audit ledger untouched (signal-vs-noise policy in
@@ -563,14 +577,17 @@ mod tests {
     async fn list_system_metadata_visible_to_read_role() {
         let d = InMemoryDashboardData::new();
         d.push_system_credential(fixture("providers.anthropic-prod", "sk"));
+        d.push_system_credential(fixture("providers.openai-prod", "sk"));
         let resp = list_system(axum::extract::State(_app_state(&d)), read_op())
             .await
             .expect("read role lists system credential metadata");
         let names: Vec<String> = resp.0.credentials.iter().map(|c| c.name.clone()).collect();
-        assert!(
-            names.iter().any(|n| n == "providers.anthropic-prod"),
-            "Anthropic credential MUST appear in the read-operator listing; got: {names:?}",
-        );
+        for expected in ["providers.anthropic-prod", "providers.openai-prod"] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "system credential {expected} MUST appear in the read-operator listing; got: {names:?}",
+            );
+        }
         let audits = d.recorded_operator_audits();
         assert!(
             audits.is_empty(),
