@@ -2134,9 +2134,11 @@ mod tests {
     #[test]
     fn collect_fails_when_data_dir_missing() {
         let r = collect(Path::new("/definitely/does/not/exist/raxis"));
-        assert_eq!(r.checks.len(), 1);
-        assert_eq!(r.checks[0].id, "data_dir.exists");
-        assert_eq!(r.checks[0].outcome, Outcome::Fail);
+        assert_eq!(r.checks.len(), 2);
+        assert_eq!(r.checks[0].id, "install.origin");
+        assert_eq!(r.checks[0].outcome, Outcome::Ok);
+        assert_eq!(r.checks[1].id, "data_dir.exists");
+        assert_eq!(r.checks[1].outcome, Outcome::Fail);
     }
 
     #[test]
