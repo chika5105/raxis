@@ -6,8 +6,8 @@
 //!     the credential metadata; `POST /api/initiatives/:id/
 //!     credentials/:name/reveal` returns the plaintext bytes.
 //!     Listing is `read`-role; reveal is `admin`-only.
-//!   * System-wide: `GET /api/system/credentials` lists provider /
-//!     gateway-bound credentials; `POST /api/system/credentials/:name/
+//!   * System-wide: `GET /api/system/credentials` lists registered
+//!     provider and workload credentials; `POST /api/system/credentials/:name/
 //!     reveal` returns the plaintext. Listing is `read`-role
 //!     (`INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`
 //!     — every credential the kernel uses, including planner LLM
@@ -193,9 +193,10 @@ fn emit_initiative_revealed<D>(
 /// stays `admin`-only.
 ///
 /// `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`
-/// pins the contract: every credential the kernel uses (including
-/// the Anthropic planner key under `<data_dir>/providers/`) MUST
-/// surface here for any operator with at least the `read` role.
+/// pins the contract: every registered credential the kernel may use
+/// (including model-provider keys under `<data_dir>/providers/` and
+/// workload credentials under `<data_dir>/credentials/`) MUST surface
+/// here for any operator with at least the `read` role.
 /// Read-only browse; no `Operator*` audit fires (the reveal
 /// endpoint records the security-relevant moment).
 pub async fn list_system<D>(

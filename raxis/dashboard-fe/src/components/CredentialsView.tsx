@@ -178,7 +178,7 @@ export function CredentialsView({ scope, operatorRoles }: CredentialsViewProps) 
         <section className="card p-4" data-testid="credentials-forbidden">
           <Empty
             title="Permission denied."
-            hint={`Listing system credentials requires the "${REQUIRED_REVEAL_ROLE}" role. Your token only carries: ${
+            hint={`Listing credentials requires the "read" role. Your token only carries: ${
               operatorRoles.join(", ") || "(none)"
             }.`}
           />
@@ -198,11 +198,16 @@ export function CredentialsView({ scope, operatorRoles }: CredentialsViewProps) 
               ? "This initiative declares no credentials."
               : "The kernel has no system credentials configured."
           }
-          hint="Credential declarations live in the initiative plan TOML (per-initiative) and in the kernel's providers.toml (system)."
+          hint="Credential declarations live in the initiative plan TOML. Registered system credentials live under the kernel data directory's credentials/ and providers/ folders."
         />
       </section>
     );
   }
+
+  const groups =
+    scope.kind === "system"
+      ? groupCredentialsByType(list.credentials)
+      : [{ key: "initiative", title: null, credentials: list.credentials }];
 
   return (
     <section
@@ -235,18 +240,83 @@ export function CredentialsView({ scope, operatorRoles }: CredentialsViewProps) 
         )}
       </header>
       <ul className="divide-y divide-edge/60">
-        {list.credentials.map((c) => (
-          <CredentialRow
-            key={c.name}
-            credential={c}
-            scope={scope}
-            canReveal={canReveal && c.is_revealable}
-            operatorHasRevealRole={canReveal}
-          />
+        {groups.map((group) => (
+          <li key={group.key} className="p-0">
+            {group.title && (
+              <div
+                className="border-b border-edge/60 bg-panel-high px-4 py-2"
+                data-testid={`credential-group-${group.key}`}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">
+                    {group.title}
+                  </div>
+                  <span className="text-[11px] text-ink-muted">
+                    {group.credentials.length}{" "}
+                    {group.credentials.length === 1 ? "credential" : "credentials"}
+                  </span>
+                </div>
+              </div>
+            )}
+            <ul className="divide-y divide-edge/60">
+              {group.credentials.map((c) => (
+                <CredentialRow
+                  key={c.name}
+                  credential={c}
+                  scope={scope}
+                  canReveal={canReveal && c.is_revealable}
+                  operatorHasRevealRole={canReveal}
+                />
+              ))}
+            </ul>
+          </li>
         ))}
       </ul>
     </section>
   );
+}
+
+function groupCredentialsByType(credentials: CredentialMetadata[]) {
+  const order = [
+    "provider",
+    "postgres",
+    "mysql",
+    "mssql",
+    "mongodb",
+    "redis",
+    "smtp",
+    "http",
+    "aws",
+    "gcp",
+    "azure",
+    "k8s",
+    "unknown",
+  ];
+  const orderIndex = new Map(order.map((key, index) => [key, index]));
+  const groups = new Map<string, CredentialMetadata[]>();
+  for (const credential of credentials) {
+    const key = credential.proxy_type || "unknown";
+    const current = groups.get(key) ?? [];
+    current.push(credential);
+    groups.set(key, current);
+  }
+  return Array.from(groups.entries())
+    .map(([key, rows]) => ({
+      key,
+      title: credentialGroupTitle(key),
+      credentials: rows.sort((a, b) => a.name.localeCompare(b.name)),
+    }))
+    .sort((a, b) => {
+      const ai = orderIndex.get(a.key) ?? 999;
+      const bi = orderIndex.get(b.key) ?? 999;
+      return ai - bi || a.key.localeCompare(b.key);
+    });
+}
+
+function credentialGroupTitle(proxyType: string) {
+  if (proxyType === "provider") return "Provider credentials";
+  if (proxyType === "unknown") return "Unclassified credentials";
+  return `${proxyType.toUpperCase()} credentials`;
 }
 
 // ---------------------------------------------------------------------------

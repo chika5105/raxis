@@ -219,6 +219,15 @@ describe("<CredentialsView> — masked baseline", () => {
           format_hint: "OpenAI provider TOML (api_key = \"…\")",
           upstream_host_port: null,
         }),
+        meta({
+          name: "postgres-staging",
+          proxy_type: "postgres",
+          environment: "staging",
+          environment_source: "credential.metadata",
+          mount_as: null,
+          format_hint: "Postgres staging URL",
+          upstream_host_port: null,
+        }),
       ),
     );
     renderWithProviders(
@@ -228,12 +237,21 @@ describe("<CredentialsView> — masked baseline", () => {
       "credential-row-providers.anthropic-prod",
     );
     const openai = screen.getByTestId("credential-row-providers.openai-prod");
+    const postgres = screen.getByTestId("credential-row-postgres-staging");
     expect(anthropic).toHaveAttribute("data-reveal-severity", "critical");
     expect(openai).toHaveAttribute("data-reveal-severity", "critical");
+    expect(postgres).toHaveAttribute("data-reveal-severity", "critical");
     expect(openai).toHaveTextContent(/env: prod \(inferred\)/i);
+    expect(postgres).toHaveTextContent(/env: staging/i);
     expect(openai).toHaveTextContent(/provider/i);
     expect(openai).toHaveTextContent(/OpenAI/);
-    expect(screen.getAllByTestId("credential-critical-pill")).toHaveLength(2);
+    expect(screen.getByTestId("credential-group-provider")).toHaveTextContent(
+      /provider credentials/i,
+    );
+    expect(screen.getByTestId("credential-group-postgres")).toHaveTextContent(
+      /postgres credentials/i,
+    );
+    expect(screen.getAllByTestId("credential-critical-pill")).toHaveLength(3);
     // Header pill calls out the limited role.
     expect(screen.getByTestId("credentials-role-warning")).toHaveTextContent(
       /read-only/i,

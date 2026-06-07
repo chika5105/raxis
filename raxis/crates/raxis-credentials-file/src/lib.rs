@@ -75,7 +75,9 @@ use raxis_credentials::{
 
 mod path;
 
-pub use path::{credential_file_path, validate_path_security, ResolvedPath};
+pub use path::{
+    credential_file_path, credential_metadata_file_path, validate_path_security, ResolvedPath,
+};
 
 // ---------------------------------------------------------------------------
 // FileCredentialBackend

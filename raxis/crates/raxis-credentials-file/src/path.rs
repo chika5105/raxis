@@ -3,6 +3,8 @@
 //! The `<name>` form decides the layout:
 //!   * `providers.<id>` → `<data_dir>/providers/<id>.toml`
 //!   * `<name>`         → `<data_dir>/credentials/<name>.env`
+//!   * metadata sidecars live beside the secret as
+//!     `<stem>.metadata.toml`
 //!
 //! Anything that breaks out of the `<data_dir>/credentials/` or
 //! `<data_dir>/providers/` subtrees (`..`, absolute paths, embedded
@@ -48,6 +50,26 @@ pub fn credential_file_path(data_dir: &Path, name: &CredentialName) -> PathBuf {
             .join(format!("{provider_id}.toml"))
     } else {
         data_dir.join("credentials").join(format!("{raw}.env"))
+    }
+}
+
+/// Compute the non-secret metadata sidecar path for a credential.
+///
+/// The sidecar stores operator-facing catalog fields such as
+/// `proxy_type`, `environment`, and `description`; it never stores
+/// credential bytes. Keeping this path logic beside
+/// [`credential_file_path`] prevents the dashboard and CLI from
+/// drifting on the on-disk contract.
+pub fn credential_metadata_file_path(data_dir: &Path, name: &CredentialName) -> PathBuf {
+    let raw = name.as_str();
+    if let Some(provider_id) = raw.strip_prefix("providers.") {
+        data_dir
+            .join("providers")
+            .join(format!("{provider_id}.metadata.toml"))
+    } else {
+        data_dir
+            .join("credentials")
+            .join(format!("{raw}.metadata.toml"))
     }
 }
 
@@ -145,6 +167,21 @@ mod tests {
             &CredentialName::from("providers.anthropic-prod"),
         );
         assert!(p.ends_with("providers/anthropic-prod.toml"));
+    }
+
+    #[test]
+    fn metadata_path_resolves_beside_secret_without_secret_extension() {
+        let p = credential_metadata_file_path(
+            Path::new("/r"),
+            &CredentialName::from("postgres-staging"),
+        );
+        assert!(p.ends_with("credentials/postgres-staging.metadata.toml"));
+
+        let p = credential_metadata_file_path(
+            Path::new("/r"),
+            &CredentialName::from("providers.openai-prod"),
+        );
+        assert!(p.ends_with("providers/openai-prod.metadata.toml"));
     }
 
     #[test]
