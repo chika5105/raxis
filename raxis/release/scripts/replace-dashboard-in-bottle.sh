@@ -34,6 +34,8 @@ if [[ -z "${cellar}" ]]; then
     echo "replace-dashboard-in-bottle.sh: bottle has no raxis/<version> cellar root" >&2
     exit 65
 fi
+cellar_version="$(basename "${cellar}")"
+formula_version="${cellar_version%%_*}"
 
 tar -xzf "${dashboard_bundle}" -C "${bundle_root}"
 if [[ -d "${bundle_root}/dist" && -f "${bundle_root}/dist/index.html" ]]; then
@@ -125,13 +127,18 @@ if [[ -n "${RAXIS_REVISION:-}" && -f "${installed_formula}" ]]; then
         echo "replace-dashboard-in-bottle.sh: RAXIS_REVISION must be a positive integer when set" >&2
         exit 65
     fi
-    refresh_installed_formula "${installed_formula}" "$(basename "${cellar}")" "${RAXIS_REVISION}"
+    refresh_installed_formula "${installed_formula}" "${formula_version}" "${RAXIS_REVISION}"
+    revised_cellar="${bottle_root}/raxis/${formula_version}_${RAXIS_REVISION}"
+    if [[ "${cellar}" != "${revised_cellar}" ]]; then
+        rm -rf "${revised_cellar}"
+        mv "${cellar}" "${revised_cellar}"
+        cellar="${revised_cellar}"
+    fi
 fi
 
 out_name="$(basename "${bottle_archive}")"
 if [[ -n "${RAXIS_REVISION:-}" ]]; then
-    formula_version="$(basename "${cellar}")"
-    out_name="${out_name/raxis-${formula_version}./raxis-${formula_version}_${RAXIS_REVISION}.}"
+    out_name="${out_name/raxis-${cellar_version}./raxis-${formula_version}_${RAXIS_REVISION}.}"
 fi
 out="${out_dir}/${out_name}"
 tar -C "${bottle_root}" -czf "${out}" raxis
