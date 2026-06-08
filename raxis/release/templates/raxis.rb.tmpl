@@ -79,6 +79,37 @@ class Raxis < Formula
     (etc/"raxis").install policy_example
   end
 
+  def raxis_homebrew_auto_restart_disabled?
+    disabled_values = %w[0 false no off]
+    disabled_values.include?(ENV.fetch("RAXIS_BREW_AUTO_RESTART", "").downcase) ||
+      disabled_values.include?(ENV.fetch("RAXIS_BREW_AUTO_REFRESH", "").downcase) ||
+      (etc/"raxis/disable-brew-auto-restart").exist?
+  end
+
+  def raxis_homebrew_service_active?
+    brew = HOMEBREW_PREFIX/"bin/brew"
+    services = IO.popen([brew.to_s, "services", "list"], err: File::NULL, &:read)
+    services.lines.any? do |line|
+      columns = line.split
+      columns[0] == "raxis" && %w[started error].include?(columns[1])
+    end
+  rescue
+    false
+  end
+
+  def raxis_restart_homebrew_service_after_upgrade
+    return unless raxis_homebrew_service_active?
+
+    if raxis_homebrew_auto_restart_disabled?
+      opoo "RAXIS Homebrew service is active but automatic restart is disabled."
+      opoo "Run `brew services restart raxis` when you want the service to use this upgrade."
+      return
+    end
+
+    ohai "Restarting active RAXIS Homebrew service so it uses this upgrade"
+    system (HOMEBREW_PREFIX/"bin/brew").to_s, "services", "restart", "raxis"
+  end
+
   service do
     run [opt_bin/"raxis-supervisor", "start"]
     keep_alive true
@@ -101,6 +132,7 @@ class Raxis < Formula
     system bin/"raxis", "doctor", "canonical-images",
                          "--install-dir", pkgshare.to_s
     system bin/"raxis", "doctor", "signing-key-fp"
+    raxis_restart_homebrew_service_after_upgrade
   end
 
   def caveats
@@ -135,6 +167,14 @@ class Raxis < Formula
 
       Start the kernel with:
         brew services start raxis
+
+      When `brew upgrade raxis` replaces this formula, an active RAXIS
+      Homebrew service is restarted automatically so launchd/systemd stops
+      using the old Cellar path. Stopped services are left stopped.
+      Disable one automatic upgrade restart with:
+        RAXIS_BREW_AUTO_RESTART=0 brew upgrade raxis
+      Disable it persistently with:
+        touch #{etc}/raxis/disable-brew-auto-restart
 
       Check daemon health with:
         RAXIS_DATA_DIR=#{var}/lib/raxis raxis-supervisor status

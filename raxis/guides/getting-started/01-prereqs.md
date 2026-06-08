@@ -193,6 +193,21 @@ Stop the daemon with:
 brew services stop raxis
 ```
 
+`brew upgrade raxis` automatically restarts an active Homebrew service
+after the upgraded bundle passes post-install checks, so the daemon does
+not keep running the old Cellar binary. Stopped services stay stopped.
+Skip one automatic restart during a maintenance window with:
+
+```bash
+RAXIS_BREW_AUTO_RESTART=0 brew upgrade raxis
+```
+
+Disable automatic upgrade restarts persistently with:
+
+```bash
+touch "$(brew --prefix)/etc/raxis/disable-brew-auto-restart"
+```
+
 By default this is a user LaunchAgent, not a privileged system daemon.
 Do not also run `raxis-kernel` in a foreground terminal against the
 same `RAXIS_DATA_DIR`; use one start mode at a time.

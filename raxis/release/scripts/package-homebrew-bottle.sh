@@ -144,6 +144,9 @@ required_service_snippets=(
     'RAXIS_ENV: "default",'
     'RAXIS_SUPERVISOR_REQUIRE_INITIALIZED_DATA_DIR: "1",'
     'RAXIS_SUPERVISOR_KERNEL_BINARY: (opt_bin/"raxis-kernel").to_s'
+    'def raxis_restart_homebrew_service_after_upgrade'
+    'RAXIS_BREW_AUTO_RESTART'
+    'disable-brew-auto-restart'
 )
 
 for snippet in "${required_service_snippets[@]}"; do

@@ -64,6 +64,22 @@ broken installed version must be replaced by a new release or reinstall
 from a corrected formula/bottle; editing the tap alone does not rewrite
 an existing generated service file.
 
+During `brew upgrade raxis`, the formula restarts an active RAXIS
+Homebrew service after post-install verification succeeds. This keeps
+launchd/systemd from continuing to run an older Cellar binary such as
+`/opt/homebrew/Cellar/raxis/<old>/bin/raxis-kernel`. Stopped services
+are not started. Operators can skip one automatic refresh with:
+
+```bash
+RAXIS_BREW_AUTO_RESTART=0 brew upgrade raxis
+```
+
+For a persistent maintenance-window opt-out, create:
+
+```bash
+touch "$(brew --prefix)/etc/raxis/disable-brew-auto-restart"
+```
+
 The tap formula uses Homebrew bottles for the clean user path. The
 workflow still publishes raw complete runtime archives, then publishes
 bottle-shaped archives for `arm64_tahoe`, `tahoe`,
@@ -73,16 +89,19 @@ bottle-shaped archives for `arm64_tahoe`, `tahoe`,
 That complete-bundle rule is intentional. A host-binary-only bottle can
 install cleanly and then fail later when the kernel tries to spawn a VM.
 
-## Dashboard-Only Release Paths
+## Homebrew Revision Release Paths
 
-RAXIS now has two dashboard patch lanes so a small React fix does not
-force a full native-binary, guest-kernel, and image rebuild.
+RAXIS has two patch lanes so a small dashboard, formula, or service
+packaging fix does not force a full native-binary, guest-kernel, and
+image rebuild.
 
 ### Middle ground: Homebrew formula revision
 
 Use the `dashboard-release` GitHub Actions workflow when the fix should
 reach `brew upgrade raxis` users but the host binaries and canonical
-guest images from a prior full release are still correct.
+guest images from a prior full release are still correct. Despite the
+workflow name, this is the supported Homebrew revision lane for
+dashboard-only fixes, formula/service fixes, or both.
 
 Inputs:
 
@@ -94,15 +113,19 @@ The workflow:
 1. Builds `dashboard-fe` only.
 2. Packages `dashboard-fe/dist` as `raxis-dashboard-fe-<version>-r<N>.tar.gz`.
 3. Downloads the runtime archives and bottles from `base_version`.
-4. Replaces only `share/raxis/dashboard` inside those archives.
-5. Uploads patched archives to `dashboard-<base_version>-r<N>`.
-6. Renders the tap formula with the same core `version`, a Homebrew
+4. Replaces `share/raxis/dashboard` inside those archives.
+5. Refreshes the bottled `.brew/raxis.rb` from the current
+   `release/templates/raxis.rb.tmpl`, with the requested formula
+   `revision`.
+6. Uploads patched archives to `dashboard-<base_version>-r<N>`.
+7. Renders the tap formula with the same core `version`, a Homebrew
    `revision <N>`, base-release source tarball URLs, and patched-bottle
    URLs.
 
 This preserves the important release boundary: host binaries, VM images,
 and guest kernel stay byte-for-byte from the full release, while the
-operator dashboard can move on a faster cadence.
+operator dashboard and Homebrew formula/service packaging can move on a
+faster cadence.
 
 ### Fastest path: local verified bundle install
 

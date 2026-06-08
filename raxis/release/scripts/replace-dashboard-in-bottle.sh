@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # replace-dashboard-in-bottle.sh — rebuild an existing Homebrew bottle
-# with only `share/raxis/dashboard` replaced by a dashboard bundle.
+# with `share/raxis/dashboard` replaced by a dashboard bundle and,
+# when `RAXIS_REVISION` is set, refresh the bottled `.brew/raxis.rb`
+# from the current formula template.
 #
 # Usage:
 #   replace-dashboard-in-bottle.sh <bottle.tar.gz> <dashboard-bundle.tar.gz> <out-dir>
@@ -49,21 +51,81 @@ rm -rf "${cellar}/share/raxis/dashboard"
 mkdir -p "${cellar}/share/raxis"
 cp -R "${dist_dir}" "${cellar}/share/raxis/dashboard"
 
+refresh_installed_formula() {
+    local installed_formula="$1"
+    local formula_version="$2"
+    local revision="$3"
+    local script_dir template revision_line tmp_formula
+    local -a urls=()
+    local -a shas=()
+
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    template="${script_dir}/../templates/raxis.rb.tmpl"
+    if [[ ! -f "${template}" ]]; then
+        echo "replace-dashboard-in-bottle.sh: formula template not found: ${template}" >&2
+        exit 66
+    fi
+
+    while IFS= read -r value; do
+        urls+=("${value}")
+    done < <(grep -E '^[[:space:]]*url "' "${installed_formula}" | sed -E 's/^[[:space:]]*url "([^"]+)".*$/\1/')
+    while IFS= read -r value; do
+        shas+=("${value}")
+    done < <(grep -E '^[[:space:]]*sha256 "' "${installed_formula}" | sed -E 's/^[[:space:]]*sha256 "([^"]+)".*$/\1/')
+    if [[ "${#urls[@]}" -ne 4 || "${#shas[@]}" -ne 4 ]]; then
+        echo "replace-dashboard-in-bottle.sh: installed formula does not expose four platform urls and sha256s" >&2
+        exit 65
+    fi
+    for sha in "${shas[@]}"; do
+        if [[ ! "${sha}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "replace-dashboard-in-bottle.sh: installed formula sha256 is not 64 lowercase hex chars: ${sha}" >&2
+            exit 65
+        fi
+    done
+
+    revision_line=""
+    if [[ -n "${revision}" && "${revision}" != "0" ]]; then
+        if [[ ! "${revision}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "replace-dashboard-in-bottle.sh: RAXIS_REVISION must be a positive integer when set" >&2
+            exit 65
+        fi
+        revision_line="  revision ${revision}"
+    fi
+
+    tmp_formula="${installed_formula}.tmp"
+    awk '
+      /^[[:space:]]*bottle do$/ { in_bottle = 1; next }
+      in_bottle && /^[[:space:]]*end$/ { in_bottle = 0; next }
+      !in_bottle { print }
+    ' "${template}" |
+        sed \
+            -e "s|@@RAXIS_VERSION@@|${formula_version}|g" \
+            -e "s|@@RAXIS_REVISION_LINE@@|${revision_line}|g" \
+            -e "s|@@RAXIS_DARWIN_ARM64_URL@@|${urls[0]}|g" \
+            -e "s|@@RAXIS_DARWIN_X86_64_URL@@|${urls[1]}|g" \
+            -e "s|@@RAXIS_LINUX_ARM64_URL@@|${urls[2]}|g" \
+            -e "s|@@RAXIS_LINUX_X86_64_URL@@|${urls[3]}|g" \
+            -e "s|@@RAXIS_DARWIN_ARM64_SHA256@@|${shas[0]}|g" \
+            -e "s|@@RAXIS_DARWIN_X86_64_SHA256@@|${shas[1]}|g" \
+            -e "s|@@RAXIS_LINUX_ARM64_SHA256@@|${shas[2]}|g" \
+            -e "s|@@RAXIS_LINUX_X86_64_SHA256@@|${shas[3]}|g" \
+        > "${tmp_formula}"
+    if grep -Eq '@@[A-Z_]+@@' "${tmp_formula}"; then
+        echo "replace-dashboard-in-bottle.sh: refreshed formula still contains template tokens" >&2
+        grep -Eo '@@[A-Z_]+@@' "${tmp_formula}" | sort -u >&2
+        exit 70
+    fi
+    ruby -c "${tmp_formula}" >/dev/null
+    mv "${tmp_formula}" "${installed_formula}"
+}
+
 installed_formula="${cellar}/.brew/raxis.rb"
 if [[ -n "${RAXIS_REVISION:-}" && -f "${installed_formula}" ]]; then
     if [[ ! "${RAXIS_REVISION}" =~ ^[1-9][0-9]*$ ]]; then
         echo "replace-dashboard-in-bottle.sh: RAXIS_REVISION must be a positive integer when set" >&2
         exit 65
     fi
-    tmp_formula="${installed_formula}.tmp"
-    awk -v revision="${RAXIS_REVISION}" '
-      /^[[:space:]]*revision[[:space:]]+[0-9]+[[:space:]]*$/ { next }
-      { print }
-      /^[[:space:]]*version[[:space:]]+"/ {
-        print "  revision " revision
-      }
-    ' "${installed_formula}" > "${tmp_formula}"
-    mv "${tmp_formula}" "${installed_formula}"
+    refresh_installed_formula "${installed_formula}" "$(basename "${cellar}")" "${RAXIS_REVISION}"
 fi
 
 out="${out_dir}/$(basename "${bottle_archive}")"

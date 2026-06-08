@@ -1,10 +1,12 @@
-# Dashboard-only release pipeline.
+# Homebrew formula revision pipeline.
 #
 # This is the middle-ground path between "rebuild every native binary
-# and guest image" and "copy local files by hand". It rebuilds only the
-# Vite dashboard bundle, rewrites the dashboard payload inside the
-# already-published runtime archives / bottles for a base release, and
-# updates the Homebrew formula with a formula `revision`.
+# and guest image" and "copy local files by hand". It can carry
+# dashboard-only changes, formula/service changes, or both. It rebuilds
+# only the Vite dashboard bundle, rewrites the dashboard payload inside
+# the already-published runtime archives / bottles for a base release,
+# refreshes the bottled `.brew/raxis.rb` from the current formula
+# template, and updates the Homebrew formula with a formula `revision`.
 
 name: dashboard-release
 
@@ -16,7 +18,7 @@ on:
         required: true
         type: string
       revision:
-        description: "Homebrew formula revision for this dashboard patch, e.g. 1"
+        description: "Homebrew formula revision, e.g. 1"
         required: true
         type: string
 
@@ -32,7 +34,7 @@ env:
 
 jobs:
   dashboard-patch:
-    name: dashboard patch ${{ inputs.base_version }} r${{ inputs.revision }}
+    name: homebrew revision ${{ inputs.base_version }} r${{ inputs.revision }}
     runs-on: ubuntu-22.04
     env:
       HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
@@ -42,7 +44,7 @@ jobs:
           case "${{ vars.RAXIS_RELEASE_ENABLED || '0' }}" in
             1|true|TRUE|yes|YES) ;;
             *)
-              echo "::error::RAXIS_RELEASE_ENABLED must be true/1 to publish dashboard releases"
+              echo "::error::RAXIS_RELEASE_ENABLED must be true/1 to publish Homebrew revisions"
               exit 78
               ;;
           esac
@@ -118,18 +120,19 @@ jobs:
           done
           ls -lh patched/runtime patched/bottles
 
-      - name: upload dashboard patch release
+      - name: upload Homebrew revision release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: dashboard-${{ inputs.base_version }}-r${{ inputs.revision }}
-          name: Dashboard patch ${{ inputs.base_version }} r${{ inputs.revision }}
+          name: Homebrew revision ${{ inputs.base_version }} r${{ inputs.revision }}
           body: |
-            Dashboard-only patch for RAXIS ${{ inputs.base_version }}.
+            Homebrew formula revision for RAXIS ${{ inputs.base_version }}.
 
-            This release rebuilds only the operator dashboard bundle and
-            repackages the existing runtime archives and Homebrew bottles.
-            Host binaries, canonical guest images, and guest kernels come
-            from the base release.
+            This release rebuilds only the operator dashboard bundle,
+            refreshes the bottled Homebrew formula copy, and repackages
+            the existing runtime archives and Homebrew bottles. Host
+            binaries, canonical guest images, and guest kernels come from
+            the base release.
           overwrite_files: true
           files: |
             out/dashboard/*.tar.gz
@@ -206,6 +209,6 @@ jobs:
             echo "Homebrew tap already up to date"
             exit 0
           fi
-          git -C tap commit -m "Update raxis dashboard ${{ inputs.base_version }} r${{ inputs.revision }}"
+          git -C tap commit -m "Update raxis ${{ inputs.base_version }} r${{ inputs.revision }}"
           GIT_SSH_COMMAND="ssh -i ~/.ssh/raxis-homebrew-tap -o IdentitiesOnly=yes" \
             git -C tap push origin HEAD
