@@ -149,6 +149,7 @@ jobs:
 
           base="${{ inputs.base_version }}"
           formula_version="${base#v}"
+          bottle_formula_version="${formula_version}_${{ inputs.revision }}"
           base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${base}"
           patch_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/dashboard-${base}-r${{ inputs.revision }}"
 
@@ -162,14 +163,14 @@ jobs:
           RAXIS_LINUX_X86_64_SHA256="$(sha256_file "base/raxis-${base}-linux-x86_64.tar.gz")"
 
           RAXIS_BOTTLE_ROOT_URL="${patch_url}"
-          RAXIS_BOTTLE_DARWIN_ARM64_TAHOE_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.arm64_tahoe.bottle.tar.gz")"
-          RAXIS_BOTTLE_DARWIN_X86_64_TAHOE_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.tahoe.bottle.tar.gz")"
-          RAXIS_BOTTLE_DARWIN_ARM64_SEQUOIA_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.arm64_sequoia.bottle.tar.gz")"
-          RAXIS_BOTTLE_DARWIN_X86_64_SEQUOIA_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.sequoia.bottle.tar.gz")"
-          RAXIS_BOTTLE_DARWIN_ARM64_SONOMA_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.arm64_sonoma.bottle.tar.gz")"
-          RAXIS_BOTTLE_DARWIN_X86_64_SONOMA_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.sonoma.bottle.tar.gz")"
-          RAXIS_BOTTLE_LINUX_ARM64_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.arm64_linux.bottle.tar.gz")"
-          RAXIS_BOTTLE_LINUX_X86_64_SHA256="$(sha256_file "patched/bottles/raxis-${formula_version}.x86_64_linux.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_ARM64_TAHOE_SHA256="$(sha256_file "patched/bottles/raxis-${bottle_formula_version}.arm64_tahoe.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_X86_64_TAHOE_SHA256="$(sha256_file "patched/bottles/raxis-${bottle_formula_version}.tahoe.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_ARM64_SEQUOIA_SHA256="$(sha256_file "patched/bottles/raxis-${bottle_formula_version}.arm64_sequoia.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_X86_64_SEQUOIA_SHA256="$(sha256_file "patched/bottles/raxis-${bottle_formula_version}.sequoia.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_ARM64_SONOMA_SHA256="$(sha256_file "patched/bottles/raxis-${bottle_formula_version}.arm64_sonoma.bottle.tar.gz")"
+          RAXIS_BOTTLE_DARWIN_X86_64_SONOMA_SHA256="$(sha256_file "patched/bottles/raxis-${bottle_formula_version}.sonoma.bottle.tar.gz")"
+          RAXIS_BOTTLE_LINUX_ARM64_SHA256="$(sha256_file "patched/bottles/raxis-${bottle_formula_version}.arm64_linux.bottle.tar.gz")"
+          RAXIS_BOTTLE_LINUX_X86_64_SHA256="$(sha256_file "patched/bottles/raxis-${bottle_formula_version}.x86_64_linux.bottle.tar.gz")"
           RAXIS_VERSION="${formula_version}"
           RAXIS_REVISION="${{ inputs.revision }}"
 

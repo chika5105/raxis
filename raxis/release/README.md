@@ -117,8 +117,11 @@ The workflow:
 5. Refreshes the bottled `.brew/raxis.rb` from the current
    `release/templates/raxis.rb.tmpl`, with the requested formula
    `revision`.
-6. Uploads patched archives to `dashboard-<base_version>-r<N>`.
-7. Renders the tap formula with the same core `version`, a Homebrew
+6. Renames patched bottle archives with Homebrew's revision suffix,
+   for example `raxis-0.2.6_2.arm64_tahoe.bottle.tar.gz` for
+   `revision 2`.
+7. Uploads patched archives to `dashboard-<base_version>-r<N>`.
+8. Renders the tap formula with the same core `version`, a Homebrew
    `revision <N>`, base-release source tarball URLs, and patched-bottle
    URLs.
 

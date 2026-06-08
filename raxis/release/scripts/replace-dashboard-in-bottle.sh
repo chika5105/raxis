@@ -128,6 +128,11 @@ if [[ -n "${RAXIS_REVISION:-}" && -f "${installed_formula}" ]]; then
     refresh_installed_formula "${installed_formula}" "$(basename "${cellar}")" "${RAXIS_REVISION}"
 fi
 
-out="${out_dir}/$(basename "${bottle_archive}")"
+out_name="$(basename "${bottle_archive}")"
+if [[ -n "${RAXIS_REVISION:-}" ]]; then
+    formula_version="$(basename "${cellar}")"
+    out_name="${out_name/raxis-${formula_version}./raxis-${formula_version}_${RAXIS_REVISION}.}"
+fi
+out="${out_dir}/${out_name}"
 tar -C "${bottle_root}" -czf "${out}" raxis
 printf '%s\n' "${out}"
