@@ -12,7 +12,7 @@
 # into the kernel binary directly, not embedded into this image.
 
 role              = "Orchestrator"
-kernel_version    = "0.2.3"
+kernel_version    = "0.2.6"
 
 source_date_epoch = 1700000000
 erofs_version     = "1.7.1"

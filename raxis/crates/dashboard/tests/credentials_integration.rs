@@ -129,12 +129,19 @@ fn fixture(name: &str, plaintext: &str) -> CredentialFixture {
         metadata: CredentialMetadata {
             name: name.to_owned(),
             proxy_type: "postgres".into(),
+            environment: Some("staging".into()),
+            environment_source: Some("policy.permitted_credentials".into()),
+            backend_kind: Some("file".into()),
+            provider_kind: None,
             mount_as: Some("DATABASE_URL".into()),
             format_hint: "libpq URL".into(),
             upstream_host_port: Some("127.0.0.1:5432".into()),
             byte_size: plaintext.len() as u64,
             sha256_prefix: Some("deadbeef".into()),
             loaded_from_path: Some(format!("/tmp/{name}.env")),
+            modified_unix: Some(1_700_000_000),
+            mode_octal: Some("0600".into()),
+            owner_uid: Some(501),
             is_revealable: true,
             reveal_required_role: "admin".into(),
         },
@@ -247,6 +254,7 @@ async fn list_initiative_credentials_unknown_initiative_returns_404() {
 async fn list_system_credentials_metadata_visible_to_read_role() {
     let (handle, base, token, data, _fp) = serve_with_role(DashboardRole::Read).await;
     data.push_system_credential(fixture("providers.anthropic", "sk-ant-…"));
+    data.push_system_credential(fixture("providers.openai", "sk-openai-…"));
 
     let client = reqwest::Client::new();
     let res = client
@@ -267,7 +275,12 @@ async fn list_system_credentials_metadata_visible_to_read_role() {
     );
     assert!(
         body_text.contains("providers.anthropic"),
-        "Anthropic credential MUST appear in the read-role listing; \
+        "Anthropic provider credential MUST appear in the read-role listing; \
+         body was: {body_text}",
+    );
+    assert!(
+        body_text.contains("providers.openai"),
+        "OpenAI provider credential MUST appear in the read-role listing; \
          body was: {body_text}",
     );
 
@@ -438,46 +451,48 @@ async fn reveal_initiative_credential_unknown_name_returns_404() {
 }
 
 // ---------------------------------------------------------------------------
-// System reveal — Anthropic Critical-severity
+// System reveal — Critical severity for every provider/system credential
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reveal_system_anthropic_credential_emits_critical_severity_audit() {
+async fn reveal_system_provider_credentials_emit_critical_severity_audit() {
     let (handle, base, token, data, fp) = serve_with_role(DashboardRole::Admin).await;
     data.push_system_credential(fixture("providers.anthropic", "sk-ant-test"));
+    data.push_system_credential(fixture("providers.openai", "sk-openai-test"));
 
     let client = reqwest::Client::new();
-    let res = client
-        .post(format!(
-            "{base}/api/system/credentials/providers.anthropic/reveal"
-        ))
-        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
-        .send()
-        .await
-        .expect("send");
-    assert_eq!(res.status(), 200);
+    for name in ["providers.anthropic", "providers.openai"] {
+        let res = client
+            .post(format!("{base}/api/system/credentials/{name}/reveal"))
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(res.status(), 200, "system reveal failed for {name}");
+    }
 
-    // INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01: the
-    // Anthropic reveal MUST carry `severity = "critical"`
-    // (NOT "high"). This is the tripwire that catches a
-    // future refactor that folds system + initiative reveals
-    // into a single severity bucket.
+    // INV-DASHBOARD-SYSTEM-CREDENTIAL-SEVERITY-01: all system reveals
+    // MUST carry `severity = "critical"` (NOT "high"), regardless of
+    // provider name. This catches a future refactor that folds system +
+    // initiative reveals into a single severity bucket.
     let audits = data.recorded_operator_audits();
-    let critical = audits.iter().any(|e| {
-        matches!(
-            e,
-            AuditEventKind::OperatorRevealedSystemCredential {
-                operator_fingerprint, credential_name, severity, outcome, ..
-            } if operator_fingerprint == &fp
-              && credential_name == "providers.anthropic"
-              && severity == "critical"
-              && outcome == "Accepted"
-        )
-    });
-    assert!(
-        critical,
-        "Anthropic reveal MUST emit severity=critical: {audits:?}",
-    );
+    for expected in ["providers.anthropic", "providers.openai"] {
+        let critical = audits.iter().any(|e| {
+            matches!(
+                e,
+                AuditEventKind::OperatorRevealedSystemCredential {
+                    operator_fingerprint, credential_name, severity, outcome, ..
+                } if operator_fingerprint == &fp
+                  && credential_name == expected
+                  && severity == "critical"
+                  && outcome == "Accepted"
+            )
+        });
+        assert!(
+            critical,
+            "system reveal for {expected} MUST emit severity=critical: {audits:?}",
+        );
+    }
     handle.shutdown().await.expect("shutdown");
 }
 
@@ -536,9 +551,7 @@ async fn reveal_system_credential_read_role_returns_403_with_audited_denial() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reveal_initiative_credential_emits_high_severity_audit() {
-    // Spec: system reveals are uniformly `severity = "critical"`
-    // (the notification-routing layer escalates Anthropic-named
-    // system reveals further to a Critical-priority inbox row);
+    // Spec: system reveals are uniformly `severity = "critical"`;
     // per-initiative reveals are uniformly `severity = "high"`.
     // This test pins the per-initiative severity floor — a future
     // refactor that drops it to "low" or omits the field would be

@@ -1,13 +1,13 @@
-/* `<SystemCredentialsPage>` — top-level page for system-wide
- * credentials (Anthropic API key, other provider keys, etc.).
+/* `<SystemCredentialsPage>` — top-level page for registered
+ * credentials (provider API keys, workload credentials, gateway
+ * upstream keys, etc.).
  *
  * Listing surface: visible to every authenticated operator
  * (`read` or higher) per
  * `INV-DASHBOARD-CREDENTIAL-VIEWER-LISTS-ALL-OPERATOR-VISIBLE-SECRETS-01`
- * — every credential the kernel uses MUST appear here so the
- * operator can audit the surface area. The wire shape is
- * metadata-only; plaintext never leaves the kernel on the
- * listing path.
+ * — every registered credential MUST appear here so the operator
+ * can audit the surface area. The wire shape is metadata-only;
+ * plaintext never leaves the kernel on the listing path.
  *
  * Reveal surface: admin-only per
  * `INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01`. A `read`
@@ -17,7 +17,7 @@
  * (`INV-DASHBOARD-CREDENTIAL-REVEAL-PLAINTEXT-WORKS-OR-EXPLAINS-01`
  * — silent failure forbidden).
  *
- * Spec: `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01` —
+ * Spec: `INV-DASHBOARD-SYSTEM-CREDENTIAL-SEVERITY-01` —
  * the page renders an explicit warning banner above the
  * credential list reminding the operator that reveals here
  * are Critical-severity audit events.
@@ -35,14 +35,13 @@ export function SystemCredentialsPage() {
       <header>
         <h1 className="text-xl font-semibold text-ink">System credentials</h1>
         <p className="mt-1 text-sm text-ink-muted max-w-2xl">
-          Provider-bound credentials the kernel uses to reach the planner /
-          reviewer model substrate, gateways, and other shared upstream
-          services. These never reach an agent VM — only the kernel reads
-          them. Reveals from this surface emit{" "}
-          <strong className="text-warn">High-severity</strong> audit rows
-          (Anthropic-bound credentials emit{" "}
-          <strong className="text-bad">Critical-severity</strong> rows and
-          fire an operator notification).
+          Registered credentials the kernel can use for model providers,
+          gateway upstreams, and task-scoped credential proxies. Secret bytes
+          never reach an agent VM — agents receive only mediated handles such
+          as mounted env names or local proxy endpoints. Every reveal from
+          this surface emits a{" "}
+          <strong className="text-bad">Critical-severity</strong> audit row
+          and fires an operator notification.
         </p>
       </header>
       <div

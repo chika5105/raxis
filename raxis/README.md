@@ -84,7 +84,7 @@ Qualified verifiers must satisfy independence (no financial relationship beyond 
 
 What you have checked out is the **RAXIS** codebase: a **Rust workspace** meant to be built and run with **this directory as the root** (`cargo build`, `cargo test`, paths in the specs). That stays true if you clone the repo by itself or park it inside a larger monorepo for a while.
 
-Do not confuse the workspace root with **where the kernel keeps live state**. Databases, sockets, audit log segments, witness blobs, and the policy cache live under **`$RAXIS_DATA_DIR`**, which defaults to **`~/.raxis/`**. That location is fixed by environment variable, not by where the Git tree sits on disk.
+Do not confuse the workspace root with **where the kernel keeps live state**. Databases, sockets, audit log segments, witness blobs, and the policy cache live under **`$RAXIS_DATA_DIR`**. Source builds default to **`~/.raxis/`**; Homebrew-installed binaries default to Homebrew's persistent **`var/lib/raxis`** under the active Homebrew prefix (for example `/opt/homebrew/var/lib/raxis` on Apple Silicon macOS). An explicit `--data-dir` flag or `RAXIS_DATA_DIR` environment variable always wins. `raxis doctor` and `raxis status` print the detected install origin so operators can tell whether they are using a source/dev binary or the Homebrew/prod binary.
 
 For operator actions (genesis, plan approval, escalations,
 audit-chain verification, and the rest), the spec names one binary:

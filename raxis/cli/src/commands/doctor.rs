@@ -75,12 +75,14 @@ use raxis_canonical_images::{
     CanonicalImageError, CanonicalImageKind, EXPECTED_KERNEL_SIGNING_KEY_BYTES,
 };
 use raxis_crypto::cert::{cert_status, CertStatus};
+use raxis_dashboard::DashboardConfig;
 use raxis_policy::load_policy;
 use raxis_runtime::{read as read_heartbeat, ReadError as HeartbeatReadError};
 use raxis_store::views::operator_certificates;
 use raxis_store::views::policy_history;
 use raxis_store::{open_ro, RoError};
 use raxis_types::unix_now_secs;
+use serde::Deserialize;
 
 use crate::errors::CliError;
 use crate::GlobalFlags;
@@ -925,6 +927,8 @@ fn print_help() {
 
 fn collect(data_dir: &Path) -> Report {
     let mut r = Report::default();
+    let origin = raxis_runtime::current_install_origin();
+    r.push("install.origin", Outcome::Ok, origin.detail());
 
     // 1. data_dir exists.
     match std::fs::metadata(data_dir) {
@@ -953,6 +957,8 @@ fn collect(data_dir: &Path) -> Report {
             return r;
         }
     }
+
+    check_dashboard_url(&mut r, data_dir);
 
     // 2. Subdir presence + mode bits.
     for (name, expected_mode) in EXPECTED_MODES {
@@ -1092,6 +1098,61 @@ fn collect(data_dir: &Path) -> Report {
     }
 
     r
+}
+
+#[derive(Debug, Deserialize)]
+struct DashboardPolicyProjection {
+    #[serde(default)]
+    dashboard: Option<DashboardConfig>,
+}
+
+fn check_dashboard_url(r: &mut Report, data_dir: &Path) {
+    let policy_path = data_dir.join("policy").join(POLICY_FILE_NAME);
+    match dashboard_url_from_policy(&policy_path) {
+        Ok(DashboardUrlStatus::Enabled(url)) => {
+            r.push("dashboard.url", Outcome::Ok, url);
+        }
+        Ok(DashboardUrlStatus::Disabled(url)) => {
+            r.push(
+                "dashboard.url",
+                Outcome::Ok,
+                format!("disabled; configured URL would be {url}"),
+            );
+        }
+        Err(msg) => {
+            r.push("dashboard.url", Outcome::Warn, msg);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DashboardUrlStatus {
+    Enabled(String),
+    Disabled(String),
+}
+
+fn dashboard_url_from_policy(policy_path: &Path) -> Result<DashboardUrlStatus, String> {
+    let raw = std::fs::read_to_string(policy_path).map_err(|e| {
+        format!(
+            "unavailable: cannot read policy artifact {}: {e}",
+            policy_path.display()
+        )
+    })?;
+    let projection: DashboardPolicyProjection = toml::from_str(&raw).map_err(|e| {
+        format!("unavailable: policy artifact is not valid TOML for dashboard URL discovery: {e}")
+    })?;
+    let cfg = projection.dashboard.unwrap_or_default();
+    let scheme = if cfg.tls_cert_path.is_empty() && cfg.tls_key_path.is_empty() {
+        "http"
+    } else {
+        "https"
+    };
+    let url = format!("{scheme}://{}:{}/", cfg.bind_address, cfg.bind_port);
+    if cfg.enabled {
+        Ok(DashboardUrlStatus::Enabled(url))
+    } else {
+        Ok(DashboardUrlStatus::Disabled(url))
+    }
 }
 
 /// Walk every row in the `operator_certificates` view and classify it
@@ -2073,9 +2134,11 @@ mod tests {
     #[test]
     fn collect_fails_when_data_dir_missing() {
         let r = collect(Path::new("/definitely/does/not/exist/raxis"));
-        assert_eq!(r.checks.len(), 1);
-        assert_eq!(r.checks[0].id, "data_dir.exists");
-        assert_eq!(r.checks[0].outcome, Outcome::Fail);
+        assert_eq!(r.checks.len(), 2);
+        assert_eq!(r.checks[0].id, "install.origin");
+        assert_eq!(r.checks[0].outcome, Outcome::Ok);
+        assert_eq!(r.checks[1].id, "data_dir.exists");
+        assert_eq!(r.checks[1].outcome, Outcome::Fail);
     }
 
     #[test]
@@ -2086,10 +2149,66 @@ mod tests {
         let mut ids: Vec<&str> = r.checks.iter().map(|c| c.id).collect();
         ids.sort();
         assert!(ids.contains(&"data_dir.exists"), "ids: {ids:?}");
+        assert!(ids.contains(&"dashboard.url"), "ids: {ids:?}");
         // Every required subdir is missing → keys/providers fail,
         // notifications warns, audit warn-or-fail through to the
         // chain check.
         assert_eq!(r.worst(), Outcome::Fail);
+    }
+
+    #[test]
+    fn dashboard_url_from_policy_uses_configured_http_listener() {
+        let tmp = TempDir::new().unwrap();
+        let policy = tmp.path().join("policy.toml");
+        std::fs::write(
+            &policy,
+            r#"
+[dashboard]
+enabled = true
+bind_address = "127.0.0.1"
+bind_port = 19820
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            dashboard_url_from_policy(&policy).unwrap(),
+            DashboardUrlStatus::Enabled("http://127.0.0.1:19820/".to_owned())
+        );
+    }
+
+    #[test]
+    fn dashboard_url_from_policy_reports_disabled_default_url() {
+        let tmp = TempDir::new().unwrap();
+        let policy = tmp.path().join("policy.toml");
+        std::fs::write(&policy, "[operators]\n").unwrap();
+
+        assert_eq!(
+            dashboard_url_from_policy(&policy).unwrap(),
+            DashboardUrlStatus::Disabled("http://127.0.0.1:9820/".to_owned())
+        );
+    }
+
+    #[test]
+    fn dashboard_url_from_policy_uses_https_when_tls_is_configured() {
+        let tmp = TempDir::new().unwrap();
+        let policy = tmp.path().join("policy.toml");
+        std::fs::write(
+            &policy,
+            r#"
+[dashboard]
+enabled = true
+bind_address = "0.0.0.0"
+bind_port = 9443
+tls_cert_path = "/etc/raxis/dashboard.crt"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            dashboard_url_from_policy(&policy).unwrap(),
+            DashboardUrlStatus::Enabled("https://0.0.0.0:9443/".to_owned())
+        );
     }
 
     #[test]

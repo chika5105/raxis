@@ -30,9 +30,14 @@
 //!    audit chain is the source of truth.
 
 pub mod heartbeat;
+pub mod install;
 
 pub use heartbeat::{
     read, unix_now_secs, write_atomic, KernelLifecycleState, ReadError, Snapshot, HEARTBEAT_FILE,
     HEARTBEAT_INTERVAL, HEARTBEAT_SCHEMA_VERSION, HEARTBEAT_STALE_AFTER, RUNTIME_DIR,
     STORE_SCHEMA_VERSION,
+};
+pub use install::{
+    current_install_origin, data_dir_from_env_or_install_default, homebrew_data_dir_from_exe_path,
+    homebrew_prefix_from_exe_path, InstallOrigin, HOMEBREW_DATA_DIR_SUFFIX, RAXIS_DATA_DIR_ENV,
 };

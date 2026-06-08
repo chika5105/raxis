@@ -179,12 +179,7 @@ fn run() -> Result<(), CliError> {
     let mut pos = 1usize;
 
     // Global flags.
-    let mut data_dir: PathBuf = std::env::var("RAXIS_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_owned());
-            PathBuf::from(home).join(".raxis")
-        });
+    let mut data_dir: PathBuf = raxis_runtime::data_dir_from_env_or_install_default();
     let mut socket_path: Option<PathBuf> = None;
     let mut operator_key_path: Option<PathBuf> = None;
 
@@ -566,8 +561,10 @@ USAGE:
     raxis --version
 
 GLOBAL FLAGS:
-    --data-dir <path>       Kernel data directory
-                            (default: ~/.raxis or $RAXIS_DATA_DIR)
+    --data-dir <path>       Kernel data directory. Explicit flag wins,
+                            then $RAXIS_DATA_DIR. Homebrew binaries
+                            default to <brew-prefix>/var/lib/raxis;
+                            source builds default to ~/.raxis.
     --socket <path>         Operator socket path
                             (default: <data-dir>/sockets/operator.sock)
     --operator-key <path>   Operator Ed25519 private key for signing (PEM format).

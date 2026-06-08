@@ -42,6 +42,80 @@ describe("Plan Builder realistic e2e plan round-trip", () => {
     );
   });
 
+  it("does not warn when a credential binding matches a registered credential", () => {
+    const parsed = __planBuilderTest.parsePlanToml(primaryPlan);
+    const tasks = parsed.tasks.map((task, index) =>
+      index === 0
+        ? {
+            ...task,
+            credentials: [
+              {
+                name: "postgres-staging",
+                proxyType: "postgres" as const,
+                mountAs: "DATABASE_URL",
+                upstreamUrl: "",
+                upstreamHostPort: "",
+                authMode: "",
+                project: "",
+                tenantId: "",
+                roleArn: "",
+                clientId: "",
+              },
+            ],
+          }
+        : task,
+    );
+
+    const issues = __planBuilderTest.validatePlan({
+      ...parsed,
+      tasks,
+      credentialSetups: [
+        {
+          name: "redis-staging",
+          proxyType: "redis",
+          mountAs: "REDIS_URL",
+          upstreamUrl: "",
+          upstreamHostPort: "127.0.0.1:6379",
+          authMode: "",
+          project: "",
+          tenantId: "",
+          roleArn: "",
+          clientId: "",
+          description: "Unrelated Redis credential.",
+          environment: "staging",
+          expectedShape: "redis://:PASSWORD@HOST:6379/0",
+        },
+      ],
+      registeredCredentials: [
+        {
+          name: "postgres-staging",
+          proxy_type: "postgres",
+          environment: "staging",
+          environment_source: "credential.metadata",
+          backend_kind: "file",
+          provider_kind: null,
+          mount_as: null,
+          format_hint: "Postgres staging URL",
+          upstream_host_port: null,
+          byte_size: 32,
+          sha256_prefix: "deadbeef",
+          loaded_from_path: "/var/raxis/credentials/postgres-staging.env",
+          modified_unix: 1_700_000_000,
+          mode_octal: "0600",
+          owner_uid: 501,
+          is_revealable: true,
+          reveal_required_role: "admin",
+        },
+      ],
+    });
+
+    expect(
+      issues.find((issue) =>
+        issue.message.includes("postgres-staging has no setup template"),
+      ),
+    ).toBeUndefined();
+  });
+
   it("maps generated TOML sections back to builder surfaces", () => {
     const parsed = __planBuilderTest.parsePlanToml(primaryPlan);
     const rendered = __planBuilderTest.renderPlan(parsed);

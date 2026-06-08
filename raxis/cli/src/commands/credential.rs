@@ -63,6 +63,7 @@ use std::path::{Path, PathBuf};
 
 use raxis_credentials::{CredentialBackend, CredentialName, CredentialValue, OperatorId};
 use raxis_credentials_file::FileCredentialBackend;
+use serde::{Deserialize, Serialize};
 
 use crate::errors::CliError;
 use crate::GlobalFlags;
@@ -104,6 +105,9 @@ pub fn run_list(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
                 serde_json::json!({
                     "name":           e.name,
                     "kind":           e.kind.as_str(),
+                    "proxy_type":     e.proxy_type,
+                    "environment":    e.environment,
+                    "description":    e.description,
                     "size_bytes":     e.size_bytes,
                     "modified_unix":  e.modified_unix,
                     "mode_octal":     format!("{:o}", e.mode),
@@ -131,16 +135,18 @@ pub fn run_list(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     }
 
     println!(
-        "{:<32}  {:<10}  {:>10}  {:<20}  {:>4}  {:>6}",
-        "NAME", "KIND", "BYTES", "MTIME", "MODE", "UID",
+        "{:<32}  {:<10}  {:<12}  {:<12}  {:>10}  {:<20}  {:>4}  {:>6}",
+        "NAME", "KIND", "TYPE", "ENV", "BYTES", "MTIME", "MODE", "UID",
     );
     for e in &entries {
         let mtime = format_mtime(e.modified_unix);
         let mode_warn = if e.mode & 0o177 != 0 { "*" } else { " " };
         println!(
-            "{:<32}  {:<10}  {:>10}  {:<20}  {:>4o}{mode_warn} {:>6}",
+            "{:<32}  {:<10}  {:<12}  {:<12}  {:>10}  {:<20}  {:>4o}{mode_warn} {:>6}",
             e.name,
             e.kind.as_str(),
+            blank_or_dash(&e.proxy_type),
+            blank_or_dash(&e.environment),
             e.size_bytes,
             mtime,
             e.mode & 0o777,
@@ -281,6 +287,10 @@ pub fn run_rotate(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
                 e.error_code(),
             ))
         })?;
+    if let Err(e) = refresh_credential_sidecar_after_rotate(data_dir, &cred_name, &name_str, &actor)
+    {
+        eprintln!("warning: credential rotated but metadata sidecar refresh failed: {e}");
+    }
 
     println!("Rotated: {name_str}");
     println!(
@@ -318,6 +328,9 @@ impl CredKind {
 struct ListEntry {
     name: String,
     kind: CredKind,
+    proxy_type: String,
+    environment: String,
+    description: String,
     size_bytes: u64,
     modified_unix: i64,
     mode: u32,
@@ -328,12 +341,14 @@ fn collect_entries(data_dir: &Path) -> Result<Vec<ListEntry>, CliError> {
     let mut out = Vec::new();
     push_dir(
         &mut out,
+        data_dir,
         &data_dir.join("credentials"),
         CredKind::Credential,
         "env",
     )?;
     push_dir(
         &mut out,
+        data_dir,
         &data_dir.join("providers"),
         CredKind::Provider,
         "toml",
@@ -344,6 +359,7 @@ fn collect_entries(data_dir: &Path) -> Result<Vec<ListEntry>, CliError> {
 
 fn push_dir(
     out: &mut Vec<ListEntry>,
+    data_dir: &Path,
     dir: &Path,
     kind: CredKind,
     ext: &str,
@@ -375,6 +391,13 @@ fn push_dir(
         if stem_ext != Some(ext) {
             continue;
         }
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if file_name.ends_with(".metadata.toml") {
+            continue;
+        }
         let stem = match path.file_stem().and_then(|s| s.to_str()) {
             Some(s) => s,
             None => continue,
@@ -402,9 +425,14 @@ fn push_dir(
             CredKind::Credential => stem.to_owned(),
             CredKind::Provider => format!("providers.{stem}"),
         };
+        let cred_name = CredentialName::from(display_name.as_str());
+        let metadata = read_credential_sidecar(data_dir, &cred_name).unwrap_or_default();
         out.push(ListEntry {
             name: display_name,
             kind,
+            proxy_type: metadata.proxy_type,
+            environment: metadata.environment,
+            description: metadata.description,
             size_bytes: md.len(),
             modified_unix,
             mode,
@@ -791,11 +819,6 @@ pub fn run_add(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         }
         i += 1;
     }
-    // `description` is recorded verbatim in the audit event but is
-    // not retained in any sidecar metadata file in V2 — the spec's
-    // "Description" field on `show` is V3.
-    let _ = description;
-
     let name_str = name.ok_or_else(|| {
         CliError::Usage(
             "credential add: <name> is required (e.g. `cat secret | raxis credential add postgres-staging --type postgres --env staging`)"
@@ -846,6 +869,24 @@ pub fn run_add(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     })?;
 
     let actor = resolve_actor(flags)?;
+    if let Err(e) = write_credential_sidecar(
+        data_dir,
+        &cred_name,
+        &name_str,
+        &proxy_type,
+        &environment,
+        &description,
+        &actor,
+        true,
+    ) {
+        let _ = std::fs::remove_file(&path);
+        return Err(CliError::Io {
+            path: raxis_credentials_file::credential_metadata_file_path(data_dir, &cred_name)
+                .display()
+                .to_string(),
+            source: e,
+        });
+    }
     let _ = append_cli_audit_event(
         data_dir,
         &serde_json::json!({
@@ -853,6 +894,7 @@ pub fn run_add(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
             "name":              name_str,
             "proxy_type":        proxy_type,
             "environment":       environment,
+            "description":       description,
             "actor_fingerprint": actor.0,
             "backend_kind":      "file",
             "emitted_at":        unix_seconds(),
@@ -948,11 +990,15 @@ pub fn run_show(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     } else {
         "credential"
     };
+    let metadata = read_credential_sidecar(data_dir, &cred_name).unwrap_or_default();
 
     if json {
         let v = serde_json::json!({
             "name":           name_str,
             "kind":           kind_str,
+            "proxy_type":     metadata.proxy_type,
+            "environment":    metadata.environment,
+            "description":    metadata.description,
             "path":           path.display().to_string(),
             "size_bytes":     md.len(),
             "mode_octal":     format!("{:o}", mode & 0o777),
@@ -970,6 +1016,15 @@ pub fn run_show(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 
     println!("Name:          {name_str}");
     println!("Kind:          {kind_str}");
+    if !metadata.proxy_type.is_empty() {
+        println!("Type:          {}", metadata.proxy_type);
+    }
+    if !metadata.environment.is_empty() {
+        println!("Environment:   {}", metadata.environment);
+    }
+    if !metadata.description.is_empty() {
+        println!("Description:   {}", metadata.description);
+    }
     println!("File path:     {}", path.display());
     println!("File size:     {} bytes", md.len());
     println!(
@@ -1044,6 +1099,17 @@ pub fn run_remove(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
         path: path.display().to_string(),
         source: e,
     })?;
+    let metadata_path = raxis_credentials_file::credential_metadata_file_path(data_dir, &cred_name);
+    match std::fs::remove_file(&metadata_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!(
+                "warning: removed credential but metadata sidecar cleanup failed at {}: {e}",
+                metadata_path.display()
+            );
+        }
+    }
 
     let actor = resolve_actor(flags)?;
     let _ = append_cli_audit_event(
@@ -1286,6 +1352,121 @@ pub fn run_audit(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 // V2 §C7 — internal helpers
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct CredentialSidecar {
+    #[serde(default = "credential_sidecar_version")]
+    version: u8,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    proxy_type: String,
+    #[serde(default)]
+    environment: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default = "credential_sidecar_backend_kind")]
+    backend_kind: String,
+    #[serde(default)]
+    created_at: i64,
+    #[serde(default)]
+    updated_at: i64,
+    #[serde(default)]
+    actor_fingerprint: String,
+}
+
+fn credential_sidecar_version() -> u8 {
+    1
+}
+
+fn credential_sidecar_backend_kind() -> String {
+    "file".to_owned()
+}
+
+fn read_credential_sidecar(data_dir: &Path, name: &CredentialName) -> Option<CredentialSidecar> {
+    let path = raxis_credentials_file::credential_metadata_file_path(data_dir, name);
+    let text = std::fs::read_to_string(path).ok()?;
+    toml::from_str(&text).ok()
+}
+
+fn write_credential_sidecar(
+    data_dir: &Path,
+    cred_name: &CredentialName,
+    raw_name: &str,
+    proxy_type: &str,
+    environment: &str,
+    description: &str,
+    actor: &OperatorId,
+    fresh_registration: bool,
+) -> std::io::Result<()> {
+    let now = unix_seconds();
+    let previous = read_credential_sidecar(data_dir, cred_name).unwrap_or_default();
+    let created_at = if fresh_registration || previous.created_at <= 0 {
+        now
+    } else {
+        previous.created_at
+    };
+    let sidecar = CredentialSidecar {
+        version: credential_sidecar_version(),
+        name: raw_name.to_owned(),
+        proxy_type: proxy_type.to_owned(),
+        environment: environment.to_owned(),
+        description: description.to_owned(),
+        backend_kind: credential_sidecar_backend_kind(),
+        created_at,
+        updated_at: now,
+        actor_fingerprint: actor.0.clone(),
+    };
+    let bytes = toml::to_string_pretty(&sidecar)
+        .map_err(|e| std::io::Error::other(format!("serialize credential sidecar: {e}")))?
+        .into_bytes();
+    let path = raxis_credentials_file::credential_metadata_file_path(data_dir, cred_name);
+    write_replace_file_mode_0600(&path, &bytes)
+}
+
+fn refresh_credential_sidecar_after_rotate(
+    data_dir: &Path,
+    cred_name: &CredentialName,
+    raw_name: &str,
+    actor: &OperatorId,
+) -> std::io::Result<()> {
+    let existing = read_credential_sidecar(data_dir, cred_name).unwrap_or_else(|| {
+        let proxy_type = if raw_name.starts_with("providers.") {
+            "provider"
+        } else {
+            ""
+        };
+        CredentialSidecar {
+            version: credential_sidecar_version(),
+            name: raw_name.to_owned(),
+            proxy_type: proxy_type.to_owned(),
+            environment: String::new(),
+            description: String::new(),
+            backend_kind: credential_sidecar_backend_kind(),
+            created_at: unix_seconds(),
+            updated_at: 0,
+            actor_fingerprint: String::new(),
+        }
+    });
+    write_credential_sidecar(
+        data_dir,
+        cred_name,
+        raw_name,
+        &existing.proxy_type,
+        &existing.environment,
+        &existing.description,
+        actor,
+        false,
+    )
+}
+
+fn blank_or_dash(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "-"
+    } else {
+        value
+    }
+}
+
 fn write_new_credential(final_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = final_path
         .parent()
@@ -1296,6 +1477,33 @@ fn write_new_credential(final_path: &Path, bytes: &[u8]) -> std::io::Result<()> 
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("cred"),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    let tmp = parent.join(tmp_name);
+    write_file_mode_0600(&tmp, bytes)?;
+    if let Err(e) = std::fs::rename(&tmp, final_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    fsync_dir(parent)?;
+    Ok(())
+}
+
+fn write_replace_file_mode_0600(final_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = final_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("credential metadata path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let tmp_name = format!(
+        "{}.tmp.{}.{}",
+        final_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("credential.metadata.toml"),
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1581,8 +1789,9 @@ REJECTED:
 The add path:
   1. Refuses if the credential already exists (use `rotate` to update).
   2. Writes a temp file with mode 0600, fsync()s, atomic-renames to the final path.
-  3. fsync()s the parent directory.
-  4. Appends a CredentialRegistered record to <data-dir>/audit/credential-cli.jsonl.
+  3. Writes a non-secret <name>.metadata.toml sidecar with type/env/description.
+  4. fsync()s the parent directory.
+  5. Appends a CredentialRegistered record to <data-dir>/audit/credential-cli.jsonl.
 
 V2 stores the bytes verbatim. Per-type validation
 (kubeconfig / AWS JSON / postgres URI / etc.) is V3.

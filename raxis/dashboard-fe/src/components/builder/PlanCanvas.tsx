@@ -39,6 +39,7 @@ import type {
   TaskDraft,
   ToolProfileDraft,
 } from "@/pages/PlanBuilder";
+import type { CredentialMetadata } from "@/types/api";
 
 const NODE_W = 270;
 const NODE_H = 104;
@@ -96,11 +97,20 @@ const credentialProxyTypes: CredentialProxyType[] = [
   "k8s",
 ];
 
+const attachableCredentialProxyTypes = new Set<string>(credentialProxyTypes);
+
+function isAttachableRegisteredCredential(
+  credential: CredentialMetadata,
+): credential is CredentialMetadata & { proxy_type: CredentialProxyType } {
+  return attachableCredentialProxyTypes.has(credential.proxy_type);
+}
+
 export interface PlanCanvasProps {
   tasks: TaskDraft[];
   planVerifiers: PlanVerifierDraft[];
   toolProfiles: ToolProfileDraft[];
   credentialSetups: CredentialSetupDraft[];
+  registeredCredentials: CredentialMetadata[];
   policyGateRefs: PolicyGateRef[];
   selectedTaskId: string | null;
   revealTaskId?: string | null;
@@ -120,6 +130,7 @@ interface TaskNodeData extends Record<string, unknown> {
   task: TaskDraft;
   toolProfiles: ToolProfileDraft[];
   credentialSetups: CredentialSetupDraft[];
+  registeredCredentials: CredentialMetadata[];
   policyGateRefs: PolicyGateRef[];
   allTaskIds: string[];
   canRemoveTask: boolean;
@@ -415,6 +426,7 @@ const TaskNode = memo(({ data }: NodeProps<Node<TaskNodeData>>) => {
           task={task}
           toolProfiles={data.toolProfiles}
           credentialSetups={data.credentialSetups}
+          registeredCredentials={data.registeredCredentials}
           policyGateRefs={data.policyGateRefs}
           allTaskIds={data.allTaskIds}
           canRemove={data.canRemoveTask}
@@ -502,6 +514,7 @@ function InlineTaskEditor({
   task,
   toolProfiles,
   credentialSetups,
+  registeredCredentials,
   policyGateRefs,
   allTaskIds,
   canRemove,
@@ -514,6 +527,7 @@ function InlineTaskEditor({
   task: TaskDraft;
   toolProfiles: ToolProfileDraft[];
   credentialSetups: CredentialSetupDraft[];
+  registeredCredentials: CredentialMetadata[];
   policyGateRefs: PolicyGateRef[];
   allTaskIds: string[];
   canRemove: boolean;
@@ -525,6 +539,12 @@ function InlineTaskEditor({
 }) {
   const isExecutor = task.agentType === "Executor";
   const selectedProfiles = splitList(task.profiles);
+  const attachableRegisteredCredentials = registeredCredentials.filter((credential) =>
+    isAttachableRegisteredCredential(credential),
+  );
+  const providerCredentialCount = registeredCredentials.filter(
+    (credential) => credential.proxy_type === "provider",
+  ).length;
   const knownProfileIds = new Set(toolProfiles.map((profile) => profile.id));
   const missingProfiles = selectedProfiles.filter((profile) => !knownProfileIds.has(profile));
   const selectedPolicyGate = policyGateRefs.find((gate) => gate.name === task.verifierName);
@@ -573,6 +593,26 @@ function InlineTaskEditor({
           tenantId: setup.tenantId,
           roleArn: setup.roleArn,
           clientId: setup.clientId,
+        },
+      ],
+    });
+  };
+  const attachRegisteredCredential = (credential: CredentialMetadata) => {
+    const proxyType = credential.proxy_type as CredentialProxyType;
+    onUpdate({
+      credentials: [
+        ...task.credentials,
+        {
+          name: credential.name,
+          proxyType,
+          mountAs: credential.mount_as || defaultMountAs(proxyType),
+          upstreamUrl: "",
+          upstreamHostPort: credential.upstream_host_port || "",
+          authMode: "",
+          project: "",
+          tenantId: "",
+          roleArn: "",
+          clientId: "",
         },
       ],
     });
@@ -936,7 +976,11 @@ function InlineTaskEditor({
               }
             >
               {credentialSetups.length > 0 && (
-                <div className="flex flex-wrap gap-1.5">
+                <div className="space-y-1.5">
+                  <div className="text-[10px] font-semibold uppercase tracking-wide text-ink-subtle">
+                    Builder templates
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
                   {credentialSetups.map((setup) => {
                     const alreadyBound = task.credentials.some(
                       (credential) => credential.name.trim() === setup.name.trim(),
@@ -960,6 +1004,49 @@ function InlineTaskEditor({
                       </button>
                     );
                   })}
+                  </div>
+                </div>
+              )}
+              {attachableRegisteredCredentials.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="text-[10px] font-semibold uppercase tracking-wide text-ink-subtle">
+                    Registered credentials
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {attachableRegisteredCredentials.map((credential) => {
+                      const alreadyBound = task.credentials.some(
+                        (bound) => bound.name.trim() === credential.name.trim(),
+                      );
+                      return (
+                        <button
+                          key={credential.name}
+                          type="button"
+                          className={`badge max-w-full text-[10px] transition-colors ${
+                            alreadyBound
+                              ? "border-edge bg-panel text-ink-subtle"
+                              : "border-info/50 bg-info-muted text-info hover:border-info"
+                          }`}
+                          disabled={alreadyBound}
+                          title={`${credential.proxy_type}${credential.environment ? ` / ${credential.environment}` : ""}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            attachRegisteredCredential(credential);
+                          }}
+                        >
+                          {alreadyBound
+                            ? `${credential.name} attached`
+                            : `Attach ${credential.name}`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {providerCredentialCount > 0 && (
+                <div className="rounded border border-edge bg-panel-high px-2 py-1.5 text-[10px] leading-snug text-ink-subtle">
+                  {providerCredentialCount} provider credential
+                  {providerCredentialCount === 1 ? "" : "s"} registered for model routing;
+                  provider keys are kernel-owned and are not task bindings.
                 </div>
               )}
               {task.credentials.length === 0 ? (
@@ -1774,6 +1861,7 @@ function PlanCanvasInner({
   planVerifiers,
   toolProfiles,
   credentialSetups,
+  registeredCredentials,
   policyGateRefs,
   selectedTaskId,
   revealTaskId,
@@ -1810,6 +1898,7 @@ function PlanCanvasInner({
     () => ({
       toolProfiles,
       credentialSetups,
+      registeredCredentials,
       policyGateRefs,
       allTaskIds: tasks.map((task) => task.id),
       canRemoveTask,
@@ -1819,7 +1908,7 @@ function PlanCanvasInner({
       onOpenToolProfiles,
       onOpenCredentialSetup,
     }),
-    [canRemoveTask, credentialSetups, onOpenCredentialSetup, onOpenToolProfiles, onRemoveTask, onSelectTask, onUpdateTask, policyGateRefs, tasks, toolProfiles],
+    [canRemoveTask, credentialSetups, onOpenCredentialSetup, onOpenToolProfiles, onRemoveTask, onSelectTask, onUpdateTask, policyGateRefs, registeredCredentials, tasks, toolProfiles],
   );
 
   const [rfNodes, setRfNodes] = useState<BuilderNode[]>(() =>

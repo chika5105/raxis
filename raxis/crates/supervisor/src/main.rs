@@ -63,7 +63,7 @@ fn print_usage_and_exit(code: i32) -> ! {
          reset-circuit-breaker       Clear the circuit-breaker state\n\
          \n\
          OPTIONS:\n  \
-         --data-dir <PATH>           Override RAXIS_DATA_DIR / ~/.raxis\n  \
+         --data-dir <PATH>           Override RAXIS_DATA_DIR / install default\n  \
          --kernel-binary <PATH>      Override RAXIS_SUPERVISOR_KERNEL_BINARY\n\
          --yes                       Confirm reset-circuit-breaker non-interactively\n\
          \n\
@@ -79,13 +79,7 @@ fn print_usage_and_exit(code: i32) -> ! {
 }
 
 fn data_dir_from_env_or_default() -> PathBuf {
-    if let Ok(s) = std::env::var("RAXIS_DATA_DIR") {
-        return PathBuf::from(s);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".raxis");
-    }
-    PathBuf::from(".raxis")
+    raxis_runtime::data_dir_from_env_or_install_default()
 }
 
 fn kernel_binary_from_env_or_sibling() -> PathBuf {
@@ -203,7 +197,7 @@ async fn cmd_start(
     // identical to running `raxis-kernel` directly.
     let opt_in = std::env::var(ENV_OPT_IN).map(|v| v == "1").unwrap_or(false);
     if !opt_in {
-        return one_shot_passthrough(kernel_binary, &args.kernel_args);
+        return one_shot_passthrough(kernel_binary, &args.kernel_args, data_dir);
     }
 
     let log = match SupervisorLog::open(data_dir) {
@@ -227,7 +221,10 @@ async fn cmd_start(
         data_dir: data_dir.to_path_buf(),
         kernel_binary: kernel_binary.to_path_buf(),
         kernel_args: args.kernel_args.clone(),
-        kernel_env: Vec::new(),
+        kernel_env: vec![(
+            raxis_runtime::RAXIS_DATA_DIR_ENV.to_owned(),
+            data_dir.display().to_string(),
+        )],
         max_attempts: DEFAULT_MAX_ATTEMPTS,
         window_secs: DEFAULT_RESTART_WINDOW_SECS,
         shutdown_grace_secs,
@@ -329,10 +326,15 @@ fn prepare_nofile_limit() {
 /// the kernel process. That is the only signal-correct way to make
 /// opt-out mode behave like running `raxis-kernel` directly.
 #[cfg(unix)]
-fn one_shot_passthrough(kernel_binary: &std::path::Path, kernel_args: &[String]) -> i32 {
+fn one_shot_passthrough(
+    kernel_binary: &std::path::Path,
+    kernel_args: &[String],
+    data_dir: &std::path::Path,
+) -> i32 {
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new(kernel_binary)
         .args(kernel_args)
+        .env(raxis_runtime::RAXIS_DATA_DIR_ENV, data_dir)
         .exec();
     eprintln!(
         "{{\"level\":\"error\",\"event\":\"kernel_exec_failed\",\
@@ -342,11 +344,16 @@ fn one_shot_passthrough(kernel_binary: &std::path::Path, kernel_args: &[String])
 }
 
 #[cfg(not(unix))]
-fn one_shot_passthrough(kernel_binary: &std::path::Path, kernel_args: &[String]) -> i32 {
+fn one_shot_passthrough(
+    kernel_binary: &std::path::Path,
+    kernel_args: &[String],
+    data_dir: &std::path::Path,
+) -> i32 {
     let rt = tokio::runtime::Runtime::new().expect("build passthrough runtime");
     rt.block_on(async {
         let mut cmd = tokio::process::Command::new(kernel_binary);
         cmd.args(kernel_args);
+        cmd.env(raxis_runtime::RAXIS_DATA_DIR_ENV, data_dir);
         match cmd.spawn() {
             Ok(mut child) => match child.wait().await {
                 Ok(status) => status.code().unwrap_or_else(|| {

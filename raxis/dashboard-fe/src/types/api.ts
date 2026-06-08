@@ -566,8 +566,9 @@ export interface InitiativePlanView {
 // The dashboard surfaces every credential file the kernel knows
 // about (per-initiative + system-wide) in a default-MASKED view:
 // the listing endpoint carries metadata only — name, proxy type,
-// mount alias, format hint, byte size, SHA-256 prefix, on-disk
-// path. Plaintext is fetched on demand through the separate
+// environment label/source, mount alias, format hint, byte size,
+// SHA-256 prefix, file/backend metadata, on-disk path. Plaintext is
+// fetched on demand through the separate
 // `*/reveal` POST endpoint, which is admin-role-gated, audited
 // before response, and rate-limited per operator.
 //
@@ -589,12 +590,19 @@ export interface InitiativePlanView {
 export interface CredentialMetadata {
   name: string;
   proxy_type: string;
+  environment?: string | null;
+  environment_source?: string | null;
+  backend_kind?: string | null;
+  provider_kind?: string | null;
   mount_as?: string | null;
   format_hint: string;
   upstream_host_port?: string | null;
   byte_size: number;
   sha256_prefix?: string | null;
   loaded_from_path?: string | null;
+  modified_unix?: number | null;
+  mode_octal?: string | null;
+  owner_uid?: number | null;
   is_revealable: boolean;
   /// Wire-stable role string the operator MUST hold to reveal
   /// (`"admin"`). Consumed verbatim by the FE so the reveal
@@ -618,9 +626,9 @@ export interface CredentialListResponse {
 ///     "base64"` (binary credentials).
 ///   * `expires_at_unix` — wall-clock auto-hide deadline. The
 ///     FE MUST honour this regardless of operator activity
-///     (`INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01`). Per-initiative
-///     credentials get +30 s; system credentials (Anthropic,
-///     other provider keys) get +15 s.
+  ///     (`INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01`). Per-initiative
+  ///     credentials get +30 s; system credentials (provider keys
+  ///     and other gateway-bound secrets) get +15 s.
 ///   * `sha256_prefix` — first 8 lowercase hex chars of the
 ///     SHA-256 of the bytes, surfaced in the reveal banner so
 ///     the operator can sanity-check what they're looking at.

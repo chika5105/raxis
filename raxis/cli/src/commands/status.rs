@@ -173,6 +173,7 @@ enum ChainQuickCheck {
 #[derive(Debug, Clone)]
 struct StatusReport {
     data_dir: PathBuf,
+    install_origin: raxis_runtime::InstallOrigin,
     liveness: Liveness,
     /// Snapshot from heartbeat.json, only `Some` when liveness is
     /// `Running` or `AmbiguousPidGone` or `Stopped::Stopping`.
@@ -214,6 +215,7 @@ fn collect(data_dir: &Path) -> StatusReport {
 
     StatusReport {
         data_dir: data_dir.to_path_buf(),
+        install_origin: raxis_runtime::current_install_origin(),
         liveness,
         heartbeat,
         workload,
@@ -493,11 +495,21 @@ impl StatusReport {
                 format_uptime(self.now_secs.saturating_sub(hb.started_at))
             );
             let _ = writeln!(out, "  data_dir:             {}", self.data_dir.display());
+            let _ = writeln!(
+                out,
+                "  install_origin:       {}",
+                self.install_origin.detail()
+            );
             let _ = writeln!(out, "  policy_epoch:         {}", hb.policy_epoch);
             let _ = writeln!(out, "  store_schema_version: {}", hb.store_schema_version);
             let _ = writeln!(out, "  binary version:       {}", env!("CARGO_PKG_VERSION"));
         } else {
             let _ = writeln!(out, "  data_dir:             {}", self.data_dir.display());
+            let _ = writeln!(
+                out,
+                "  install_origin:       {}",
+                self.install_origin.detail()
+            );
             let _ = writeln!(out, "  binary version:       {}", env!("CARGO_PKG_VERSION"));
         }
 
@@ -619,6 +631,7 @@ impl StatusReport {
 
         serde_json::json!({
             "data_dir":         self.data_dir.display().to_string(),
+            "install_origin":   self.install_origin,
             "liveness":         liveness_str,
             "liveness_detail":  liveness_detail,
             "heartbeat":        self.heartbeat,

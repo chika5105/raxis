@@ -291,14 +291,12 @@ export const dashboardApi = {
       ),
   },
 
-  /// System-wide credential viewer (admin-only — the listing
-  /// itself is gated so a `read` operator cannot enumerate
-  /// the providers the kernel is bound to). The Anthropic
-  /// API key surfaces here under
-  /// `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`:
-  /// reveals emit a `Critical`-severity notification and
-  /// auto-hide on a 15-second deadline (vs the 30-second
-  /// per-initiative default).
+  /// System-wide credential viewer. Listing is metadata-only
+  /// and visible to authenticated operators; plaintext reveal is
+  /// admin-only. Under
+  /// `INV-DASHBOARD-SYSTEM-CREDENTIAL-SEVERITY-01`, every system
+  /// reveal emits a `Critical`-severity notification and auto-hides
+  /// on a 15-second deadline (vs the 30-second per-initiative default).
   systemCredentials: {
     list: (signal?: AbortSignal): Promise<CredentialListResponse> =>
       apiFetch<CredentialListResponse>(

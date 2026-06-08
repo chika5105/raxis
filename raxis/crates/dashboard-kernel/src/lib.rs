@@ -2758,9 +2758,15 @@ impl DashboardData for KernelDashboardData {
             }
         }
         // Step 4: project to wire shape.
+        let policy = self.policy.load_full();
         let mut out: Vec<CredentialMetadata> = seen
             .into_values()
-            .map(|d| project_credential_metadata(d, &self.data_dir))
+            .map(|d| {
+                let environment = policy
+                    .credential_environment(d.name.as_str())
+                    .map(str::to_owned);
+                project_credential_metadata(d, &self.data_dir, environment)
+            })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
@@ -2813,23 +2819,20 @@ impl DashboardData for KernelDashboardData {
     }
 
     fn list_system_credentials(&self) -> Result<Vec<CredentialMetadata>, ApiError> {
-        list_system_credential_metadata(&self.data_dir)
+        list_system_credential_metadata(&self.data_dir, &self.policy.load_full())
     }
 
     fn reveal_system_credential(
         &self,
         credential_name: &str,
     ) -> Result<CredentialReveal, ApiError> {
-        // Defence-in-depth: the route layer requires admin role +
-        // rate-limits; this layer additionally rejects any name
-        // that doesn't carry the `providers.` scope prefix. The
-        // current system-credential set is provider-only; future
-        // system credentials will bring their own prefix.
-        if !credential_name.starts_with("providers.") {
-            return Err(ApiError::NotFound {
-                kind: "system-credential".into(),
-            });
-        }
+        // The route layer requires admin role + rate-limits and
+        // emits the Critical audit row. This layer resolves through
+        // the same file backend used by credential proxies, so both
+        // provider credentials (`providers.<id>`) and ordinary
+        // registered credentials (`<name>`) get the shared
+        // path-shape, chmod-0600, and uid checks before plaintext
+        // can leave the kernel.
         read_credential_bytes(&self.data_dir, credential_name, REVEAL_AUTOHIDE_SYSTEM_SECS)
     }
 
@@ -2919,7 +2922,10 @@ mod snapshot_blob_path_tests {
 
 #[cfg(all(test, unix))]
 mod credential_metadata_security_tests {
-    use super::stat_credential_bytes;
+    use super::{
+        credential_file_metadata, infer_environment_from_credential_name,
+        list_registered_credential_metadata, stat_credential_bytes,
+    };
     use raxis_credentials::CredentialName;
     use std::os::unix::fs::PermissionsExt;
 
@@ -2944,6 +2950,76 @@ mod credential_metadata_security_tests {
         assert!(
             prefix.is_some(),
             "0600 credential should expose metadata hash"
+        );
+        let file_meta = credential_file_metadata(&path);
+        assert_eq!(file_meta.mode_octal.as_deref(), Some("0600"));
+        assert!(file_meta.modified_unix.is_some());
+        assert!(file_meta.owner_uid.is_some());
+    }
+
+    #[test]
+    fn system_provider_environment_inference_is_suffix_only() {
+        assert_eq!(
+            infer_environment_from_credential_name("anthropic-prod").as_deref(),
+            Some("prod"),
+        );
+        assert_eq!(
+            infer_environment_from_credential_name("gemini_staging").as_deref(),
+            Some("staging"),
+        );
+        assert_eq!(
+            infer_environment_from_credential_name("openai-production").as_deref(),
+            Some("production"),
+        );
+        assert_eq!(
+            infer_environment_from_credential_name("production-openai"),
+            None
+        );
+        assert_eq!(
+            infer_environment_from_credential_name("custom-provider"),
+            None
+        );
+    }
+
+    #[test]
+    fn system_catalog_includes_registered_non_provider_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = CredentialName::new("postgres-staging");
+        let path = raxis_credentials_file::credential_file_path(dir.path(), &name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"postgres://user:pass@localhost/app\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let sidecar = raxis_credentials_file::credential_metadata_file_path(dir.path(), &name);
+        std::fs::write(
+            sidecar,
+            r#"
+version = 1
+name = "postgres-staging"
+proxy_type = "postgres"
+environment = "staging"
+description = "Postgres staging URL"
+backend_kind = "file"
+"#,
+        )
+        .unwrap();
+
+        let rows = list_registered_credential_metadata(dir.path()).unwrap();
+        let row = rows
+            .iter()
+            .find(|candidate| candidate.name == "postgres-staging")
+            .expect("registered credential row");
+        assert_eq!(row.proxy_type, "postgres");
+        assert_eq!(row.environment.as_deref(), Some("staging"));
+        assert_eq!(
+            row.environment_source.as_deref(),
+            Some("credential.metadata")
+        );
+        assert_eq!(row.format_hint, "Postgres staging URL");
+        let expected_path = path.to_string_lossy().into_owned();
+        assert_eq!(
+            row.loaded_from_path.as_deref(),
+            Some(expected_path.as_str())
         );
     }
 }
@@ -3126,6 +3202,7 @@ fn read_task_credential_proxies_via_dashboard_glue(
 fn project_credential_metadata(
     decl: raxis_plan_credentials::TaskCredentialDecl,
     data_dir: &std::path::Path,
+    environment: Option<String>,
 ) -> CredentialMetadata {
     use raxis_plan_credentials::ProxyDecl;
     let name = decl.name.as_str().to_owned();
@@ -3164,15 +3241,26 @@ fn project_credential_metadata(
     let upstream_host_port = upstream_host_port_for_decl(&decl.proxy);
     let path = raxis_credentials_file::credential_file_path(data_dir, &decl.name);
     let (byte_size, sha256_prefix) = stat_credential_bytes(data_dir, &decl.name);
+    let file_meta = credential_file_metadata(&path);
+    let environment_source = environment
+        .as_ref()
+        .map(|_| "policy.permitted_credentials".to_owned());
     CredentialMetadata {
         name,
         proxy_type: proxy_type.to_owned(),
+        environment,
+        environment_source,
+        backend_kind: Some("file".to_owned()),
+        provider_kind: None,
         mount_as: Some(decl.mount_as),
         format_hint,
         upstream_host_port,
         byte_size,
         sha256_prefix,
         loaded_from_path: Some(path.to_string_lossy().into_owned()),
+        modified_unix: file_meta.modified_unix,
+        mode_octal: file_meta.mode_octal,
+        owner_uid: file_meta.owner_uid,
         is_revealable: true,
         reveal_required_role: "admin".into(),
     }
@@ -3233,6 +3321,41 @@ fn stat_credential_bytes(
         }
         (bytes.len() as u64, Some(hex_prefix))
     })
+}
+
+#[derive(Debug, Clone, Default)]
+struct CredentialFileMetadata {
+    modified_unix: Option<i64>,
+    mode_octal: Option<String>,
+    owner_uid: Option<u32>,
+}
+
+fn credential_file_metadata(path: &std::path::Path) -> CredentialFileMetadata {
+    let Ok(md) = std::fs::metadata(path) else {
+        return CredentialFileMetadata::default();
+    };
+    let modified_unix = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64);
+    let (mode_octal, owner_uid) = file_mode_and_owner_uid(&md);
+    CredentialFileMetadata {
+        modified_unix,
+        mode_octal,
+        owner_uid,
+    }
+}
+
+#[cfg(unix)]
+fn file_mode_and_owner_uid(md: &std::fs::Metadata) -> (Option<String>, Option<u32>) {
+    use std::os::unix::fs::MetadataExt;
+    (Some(format!("{:04o}", md.mode() & 0o777)), Some(md.uid()))
+}
+
+#[cfg(not(unix))]
+fn file_mode_and_owner_uid(_md: &std::fs::Metadata) -> (Option<String>, Option<u32>) {
+    (None, None)
 }
 
 /// Read the credential bytes and project them onto the wire
@@ -3307,23 +3430,85 @@ fn read_credential_bytes(
     })
 }
 
-/// Enumerate `<data_dir>/providers/*.toml` and surface metadata
-/// only. Provider credentials are gateway-bound; the listing
-/// surface here is the operator-visible counterpart so an admin
-/// can see WHICH providers the kernel is configured against
-/// without revealing any plaintext.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct CredentialSidecar {
+    #[serde(default)]
+    proxy_type: String,
+    #[serde(default)]
+    environment: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    backend_kind: String,
+}
+
+fn read_credential_sidecar(
+    data_dir: &std::path::Path,
+    name: &raxis_credentials::CredentialName,
+) -> Option<CredentialSidecar> {
+    let path = raxis_credentials_file::credential_metadata_file_path(data_dir, name);
+    let text = std::fs::read_to_string(path).ok()?;
+    toml::from_str(&text).ok()
+}
+
+fn sidecar_backend_kind(sidecar: &CredentialSidecar) -> String {
+    if sidecar.backend_kind.trim().is_empty() {
+        "file".to_owned()
+    } else {
+        sidecar.backend_kind.clone()
+    }
+}
+
+fn format_hint_for_proxy_type(proxy_type: &str, description: &str) -> String {
+    if !description.trim().is_empty() {
+        return description.trim().to_owned();
+    }
+    match proxy_type {
+        "postgres" => "libpq URL (postgresql://user:pass@host:port/db)".to_owned(),
+        "mysql" => "MySQL URL (mysql://user:pass@host:port/db)".to_owned(),
+        "mssql" => "MSSQL URL (mssql://user:pass@host:port/db)".to_owned(),
+        "mongodb" => "MongoDB URI (mongodb://user:pass@host:port/db)".to_owned(),
+        "redis" => "Redis password or Redis URL".to_owned(),
+        "smtp" => "SMTP credential material".to_owned(),
+        "http" => "HTTP credential (Bearer token / Basic password)".to_owned(),
+        "aws" => "AWS credential material".to_owned(),
+        "gcp" => "GCP service-account JSON or secret reference".to_owned(),
+        "azure" => "Azure service-principal credential material".to_owned(),
+        "k8s" => "Kubeconfig YAML".to_owned(),
+        "provider" => "Provider TOML (api_key + auth_header + auth_prefix)".to_owned(),
+        _ => "Registered credential file (metadata sidecar has no known proxy type)".to_owned(),
+    }
+}
+
+/// Enumerate `<data_dir>/providers/*.toml` and
+/// `<data_dir>/credentials/*.env`, then surface metadata only.
+/// Provider credentials are kernel/model-provider secrets;
+/// ordinary credentials are workload/service credentials that can
+/// be attached to executor tasks through plan TOML. Both are
+/// operator-visible under System so admins can audit the full
+/// credential surface without revealing plaintext.
 fn list_system_credential_metadata(
     data_dir: &std::path::Path,
+    policy: &PolicyBundle,
+) -> Result<Vec<CredentialMetadata>, ApiError> {
+    let mut out = list_provider_credential_metadata(data_dir, policy)?;
+    out.extend(list_registered_credential_metadata(data_dir)?);
+    out.sort_by(|a, b| {
+        a.proxy_type
+            .cmp(&b.proxy_type)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(out)
+}
+
+fn list_provider_credential_metadata(
+    data_dir: &std::path::Path,
+    policy: &PolicyBundle,
 ) -> Result<Vec<CredentialMetadata>, ApiError> {
     let providers_dir = data_dir.join("providers");
     let entries = match std::fs::read_dir(&providers_dir) {
         Ok(e) => e,
-        // No providers/ dir ⇒ kernel has no system credentials.
-        // Empty list, NOT an error (the dashboard surface should
-        // still render so the operator can see the absence).
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Vec::new());
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => {
             return Err(ApiError::Internal {
                 log_only: format!("read_dir providers: {e}"),
@@ -3336,38 +3521,168 @@ fn list_system_credential_metadata(
         if path.extension().and_then(|e| e.to_str()) != Some("toml") {
             continue;
         }
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if file_name.ends_with(".metadata.toml") {
+            continue;
+        }
         let stem = match path.file_stem().and_then(|s| s.to_str()) {
             Some(s) => s,
             None => continue,
         };
         let name = format!("providers.{stem}");
         let credential_name = raxis_credentials::CredentialName::new(name.clone());
+        let sidecar = read_credential_sidecar(data_dir, &credential_name).unwrap_or_default();
         let (byte_size, sha256_prefix) = stat_credential_bytes(data_dir, &credential_name);
-        // The Anthropic credential is the canonical example; we
-        // hint at the wire format so operators can sanity-check
-        // before they reveal.
-        let format_hint = if stem.contains("anthropic") {
-            "Anthropic provider TOML (api_key = \"sk-ant-…\")".to_owned()
-        } else if stem.contains("openai") {
-            "OpenAI provider TOML (api_key = \"sk-…\")".to_owned()
+        let file_meta = credential_file_metadata(&path);
+        let credentials_file = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let provider = policy
+            .providers()
+            .iter()
+            .find(|p| p.credentials_file == credentials_file || p.provider_id == stem);
+        let provider_kind = provider.map(|p| p.kind.clone());
+        let kind_for_hint = provider_kind.as_deref().unwrap_or(stem);
+        let format_hint =
+            if kind_for_hint.eq_ignore_ascii_case("anthropic") || stem.contains("anthropic") {
+                "Anthropic provider TOML (api_key = \"sk-ant-…\")".to_owned()
+            } else if kind_for_hint.eq_ignore_ascii_case("openai") || stem.contains("openai") {
+                "OpenAI provider TOML (api_key = \"sk-…\")".to_owned()
+            } else if kind_for_hint.eq_ignore_ascii_case("gemini") || stem.contains("gemini") {
+                "Gemini provider TOML (api_key = \"…\")".to_owned()
+            } else {
+                "Provider TOML (api_key + auth_header + auth_prefix)".to_owned()
+            };
+        let (environment, environment_source) = if !sidecar.environment.trim().is_empty() {
+            (
+                Some(sidecar.environment.clone()),
+                Some("credential.metadata".to_owned()),
+            )
         } else {
-            "Provider TOML (api_key + auth_header + auth_prefix)".to_owned()
+            let environment = infer_environment_from_credential_name(stem);
+            let environment_source = environment
+                .as_ref()
+                .map(|_| "provider_id_suffix".to_owned());
+            (environment, environment_source)
         };
         out.push(CredentialMetadata {
             name,
             proxy_type: "provider".to_owned(),
+            environment,
+            environment_source,
+            backend_kind: Some(sidecar_backend_kind(&sidecar)),
+            provider_kind,
             mount_as: None,
             format_hint,
             upstream_host_port: None,
             byte_size,
             sha256_prefix,
             loaded_from_path: Some(path.to_string_lossy().into_owned()),
+            modified_unix: file_meta.modified_unix,
+            mode_octal: file_meta.mode_octal,
+            owner_uid: file_meta.owner_uid,
             is_revealable: true,
             reveal_required_role: "admin".into(),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+fn list_registered_credential_metadata(
+    data_dir: &std::path::Path,
+) -> Result<Vec<CredentialMetadata>, ApiError> {
+    let credentials_dir = data_dir.join("credentials");
+    let entries = match std::fs::read_dir(&credentials_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(ApiError::Internal {
+                log_only: format!("read_dir credentials: {e}"),
+            });
+        }
+    };
+    let mut out: Vec<CredentialMetadata> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("env") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        if stem.contains(".tmp.") || stem.ends_with(".new") {
+            continue;
+        }
+        let name = stem.to_owned();
+        let credential_name = raxis_credentials::CredentialName::new(name.clone());
+        let sidecar = read_credential_sidecar(data_dir, &credential_name).unwrap_or_default();
+        let proxy_type = if sidecar.proxy_type.trim().is_empty() {
+            "unknown".to_owned()
+        } else {
+            sidecar.proxy_type.clone()
+        };
+        let (byte_size, sha256_prefix) = stat_credential_bytes(data_dir, &credential_name);
+        let file_meta = credential_file_metadata(&path);
+        let environment = if sidecar.environment.trim().is_empty() {
+            None
+        } else {
+            Some(sidecar.environment.clone())
+        };
+        let environment_source = environment
+            .as_ref()
+            .map(|_| "credential.metadata".to_owned());
+        out.push(CredentialMetadata {
+            name,
+            proxy_type: proxy_type.clone(),
+            environment,
+            environment_source,
+            backend_kind: Some(sidecar_backend_kind(&sidecar)),
+            provider_kind: None,
+            mount_as: None,
+            format_hint: format_hint_for_proxy_type(&proxy_type, &sidecar.description),
+            upstream_host_port: None,
+            byte_size,
+            sha256_prefix,
+            loaded_from_path: Some(path.to_string_lossy().into_owned()),
+            modified_unix: file_meta.modified_unix,
+            mode_octal: file_meta.mode_octal,
+            owner_uid: file_meta.owner_uid,
+            is_revealable: true,
+            reveal_required_role: "admin".into(),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+fn infer_environment_from_credential_name(name: &str) -> Option<String> {
+    const KNOWN: &[&str] = &[
+        "prod",
+        "production",
+        "staging",
+        "stage",
+        "dev",
+        "development",
+        "test",
+        "qa",
+        "sandbox",
+        "local",
+    ];
+    let tail = name
+        .rsplit(|c| matches!(c, '-' | '_' | '.'))
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    KNOWN
+        .iter()
+        .find(|label| **label == tail)
+        .map(|label| (*label).to_owned())
 }
 
 // ---------------------------------------------------------------------------

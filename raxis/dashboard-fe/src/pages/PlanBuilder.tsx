@@ -22,6 +22,7 @@ import { useTheme } from "@/lib/theme-context";
 import type {
   BuilderValidationResponse,
   BuilderValidationSeverity,
+  CredentialMetadata,
 } from "@/types/api";
 
 type AgentType = "" | "Executor" | "Reviewer";
@@ -537,6 +538,13 @@ export function PlanBuilderPage() {
     queryFn: ({ signal }) => dashboardApi.policy.rawToml(signal),
     staleTime: 30_000,
   });
+  const registeredCredentialsQuery = useQuery({
+    queryKey: ["system-credentials", "plan-builder"],
+    queryFn: ({ signal }) => dashboardApi.systemCredentials.list(signal),
+    staleTime: 30_000,
+    retry: false,
+  });
+  const registeredCredentials = registeredCredentialsQuery.data?.credentials ?? [];
   useEffect(() => {
     const refreshDraft = () => setPolicyDraftToml(readPolicyDraft() ?? "");
     window.addEventListener("focus", refreshDraft);
@@ -564,6 +572,7 @@ export function PlanBuilderPage() {
             toolProfiles,
             modelRoutes,
             credentialSetups,
+            registeredCredentials,
             planVerifiers,
           })
         : [],
@@ -574,6 +583,7 @@ export function PlanBuilderPage() {
       toolProfiles,
       modelRoutes,
       credentialSetups,
+      registeredCredentials,
       planVerifiers,
     ],
   );
@@ -1075,6 +1085,7 @@ export function PlanBuilderPage() {
         {drawer === "credentials" && planEnabled && (
           <CredentialSetupDrawer
             credentials={credentialSetups}
+            registeredCredentials={registeredCredentials}
             onUpdate={updateCredentialSetups}
             onClose={() => setDrawer(null)}
           />
@@ -1086,6 +1097,7 @@ export function PlanBuilderPage() {
               planVerifiers={planVerifiers}
               toolProfiles={toolProfiles}
               credentialSetups={credentialSetups}
+              registeredCredentials={registeredCredentials}
               policyGateRefs={policyGateRefs}
               selectedTaskId={selectedTaskId}
               revealTaskId={canvasReveal?.taskId ?? null}
@@ -2167,10 +2179,12 @@ function PlanVerifiersDrawer({
 
 function CredentialSetupDrawer({
   credentials,
+  registeredCredentials,
   onUpdate,
   onClose,
 }: {
   credentials: CredentialSetupDraft[];
+  registeredCredentials: CredentialMetadata[];
   onUpdate: (updater: (prev: CredentialSetupDraft[]) => CredentialSetupDraft[]) => void;
   onClose: () => void;
 }) {
@@ -2178,6 +2192,15 @@ function CredentialSetupDrawer({
   const selected =
     credentials.find((credential) => credential.name === selectedName) ?? credentials[0];
   const renderedToml = renderCredentialSetupToml(credentials);
+  const setupNames = new Set(credentials.map((credential) => credential.name.trim()));
+  const importableCredentials = registeredCredentials.filter(
+    (credential) =>
+      isCredentialProxyType(credential.proxy_type) &&
+      !setupNames.has(credential.name.trim()),
+  );
+  const providerCredentialCount = registeredCredentials.filter(
+    (credential) => credential.proxy_type === "provider",
+  ).length;
 
   const updateCredential = (
     credentialName: string,
@@ -2201,6 +2224,13 @@ function CredentialSetupDrawer({
 
   const addCredential = () => {
     const next = makeCredentialSetup(credentials);
+    onUpdate((prev) => [...prev, next]);
+    setSelectedName(next.name);
+  };
+
+  const importCredential = (credential: CredentialMetadata) => {
+    if (!isCredentialProxyType(credential.proxy_type)) return;
+    const next = credentialSetupFromMetadata(credential);
     onUpdate((prev) => [...prev, next]);
     setSelectedName(next.name);
   };
@@ -2252,6 +2282,40 @@ function CredentialSetupDrawer({
           )}
         </div>
         <div className="p-4 space-y-3">
+          {(importableCredentials.length > 0 || providerCredentialCount > 0) && (
+            <div className="rounded border border-edge bg-panel px-3 py-2">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">
+                Registered catalog
+              </div>
+              {importableCredentials.length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {importableCredentials.map((credential) => (
+                    <button
+                      key={credential.name}
+                      type="button"
+                      className="badge border-info/50 bg-info-muted text-[10px] text-info hover:border-info"
+                      title={`${credential.proxy_type}${credential.environment ? ` / ${credential.environment}` : ""}`}
+                      onClick={() => importCredential(credential)}
+                    >
+                      Import {credential.name}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-1 text-[11px] text-ink-subtle">
+                  No unimported task-bindable credentials are registered.
+                </p>
+              )}
+              {providerCredentialCount > 0 && (
+                <p className="mt-2 text-[10px] leading-snug text-ink-subtle">
+                  {providerCredentialCount} provider credential
+                  {providerCredentialCount === 1 ? "" : "s"} are available to model
+                  routing. They are kernel-owned and cannot be imported as task
+                  credential bindings.
+                </p>
+              )}
+            </div>
+          )}
           {!selected ? (
             <div className="rounded border border-edge bg-panel px-3 py-4 text-xs text-ink-muted">
               Add a credential template, then bind it from executor cards.
@@ -2341,7 +2405,12 @@ function CredentialSetupDrawer({
                   placeholder={defaultCredentialShape(selected.proxyType)}
                 />
               </Field>
-              <Divider label="Downloadable setup TOML" />
+              <Divider label="Credential setup snippet" />
+              <p className="text-[11px] leading-snug text-ink-subtle">
+                This is a non-secret reference snippet. The actual secret is registered
+                separately with raxis credential add; plan.toml only needs the stable
+                credential name, proxy type, and mount environment.
+              </p>
               <textarea
                 readOnly
                 value={renderedToml}
@@ -2350,14 +2419,6 @@ function CredentialSetupDrawer({
               />
               <div className="flex items-center gap-2">
                 <CopyButton value={renderedToml} label="Copy credential setup" />
-                <button
-                  type="button"
-                  className="btn text-xs py-1"
-                  disabled={!credentials.length}
-                  onClick={() => downloadText("credentials.toml", renderedToml)}
-                >
-                  Download credentials.toml
-                </button>
               </div>
             </>
           )}
@@ -2930,6 +2991,34 @@ function makeCredentialSetup(existing: CredentialSetupDraft[]): CredentialSetupD
   };
 }
 
+function isCredentialProxyType(value: string): value is CredentialProxyType {
+  return (credentialProxyTypes as readonly string[]).includes(value);
+}
+
+function credentialSetupFromMetadata(
+  credential: CredentialMetadata,
+): CredentialSetupDraft {
+  const proxyType = isCredentialProxyType(credential.proxy_type)
+    ? credential.proxy_type
+    : "http";
+  return {
+    ...makeCredentialDraft({
+      name: credential.name,
+      proxyType,
+      mountAs: credential.mount_as || defaultMountAs(proxyType),
+    }),
+    upstreamUrl:
+      proxyType === "http" ? credential.upstream_host_port || "" : "",
+    upstreamHostPort:
+      proxyType === "redis" || proxyType === "smtp"
+        ? credential.upstream_host_port || ""
+        : "",
+    description: credential.format_hint || "Registered kernel credential.",
+    environment: credential.environment || "",
+    expectedShape: defaultCredentialShape(proxyType),
+  };
+}
+
 export function makeCredentialDraft(input: {
   name?: string;
   proxyType?: CredentialProxyType;
@@ -2989,6 +3078,7 @@ function validatePlan(input: {
   toolProfiles: ToolProfileDraft[];
   modelRoutes: ModelRouteDraft[];
   credentialSetups: CredentialSetupDraft[];
+  registeredCredentials?: CredentialMetadata[];
   planVerifiers: PlanVerifierDraft[];
 }) {
   const issues: LocalIssue[] = [];
@@ -3185,6 +3275,11 @@ function validatePlan(input: {
   }
 
   const setupNames = new Set<string>();
+  const registeredCredentialNames = new Set(
+    (input.registeredCredentials ?? [])
+      .map((credential) => credential.name.trim())
+      .filter(Boolean),
+  );
   const referencedCredentials = new Set(
     input.tasks
       .filter((task) => task.agentType === "Executor")
@@ -3296,8 +3391,13 @@ function validatePlan(input: {
           push("warning", `${field}.name`, `Executor ${id || "(blank)"} binds credential ${name} more than once.`, "This is allowed when intentional, but one binding per credential name is usually clearer.");
         }
         if (name) credentialNames.add(name);
-        if (name && input.credentialSetups.length > 0 && !setupNames.has(name)) {
-          push("warning", `${field}.name`, `Credential ${name} has no setup template in this builder.`, "This can be intentional; add it in Credential setup if you want it downloaded with the plan materials.");
+        if (
+          name &&
+          input.credentialSetups.length > 0 &&
+          !setupNames.has(name) &&
+          !registeredCredentialNames.has(name)
+        ) {
+          push("warning", `${field}.name`, `Credential ${name} has no setup template or registered credential.`, "This can be intentional; add it in Credential setup or register it with `raxis credential add`.");
         }
         validateCredentialDraft(credential, field, push);
       }
