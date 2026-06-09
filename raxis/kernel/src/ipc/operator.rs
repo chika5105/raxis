@@ -1677,6 +1677,18 @@ async fn handle_approve_plan(
             }
         }
         Err(e) => match &e {
+            lifecycle::LifecycleError::PlanTaskIdAlreadyExists {
+                task_id,
+                existing_initiative_id,
+            } => OperatorResponse::Error {
+                code: "FAIL_PLAN_TASK_ID_ALREADY_EXISTS".to_owned(),
+                detail: serde_json::json!({
+                    "task_id": task_id,
+                    "existing_initiative_id": existing_initiative_id,
+                    "suggestion": "Choose task_id values that have never been used before, or clone the recurring plan with a fresh task-id prefix.",
+                })
+                .to_string(),
+            },
             // §12.9 — surface the structured
             // locked-field / format-invalid rejections with their
             // dedicated wire codes so the CLI's diagnostic does not

@@ -98,6 +98,41 @@ export interface FailureInfo {
   observed_at?: number;
 }
 
+export interface DiagnosticsResponse {
+  generated_at: number;
+  findings: DiagnosticFinding[];
+}
+
+export interface DiagnosticFinding {
+  finding_id: string;
+  severity: "critical" | "high" | "medium" | "low" | "info" | string;
+  status: "active" | "resolved" | "unknown" | string;
+  scope: string;
+  title: string;
+  summary: string;
+  initiative_id?: string | null;
+  task_id?: string | null;
+  session_id?: string | null;
+  event_kind?: string | null;
+  event_id?: string | null;
+  seq?: number | null;
+  observed_at?: number;
+  evidence?: DiagnosticEvidence[];
+  actions?: DiagnosticAction[];
+}
+
+export interface DiagnosticEvidence {
+  label: string;
+  value: string;
+  href?: string | null;
+}
+
+export interface DiagnosticAction {
+  label: string;
+  kind: "route" | "command" | "external" | string;
+  target: string;
+}
+
 export interface ReviewerVerdictView {
   verdict: string;
   critique: string;
@@ -521,11 +556,29 @@ export interface InitiativeView extends InitiativeListEntry {
   policy_epoch: number;
   tasks: TaskView[];
   edges: DagEdge[];
+  run_summary: InitiativeRunSummary;
   /// Failure reason, set when the initiative is in a
   /// terminal-failure state (`Failed`, `Aborted`). The dashboard
   /// renders this in `<FailureReasonPanel>` at the top of the
   /// initiative detail page.
   failure?: FailureInfo | null;
+}
+
+export interface InitiativeRunSummary {
+  terminal: boolean;
+  elapsed_seconds: number;
+  session_count: number;
+  active_session_count: number;
+  llm_turn_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  token_cost_micros: number;
+  admission_reserved_units: number;
+  actual_cost_units: number;
+  declared_turn_budget?: number | null;
+  declared_wallclock_budget_seconds?: number | null;
 }
 
 /// `GET /api/initiatives/:id/plan` response body — the original
@@ -1041,6 +1094,8 @@ export interface WorktreeListEntry {
   name: string;
   label: string;
   kind: string;
+  surface?: string | null;
+  repository_id?: string | null;
   path: string;
   session_id: string | null;
   task_id: string | null;
@@ -1051,6 +1106,15 @@ export interface WorktreeListEntry {
   observed_head_sha?: string | null;
   observed_branch?: string | null;
   observed_dirty_paths?: number | null;
+  repository_lifecycle_state?: string | null;
+  repository_publish_state?: string | null;
+  repository_source_url?: string | null;
+  repository_tracking_ref?: string | null;
+  repository_ahead_count?: number | null;
+  repository_behind_count?: number | null;
+  repository_last_fetch_at?: number | null;
+  repository_last_push_at?: number | null;
+  repository_last_error?: string | null;
   base_sha: string | null;
   comparison_head_sha?: string | null;
 }

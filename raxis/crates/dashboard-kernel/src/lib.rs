@@ -41,6 +41,7 @@
 // file once at boot to extract the optional block; absence ⇒
 // dashboard disabled (zero runtime cost per spec §4.3).
 
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -53,13 +54,14 @@ use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
     AuditEntryView, AuditListFilters, BuilderValidationIssue, BuilderValidationResponse,
     BuilderValidationSeverity, ChainStatusView, CredentialMetadata, CredentialReveal,
-    CustomToolCallView, DagEdge, DashboardData, EscalationView, HealthCheck, HealthSnapshot,
-    InitiativeListEntry, InitiativePlanView, InitiativeView, NotificationView,
-    OperatorAuthResolution, OrchestratorGapsResponse, PolicyAdvancement, PolicyOperatorView,
-    PolicySnapshotView, RecentSessionEntry, ReviewerPanelEntry, ReviewerVerdictView, SessionView,
-    SessionVmEnvView, StructuredOutputView, SubsystemDetailRow, SubsystemHealthCard,
-    SubsystemHealthResponse, TaskView, WorktreeDetail, WorktreeDiff, WorktreeFile,
-    WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry, SUBSYSTEM_CATALOG,
+    CustomToolCallView, DagEdge, DashboardData, DiagnosticFinding, DiagnosticsResponse,
+    EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry, InitiativePlanView,
+    InitiativeRunSummary, InitiativeView, NotificationView, OperatorAuthResolution,
+    OrchestratorGapsResponse, PolicyAdvancement, PolicyOperatorView, PolicySnapshotView,
+    RecentSessionEntry, ReviewerPanelEntry, ReviewerVerdictView, SessionView, SessionVmEnvView,
+    StructuredOutputView, SubsystemDetailRow, SubsystemHealthCard, SubsystemHealthResponse,
+    TaskView, WorktreeDetail, WorktreeDiff, WorktreeFile, WorktreeListEntry, WorktreeLogEntry,
+    WorktreeTree, WorktreeTreeEntry, SUBSYSTEM_CATALOG,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -461,6 +463,34 @@ impl KernelDashboardData {
             log_only: format!("ro::open failed: {e}"),
         })
     }
+
+    fn kernel_log_tails(&self) -> Vec<(String, String)> {
+        const MAX_BYTES: u64 = 256 * 1024;
+        let mut candidates = vec![
+            self.data_dir.join("kernel.stderr.log"),
+            self.data_dir.join("kernel.err.log"),
+        ];
+        if let Some(var_dir) = self
+            .data_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf)
+        {
+            candidates.push(var_dir.join("log/raxis/kernel.err.log"));
+        }
+
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for path in candidates {
+            if !seen.insert(path.clone()) || !path.exists() {
+                continue;
+            }
+            if let Ok(tail) = read_text_tail(&path, MAX_BYTES) {
+                out.push((path.display().to_string(), tail));
+            }
+        }
+        out
+    }
 }
 
 /// Map an `OperatorEntry::permitted_ops` set to the dashboard's
@@ -810,6 +840,101 @@ impl DashboardData for KernelDashboardData {
         })
     }
 
+    fn diagnostics(
+        &self,
+        initiative_id: Option<&str>,
+        limit: u32,
+    ) -> Result<DiagnosticsResponse, ApiError> {
+        let now = unix_now_s();
+        let mut findings = Vec::new();
+
+        // 1. Health-derived findings: audit/store breakage explains many
+        // apparently unrelated dashboard errors, so surface it globally.
+        if let Ok(health) = self.subsystem_health() {
+            for card in health.cards {
+                if card.status == "failing" || card.status == "degraded" {
+                    findings.push(
+                        DiagnosticFinding::new(
+                            format!("subsystem:{}", card.id),
+                            if card.status == "failing" {
+                                "critical"
+                            } else {
+                                "high"
+                            },
+                            "subsystem",
+                            format!("{} is {}", card.label, card.status),
+                            card.last_error.clone().unwrap_or(card.summary.clone()),
+                        )
+                        .observed_at(card.last_observed_at)
+                        .evidence("Subsystem", card.id)
+                        .evidence("Status", card.status)
+                        .action("Open Health", "route", "/health"),
+                    );
+                }
+            }
+        }
+
+        // 2. Audit/notification-derived findings. These are durable and
+        // initiative-scoped when the underlying row has a relationship.
+        let notifications = self
+            .list_notifications(100, false, initiative_id)
+            .unwrap_or_default();
+        for n in notifications {
+            if !diagnostic_priority_is_actionable(n.priority.as_deref()) {
+                continue;
+            }
+            if !diagnostic_matches_focus(initiative_id, n.initiative_id.as_deref()) {
+                continue;
+            }
+            findings.push(
+                DiagnosticFinding::new(
+                    format!("notification:{}", n.notification_id),
+                    diagnostic_severity_from_priority(n.priority.as_deref()),
+                    diagnostic_scope_for_event(&n.event_kind),
+                    n.summary.clone(),
+                    diagnostic_notification_summary(&n),
+                )
+                .observed_at(n.created_at)
+                .maybe_initiative(n.initiative_id.clone())
+                .maybe_task(n.task_id.clone())
+                .maybe_session(n.session_id.clone())
+                .audit(n.event_kind.clone(), n.source_event_id.clone(), 0)
+                .evidence("Notification", n.notification_id)
+                .action("Open Notifications", "route", "/notifications")
+                .action(
+                    "Search Audit Chain",
+                    "route",
+                    format!("/audit?search={}", n.event_kind),
+                ),
+            );
+        }
+
+        let audit_rows = self
+            .list_audit(None, 200, initiative_id, AuditListFilters::default())
+            .unwrap_or_default();
+        for row in audit_rows.iter() {
+            if !diagnostic_matches_focus(initiative_id, row.initiative_id.as_deref()) {
+                continue;
+            }
+            if let Some(f) = diagnostic_from_audit_row(row) {
+                findings.push(f);
+            }
+        }
+
+        // 3. Kernel stderr/log-tail hints. These catch early boot/config
+        // failures that happen before an initiative/audit row can exist.
+        for (path, text) in self.kernel_log_tails() {
+            extend_diagnostics_from_log_tail(&mut findings, initiative_id, &path, &text, now);
+        }
+
+        dedupe_and_sort_diagnostics(&mut findings);
+        findings.truncate(limit.min(200) as usize);
+        Ok(DiagnosticsResponse {
+            generated_at: now,
+            findings,
+        })
+    }
+
     fn list_initiatives(
         &self,
         limit: u32,
@@ -913,6 +1038,13 @@ impl DashboardData for KernelDashboardData {
             )?);
         }
         let display_name = initiative_name_for_id(&conn, &row.initiative_id)?;
+        let run_summary = initiative_run_summary(
+            &conn,
+            &row,
+            &task_rows,
+            self.task_llm_capture.as_ref(),
+            updated_at,
+        )?;
         // INV-DASHBOARD-FAILURE-VISIBILITY-01: when the initiative
         // is in a terminal-failure state, surface the most recent
         // failure-bearing audit row as `failure`. V2.5 ships the
@@ -938,6 +1070,7 @@ impl DashboardData for KernelDashboardData {
             policy_epoch: bundle.epoch(),
             tasks,
             edges,
+            run_summary,
             failure,
         })
     }
@@ -3685,6 +3818,316 @@ fn infer_environment_from_credential_name(name: &str) -> Option<String> {
         .map(|label| (*label).to_owned())
 }
 
+trait DiagnosticFindingExt {
+    fn maybe_initiative(self, id: Option<String>) -> Self;
+    fn maybe_task(self, id: Option<String>) -> Self;
+    fn maybe_session(self, id: Option<String>) -> Self;
+}
+
+impl DiagnosticFindingExt for DiagnosticFinding {
+    fn maybe_initiative(mut self, id: Option<String>) -> Self {
+        self.initiative_id = id;
+        self
+    }
+
+    fn maybe_task(mut self, id: Option<String>) -> Self {
+        self.task_id = id;
+        self
+    }
+
+    fn maybe_session(mut self, id: Option<String>) -> Self {
+        self.session_id = id;
+        self
+    }
+}
+
+fn diagnostic_priority_is_actionable(priority: Option<&str>) -> bool {
+    matches!(priority, Some("Critical" | "High"))
+}
+
+fn diagnostic_severity_from_priority(priority: Option<&str>) -> &'static str {
+    match priority {
+        Some("Critical") => "critical",
+        Some("High") => "high",
+        Some("Medium") => "medium",
+        _ => "low",
+    }
+}
+
+fn diagnostic_scope_for_event(event_kind: &str) -> &'static str {
+    if event_kind.contains("Gateway") {
+        "model_gateway"
+    } else if event_kind.contains("Orchestrator") {
+        "orchestration"
+    } else if event_kind.contains("Witness") || event_kind.contains("Gate") {
+        "gates"
+    } else if event_kind.contains("Tproxy") || event_kind.contains("Dns") {
+        "networking"
+    } else if event_kind.contains("Credential") {
+        "credentials"
+    } else if event_kind.contains("Session") {
+        "sessions"
+    } else {
+        "kernel"
+    }
+}
+
+fn diagnostic_matches_focus(focus: Option<&str>, candidate: Option<&str>) -> bool {
+    match focus {
+        None => true,
+        Some(expected) => candidate.is_none() || candidate == Some(expected),
+    }
+}
+
+fn diagnostic_notification_summary(n: &NotificationView) -> String {
+    let reason = n
+        .payload
+        .get("reason")
+        .or_else(|| n.payload.get("detail"))
+        .or_else(|| n.payload.get("error"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if reason.is_empty() {
+        n.summary.clone()
+    } else {
+        format!("{} Reason: {reason}", n.summary)
+    }
+}
+
+fn diagnostic_from_audit_row(row: &AuditEntryView) -> Option<DiagnosticFinding> {
+    match row.event_kind.as_str() {
+        "OrchestratorRespawnCeilingExceeded" => Some(
+            DiagnosticFinding::new(
+                format!("audit:{}:{}", row.event_kind, row.seq),
+                "critical",
+                "orchestration",
+                "Orchestrator respawn ceiling exhausted",
+                "The orchestrator could not make progress after its configured respawn budget. Check model gateway availability, plan validation, and earlier task/gate failures before retrying.",
+            )
+            .maybe_initiative(row.initiative_id.clone())
+            .maybe_task(row.task_id.clone())
+            .maybe_session(row.session_id.clone())
+            .audit(row.event_kind.clone(), row.event_id.clone(), row.seq)
+            .observed_at(row.at)
+            .evidence("Audit sequence", row.seq.to_string())
+            .evidence("Event", row.event_kind.clone())
+            .action(
+                "Open Initiative",
+                "route",
+                row.initiative_id
+                    .as_ref()
+                    .map(|id| format!("/initiatives/{id}"))
+                    .unwrap_or_else(|| "/initiatives".to_owned()),
+            )
+            .action(
+                "Search Audit Chain",
+                "route",
+                "/audit?search=OrchestratorRespawnCeilingExceeded",
+            ),
+        ),
+        "GatewaySignalFailed" => Some(
+            DiagnosticFinding::new(
+                format!("audit:{}:{}", row.event_kind, row.seq),
+                "high",
+                "model_gateway",
+                "Gateway signal failed",
+                "The kernel could not reach or signal the model gateway. Model calls may fail until provider configuration and the gateway subprocess are healthy.",
+            )
+            .maybe_initiative(row.initiative_id.clone())
+            .maybe_task(row.task_id.clone())
+            .maybe_session(row.session_id.clone())
+            .audit(row.event_kind.clone(), row.event_id.clone(), row.seq)
+            .observed_at(row.at)
+            .evidence("Audit sequence", row.seq.to_string())
+            .action("Open Health", "route", "/health")
+            .action("Open Policy Builder", "route", "/policy-builder"),
+        ),
+        "TproxyAdmissionDenied" => {
+            let reason = row
+                .payload
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let host = row
+                .payload
+                .get("host_or_sni")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown host");
+            Some(
+                DiagnosticFinding::new(
+                    format!("audit:{}:{}", row.event_kind, row.seq),
+                    "high",
+                    "networking",
+                    "Mediated egress was denied",
+                    "A session tried to reach a host outside its signed allowlist. Add the host to the plan only if this access is intended.",
+                )
+                .maybe_initiative(row.initiative_id.clone())
+                .maybe_task(row.task_id.clone())
+                .maybe_session(row.session_id.clone())
+                .audit(row.event_kind.clone(), row.event_id.clone(), row.seq)
+                .observed_at(row.at)
+                .evidence("Host", host)
+                .evidence("Reason", reason)
+                .action("Open Plan Builder", "route", "/plan-builder")
+                .action("Search Audit Chain", "route", "/audit?search=TproxyAdmissionDenied"),
+            )
+        }
+        _ if row.payload.to_string().contains("GatewayUnavailable") => Some(
+            DiagnosticFinding::new(
+                format!("audit:gateway-unavailable:{}", row.seq),
+                "critical",
+                "model_gateway",
+                "Model gateway unavailable",
+                "A planner/model request failed because no reachable gateway was available. Configure model providers in policy and restart the kernel service if needed.",
+            )
+            .maybe_initiative(row.initiative_id.clone())
+            .maybe_task(row.task_id.clone())
+            .maybe_session(row.session_id.clone())
+            .audit(row.event_kind.clone(), row.event_id.clone(), row.seq)
+            .observed_at(row.at)
+            .action("Open Policy Builder", "route", "/policy-builder")
+            .action("Restart Homebrew service", "command", "brew services restart raxis"),
+        ),
+        _ => None,
+    }
+}
+
+fn extend_diagnostics_from_log_tail(
+    findings: &mut Vec<DiagnosticFinding>,
+    focus: Option<&str>,
+    path: &str,
+    text: &str,
+    now: u64,
+) {
+    for line in text.lines().rev().take(800) {
+        let line_initiative = extract_json_string_field(line, "initiative_id");
+        if !diagnostic_matches_focus(focus, line_initiative.as_deref()) {
+            continue;
+        }
+        if line.contains("gateway_supervisor_no_config") {
+            findings.push(
+                DiagnosticFinding::new(
+                    "log:gateway-supervisor-no-config",
+                    "critical",
+                    "model_gateway",
+                    "No model providers are configured",
+                    "The gateway supervisor did not start because the active policy has no model provider configuration. Orchestrators and executors will fail model calls until providers and routing are added.",
+                )
+                .maybe_initiative(line_initiative.clone())
+                .observed_at(now)
+                .evidence_link("Kernel log", path, path)
+                .action("Open Policy Builder", "route", "/policy-builder")
+                .action("View Policy", "route", "/policy")
+                .action("Restart Homebrew service", "command", "brew services restart raxis"),
+            );
+        } else if line.contains("GatewayUnavailable") {
+            findings.push(
+                DiagnosticFinding::new(
+                    "log:gateway-unavailable",
+                    "critical",
+                    "model_gateway",
+                    "Model gateway unavailable",
+                    "A planner/model call failed because the kernel had no connected gateway. Check provider configuration and gateway process health before retrying the initiative.",
+                )
+                .maybe_initiative(line_initiative.clone())
+                .observed_at(now)
+                .evidence_link("Kernel log", path, path)
+                .action("Open Health", "route", "/health")
+                .action("Restart Homebrew service", "command", "brew services restart raxis"),
+            );
+        } else if line.contains("FAIL_APPROVE_PLAN") && line.contains("on_failure_invalid") {
+            findings.push(
+                DiagnosticFinding::new(
+                    "log:approve-plan:on-failure-invalid",
+                    "high",
+                    "plan_validation",
+                    "Integration verifier failure action is invalid",
+                    "A pre-merge integration verifier used an on_failure value that only makes sense for per-task review blocking. Integration merge verifiers must use block_merge or warn_only.",
+                )
+                .maybe_initiative(line_initiative.clone())
+                .observed_at(now)
+                .evidence_link("Kernel log", path, path)
+                .evidence("Valid values", "block_merge, warn_only")
+                .action("Open Plan Builder", "route", "/plan-builder"),
+            );
+        } else if line.contains("FAIL_APPROVE_PLAN")
+            && line.contains("lane_id")
+            && line.contains("not declared")
+        {
+            findings.push(
+                DiagnosticFinding::new(
+                    "log:approve-plan:lane-not-declared",
+                    "high",
+                    "policy_envelope",
+                    "Plan lane is outside the policy envelope",
+                    "The plan selected a lane that is not declared by the active policy. Add the lane to policy or choose an allowed lane in the plan.",
+                )
+                .maybe_initiative(line_initiative.clone())
+                .observed_at(now)
+                .evidence_link("Kernel log", path, path)
+                .action("Open Policy Builder", "route", "/policy-builder")
+                .action("Open Plan Builder", "route", "/plan-builder"),
+            );
+        } else if line.contains("PLAN_TOML_PARSE") {
+            findings.push(
+                DiagnosticFinding::new(
+                    "log:approve-plan:toml-parse",
+                    "high",
+                    "plan_validation",
+                    "Plan TOML is malformed",
+                    "The submitted plan could not be parsed as TOML. Multi-line text must use TOML multi-line strings or escaped newlines.",
+                )
+                .maybe_initiative(line_initiative.clone())
+                .observed_at(now)
+                .evidence_link("Kernel log", path, path)
+                .action("Open Plan Builder", "route", "/plan-builder"),
+            );
+        }
+    }
+}
+
+fn extract_json_string_field(line: &str, key: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(line).ok()?;
+    parsed
+        .get(key)
+        .or_else(|| parsed.get("payload").and_then(|p| p.get(key)))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn read_text_tail(path: &Path, max_bytes: u64) -> std::io::Result<String> {
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    if len > max_bytes {
+        f.seek(SeekFrom::Start(len - max_bytes))?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+fn dedupe_and_sort_diagnostics(findings: &mut Vec<DiagnosticFinding>) {
+    findings.sort_by(|a, b| {
+        diagnostic_severity_rank(&a.severity)
+            .cmp(&diagnostic_severity_rank(&b.severity))
+            .then_with(|| b.observed_at.cmp(&a.observed_at))
+            .then_with(|| a.finding_id.cmp(&b.finding_id))
+    });
+    let mut seen = std::collections::HashSet::new();
+    findings.retain(|f| seen.insert(f.finding_id.clone()));
+}
+
+fn diagnostic_severity_rank(severity: &str) -> u8 {
+    match severity {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Git-error → ApiError classification
 // ---------------------------------------------------------------------------
@@ -4039,6 +4482,16 @@ fn map_git_error_to_api(err: git::GitError) -> ApiError {
                 kind: "worktree-path".into(),
             }
         }
+        git::GitError::CommitNotFound { sha } => {
+            tracing::warn!(
+                target = "raxis_dashboard",
+                sha = %sha,
+                "git: commit missing from selected repository; surfacing operator-safe 400"
+            );
+            ApiError::BadRequest {
+                detail: "commit not found in the selected repository; choose a worktree/repository that contains both sides of the review range".into(),
+            }
+        }
         git::GitError::Timeout { secs } => {
             tracing::warn!(
                 target = "raxis_dashboard",
@@ -4068,6 +4521,27 @@ struct ResolvedWorktree {
     summary: WorktreeListEntry,
 }
 
+#[derive(Debug, Clone)]
+struct ManagedRepoRoot {
+    name: String,
+    path: String,
+    source_url: Option<String>,
+    tracking_ref: Option<String>,
+    lifecycle_state: Option<String>,
+    publish_state: Option<String>,
+    ahead_count: Option<i64>,
+    behind_count: Option<i64>,
+    last_fetch_at: Option<i64>,
+    last_push_at: Option<i64>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedReviewRepo {
+    path: String,
+    repository_id: Option<String>,
+}
+
 impl KernelDashboardData {
     /// Walk `policy.allowed_worktree_roots()` (kind=Main) +
     /// the durable session worktree list (kind=Session) and produce a
@@ -4075,36 +4549,53 @@ impl KernelDashboardData {
     /// layer to look up.
     ///
     /// Slug discipline:
-    ///   * Main roots: `main-<idx>` where `<idx>` is the
-    ///     position in `allowed_worktree_roots()`. Stable
-    ///     across reloads as long as the operator does not
-    ///     reshuffle the list.
+    ///   * Managed repository roots: `main-repository` for
+    ///     `repositories/main`, or `main-repository-<repo>` for
+    ///     other exact git roots under `data_dir/repositories`.
+    ///   * Policy-listed main roots: `main-<idx>` where `<idx>`
+    ///     is the position in `allowed_worktree_roots()`. These
+    ///     are included only when the listed path is itself a git
+    ///     top-level, not merely a child of some parent checkout.
+    ///   * Integration roots: `main-integration-<initiative-id>`
+    ///     resolved against a repo/worktree that contains both
+    ///     recorded range endpoints.
     ///   * Session roots: `session-<short-id>` where
     ///     `<short-id>` is the first 12 hex chars of the
     ///     session id (or the whole session id if shorter).
     fn collect_worktrees(&self) -> Result<Vec<ResolvedWorktree>, ApiError> {
         let mut out = Vec::new();
-        let main_repo_path = self.internal_main_repo_path();
-        out.push(main_worktree_entry(
-            "main-repository".to_owned(),
-            "repositories/main".to_owned(),
-            main_repo_path.clone(),
-            None,
-            None,
-            None,
-            None,
-        ));
+        let managed_repos = self.collect_managed_repo_roots();
+        for repo in &managed_repos {
+            out.push(main_worktree_entry(
+                managed_repo_slug(&repo.name),
+                repo.name.clone(),
+                repo.path.clone(),
+                Some("Repository".into()),
+                Some(repo.name.clone()),
+                None,
+                None,
+                None,
+                Some(repo),
+                None,
+            ));
+        }
         let bundle = self.policy.load_full();
         for (idx, raw) in bundle.allowed_worktree_roots().iter().enumerate() {
             let path = raw.trim_end_matches('/').to_owned();
-            if same_display_path(&path, &main_repo_path) {
+            if managed_repos
+                .iter()
+                .any(|repo| same_display_path(&path, &repo.path))
+            {
+                continue;
+            }
+            if !git::is_exact_repo_root(std::path::Path::new(&path)) {
                 continue;
             }
             let label = std::path::Path::new(&path)
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.clone());
-            let entry = main_worktree_entry(
+            out.push(main_worktree_entry(
                 format!("main-{idx}"),
                 if label.is_empty() {
                     format!("main-{idx}")
@@ -4112,14 +4603,14 @@ impl KernelDashboardData {
                     label
                 },
                 path,
+                Some("Repository".into()),
                 None,
                 None,
                 None,
                 None,
-            );
-            if entry.summary.observed_head_sha.is_some() {
-                out.push(entry);
-            }
+                None,
+                None,
+            ));
         }
         if let Ok(conn) = self.open_ro() {
             let mut seen_main_initiatives = std::collections::HashSet::new();
@@ -4157,18 +4648,42 @@ impl KernelDashboardData {
                             }
                             _ => format!("Main:{short}"),
                         };
+                        let Some(review_repo) = self.find_repo_path_containing_range(
+                            &conn,
+                            &managed_repos,
+                            &initiative_id,
+                            &review_base_sha,
+                            &head_sha,
+                        )?
+                        else {
+                            tracing::warn!(
+                                target = "raxis_dashboard",
+                                initiative_id = %initiative_id,
+                                base_sha = %review_base_sha,
+                                head_sha = %head_sha,
+                                "git: skipping integration worktree row because no managed repo/worktree contains the recorded range"
+                            );
+                            continue;
+                        };
                         // Use the full initiative id in the route slug.
                         // UUIDv7 initiatives admitted in the same moment can
                         // share their first timestamp-heavy characters; a
                         // short slug would collapse multiple main review rows
                         // onto one `/git/:name` route.
+                        let review_repo_meta =
+                            review_repo.repository_id.as_ref().and_then(|repo_id| {
+                                managed_repos.iter().find(|repo| &repo.name == repo_id)
+                            });
                         out.push(main_worktree_entry(
                             format!("main-integration-{initiative_id}"),
                             label,
-                            main_repo_path.clone(),
+                            review_repo.path,
+                            Some("Integration".into()),
+                            review_repo.repository_id,
                             Some(task_id),
                             Some(initiative_id),
                             initiative_display_name,
+                            review_repo_meta,
                             Some((review_base_sha, head_sha)),
                         ));
                     }
@@ -4261,11 +4776,16 @@ impl KernelDashboardData {
                         };
                         let initiative_display_name =
                             initiative_name_for_id_opt(&conn, initiative_id.as_deref())?;
+                        if !git::is_exact_repo_root(std::path::Path::new(&wt)) {
+                            continue;
+                        }
                         out.push(ResolvedWorktree {
                             summary: WorktreeListEntry {
                                 name: format!("session-{short}"),
                                 label: format!("{agent_type}:{short}"),
                                 kind: "Session".into(),
+                                surface: Some("Worktree".into()),
+                                repository_id: None,
                                 path: wt,
                                 session_id: Some(session_id),
                                 task_id,
@@ -4278,6 +4798,15 @@ impl KernelDashboardData {
                                 observed_head_sha: None,
                                 observed_branch: None,
                                 observed_dirty_paths: None,
+                                repository_lifecycle_state: None,
+                                repository_publish_state: None,
+                                repository_source_url: None,
+                                repository_tracking_ref: None,
+                                repository_ahead_count: None,
+                                repository_behind_count: None,
+                                repository_last_fetch_at: None,
+                                repository_last_push_at: None,
+                                repository_last_error: None,
                                 base_sha,
                                 comparison_head_sha: None,
                             },
@@ -4303,9 +4832,9 @@ impl KernelDashboardData {
                 kind: "worktree".into(),
             })?;
         if !bundle.worktree_root_allowed(&resolved.summary.path) {
-            let is_internal_main = resolved.summary.kind == "Main"
-                && same_display_path(&resolved.summary.path, &self.internal_main_repo_path());
-            if !is_internal_main {
+            let is_managed_repo = resolved.summary.kind == "Main"
+                && self.is_managed_repo_root_path(&resolved.summary.path);
+            if !is_managed_repo {
                 return Err(ApiError::NotFound {
                     kind: "worktree".into(),
                 });
@@ -4314,12 +4843,159 @@ impl KernelDashboardData {
         Ok(resolved)
     }
 
-    fn internal_main_repo_path(&self) -> String {
-        self.data_dir
-            .join("repositories")
-            .join("main")
-            .display()
-            .to_string()
+    fn collect_managed_repo_roots(&self) -> Vec<ManagedRepoRoot> {
+        if let Ok(conn) = self.open_ro() {
+            if let Ok(rows) = raxis_store::managed_repositories::list(&conn) {
+                let mut repos = Vec::new();
+                for row in rows {
+                    let path = std::path::PathBuf::from(&row.managed_path);
+                    if !git::is_exact_repo_root(&path) {
+                        continue;
+                    }
+                    repos.push(ManagedRepoRoot {
+                        name: row.repository_id,
+                        path: row.managed_path,
+                        source_url: row.source_url,
+                        tracking_ref: row.tracking_ref,
+                        lifecycle_state: Some(row.lifecycle_state),
+                        publish_state: Some(row.publish_state),
+                        ahead_count: row.ahead_count,
+                        behind_count: row.behind_count,
+                        last_fetch_at: row.last_fetch_at,
+                        last_push_at: row.last_push_at,
+                        last_error: row.last_error,
+                    });
+                }
+                if !repos.is_empty() {
+                    repos.sort_by(|a, b| a.name.cmp(&b.name));
+                    return repos;
+                }
+            }
+        }
+        let repos_dir = self.data_dir.join("repositories");
+        let mut repos = Vec::new();
+        let Ok(read_dir) = std::fs::read_dir(&repos_dir) else {
+            return repos;
+        };
+        for entry in read_dir.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            if !git::is_exact_repo_root(&path) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.trim().is_empty() {
+                continue;
+            }
+            repos.push(ManagedRepoRoot {
+                name,
+                path: path.display().to_string(),
+                source_url: None,
+                tracking_ref: None,
+                lifecycle_state: None,
+                publish_state: None,
+                ahead_count: None,
+                behind_count: None,
+                last_fetch_at: None,
+                last_push_at: None,
+                last_error: None,
+            });
+        }
+        repos.sort_by(|a, b| a.name.cmp(&b.name));
+        repos
+    }
+
+    fn find_repo_path_containing_range(
+        &self,
+        conn: &raxis_store::ro::RoConn,
+        managed_repos: &[ManagedRepoRoot],
+        initiative_id: &str,
+        base_sha: &str,
+        head_sha: &str,
+    ) -> Result<Option<ResolvedReviewRepo>, ApiError> {
+        let mut candidates: Vec<ResolvedReviewRepo> = managed_repos
+            .iter()
+            .map(|repo| ResolvedReviewRepo {
+                path: repo.path.clone(),
+                repository_id: Some(repo.name.clone()),
+            })
+            .collect();
+        candidates.push(ResolvedReviewRepo {
+            path: self
+                .data_dir
+                .join("worktrees")
+                .join(format!("orch-{initiative_id}"))
+                .display()
+                .to_string(),
+            repository_id: None,
+        });
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT worktree_root \
+                   FROM {TBL_SESSIONS} \
+                  WHERE initiative_id = ?1 \
+                    AND worktree_root IS NOT NULL \
+                  ORDER BY created_at ASC, session_id ASC"
+            ))
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("integration worktree candidate query prepare: {e}"),
+            })?;
+        let roots = stmt
+            .query_map([initiative_id], |r| r.get::<_, String>(0))
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("integration worktree candidate query: {e}"),
+            })?;
+        for root in roots {
+            let root = root.map_err(|e| ApiError::Internal {
+                log_only: format!("integration worktree candidate row: {e}"),
+            })?;
+            candidates.push(ResolvedReviewRepo {
+                path: root,
+                repository_id: None,
+            });
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for candidate in candidates {
+            let normalized = candidate.path.trim_end_matches('/').to_owned();
+            if normalized.is_empty() || !seen.insert(normalized.clone()) {
+                continue;
+            }
+            let path = std::path::Path::new(&normalized);
+            if !git::is_exact_repo_root(path) {
+                continue;
+            }
+            if git::has_commit(path, base_sha) && git::has_commit(path, head_sha) {
+                return Ok(Some(ResolvedReviewRepo {
+                    path: normalized,
+                    repository_id: candidate.repository_id,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn is_managed_repo_root_path(&self, path: &str) -> bool {
+        let path = std::path::Path::new(path);
+        if !git::is_exact_repo_root(path) {
+            return false;
+        }
+        let Some(parent_path) = path.parent() else {
+            return false;
+        };
+        let Ok(parent) = parent_path.canonicalize() else {
+            return false;
+        };
+        let Ok(repos_dir) = self.data_dir.join("repositories").canonicalize() else {
+            return false;
+        };
+        parent == repos_dir
     }
 }
 
@@ -4327,9 +5003,12 @@ fn main_worktree_entry(
     name: String,
     label: String,
     path: String,
+    surface: Option<String>,
+    repository_id: Option<String>,
     task_id: Option<String>,
     initiative_id: Option<String>,
     initiative_display_name: Option<String>,
+    repo_meta: Option<&ManagedRepoRoot>,
     review_range: Option<(String, String)>,
 ) -> ResolvedWorktree {
     let observed = std::path::Path::new(&path)
@@ -4343,6 +5022,8 @@ fn main_worktree_entry(
             name,
             label,
             kind: "Main".into(),
+            surface,
+            repository_id,
             path,
             session_id: None,
             task_id,
@@ -4357,6 +5038,15 @@ fn main_worktree_entry(
             observed_dirty_paths: observed
                 .as_ref()
                 .map(|s| u32::try_from(s.status_lines.len()).unwrap_or(u32::MAX)),
+            repository_lifecycle_state: repo_meta.and_then(|r| r.lifecycle_state.clone()),
+            repository_publish_state: repo_meta.and_then(|r| r.publish_state.clone()),
+            repository_source_url: repo_meta.and_then(|r| r.source_url.clone()),
+            repository_tracking_ref: repo_meta.and_then(|r| r.tracking_ref.clone()),
+            repository_ahead_count: repo_meta.and_then(|r| r.ahead_count),
+            repository_behind_count: repo_meta.and_then(|r| r.behind_count),
+            repository_last_fetch_at: repo_meta.and_then(|r| r.last_fetch_at),
+            repository_last_push_at: repo_meta.and_then(|r| r.last_push_at),
+            repository_last_error: repo_meta.and_then(|r| r.last_error.clone()),
             base_sha,
             comparison_head_sha,
         },
@@ -4369,6 +5059,34 @@ fn short_stable_id(id: &str, max_chars: usize) -> String {
 
 fn same_display_path(a: &str, b: &str) -> bool {
     a.trim_end_matches('/') == b.trim_end_matches('/')
+}
+
+fn managed_repo_slug(name: &str) -> String {
+    if name == "main" {
+        "main-repository".to_owned()
+    } else {
+        format!("main-repository-{}", slug_component(name))
+    }
+}
+
+fn slug_component(raw: &str) -> String {
+    let slug = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if slug.is_empty() {
+        "repo".to_owned()
+    } else {
+        slug
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4848,6 +5566,314 @@ fn initiative_review_base_sha(
             log_only: format!("initiative review-base query: {e}"),
         }),
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct InitiativeTaskAccounting {
+    task_id: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    token_cost_micros: u64,
+    admission_reserved_units: u64,
+    actual_cost_units: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CapturedUsageTotals {
+    turn_count: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+    any_usage: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DeclaredBudgetTotals {
+    turn_budget: Option<u64>,
+    wallclock_budget_seconds: Option<u64>,
+}
+
+fn initiative_run_summary(
+    conn: &raxis_store::ro::RoConn,
+    initiative: &raxis_store::views::initiatives::InitiativeRow,
+    task_rows: &[raxis_store::views::tasks::TaskRow],
+    capture: Option<&Arc<TaskLlmCapture>>,
+    latest_task_transition_at: u64,
+) -> Result<InitiativeRunSummary, ApiError> {
+    let mut summary = InitiativeRunSummary {
+        terminal: initiative_is_terminal(&initiative.state),
+        elapsed_seconds: latest_task_transition_at.saturating_sub(initiative.created_at),
+        ..InitiativeRunSummary::default()
+    };
+
+    let (session_count, active_session_count) =
+        initiative_session_counts(conn, &initiative.initiative_id)?;
+    summary.session_count = session_count;
+    summary.active_session_count = active_session_count;
+
+    for row in task_accounting_for_initiative(conn, &initiative.initiative_id)? {
+        let captured = captured_usage_for_task(capture, &row.task_id);
+        summary.llm_turn_count = saturating_u32_add(summary.llm_turn_count, captured.turn_count);
+
+        let task_has_persisted_tokens = row.input_tokens != 0
+            || row.output_tokens != 0
+            || row.cache_creation_tokens != 0
+            || row.cache_read_tokens != 0;
+        if task_has_persisted_tokens || !captured.any_usage {
+            summary.input_tokens = summary.input_tokens.saturating_add(row.input_tokens);
+            summary.output_tokens = summary.output_tokens.saturating_add(row.output_tokens);
+            summary.cache_creation_tokens = summary
+                .cache_creation_tokens
+                .saturating_add(row.cache_creation_tokens);
+            summary.cache_read_tokens = summary
+                .cache_read_tokens
+                .saturating_add(row.cache_read_tokens);
+        } else {
+            summary.input_tokens = summary.input_tokens.saturating_add(captured.input_tokens);
+            summary.output_tokens = summary.output_tokens.saturating_add(captured.output_tokens);
+            summary.cache_creation_tokens = summary
+                .cache_creation_tokens
+                .saturating_add(captured.cache_creation_tokens);
+            summary.cache_read_tokens = summary
+                .cache_read_tokens
+                .saturating_add(captured.cache_read_tokens);
+        }
+
+        summary.token_cost_micros = summary
+            .token_cost_micros
+            .saturating_add(row.token_cost_micros);
+        summary.admission_reserved_units = summary
+            .admission_reserved_units
+            .saturating_add(row.admission_reserved_units);
+        summary.actual_cost_units = summary
+            .actual_cost_units
+            .saturating_add(row.actual_cost_units);
+    }
+
+    let declared = declared_budget_totals_for_initiative(conn, &initiative.initiative_id);
+    summary.declared_turn_budget = declared.turn_budget;
+    summary.declared_wallclock_budget_seconds = declared.wallclock_budget_seconds;
+
+    // A freshly approved initiative with no task transitions yet still
+    // has a meaningful elapsed clock from creation to completion if the
+    // initiatives table carries a terminal timestamp.
+    if summary.elapsed_seconds == 0 {
+        if let Some(completed_at) = initiative.completed_at {
+            summary.elapsed_seconds = completed_at.saturating_sub(initiative.created_at);
+        }
+    }
+
+    // Keep the compiler honest that the caller supplied the same task
+    // rows it used for page rendering; task_accounting_for_initiative is
+    // the source of truth for ledger fields, but this guards accidental
+    // dead-code removal of the existing view query parameter.
+    let _rendered_task_count = task_rows.len();
+
+    Ok(summary)
+}
+
+fn initiative_is_terminal(state: &str) -> bool {
+    matches!(
+        state,
+        "Completed" | "Failed" | "Aborted" | "Quarantined" | "Closed"
+    )
+}
+
+fn initiative_session_counts(
+    conn: &raxis_store::ro::RoConn,
+    initiative_id: &str,
+) -> Result<(u32, u32), ApiError> {
+    let sql = format!(
+        "SELECT COUNT(*), \
+                COALESCE(SUM(CASE WHEN revoked = 0 THEN 1 ELSE 0 END), 0) \
+         FROM {TBL_SESSIONS} \
+         WHERE initiative_id = ?1",
+    );
+    let (total, active): (i64, i64) = conn
+        .query_row(&sql, rusqlite::params![initiative_id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("initiative session-count query: {e}"),
+        })?;
+    Ok((
+        nonnegative_i64_to_u32(total),
+        nonnegative_i64_to_u32(active),
+    ))
+}
+
+fn task_accounting_for_initiative(
+    conn: &raxis_store::ro::RoConn,
+    initiative_id: &str,
+) -> Result<Vec<InitiativeTaskAccounting>, ApiError> {
+    let sql = format!(
+        "SELECT task_id, \
+                cumulative_input_tokens, \
+                cumulative_output_tokens, \
+                cumulative_cache_creation_tokens, \
+                cumulative_cache_read_tokens, \
+                cumulative_token_cost_micros, \
+                COALESCE(admission_reserved_units, 0), \
+                actual_cost \
+         FROM {TBL_TASKS} \
+         WHERE initiative_id = ?1 \
+         ORDER BY admitted_at ASC, task_id ASC",
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| ApiError::Internal {
+        log_only: format!("initiative task-accounting prepare: {e}"),
+    })?;
+    let rows = stmt
+        .query_map(rusqlite::params![initiative_id], |r| {
+            Ok(InitiativeTaskAccounting {
+                task_id: r.get(0)?,
+                input_tokens: nonnegative_i64_to_u64(r.get::<_, i64>(1)?),
+                output_tokens: nonnegative_i64_to_u64(r.get::<_, i64>(2)?),
+                cache_creation_tokens: nonnegative_i64_to_u64(r.get::<_, i64>(3)?),
+                cache_read_tokens: nonnegative_i64_to_u64(r.get::<_, i64>(4)?),
+                token_cost_micros: nonnegative_i64_to_u64(r.get::<_, i64>(5)?),
+                admission_reserved_units: nonnegative_i64_to_u64(r.get::<_, i64>(6)?),
+                actual_cost_units: nonnegative_i64_to_u64(r.get::<_, i64>(7)?),
+            })
+        })
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("initiative task-accounting query: {e}"),
+        })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("initiative task-accounting row decode: {e}"),
+        })
+}
+
+fn captured_usage_for_task(
+    capture: Option<&Arc<TaskLlmCapture>>,
+    task_id: &str,
+) -> CapturedUsageTotals {
+    let Some(cap) = capture else {
+        return CapturedUsageTotals::default();
+    };
+    let recs = cap.tail(task_id, usize::MAX);
+    let mut totals = CapturedUsageTotals {
+        turn_count: recs.len() as u64,
+        ..CapturedUsageTotals::default()
+    };
+    for r in &recs {
+        let Some(usage) = usage_accounting_from_llm_turn(r) else {
+            continue;
+        };
+        totals.any_usage = true;
+        totals.input_tokens = totals.input_tokens.saturating_add(usage.input_tokens);
+        totals.output_tokens = totals.output_tokens.saturating_add(usage.output_tokens);
+        totals.cache_creation_tokens = totals
+            .cache_creation_tokens
+            .saturating_add(usage.cache_creation_tokens);
+        totals.cache_read_tokens = totals
+            .cache_read_tokens
+            .saturating_add(usage.cache_read_tokens);
+    }
+    totals
+}
+
+fn usage_accounting_from_llm_turn(r: &LlmTurnRecord) -> Option<CapturedUsageTotals> {
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(&r.body) else {
+        return None;
+    };
+    let usage = body.get("usage").and_then(|v| v.as_object())?;
+    Some(CapturedUsageTotals {
+        turn_count: 0,
+        input_tokens: usage
+            .get("input_tokens")
+            .or_else(|| usage.get("prompt_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        output_tokens: usage
+            .get("output_tokens")
+            .or_else(|| usage.get("completion_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        cache_creation_tokens: usage
+            .get("cache_creation_input_tokens")
+            .or_else(|| usage.get("cache_creation_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        cache_read_tokens: usage
+            .get("cache_read_input_tokens")
+            .or_else(|| usage.get("cache_read_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        any_usage: true,
+    })
+}
+
+fn declared_budget_totals_for_initiative(
+    conn: &raxis_store::ro::RoConn,
+    initiative_id: &str,
+) -> DeclaredBudgetTotals {
+    let Ok(Some(bytes)) =
+        raxis_store::views::plan_fields::submitted_toml_for_initiative(conn, initiative_id)
+    else {
+        return DeclaredBudgetTotals::default();
+    };
+    let Ok(plan_toml) = String::from_utf8(bytes) else {
+        return DeclaredBudgetTotals::default();
+    };
+    let Ok(doc) = toml::from_str::<toml::Value>(&plan_toml) else {
+        return DeclaredBudgetTotals::default();
+    };
+    let Some(tasks) = doc.get("tasks").and_then(|v| v.as_array()) else {
+        return DeclaredBudgetTotals::default();
+    };
+
+    let mut turn_budget = OptionalSum::default();
+    let mut wallclock_budget = OptionalSum::default();
+    for task in tasks {
+        turn_budget.add_toml_u64(task, "max_turns");
+        wallclock_budget.add_toml_u64(task, "cumulative_max_seconds");
+        wallclock_budget.add_toml_u64(task, "max_wall_seconds");
+    }
+    DeclaredBudgetTotals {
+        turn_budget: turn_budget.finish(),
+        wallclock_budget_seconds: wallclock_budget.finish(),
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct OptionalSum {
+    seen: bool,
+    value: u64,
+}
+
+impl OptionalSum {
+    fn add_toml_u64(&mut self, table: &toml::Value, key: &str) {
+        let Some(value) = table
+            .get(key)
+            .and_then(|v| v.as_integer())
+            .and_then(|v| u64::try_from(v).ok())
+        else {
+            return;
+        };
+        self.seen = true;
+        self.value = self.value.saturating_add(value);
+    }
+
+    fn finish(self) -> Option<u64> {
+        self.seen.then_some(self.value)
+    }
+}
+
+fn nonnegative_i64_to_u64(value: i64) -> u64 {
+    value.max(0) as u64
+}
+
+fn nonnegative_i64_to_u32(value: i64) -> u32 {
+    u32::try_from(value.max(0)).unwrap_or(u32::MAX)
+}
+
+fn saturating_u32_add(current: u32, add: u64) -> u32 {
+    let total = u64::from(current).saturating_add(add);
+    u32::try_from(total).unwrap_or(u32::MAX)
 }
 
 fn session_vm_env_view_for_session(
@@ -7917,6 +8943,137 @@ task_id = "t-state"
              dashboard-fe/src/lib/state-color.ts in the same commit \
              (INV-DASHBOARD-TASK-STATE-COMPLETENESS-01).",
         );
+    }
+
+    #[test]
+    fn initiative_run_summary_aggregates_ledger_capture_sessions_and_budgets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = raxis_store::Store::open(&tmp.path().join("kernel.db")).unwrap();
+        {
+            let g = store.lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {init} \
+                     (initiative_id, state, terminal_criteria_json, \
+                      plan_artifact_sha256, created_at, approved_at, completed_at) \
+                     VALUES ('init-summary', 'Completed', '{{}}', \
+                             'sha-summary', 100, 110, 260)",
+                    init = raxis_store::Table::Initiatives.as_str()
+                ),
+                [],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {plans} \
+                     (initiative_id, plan_bytes, plan_sig, stored_at) \
+                     VALUES ('init-summary', ?1, x'00', 100)",
+                    plans = raxis_store::Table::SignedPlanArtifacts.as_str()
+                ),
+                [br#"[plan.initiative]
+description = "summary fixture"
+
+[workspace]
+name = "Summary fixture"
+lane_id = "default"
+
+[[tasks]]
+task_id = "t-ledger"
+description = "ledger task"
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+max_turns = 5
+cumulative_max_seconds = 30
+prompt = "do ledger work"
+
+[[tasks]]
+task_id = "t-capture"
+description = "capture task"
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+max_turns = 7
+max_wall_seconds = 40
+prompt = "do capture work"
+"# as &[u8]],
+            )
+            .unwrap();
+            for (session_id, revoked) in [("s-live", 0), ("s-revoked", 1)] {
+                g.execute(
+                    &format!(
+                        "INSERT INTO {sessions} \
+                         (session_id, role_id, session_token, lineage_id, \
+                          fetch_quota, created_at, expires_at, revoked, \
+                          session_agent_type, can_delegate, initiative_id) \
+                         VALUES (?1, 'Executor', ?2, 'lin', \
+                                 0, 120, 9999999999, ?3, \
+                                 'Executor', 0, 'init-summary')",
+                        sessions = raxis_store::Table::Sessions.as_str()
+                    ),
+                    rusqlite::params![session_id, format!("tok-{session_id}"), revoked,],
+                )
+                .unwrap();
+            }
+            g.execute(
+                &format!(
+                    "INSERT INTO {tasks} \
+                     (task_id, initiative_id, lane_id, state, actor, \
+                      policy_epoch, admitted_at, transitioned_at, session_id, \
+                      admission_reserved_units, actual_cost, \
+                      cumulative_input_tokens, cumulative_output_tokens, \
+                      cumulative_cache_creation_tokens, cumulative_cache_read_tokens, \
+                      cumulative_token_cost_micros) \
+                     VALUES ('t-ledger', 'init-summary', 'default', 'Completed', \
+                             'kernel', 1, 120, 200, 's-live', \
+                             3, 7, 100, 50, 11, 22, 123456)",
+                    tasks = raxis_store::Table::Tasks.as_str()
+                ),
+                [],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {tasks} \
+                     (task_id, initiative_id, lane_id, state, actor, \
+                      policy_epoch, admitted_at, transitioned_at, session_id) \
+                     VALUES ('t-capture', 'init-summary', 'default', 'Completed', \
+                             'kernel', 1, 130, 260, 's-revoked')",
+                    tasks = raxis_store::Table::Tasks.as_str()
+                ),
+                [],
+            )
+            .unwrap();
+        }
+
+        let cap = crate::TaskLlmCapture::new(tmp.path(), crate::TaskCaptureConfig::default())
+            .expect("capture");
+        cap.append("t-ledger", mk_rec(anthropic_turn_body(999, 999), 1))
+            .unwrap();
+        cap.append("t-capture", mk_rec(openai_turn_body(20, 10), 2))
+            .unwrap();
+
+        let conn = raxis_store::ro::open(tmp.path()).unwrap();
+        let init = raxis_store::views::initiatives::by_id(&conn, "init-summary")
+            .unwrap()
+            .unwrap();
+        let tasks =
+            raxis_store::views::tasks::list_by_initiative(&conn, "init-summary", 10).unwrap();
+        let summary =
+            initiative_run_summary(&conn, &init, &tasks, Some(&cap), 260).expect("summary");
+
+        assert!(summary.terminal);
+        assert_eq!(summary.elapsed_seconds, 160);
+        assert_eq!(summary.session_count, 2);
+        assert_eq!(summary.active_session_count, 1);
+        assert_eq!(summary.llm_turn_count, 2);
+        assert_eq!(summary.input_tokens, 120);
+        assert_eq!(summary.output_tokens, 60);
+        assert_eq!(summary.cache_creation_tokens, 11);
+        assert_eq!(summary.cache_read_tokens, 22);
+        assert_eq!(summary.token_cost_micros, 123456);
+        assert_eq!(summary.admission_reserved_units, 3);
+        assert_eq!(summary.actual_cost_units, 7);
+        assert_eq!(summary.declared_turn_budget, Some(12));
+        assert_eq!(summary.declared_wallclock_budget_seconds, Some(70));
     }
 
     // ── iter69 — observability-pusher health classification ─────────────

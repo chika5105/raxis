@@ -248,7 +248,7 @@ function PaneSide({
           className={
             contentOwnsScroll
               ? "flex-1 min-h-0 overflow-hidden"
-              : "flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-thin pb-4"
+              : "flex-1 min-h-0 overflow-y-auto overscroll-y-auto scroll-thin pb-4"
           }
         >
           {children}

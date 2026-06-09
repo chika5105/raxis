@@ -229,7 +229,7 @@ Other disk consumers:
 | Subsystem | Typical size | Notes |
 |---|---|---|
 | `state.db` (SQLite) | 100 MB to 5 GB | Grows with `pending_pushes`, indexed views, escalations |
-| `main_repos/` | 10 MB to 5 GB per initiative | Soft cap: `main_repo_quota_mb` (default 8 GB) per [`host-capacity.md §6.2`](host-capacity.md) |
+| `repositories/` | 10 MB to 5 GB per adopted repository | RAXIS managed repository mirrors; exact Git roots adopted with `raxis repo adopt` and refreshed/published with `raxis repo {status,fetch,sync,publish}`. Soft cap: `managed_repo_quota_mb` (default 8 GB) per [`host-capacity.md §6.2`](host-capacity.md). |
 | `worktrees/` | up to 2 GB per active session | Hard cap: `worktree_quota_mb` (default 2 GB) per [`host-capacity.md §6.1`](host-capacity.md) |
 | `bundles/` | small (KBs to MBs); ephemeral | Per-initiative bundle staging |
 | `artifacts/` (immutable artifact store) | 1 to 100 GB | Operator-bound via `artifact_store_quota_gb` (default 100 GB) |
@@ -295,8 +295,8 @@ The kernel uses these paths (all under `disk_root`):
 │   ├── policies/<sha>/
 │   ├── plans/<sha>/
 │   └── keys/<fingerprint>/
-├── main_repos/                          # bare git repos, one per initiative
-│   └── <initiative_uuid>/
+├── repositories/                        # adopted managed repository mirrors
+│   └── <repo_id>/
 ├── worktrees/                             # per-session worktrees (mounted into VMs)
 │   └── <session_uuid>/
 ├── bundles/                               # ephemeral inter-agent git bundles
@@ -518,7 +518,7 @@ The kernel binary is statically-linked for SQLite, rustls, and most other depend
 |---|---|---|
 | A monitoring agent (Prometheus node-exporter, Datadog agent, etc.) | Host capacity visibility | RAXIS emits authority-side metrics/traces through the implemented observability ring and `raxis-otel-pusher`; host-level CPU/disk/network metrics still come from the operator's normal monitoring stack. |
 | Log shipper (vector, fluentd, etc.) | Centralized operational logs | journald or `kernel.{out,err}` files are the source |
-| Backup tool (restic, borg, snapshots) | Disaster recovery for `disk_root` | Audit log + state.db + main_repos are the critical state |
+| Backup tool (restic, borg, snapshots) | Disaster recovery for `disk_root` | Audit log + state.db + adopted `repositories/` mirrors are the critical state |
 
 ---
 

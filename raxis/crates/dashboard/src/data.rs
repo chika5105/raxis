@@ -789,6 +789,200 @@ impl FailureInfo {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Diagnostics — operator triage projection
+// ---------------------------------------------------------------------------
+
+/// `GET /api/diagnostics` response body.
+///
+/// This is a read-only operator triage projection over facts that
+/// already exist elsewhere: health checks, notifications, audit rows,
+/// and kernel-owned log lines. It deliberately does not mutate state
+/// or create a second source of truth; the dashboard uses it to answer
+/// "what probably broke, where is the evidence, and what should I do
+/// next?" without forcing operators to manually correlate five pages.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiagnosticsResponse {
+    /// Unix-seconds timestamp when the backend assembled the view.
+    pub generated_at: u64,
+    /// Findings ordered by severity, then most-recent observation.
+    pub findings: Vec<DiagnosticFinding>,
+}
+
+/// One actionable diagnostic finding.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiagnosticFinding {
+    /// Stable id used by the FE as a React key and by tests as a
+    /// selector. This is NOT an audit id; it is a derived classifier id.
+    pub finding_id: String,
+    /// `critical`, `high`, `medium`, `low`, or `info`.
+    pub severity: String,
+    /// `active`, `resolved`, or `unknown`. First pass emits active
+    /// findings only; the field is reserved so later classifiers can
+    /// show recently resolved incidents without changing the wire.
+    pub status: String,
+    /// Broad owner of the finding (`plan_validation`,
+    /// `model_gateway`, `orchestration`, `audit_chain`, …).
+    pub scope: String,
+    /// Short operator-facing title.
+    pub title: String,
+    /// Explanation of why the finding matters and what symptom it
+    /// explains. Must be safe for read-role operators.
+    pub summary: String,
+    /// Owning initiative id when the finding can be scoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiative_id: Option<String>,
+    /// Owning task id when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Owning session id when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Audit event kind that produced or corroborated the finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_kind: Option<String>,
+    /// Audit event id, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    /// Audit sequence number, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    /// Unix-seconds when the underlying symptom was observed.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub observed_at: u64,
+    /// Evidence rows displayed as a compact definition list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<DiagnosticEvidence>,
+    /// Suggested next actions. Actions are hints, not authority;
+    /// operators still perform the underlying CLI/dashboard step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<DiagnosticAction>,
+}
+
+impl DiagnosticFinding {
+    /// Construct a minimal active finding.
+    pub fn new(
+        finding_id: impl Into<String>,
+        severity: impl Into<String>,
+        scope: impl Into<String>,
+        title: impl Into<String>,
+        summary: impl Into<String>,
+    ) -> Self {
+        Self {
+            finding_id: finding_id.into(),
+            severity: severity.into(),
+            status: "active".into(),
+            scope: scope.into(),
+            title: title.into(),
+            summary: summary.into(),
+            initiative_id: None,
+            task_id: None,
+            session_id: None,
+            event_kind: None,
+            event_id: None,
+            seq: None,
+            observed_at: 0,
+            evidence: Vec::new(),
+            actions: Vec::new(),
+        }
+    }
+
+    /// Builder: attach initiative scope.
+    pub fn initiative(mut self, id: impl Into<String>) -> Self {
+        self.initiative_id = Some(id.into());
+        self
+    }
+
+    /// Builder: attach task scope.
+    pub fn task(mut self, id: impl Into<String>) -> Self {
+        self.task_id = Some(id.into());
+        self
+    }
+
+    /// Builder: attach session scope.
+    pub fn session(mut self, id: impl Into<String>) -> Self {
+        self.session_id = Some(id.into());
+        self
+    }
+
+    /// Builder: attach an audit-chain anchor.
+    pub fn audit(mut self, kind: impl Into<String>, event_id: impl Into<String>, seq: u64) -> Self {
+        self.event_kind = Some(kind.into());
+        self.event_id = Some(event_id.into());
+        self.seq = Some(seq);
+        self
+    }
+
+    /// Builder: stamp observation time.
+    pub fn observed_at(mut self, ts: u64) -> Self {
+        self.observed_at = ts;
+        self
+    }
+
+    /// Builder: attach a compact evidence row.
+    pub fn evidence(mut self, label: impl Into<String>, value: impl Into<String>) -> Self {
+        self.evidence.push(DiagnosticEvidence {
+            label: label.into(),
+            value: value.into(),
+            href: None,
+        });
+        self
+    }
+
+    /// Builder: attach a compact linked evidence row.
+    pub fn evidence_link(
+        mut self,
+        label: impl Into<String>,
+        value: impl Into<String>,
+        href: impl Into<String>,
+    ) -> Self {
+        self.evidence.push(DiagnosticEvidence {
+            label: label.into(),
+            value: value.into(),
+            href: Some(href.into()),
+        });
+        self
+    }
+
+    /// Builder: attach an action.
+    pub fn action(
+        mut self,
+        label: impl Into<String>,
+        kind: impl Into<String>,
+        target: impl Into<String>,
+    ) -> Self {
+        self.actions.push(DiagnosticAction {
+            label: label.into(),
+            kind: kind.into(),
+            target: target.into(),
+        });
+        self
+    }
+}
+
+/// One compact evidence row for a diagnostic finding.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiagnosticEvidence {
+    /// Label such as `Audit event`, `Policy`, or `Kernel log`.
+    pub label: String,
+    /// Operator-safe value.
+    pub value: String,
+    /// Optional link to a dashboard route or external artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
+}
+
+/// One suggested next action for a diagnostic finding.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiagnosticAction {
+    /// Button/link label.
+    pub label: String,
+    /// `route`, `command`, or `external`.
+    pub kind: String,
+    /// Route path, shell command, or URL depending on `kind`.
+    pub target: String,
+}
+
 /// Operator role decoded from the cert. Mirrors
 /// [`DashboardRole`] but lives on the data layer so impls can
 /// surface their own role strings without a dependency cycle.
@@ -835,6 +1029,11 @@ pub struct InitiativeView {
     pub tasks: Vec<TaskView>,
     /// Predecessor → successor adjacency for the DAG view.
     pub edges: Vec<DagEdge>,
+    /// Compact resource ledger for the initiative. The dashboard
+    /// renders this as a run receipt so an operator can answer
+    /// "what did this initiative consume?" without clicking
+    /// through every session/task.
+    pub run_summary: InitiativeRunSummary,
     /// Structured failure detail when the initiative is in a
     /// terminal `Failed` / `Aborted` / `Quarantined` state.
     /// `None` when the initiative is healthy. The FE renders
@@ -842,6 +1041,41 @@ pub struct InitiativeView {
     /// see `INV-DASHBOARD-FAILURE-VISIBILITY-01`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<FailureInfo>,
+}
+
+/// Resource-consumption summary for one initiative.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct InitiativeRunSummary {
+    /// `true` once the initiative is terminal. Non-terminal
+    /// summaries are "so far" snapshots.
+    pub terminal: bool,
+    /// Wall-clock seconds from initiative creation to the latest
+    /// task transition (or completion timestamp when present).
+    pub elapsed_seconds: u64,
+    /// Number of DB session rows attached to this initiative.
+    pub session_count: u32,
+    /// Number of unrevoked sessions attached to this initiative.
+    pub active_session_count: u32,
+    /// Number of captured model turns across initiative tasks.
+    pub llm_turn_count: u32,
+    /// Cumulative provider-reported input tokens.
+    pub input_tokens: u64,
+    /// Cumulative provider-reported output tokens.
+    pub output_tokens: u64,
+    /// Cumulative provider-reported cache-read tokens.
+    pub cache_read_tokens: u64,
+    /// Cumulative provider-reported cache-write tokens.
+    pub cache_creation_tokens: u64,
+    /// Kernel-computed token cost in micro-dollars.
+    pub token_cost_micros: u64,
+    /// Sum of per-task admission reservation units, when present.
+    pub admission_reserved_units: u64,
+    /// Sum of kernel admission actual-cost units.
+    pub actual_cost_units: u64,
+    /// Sum of `[[tasks]].max_turns`, when declared.
+    pub declared_turn_budget: Option<u64>,
+    /// Sum of `[[tasks]].cumulative_max_seconds`, when declared.
+    pub declared_wallclock_budget_seconds: Option<u64>,
 }
 
 /// One DAG edge.
@@ -1744,13 +1978,22 @@ pub struct WorktreeListEntry {
     /// `session-abc123de`). Used as the `:name` path component
     /// for downstream worktree endpoints.
     pub name: String,
-    /// Friendly label suitable for table rendering. For main
-    /// worktrees this is the path basename; for session
-    /// worktrees this is `<role>:<short-session-id>`.
+    /// Friendly label suitable for table rendering. Repository
+    /// rows use the managed repository id; session worktrees use
+    /// `<role>:<short-session-id>`.
     pub label: String,
     /// `Main` for operator-allowed roots, `Session` for
     /// per-session VM clones.
     pub kind: String,
+    /// Operator-facing surface type. `Repository` means a managed
+    /// source mirror, `Integration` means a bounded merged-result
+    /// review range, and `Worktree` means a per-session clone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
+    /// Managed repository id when this row can be tied back to
+    /// `$RAXIS_DATA_DIR/repositories/<id>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_id: Option<String>,
     /// Absolute on-disk path of the worktree (loopback-only —
     /// this is the same path the kernel reads).
     pub path: String,
@@ -1786,6 +2029,35 @@ pub struct WorktreeListEntry {
     /// be probed or is a session row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_dirty_paths: Option<u32>,
+    /// Adopted repository lifecycle state (`clean`, `dirty`, `ahead`,
+    /// `behind`, `diverged`, `local_only`, `remote_unreachable`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_lifecycle_state: Option<String>,
+    /// Publish state for the managed mirror after IntegrationMerge
+    /// (`pending`, `published`, `failed`, `local_only`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_publish_state: Option<String>,
+    /// External source URL recorded at `raxis repo adopt` time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_source_url: Option<String>,
+    /// Remote tracking ref used for ahead/behind status, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_tracking_ref: Option<String>,
+    /// Commits the managed mirror is ahead of its tracking ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_ahead_count: Option<i64>,
+    /// Commits the managed mirror is behind its tracking ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_behind_count: Option<i64>,
+    /// Last successful remote fetch time, as host unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_last_fetch_at: Option<i64>,
+    /// Last successful publish/push time, as host unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_last_push_at: Option<i64>,
+    /// Last recorded lifecycle/publish error for this repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_last_error: Option<String>,
     /// Review-base SHA. Session rows use the session's recorded
     /// base. Per-initiative `IntegrationMerge` main rows use the
     /// initiative's original target-ref anchor so `Diff vs base`
@@ -2334,6 +2606,27 @@ pub trait DashboardData: Send + Sync + 'static {
     /// the kernel's own bookkeeping — the dashboard never
     /// invents a status (`INV-DASHBOARD-VALIDATE-01`).
     fn subsystem_health(&self) -> Result<SubsystemHealthResponse, ApiError>;
+
+    /// Operator diagnostics projection for `GET /api/diagnostics`.
+    ///
+    /// `initiative_id` narrows findings to one initiative when the
+    /// backend can correlate them. Implementations may still include
+    /// global findings (for example a broken audit chain or missing
+    /// model gateway) because those explain initiative-local failures.
+    ///
+    /// Default impl returns an empty response so in-memory fixtures and
+    /// older route tests keep working without fabricating operational
+    /// incidents.
+    fn diagnostics(
+        &self,
+        _initiative_id: Option<&str>,
+        _limit: u32,
+    ) -> Result<DiagnosticsResponse, ApiError> {
+        Ok(DiagnosticsResponse {
+            generated_at: 0,
+            findings: Vec::new(),
+        })
+    }
 
     /// Paginated initiative list (newest first). `limit ≤ 200`.
     fn list_initiatives(
@@ -4357,6 +4650,7 @@ mod tests {
                 from: format!("{id}-t1"),
                 to: format!("{id}-t2"),
             }],
+            run_summary: InitiativeRunSummary::default(),
             failure: None,
         }
     }
@@ -4691,6 +4985,8 @@ mod tests {
             name: "main-0".into(),
             label: "raxis".into(),
             kind: "Main".into(),
+            surface: Some("Repository".into()),
+            repository_id: Some("main".into()),
             path: "/srv/work/raxis".into(),
             session_id: None,
             task_id: None,
@@ -4701,6 +4997,15 @@ mod tests {
             observed_head_sha: None,
             observed_branch: None,
             observed_dirty_paths: None,
+            repository_lifecycle_state: None,
+            repository_publish_state: None,
+            repository_source_url: None,
+            repository_tracking_ref: None,
+            repository_ahead_count: None,
+            repository_behind_count: None,
+            repository_last_fetch_at: None,
+            repository_last_push_at: None,
+            repository_last_error: None,
             base_sha: Some(from.clone()),
             comparison_head_sha: None,
         };

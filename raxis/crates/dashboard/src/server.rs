@@ -343,6 +343,7 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // Health (admin sees full, read sees sanitized).
         .route("/api/health", get(health::health::<D>))
         .route("/api/health/subsystems", get(health::subsystems::<D>))
+        .route("/api/diagnostics", get(diagnostics::list::<D>))
         // V2.5 self-healing-supervisor.md §5.2 — supervisor
         // sentinel view, polled every 5 s by `KernelLifecycleBanner`.
         .route(

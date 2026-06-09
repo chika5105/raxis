@@ -319,6 +319,21 @@ pub enum Table {
     ///           diff_blob_sha256, log_blob_sha256, tree_blob_sha256,
     ///           porcelain_blob_sha256, diff_bytes_total, diff_truncated)`.
     WorktreeSnapshots,
+
+    // ── v3: Adopted source repositories ──────────────────────────────────
+    /// **Operator-adopted source repository metadata.** One row per
+    /// `raxis repo adopt <id> <path-or-url>`. This table is the durable
+    /// source of truth for repository/worktree dashboard rows: RAXIS must
+    /// never infer a managed repository from an arbitrary directory where
+    /// `git rev-parse` succeeds by walking into a parent checkout.
+    ///
+    /// Schema: `(repository_id PK, managed_path, source_url,
+    ///           default_remote, default_target_ref, tracking_ref,
+    ///           lifecycle_state, publish_state, head_sha, remote_sha,
+    ///           ahead_count, behind_count, dirty, last_fetch_at,
+    ///           last_push_at, last_status_at, last_error, adopted_at,
+    ///           updated_at)`.
+    ManagedRepositories,
 }
 
 impl Table {
@@ -366,6 +381,7 @@ impl Table {
             Self::ProviderCircuitState => "provider_circuit_state",
             Self::SessionVmEnv => "session_vm_env",
             Self::WorktreeSnapshots => "worktree_snapshots",
+            Self::ManagedRepositories => "managed_repositories",
         }
     }
 }
@@ -415,6 +431,7 @@ mod tests {
             Table::ProviderCircuitState,
             Table::SessionVmEnv,
             Table::WorktreeSnapshots,
+            Table::ManagedRepositories,
         ];
         for t in all {
             assert!(!t.as_str().is_empty(), "Table::{t:?} returned empty string");
@@ -429,6 +446,13 @@ mod tests {
     #[test]
     fn worktree_snapshots_table_name_is_pinned() {
         assert_eq!(Table::WorktreeSnapshots.as_str(), "worktree_snapshots");
+    }
+
+    /// Adopted repository metadata table name is wire-stable: the CLI,
+    /// kernel publish path, and dashboard all join through this table.
+    #[test]
+    fn managed_repositories_table_name_is_pinned() {
+        assert_eq!(Table::ManagedRepositories.as_str(), "managed_repositories");
     }
 
     /// V2 §3.2 structured outputs table name is wire-stable (the

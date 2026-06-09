@@ -82,7 +82,7 @@ pub fn admit_in_tx(
     // DDL has no `name` column — it's deliberately not persisted.
     conn.execute(
         &format!(
-            "INSERT OR IGNORE INTO {TASKS}
+            "INSERT INTO {TASKS}
                 (task_id, initiative_id, lane_id, state, actor,
                  policy_epoch, admitted_at, transitioned_at, actual_cost)
              VALUES (?1, ?2, ?3, ?4, 'kernel', ?5, ?6, ?6, 0)"
@@ -232,5 +232,27 @@ mod tests {
         assert_eq!(init_id, "init-edges");
         assert_eq!(pred, "p1");
         assert_eq!(succ, "s1");
+    }
+
+    #[test]
+    fn admit_in_tx_rejects_duplicate_global_task_id() {
+        let store = fresh_store_with_initiative("init-dup");
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch("PRAGMA defer_foreign_keys = 1;").unwrap();
+
+        let task = PlanTask {
+            task_id: "same-id".into(),
+            initiative_id: "init-dup".into(),
+            lane_id: "default".into(),
+            name: "first".into(),
+            dependencies: vec![],
+        };
+        admit_in_tx(&tx, task.clone(), 1).unwrap();
+        let err = admit_in_tx(&tx, task, 1).unwrap_err();
+        assert!(
+            matches!(err, SchedulerError::Sql(_)),
+            "duplicate task_id must surface as SQL constraint failure, got {err:?}"
+        );
     }
 }

@@ -18,6 +18,7 @@ pub mod audit;
 pub mod auth;
 pub mod builders;
 pub mod credentials;
+pub mod diagnostics;
 pub mod escalations;
 pub mod gates;
 pub mod git;

@@ -547,7 +547,7 @@ function payloadSearchText(payload: unknown): string {
 function JsonPayload({ payload }: { payload: unknown }) {
   const body = useMemo(() => JSON.stringify(payload, null, 2), [payload]);
   return (
-    <pre className="text-[11px] font-mono text-ink-muted overflow-x-auto scroll-thin max-h-96">
+    <pre className="text-[11px] font-mono text-ink-muted overflow-x-auto overscroll-x-auto scroll-thin max-h-96">
       {body}
     </pre>
   );

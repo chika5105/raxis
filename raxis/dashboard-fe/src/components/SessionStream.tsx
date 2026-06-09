@@ -392,7 +392,7 @@ export function SessionStream({
         // theme-aware `bg-panel` (page canvas) so the stream pane
         // sits one elevation BELOW the card in both modes, with
         // an `border` line for the seam.
-        className="overflow-y-auto scroll-thin font-mono text-[12px] leading-relaxed bg-panel border-t border-edge p-3 h-[60vh]"
+        className="overflow-y-auto overscroll-y-auto scroll-thin font-mono text-[12px] leading-relaxed bg-panel border-t border-edge p-3 h-[60vh]"
       >
         {merged.length === 0 ? (
           <div className="text-ink-subtle italic">

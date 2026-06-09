@@ -647,9 +647,6 @@ function InlineTaskEditor({
       className="nowheel flex max-h-[min(78vh,720px)] flex-col overflow-hidden"
       onClick={(event) => event.stopPropagation()}
       onDoubleClick={(event) => event.stopPropagation()}
-      onWheel={(event) => {
-        event.stopPropagation();
-      }}
     >
       <div className="task-card-drag-handle shrink-0 cursor-grab border-b border-edge bg-panel-raised px-4 py-3 active:cursor-grabbing">
         <div className="flex items-center justify-between gap-3">
@@ -726,7 +723,7 @@ function InlineTaskEditor({
 
       <div
         data-task-scroll-region
-        className="nodrag nopan nowheel flex-1 overflow-y-auto overscroll-contain scroll-thin p-4 pb-8 space-y-3 [touch-action:pan-y]"
+        className="nodrag nopan nowheel flex-1 overflow-y-auto overscroll-y-auto scroll-thin p-4 pb-8 space-y-3 [touch-action:pan-y]"
         onPointerDown={(event) => event.stopPropagation()}
       >
         <div className="grid grid-cols-[1fr_8.5rem] gap-2">

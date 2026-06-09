@@ -104,6 +104,22 @@ function renderPage(id: string) {
     policy_epoch: 1,
     tasks: [],
     edges: [],
+    run_summary: {
+      terminal: false,
+      elapsed_seconds: 0,
+      session_count: 0,
+      active_session_count: 0,
+      llm_turn_count: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      token_cost_micros: 0,
+      admission_reserved_units: 0,
+      actual_cost_units: 0,
+      declared_turn_budget: null,
+      declared_wallclock_budget_seconds: null,
+    },
     failure: null,
   });
   return render(

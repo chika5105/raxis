@@ -1908,6 +1908,15 @@ mod tests {
             .expect("test fixture: model id must be registered")
     }
 
+    fn openai_chat_fixture() -> crate::provider_model::KnownModel {
+        crate::provider_model::KnownModel {
+            name: "openai-chat-fixture",
+            provider: crate::provider_model::ProviderId::OpenAi,
+            deprecated: None,
+            context_window: Some(200_000),
+        }
+    }
+
     /// Drive one `create_message` call through the constructed client
     /// and return the URL it dialled. The trait-object surface
     /// (`Arc<dyn ModelClient>`) hides which concrete impl is
@@ -1996,7 +2005,7 @@ mod tests {
         let rec = Arc::new(FlakyRecordingFetch::new(1, body));
         let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
         let client = build_model_client_chain(
-            &[known("gpt-5.5-medium"), known("claude-sonnet-4-5-20250929")],
+            &[known("gpt-5.3-codex"), known("claude-sonnet-4-5-20250929")],
             &fetch,
             &|_| None,
         )
@@ -2024,8 +2033,8 @@ mod tests {
     async fn build_model_client_routes_openai_to_openai_url() {
         let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
         let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
-        let m = known("gpt-5.5-medium");
-        let client = build_model_client(m, "https://api.openai.com", &fetch, &|_| None).unwrap();
+        let m = openai_chat_fixture();
+        let client = build_model_client(&m, "https://api.openai.com", &fetch, &|_| None).unwrap();
         let url = url_dialled_by(client, rec).await;
         assert_eq!(url, "https://api.openai.com/v1/chat/completions");
     }

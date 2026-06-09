@@ -246,7 +246,7 @@ provider_alias = "orchestrator_default"
 [provider_aliases.orchestrator_default]
 chain = [
     "anthropic:claude-4.6-sonnet-medium-thinking",   # primary
-    "openai:gpt-5.5-medium",                         # cross-provider fallback
+    "openai:gpt-5.3-codex",                         # cross-provider fallback
 ]
 fallback_behavior = "attempt_in_order"
 
@@ -260,7 +260,7 @@ fallback_behavior = "attempt_in_order"
 [provider_aliases_defaults.executor]
 chain = [
     "anthropic:claude-4.6-sonnet-medium-thinking",
-    "openai:gpt-5.5-medium",
+    "openai:gpt-5.3-codex",
 ]
 fallback_behavior = "attempt_in_order"
 ```
@@ -285,7 +285,7 @@ provider_alias = "orchestrator_default"
 [provider_aliases.orchestrator_default]
 chain = [
     "anthropic:claude-4.6-sonnet-medium-thinking",
-    "openai:gpt-5.5-medium",
+    "openai:gpt-5.3-codex",
     "google:gemini-2.5-pro",
 ]
 fallback_behavior = "attempt_in_order"
@@ -301,7 +301,7 @@ fallback_behavior = "attempt_in_order"
 [provider_aliases_defaults.executor]
 chain = [
     "anthropic:claude-4.6-sonnet-medium-thinking",
-    "openai:gpt-5.5-medium",
+    "openai:gpt-5.3-codex",
     "google:gemini-2.5-flash",
 ]
 fallback_behavior = "attempt_in_order"
@@ -350,7 +350,7 @@ A naive "diversify within a single role's chain" would be:
 [provider_aliases.orchestrator_default]
 chain = [
     "anthropic:claude-4.6-sonnet-medium-thinking",
-    "openai:gpt-5.5-medium",
+    "openai:gpt-5.3-codex",
 ]
 [provider_aliases_defaults.reviewer]
 chain = [
@@ -360,7 +360,7 @@ chain = [
 [provider_aliases_defaults.executor]
 chain = [
     "anthropic:claude-4.6-sonnet-medium-thinking",
-    "openai:gpt-5.5-medium",
+    "openai:gpt-5.3-codex",
 ]
 ```
 
@@ -497,7 +497,7 @@ React; a "systems" profile might use a model strong on Rust:
 
 ```toml
 [provider_aliases.frontend_dev]
-chain = ["openai:gpt-5.5-medium"]
+chain = ["openai:gpt-5.3-codex"]
 
 [provider_aliases.systems_dev]
 chain = ["anthropic:claude-opus-4.7-thinking-medium"]
@@ -532,7 +532,7 @@ chain             = ["openai:gpt-5.3-codex", "anthropic:claude-opus-4.7-thinking
 fallback_behavior = "attempt_in_order"   # currently the only valid value; reserved for future strategies
 
 [provider_aliases_defaults.executor]
-chain             = ["anthropic:claude-4.6-sonnet-medium-thinking", "openai:gpt-5.5-medium"]
+chain             = ["anthropic:claude-4.6-sonnet-medium-thinking", "openai:gpt-5.3-codex"]
 fallback_behavior = "attempt_in_order"
 ```
 
@@ -676,7 +676,7 @@ Step 1 — Operator declares the alias chain.
   Plan.toml or policy.toml:
     [provider_aliases.reviewer]
     chain = ["anthropic:claude-opus-4.7-thinking-medium",
-             "openai:gpt-5.5-medium"]
+             "openai:gpt-5.3-codex"]
 
 Step 2 — Planner submits an inference request.
   Inside the Reviewer VM, the planner harness emits:
@@ -828,7 +828,6 @@ created.
 
     [✓] anthropic:claude-4.6-sonnet-medium-thinking
     [✓] anthropic:claude-opus-4.7-thinking-medium
-    [✓] openai:gpt-5.5-medium
     [✓] openai:gpt-5.3-codex
     [ ] google:gemini-2.5-pro     (selected if Google configured)
     [ ] google:gemini-2.5-flash   (selected if Google configured)
@@ -849,7 +848,6 @@ The selected set lands in `policy.toml`:
 permitted_models = [
     "anthropic:claude-4.6-sonnet-medium-thinking",
     "anthropic:claude-opus-4.7-thinking-medium",
-    "openai:gpt-5.5-medium",
     "openai:gpt-5.3-codex",
 ]
 ```
@@ -871,7 +869,7 @@ writes the resulting chains to `policy.toml`.
 
   Orchestrator (policy-pinned)
     primary:  anthropic:claude-4.6-sonnet-medium-thinking
-    fallback: openai:gpt-5.5-medium
+    fallback: openai:gpt-5.3-codex
 
   Reviewer (defaulted into every plan via plan prepare)
     primary:  openai:gpt-5.3-codex                    [DIFFERENT provider for diversification]
@@ -879,7 +877,7 @@ writes the resulting chains to `policy.toml`.
 
   Executor (defaulted into every plan via plan prepare)
     primary:  anthropic:claude-4.6-sonnet-medium-thinking
-    fallback: openai:gpt-5.5-medium
+    fallback: openai:gpt-5.3-codex
 
   Why the cross-provider primary on Reviewer: when Anthropic has
   an outage, the Reviewer keeps running on its OpenAI primary; the

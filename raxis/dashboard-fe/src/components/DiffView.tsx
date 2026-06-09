@@ -198,7 +198,7 @@ function FileDiff({ file, mode, isOpen, onToggle }: FileDiffProps) {
         <span className="text-bad">−{file.deletions}</span>
       </header>
       {isOpen && (
-        <div className="font-mono text-[11.5px] leading-relaxed overflow-x-auto scroll-thin">
+        <div className="font-mono text-[11.5px] leading-relaxed overflow-x-auto overscroll-x-auto scroll-thin">
           {file.hunk.length === 0 ? (
             <span className="block px-3 py-2 text-ink-subtle italic">
               (binary or empty diff)

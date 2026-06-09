@@ -128,7 +128,9 @@ const KERNEL_SUBCOMMANDS: &[&str] = &["install", "uninstall"];
 /// provider-failure-handling.md §6.6 — circuit breaker operator surface.
 const PROVIDERS_SUBCOMMANDS: &[&str] = &["status", "reset"];
 /// Raxis 0.2 — local managed repository ergonomics.
-const REPO_SUBCOMMANDS: &[&str] = &["adopt", "status", "list"];
+const REPO_SUBCOMMANDS: &[&str] = &[
+    "adopt", "status", "list", "fetch", "sync", "publish", "repair",
+];
 /// V2 §4.2 — operator-dashboard auth helper (challenge-response signing).
 const AUTH_SUBCOMMANDS: &[&str] = &["sign"];
 /// V2.5 self-healing-supervisor.md §10 / dashboard-hardening.md
@@ -437,6 +439,10 @@ fn run() -> Result<(), CliError> {
                 "adopt" => commands::repo::run_adopt(&flags, &rest[1..]),
                 "status" => commands::repo::run_status(&flags, &rest[1..]),
                 "list" => commands::repo::run_status(&flags, &rest[1..]),
+                "fetch" => commands::repo::run_fetch(&flags, &rest[1..]),
+                "sync" => commands::repo::run_sync(&flags, &rest[1..]),
+                "publish" => commands::repo::run_publish(&flags, &rest[1..]),
+                "repair" => commands::repo::run_repair(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "repo sub-command",
                     sub2,
@@ -805,10 +811,25 @@ SUBCOMMANDS:
         `[workspace] repository = "<repository_id>"`; omitting the
         field uses the default `main` repository.
 
-    repo status [repository_id] [--json]
-        Inspect one managed repository, or list every repository under
-        <data-dir>/repositories. Local-only; does not contact the
-        kernel.
+    repo status [repository_id] [--remote] [--json]
+        Inspect adopted repository lifecycle state. With --remote,
+        fetches before computing clean/dirty/ahead/behind/diverged.
+
+    repo fetch [repository_id] [--json]
+        Fetch the repository's default remote and update lifecycle
+        metadata without modifying the managed branch.
+
+    repo sync [repository_id] [--json]
+        Fetch then fast-forward the managed branch when it is clean and
+        behind its tracking ref. Refuses dirty/ahead/diverged states.
+
+    repo publish [repository_id] [--remote origin] [--ref refs/heads/main] [--json]
+        Push the managed repository HEAD to the external source of
+        record and update publish_state.
+
+    repo repair [--json]
+        Re-scan <data-dir>/repositories for exact Git roots and record
+        missing adopted-repository metadata. Rejects parent-walk roots.
 
     auth sign [--json] <challenge-hex>
         Sign a 32-byte hex challenge issued by the operator dashboard's

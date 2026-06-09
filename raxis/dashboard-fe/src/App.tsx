@@ -5,6 +5,7 @@ import { ApiError } from "@/api/client";
 import { RequireAuth } from "@/components/RequireAuth";
 import { Shell } from "@/components/Shell";
 import { AuditPage } from "@/pages/Audit";
+import { DiagnosticsPage } from "@/pages/Diagnostics";
 import { EscalationsPage } from "@/pages/Escalations";
 import { GatesPage } from "@/pages/Gates";
 import { GitPage } from "@/pages/Git";
@@ -67,6 +68,7 @@ export function App() {
                     <Route path="/" element={<OverviewPage />} />
                     <Route path="/glossary" element={<GlossaryPage />} />
                     <Route path="/health" element={<HealthPage />} />
+                    <Route path="/diagnostics" element={<DiagnosticsPage />} />
                     <Route path="/inbox" element={<InboxPage />} />
                     <Route path="/notifications" element={<NotificationsPage />} />
                     <Route path="/initiatives" element={<InitiativesPage />} />

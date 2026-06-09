@@ -20,8 +20,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_crypto::token::try_random_array;
+use raxis_policy::PolicyBundle;
 use thiserror::Error;
 use tokio::process::{Child, Command};
 use tokio::sync::oneshot;
@@ -29,6 +31,8 @@ use tokio::sync::oneshot;
 pub const GATEWAY_BINARY_ENV: &str = "RAXIS_GATEWAY_BINARY";
 pub const GATEWAY_RESPAWN_BACKOFF_MS_ENV: &str = "RAXIS_GATEWAY_RESPAWN_BACKOFF_MS";
 pub const GATEWAY_MAX_CONSECUTIVE_RESPAWNS_ENV: &str = "RAXIS_GATEWAY_MAX_CONSECUTIVE_RESPAWNS";
+pub const GATEWAY_POLICY_RECONCILE_INTERVAL_MS_ENV: &str =
+    "RAXIS_GATEWAY_POLICY_RECONCILE_INTERVAL_MS";
 
 #[derive(Debug, Clone)]
 pub struct GatewayRuntimeConfig {
@@ -63,6 +67,160 @@ pub enum SupervisorShutdown {
     /// The kernel was booted without any approved model providers, so
     /// no gateway subprocess is needed for this runtime.
     NoGatewayConfigured,
+}
+
+/// Policy-aware wrapper around [`spawn_and_supervise`].
+///
+/// Older kernels made the boot-time provider set a static decision: if
+/// policy declared no `[[providers]]`, the supervisor returned
+/// `NoGatewayConfigured` and was gone for the rest of the process
+/// lifetime. That made the otherwise-valid operator flow
+/// "boot minimal policy → advance epoch with providers" fail until the
+/// kernel was restarted. This reconciler keeps a small, kernel-owned
+/// policy watch alive for the whole process lifetime:
+///
+/// * no providers ⇒ no gateway child, fetches fail closed;
+/// * providers appear ⇒ start the normal crash/respawn supervisor;
+/// * providers disappear ⇒ stop the child and disconnect callers;
+/// * provider details change while the child is alive ⇒ the existing
+///   `EpochAdvanced` signal path reloads the gateway view.
+///
+/// The watch is deliberately based on the in-process [`ArcSwap`]
+/// policy bundle, not filesystem polling. Every valid epoch advance
+/// swaps that bundle after signature verification, so the reconciler
+/// sees exactly the same committed policy state as IPC handlers.
+pub async fn spawn_policy_reconciler(
+    policy: Arc<ArcSwap<PolicyBundle>>,
+    data_dir: PathBuf,
+    socket_path: PathBuf,
+    audit: Arc<dyn AuditSink>,
+    client: Arc<crate::gateway::client::GatewayClient>,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) -> SupervisorShutdown {
+    let poll_every = policy_reconcile_interval();
+    let mut ever_started_gateway = false;
+    let mut last_idle_epoch_logged: Option<u64> = None;
+
+    loop {
+        while !policy_has_providers(&policy) {
+            let epoch = policy.load().epoch();
+            if last_idle_epoch_logged != Some(epoch) {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"gateway_supervisor_no_config\",\
+                     \"action\":\"no_model_providers\",\"epoch\":{epoch}}}"
+                );
+                last_idle_epoch_logged = Some(epoch);
+            }
+            client.disconnect().await;
+
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    return if ever_started_gateway {
+                        SupervisorShutdown::Stopped
+                    } else {
+                        SupervisorShutdown::NoGatewayConfigured
+                    };
+                }
+                _ = tokio::time::sleep(poll_every) => {}
+            }
+        }
+
+        let start_epoch = policy.load().epoch();
+        let provider_count = policy.load().providers().len();
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"gateway_supervisor_policy_enabled\",\
+             \"epoch\":{start_epoch},\"provider_count\":{provider_count}}}"
+        );
+        ever_started_gateway = true;
+        last_idle_epoch_logged = None;
+
+        let (inner_shutdown_tx, inner_shutdown_rx) = oneshot::channel::<()>();
+        let mut inner_shutdown_tx = Some(inner_shutdown_tx);
+        let inner_data_dir = data_dir.clone();
+        let inner_socket_path = socket_path.clone();
+        let inner_audit = Arc::clone(&audit);
+        let inner_client = Arc::clone(&client);
+        let mut inner_handle = tokio::spawn(async move {
+            spawn_and_supervise(
+                Some(GatewayRuntimeConfig::from_runtime_env()),
+                inner_data_dir,
+                inner_socket_path,
+                inner_audit,
+                inner_client,
+                inner_shutdown_rx,
+            )
+            .await
+        });
+
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    if let Some(tx) = inner_shutdown_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    let _ = inner_handle.await;
+                    client.disconnect().await;
+                    return SupervisorShutdown::Stopped;
+                }
+                joined = &mut inner_handle => {
+                    match joined {
+                        Ok(SupervisorShutdown::Stopped) => {
+                            client.disconnect().await;
+                            break;
+                        }
+                        Ok(SupervisorShutdown::NoGatewayConfigured) => {
+                            client.disconnect().await;
+                            break;
+                        }
+                        Ok(SupervisorShutdown::Quarantined { reason, total_attempts }) => {
+                            return SupervisorShutdown::Quarantined { reason, total_attempts };
+                        }
+                        Err(join_err) => {
+                            let reason = format!("gateway supervisor task join failed: {join_err}");
+                            eprintln!(
+                                "{{\"level\":\"error\",\"event\":\"gateway_supervisor_join_failed\",\
+                                 \"reason\":\"{reason}\"}}"
+                            );
+                            if let Err(audit_err) = audit.emit(
+                                AuditEventKind::GatewayQuarantined {
+                                    reason: reason.clone(),
+                                    total_attempts: 0,
+                                },
+                                None,
+                                None,
+                                None,
+                            ) {
+                                eprintln!(
+                                    "{{\"level\":\"error\",\"event\":\"GatewayQuarantined\",\
+                                     \"audit_emit_failed\":{},\"reason\":\"{reason}\"}}",
+                                    serde_json::Value::String(audit_err.to_string()),
+                                );
+                            }
+                            return SupervisorShutdown::Quarantined {
+                                reason,
+                                total_attempts: 0,
+                            };
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(poll_every) => {
+                    if !policy_has_providers(&policy) {
+                        let epoch = policy.load().epoch();
+                        eprintln!(
+                            "{{\"level\":\"info\",\"event\":\"gateway_supervisor_policy_disabled\",\
+                             \"epoch\":{epoch},\"action\":\"stop_gateway_no_model_providers\"}}"
+                        );
+                        if let Some(tx) = inner_shutdown_tx.take() {
+                            let _ = tx.send(());
+                        }
+                        let _ = inner_handle.await;
+                        client.disconnect().await;
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Fatal supervisor errors that the supervisor cannot recover from
@@ -444,6 +602,16 @@ fn parse_env_u32(name: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
+fn policy_reconcile_interval() -> Duration {
+    Duration::from_millis(
+        parse_env_u64(GATEWAY_POLICY_RECONCILE_INTERVAL_MS_ENV, 250).clamp(25, 30_000),
+    )
+}
+
+fn policy_has_providers(policy: &Arc<ArcSwap<PolicyBundle>>) -> bool {
+    !policy.load().providers().is_empty()
+}
+
 fn runtime_gateway_binary_path() -> String {
     if let Ok(raw) = std::env::var(GATEWAY_BINARY_ENV) {
         let trimmed = raw.trim();
@@ -701,6 +869,39 @@ mod tests {
         assert!(matches!(outcome, SupervisorShutdown::NoGatewayConfigured));
         assert_eq!(count_events_of(&audit, "GatewaySpawned"), 0);
         assert_eq!(count_events_of(&audit, "GatewayCrashed"), 0);
+        assert_eq!(count_events_of(&audit, "GatewayQuarantined"), 0);
+    }
+
+    #[tokio::test]
+    async fn policy_reconciler_without_providers_stays_alive_until_shutdown() {
+        let (tmp, socket, audit) = supervisor_inputs();
+        let policy = Arc::new(ArcSwap::from_pointee(
+            PolicyBundle::for_tests_with_operators(vec![]),
+        ));
+        let (tx, rx) = oneshot::channel();
+        let audit_for_task = audit.clone() as Arc<dyn AuditSink>;
+        let client = Arc::new(crate::gateway::client::GatewayClient::new());
+        let supervisor = tokio::spawn(spawn_policy_reconciler(
+            policy,
+            tmp.path().to_path_buf(),
+            socket,
+            audit_for_task,
+            client,
+            rx,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !supervisor.is_finished(),
+            "policy reconciler must keep watching after a no-provider boot"
+        );
+        let _ = tx.send(());
+        let outcome = tokio::time::timeout(Duration::from_secs(2), supervisor)
+            .await
+            .expect("reconciler must respond to shutdown")
+            .expect("reconciler task must not panic");
+        assert!(matches!(outcome, SupervisorShutdown::NoGatewayConfigured));
+        assert_eq!(count_events_of(&audit, "GatewaySpawned"), 0);
         assert_eq!(count_events_of(&audit, "GatewayQuarantined"), 0);
     }
 

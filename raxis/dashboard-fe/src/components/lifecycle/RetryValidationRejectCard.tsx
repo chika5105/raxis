@@ -51,7 +51,7 @@ export function RetryValidationRejectCard({ a }: Props) {
             {expanded ? "Collapse" : "Expand validator detail"}
           </button>
           {expanded && (
-            <pre className="mt-1 overflow-x-auto text-[11px] text-ink-muted whitespace-pre-wrap">
+            <pre className="mt-1 overflow-x-auto overscroll-x-auto scroll-thin text-[11px] text-ink-muted whitespace-pre-wrap">
               {JSON.stringify(a.validator_detail, null, 2)}
             </pre>
           )}

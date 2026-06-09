@@ -2059,13 +2059,18 @@ async fn main() {
 
     let ctx = Arc::new(ctx_inner);
 
-    // Step 8.5: Spawn the gateway supervisor when the active policy declares
-    // model providers. The supervisor runs as a long-lived tokio task:
-    // it spawns one kernel-owned `raxis-gateway` subprocess, waits for it
-    // to exit, applies back-off, and respawns. Gateway binary discovery,
-    // sockets, process tokens, and respawn mechanics are runtime-owned, not
-    // signed policy. If no provider is declared, the supervisor returns
-    // `NoGatewayConfigured` immediately.
+    // Step 8.5: Spawn the policy-aware gateway supervisor. The supervisor
+    // runs as a long-lived tokio task: it starts one kernel-owned
+    // `raxis-gateway` subprocess when the active policy declares model
+    // providers, waits for it to exit, applies back-off, and respawns.
+    // Gateway binary discovery, sockets, process tokens, and respawn
+    // mechanics are runtime-owned, not signed policy.
+    //
+    // Important lifecycle detail: the supervisor must stay alive even when
+    // boot policy declares no providers. Operators can legitimately boot a
+    // minimal policy, then advance the epoch with [[providers]] later. The
+    // supervisor watches the in-memory PolicyBundle and starts/stops the
+    // gateway as that committed provider set changes.
     //
     // We hold a `oneshot::Sender<()>` so the post-IPC-dispatch shutdown
     // path (step 11 below) can ask the supervisor to kill the child
@@ -2075,18 +2080,14 @@ async fn main() {
     // shutdown the spec mandates.
     let (gateway_shutdown_tx, gateway_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let supervisor_handle = {
-        let gateway_config = if policy.load().providers().is_empty() {
-            None
-        } else {
-            Some(gateway::supervisor::GatewayRuntimeConfig::from_runtime_env())
-        };
         let socket_path = data_dir.join("sockets/gateway.sock");
         let data_dir_for_sup = data_dir.clone();
         let audit_for_sup = Arc::clone(&audit);
         let client_for_sup = Arc::clone(&gateway_client);
+        let policy_for_sup = Arc::clone(&policy);
         tokio::spawn(async move {
-            gateway::spawn_and_supervise(
-                gateway_config,
+            gateway::spawn_policy_reconciler(
+                policy_for_sup,
                 data_dir_for_sup,
                 socket_path,
                 audit_for_sup,
@@ -2167,8 +2168,8 @@ async fn main() {
             // the CLI. The dashboard NEVER holds the authority
             // private key — the operator signs offline and
             // pastes the detached signature into the editor.
-            let advancer: Arc<dyn raxis_dashboard_kernel::PolicyAdvancer> =
-                Arc::new(crate::dashboard_glue::KernelPolicyAdvancer::new(
+            let advancer: Arc<dyn raxis_dashboard_kernel::PolicyAdvancer> = Arc::new(
+                crate::dashboard_glue::KernelPolicyAdvancer::new(
                     Arc::clone(&registry),
                     Arc::clone(&store),
                     Arc::clone(&audit),
@@ -2176,7 +2177,9 @@ async fn main() {
                     Arc::clone(&epoch_binding),
                     Some(Arc::clone(&artifact_store)),
                     policy_path.clone(),
-                ));
+                )
+                .with_gateway(Arc::clone(&gateway_client)),
+            );
             // Reuse the SAME `SessionStreamCapture` instance
             // that the audit-sink `StreamingAuditSink` bridge
             // was wrapped around earlier (so audit→SSE mirror

@@ -31,6 +31,7 @@ use raxis_policy::PolicyBundle;
 use raxis_store::Store;
 
 use crate::authority::keys::KeyRegistry;
+use crate::gateway::client::GatewayClient;
 use crate::policy_manager::{self, PolicyError};
 use crate::prompt::epoch_binding::EpochBinding;
 
@@ -45,6 +46,11 @@ pub struct KernelPolicyAdvancer {
     pub policy: Arc<ArcSwap<PolicyBundle>>,
     pub epoch_binding: Arc<EpochBinding>,
     pub artifact_store: Option<Arc<raxis_artifact_store::ArtifactStore>>,
+    /// Optional gateway client used for the same best-effort
+    /// `EpochAdvanced` signal that operator IPC sends after
+    /// `RotateEpoch`. `None` only in tests that exercise the policy
+    /// writer without booting the gateway subsystem.
+    pub gateway: Option<Arc<GatewayClient>>,
     /// Canonical on-disk policy.toml path. Writes go via temp +
     /// rename so a partial write never leaves the canonical
     /// path inconsistent with the in-memory bundle.
@@ -75,9 +81,15 @@ impl KernelPolicyAdvancer {
             policy,
             epoch_binding,
             artifact_store,
+            gateway: None,
             policy_path,
             sig_path,
         }
+    }
+
+    pub fn with_gateway(mut self, gateway: Arc<GatewayClient>) -> Self {
+        self.gateway = Some(gateway);
+        self
     }
 }
 
@@ -158,6 +170,12 @@ impl PolicyAdvancer for KernelPolicyAdvancer {
                  \"reason\":\"{e}\"}}"
             );
         }
+        signal_gateway_epoch_advanced(
+            self.gateway.clone(),
+            Arc::clone(&self.audit),
+            outcome.new_epoch_id,
+            "DashboardPolicyUpdated",
+        );
         Ok(AdvanceResult {
             previous_epoch,
             new_epoch: outcome.new_epoch_id,
@@ -201,6 +219,46 @@ fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(&tmp_path, bytes)?;
     std::fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+fn signal_gateway_epoch_advanced(
+    gateway: Option<Arc<GatewayClient>>,
+    audit: Arc<dyn AuditSink>,
+    new_epoch_id: u64,
+    source: &'static str,
+) {
+    let Some(gateway) = gateway else {
+        return;
+    };
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"GatewaySignalSkipped\",\
+             \"source\":\"{source}\",\"reason\":\"no_tokio_runtime\",\
+             \"new_epoch_id\":{new_epoch_id}}}"
+        );
+        return;
+    };
+    handle.spawn(async move {
+        if let Err(e) = gateway.notify_epoch_advanced(new_epoch_id).await {
+            let reason = e.category().to_owned();
+            if let Err(audit_err) = audit.emit(
+                AuditEventKind::GatewaySignalFailed {
+                    signal: "EpochAdvanced".to_owned(),
+                    new_epoch_id: Some(new_epoch_id),
+                    reason: reason.clone(),
+                },
+                None,
+                None,
+                None,
+            ) {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"GatewaySignalFailed\",\
+                     \"audit_emit_failed\":\"{audit_err}\",\"signal\":\"EpochAdvanced\",\
+                     \"new_epoch_id\":{new_epoch_id},\"reason\":\"{reason}\"}}"
+                );
+            }
+        }
+    });
 }
 
 /// Restore the previous bytes (or remove the staged file when

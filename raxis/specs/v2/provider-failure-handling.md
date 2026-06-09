@@ -78,7 +78,7 @@ The operator declares which providers and models are permitted, the credentials 
 permitted_models = [
     "anthropic:claude-opus-4.7",
     "anthropic:claude-sonnet-4.6",
-    "openai:gpt-5.5-medium",
+    "openai:gpt-5.3-codex",
 ]
 
 [providers.retry]
@@ -128,7 +128,7 @@ input_per_mtok  = 3.00
 output_per_mtok = 15.00
 
 [[providers.pricing]]
-model           = "openai:gpt-5.5-medium"
+model           = "openai:gpt-5.3-codex"
 input_per_mtok  = 5.00
 output_per_mtok = 20.00
 ```
@@ -154,7 +154,7 @@ fallback_behavior = "attempt_in_order"
 
 [provider_aliases.reviewer]
 models            = [
-    "openai:gpt-5.5-medium",
+    "openai:gpt-5.3-codex",
     "anthropic:claude-sonnet-4.6",
 ]
 fallback_behavior = "attempt_in_order"
@@ -1125,7 +1125,7 @@ $ raxis providers status
 PROVIDER          MODEL                          STATE      FAILURES  OPENED_AT            EXPIRES_AT
 anthropic         claude-opus-4.7                Closed     0         —                    —
 anthropic         claude-sonnet-4.6              HalfOpen   5         2026-05-04T14:32Z    —
-openai            gpt-5.5-medium                 Open       12        2026-05-04T14:35Z    2026-05-04T14:40Z
+openai            gpt-5.3-codex                 Open       12        2026-05-04T14:35Z    2026-05-04T14:40Z
 
 $ raxis providers reset --provider anthropic --model claude-sonnet-4.6
 Reset breaker for anthropic:claude-sonnet-4.6 → Closed (was: HalfOpen, 5 failures).

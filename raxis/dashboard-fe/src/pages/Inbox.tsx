@@ -97,7 +97,7 @@ export function InboxPage() {
                     <Mono>#{a.seq}</Mono> · {fmtRelative(a.at)}
                   </span>
                 </div>
-                <pre className="mt-2 text-[11px] text-ink-muted font-mono overflow-x-auto scroll-thin">
+                <pre className="mt-2 text-[11px] text-ink-muted font-mono overflow-x-auto overscroll-x-auto scroll-thin">
                   {JSON.stringify(a.payload, null, 2)}
                 </pre>
               </li>

@@ -24,6 +24,7 @@
 pub mod circuit_store;
 pub mod db;
 pub mod genesis;
+pub mod managed_repositories;
 pub mod migration;
 pub mod observability;
 pub mod plan_bundles;
@@ -34,6 +35,14 @@ pub mod views;
 pub use circuit_store::{CircuitRowSqlite, CircuitTransition, SqliteCircuitStore};
 pub use db::{Store, StoreError};
 pub use genesis::install_genesis_policy_epoch_row;
+pub use managed_repositories::{
+    by_id as managed_repository_by_id, list as managed_repository_list,
+    record_publish_failure as managed_repository_record_publish_failure,
+    record_publish_pending as managed_repository_record_publish_pending,
+    record_publish_success as managed_repository_record_publish_success,
+    record_status as managed_repository_record_status, upsert as managed_repository_upsert,
+    ManagedRepositoryRow, RepositoryStatusUpdate, UpsertManagedRepository,
+};
 pub use migration::SCHEMA_VERSION;
 pub use plan_bundles::{
     insert_artifacts, insert_bundle, nonce_status_in_tx, record_nonce, sweep_expired_nonces,

@@ -452,23 +452,98 @@ HEAD). It does NOT:
 - Walk subdirectories (would explode the suggestion list; the
   trailing-slash discipline naturally encourages directory-prefix
   declarations like `src/` over leaf-file declarations).
-- Consult the kernel's git store (`<data_dir>/main_repos/`) — that is
-  a kernel-internal implementation detail, not an operator-facing
-  concept; the operator's worktree at `$PWD` is the canonical source.
+- Consult the RAXIS managed repository mirror
+  (`<data_dir>/repositories/<repo_id>/`). That mirror is used for
+  governed execution and publishing, not for local authoring-time
+  path suggestions; the operator's worktree at `$PWD` remains the
+  canonical source for `plan prepare` suggestions.
 
 ### 4.5.7 Worktree concept clarification
 
-There are two conceptually distinct git locations operators can confuse:
+There are three conceptually distinct git locations operators can confuse:
 
 | Location | Owned by | Purpose | Operator-configurable? |
 |---|---|---|---|
 | **operator worktree** (e.g., `~/work/myproject/`) | Operator | Where the operator authors code, runs `raxis-cli`, and edits `plan.toml`. | Yes — the operator's filesystem; identified to the CLI via `$PWD` or `--suggest-from`. Bound to a session at session-creation time and validated against `policy.toml [sessions] allowed_worktree_roots`. |
-| **Kernel main_repos** (`<data_dir>/main_repos/<initiative_id>/`) | Kernel | The kernel's internal SQLite-backed git store where it materializes `refs/heads/main` after each `IntegrationMerge`. | No — implementation detail; not an operator-facing config. References to `main_repo` in [`integration-merge.md`](integration-merge.md) and `kernel-store.md` are about this kernel-internal location. |
+| **external repository** (GitHub, GitLab, local bare repo, etc.) | Operator/team | Source of record outside RAXIS. This is what humans and CI/CD systems normally use. | Yes — registered with `raxis repo adopt <repo_id> <path-or-git-url>`. |
+| **RAXIS managed repository mirror** (`<data_dir>/repositories/<repo_id>/`) | Kernel | Governed working mirror. Plans select it with `[workspace] repository = "<repo_id>"`. Initiatives pin a base SHA from it. `IntegrationMerge` advances its `target_ref` first; publishing back to the external repository is a separate explicit state. | Yes by repository id, not by arbitrary path. The path is kernel-owned and exact-root validated. |
+| **session worktree** (`<data_dir>/worktrees/<session_id>/`) | Kernel | Per-session worktree/clone mounted into a planner, executor, reviewer, or verifier VM. It is derived from the managed mirror and may be garbage-collected after session completion. | No — selected by task/session scheduling. |
 
 The §4.5.6 suggestion mechanism reads from the **operator worktree**.
-The kernel's main_repos is never inspected by `plan prepare` (it would
-require IPC and kernel-side plan-author authority, both of which would
-violate the boundary between authoring and admission).
+The RAXIS managed repository mirror is never inspected by `plan prepare`
+(it would require IPC and kernel-side plan-author authority, both of
+which would violate the boundary between authoring and admission).
+
+### 4.5.8 Adopted repository lifecycle
+
+The external repository is the source of record. The RAXIS managed
+repository is the governed working mirror. Initiatives run against the
+managed mirror, and `IntegrationMerge` lands there before anything is
+published back to the external repository.
+
+The durable metadata for each adopted repository lives in the
+`managed_repositories` store table:
+
+| Field | Meaning |
+|---|---|
+| `repository_id` | Stable id used by `[workspace] repository`. |
+| `managed_path` | Kernel-owned exact Git root under `<data_dir>/repositories/<repo_id>`. |
+| `source_url` | External repository path or URL originally adopted. |
+| `default_remote` | Remote used for fetch/publish, normally `origin`. |
+| `default_target_ref` | Ref plans normally target, normally `refs/heads/main`. |
+| `tracking_ref` | Remote-tracking ref used to compute ahead/behind/diverged state. |
+| `last_fetch_at`, `last_push_at`, `last_status_at` | Operator-facing freshness/provenance timestamps. |
+| `lifecycle_state` | Current mirror state (`clean`, `dirty`, `ahead`, `behind`, `diverged`, `local_only`, `remote_unreachable`, `missing`, `not_a_git_root`, or `unknown`). |
+| `publish_state` | Last known publish state (`pending`, `published`, `failed`, `local_only`, or `unknown`). |
+
+Repository commands:
+
+```bash
+raxis repo adopt <repo_id> <path-or-git-url>
+raxis repo status [repo_id] [--remote]
+raxis repo fetch [repo_id]
+raxis repo sync [repo_id]
+raxis repo publish [repo_id] [--remote origin] [--ref refs/heads/main]
+raxis repo repair
+```
+
+Lifecycle semantics:
+
+- `clean`: managed mirror is clean and aligned with its tracking ref.
+- `dirty`: managed mirror has uncommitted local changes; plan approval
+  fails until repaired or intentionally resolved.
+- `ahead`: managed mirror contains local IntegrationMerge output that is
+  not published yet.
+- `behind`: external source advanced; run `raxis repo sync` before
+  approving a new plan unless doing an explicitly pinned/offline run.
+- `diverged`: both managed mirror and external source moved; operator
+  intervention is required.
+- `local_only`: no remote is configured; valid for local-only use.
+- `remote_unreachable`: fetch/publish failed; operator should diagnose
+  credentials/network before approving production work.
+- `missing` / `not_a_git_root`: metadata points at a path that is gone
+  or is not the exact Git root; run `raxis repo repair` or re-adopt.
+
+Plan approval performs a pre-run repository check. If the store contains
+managed repository metadata, `[workspace] repository` must refer to a
+known adopted repository and its lifecycle must be `clean` or
+`local_only`. Plans may narrow the target ref inside policy bounds, but
+they cannot silently run on a dirty/stale/diverged mirror.
+
+After `IntegrationMerge`, the managed mirror's `publish_state` becomes
+`pending`. If policy enables direct auto-push and the push succeeds,
+`publish_state` becomes `published`. If auto-push is disabled, rejected
+by branch protection, or fails for credentials/network reasons, the
+state remains `pending` or becomes `failed` with `last_error` populated.
+The dashboard surfaces this state next to the repository row and offers
+copyable follow-up commands.
+
+**Exact-root rule.** RAXIS never treats "any directory where `git
+rev-parse` succeeds" as a repository. `git rev-parse --show-toplevel`
+must equal the candidate path (after canonicalization), or the candidate
+is ignored/rejected. This prevents parent-walk bugs where
+`<data_dir>/repositories/main` accidentally resolves to a parent checkout
+such as `/opt/homebrew/.git`.
 
 ---
 
@@ -1371,7 +1446,6 @@ raxis-cli setup wizard [--non-interactive --config <path>]
      configured-provider count:
        [✓] anthropic:claude-4.6-sonnet-medium-thinking
        [✓] anthropic:claude-opus-4.7-thinking-medium
-       [✓] openai:gpt-5.5-medium
        [✓] openai:gpt-5.3-codex
        [ ] google:gemini-2.5-pro     (auto-checked if Google configured)
        [ ] google:gemini-2.5-flash   (auto-checked if Google configured)

@@ -35,6 +35,7 @@ const NAV: NavSection[] = [
       { to: "/", label: "Home", glyph: "H" },
       { to: "/glossary", label: "Glossary", glyph: "?" },
       { to: "/health", label: "Health", glyph: "+" },
+      { to: "/diagnostics", label: "Diagnostics", glyph: "D" },
       { to: "/inbox", label: "Inbox", glyph: "I" },
       { to: "/notifications", label: "Notifications", glyph: "N" },
     ],
@@ -52,7 +53,7 @@ const NAV: NavSection[] = [
   {
     label: "Code",
     items: [
-      { to: "/git", label: "Git Worktrees", glyph: "G" },
+      { to: "/git", label: "Repos & Worktrees", glyph: "G" },
       { to: "/audit", label: "Audit Chain", glyph: "A" },
       // iter69 — Gates absorbed the standalone /witnesses page;
       // per-gate rollup + cross-task verdict timeline now live
@@ -224,7 +225,7 @@ export function Shell({ children }: ShellProps) {
             </div>
           </div>
         </div>
-        <nav className="flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-thin py-3">
+        <nav className="flex-1 min-h-0 overflow-y-auto overscroll-y-auto scroll-thin py-3">
           {NAV.map((section) => (
             <div key={section.label} className="mb-4">
               <div className="px-4 py-1 text-[10px] uppercase tracking-wider text-ink-subtle font-semibold">
@@ -330,7 +331,7 @@ export function Shell({ children }: ShellProps) {
           className={
             isCanvasPage
               ? "flex-1 min-h-0 min-w-0 overflow-hidden flex flex-col"
-              : "flex-1 min-h-0 min-w-0 overflow-auto scroll-thin"
+              : "flex-1 min-h-0 min-w-0 overflow-auto overscroll-auto scroll-thin"
           }
           data-testid="dashboard-scroll-viewport"
         >
@@ -372,6 +373,7 @@ export function Shell({ children }: ShellProps) {
 const SEGMENT_LABELS: Record<string, string> = {
   glossary: "Glossary",
   health: "Health",
+  diagnostics: "Diagnostics",
   inbox: "Inbox",
   notifications: "Notifications",
   initiatives: "Initiatives",
@@ -382,7 +384,7 @@ const SEGMENT_LABELS: Record<string, string> = {
   escalations: "Escalations",
   audit: "Audit",
   gates: "Gates",
-  git: "Git Worktrees",
+  git: "Repos & Worktrees",
   policy: "Policy",
   system: "System",
   credentials: "Credentials",

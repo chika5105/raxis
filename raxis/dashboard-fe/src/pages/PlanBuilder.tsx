@@ -272,7 +272,7 @@ const starterModelRoutes: ModelRouteDraft[] = [
       {
         providerKind: "openai",
         providerId: "openai",
-        model: "gpt-5.5-medium",
+        model: "gpt-5.3-codex",
       },
       {
         providerKind: "google",
@@ -445,6 +445,9 @@ export function PlanBuilderPage() {
   const persistedDraft = useMemo(() => readPlanBuilderDraft(), []);
   const sourceEditorRef = useRef<PlanTomlEditor | null>(null);
   const sourceRevealRequestRef = useRef(0);
+  const sourceCursorRevealRequestRef = useRef(0);
+  const sourceCursorRevealKeyRef = useRef<string | null>(null);
+  const sourceCursorSubscriptionRef = useRef<{ dispose: () => void } | null>(null);
   const canvasRevealVersionRef = useRef(0);
   const [planEnabled, setPlanEnabled] = useState(
     persistedDraft?.planEnabled ?? true,
@@ -498,6 +501,17 @@ export function PlanBuilderPage() {
   const [kernelBusy, setKernelBusy] = useState(false);
   const [kernelError, setKernelError] = useState<string | null>(null);
   const [policyDraftToml, setPolicyDraftToml] = useState(() => readPolicyDraft() ?? "");
+  const tasksRef = useRef(tasks);
+  useEffect(() => {
+    tasksRef.current = tasks;
+  }, [tasks]);
+  useEffect(
+    () => () => {
+      sourceCursorSubscriptionRef.current?.dispose();
+      sourceCursorSubscriptionRef.current = null;
+    },
+    [],
+  );
   useEffect(() => {
     writePlanBuilderDraft({
       version: 1,
@@ -633,8 +647,13 @@ export function PlanBuilderPage() {
   );
 
   const revealCanvasFromToml = useCallback(
-    (target: PlanTomlRevealTarget | null, nextTasks: TaskDraft[]) => {
+    (
+      target: PlanTomlRevealTarget | null,
+      nextTasks: TaskDraft[],
+      options: { openDrawers?: boolean } = {},
+    ) => {
       if (!target) return;
+      const openDrawers = options.openDrawers ?? true;
       if (target.kind === "task") {
         if (!nextTasks.some((task) => task.id === target.taskId)) return;
         setSelectedTaskId(target.taskId);
@@ -643,6 +662,8 @@ export function PlanBuilderPage() {
         setCanvasReveal({ taskId: target.taskId, version });
         return;
       }
+
+      if (!openDrawers) return;
 
       if (
         target.kind === "plan" ||
@@ -661,6 +682,26 @@ export function PlanBuilderPage() {
       }
     },
     [],
+  );
+
+  const scheduleCanvasRevealFromSourceCursor = useCallback(
+    (editor: PlanTomlEditor) => {
+      const requestId = sourceCursorRevealRequestRef.current + 1;
+      sourceCursorRevealRequestRef.current = requestId;
+      window.setTimeout(() => {
+        if (sourceCursorRevealRequestRef.current !== requestId) return;
+        const model = editor.getModel();
+        const lineNumber = editor.getPosition()?.lineNumber ?? null;
+        if (!model || !lineNumber) return;
+        const text = model.getValue();
+        const target = inferPlanTomlTargetFromLine(text, lineNumber);
+        const key = target ? planTomlRevealTargetKey(target) : null;
+        if (!key || sourceCursorRevealKeyRef.current === key) return;
+        sourceCursorRevealKeyRef.current = key;
+        revealCanvasFromToml(target, tasksRef.current, { openDrawers: false });
+      }, 160);
+    },
+    [revealCanvasFromToml],
   );
 
   const toggleDrawer = (nextDrawer: Exclude<BuilderDrawer, null>, target: PlanTomlRevealTarget) => {
@@ -906,8 +947,6 @@ export function PlanBuilderPage() {
     }
     try {
       const parsed = parsePlanToml(next);
-      const cursorLine = sourceEditorRef.current?.getPosition()?.lineNumber ?? null;
-      const revealTarget = cursorLine ? inferPlanTomlTargetFromLine(next, cursorLine) : null;
       setPlanEnabled(true);
       setPlan(parsed.plan);
       setTasks(parsed.tasks);
@@ -917,7 +956,6 @@ export function PlanBuilderPage() {
       setSelectedTaskId((prev) =>
         prev && parsed.tasks.some((t) => t.id === prev) ? prev : null,
       );
-      revealCanvasFromToml(revealTarget, parsed.tasks);
       setParseStatus({
         kind: "synced",
         message: "Valid TOML parsed back into the canvas.",
@@ -1171,7 +1209,12 @@ export function PlanBuilderPage() {
                 beforeMount={ensureTomlLanguage}
                 theme={monacoTheme}
                 onMount={(editor) => {
+                  sourceCursorSubscriptionRef.current?.dispose();
                   sourceEditorRef.current = editor;
+                  sourceCursorSubscriptionRef.current =
+                    editor.onDidChangeCursorPosition?.(() => {
+                      scheduleCanvasRevealFromSourceCursor(editor);
+                    }) ?? null;
                 }}
                 onChange={handleTomlChange}
                 options={{
@@ -1241,7 +1284,7 @@ function PlanSetupDrawer({
   onClose: () => void;
 }) {
   return (
-    <aside className="w-80 shrink-0 border-r border-edge bg-panel-raised min-h-0 overflow-y-auto scroll-thin max-xl:w-full max-xl:max-h-64 max-xl:border-r-0 max-xl:border-b">
+    <aside className="w-80 shrink-0 border-r border-edge bg-panel-raised min-h-0 overflow-y-auto overscroll-y-auto scroll-thin max-xl:w-full max-xl:max-h-64 max-xl:border-r-0 max-xl:border-b">
       <div className="sticky top-0 z-10 border-b border-edge bg-panel-raised px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -1400,7 +1443,7 @@ function ModelRoutingDrawer({
   };
 
   return (
-    <aside className="w-[380px] shrink-0 border-r border-edge bg-panel-raised min-h-0 overflow-y-auto scroll-thin max-xl:w-full max-xl:max-h-[380px] max-xl:border-r-0 max-xl:border-b">
+    <aside className="w-[380px] shrink-0 border-r border-edge bg-panel-raised min-h-0 overflow-y-auto overscroll-y-auto scroll-thin max-xl:w-full max-xl:max-h-[380px] max-xl:border-r-0 max-xl:border-b">
       <div className="sticky top-0 z-10 border-b border-edge bg-panel-raised px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -1734,7 +1777,7 @@ function ToolProfilesDrawer({
   };
 
   return (
-    <aside className="w-[360px] shrink-0 border-r border-edge bg-panel-raised min-h-0 overflow-y-auto scroll-thin max-xl:w-full max-xl:max-h-[360px] max-xl:border-r-0 max-xl:border-b">
+    <aside className="w-[360px] shrink-0 border-r border-edge bg-panel-raised min-h-0 overflow-y-auto overscroll-y-auto scroll-thin max-xl:w-full max-xl:max-h-[360px] max-xl:border-r-0 max-xl:border-b">
       <div className="sticky top-0 z-10 border-b border-edge bg-panel-raised px-4 py-3">
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
@@ -1994,7 +2037,7 @@ function PlanVerifiersDrawer({
   };
 
   return (
-    <aside className="w-[360px] shrink-0 border-r border-edge bg-panel-raised min-h-0 overflow-y-auto scroll-thin max-xl:w-full max-xl:max-h-[360px] max-xl:border-r-0 max-xl:border-b">
+    <aside className="w-[360px] shrink-0 border-r border-edge bg-panel-raised min-h-0 overflow-y-auto overscroll-y-auto scroll-thin max-xl:w-full max-xl:max-h-[360px] max-xl:border-r-0 max-xl:border-b">
       <div className="sticky top-0 z-10 border-b border-edge bg-panel-raised px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -2241,7 +2284,7 @@ function CredentialSetupDrawer({
   };
 
   return (
-    <aside className="w-[380px] shrink-0 border-r border-edge bg-panel-raised min-h-0 overflow-y-auto scroll-thin max-xl:w-full max-xl:max-h-[380px] max-xl:border-r-0 max-xl:border-b">
+    <aside className="w-[380px] shrink-0 border-r border-edge bg-panel-raised min-h-0 overflow-y-auto overscroll-y-auto scroll-thin max-xl:w-full max-xl:max-h-[380px] max-xl:border-r-0 max-xl:border-b">
       <div className="sticky top-0 z-10 border-b border-edge bg-panel-raised px-4 py-3">
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
@@ -2623,7 +2666,7 @@ function ValidationPanel({
           Close
         </button>
       </div>
-      <div className="max-h-[58vh] overflow-y-auto scroll-thin p-3 space-y-3">
+      <div className="max-h-[58vh] overflow-y-auto overscroll-y-auto scroll-thin p-3 space-y-3">
         <section>
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-xs font-semibold text-ink">Draft checks</h2>
@@ -3812,6 +3855,15 @@ function inferPlanTomlTargetFromLine(
   return null;
 }
 
+function planTomlRevealTargetKey(target: PlanTomlRevealTarget) {
+  if (target.kind === "models") return `models:${target.alias ?? ""}`;
+  if (target.kind === "tools") return `tools:${target.profileId ?? ""}`;
+  if (target.kind === "credentials") return `credentials:${target.name ?? ""}`;
+  if (target.kind === "verifiers") return `verifiers:${target.name ?? ""}`;
+  if (target.kind === "task") return `task:${target.taskId}`;
+  return target.kind;
+}
+
 function findExactHeaderLine(lines: string[], header: string) {
   const index = lines.findIndex((line) => line.trim() === header);
   return index >= 0 ? index + 1 : null;
@@ -4333,7 +4385,7 @@ function defaultModelForProvider(kind: ProviderKind) {
     case "anthropic":
       return "claude-4.6-sonnet-medium-thinking";
     case "openai":
-      return "gpt-5.5-medium";
+      return "gpt-5.3-codex";
     case "google":
       return "gemini-2.5-flash";
     case "bedrock":

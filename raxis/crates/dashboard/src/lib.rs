@@ -65,7 +65,8 @@ pub mod stream;
 
 pub use config::{DashboardConfig, DEFAULT_DASHBOARD_ADDR, DEFAULT_DASHBOARD_PORT};
 pub use data::{
-    AuditEntryView, ChainStatusView, DashboardData, EscalationView, InMemoryDashboardData,
+    AuditEntryView, ChainStatusView, DashboardData, DiagnosticAction, DiagnosticEvidence,
+    DiagnosticFinding, DiagnosticsResponse, EscalationView, InMemoryDashboardData,
     InitiativeListEntry, InitiativeView, OperatorRole, PolicySnapshotView, SessionView,
     SubsystemDetailRow, SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeFile,
     WorktreeTree, WorktreeTreeEntry,

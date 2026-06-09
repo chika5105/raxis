@@ -94,16 +94,23 @@ export function WorktreeDetailPage() {
         <div>
           <div className="flex items-center gap-2 text-sm text-ink-subtle">
             <Link to="/git" className="hover:text-accent">
-              Git Worktrees
+              Repositories & Worktrees
             </Link>
             <span>/</span>
             <Mono>{w.name}</Mono>
           </div>
-          <h1 className="mt-1 text-xl font-semibold text-ink">{w.label}</h1>
+          <h1 className="mt-1 text-xl font-semibold text-ink">
+            {detailTitle(w)}
+          </h1>
           <div className="mt-2 flex items-center gap-2 flex-wrap text-xs">
             <span className="badge bg-info-muted/30 border-info text-info">
-              {w.kind}
+              {worktreeSurface(w)}
             </span>
+            {w.repository_id && (
+              <span className="badge bg-panel border-edge text-ink-muted">
+                repo {w.repository_id}
+              </span>
+            )}
             {w.agent_type && (
               <span className="badge bg-panel border-edge text-ink-muted">
                 {w.agent_type}
@@ -120,8 +127,10 @@ export function WorktreeDetailPage() {
             )}
             <WorktreeLifecyclePill
               kind={w.kind}
+              surface={w.surface ?? null}
               sessionState={w.session_state ?? null}
             />
+            <span className="text-ink-subtle">Root</span>
             <Mono className="text-ink-muted">{w.path}</Mono>
             <CopyButton value={w.path} />
             {w.session_id && (
@@ -143,6 +152,7 @@ export function WorktreeDetailPage() {
           </div>
         </div>
         <div className="card p-3 text-xs space-y-1.5 min-w-[260px]">
+          <Row label="Repository" value={w.repository_id ?? "—"} mono />
           <Row
             label="HEAD"
             value={
@@ -175,7 +185,7 @@ export function WorktreeDetailPage() {
               )
             }
           />
-          {w.kind !== "Main" && (
+          {worktreeSurface(w) === "Worktree" && (
             <Row label="Lifecycle" value={w.session_state ?? "Unknown"} />
           )}
           {w.status_lines.length > 0 && (
@@ -525,7 +535,7 @@ function FilesTab({
         />
       ) : (
         <div className="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-4">
-          <aside className="card p-3 self-start xl:sticky xl:top-2 max-h-[80vh] overflow-y-auto scroll-thin">
+          <aside className="card p-3 self-start xl:sticky xl:top-2 max-h-[80vh] overflow-y-auto overscroll-y-auto scroll-thin">
             <header className="mb-3 space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs text-ink-subtle uppercase tracking-wider">
@@ -609,10 +619,9 @@ function DiffErrorOrEmpty({
             </>
           ) : (
             <>
-              The main repository root tracks{" "}
-              <code className="font-mono">origin/main</code> directly. Use the{" "}
+              This repository row tracks its Git branch directly. Use the{" "}
               <strong>Range diff</strong> tab to compare two arbitrary commits
-              in this worktree.
+              in this repository.
             </>
           )
         }
@@ -622,24 +631,66 @@ function DiffErrorOrEmpty({
   return <ErrorBox error={error} />;
 }
 
+function worktreeSurface(worktree: {
+  kind: string;
+  surface?: string | null;
+}): "Repository" | "Integration" | "Worktree" {
+  if (worktree.surface === "Integration") return "Integration";
+  if (worktree.surface === "Repository") return "Repository";
+  return worktree.kind === "Main" ? "Repository" : "Worktree";
+}
+
+function detailTitle(worktree: {
+  kind: string;
+  surface?: string | null;
+  repository_id?: string | null;
+  initiative_display_name?: string | null;
+  label: string;
+}): string {
+  const surface = worktreeSurface(worktree);
+  if (surface === "Repository") {
+    return worktree.repository_id
+      ? `Repository: ${worktree.repository_id}`
+      : worktree.label;
+  }
+  if (surface === "Integration") {
+    return worktree.initiative_display_name
+      ? `Integrated result: ${worktree.initiative_display_name}`
+      : worktree.label;
+  }
+  return worktree.label;
+}
+
 function WorktreeLifecyclePill({
   kind,
+  surface,
   sessionState,
 }: {
   kind: string;
+  surface: string | null;
   sessionState: string | null;
 }) {
+  const rowSurface =
+    surface === "Integration"
+      ? "Integration"
+      : surface === "Repository" || kind === "Main"
+        ? "Repository"
+        : "Worktree";
   const lifecycle =
-    kind === "Main"
-      ? "root"
+    rowSurface === "Repository"
+      ? "repository"
+      : rowSurface === "Integration"
+        ? "integration"
       : !sessionState
         ? "unknown"
         : isLiveSessionState(sessionState)
           ? "live"
           : "past";
   const label =
-    lifecycle === "root"
-      ? "Root"
+    lifecycle === "repository"
+      ? "Managed"
+      : lifecycle === "integration"
+        ? "Integrated"
       : lifecycle === "live"
         ? "Live"
         : lifecycle === "past"
@@ -651,12 +702,16 @@ function WorktreeLifecyclePill({
         "badge text-[11px]",
         lifecycle === "live" && "bg-ok-muted/20 border-ok text-ok",
         lifecycle === "past" && "bg-panel-high border-edge text-ink-subtle",
-        lifecycle === "root" && "bg-info-muted/30 border-info text-info",
+        lifecycle === "repository" &&
+          "bg-info-muted/30 border-info text-info",
+        lifecycle === "integration" && "bg-ok-muted/20 border-ok text-ok",
         lifecycle === "unknown" && "bg-warn-muted/20 border-warn text-warn",
       )}
       title={
-        lifecycle === "root"
-          ? "Repository root"
+        lifecycle === "repository"
+          ? "RAXIS-managed source repository"
+          : lifecycle === "integration"
+            ? "Merged initiative result ready for repository-level review"
           : sessionState
             ? `Owning session is ${sessionState}`
             : "Owning session lifecycle was not recorded"

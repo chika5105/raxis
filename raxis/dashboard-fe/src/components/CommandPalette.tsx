@@ -153,7 +153,7 @@ export function CommandPalette({ open, onClose, commands }: CommandPaletteProps)
           id="command-palette-list"
           ref={listRef}
           role="listbox"
-          className="max-h-80 overflow-y-auto scroll-thin"
+          className="max-h-80 overflow-y-auto overscroll-y-auto scroll-thin"
         >
           {filtered.length === 0 ? (
             <li className="px-4 py-6 text-center text-sm text-ink-subtle">

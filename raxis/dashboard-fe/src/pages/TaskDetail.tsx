@@ -211,7 +211,7 @@ export function TaskDetailPage() {
                       {fmtAbsolute(o.at)}
                     </span>
                   </div>
-                  <pre className="mt-2 text-[11px] font-mono text-ink-muted overflow-x-auto scroll-thin max-h-64">
+                  <pre className="mt-2 text-[11px] font-mono text-ink-muted overflow-x-auto overscroll-x-auto scroll-thin max-h-64">
                     {JSON.stringify(o.payload, null, 2)}
                   </pre>
                 </li>

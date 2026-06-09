@@ -29,10 +29,12 @@
 //! # No model providers
 //!
 //! If policy declares no model providers, the kernel runs in degraded
-//! mode: the supervisor task starts but immediately exits, logging that
-//! no gateway was configured. Subsequent FetchRequests fail-closed at
-//! the kernel-side `gateway::*` adapter. Gateway process wiring is
-//! kernel-owned runtime config, not signed operator policy.
+//! mode: the policy-aware supervisor stays alive without a child,
+//! logging that no gateway is configured. Subsequent FetchRequests
+//! fail-closed at the kernel-side `gateway::*` adapter. If a later
+//! epoch advance installs providers, the same supervisor starts the
+//! gateway without requiring a kernel restart. Gateway process wiring
+//! is kernel-owned runtime config, not signed operator policy.
 
 pub mod accept;
 pub mod client;
@@ -40,4 +42,4 @@ pub mod embedded;
 pub mod supervisor;
 
 pub use client::GatewayCallError;
-pub use supervisor::spawn_and_supervise;
+pub use supervisor::spawn_policy_reconciler;

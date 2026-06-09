@@ -25,6 +25,7 @@ use raxis_store::{Store, Table};
 use raxis_types::{
     unix_now_secs, BlockReason, CloneStrategy, InitiativeState, SessionAgentType, TaskState,
 };
+use rusqlite::OptionalExtension;
 
 use crate::authority::keys::AuthorityError;
 use crate::initiatives::plan_registry::{PlanRegistry, TaskKey, TaskPlanFields};
@@ -75,6 +76,22 @@ pub enum LifecycleError {
 
     #[error("plan TOML invalid: {reason}")]
     PlanInvalid { reason: String },
+
+    /// **V2 recurring-plan integrity — `FAIL_PLAN_TASK_ID_ALREADY_EXISTS`.**
+    /// `tasks.task_id` is a global primary key in the current SQLite
+    /// schema, so a new initiative may not reuse a task id that already
+    /// exists anywhere in the store. This is checked before
+    /// `BEGIN TRANSACTION`: relying on SQLite's global PK would surface
+    /// an opaque constraint failure, and relying on `INSERT OR IGNORE`
+    /// in the scheduler can create a cross-initiative
+    /// `subtask_activations` row pointing at an older task. The task id
+    /// namespace can become composite only with a deliberate schema
+    /// migration; until then, reused ids are fail-closed at approval.
+    #[error("FAIL_PLAN_TASK_ID_ALREADY_EXISTS: task_id {task_id:?} already exists under initiative {existing_initiative_id}")]
+    PlanTaskIdAlreadyExists {
+        task_id: String,
+        existing_initiative_id: String,
+    },
 
     /// **V2 (Step 19) — `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`.** A
     /// `path_allowlist` entry violates the V2 trailing-slash discipline.
@@ -875,6 +892,7 @@ pub fn approve_plan(
     // This selects the managed source repository under
     // `<data_dir>/repositories/<id>` for every spawn / merge path.
     let plan_repository_id = parse_plan_workspace_repository(&plan_toml_str)?;
+    validate_managed_repository_ready(&conn, &plan_repository_id)?;
     // V2 (`verifier-processes.md §15`) — parse plan-source pre-merge
     // verifiers. Empty `Vec` for plans that don't declare any.
     // Structural per-field rules run inside the validator below.
@@ -900,6 +918,7 @@ pub fn approve_plan(
     // validators run today and are forward-compatible (they operate on
     // `predecessors` / `path_allowlist`, both already in the V1 schema).
     validate_plan_dag(&plan_tasks)?;
+    validate_plan_task_ids_globally_unused(&conn, &plan_tasks)?;
     validate_path_allowlist_v2_format(&plan_tasks)?;
     validate_cross_cutting_artifacts(&orchestrator_fields)?;
     // V2 (`verifier-processes.md §15`) — shift-left validation of
@@ -3278,6 +3297,56 @@ fn parse_plan_workspace_repository(plan_toml: &str) -> Result<String, LifecycleE
     })
 }
 
+/// Pre-run adopted-repository guard. Once the operator has adopted at
+/// least one repository, plan approval must use a recorded repo row and
+/// the row must be in a state where running new work is safe. This turns
+/// stale/dirty/diverged source-of-record problems into approval-time
+/// failures instead of late IntegrationMerge surprises.
+fn validate_managed_repository_ready(
+    conn: &rusqlite::Connection,
+    repository_id: &str,
+) -> Result<(), LifecycleError> {
+    let total: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM {table}",
+            table = raxis_store::Table::ManagedRepositories.as_str(),
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    if total == 0 {
+        // Fresh in-memory unit fixtures and older data dirs may not have
+        // adopted repository metadata yet. `raxis repo repair` migrates
+        // those installs into the strict path; once any row exists, the
+        // guard below becomes mandatory.
+        return Ok(());
+    }
+
+    let Some(row) = raxis_store::managed_repositories::by_id(conn, repository_id)? else {
+        return Err(LifecycleError::PlanInvalid {
+            reason: format!(
+                "[workspace] repository {repository_id:?} has not been adopted; \
+                 run `raxis repo adopt {repository_id} <path-or-git-url>` or `raxis repo repair`"
+            ),
+        });
+    };
+
+    match row.lifecycle_state.as_str() {
+        raxis_store::managed_repositories::STATE_CLEAN
+        | raxis_store::managed_repositories::STATE_LOCAL_ONLY => Ok(()),
+        other => Err(LifecycleError::PlanInvalid {
+            reason: format!(
+                "[workspace] repository {repository_id:?} is not ready for a new run: \
+                 lifecycle_state={other}, publish_state={}, last_error={}. \
+                 Run `raxis repo status {repository_id} --remote`, then `raxis repo sync` \
+                 or publish/repair the repository before approving the plan.",
+                row.publish_state,
+                row.last_error.as_deref().unwrap_or("-"),
+            ),
+        }),
+    }
+}
+
 /// V3 iter69 — `INV-ORCH-BOUNDED-CONCURRENCY-01`.
 ///
 /// Parse the plan-side `[workspace] max_concurrent_admissions`
@@ -4361,6 +4430,36 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
     Ok(())
 }
 
+/// Recurring-plan integrity guard. The current store schema makes
+/// `tasks.task_id` globally unique (`PRIMARY KEY(task_id)`), so
+/// approval must reject any plan whose declared task id already exists
+/// under a prior initiative. Without this shift-left check, a lower
+/// layer that accidentally ignores a duplicate task insert can still
+/// write `subtask_activations(initiative_id = new, task_id = old)`,
+/// causing the orchestrator's KSB/DAG to reason over another
+/// initiative's failed task.
+fn validate_plan_task_ids_globally_unused(
+    conn: &rusqlite::Connection,
+    tasks: &[PlanTask],
+) -> Result<(), LifecycleError> {
+    for task in tasks {
+        let existing: Option<String> = conn
+            .query_row(
+                &format!("SELECT initiative_id FROM {TASKS} WHERE task_id = ?1"),
+                rusqlite::params![task.task_id.as_str()],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(existing_initiative_id) = existing {
+            return Err(LifecycleError::PlanTaskIdAlreadyExists {
+                task_id: task.task_id.clone(),
+                existing_initiative_id,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// V2 Step 19 — validate every `path_allowlist` entry across `tasks` for
 /// the trailing-slash discipline mandated by `v2-deep-spec.md §6` table 4
 /// and `policy-plan-authority.md §FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`.
@@ -4802,6 +4901,30 @@ fn insert_subtask_activation_in_tx(
     // expected to gate on this; we defense-in-depth here.
     if matches!(session_agent_type, SessionAgentType::Orchestrator) {
         return Ok(());
+    }
+
+    let owner: Option<String> = tx
+        .query_row(
+            &format!("SELECT initiative_id FROM {TASKS} WHERE task_id = ?1"),
+            rusqlite::params![task_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    match owner.as_deref() {
+        Some(found) if found == initiative_id => {}
+        Some(found) => {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "FAIL_SUBTASK_ACTIVATION_INITIATIVE_MISMATCH: task_id {task_id:?} \
+                     belongs to initiative {found}, not {initiative_id}"
+                ),
+            });
+        }
+        None => {
+            return Err(LifecycleError::TaskNotFound {
+                task_id: task_id.to_owned(),
+            });
+        }
     }
 
     let activation_id = uuid::Uuid::new_v4().to_string();
@@ -9340,6 +9463,137 @@ name = "fixture"
             task_id = "dup"
         "#;
         assert_dag_rule_blocks_approve_plan(plan, "duplicate_task_id");
+    }
+
+    #[test]
+    fn approve_plan_rejects_task_id_reused_by_prior_initiative_shift_left() {
+        let store = Store::open_in_memory().unwrap();
+        let now = unix_now_secs();
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {INITIATIVES}
+                        (initiative_id, state, terminal_criteria_json,
+                         plan_artifact_sha256, created_at)
+                     VALUES ('old-init', ?1, '{{}}', 'deadbeef', ?2)"
+                ),
+                rusqlite::params![InitiativeState::Failed.as_sql_str(), now],
+            )
+            .unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at,
+                         actual_cost)
+                     VALUES ('ingest_metrics', 'old-init', 'default', ?1,
+                             'kernel', 1, ?2, ?2, 0)"
+                ),
+                rusqlite::params![TaskState::Failed.as_sql_str(), now],
+            )
+            .unwrap();
+        }
+
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+[plan.initiative]
+description = "fixture: recurring plan reuse"
+
+[workspace]
+name = "fixture"
+lane_id = "default"
+
+[[tasks]]
+task_id = "ingest_metrics"
+description = "ingest metrics again"
+"#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan_for_test(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        )
+        .unwrap_err();
+        match err {
+            LifecycleError::PlanTaskIdAlreadyExists {
+                task_id,
+                existing_initiative_id,
+            } => {
+                assert_eq!(task_id, "ingest_metrics");
+                assert_eq!(existing_initiative_id, "old-init");
+            }
+            other => panic!("expected PlanTaskIdAlreadyExists, got {other:?}"),
+        }
+
+        assert_eq!(read_initiative_state(&store, &init_id), "Draft");
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0);
+        assert_eq!(
+            count_initiative_rows(&store, "subtask_activations", &init_id),
+            0
+        );
+        assert!(audit.events().is_empty());
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn subtask_activation_insert_rejects_cross_initiative_task_owner() {
+        let store = Store::open_in_memory().unwrap();
+        let now = unix_now_secs();
+        {
+            let conn = store.lock_sync();
+            for init in ["old-init", "new-init"] {
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {INITIATIVES}
+                            (initiative_id, state, terminal_criteria_json,
+                             plan_artifact_sha256, created_at)
+                         VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
+                    ),
+                    rusqlite::params![init, InitiativeState::Executing.as_sql_str(), now],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at,
+                         actual_cost)
+                     VALUES ('ingest_metrics', 'old-init', 'default', ?1,
+                             'kernel', 1, ?2, ?2, 0)"
+                ),
+                rusqlite::params![TaskState::Failed.as_sql_str(), now],
+            )
+            .unwrap();
+        }
+
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction().unwrap();
+        let err = insert_subtask_activation_in_tx(
+            &tx,
+            "ingest_metrics",
+            "new-init",
+            SessionAgentType::Executor,
+        )
+        .unwrap_err();
+        drop(tx);
+        drop(conn);
+
+        match err {
+            LifecycleError::PlanInvalid { reason } => {
+                assert!(
+                    reason.contains("FAIL_SUBTASK_ACTIVATION_INITIATIVE_MISMATCH"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected PlanInvalid activation mismatch, got {other:?}"),
+        }
+        assert_eq!(
+            count_initiative_rows(&store, "subtask_activations", "new-init"),
+            0
+        );
     }
 
     #[test]

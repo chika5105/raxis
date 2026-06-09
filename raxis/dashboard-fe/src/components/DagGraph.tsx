@@ -238,7 +238,7 @@ export function DagGraph({
   const svgHeight = Math.max(layout.height, height);
 
   return (
-    <div ref={containerRef} className="w-full overflow-auto scroll-thin">
+    <div ref={containerRef} className="w-full overflow-auto overscroll-auto scroll-thin">
       <svg
         viewBox={`0 0 ${layout.width} ${layout.height}`}
         width={layout.width}

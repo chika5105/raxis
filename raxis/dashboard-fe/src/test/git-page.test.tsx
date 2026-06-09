@@ -41,6 +41,8 @@ function worktree(over: Partial<WorktreeListEntry>): WorktreeListEntry {
     observed_head_sha: null,
     observed_branch: null,
     observed_dirty_paths: null,
+    surface: "Worktree",
+    repository_id: null,
     base_sha: "a".repeat(40),
     ...over,
   };
@@ -109,8 +111,10 @@ describe("<GitPage>", () => {
     vi.spyOn(dashboardApi.git, "list").mockResolvedValue([
       worktree({
         name: "main-repository",
-        label: "repositories/main",
+        label: "main",
         kind: "Main",
+        surface: "Repository",
+        repository_id: "main",
         path: "/tmp/raxis/repositories/main",
         session_id: null,
         task_id: null,
@@ -128,6 +132,8 @@ describe("<GitPage>", () => {
         name: "main-integration-init-a",
         label: "Main:Alpha pipeline",
         kind: "Main",
+        surface: "Integration",
+        repository_id: "main",
         path: "/tmp/raxis/repositories/main",
         session_id: null,
         task_id: "init-a",
@@ -145,6 +151,8 @@ describe("<GitPage>", () => {
         name: "main-integration-init-b",
         label: "Main:Beta import",
         kind: "Main",
+        surface: "Integration",
+        repository_id: "main",
         path: "/tmp/raxis/repositories/main",
         session_id: null,
         task_id: "init-b",
@@ -162,24 +170,33 @@ describe("<GitPage>", () => {
 
     renderWithProviders(<GitPage />);
 
-    expect(await screen.findByText("Main repository")).toBeInTheDocument();
+    expect((await screen.findAllByText("Repositories")).length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getByText("Repository: main")).toBeInTheDocument();
     expect(screen.getAllByText("Alpha pipeline").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Beta import").length).toBeGreaterThan(0);
-    expect(screen.getByText("Main:Alpha pipeline")).toBeInTheDocument();
-    expect(screen.getByText("Main:Beta import")).toBeInTheDocument();
+    expect(
+      screen.getByText("Integrated result: Alpha pipeline"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Integrated result: Beta import"),
+    ).toBeInTheDocument();
     expect(screen.getAllByText("bbbbbbbb").length).toBeGreaterThan(0);
     expect(screen.getAllByText("dddddddd").length).toBeGreaterThan(0);
 
     fireEvent.change(
       screen.getByPlaceholderText(
-        "Search workspace / path / session / initiative...",
+        "Search repo / workspace / path / session...",
       ),
       { target: { value: "Beta import" } },
     );
 
     await waitFor(() => {
-      expect(screen.queryByText("Main:Alpha pipeline")).toBeNull();
-      expect(screen.getByText("Main:Beta import")).toBeInTheDocument();
+      expect(screen.queryByText("Integrated result: Alpha pipeline")).toBeNull();
+      expect(
+        screen.getByText("Integrated result: Beta import"),
+      ).toBeInTheDocument();
     });
   });
 });

@@ -48,7 +48,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 28;
+pub const SCHEMA_VERSION: u32 = 29;
 
 /// Apply all pending migrations to `conn`.
 /// Safe to call on every startup — skips already-applied migrations. Returns
@@ -145,6 +145,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 28 {
         apply_migration_28(conn)?;
+    }
+    if current_version < 29 {
+        apply_migration_29(conn)?;
     }
 
     Ok(())
@@ -2930,6 +2933,12 @@ fn apply_migration_28(conn: &Connection) -> Result<(), StoreError> {
         .map_err(|e| StoreError::Migration(format!("migration 28 failed: {e}")))
 }
 
+fn apply_migration_29(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_29_ddl();
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 29 failed: {e}")))
+}
+
 /// The complete migration-26 DDL.
 pub fn render_migration_26_ddl() -> String {
     let session_vm_env = Table::SessionVmEnv.as_str();
@@ -3045,6 +3054,72 @@ CREATE INDEX IF NOT EXISTS idx_verifier_run_tokens_status
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (28, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+/// The complete migration-29 DDL.
+pub fn render_migration_29_ddl() -> String {
+    let managed_repositories = Table::ManagedRepositories.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- adopted repository lifecycle -- persistent metadata for repositories
+-- explicitly adopted by the operator. Dashboard/CLI/kernel code must
+-- prefer this table over directory scanning so a child of a parent Git
+-- checkout is never mistaken for a RAXIS-managed repository.
+CREATE TABLE IF NOT EXISTS {managed_repositories} (
+    repository_id      TEXT    PRIMARY KEY,
+    managed_path       TEXT    NOT NULL,
+    source_url         TEXT,
+    default_remote     TEXT,
+    default_target_ref TEXT    NOT NULL DEFAULT 'refs/heads/main',
+    tracking_ref       TEXT,
+    lifecycle_state    TEXT    NOT NULL DEFAULT 'unknown'
+        CHECK (lifecycle_state IN (
+            'unknown',
+            'clean',
+            'dirty',
+            'ahead',
+            'behind',
+            'diverged',
+            'local_only',
+            'remote_unreachable',
+            'missing',
+            'not_a_git_root'
+        )),
+    publish_state      TEXT    NOT NULL DEFAULT 'local_only'
+        CHECK (publish_state IN (
+            'unknown',
+            'local_only',
+            'pending',
+            'published',
+            'failed'
+        )),
+    head_sha           TEXT,
+    remote_sha         TEXT,
+    ahead_count        INTEGER,
+    behind_count       INTEGER,
+    dirty              INTEGER NOT NULL DEFAULT 0 CHECK (dirty IN (0, 1)),
+    last_fetch_at      INTEGER,
+    last_push_at       INTEGER,
+    last_status_at     INTEGER,
+    last_error         TEXT,
+    adopted_at         INTEGER NOT NULL,
+    updated_at         INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_repositories_lifecycle
+    ON {managed_repositories} (lifecycle_state, publish_state);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (29, strftime('%s', 'now'));
 
 COMMIT;
 "
@@ -6811,5 +6886,66 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    /// Migration 29 adds the durable adopted-repository metadata table.
+    #[test]
+    fn migration_29_adds_managed_repositories_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+                [Table::ManagedRepositories.as_str()],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "managed_repositories table must exist");
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "PRAGMA table_info({})",
+                Table::ManagedRepositories.as_str()
+            ))
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for expected in [
+            "repository_id",
+            "managed_path",
+            "source_url",
+            "tracking_ref",
+            "lifecycle_state",
+            "publish_state",
+            "last_fetch_at",
+            "last_push_at",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "{expected} column missing from managed_repositories"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_29_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+                [Table::ManagedRepositories.as_str()],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1);
     }
 }

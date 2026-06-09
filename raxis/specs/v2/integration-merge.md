@@ -1834,9 +1834,12 @@ which lists all paths from both sources that triggered an approval for this merg
 
 ### The Problem
 
-`IntegrationMerge` updates the local main branch in the RAXIS host's git repository.
-The local main is the record of everything the agent produced. But it has not yet left
-the machine — `git push` to the remote (GitHub, GitLab, etc.) is a separate step.
+`IntegrationMerge` updates the target ref in the RAXIS managed repository
+mirror selected by `[workspace] repository`. The managed mirror is the
+governed local record of everything the agent produced. But it has not yet
+left the machine — publishing back to the external source repository
+(`git push`, PR creation, or another provider-specific publish operation)
+is a separate step with its own state.
 
 For some deployments, operators want a final human gate between "the DAG completed and
 main is updated locally" and "the code is pushed to the remote and visible to the rest
@@ -1871,10 +1874,15 @@ is opt-in per initiative by the operator at plan-signing time.
    → main updated to final_sha
    → Kernel emits InitiativeCompleted
 
-2. If plan.require_push_approval = false:
+2. If plan.require_push_approval = false and direct auto-push is enabled:
    → Kernel executes git push immediately
    → Emits PushCompleted { initiative_id, commit_sha, remote, ref_spec }
-   → Initiative transitions to Pushed state
+   → managed_repositories.publish_state transitions to published
+
+2b. If direct auto-push is disabled:
+    → managed_repositories.publish_state transitions to pending
+    → Dashboard and CLI show the follow-up `raxis repo publish <repo_id>`
+      command
 
 3. If plan.require_push_approval = true:
    → Kernel creates PushApproval escalation { id: esc-200, state: Pending,

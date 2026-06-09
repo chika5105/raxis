@@ -59,7 +59,7 @@ disk_full_behavior                 = "halt_admit"   # "halt_admit" | "gc_then_re
 
 # Per-component disk caps
 worktree_quota_mb                  = 2048       # per session
-main_repo_quota_mb               = 8192       # per initiative; soft cap, warns on exceed
+managed_repo_quota_mb              = 8192       # per adopted repository; soft cap, warns on exceed
 audit_log_max_size_gb              = 50         # rotates segments above this; oldest segments archived per audit-retention.md
 artifact_store_quota_gb            = 100        # immutable artifact store; GC-able per immutable-artifact-store.md
 
@@ -193,8 +193,8 @@ Wire reference: `kernel/src/session_spawn_orchestrator.rs::ExecutorSpawnContext:
 │   ├── policies/<sha>/
 │   ├── plans/<sha>/
 │   └── keys/<fingerprint>/
-├── main_repos/         Bare git repos, one per initiative
-│   └── <initiative_uuid>/
+├── repositories/       Adopted managed repository mirrors
+│   └── <repo_id>/
 ├── worktrees/            Per-session worktrees (mounted into VMs via VirtioFS)
 │   └── <session_uuid>/
 ├── bundles/              Per-initiative bundle staging (Executor → Orchestrator routing)
@@ -211,9 +211,16 @@ Each session's worktree is capped at `worktree_quota_mb` (default 2 GiB). Enforc
 - **Soft enforcement (always)**: a periodic scan (every 30s) computes `du -s` on each active session's worktree and updates `sessions.worktree_size_mb`. If size exceeds 90% of quota, the kernel emits `KernelPush::DiskQuotaWarning { current_mb, quota_mb }` to the planner. If size exceeds 100% of quota, the kernel emits `KernelPush::DiskQuotaExceeded` and the next write-class intent (CompleteTask, IntegrationMerge) returns `FAIL_DISK_QUOTA_EXCEEDED`. The session does NOT auto-terminate — the agent has a chance to clean up large files and retry.
 - **Hard enforcement (when filesystem supports it)**: if the host filesystem supports per-directory quotas (XFS prjquota, ZFS dataset quotas), the kernel sets a hard quota at `worktree_quota_mb × 1.1` (10% slack for the soft enforcement to surface first). If the filesystem doesn't support quotas (ext4 without prjquota), only soft enforcement applies and the operator is warned at startup.
 
-### 6.2 main_repo size
+### 6.2 Managed repository size
 
-`main_repos/<initiative_uuid>/` grows monotonically with merge history. `main_repo_quota_mb` is a SOFT cap — exceeding it does NOT block merges (you can't refuse to admit valid history). It triggers `KernelPush::MainRepoLargeWarning` to the Orchestrator and an `OperatorAttentionRequired { kind: MainRepoOverQuota }` audit event so the operator can plan to archive or split the initiative.
+`repositories/<repo_id>/` is the RAXIS-managed mirror adopted from an
+external source repository. It grows with the target refs and any
+locally merged-but-unpublished history. `managed_repo_quota_mb` is a
+SOFT cap — exceeding it does NOT block a valid `IntegrationMerge` after
+admission, but it does trigger an operator warning so the repository can
+be archived, pruned, split, or published/cleaned up deliberately. The
+managed mirror is exact-root validated; parent-walk Git discoveries are
+not accepted as repositories.
 
 ### 6.3 Audit log
 
@@ -372,8 +379,8 @@ This section directly answers the question: can a disk-full condition during `In
 
 1. **Orchestrator's worktree** (`worktrees/<orchestrator_uuid>/`): the source of `commit_sha`. Already on disk before `IntegrationMerge` is submitted; not written by the merge handler itself.
 2. **Bundle staging** (`bundles/<initiative_uuid>/`): consumed by the Orchestrator during its merge work, BEFORE submitting `IntegrationMerge`. Not touched by the kernel handler.
-3. **`main_repo`** (`main_repos/<initiative_uuid>/.git/`): target of the kernel's `git fetch` + `git update-ref` during Phase 2.
-4. **`tmp/`**: gix's pack-receive temporary files written during `git fetch` before atomic rename into `main_repo/.git/objects/pack/`.
+3. **Managed repository mirror** (`repositories/<repo_id>/.git/`): target of the kernel's `git fetch` + `git update-ref` during Phase 2.
+4. **`tmp/`**: gix's pack-receive temporary files written during `git fetch` before atomic rename into the managed mirror's `.git/objects/pack/`.
 5. **SQLite state.db + WAL**: target of Phase 1 and Phase 3 commits, plus the audit event INSERT inside Phase 1.
 
 ### 8.2 Disk-full scenarios per phase
@@ -390,15 +397,15 @@ The audit-reserve mechanism (§7.5) ensures the audit-event INSERT specifically 
 
 **Phase 2 (`git fetch`) under disk full.**
 
-The kernel invokes `gix::Repository::fetch` to pull `commit_sha` and its ancestors from the Orchestrator's worktree into `main_repo`. gix writes pack files into `tmp/` first, then atomically renames into `main_repo/.git/objects/pack/`. If the disk fills mid-fetch:
+The kernel invokes `gix::Repository::fetch` to pull `commit_sha` and its ancestors from the Orchestrator's worktree into the managed mirror. gix writes pack files into `tmp/` first, then atomically renames into the mirror's `.git/objects/pack/`. If the disk fills mid-fetch:
 
 | Sub-case | What's on disk | Recovery |
 |---|---|---|
-| 2a. Failed before any tmp file written | tmp/ unchanged; main_repo unchanged | Re-fetch on retry (idempotent). |
+| 2a. Failed before any tmp file written | tmp/ unchanged; managed mirror unchanged | Re-fetch on retry (idempotent). |
 | 2b. Failed mid-write of a tmp pack | Partial `tmp/pack-<sha>.tmp` file | gix's startup GC removes orphan tmp files. Re-fetch on retry. |
 | 2c. Failed after tmp file written, before atomic rename | Complete `tmp/pack-<sha>.tmp` not yet renamed | gix's startup GC removes orphan tmp files. Re-fetch on retry; same pack will be re-created. |
 | 2d. Renamed into pack/ but not yet referenced by index | `pack-<sha>.pack` and `.idx` exist; objects unreferenced | Objects are reachable by SHA; subsequent operations find them. Re-fetch is a no-op for already-present objects. |
-| 2e. Fetch fully succeeded; `update-ref` failed (disk full at .lock write) | All objects in main_repo; `refs/heads/main` still at old base_sha | §11.3 Case A recovery: re-runs both fetch (no-op) and update-ref (succeeds when disk frees). |
+| 2e. Fetch fully succeeded; `update-ref` failed (disk full at .lock write) | All objects in managed mirror; target ref still at old base_sha | §11.3 Case A recovery: re-runs both fetch (no-op) and update-ref (succeeds when disk frees). |
 
 In all sub-cases, `git_apply_pending = 1` remains set in SQLite (Phase 1 already committed). The handler returns `FAIL_DISK_FULL_DURING_GIT_APPLY` to the Orchestrator. The Orchestrator does NOT retry — instead, the kernel-side recovery on next disk-healthy transition (or kernel restart) replays Phase 2.
 
@@ -910,7 +917,7 @@ Allow admission to exceed cap by some percentage (e.g., 110%) under the theory t
 
 ### Alt C — Dynamic worktree quota based on initiative size
 
-Compute worktree quota as a function of main_repo size + expected diff scale. Rejected: complicates configuration significantly, and operators rarely have good estimates. Static `worktree_quota_mb` per session with `[plan] override_worktree_quota_mb = N` for special cases is simpler and adequately flexible.
+Compute worktree quota as a function of managed repository size + expected diff scale. Rejected: complicates configuration significantly, and operators rarely have good estimates. Static `worktree_quota_mb` per session with `[plan] override_worktree_quota_mb = N` for special cases is simpler and adequately flexible.
 
 ### Alt D — Block kernel writes during disk full instead of halting admission
 
@@ -938,4 +945,4 @@ When an initiative hits `max_per_initiative_concurrent_vms`, surface an escalati
 
 ### Alt J — Audit log on a separate filesystem from `disk_root`
 
-Mount `audit/` on its own dedicated filesystem so audit writes are insulated from worktree/main_repo growth. Rejected as a default — most operators run RAXIS on a single filesystem and dual-mount adds operational complexity. However, the spec explicitly permits this layout: operators may mount `disk_root/audit/` on a separate device, and the audit reserve mechanism (§7.5) applies to whichever filesystem `audit/` lives on. The watchdog statvfs's `audit/` separately from `disk_root` if they are on different filesystems.
+Mount `audit/` on its own dedicated filesystem so audit writes are insulated from worktree/managed-repository growth. Rejected as a default — most operators run RAXIS on a single filesystem and dual-mount adds operational complexity. However, the spec explicitly permits this layout: operators may mount `disk_root/audit/` on a separate device, and the audit reserve mechanism (§7.5) applies to whichever filesystem `audit/` lives on. The watchdog statvfs's `audit/` separately from `disk_root` if they are on different filesystems.

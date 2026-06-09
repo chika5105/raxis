@@ -19,6 +19,7 @@ import type {
   CredentialListResponse,
   CredentialReveal,
   DagView,
+  DiagnosticsResponse,
   EscalationView,
   HealthSnapshot,
   InitiativeListEntry,
@@ -227,6 +228,22 @@ export const dashboardApi = {
       "/api/health/kernel-lifecycle",
       signal ? { signal } : {},
     ),
+
+  diagnostics: {
+    list: (
+      params: { initiative_id?: string; limit?: number } = {},
+      signal?: AbortSignal,
+    ): Promise<DiagnosticsResponse> => {
+      const qs = new URLSearchParams();
+      if (params.initiative_id) qs.set("initiative_id", params.initiative_id);
+      if (params.limit !== undefined) qs.set("limit", String(params.limit));
+      const suffix = qs.toString() ? `?${qs}` : "";
+      return apiFetch<DiagnosticsResponse>(
+        `/api/diagnostics${suffix}`,
+        signal ? { signal } : {},
+      );
+    },
+  },
 
   initiatives: {
     list: (

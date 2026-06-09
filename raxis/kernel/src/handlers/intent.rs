@@ -40,12 +40,15 @@ use raxis_types::{
     unix_now_secs, BudgetSnapshot, InitiativeState, IntentKind, IntentOutcome, IntentRequest,
     IntentResponse, PlannerErrorCode, SessionId, TaskState,
 };
+use rusqlite::OptionalExtension;
 
 // INV-STORE-03 (kernel-store.md §2.5.1): table identifiers come from the
 // `Table` enum; FSM state strings come from `*State::as_sql_str()`.
 const TASKS: &str = Table::Tasks.as_str();
 const TASK_INTENT_RANGES: &str = Table::TaskIntentRanges.as_str();
 const INITIATIVES: &str = Table::Initiatives.as_str();
+const SIGNED_PLAN_ARTIFACTS: &str = Table::SignedPlanArtifacts.as_str();
+const PLAN_BUNDLE_ARTIFACTS: &str = Table::PlanBundleArtifacts.as_str();
 const TASK_EXPORTED_PATH_SNAPSHOTS: &str = Table::TaskExportedPathSnapshots.as_str();
 const WITNESS_RECORDS: &str = Table::WitnessRecords.as_str();
 const SUBTASK_ACTIVATIONS: &str = Table::SubtaskActivations.as_str();
@@ -1343,6 +1346,53 @@ fn run_phase_a(
         }
     }
 
+    // ── Step 3d (recurring-plan integrity): no merge with live subtasks ──
+    //
+    // `IntegrationMerge` is only meaningful once the initiative's
+    // executor/reviewer activation FSM has drained. A malformed recurring
+    // plan once created `subtask_activations(initiative_id = new,
+    // task_id = old)` after a global task-id collision; the orchestrator
+    // then saw an empty/inconsistent DAG and attempted a merge anyway.
+    // This gate is the runtime backstop: any PendingActivation or Active
+    // activation owned by the initiative blocks merge admission before
+    // review folding, diff validation, or target-ref side effects.
+    if matches!(req.intent_kind, IntentKind::IntegrationMerge) {
+        let initiative_id = task.initiative_id.clone();
+        let blocker: Result<Option<(String, String)>, rusqlite::Error> = {
+            let conn = store.lock_sync();
+            conn.query_row(
+                &format!(
+                    "SELECT task_id, activation_state
+                       FROM {SUBTASK_ACTIVATIONS}
+                      WHERE initiative_id = ?1
+                        AND activation_state IN ('PendingActivation', 'Active')
+                      ORDER BY created_at ASC, task_id ASC
+                      LIMIT 1"
+                ),
+                rusqlite::params![initiative_id.as_str()],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()
+        };
+        match blocker {
+            Ok(Some((blocker_task, blocker_state))) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"IntegrationMergeBlockedByOutstandingSubtasks\",\
+                     \"task_id\":\"{}\",\"initiative_id\":\"{initiative_id}\",\
+                     \"blocker_task_id\":\"{blocker_task}\",\
+                     \"blocker_activation_state\":\"{blocker_state}\",\
+                     \"diagnostic\":\"integration_merge requires every executor/reviewer activation for the initiative to be terminal before merge admission\"}}",
+                    req.task_id.as_str(),
+                );
+                return PreGateOutcome::Reject(PlannerErrorCode::FailReviewOutstanding, task_state);
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return PreGateOutcome::Reject(PlannerErrorCode::FailPolicyViolation, task_state)
+            }
+        }
+    }
+
     // ── Step 3d: IntegrationMerge fail-closed gate on outstanding review ──
     //
     // The orchestrator's NNSP rule 3a (`crates/planner-core/src/
@@ -1509,6 +1559,46 @@ fn run_phase_a(
         Ok(s) => s,
         Err(_) => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
     };
+
+    if matches!(req.intent_kind, IntentKind::IntegrationMerge) && base_sha_raw == head_sha_raw {
+        let has_declared_subtasks: Result<bool, rusqlite::Error> = {
+            let conn = store.lock_sync();
+            initiative_declares_executor_or_reviewer_subtasks_for_merge(
+                &conn,
+                task.initiative_id.as_str(),
+            )
+        };
+        match has_declared_subtasks {
+            Ok(true) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"IntegrationMergeRejectedNoOpWithSubtasks\",\
+                     \"task_id\":\"{}\",\"initiative_id\":\"{}\",\
+                     \"base_sha\":\"{}\",\"head_sha\":\"{}\",\
+                     \"diagnostic\":\"no-op integration_merge is invalid when the initiative declared executor/reviewer subtasks\"}}",
+                    req.task_id.as_str(),
+                    task.initiative_id,
+                    base_sha_raw,
+                    head_sha_raw,
+                );
+                return PreGateOutcome::RejectWithDetail(
+                    PlannerErrorCode::FailInvalidDiff,
+                    task_state,
+                    serde_json::json!({
+                        "intent_kind": req.intent_kind.as_str(),
+                        "task_id": req.task_id.as_str(),
+                        "base_sha": req.base_sha.as_ref().map(|s| s.as_str()),
+                        "head_sha": req.head_sha.as_ref().map(|s| s.as_str()),
+                        "validation_reason": "integration_merge_noop_with_declared_subtasks",
+                        "diagnostic": "no-op integration_merge is invalid when the initiative declared executor/reviewer subtasks",
+                    }),
+                );
+            }
+            Ok(false) => {}
+            Err(_) => {
+                return PreGateOutcome::Reject(PlannerErrorCode::FailPolicyViolation, task_state)
+            }
+        }
+    }
 
     // V2 migration: ancestry / topology / diff dispatch through the
     // `DomainAdapter` (`extensibility-traits.md §2.2.B`). The kernel
@@ -2101,6 +2191,35 @@ fn run_phase_c(
                     aat = advance.already_at_target,
                 );
 
+                {
+                    let conn = store.lock_sync();
+                    match raxis_store::managed_repositories::record_publish_pending(
+                        &conn,
+                        &repository_id,
+                        Some(&applied_commit_sha),
+                    ) {
+                        Ok(0) => {
+                            eprintln!(
+	                                "{{\"level\":\"warn\",\"event\":\"ManagedRepoPublishStateMissing\",\
+	                                 \"initiative_id\":\"{initiative_id_owned}\",\
+	                                 \"repository_id\":\"{repository_id}\",\
+	                                 \"publish_state\":\"pending\",\
+	                                 \"diagnostic\":\"repository metadata row not found; run raxis repo repair\"}}",
+	                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!(
+	                                "{{\"level\":\"warn\",\"event\":\"ManagedRepoPublishStateUpdateFailed\",\
+	                                 \"initiative_id\":\"{initiative_id_owned}\",\
+	                                 \"repository_id\":\"{repository_id}\",\
+	                                 \"publish_state\":\"pending\",\
+	                                 \"diagnostic\":\"{e}\"}}",
+	                            );
+                        }
+                    }
+                }
+
                 // ── V2.5 §11.1 Phase 3: clear git_apply_pending ─────────
                 //
                 // Best-effort: a SQLite failure here would re-trigger
@@ -2473,7 +2592,24 @@ fn run_phase_c(
                     eprintln!(
                         "{{\"level\":\"error\",\"event\":\"PushFailed\",\
                          \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
-                    );
+	                    );
+                }
+                {
+                    let conn = store.lock_sync();
+                    if let Err(e) = raxis_store::managed_repositories::record_publish_failure(
+                        &conn,
+                        &repository_id,
+                        Some(&applied_commit_sha),
+                        "git_apply_pending did not clear within 5s deadline",
+                    ) {
+                        eprintln!(
+	                            "{{\"level\":\"warn\",\"event\":\"ManagedRepoPublishStateUpdateFailed\",\
+	                             \"initiative_id\":\"{initiative_id_owned}\",\
+	                             \"repository_id\":\"{repository_id}\",\
+	                             \"publish_state\":\"failed\",\
+	                             \"diagnostic\":\"{e}\"}}",
+	                        );
+                    }
                 }
                 // `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
                 // (iter65-review). Push deferred past the 5s deadline
@@ -2544,6 +2680,22 @@ fn run_phase_c(
 
             match result {
                 Ok(outcome) => {
+                    {
+                        let conn = store.lock_sync();
+                        if let Err(e) = raxis_store::managed_repositories::record_publish_success(
+                            &conn,
+                            &repository_id,
+                            Some(&applied_commit_sha),
+                        ) {
+                            eprintln!(
+	                                "{{\"level\":\"warn\",\"event\":\"ManagedRepoPublishStateUpdateFailed\",\
+	                                 \"initiative_id\":\"{initiative_id_owned}\",\
+	                                 \"repository_id\":\"{repository_id}\",\
+	                                 \"publish_state\":\"published\",\
+	                                 \"diagnostic\":\"{e}\"}}",
+	                            );
+                        }
+                    }
                     if let Err(e) = ctx.audit.emit(
                         raxis_audit_tools::AuditEventKind::PushCompleted {
                             initiative_id: initiative_id_owned.clone(),
@@ -2596,6 +2748,23 @@ fn run_phase_c(
                             "{{\"level\":\"error\",\"event\":\"PushFailed\",\
                              \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
                         );
+                    }
+                    {
+                        let conn = store.lock_sync();
+                        if let Err(e) = raxis_store::managed_repositories::record_publish_failure(
+                            &conn,
+                            &repository_id,
+                            Some(&applied_commit_sha),
+                            &reason,
+                        ) {
+                            eprintln!(
+	                                "{{\"level\":\"warn\",\"event\":\"ManagedRepoPublishStateUpdateFailed\",\
+	                                 \"initiative_id\":\"{initiative_id_owned}\",\
+	                                 \"repository_id\":\"{repository_id}\",\
+	                                 \"publish_state\":\"failed\",\
+	                                 \"diagnostic\":\"{e}\"}}",
+	                            );
+                        }
                     }
                     // `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
                     // (iter65-review). Real push failure (network /
@@ -8103,6 +8272,22 @@ async fn handle_retry_sub_task(
                     && review_reject_count > 0;
             let new_review_reject_count = review_reject_count;
             let new_activation_id = uuid::Uuid::new_v4().to_string();
+            if !task_belongs_to_initiative(&tx, &task_id_clone, &initiative_id_clone).map_err(
+                |_| {
+                    emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                    (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+                },
+            )? {
+                eprintln!(
+                    "{{\"level\":\"error\",\
+                     \"event\":\"RetrySubTaskActivationOwnerMismatch\",\
+                     \"task_id\":\"{task_id_clone}\",\
+                     \"initiative_id\":\"{initiative_id_clone}\",\
+                     \"diagnostic\":\"retry activation insert refused because the task row is not owned by the activation initiative\"}}",
+                );
+                emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+            }
             tx.execute(
                 &format!(
                     "INSERT INTO {SUBTASK_ACTIVATIONS} (
@@ -8244,13 +8429,18 @@ async fn handle_retry_sub_task(
                            FROM {TASK_DAG_EDGES} e \
                            JOIN {TASKS} t ON t.task_id = e.successor_task_id \
                           WHERE e.predecessor_task_id = ?1 \
+                            AND e.initiative_id = ?2 \
+                            AND t.initiative_id = ?2 \
                             AND t.review_verdict IS NOT NULL"
                     )).map_err(|_| {
                         emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
                         (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
                     })?;
                     let rows = stmt
-                        .query_map(rusqlite::params![&task_id_clone], |r| r.get::<_, String>(0))
+                        .query_map(
+                            rusqlite::params![&task_id_clone, &initiative_id_clone],
+                            |r| r.get::<_, String>(0),
+                        )
                         .map_err(|_| {
                             emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
                             (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
@@ -8287,6 +8477,23 @@ async fn handle_retry_sub_task(
                     })?;
 
                     let reviewer_activation_id = uuid::Uuid::new_v4().to_string();
+                    if !task_belongs_to_initiative(&tx, reviewer_task_id, &initiative_id_clone)
+                        .map_err(|_| {
+                            emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                            (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+                        })?
+                    {
+                        eprintln!(
+                            "{{\"level\":\"error\",\
+                             \"event\":\"ReviewerReactivationOwnerMismatch\",\
+                             \"executor_task_id\":\"{task_id_clone}\",\
+                             \"reviewer_task_id\":\"{reviewer_task_id}\",\
+                             \"initiative_id\":\"{initiative_id_clone}\",\
+                             \"diagnostic\":\"reviewer activation insert refused because the reviewer task row is not owned by the activation initiative\"}}",
+                        );
+                        emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                        return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+                    }
                     tx.execute(
                         &format!(
                             "INSERT INTO {SUBTASK_ACTIVATIONS} (
@@ -8914,6 +9121,24 @@ fn load_task(task_id: &str, store: &Store) -> Result<TaskRow, ()> {
     .map_err(|_| ())
 }
 
+fn task_belongs_to_initiative(
+    conn: &rusqlite::Connection,
+    task_id: &str,
+    initiative_id: &str,
+) -> rusqlite::Result<bool> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(
+                 SELECT 1 FROM {TASKS}
+                  WHERE task_id = ?1 AND initiative_id = ?2
+             )"
+        ),
+        rusqlite::params![task_id, initiative_id],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|v| v != 0)
+}
+
 fn load_completed_executor_heads_for_merge(
     initiative_id: &str,
     plan_registry: &crate::initiatives::plan_registry::PlanRegistry,
@@ -8956,6 +9181,79 @@ fn load_completed_executor_heads_for_merge(
         }
     }
     Ok(heads)
+}
+
+fn initiative_declares_executor_or_reviewer_subtasks_for_merge(
+    conn: &rusqlite::Connection,
+    initiative_id: &str,
+) -> rusqlite::Result<bool> {
+    let activation_count: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM {SUBTASK_ACTIVATIONS} WHERE initiative_id = ?1"),
+        rusqlite::params![initiative_id],
+        |r| r.get(0),
+    )?;
+    if activation_count > 0 {
+        return Ok(true);
+    }
+
+    let legacy_plan_bytes: Option<Vec<u8>> = conn
+        .query_row(
+            &format!("SELECT plan_bytes FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id = ?1"),
+            rusqlite::params![initiative_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let plan_bytes: Option<Vec<u8>> = match legacy_plan_bytes {
+        Some(bytes) => Some(bytes),
+        None => conn
+            .query_row(
+                &format!(
+                    "SELECT pba.artifact_bytes
+                       FROM {INITIATIVES} AS i
+                       JOIN {PLAN_BUNDLE_ARTIFACTS} AS pba
+                         ON pba.bundle_sha256 = i.plan_bundle_sha256
+                      WHERE i.initiative_id = ?1
+                        AND pba.artifact_name = 'plan.toml'
+                      LIMIT 1"
+                ),
+                rusqlite::params![initiative_id],
+                |r| r.get(0),
+            )
+            .optional()?,
+    };
+
+    let Some(plan_bytes) = plan_bytes else {
+        return Ok(false);
+    };
+    let Ok(plan_text) = std::str::from_utf8(&plan_bytes) else {
+        return Ok(true);
+    };
+    let Ok(plan_doc) = toml::from_str::<toml::Value>(plan_text) else {
+        return Ok(true);
+    };
+    match plan_doc.get("tasks") {
+        Some(toml::Value::Array(entries)) => Ok(entries.iter().any(|entry| {
+            let Some(table) = entry.as_table() else {
+                return true;
+            };
+            match table.get("session_agent_type") {
+                Some(toml::Value::String(kind)) => {
+                    match raxis_types::SessionAgentType::from_sql_str(kind) {
+                        Some(raxis_types::SessionAgentType::Executor)
+                        | Some(raxis_types::SessionAgentType::Reviewer) => true,
+                        Some(raxis_types::SessionAgentType::Orchestrator) => false,
+                        None => true,
+                    }
+                }
+                // A malformed `[[tasks]]` declaration is still a
+                // declaration of planned work. Merge must fail closed
+                // instead of treating parse drift as "safe no-op".
+                Some(_) | None => true,
+            }
+        })),
+        Some(_) => Ok(true),
+        None => Ok(false),
+    }
 }
 
 /// Update intent-binding fields on the task row — standalone wrapper.
@@ -11683,6 +11981,295 @@ mod tests {
             | PreGateOutcome::Proceed(_)
             | PreGateOutcome::RejectWithDetail(_, _, _) => {
                 panic!("integration_merge must reject while reviewer verdict is missing")
+            }
+        }
+    }
+
+    #[test]
+    fn integration_merge_rejects_pending_subtask_activation() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let init = "init-im-pending-activation";
+        let merge_task = "integration-merge";
+        let executor = "ingest_metrics";
+
+        seed_orchestrator_session(&store);
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            init,
+            &[(executor, raxis_types::SessionAgentType::Executor)],
+        );
+
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        conn.execute(
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
+            ),
+            rusqlite::params![init, InitiativeState::Executing.as_sql_str(), now],
+        )
+        .unwrap();
+        for (task_id, state) in [
+            (merge_task, TaskState::Running.as_sql_str()),
+            (executor, TaskState::Admitted.as_sql_str()),
+        ] {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at,
+                         actual_cost)
+                     VALUES (?1, ?2, 'default', ?3, 'kernel',
+                             1, ?4, ?4, 0)"
+                ),
+                rusqlite::params![task_id, init, state, now],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            &format!(
+                "INSERT INTO {SUBTASK_ACTIVATIONS}
+                    (activation_id, task_id, initiative_id,
+                     activation_state, session_id, evaluation_sha,
+                     crash_retry_count, review_reject_count,
+                     created_at, activated_at, terminated_at)
+                 VALUES (?1, ?2, ?3, 'PendingActivation', NULL, NULL,
+                         0, 0, ?4, NULL, NULL)"
+            ),
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), executor, init, now],
+        )
+        .unwrap();
+        drop(conn);
+
+        let outcome = run_phase_a(
+            make_integration_merge_request(merge_task, 1),
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            Arc::new(default_test_policy()),
+            ctx,
+        );
+
+        match outcome {
+            PreGateOutcome::Reject(code, state) => {
+                assert_eq!(code, PlannerErrorCode::FailReviewOutstanding);
+                assert_eq!(state, TaskState::Running);
+            }
+            PreGateOutcome::EarlyResponse(_)
+            | PreGateOutcome::Proceed(_)
+            | PreGateOutcome::RejectWithDetail(_, _, _) => {
+                panic!("integration_merge must reject while an activation is pending")
+            }
+        }
+    }
+
+    #[test]
+    fn integration_merge_rejects_noop_when_subtasks_were_declared() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut ctx_policy = default_test_policy();
+        ctx_policy.set_allowed_worktree_roots_for_tests(vec!["/tmp".to_owned()]);
+        let mut phase_policy = default_test_policy();
+        phase_policy.set_allowed_worktree_roots_for_tests(vec!["/tmp".to_owned()]);
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), ctx_policy);
+        let init = "init-im-noop";
+        let merge_task = "integration-merge";
+        let executor = "ingest_metrics";
+
+        seed_orchestrator_session(&store);
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            init,
+            &[(executor, raxis_types::SessionAgentType::Executor)],
+        );
+
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        conn.execute(
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
+            ),
+            rusqlite::params![init, InitiativeState::Executing.as_sql_str(), now],
+        )
+        .unwrap();
+        for (task_id, state, eval) in [
+            (merge_task, TaskState::Running.as_sql_str(), None),
+            (
+                executor,
+                TaskState::Completed.as_sql_str(),
+                Some("3333333333333333333333333333333333333333"),
+            ),
+        ] {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at,
+                         evaluation_sha, actual_cost)
+                     VALUES (?1, ?2, 'default', ?3, 'kernel',
+                             1, ?4, ?4, ?5, 0)"
+                ),
+                rusqlite::params![task_id, init, state, now, eval],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            &format!(
+                "INSERT INTO {SUBTASK_ACTIVATIONS}
+                    (activation_id, task_id, initiative_id,
+                     activation_state, session_id, evaluation_sha,
+                     crash_retry_count, review_reject_count,
+                     created_at, activated_at, terminated_at)
+                 VALUES (?1, ?2, ?3, 'Completed', NULL, ?4,
+                         0, 0, ?5, ?5, ?5)"
+            ),
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                executor,
+                init,
+                "3333333333333333333333333333333333333333",
+                now,
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut req = make_integration_merge_request(merge_task, 1);
+        req.head_sha = req.base_sha.clone();
+        let mut session = dummy_orchestrator_session_row();
+        session.worktree_root = Some("/tmp/raxis-im-noop-test".to_owned());
+        let outcome = run_phase_a(
+            req,
+            session,
+            dummy_session_id(),
+            1,
+            Arc::new(phase_policy),
+            ctx,
+        );
+
+        match outcome {
+            PreGateOutcome::RejectWithDetail(code, state, detail) => {
+                assert_eq!(code, PlannerErrorCode::FailInvalidDiff);
+                assert_eq!(state, TaskState::Running);
+                assert_eq!(
+                    detail
+                        .get("validation_reason")
+                        .and_then(serde_json::Value::as_str),
+                    Some("integration_merge_noop_with_declared_subtasks"),
+                );
+            }
+            PreGateOutcome::Reject(code, state) => {
+                panic!("expected no-op detail, got reject {code:?} in state {state:?}")
+            }
+            PreGateOutcome::EarlyResponse(_) | PreGateOutcome::Proceed(_) => {
+                panic!("no-op integration_merge must not proceed")
+            }
+        }
+    }
+
+    #[test]
+    fn integration_merge_rejects_noop_when_signed_plan_declares_subtasks_without_task_rows() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut ctx_policy = default_test_policy();
+        ctx_policy.set_allowed_worktree_roots_for_tests(vec!["/tmp".to_owned()]);
+        let mut phase_policy = default_test_policy();
+        phase_policy.set_allowed_worktree_roots_for_tests(vec!["/tmp".to_owned()]);
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), ctx_policy);
+        let init = "init-im-noop-plan-only";
+        let merge_task = "integration-merge-plan-only";
+        let executor = "ingest_metrics";
+
+        seed_orchestrator_session(&store);
+
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        conn.execute(
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
+            ),
+            rusqlite::params![init, InitiativeState::Executing.as_sql_str(), now],
+        )
+        .unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at,
+                     actual_cost)
+                 VALUES (?1, ?2, 'default', ?3, 'kernel',
+                         1, ?4, ?4, 0)"
+            ),
+            rusqlite::params![merge_task, init, TaskState::Running.as_sql_str(), now],
+        )
+        .unwrap();
+        let plan_toml = format!(
+            r#"[plan.initiative]
+description = "Metrics ingest recurring run"
+
+[workspace]
+name = "Metrics ingest"
+repository = "metrics-ingest"
+lane_id = "default"
+target_ref = "refs/heads/main"
+
+[[tasks]]
+task_id = "{executor}"
+description = "Ingest metrics"
+prompt = "Update metrics ingestion."
+clone_strategy = "blobless"
+session_agent_type = "Executor"
+path_allowlist = ["**/*"]
+"#
+        )
+        .into_bytes();
+        conn.execute(
+            &format!(
+                "INSERT INTO {SIGNED_PLAN_ARTIFACTS}
+                    (initiative_id, plan_bytes, plan_sig, stored_at)
+                 VALUES (?1, ?2, ?3, ?4)"
+            ),
+            rusqlite::params![init, plan_toml, vec![0_u8; 64], now],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut req = make_integration_merge_request(merge_task, 1);
+        req.head_sha = req.base_sha.clone();
+        let mut session = dummy_orchestrator_session_row();
+        session.worktree_root = Some("/tmp/raxis-im-noop-plan-only-test".to_owned());
+        let outcome = run_phase_a(
+            req,
+            session,
+            dummy_session_id(),
+            1,
+            Arc::new(phase_policy),
+            ctx,
+        );
+
+        match outcome {
+            PreGateOutcome::RejectWithDetail(code, state, detail) => {
+                assert_eq!(code, PlannerErrorCode::FailInvalidDiff);
+                assert_eq!(state, TaskState::Running);
+                assert_eq!(
+                    detail
+                        .get("validation_reason")
+                        .and_then(serde_json::Value::as_str),
+                    Some("integration_merge_noop_with_declared_subtasks"),
+                );
+            }
+            PreGateOutcome::Reject(code, state) => {
+                panic!("expected no-op detail, got reject {code:?} in state {state:?}")
+            }
+            PreGateOutcome::EarlyResponse(_) | PreGateOutcome::Proceed(_) => {
+                panic!("plan-declared no-op integration_merge must not proceed")
             }
         }
     }

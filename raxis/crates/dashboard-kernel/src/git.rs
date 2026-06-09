@@ -34,7 +34,7 @@
 //!   the JSON. Stderr is logged via `tracing::warn!` and
 //!   discarded.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -103,6 +103,14 @@ pub enum GitError {
     MissingPath {
         /// Worktree path that failed to exist.
         path: String,
+    },
+    /// A requested range endpoint named a commit that is not
+    /// present in the selected repository. This is a user/data
+    /// mismatch, not a dashboard-internal failure.
+    #[error("commit {sha} not found in selected repository")]
+    CommitNotFound {
+        /// Missing commit-ish as supplied by the caller.
+        sha: String,
     },
 }
 
@@ -262,6 +270,68 @@ pub fn head_sha(root: &Path) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// `git rev-parse --show-toplevel` for `root`.
+///
+/// This intentionally returns the discovered top-level, not just a
+/// boolean. Callers that enumerate candidate repository roots must
+/// compare it to the candidate path and reject parent-walk matches.
+/// Without that check, a RAXIS storage directory under Homebrew can
+/// be misidentified as the Homebrew checkout because Git walks
+/// upward until it finds `/opt/homebrew/.git`.
+pub fn repo_toplevel(root: &Path) -> Option<PathBuf> {
+    match run_git(&["rev-parse", "--show-toplevel"], root) {
+        Ok((s, _, 0)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(trimmed))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// True only when `root` is itself the Git worktree top-level.
+///
+/// `git -C <dir> rev-parse HEAD` is not sufficient for dashboard
+/// discovery because it succeeds in arbitrary subdirectories of a
+/// parent repository. This helper enforces identity: the returned
+/// Git top-level must canonicalize to the candidate path.
+pub fn is_exact_repo_root(root: &Path) -> bool {
+    let Ok(root_canon) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    let Some(top) = repo_toplevel(root) else {
+        return false;
+    };
+    let Ok(top_canon) = std::fs::canonicalize(top) else {
+        return false;
+    };
+    top_canon == root_canon
+}
+
+/// True when `sha` resolves to a commit object in `root`.
+pub fn has_commit(root: &Path, sha: &str) -> bool {
+    ensure_commit(root, sha).is_ok()
+}
+
+fn ensure_commit(root: &Path, sha: &str) -> Result<(), GitError> {
+    let rev = format!("{sha}^{{commit}}");
+    let (_stdout, stderr, code) = run_git(&["cat-file", "-e", &rev], root)?;
+    if code == 0 {
+        return Ok(());
+    }
+    if stderr_is_not_a_git_repo(&stderr) {
+        return Err(GitError::NotARepo {
+            path: root.display().to_string(),
+        });
+    }
+    Err(GitError::CommitNotFound {
+        sha: sha.to_owned(),
+    })
 }
 
 /// `git symbolic-ref --short HEAD` → `Some("branch-name")` or
@@ -432,6 +502,7 @@ pub fn log_entries_since_base(
     base: &str,
     limit: u32,
 ) -> Result<Vec<WorktreeLogEntry>, GitError> {
+    ensure_commit(root, base)?;
     log_entries_inner(root, limit, Some(format!("{base}..HEAD")))
 }
 
@@ -446,6 +517,8 @@ pub fn log_entries_between(
     head: &str,
     limit: u32,
 ) -> Result<Vec<WorktreeLogEntry>, GitError> {
+    ensure_commit(root, base)?;
+    ensure_commit(root, head)?;
     log_entries_inner(root, limit, Some(format!("{base}..{head}")))
 }
 
@@ -511,6 +584,8 @@ fn log_entries_inner(
 /// hunk text. Per-file hunks are truncated at
 /// [`MAX_PER_FILE_DIFF_BYTES`].
 pub fn diff_files(root: &Path, from: &str, to: &str) -> Result<Vec<WorktreeDiffFile>, GitError> {
+    ensure_commit(root, from)?;
+    ensure_commit(root, to)?;
     let range = format!("{from}..{to}");
     let (numstat, stderr, code) = run_git(&["diff", &range, "--numstat", "--no-renames"], root)?;
     if code != 0 {
@@ -713,6 +788,44 @@ mod tests {
         match err {
             GitError::NotARepo { .. } => {}
             other => panic!("expected NotARepo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exact_repo_root_rejects_parent_walk_matches() {
+        let Some(dir) = make_seed_repo() else {
+            eprintln!("skipping: no working git binary on PATH");
+            return;
+        };
+        let child = dir.path().join("raxis-data").join("worktrees");
+        std::fs::create_dir_all(&child).expect("mkdir child");
+
+        assert!(
+            head_sha(&child).is_some(),
+            "git parent-walks into seed repo"
+        );
+        assert!(
+            !is_exact_repo_root(&child),
+            "dashboard discovery must reject child dirs that only work because git walks upward"
+        );
+        assert!(is_exact_repo_root(dir.path()));
+    }
+
+    #[test]
+    fn diff_files_returns_commit_not_found_for_missing_sha() {
+        let Some(dir) = make_seed_repo() else {
+            eprintln!("skipping: no working git binary on PATH");
+            return;
+        };
+        let Some(base) = head_sha(dir.path()) else {
+            eprintln!("skipping: seed repo has no HEAD");
+            return;
+        };
+        let missing = "b".repeat(40);
+        let err = diff_files(dir.path(), &base, &missing).expect_err("missing commit");
+        match err {
+            GitError::CommitNotFound { sha } => assert_eq!(sha, missing),
+            other => panic!("expected CommitNotFound, got {other:?}"),
         }
     }
 

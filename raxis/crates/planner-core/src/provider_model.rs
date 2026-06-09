@@ -28,13 +28,13 @@
 //! [`ProviderModelError::UnknownModel`] at planner-boot, BEFORE
 //! the dispatch loop spends any tokens against the wrong model.
 //!
-//! The registry is intentionally append-only: when a new Anthropic
+//! The registry is intentionally conservative: when a new Anthropic
 //! / OpenAI / Bedrock model lands, the spec adds a row, the model
 //! id is recognised by `validate_model_id(...)`, and operators
-//! consume it via `RAXIS_MODEL_ID=<new-id>`. Removing a row
-//! requires a deprecation cycle (mark deprecated → emit warning
-//! → eventual removal in a major release) so existing plans don't
-//! break silently.
+//! consume it via `RAXIS_MODEL_ID=<new-id>`. Models that are still
+//! served but discouraged go through a deprecation cycle; model ids
+//! verified as unavailable upstream are removed so RAXIS fails closed
+//! before spending a live provider turn.
 
 use std::env;
 
@@ -233,12 +233,6 @@ pub const KNOWN_MODELS: &[KnownModel] = &[
         context_window: Some(200_000),
     },
     // --- OpenAI ---
-    KnownModel {
-        name: "gpt-5.5-medium",
-        provider: ProviderId::OpenAi,
-        deprecated: None,
-        context_window: Some(200_000),
-    },
     KnownModel {
         name: "gpt-5.3-codex",
         provider: ProviderId::OpenAi,
@@ -469,12 +463,6 @@ mod tests {
 
     #[test]
     fn openai_registry_marks_completion_only_models() {
-        let chat = validate_model_id("gpt-5.5-medium").unwrap();
-        assert_eq!(
-            chat.openai_api_surface(),
-            Some(OpenAiModelApiSurface::ChatCompletions)
-        );
-
         let completions = validate_model_id("gpt-5.3-codex").unwrap();
         assert_eq!(
             completions.openai_api_surface(),
@@ -483,6 +471,14 @@ mod tests {
 
         let non_openai = validate_model_id("claude-haiku-4-5").unwrap();
         assert_eq!(non_openai.openai_api_surface(), None);
+    }
+
+    #[test]
+    fn stale_openai_model_is_rejected() {
+        let err = validate_model_id("gpt-5.5-medium").unwrap_err();
+        assert!(
+            matches!(err, ProviderModelError::UnknownModel(model) if model == "gpt-5.5-medium")
+        );
     }
 
     #[test]

@@ -189,7 +189,7 @@ function TurnCard({ turn }: TurnCardProps) {
           <summary className="text-[11px] text-accent cursor-pointer">
             Request payload
           </summary>
-          <pre className="mt-1 max-h-64 overflow-auto scroll-thin text-[10px] font-mono text-ink-muted whitespace-pre-wrap">
+          <pre className="mt-1 max-h-64 overflow-auto overscroll-auto scroll-thin text-[10px] font-mono text-ink-muted whitespace-pre-wrap">
             {safeStringify(turn.request)}
           </pre>
         </details>
@@ -208,7 +208,7 @@ function TurnCard({ turn }: TurnCardProps) {
               </span>
             )}
           </summary>
-          <pre className="mt-1 max-h-64 overflow-auto scroll-thin text-[10px] font-mono text-ink-muted whitespace-pre-wrap">
+          <pre className="mt-1 max-h-64 overflow-auto overscroll-auto scroll-thin text-[10px] font-mono text-ink-muted whitespace-pre-wrap">
             {safeStringify(turn.response)}
           </pre>
         </details>

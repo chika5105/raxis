@@ -1617,7 +1617,7 @@ all_merges_require_approval     = false                     # default; when true
 [provider_aliases.orchestrator_default]
 chain = [
     "anthropic:claude-4.6-sonnet-medium-thinking",   # primary
-    "openai:gpt-5.5-medium",                         # cross-provider fallback (omit if single-provider)
+    "openai:gpt-5.3-codex",                         # cross-provider fallback (omit if single-provider)
 ]
 fallback_behavior = "attempt_in_order"
 ```
@@ -1718,7 +1718,7 @@ fallback_behavior = "attempt_in_order"
 [provider_aliases_defaults.executor]
 chain             = [
     "anthropic:claude-4.6-sonnet-medium-thinking",
-    "openai:gpt-5.5-medium",
+    "openai:gpt-5.3-codex",
 ]
 fallback_behavior = "attempt_in_order"
 ```

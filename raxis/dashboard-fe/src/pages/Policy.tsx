@@ -729,7 +729,7 @@ function PolicyFeatureLibrary({
   onAppendSnippet: (snippet: string) => void;
 }) {
   return (
-    <div className="h-full min-h-0 overflow-y-auto overscroll-contain scroll-thin pb-4">
+    <div className="h-full min-h-0 overflow-y-auto overscroll-y-auto scroll-thin pb-4">
       <div className="px-3 pt-3 pb-2">
         <div className="rounded border border-info/30 bg-info-muted p-2 text-xs">
           <div className="font-semibold text-ink">Org security policy</div>
@@ -880,7 +880,7 @@ function PolicyInspector(props: PolicyInspectorProps) {
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <InspectorTabBar tabs={tabs} active={activeTab} onChange={onTabChange} />
 
-      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain scroll-thin pb-4">
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-auto scroll-thin pb-4">
 
         {/* VALIDATE TAB */}
         {activeTab === "validate" && (

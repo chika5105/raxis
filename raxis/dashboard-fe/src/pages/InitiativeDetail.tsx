@@ -6,6 +6,7 @@ import clsx from "clsx";
 import { dashboardApi } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
 import { CredentialsView } from "@/components/CredentialsView";
+import { DiagnosticFindingsPanel } from "@/components/DiagnosticFindingsPanel";
 import { useOperatorRoles } from "@/components/useOperatorRoles";
 import { DagGraph, type DagGraphNode } from "@/components/DagGraph";
 import { Empty } from "@/components/Empty";
@@ -36,6 +37,7 @@ import {
 import {
   fmtAbsolute,
   fmtRelative,
+  fmtTokens,
   plural,
   shortFingerprint,
   shortSha,
@@ -45,7 +47,12 @@ import {
   serializeStatusParam,
   toggleStatus,
 } from "@/lib/status-filter";
-import type { DagNode, TaskView, WorktreeSnapshotView } from "@/types/api";
+import type {
+  DagNode,
+  InitiativeRunSummary,
+  TaskView,
+  WorktreeSnapshotView,
+} from "@/types/api";
 
 /// Project an initiative's `TaskView[]` payload onto the
 /// minimal `DagGraphNode[]` shape the embedded DAG renderer
@@ -146,6 +153,13 @@ export function InitiativeDetailPage() {
     refetchInterval: 4_000,
     enabled: id.length > 0,
   });
+  const diagnosticsQ = useQuery({
+    queryKey: ["diagnostics", "initiative", id],
+    queryFn: ({ signal }) =>
+      dashboardApi.diagnostics.list({ initiative_id: id, limit: 6 }, signal),
+    refetchInterval: 10_000,
+    enabled: id.length > 0,
+  });
 
   // Per-task-state counts for the legend. Computed even when the
   // query is pending so hook order stays stable; the early returns
@@ -164,6 +178,7 @@ export function InitiativeDetailPage() {
   const integrationDagNodes = dagQ.data?.nodes ?? [];
   const dagGraphNodes = dagQ.data?.nodes ?? mapTasksToDagNodes(init.tasks);
   const dagEdges = dagQ.data?.edges ?? init.edges;
+  const diagnosticFindings = diagnosticsQ.data?.findings ?? [];
   const focusedTask =
     selectedTask && init.tasks.find((t) => t.task_id === selectedTask);
   const activeSet = new Set(activeStatuses);
@@ -214,6 +229,28 @@ export function InitiativeDetailPage() {
           reason={init.failure ?? null}
           heading="Initiative failure reason"
         />
+      )}
+
+      <InitiativeRunSummaryCard summary={init.run_summary} />
+
+      {diagnosticFindings.length > 0 && (
+        <section className="space-y-2">
+          <header className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-ink">Diagnosis</h2>
+              <p className="text-xs text-ink-muted">
+                Active root-cause hints for this initiative.
+              </p>
+            </div>
+            <Link
+              to={`/diagnostics?initiative_id=${encodeURIComponent(init.initiative_id)}`}
+              className="text-xs text-accent hover:underline"
+            >
+              Open diagnostics →
+            </Link>
+          </header>
+          <DiagnosticFindingsPanel findings={diagnosticFindings.slice(0, 3)} compact />
+        </section>
       )}
 
       <InitiativeIntegrationState
@@ -516,7 +553,7 @@ export function InitiativeDetailPage() {
                 <Row
                   label="Path scope"
                   value={
-                    <div className="font-mono text-[11px] mt-1 max-h-32 overflow-y-auto scroll-thin">
+                    <div className="font-mono text-[11px] mt-1 max-h-32 overflow-y-auto overscroll-y-auto scroll-thin">
                       {focusedTask.path_allowlist.length === 0 ? (
                         <span className="text-ink-subtle">—</span>
                       ) : (
@@ -658,6 +695,150 @@ function ReviewRetryPill({
       {label}
     </span>
   );
+}
+
+function InitiativeRunSummaryCard({
+  summary,
+}: {
+  summary: InitiativeRunSummary;
+}) {
+  const totalTokens =
+    summary.input_tokens +
+    summary.output_tokens +
+    summary.cache_read_tokens +
+    summary.cache_creation_tokens;
+  const turnBudget =
+    summary.declared_turn_budget != null
+      ? `${fmtTokens(summary.llm_turn_count)} / ${fmtTokens(summary.declared_turn_budget)}`
+      : fmtTokens(summary.llm_turn_count);
+  const wallBudget =
+    summary.declared_wallclock_budget_seconds != null
+      ? `${fmtDuration(summary.elapsed_seconds)} / ${fmtDuration(summary.declared_wallclock_budget_seconds)}`
+      : fmtDuration(summary.elapsed_seconds);
+  return (
+    <section className="card p-4">
+      <header className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-semibold text-ink">
+              Resource summary
+            </h2>
+            <span
+              className={clsx(
+                "badge",
+                summary.terminal ? toneClasses("ok") : toneClasses("info"),
+              )}
+            >
+              {summary.terminal ? "final" : "so far"}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-ink-muted">
+            Kernel ledger for sessions, turns, tokens, budget ceilings, and cost.
+          </p>
+        </div>
+        <div className="text-right text-xs text-ink-subtle">
+          <div>{plural(summary.session_count, "session")}</div>
+          {summary.active_session_count > 0 && (
+            <div>{summary.active_session_count} still active</div>
+          )}
+        </div>
+      </header>
+
+      <div className="mt-4 grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-2">
+        <SummaryMetric
+          label="Turns"
+          value={turnBudget}
+          hint={
+            summary.declared_turn_budget != null
+              ? "used / declared"
+              : "no declared cap"
+          }
+        />
+        <SummaryMetric
+          label="Tokens"
+          value={fmtTokens(totalTokens)}
+          hint={`in ${fmtTokens(summary.input_tokens)} · out ${fmtTokens(summary.output_tokens)}`}
+        />
+        <SummaryMetric
+          label="Cache"
+          value={fmtTokens(
+            summary.cache_read_tokens + summary.cache_creation_tokens,
+          )}
+          hint={`read ${fmtTokens(summary.cache_read_tokens)} · write ${fmtTokens(summary.cache_creation_tokens)}`}
+        />
+        <SummaryMetric
+          label="Cost"
+          value={fmtMicroDollars(summary.token_cost_micros)}
+          hint="token ledger"
+        />
+        <SummaryMetric
+          label="Elapsed"
+          value={wallBudget}
+          hint={
+            summary.declared_wallclock_budget_seconds != null
+              ? "used / declared"
+              : "no declared cap"
+          }
+        />
+        <SummaryMetric
+          label="Admission"
+          value={fmtTokens(summary.admission_reserved_units)}
+          hint="reserved units"
+        />
+        <SummaryMetric
+          label="Actual"
+          value={fmtTokens(summary.actual_cost_units)}
+          hint="admission units"
+        />
+      </div>
+    </section>
+  );
+}
+
+function SummaryMetric({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: React.ReactNode;
+  hint: string;
+}) {
+  return (
+    <div className="rounded border border-edge bg-panel px-3 py-2 min-w-0">
+      <div className="text-[10px] uppercase tracking-wider text-ink-subtle">
+        {label}
+      </div>
+      <div className="mt-1 text-sm font-semibold text-ink font-mono truncate">
+        {value}
+      </div>
+      <div className="mt-0.5 text-[11px] text-ink-muted truncate">{hint}</div>
+    </div>
+  );
+}
+
+function fmtDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  const s = Math.floor(seconds);
+  const hours = Math.floor(s / 3600);
+  const minutes = Math.floor((s % 3600) / 60);
+  const rest = s % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${rest}s`;
+  return `${rest}s`;
+}
+
+function fmtMicroDollars(micros: number): string {
+  if (!Number.isFinite(micros) || micros < 0) return "—";
+  const dollars = micros / 1_000_000;
+  if (dollars === 0) return "$0.00";
+  if (dollars < 0.01) return `$${dollars.toFixed(6)}`;
+  if (dollars < 1) return `$${dollars.toFixed(4)}`;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2,
+  }).format(dollars);
 }
 
 function InitiativeIntegrationState({
@@ -1030,7 +1211,7 @@ function SnapshotBlobPanel({
     return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
   }
   return (
-    <pre className="text-[11px] font-mono text-ink-muted overflow-x-auto scroll-thin max-h-96 bg-panel border border-edge rounded p-2">
+    <pre className="text-[11px] font-mono text-ink-muted overflow-x-auto overscroll-x-auto scroll-thin max-h-96 bg-panel border border-edge rounded p-2">
       {q.data}
     </pre>
   );
