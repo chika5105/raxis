@@ -48,7 +48,7 @@ target_ref  = "refs/heads/main"
 # large monorepos. The Executor can only WRITE to src/auth/**; it can READ
 # anything in the full sparse cone.
 [[tasks]]
-task_id             = "rate_limit_implementer"
+task_name             = "rate_limit_implementer"
 session_agent_type  = "Executor"
 clone_strategy      = "sparse"
 path_allowlist      = ["src/auth/"]
@@ -69,7 +69,7 @@ prompt             = """
 # CompleteTask — the kernel enforces this via the `predecessors` gate.
 # The Reviewer receives the Executor's exact HEAD SHA in its system prompt.
 [[tasks]]
-task_id             = "security_reviewer"
+task_name             = "security_reviewer"
 session_agent_type  = "Reviewer"
 clone_strategy      = "blobless"             # needs to read the full src/auth/ tree
 path_allowlist      = ["src/auth/"]          # must match (or be subset of) the Executor's

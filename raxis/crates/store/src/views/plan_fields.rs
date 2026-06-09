@@ -122,11 +122,12 @@ pub enum PlanFieldsError {
 
     #[error(
         "plan TOML for initiative {initiative_id:?} has no `[[tasks]]` entry \
-         matching task_id={task_id:?}"
+         matching task_name={task_name:?} for runtime task_id={task_id:?}"
     )]
     TaskNotInPlan {
         initiative_id: String,
         task_id: String,
+        task_name: String,
     },
 }
 
@@ -146,11 +147,11 @@ pub enum PlanFieldsError {
 ///   struct.
 /// - `Err(...)` — see [`PlanFieldsError`] for the typed failure cases.
 pub fn reveal_for_task(conn: &RoConn, task_id: &str) -> Result<PlanPathFields, PlanFieldsError> {
-    let initiative_id = lookup_initiative_id(conn, task_id)?;
+    let (initiative_id, task_name) = lookup_task_identity(conn, task_id)?;
     let plan_bytes = lookup_plan_bytes(conn, &initiative_id, task_id)?;
 
     let plan_toml = String::from_utf8_lossy(&plan_bytes);
-    parse_plan_path_fields(&plan_toml, &initiative_id, task_id)
+    parse_plan_path_fields(&plan_toml, &initiative_id, task_id, &task_name)
 }
 
 /// Read the **original submitted** `plan.toml` bytes for one
@@ -218,13 +219,15 @@ pub fn reveal_initiative_meta(
 //             entry point.
 // ────────────────────────────────────────────────────────────────────
 
-fn lookup_initiative_id(conn: &RoConn, task_id: &str) -> Result<String, PlanFieldsError> {
+fn lookup_task_identity(conn: &RoConn, task_id: &str) -> Result<(String, String), PlanFieldsError> {
     let sql = format!(
-        "SELECT initiative_id FROM {} WHERE task_id = ?1",
+        "SELECT initiative_id, COALESCE(task_name, task_id) FROM {} WHERE task_id = ?1",
         Table::Tasks.as_str(),
     );
-    let row: Option<String> = conn
-        .query_row(&sql, rusqlite::params![task_id], |r| r.get::<_, String>(0))
+    let row: Option<(String, String)> = conn
+        .query_row(&sql, rusqlite::params![task_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
         .optional()?;
     row.ok_or_else(|| PlanFieldsError::TaskNotFound {
         task_id: task_id.to_owned(),
@@ -283,7 +286,7 @@ fn lookup_plan_bytes(
 }
 
 /// Parse the `[[tasks]]` array out of the plan TOML and pluck the
-/// entry whose `task_id` matches. Defaults match the spec lockdown
+/// entry whose `task_name` matches. Defaults match the spec lockdown
 /// (deny-everything) for any field the operator omitted.
 ///
 /// Kept in lockstep with the kernel's `parse_plan_tasks` in
@@ -295,6 +298,7 @@ fn parse_plan_path_fields(
     plan_toml: &str,
     initiative_id: &str,
     task_id: &str,
+    task_name: &str,
 ) -> Result<PlanPathFields, PlanFieldsError> {
     let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| PlanFieldsError::PlanInvalid {
         initiative_id: initiative_id.to_owned(),
@@ -310,10 +314,11 @@ fn parse_plan_path_fields(
 
     let entry = tasks_array
         .iter()
-        .find(|t| t.get("task_id").and_then(|v| v.as_str()) == Some(task_id))
+        .find(|t| t.get("task_name").and_then(|v| v.as_str()) == Some(task_name))
         .ok_or_else(|| PlanFieldsError::TaskNotInPlan {
             initiative_id: initiative_id.to_owned(),
             task_id: task_id.to_owned(),
+            task_name: task_name.to_owned(),
         })?;
 
     Ok(PlanPathFields {
@@ -458,7 +463,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         let initiative_id = "init-1".to_owned();
-        let task_id = "t-1".to_owned();
+        let task_id = "00000000-0000-4000-8000-000000000001".to_owned();
+        let task_name = "t-1".to_owned();
         {
             let store = Store::open(&db).unwrap();
             let guard = store.lock_sync();
@@ -474,11 +480,11 @@ mod tests {
                 .execute(
                     &format!(
                         "INSERT INTO {TASKS} \
-                     (task_id, initiative_id, lane_id, state, actor, \
+                     (task_id, task_name, initiative_id, lane_id, state, actor, \
                       policy_epoch, admitted_at, transitioned_at) \
-                     VALUES (?1, ?2, 'default', 'Running', 'op', 1, 1, 1)"
+                     VALUES (?1, ?2, ?3, 'default', 'Running', 'op', 1, 1, 1)"
                     ),
-                    rusqlite::params![&task_id, &initiative_id],
+                    rusqlite::params![&task_id, &task_name, &initiative_id],
                 )
                 .unwrap();
             guard
@@ -504,7 +510,7 @@ mod tests {
             [meta]
             version = 1
             [[tasks]]
-            task_id = "t-1"
+            task_name = "t-1"
         "#;
         let (tmp, _init, task) = fresh_store_with_plan(plan);
         let conn = open_ro(tmp.path()).unwrap();
@@ -520,7 +526,7 @@ mod tests {
     fn reveal_round_trips_every_path_scope_field_in_order() {
         let plan = r#"
             [[tasks]]
-            task_id                   = "t-1"
+            task_name = "t-1"
             path_allowlist            = ["src/**", "tests/**", "README.md"]
             path_export_to_successors = true
             path_export_globs         = ["src/ipc/**", "src/auth/**"]
@@ -542,7 +548,7 @@ mod tests {
     fn reveal_round_trips_retry_limits_and_uses_kernel_defaults() {
         let defaults_plan = r#"
             [[tasks]]
-            task_id = "t-1"
+            task_name = "t-1"
         "#;
         let (tmp, _init, task) = fresh_store_with_plan(defaults_plan);
         let conn = open_ro(tmp.path()).unwrap();
@@ -552,7 +558,7 @@ mod tests {
 
         let explicit_plan = r#"
             [[tasks]]
-            task_id                = "t-1"
+            task_name = "t-1"
             max_review_rejections  = 4
             max_crash_retries      = 5
         "#;
@@ -573,7 +579,7 @@ mod tests {
             name = "Ship dashboard polish"
 
             [[tasks]]
-            task_id = "t-1"
+            task_name = "t-1"
         "#;
         let (tmp, init, _task) = fresh_store_with_plan(plan);
         let conn = open_ro(tmp.path()).unwrap();
@@ -593,7 +599,7 @@ mod tests {
             lane_id = "default"
 
             [[tasks]]
-            task_id = "t-1"
+            task_name = "t-1"
         "#;
         let (tmp, init, _task) = fresh_store_with_plan(plan);
         let conn = open_ro(tmp.path()).unwrap();
@@ -614,7 +620,7 @@ mod tests {
         // `parse_plan_tasks_silently_ignores_non_string_array_entries`.
         let plan = r#"
             [[tasks]]
-            task_id        = "t-1"
+            task_name = "t-1"
             path_allowlist = ["src/**", 42, "ok.rs"]
         "#;
         let (tmp, _init, task) = fresh_store_with_plan(plan);
@@ -663,9 +669,9 @@ mod tests {
                 .execute(
                     &format!(
                         "INSERT INTO {TASKS} \
-                     (task_id, initiative_id, lane_id, state, actor, \
+                     (task_id, task_name, initiative_id, lane_id, state, actor, \
                       policy_epoch, admitted_at, transitioned_at) \
-                     VALUES ('t-x', 'init-x', 'default', 'Admitted', 'op', 1, 1, 1)"
+                     VALUES ('t-x', 't-x', 'init-x', 'default', 'Admitted', 'op', 1, 1, 1)"
                     ),
                     [],
                 )
@@ -729,7 +735,7 @@ mod tests {
         // OTHER task. This is the genuine "kernel admitted a task
         // outside the signed plan" forensic case — must surface
         // distinctly from `TaskNotFound`.
-        let plan = "[[tasks]]\ntask_id = \"t-other\"\n";
+        let plan = "[[tasks]]\ntask_name = \"t-other\"\n";
         let (tmp, init, task) = fresh_store_with_plan(plan);
         let conn = open_ro(tmp.path()).unwrap();
 
@@ -738,9 +744,11 @@ mod tests {
             PlanFieldsError::TaskNotInPlan {
                 initiative_id,
                 task_id,
+                task_name,
             } => {
                 assert_eq!(initiative_id, init);
                 assert_eq!(task_id, task);
+                assert_eq!(task_name, "t-1");
             }
             other => panic!("expected TaskNotInPlan; got {other:?}"),
         }

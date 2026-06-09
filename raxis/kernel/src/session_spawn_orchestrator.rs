@@ -1287,6 +1287,87 @@ pub struct IdleWatchdogFired {
     pub threshold_secs: u64,
 }
 
+fn reviewer_no_terminal_reason_from_notice(
+    notice: &raxis_types::PlannerExitOutcome,
+) -> Option<String> {
+    use raxis_types::PlannerExitOutcome;
+    match notice {
+        PlannerExitOutcome::CleanCompletion { .. } => None,
+        PlannerExitOutcome::MaxTurnsReached { used, limit } => Some(format!(
+            "ReviewerTurnBudgetExhausted: reviewer planner reached max_turns budget \
+             ({used} used / {limit} limit) without submitting `SubmitReview`. This \
+             is a reviewer runtime failure, not a semantic review rejection; RAXIS \
+             fails closed and the orchestrator must retry or escalate according to \
+             the task retry ceilings."
+        )),
+        PlannerExitOutcome::MaxTokensReached { which, used, limit } => Some(format!(
+            "ReviewerNoTerminalIntent: reviewer planner exceeded cumulative \
+             max_tokens cap on the {which} axis ({used} used / {limit} limit) before \
+             submitting `SubmitReview`. This is a reviewer runtime failure, not a \
+             semantic review rejection; RAXIS fails closed and the orchestrator must \
+             retry or escalate according to the task retry ceilings.",
+        )),
+        PlannerExitOutcome::IdleNoTerminalIntent { final_text_len } => Some(format!(
+            "ReviewerExitedWithoutVerdict: reviewer planner declared end_turn \
+             (final_text {final_text_len} bytes) without submitting `SubmitReview`. \
+             This is a reviewer runtime failure, not a semantic review rejection; \
+             inspect the planner stderr at step:\"planner-idle\" for the final \
+             assistant text and tighten the reviewer prompt/tool contract if needed."
+        )),
+        PlannerExitOutcome::ToolErrorBudgetExhausted { errors, budget } => Some(format!(
+            "ReviewInfrastructureFailed: reviewer planner exhausted consecutive \
+             tool-error budget ({errors} errors / {budget} budget) before submitting \
+             `SubmitReview`. This is a reviewer runtime failure, not a semantic \
+             review rejection; fix the underlying tool error or widen the budget."
+        )),
+        PlannerExitOutcome::ExplicitGiveUp { reason } => Some(format!(
+            "ReviewInfrastructureFailed: reviewer planner driver gave up before \
+             submitting `SubmitReview`: {reason}. This is a reviewer runtime failure, \
+             not a semantic review rejection."
+        )),
+        PlannerExitOutcome::Unknown { detail } => Some(format!(
+            "ReviewInfrastructureFailed: reviewer planner emitted an exit-notice \
+             variant the kernel could not decode before submitting `SubmitReview` \
+             (kernel/planner minor-rev skew?). Verbatim notice detail: {detail}"
+        )),
+    }
+}
+
+fn reviewer_no_terminal_reason_from_dispatch_err(err: &str) -> String {
+    format!(
+        "ReviewerExitedWithoutVerdict: reviewer VM disconnected before submitting \
+         `SubmitReview`. The planner IPC stream then surfaced a transport detail: \
+         {err}. This is a reviewer runtime failure, not a semantic review rejection; \
+         RAXIS fails closed and the orchestrator must retry or escalate according to \
+         the task retry ceilings."
+    )
+}
+
+fn reviewer_no_terminal_reason_from_activity(
+    activity: &crate::session_activity::SessionActivity,
+) -> String {
+    format!(
+        "ReviewerExitedWithoutVerdict: reviewer VM exited after last intent \
+         {kind} #{seq} ({outcome}) at unix={ts} without submitting `SubmitReview`, \
+         and no PlannerExitNotice was received before the socket closed. This is a \
+         reviewer runtime failure, not a semantic review rejection; correlate with \
+         SessionVmExited for the host-side exit code.",
+        kind = activity.last_intent_kind.as_str(),
+        seq = activity.last_intent_seq,
+        outcome = activity.last_intent_outcome.as_short_str(),
+        ts = activity.recorded_at_unix,
+    )
+}
+
+fn reviewer_no_terminal_reason_without_activity() -> String {
+    "ReviewerExitedWithoutVerdict: reviewer VM exited before submitting \
+     `SubmitReview`, before the kernel observed any IntentRequest, and without \
+     a PlannerExitNotice. This is a reviewer runtime failure, not a semantic \
+     review rejection; correlate with SessionVmExited and planner stderr for \
+     boot/model-init failure details."
+        .to_owned()
+}
+
 pub(crate) fn build_worker_post_exit_failure_reason(
     role_str: &str,
     exit_notice: Option<&raxis_types::PlannerExitOutcome>,
@@ -1342,6 +1423,11 @@ pub(crate) fn build_worker_post_exit_failure_reason(
     //    `CleanCompletion` notice the structural anomaly is
     //    spelled out so the operator can correlate.
     if let Some(notice) = exit_notice {
+        if role_str == "reviewer" {
+            if let Some(reason) = reviewer_no_terminal_reason_from_notice(notice) {
+                return reason;
+            }
+        }
         if let Some(reason) = notice.format_concrete_reason(role_str) {
             return reason;
         }
@@ -1360,6 +1446,9 @@ pub(crate) fn build_worker_post_exit_failure_reason(
     }
     // 2) Transport-level error from `drive_planner_stream`.
     if let Some(err) = dispatch_err_str {
+        if role_str == "reviewer" {
+            return reviewer_no_terminal_reason_from_dispatch_err(err);
+        }
         return format!(
             "session_spawn_orchestrator: {role_str} VM exited \
              without submitting a terminal intent. The kernel-side \
@@ -1374,6 +1463,9 @@ pub(crate) fn build_worker_post_exit_failure_reason(
     //    concretely (no multi-option umbrella —
     //    `INV-FAILURE-REASON-CONCRETE-01`).
     if let Some(activity) = last_activity {
+        if role_str == "reviewer" {
+            return reviewer_no_terminal_reason_from_activity(activity);
+        }
         return crate::session_activity::render_clean_exit_with_activity(role_str, activity);
     }
     // 4) Concrete final fallback — the planner exited via clean
@@ -1387,6 +1479,9 @@ pub(crate) fn build_worker_post_exit_failure_reason(
     //    against substrate-level signals (kernel cgroup OOM
     //    counter, AVF/Firecracker exit code, panic backtrace in
     //    the planner stderr).
+    if role_str == "reviewer" {
+        return reviewer_no_terminal_reason_without_activity();
+    }
     crate::session_activity::render_clean_exit_without_activity(role_str)
 }
 
@@ -6670,6 +6765,86 @@ mod concrete_reason_tests {
         );
     }
 
+    /// Reviewer idle is not a semantic rejection. The role's
+    /// contract requires `SubmitReview`; if the planner idles
+    /// without it, Mode-B must say "reviewer exited without
+    /// verdict" instead of letting operators confuse the gap
+    /// with `approved=false`.
+    #[test]
+    fn reviewer_idle_reason_names_missing_verdict() {
+        let o = PlannerExitOutcome::IdleNoTerminalIntent {
+            final_text_len: 2048,
+        };
+        let s = build_worker_post_exit_failure_reason("reviewer", Some(&o), None, None, None);
+        assert_no_forbidden(&s);
+        assert!(
+            s.starts_with("ReviewerExitedWithoutVerdict"),
+            "must lead with reviewer no-verdict taxonomy; got {s:?}"
+        );
+        assert!(
+            s.contains("SubmitReview"),
+            "must name the missing terminal reviewer intent; got {s:?}"
+        );
+        assert!(
+            s.contains("not a semantic review rejection"),
+            "must disambiguate from reviewer approved=false; got {s:?}"
+        );
+    }
+
+    /// Iter-GTM regression guard: a reviewer VM that exits before
+    /// `SubmitReview` can surface as a host-side Broken pipe when
+    /// the dispatch loop writes after the guest closed its stream.
+    /// The operator-facing reason must headline the semantic
+    /// failure, with Broken pipe demoted to transport detail.
+    #[test]
+    fn reviewer_broken_pipe_reason_demotes_transport_detail() {
+        let s = build_worker_post_exit_failure_reason(
+            "reviewer",
+            None,
+            Some("Broken pipe (os error 32)"),
+            None,
+            None,
+        );
+        assert_no_forbidden(&s);
+        assert!(
+            s.starts_with("ReviewerExitedWithoutVerdict"),
+            "must lead with semantic reviewer failure; got {s:?}"
+        );
+        assert!(
+            s.contains("transport detail: Broken pipe (os error 32)"),
+            "must retain the transport symptom as detail; got {s:?}"
+        );
+        assert!(
+            s.contains("not a semantic review rejection"),
+            "must not imply reviewer rejected content; got {s:?}"
+        );
+    }
+
+    /// Reviewer max-turn exhaustion has a distinct remediation
+    /// from an idle answer: raise/tune review turn budget or make
+    /// the reviewer task smaller. Keep the taxonomy precise.
+    #[test]
+    fn reviewer_max_turns_reason_names_budget_exhaustion() {
+        let o = PlannerExitOutcome::MaxTurnsReached {
+            used: 20,
+            limit: 20,
+        };
+        let s = build_worker_post_exit_failure_reason("reviewer", Some(&o), None, None, None);
+        assert_no_forbidden(&s);
+        assert!(
+            s.starts_with("ReviewerTurnBudgetExhausted"),
+            "must lead with reviewer turn-budget taxonomy; got {s:?}"
+        );
+        assert!(
+            s.contains("20 used / 20 limit"),
+            "must preserve used/limit rendering; got {s:?}"
+        );
+        assert!(
+            s.contains("SubmitReview"),
+            "must name the missing terminal reviewer intent; got {s:?}"
+        );
+    }
+
     /// `ToolErrorBudgetExhausted` — surfaced reason MUST name the
     /// `tool-error` budget and quote counters.
     #[test]
@@ -6832,6 +7007,37 @@ mod concrete_reason_tests {
         assert!(
             s.contains("PlannerExitNotice"),
             "must NAME the missing-notice gap concretely; got {s:?}"
+        );
+    }
+
+    /// Reviewer activity fallback still uses the reviewer
+    /// taxonomy because the last observed intent is forensic
+    /// context, not the actual terminal contract.
+    #[test]
+    fn reviewer_activity_fallback_names_missing_verdict() {
+        use crate::session_activity::{LastIntentOutcome, SessionActivity};
+        use raxis_types::IntentKind;
+        let activity = SessionActivity {
+            last_intent_kind: IntentKind::StructuredOutput,
+            last_intent_seq: 20,
+            last_intent_outcome: LastIntentOutcome::Accepted,
+            recorded_at_unix: 1_715_694_342_i64,
+        };
+        let s =
+            build_worker_post_exit_failure_reason("reviewer", None, None, Some(&activity), None);
+        assert_no_forbidden(&s);
+        assert!(
+            s.starts_with("ReviewerExitedWithoutVerdict"),
+            "must lead with reviewer no-verdict taxonomy; got {s:?}"
+        );
+        assert!(
+            s.contains("StructuredOutput"),
+            "must include last intent; got {s:?}"
+        );
+        assert!(s.contains("#20"), "must include last seq; got {s:?}");
+        assert!(
+            s.contains("SubmitReview"),
+            "must name missing reviewer terminal intent; got {s:?}"
         );
     }
 

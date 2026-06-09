@@ -149,7 +149,7 @@ Per-task override:
 
 ```toml
 [[tasks]]
-task_id            = "implementer"
+task_name            = "implementer"
 session_agent_type = "Executor"
 vm_image           = "executor-rust-v1"
 ```

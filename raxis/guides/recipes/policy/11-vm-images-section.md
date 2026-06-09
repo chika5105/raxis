@@ -69,7 +69,7 @@ shape its review behaviour instead.
 ```toml
 # plan.toml
 [[tasks]]
-task_id            = "rust-build"
+task_name            = "rust-build"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]

@@ -358,7 +358,6 @@ for operators who want a copy-paste terminal flow.
 
 ```bash
 export PLAN_PATH="/tmp/raxis-hello-plan.toml"
-export RAXIS_TASK_ID="greeter-$(date +%Y%m%d%H%M%S)"
 
 cat > "$PLAN_PATH" <<EOF
 [plan.initiative]
@@ -371,7 +370,7 @@ target_ref = "refs/heads/main"
 repository = "hello-world"
 
 [[tasks]]
-task_id            = "$RAXIS_TASK_ID"
+task_name            = "greeter"
 description        = "Create HELLO.md and commit it."
 session_agent_type = "Executor"
 clone_strategy    = "blobless"
@@ -391,9 +390,10 @@ EOF
 used `context`; 0.2.0 rejects that field because it looked meaningful
 but was not used by the agent.
 
-Task IDs are globally indexed in the kernel store. The timestamp keeps
-this quickstart easy to rerun without colliding with an older
-`greeter` task in the same data dir.
+`task_name` is the human DAG label in the plan. It only needs to be
+unique inside this initiative; the kernel generates a fresh runtime
+`task_id` UUID on every approval, so rerunning this quickstart does not
+require editing the name.
 
 Field-by-field references:
 [`plan.initiative`](../recipes/plan/01-plan-initiative-block.md),

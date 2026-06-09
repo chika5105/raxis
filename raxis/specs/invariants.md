@@ -281,12 +281,16 @@ requested transition and rejects.
 
 ---
 
-### INV-INIT-03 — Successors blocked until predecessors complete
+### INV-INIT-03 — Successors blocked until predecessor gates close
 
 **Statement.** A successor task cannot become schedulable (returned by
-`next_ready_tasks`) until all its predecessors are `Completed`.
-`release_successors` is the only mechanism that marks a successor's
-predecessors as satisfied in the DAG edge table.
+`next_ready_tasks`) until all its predecessors are `Completed`. When
+a completed Executor predecessor has Reviewer successors, non-Reviewer
+downstream tasks remain blocked until those Reviewers have aggregated to
+`AllReviewersPassed`. Reviewer successors are the gate-closing tasks, so
+they may start as soon as the Executor predecessor is mechanically
+complete. `release_successors` is the only mechanism that marks a
+successor's predecessors as satisfied in the DAG edge table.
 
 **Justification.** The DAG edges in the signed plan encode work
 dependencies approved by the operator. If a successor could run
@@ -294,9 +298,11 @@ before its predecessors complete, the kernel would be executing
 work in an order the operator did not approve — a structural
 violation of the plan signature.
 
-**Scenario.** Plan declares `B depends on A`. Task A is `Running`.
-Planner attempts to schedule B. `next_ready_tasks` does not return
-B because the DAG edge `A → B` has not been satisfied yet.
+**Scenario.** Plan declares `review depends on implement` and
+`publish depends on implement`. Task `implement` reaches `Completed`.
+The reviewer can start, but `publish` remains unschedulable until
+the review aggregate passes. The gate prevents publish from starting
+and later needing cleanup.
 
 ---
 
@@ -782,13 +788,16 @@ finds the mismatch, and aborts with
 
 Canonical home: [`v2/kernel-mechanics-prompt.md`](v2/kernel-mechanics-prompt.md).
 
-### INV-KERNEL-DAG-AUTHORITY-01 — Kernel gates `ActivateSubTask` on predecessor completion
+### INV-KERNEL-DAG-AUTHORITY-01 — Kernel gates `ActivateSubTask` on predecessor gate closure
 
 **Statement.** `handle_activate_sub_task` rejects an activation with
 `FAIL_PREDECESSORS_NOT_COMPLETE` whenever any predecessor task on
-the DAG is not in `Completed`. The check is mechanical: the kernel
-walks the `task_dag_edges` rows for the target sub-task and queries
-each predecessor's state under the same transaction.
+the DAG is not in `Completed`, or whenever a non-Reviewer successor
+would run past a completed Executor predecessor whose Reviewer gate has
+not aggregated to `AllReviewersPassed`. The check is mechanical: the
+kernel walks the `task_dag_edges` rows for the target sub-task and
+queries each predecessor's state and reviewer verdict under the same
+transaction.
 
 **Justification.** The Orchestrator's prompt rules guide it toward
 respecting the DAG, but prompts are advice, not enforcement. The
@@ -803,6 +812,40 @@ rejects; the rejection is recorded in the audit chain;
 review-aggregate cannot satisfy the upstream gate; the
 initiative halts pending operator action rather than executing
 out-of-order work.
+
+**Reviewer-gate scenario.** Plan declares `review-A depends on A`
+and `B depends on A`. Once A completes, `review-A` may start because it
+is the gate. `B` remains blocked with `AwaitingReviewerVerdicts` until
+`review-A` submits an approved verdict. RAXIS must prevent `B` from
+starting early rather than starting it and revoking/retrying it after
+the reviewer result arrives.
+
+### INV-KERNEL-DAG-AUTHORITY-02 — Review-rejection retry supersedes prior integration candidates
+
+**Statement.** When a Reviewer rejects an Executor output and the
+Orchestrator admits `RetrySubTask`, the rejected Executor
+`evaluation_sha` is superseded for final integration. The kernel clears
+the task's per-attempt VCS state, deletes the stale per-task transfer
+ref, and resets the per-initiative Orchestrator integration worktree to
+the initiative anchor before the retry is driven forward. Root closeout
+and `IntegrationMerge` consume only the current terminal approved
+Executor head for each task lineage.
+
+**Justification.** The Orchestrator worktree is mutable integration
+scratch. A prior Orchestrator turn may have merged an Executor commit
+before the Reviewer panel closed; if the Reviewer rejects that output
+and the retry writes overlapping files, keeping both commits in the
+integration workspace can strand Git in an add/add conflict and make the
+root Orchestrator respawn indefinitely. Reviewer rejection means the
+candidate is no longer authority-valid input for final merge.
+
+**Scenario.** Executor `A` commits files `x` and `y`. Reviewer `R`
+rejects because `y` is missing required content. The Orchestrator retries
+`A`; the second attempt commits corrected `x` and `y` and passes review.
+RAXIS must integrate only the approved retry head. It must not merge the
+rejected round-1 head and the approved round-2 head together, and if an
+unexpected Git conflict still occurs it must surface an integration
+conflict instead of cycling root Orchestrator sessions.
 
 ---
 

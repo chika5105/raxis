@@ -527,15 +527,18 @@ function FilesTab({
   const reviewDiff = filteredDiff ?? diff;
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 min-w-0 max-w-full">
       {diff.files.length === 0 ? (
         <Empty
           title="No files changed against the base SHA."
           hint="The executor hasn't touched any tracked files in this worktree yet, or the base SHA already matches HEAD."
         />
       ) : (
-        <div className="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-4">
-          <aside className="card p-3 self-start xl:sticky xl:top-2 max-h-[80vh] overflow-y-auto overscroll-y-auto scroll-thin">
+        <div
+          className="grid min-w-0 max-w-full grid-cols-1 xl:grid-cols-[320px_minmax(0,1fr)] gap-4"
+          data-testid="worktree-diff-grid"
+        >
+          <aside className="card p-3 min-w-0 self-start xl:sticky xl:top-2 max-h-[80vh] overflow-y-auto overscroll-y-auto scroll-thin">
             <header className="mb-3 space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs text-ink-subtle uppercase tracking-wider">
@@ -568,7 +571,7 @@ function FilesTab({
               <RepoFileTree diff={reviewDiff} onSelect={onSelectFile} />
             )}
           </aside>
-          <div ref={inlineRef} className="space-y-3">
+          <div ref={inlineRef} className="space-y-3 min-w-0 max-w-full">
             {reviewDiff.files.length === 0 ? (
               <Empty title="No diffs match the current file filter." />
             ) : (

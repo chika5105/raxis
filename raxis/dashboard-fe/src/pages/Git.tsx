@@ -244,7 +244,7 @@ export function GitPage() {
           hint="Switch the scope filter or search text to inspect browse-only roots and older sessions."
         />
       ) : (
-        <div className="card p-0 overflow-x-auto overscroll-x-auto scroll-thin">
+        <div className="card p-0 min-w-0 max-w-full overflow-x-auto overflow-y-hidden overscroll-x-contain scroll-thin">
           <table className="min-w-[1280px] w-full text-sm">
             <thead className="text-xs text-ink-subtle bg-panel-high">
               <tr>

@@ -10,6 +10,60 @@ const primaryPlan = readFileSync(
 );
 
 describe("Plan Builder realistic e2e plan round-trip", () => {
+  const gtmXDiscoveryPlan = `[plan.initiative]
+description = """
+Run a bounded X discovery loop for RAXIS-related conversations.
+"""
+
+[workspace]
+name = "RAXIS GTM X Discovery"
+lane_id = "default"
+repository = "raxis-gtm"
+target_ref = "refs/heads/main"
+
+[profiles.gtm_x_discovery]
+inherits_from = "Executor"
+
+[[profiles.gtm_x_discovery.custom_tool]]
+name = "x_discover"
+description = "Collect X discovery evidence from configured search queries."
+execution_locality = "host_subprocess"
+command = ["/Users/jinanwachikafavour/raxis-gtm-host-tools/gtm-host", "x-discover", "--release", "current", "--limit", "10"]
+timeout_seconds = 180
+
+[profiles.gtm_x_discovery.custom_tool.schema]
+type = "object"
+additionalProperties = false
+
+[[tasks]]
+task_name = "discover_x_opportunities__20260609T120719Z_daily_x_discovery_plan_53550"
+description = "Collect, rank, and summarize X opportunities."
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+profiles = ["gtm_x_discovery"]
+path_allowlist = ["gtm/evidence/x/"]
+predecessors = []
+prompt = "Invoke x_discover, commit the generated evidence, and submit CompleteTask."
+
+[[tasks]]
+task_name = "interpret_x_opportunities__20260609T120719Z_daily_x_discovery_plan_53550"
+description = "Interpret X candidates and propose the safest engagement posture."
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+path_allowlist = ["gtm/analysis/x_engagement/"]
+predecessors = ["discover_x_opportunities__20260609T120719Z_daily_x_discovery_plan_53550"]
+prompt = "Write the interpretation and submit CompleteTask."
+
+[[tasks]]
+task_name = "x_strategy_reviewer__20260609T120719Z_daily_x_discovery_plan_53550"
+description = "Review whether X engagement recommendations are grounded and safe."
+session_agent_type = "Reviewer"
+clone_strategy = "blobless"
+path_allowlist = ["gtm/analysis/x_engagement/"]
+predecessors = ["interpret_x_opportunities__20260609T120719Z_daily_x_discovery_plan_53550"]
+prompt = "Approve only if the recommendations are grounded and safe."
+`;
+
   it("preserves tool profile descriptions from the primary live-e2e plan", () => {
     const parsed = __planBuilderTest.parsePlanToml(primaryPlan);
     const profile = parsed.toolProfiles.find(
@@ -22,6 +76,22 @@ describe("Plan Builder realistic e2e plan round-trip", () => {
         .validatePlan({ ...parsed, credentialSetups: [] })
         .find((issue) => issue.field === "[profiles.unity_mcp_tools].description"),
     ).toBeUndefined();
+  });
+
+  it("accepts GTM generated task names and optional profile descriptions", () => {
+    const parsed = __planBuilderTest.parsePlanToml(gtmXDiscoveryPlan);
+    const issues = __planBuilderTest.validatePlan({
+      ...parsed,
+      credentialSetups: [],
+    });
+
+    expect(
+      issues.find((issue) =>
+        issue.field.includes("gtm_x_discovery") &&
+        issue.field.endsWith(".description"),
+      ),
+    ).toBeUndefined();
+    expect(issues.filter((issue) => issue.field.endsWith(".task_name"))).toEqual([]);
   });
 
   it("renders multiline initiative descriptions as valid multiline TOML", () => {

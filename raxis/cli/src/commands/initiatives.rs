@@ -162,8 +162,8 @@ fn print_help() {
          \n\
          FLAGS:\n\
          \t--state FILTER   Bucket to filter on (default: active).\n\
-         \t                 - active      = non-terminal FSM states (Draft, ApprovedPlan,\n\
-         \t                                 Executing, Blocked).\n\
+         \t                 - active      = in-flight FSM states (ApprovedPlan,\n\
+         \t                                 Executing, Blocked). Draft is not in flight.\n\
          \t                 - completed   = the Completed terminal only. Failed and\n\
          \t                                 Aborted are reachable via `--state all` or\n\
          \t                                 `raxis initiative show <id>`.\n\

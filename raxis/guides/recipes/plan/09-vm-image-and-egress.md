@@ -31,7 +31,7 @@ will forward outbound traffic to.
 
 ```toml
 [[tasks]]
-task_id            = "rust-build"
+task_name            = "rust-build"
 description        = "Rust Build"
 prompt             = """Complete Rust Build according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
@@ -44,7 +44,7 @@ vm_image           = "rust-toolchain-2026-05"
 
 ```toml
 [[tasks]]
-task_id            = "node-build"
+task_name            = "node-build"
 description        = "Node Build"
 prompt             = """Complete Node Build according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
@@ -76,7 +76,7 @@ path_allowlist     = ["src/"]
 
 ```toml
 [[tasks]]
-task_id            = "fetch-deps-and-build"
+task_name            = "fetch-deps-and-build"
 description        = "Fetch Deps And Build"
 prompt             = """Complete Fetch Deps And Build according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
@@ -93,7 +93,7 @@ allowed_egress     = [
 
 ```toml
 [[tasks]]
-task_id            = "lint-only"
+task_name            = "lint-only"
 description        = "Lint Only"
 prompt             = """Complete Lint Only according to this plan's acceptance criteria."""
 session_agent_type = "Executor"

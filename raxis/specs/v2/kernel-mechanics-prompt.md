@@ -368,6 +368,14 @@ When you have completed a logical unit of work, submit SingleCommit:
   - If the commit is admitted: your working branch advances; continue working
   - You may submit multiple SingleCommit intents; each builds on the previous
 
+[KERNEL: COMPLETION PROTOCOL]
+When the task is finished, commit the completed work and call `task_complete`.
+Do not provide or guess a completion SHA. The executor runtime inspects the
+Git workspace, verifies it is clean, rejects unchanged HEAD vs the session base,
+and submits the kernel's internal completion intent with the mechanically
+observed commit SHA. If you cannot produce a valid committed change, use
+`report_failure` with a concise actionable reason instead of claiming success.
+
 [KERNEL: EGRESS PROTOCOL]
 
 Three categories of network access exist in your VM. They behave differently.
@@ -543,11 +551,15 @@ When you receive KernelPush::AllReviewersPassed for all tasks in a wave:
   Step 1. Confirm all expected tasks for this wave have sent AllReviewersPassed.
           Do NOT merge a partial wave.
 
-  Step 2. For each sub-task in merge order:
-          a. git fetch /workspace/.raxis/bundles/<task_id>.bundle
-          b. git merge refs/raxis/subtasks/<task_id>
-          c. If clean merge: write a descriptive message and proceed
-          d. If conflicts: see [KERNEL: CONFLICT RESOLUTION PROTOCOL] below
+  Step 2. Collect every completed, reviewer-approved Executor row from the KSB:
+          capabilities.integration_merge.required_executor_shas[*].sha.
+          Call prepare_integration_merge { base_sha, executor_shas }.
+          The tool resets the integration workspace to base_sha and merges only
+          the current approved executor SHAs. Do not merge historical retry
+          attempts or stale transfer refs by hand.
+
+          If prepare_integration_merge reports conflicts, see
+          [KERNEL: CONFLICT RESOLUTION PROTOCOL] below.
 
   Step 3. After all merged:
           a. git log --oneline <base_sha>..HEAD  (verify chain)
@@ -745,8 +757,13 @@ To review:
      local to this session only).
 
 Submit SubmitReview:
-  { approved: true,  comments: "<brief rationale>" }   — work is acceptable
-  { approved: false, comments: "<specific defects>" }  — work requires revision
+  { approved: true,  critique: "<brief rationale>" }   — work is acceptable
+  { approved: false, critique: "<specific defects>" }  — work requires revision
+
+A prose statement such as "approved" or "rejected" is not a verdict. The
+reviewer runtime may issue one internal corrective turn if the model answers
+without the terminal tool; after that, no `SubmitReview` is classified as a
+reviewer runtime failure, not a semantic rejection of the work.
 
 On rejection: the Executor receives your comments and re-runs. You will be called
 again for the next attempt. If you reject <max_review_rejections> times, the task
@@ -1252,6 +1269,6 @@ The assembler does NOT include:
       - KSB `state = Paused` when escalation is pending
       - KSB `b_status = APPROACHING_CEILING` at 80% budget used
       - Executor NNSP does not contain Orchestrator task's path allowlist
-      - Orchestrator NNSP contains full DAG structure (all task IDs + deps)
+      - Orchestrator NNSP contains full DAG structure (task names + kernel-owned runtime UUIDs + deps)
       - Reviewer NNSP contains correct review attempt count from DB
       - NNSP is written to /raxis/system_prompt.txt inside VM before agent boots

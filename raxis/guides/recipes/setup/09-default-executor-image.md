@@ -88,7 +88,7 @@ raxis policy show \
 ```toml
 # plan.toml
 [[tasks]]
-task_id            = "demo"
+task_name            = "demo"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
@@ -100,7 +100,7 @@ Submit it. The `SubTaskActivated` audit event names the alias the
 kernel resolved:
 
 ```text
-{"event":"SubTaskActivated","task_id":"demo","vm_image_alias":"rust-toolchain-2026-05","oci_digest":"sha256:7c1f..."}
+{"event":"SubTaskActivated","task_id":"019ea...","task_name":"demo","vm_image_alias":"rust-toolchain-2026-05","oci_digest":"sha256:7c1f..."}
 ```
 
 If the alias resolves to a digest that's not in the local image cache

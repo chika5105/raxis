@@ -301,7 +301,7 @@ support module):
 
 ```toml
 [[tasks]]
-task_id            = "materialize-records"
+task_name            = "materialize-records"
 session_agent_type = "Executor"
 path_allowlist     = ["out/postgres/", "out/mongo/", "out/manifest.json"]
 
@@ -552,7 +552,7 @@ Plan defines **two** Reviewer tasks for `materialize-records`:
 
 ```toml
 [[tasks]]
-task_id            = "review-materialize-A"
+task_name            = "review-materialize-A"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["materialize-records"]
@@ -563,7 +563,7 @@ critique: "test forces a disagreement round" }`.
 """
 
 [[tasks]]
-task_id            = "review-materialize-B"
+task_name            = "review-materialize-B"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["materialize-records"]

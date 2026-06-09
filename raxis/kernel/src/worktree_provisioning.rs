@@ -44,6 +44,7 @@
 // the spawn-path tests harder to drive with a fake substrate.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use raxis_isolation::{ContentHash, MountMode, WorkspaceMount};
 use raxis_types::CloneStrategy;
@@ -455,10 +456,88 @@ pub fn copy_executor_commit_to_orchestrator_odb(
     Ok(())
 }
 
+/// Reset the per-initiative orchestrator merge workspace after an
+/// Executor retry supersedes a rejected output.
+///
+/// The orchestrator worktree is a mutable integration workspace. If a
+/// prior orchestrator turn eagerly merged the rejected executor commit
+/// before the reviewer panel closed, the retry commit can later overlap
+/// the same paths and strand the workspace in an add/add conflict. SQL
+/// retry cleanup already clears `tasks.evaluation_sha`; this function
+/// clears the corresponding Git-side residue:
+///
+/// * delete `refs/heads/raxis-transfer/<task_id>` so future clones do
+///   not discover the superseded attempt through the transfer namespace;
+/// * hard-reset the orchestrator workspace to the initiative anchor so
+///   any previously merged rejected tree disappears;
+/// * clean non-RAXIS untracked files while preserving `.raxis/`.
+///
+/// The approved executor SHAs remain durable in the kernel store and
+/// transfer refs. A respawned orchestrator re-merges the current,
+/// reviewer-approved set from the KSB. This is intentionally a
+/// workspace reset, not history deletion: old objects may remain in the
+/// ODB for forensic reachability, but they are no longer merge inputs.
+pub fn reset_orchestrator_workspace_after_superseded_retry(
+    orch_worktree_root: &Path,
+    task_id: &str,
+    reset_sha: &str,
+) -> Result<(), String> {
+    if task_id.is_empty() || task_id.contains(['/', '\n', ' ', '\t', '\r']) {
+        return Err(format!(
+            "task_id {task_id:?} contains invalid characters; \
+             refusing to delete transfer ref",
+        ));
+    }
+    if reset_sha.trim().is_empty() {
+        return Err("reset_sha is empty".to_owned());
+    }
+    if !orch_worktree_root.join(".git").exists() {
+        return Err(format!(
+            "orchestrator worktree {} is not a git worktree",
+            orch_worktree_root.display()
+        ));
+    }
+
+    let ref_name = format!("{TRANSFER_REF_PREFIX}{task_id}");
+    run_git_for_retry_scrub(
+        orch_worktree_root,
+        &["update-ref", "-d", ref_name.as_str()],
+        "delete stale transfer ref",
+    )?;
+    run_git_for_retry_scrub(
+        orch_worktree_root,
+        &["reset", "--hard", reset_sha],
+        "reset orchestrator workspace",
+    )?;
+    run_git_for_retry_scrub(
+        orch_worktree_root,
+        &["clean", "-ffd", "--", ".", ":!/.raxis"],
+        "clean orchestrator workspace",
+    )?;
+    Ok(())
+}
+
+fn run_git_for_retry_scrub(cwd: &Path, args: &[&str], op: &str) -> Result<(), String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| format!("{op}: spawn git {:?}: {e}", args))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "{op}: git {:?} exited {:?}: {}{}",
+        args,
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
     use tempfile::TempDir;
 
     /// Helper: run a git CLI command in `cwd`. The provisioning
@@ -578,6 +657,84 @@ mod tests {
         .expect("re-attach ok");
         assert_eq!(first.worktree_root, second.worktree_root);
         assert_eq!(first.base_sha, second.base_sha);
+    }
+
+    #[test]
+    fn superseded_retry_reset_removes_stale_transfer_ref_and_cleans_workspace() {
+        if Command::new("git").arg("--version").output().is_err() {
+            eprintln!("skipping: git CLI not available");
+            return;
+        }
+        let dd = TempDir::new().unwrap();
+        let base_sha = bootstrap_source(dd.path(), "main");
+        let anchor = provision_orchestrator_worktree(
+            dd.path(),
+            "01900000-0000-7000-8000-0000000000aa",
+            crate::managed_repositories::DEFAULT_REPOSITORY_ID,
+            "refs/heads/main",
+        )
+        .expect("orchestrator provisioning succeeds");
+
+        run_git(
+            &anchor.worktree_root,
+            &["config", "user.email", "test@raxis.local"],
+        );
+        run_git(
+            &anchor.worktree_root,
+            &["config", "user.name", "raxis-test"],
+        );
+        std::fs::write(anchor.worktree_root.join("rejected.txt"), b"rejected\n").unwrap();
+        run_git(&anchor.worktree_root, &["add", "rejected.txt"]);
+        run_git(
+            &anchor.worktree_root,
+            &["commit", "-q", "-m", "rejected attempt"],
+        );
+        let rejected_sha = git_stdout(&anchor.worktree_root, &["rev-parse", "HEAD"]);
+        let ref_name = format!("{TRANSFER_REF_PREFIX}task-a");
+        run_git(
+            &anchor.worktree_root,
+            &["update-ref", ref_name.as_str(), &rejected_sha],
+        );
+
+        std::fs::write(anchor.worktree_root.join("README.md"), b"dirty\n").unwrap();
+        std::fs::write(anchor.worktree_root.join("untracked.tmp"), b"remove me\n").unwrap();
+        let raxis_dir = anchor.worktree_root.join(".raxis");
+        std::fs::create_dir_all(&raxis_dir).unwrap();
+        std::fs::write(raxis_dir.join("keep.txt"), b"keep\n").unwrap();
+
+        reset_orchestrator_workspace_after_superseded_retry(
+            &anchor.worktree_root,
+            "task-a",
+            &base_sha,
+        )
+        .expect("retry scrub succeeds");
+
+        assert_eq!(
+            git_stdout(&anchor.worktree_root, &["rev-parse", "HEAD"]),
+            base_sha
+        );
+        assert!(
+            !anchor.worktree_root.join("rejected.txt").exists(),
+            "rejected tracked file must disappear after reset"
+        );
+        assert!(
+            !anchor.worktree_root.join("untracked.tmp").exists(),
+            "non-RAXIS untracked files must be cleaned"
+        );
+        assert!(
+            raxis_dir.join("keep.txt").exists(),
+            ".raxis metadata must survive the retry scrub"
+        );
+
+        let show_ref = Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", ref_name.as_str()])
+            .current_dir(&anchor.worktree_root)
+            .status()
+            .expect("git show-ref");
+        assert!(
+            !show_ref.success(),
+            "stale per-task transfer ref must be deleted"
+        );
     }
 
     #[test]

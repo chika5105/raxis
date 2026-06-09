@@ -3328,6 +3328,51 @@ pub fn locate_executor_worktree_via_chain(
     candidate
 }
 
+/// Resolve an operator-authored `[[tasks]].task_name` to the
+/// kernel-owned runtime `tasks.task_id` for one initiative.
+///
+/// The plan boundary intentionally no longer lets operators choose
+/// `task_id`; tests that need to inspect audit-chain rows must do the
+/// same thing production diagnostics do: resolve the human name through
+/// the store, then use the UUID in runtime predicates.
+pub fn runtime_task_id_for_name(data_dir: &Path, initiative_id: &str, task_name: &str) -> String {
+    let conn = raxis_store::ro::open(data_dir).unwrap_or_else(|e| {
+        panic!(
+            "open read-only kernel store at {} while resolving task_name={task_name}: {e}",
+            data_dir.display(),
+        )
+    });
+    let sql = format!(
+        "SELECT task_id FROM {} WHERE initiative_id = ?1 AND task_name = ?2",
+        raxis_store::Table::Tasks.as_str(),
+    );
+    conn.query_row(&sql, rusqlite::params![initiative_id, task_name], |r| {
+        r.get::<_, String>(0)
+    })
+    .unwrap_or_else(|e| {
+        panic!("resolve runtime task_id for initiative={initiative_id} task_name={task_name}: {e}",)
+    })
+}
+
+pub fn runtime_task_ids_for_names<'a, I>(
+    data_dir: &Path,
+    initiative_id: &str,
+    task_names: I,
+) -> std::collections::BTreeMap<&'a str, String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    task_names
+        .into_iter()
+        .map(|name| {
+            (
+                name,
+                runtime_task_id_for_name(data_dir, initiative_id, name),
+            )
+        })
+        .collect()
+}
+
 /// Legacy path-based locator. Retained for callers that pre-date
 /// the audit-chain-based locator above. New callers should prefer
 /// `locate_executor_worktree_via_chain`. This still searches the

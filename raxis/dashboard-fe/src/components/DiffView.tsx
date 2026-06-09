@@ -18,6 +18,8 @@ interface DiffViewProps {
 
 type DiffViewMode = "unified" | "split" | "raw";
 
+const DIFF_ROW_SURFACE = "inline-grid min-w-full w-max";
+
 /// Unified-diff renderer for a `WorktreeDiff` payload from
 /// `GET /api/git/worktrees/:name/diff[/:range]`. Each file
 /// shows the path header, status, line counts, and a
@@ -70,8 +72,8 @@ export function DiffView({ diff, defaultOpen = true }: DiffViewProps) {
     setOpen(Object.fromEntries(diff.files.map((f) => [f.path, next])));
 
   return (
-    <div className="space-y-4">
-      <header className="card p-3 flex items-center gap-3 text-xs flex-wrap">
+    <div className="space-y-4 min-w-0 max-w-full">
+      <header className="card p-3 flex min-w-0 max-w-full items-center gap-3 text-xs flex-wrap">
         <Mono className="text-ink-muted">{shortSha(diff.from_sha)}</Mono>
         <span className="text-ink-subtle">to</span>
         <Mono className="text-ink-muted">{shortSha(diff.to_sha)}</Mono>
@@ -160,7 +162,10 @@ interface FileDiffProps {
 function FileDiff({ file, mode, isOpen, onToggle }: FileDiffProps) {
   const rows = useMemo(() => parseUnifiedDiff(file.hunk), [file.hunk]);
   return (
-    <div className="card p-0 overflow-hidden" data-file-path={file.path}>
+    <div
+      className="card p-0 min-w-0 max-w-full overflow-hidden"
+      data-file-path={file.path}
+    >
       <header
         className="px-3 py-2 border-b border-edge bg-panel-high flex items-center gap-3 text-xs cursor-pointer hover:bg-panel"
         onClick={onToggle}
@@ -193,12 +198,15 @@ function FileDiff({ file, mode, isOpen, onToggle }: FileDiffProps) {
         >
           {file.status}
         </span>
-        <Mono className="text-ink truncate flex-1">{file.path}</Mono>
+        <Mono className="text-ink truncate flex-1 min-w-0">{file.path}</Mono>
         <span className="text-ok">+{file.insertions}</span>
         <span className="text-bad">−{file.deletions}</span>
       </header>
       {isOpen && (
-        <div className="font-mono text-[11.5px] leading-relaxed overflow-x-auto overscroll-x-auto scroll-thin">
+        <div
+          className="w-full max-w-full min-w-0 font-mono text-[11.5px] leading-relaxed overflow-x-auto overflow-y-hidden overscroll-x-contain scroll-thin"
+          data-testid="diff-hunk-scroll"
+        >
           {file.hunk.length === 0 ? (
             <span className="block px-3 py-2 text-ink-subtle italic">
               (binary or empty diff)
@@ -223,7 +231,8 @@ function UnifiedDiff({ rows }: { rows: DiffRow[] }) {
         <div
           key={i}
           className={clsx(
-            "grid grid-cols-[3.25rem_3.25rem_2rem_minmax(max-content,1fr)] border-l-2",
+            DIFF_ROW_SURFACE,
+            "grid-cols-[3.25rem_3.25rem_2rem_minmax(max-content,1fr)] border-l-2",
             rowTone(row.kind),
           )}
         >
@@ -252,7 +261,8 @@ function SplitDiff({ rows }: { rows: DiffRow[] }) {
           <div
             key={i}
             className={clsx(
-              "grid grid-cols-[minmax(max-content,1fr)] border-l-2 px-3 py-0.5 whitespace-pre",
+              DIFF_ROW_SURFACE,
+              "grid-cols-[minmax(max-content,1fr)] border-l-2 px-3 py-0.5 whitespace-pre",
               row.kind === "hunk"
                 ? "text-info bg-info-muted/15 border-info font-semibold"
                 : "text-ink-subtle bg-panel border-edge",
@@ -263,7 +273,10 @@ function SplitDiff({ rows }: { rows: DiffRow[] }) {
         ) : (
           <div
             key={i}
-            className="grid grid-cols-[3.25rem_2rem_minmax(18rem,1fr)_3.25rem_2rem_minmax(18rem,1fr)]"
+            className={clsx(
+              DIFF_ROW_SURFACE,
+              "grid-cols-[3.25rem_2rem_minmax(18rem,max-content)_3.25rem_2rem_minmax(18rem,max-content)]",
+            )}
           >
             <span className="select-none text-right pr-2 text-ink-subtle/70 border-r border-edge/60 bg-panel">
               {row.oldLine ?? ""}
@@ -330,7 +343,11 @@ export function TerminalDiffBlock({ diffText }: { diffText: string }) {
         return (
           <div
             key={i}
-            className={clsx("px-3 whitespace-pre border-l-2", rowTone(kind))}
+            className={clsx(
+              DIFF_ROW_SURFACE,
+              "grid-cols-[minmax(max-content,1fr)] px-3 whitespace-pre border-l-2",
+              rowTone(kind),
+            )}
           >
             {line || " "}
           </div>

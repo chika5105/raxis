@@ -224,7 +224,7 @@ cat > /tmp/byo-smoke.toml <<'EOF'
 description = "BYO Executor smoke — confirm Python 3.12 + Node 22 are present."
 
 [[plan.tasks]]
-task_id            = "version-check"
+task_name            = "version-check"
 session_agent_type = "Executor"
 description        = """
   Run `bash -c 'python3.12 --version && node --version'` and surface the

@@ -80,6 +80,8 @@ type ProviderKind =
   | "custom";
 type ModelAliasScope = "executor" | "reviewer" | "custom";
 
+const TASK_NAME_MAX_CHARS = 256;
+
 interface PlanBasics {
   initiative: string;
   workspace: string;
@@ -1465,7 +1467,7 @@ function ModelRoutingDrawer({
           model allowlist, timeout, and pricing fields before the kernel admits the plan.
         </div>
       </div>
-      <div className="grid grid-cols-[9rem_1fr] gap-0 min-h-full max-md:grid-cols-1">
+      <div className="grid min-w-0 grid-cols-[9rem_minmax(0,1fr)] gap-0 min-h-full max-md:grid-cols-1">
         <div className="border-r border-edge p-3 space-y-1 max-md:border-r-0 max-md:border-b">
           {routes.length === 0 ? (
             <div className="rounded border border-dashed border-edge px-2.5 py-3 text-xs text-ink-muted">
@@ -1590,7 +1592,7 @@ function ModelRoutingDrawer({
                     className="mt-0.5"
                   />
                   <span>
-                    Rotate executor primary by task id so concurrent executors exercise
+                    Rotate executor primary by task name so concurrent executors exercise
                     different first-choice providers while keeping the same fallback set.
                   </span>
                 </label>
@@ -1632,7 +1634,7 @@ function ModelRoutingDrawer({
                         </button>
                       </div>
                     </div>
-                    <div className="grid grid-cols-[8.5rem_1fr] gap-2">
+                    <div className="grid min-w-0 grid-cols-[8.5rem_minmax(0,1fr)] gap-2">
                       <Field label="Provider">
                         <select
                           value={entry.providerKind}
@@ -1794,7 +1796,7 @@ function ToolProfilesDrawer({
           </div>
         </div>
       </div>
-      <div className="grid grid-cols-[8.5rem_1fr] gap-0 min-h-full max-md:grid-cols-1">
+      <div className="grid min-w-0 grid-cols-[8.5rem_minmax(0,1fr)] gap-0 min-h-full max-md:grid-cols-1">
         <div className="border-r border-edge p-3 space-y-1 max-md:border-r-0 max-md:border-b">
           {profiles.length === 0 ? (
             <div className="rounded border border-dashed border-edge px-2.5 py-3 text-xs text-ink-muted">
@@ -2073,7 +2075,7 @@ function PlanVerifiersDrawer({
           </div>
         )}
       </div>
-      <div className="grid grid-cols-[8.5rem_1fr] gap-0 min-h-full max-md:grid-cols-1">
+      <div className="grid min-w-0 grid-cols-[8.5rem_minmax(0,1fr)] gap-0 min-h-full max-md:grid-cols-1">
         <div className="border-r border-edge p-3 space-y-1 max-md:border-r-0 max-md:border-b">
           {verifiers.length === 0 ? (
             <div className="rounded border border-dashed border-edge px-2.5 py-3 text-xs text-ink-muted">
@@ -2178,7 +2180,7 @@ function PlanVerifiersDrawer({
                   placeholder={tasks.map((task) => task.id).slice(0, 3).join(", ")}
                 />
               </Field>
-              <div className="grid grid-cols-[1fr_8rem] gap-2">
+              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_8rem] gap-2">
                 <Field label="Artifact">
                   <input
                     value={selected.artifact}
@@ -2301,7 +2303,7 @@ function CredentialSetupDrawer({
           </div>
         </div>
       </div>
-      <div className="grid grid-cols-[9rem_1fr] gap-0 min-h-full max-md:grid-cols-1">
+      <div className="grid min-w-0 grid-cols-[9rem_minmax(0,1fr)] gap-0 min-h-full max-md:grid-cols-1">
         <div className="border-r border-edge p-3 space-y-1 max-md:border-r-0 max-md:border-b">
           {credentials.length === 0 ? (
             <div className="rounded border border-dashed border-edge px-2.5 py-3 text-xs text-ink-muted">
@@ -2726,12 +2728,27 @@ function ValidationPanel({
 }
 
 function KernelValidationPanel({ response }: { response: BuilderValidationResponse }) {
+  const hasErrors = response.issues.some((issue) => issue.severity === "error");
+  const hasWarnings = response.issues.some((issue) => issue.severity === "warning");
+  const badgeClass = hasErrors
+    ? "badge border-bad bg-bad/10 text-bad"
+    : hasWarnings
+      ? "badge border-warn bg-warn-muted text-warn"
+      : response.ok
+        ? "badge border-ok bg-ok-muted text-ok"
+        : "badge border-edge bg-panel text-ink-muted";
+  const label = hasErrors
+    ? "Kernel check found errors"
+    : hasWarnings
+      ? "Kernel check passed with warnings"
+      : response.ok
+        ? "Kernel check passed"
+        : "Kernel check reported issues";
+
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span className={response.ok ? "badge border-ok bg-ok-muted text-ok" : "badge border-bad bg-bad/10 text-bad"}>
-          {response.ok ? "Kernel check passed" : "Kernel check found errors"}
-        </span>
+        <span className={badgeClass}>{label}</span>
         <span className="text-ink-subtle">epoch #{response.policy_epoch}</span>
         {response.resolved_target_ref && (
           <code className="rounded border border-edge bg-panel px-1.5 py-0.5 font-mono text-[10px] text-ink-muted">
@@ -3240,9 +3257,6 @@ function validatePlan(input: {
     if (!referencedProfiles.has(profileId)) {
       push("warning", `[profiles.${profileId}]`, `Tool profile ${profileId || "(blank)"} is not used by any executor.`, "Select it on an executor card or remove it from the plan.");
     }
-    if (!profile.description.trim()) {
-      push("warning", `[profiles.${profileId}].description`, `Tool profile ${profileId || "(blank)"} has no description.`, "Describe the kind of tasks this profile supports.");
-    }
     const providerAlias = profile.providerAlias?.trim();
     if (providerAlias && !routeAliases.has(providerAlias)) {
       push("error", `[profiles.${profileId}].provider_alias`, `Tool profile ${profileId || "(blank)"} references missing model route ${providerAlias}.`, "Create that route in Model routing or choose Role default.");
@@ -3290,7 +3304,7 @@ function validatePlan(input: {
     }
   }
 
-  const taskIdsForVerifiers = new Set(input.tasks.map((task) => task.id.trim()).filter(Boolean));
+  const taskNamesForVerifiers = new Set(input.tasks.map((task) => task.id.trim()).filter(Boolean));
   const planVerifierNames = new Set<string>();
   for (const verifier of input.planVerifiers) {
     const name = verifier.name.trim();
@@ -3310,9 +3324,9 @@ function validatePlan(input: {
       push("error", `[plan.integration_merge_verifiers.${name || "blank"}].timeout`, `Plan verifier ${name || "(blank)"} needs a timeout.`, "Use a duration such as 30s or 10m.");
     }
     if (verifier.appliesTo === "task_set") {
-      const missing = splitList(verifier.taskSet).filter((taskId) => !taskIdsForVerifiers.has(taskId));
+      const missing = splitList(verifier.taskSet).filter((taskName) => !taskNamesForVerifiers.has(taskName));
       if (missing.length > 0) {
-        push("warning", `[plan.integration_merge_verifiers.${name || "blank"}].task_set`, `Plan verifier ${name || "(blank)"} references unknown task ids: ${missing.join(", ")}.`, "Fix the task_set list or add those tasks to the DAG.");
+        push("warning", `[plan.integration_merge_verifiers.${name || "blank"}].task_set`, `Plan verifier ${name || "(blank)"} references unknown task names: ${missing.join(", ")}.`, "Fix the task_set list or add those tasks to the DAG.");
       }
     }
   }
@@ -3350,12 +3364,12 @@ function validatePlan(input: {
   for (const task of input.tasks) {
     const id = task.id.trim();
     if (!id) {
-      push("error", "[[tasks]].task_id", "Every task needs a task id.", "Open the task card and enter a stable id.");
-    } else if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(id)) {
-      push("error", `${id}.task_id`, `Task id ${id} is invalid.`, "Start with a letter and use only letters, digits, underscores, or dashes.");
+      push("error", "[[tasks]].task_name", "Every task needs a task name.", "Open the task card and enter a name unique within this initiative.");
+    } else if (!isPlanTaskName(id)) {
+      push("error", `${id}.task_name`, `Task name ${id} is invalid.`, `Use a non-empty name without control characters and keep it at ${TASK_NAME_MAX_CHARS} characters or fewer.`);
     }
     if (ids.has(id)) {
-      push("error", `${id}.task_id`, `Duplicate task id ${id}.`, "Rename one of the tasks so every id is unique.");
+      push("error", `${id}.task_name`, `Duplicate task name ${id}.`, "Rename one of the tasks so every name is unique within this initiative.");
     }
     ids.add(id);
     if (!task.description.trim()) {
@@ -3622,7 +3636,7 @@ function renderPlan(input: {
     const pathExports = splitList(task.pathExports);
     const allowedEgress = splitList(task.allowedEgress);
     lines.push("[[tasks]]");
-    lines.push(`task_id            = ${tomlString(task.id.trim())}`);
+    lines.push(`task_name          = ${tomlString(task.id.trim())}`);
     lines.push(`description        = ${tomlString(task.description.trim())}`);
     lines.push(`session_agent_type = ${tomlString(task.agentType)}`);
     lines.push(`clone_strategy     = ${tomlString(task.cloneStrategy)}`);
@@ -3818,7 +3832,7 @@ function inferPlanTomlTargetFromLine(
   if (taskStart >= 0 && (taskEnd < 0 || lineIndex < taskEnd)) {
     const id = readString(
       lines.slice(taskStart, taskEnd < 0 ? undefined : taskEnd).join("\n"),
-      "task_id",
+      "task_name",
     );
     if (id) return { kind: "task", taskId: id };
   }
@@ -3878,7 +3892,7 @@ function findTaskHeaderLine(lines: string[], taskId: string) {
       (line) => isTomlHeaderLine(line) && !isTaskNestedHeader(line),
     );
     const block = lines.slice(index, nextTask < 0 ? undefined : nextTask).join("\n");
-    if (readString(block, "task_id") === taskId) return index + 1;
+    if (readString(block, "task_name") === taskId) return index + 1;
   }
   return null;
 }
@@ -4025,7 +4039,7 @@ function parsePlanToml(text: string): {
     });
     const verifier = readNestedBlock(block, "tasks.verifiers");
     return normalizeTask({
-      id: readString(block, "task_id") ?? `task-${index + 1}`,
+      id: readString(block, "task_name") ?? `Task ${index + 1}`,
       description,
       agentType,
       predecessors: readArray(block, "predecessors").join(", "),
@@ -4252,6 +4266,14 @@ function readBoolean(text: string, key: string) {
 
 function parseCloneStrategy(value: string | null): CloneStrategy {
   return value === "blobless" || value === "full" || value === "sparse" ? value : "";
+}
+
+function isPlanTaskName(value: string) {
+  return (
+    value.trim().length > 0 &&
+    value.length <= TASK_NAME_MAX_CHARS &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
 }
 
 function parseModelAliasScope(value: string | null, alias: string): ModelAliasScope {

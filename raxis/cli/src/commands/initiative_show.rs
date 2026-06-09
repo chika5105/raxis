@@ -1144,6 +1144,7 @@ mod tests {
         };
         let tasks = vec![TaskRow {
             task_id: "t-rendered".to_owned(),
+            task_name: Some("rendered-task".to_owned()),
             initiative_id: "init-render".to_owned(),
             initiative_state: "Executing".to_owned(),
             lane_id: "default".to_owned(),
@@ -1215,6 +1216,7 @@ mod tests {
         };
         let tasks = vec![TaskRow {
             task_id: "task-alpha".to_owned(),
+            task_name: Some("alpha".to_owned()),
             initiative_id: "init-q".to_owned(),
             initiative_state: "Quarantined".to_owned(),
             lane_id: "default".to_owned(),

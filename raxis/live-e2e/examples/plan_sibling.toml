@@ -22,8 +22,7 @@ target_ref = "refs/heads/main"
 
 # ── Sibling materializer Executor (P3-6) ────────────────
 [[tasks]]
-task_id            = "sibling-materialize-records"
-name               = "Sibling-initiative materializer (audit-chain isolation witness)"
+task_name            = "sibling-materialize-records"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 # Same workload as `materialize-records` (25 pg rows + 25 mongo docs +

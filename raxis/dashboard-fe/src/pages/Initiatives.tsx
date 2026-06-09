@@ -88,11 +88,26 @@ export function InitiativesPage() {
     if (!q.data) return [];
     if (search.trim() === "") return q.data;
     const needle = search.trim().toLowerCase();
-    return q.data.filter(
-      (i) =>
-        (i.display_name ?? "").toLowerCase().includes(needle) ||
-        i.initiative_id.toLowerCase().includes(needle),
-    );
+    return q.data.filter((i) => {
+      const taskHaystack = (i.tasks ?? [])
+        .flatMap((t) => [
+          t.task_id,
+          t.task_name ?? "",
+          t.title,
+          t.agent_type,
+          t.state,
+        ])
+        .join(" ");
+      const haystack = [
+        i.display_name ?? "",
+        i.initiative_id,
+        i.state,
+        taskHaystack,
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
   }, [q.data, search]);
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
@@ -118,7 +133,7 @@ export function InitiativesPage() {
         <div className="flex items-center gap-2">
           <input
             className="input w-56"
-            placeholder="Search workspace or id…"
+            placeholder="Search workspace, task name, or id…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -200,6 +215,9 @@ export function InitiativesPage() {
               {filtered.map((i) => {
                 const href = `/initiatives/${i.initiative_id}`;
                 const dimmed = filterActive && !activeSet.has(i.state);
+                const previewTasks = (i.tasks ?? [])
+                  .filter((t) => t.task_id !== i.initiative_id)
+                  .slice(0, 3);
                 return (
                   <tr
                     key={i.initiative_id}
@@ -250,6 +268,21 @@ export function InitiativesPage() {
                           </span>
                         )}
                       </div>
+                      {previewTasks.length > 0 && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {previewTasks.map((t) => (
+                            <Link
+                              key={t.task_id}
+                              to={`/tasks/${t.task_id}`}
+                              onClick={(e) => e.stopPropagation()}
+                              className="badge bg-panel border-edge text-ink-muted hover:text-accent max-w-[14rem] truncate"
+                              title={`${t.task_name ?? t.title} · ${t.task_id}`}
+                            >
+                              {t.task_name ?? compactTaskId(t.task_id)}
+                            </Link>
+                          ))}
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-2.5 text-right text-xs text-ink-muted tabular">
                       {fmtRelative(i.created_at)}
@@ -266,4 +299,8 @@ export function InitiativesPage() {
       )}
     </div>
   );
+}
+
+function compactTaskId(taskId: string): string {
+  return taskId.length > 12 ? `${taskId.slice(0, 12)}…` : taskId;
 }

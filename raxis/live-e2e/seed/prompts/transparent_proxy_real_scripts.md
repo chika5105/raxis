@@ -8,8 +8,15 @@ outputs.
 Use the scripts already staged under `scripts/`, including `check_postgres.py`,
 to produce per-service evidence under `out/services/`.
 
-The wrapper should also leave `scripts/last_run_summary.txt` with a compact
-summary of which scripts ran, their exit codes, and the output paths.
+Run the wrapper directly and save its normal stdout/stderr transcript:
+
+```bash
+bash scripts/run_all_services.sh > scripts/last_run_summary.txt 2>&1
+```
+
+Do not rewrite or reformat `scripts/last_run_summary.txt` after the wrapper
+runs. The wrapper transcript must keep its per-service lines such as
+`postgres:`, `mongodb:`, `redis:`, and `smtp:` so the run can be checked later.
 
 ## Boundaries
 

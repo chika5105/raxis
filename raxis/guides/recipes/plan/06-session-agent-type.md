@@ -81,7 +81,7 @@ You cannot declare it; declaring `session_agent_type =
 
 ```toml
 [[tasks]]
-task_id            = "implementer"
+task_name            = "implementer"
 prompt             = """Complete Implementer according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
@@ -90,7 +90,7 @@ predecessors       = []
 description        = """Implement rate limiting on /auth/login."""
 
 [[tasks]]
-task_id            = "code_reviewer"
+task_name            = "code_reviewer"
 prompt             = """Complete Code Reviewer according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
@@ -103,7 +103,7 @@ description        = """Review src/auth/rate_limit.rs for correctness + style.""
 
 ```toml
 [[tasks]]
-task_id            = "frontend"
+task_name            = "frontend"
 description        = "Frontend"
 prompt             = """Complete Frontend according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
@@ -112,7 +112,7 @@ path_allowlist     = ["frontend/"]
 predecessors       = []
 
 [[tasks]]
-task_id            = "backend"
+task_name            = "backend"
 description        = "Backend"
 prompt             = """Complete Backend according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
@@ -128,7 +128,7 @@ merges their commits into the target branch.
 
 ```toml
 [[tasks]]
-task_id            = "implementer"
+task_name            = "implementer"
 clone_strategy     = "blobless"
 description        = "Implementer"
 prompt             = """Complete Implementer according to this plan's acceptance criteria."""
@@ -136,7 +136,7 @@ session_agent_type = "Executor"
 ...
 
 [[tasks]]
-task_id            = "correctness_reviewer"
+task_name            = "correctness_reviewer"
 clone_strategy     = "blobless"
 prompt             = """Complete Correctness Reviewer according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
@@ -144,7 +144,7 @@ predecessors       = ["implementer"]
 description        = """Review for correctness."""
 
 [[tasks]]
-task_id            = "style_reviewer"
+task_name            = "style_reviewer"
 clone_strategy     = "blobless"
 prompt             = """Complete Style Reviewer according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
@@ -152,7 +152,7 @@ predecessors       = ["implementer"]
 description        = """Review for style + idioms."""
 
 [[tasks]]
-task_id            = "security_reviewer"
+task_name            = "security_reviewer"
 clone_strategy     = "blobless"
 prompt             = """Complete Security Reviewer according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"

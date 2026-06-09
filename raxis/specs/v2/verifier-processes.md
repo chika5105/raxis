@@ -1469,7 +1469,7 @@ Operator-side declarations:
 | `timeout` | Required | Yes | Yes | ≥ 5s, ≤ kernel hard cap |
 | `on_failure` | Required | `block_merge` \| `warn_only` | `block_merge` only (cannot downgrade to `warn_only`) | `block_review` is rejected (`FAIL_VERIFIER_INVALID_ON_FAILURE`) |
 | `applies_to` | Optional | `all` \| `task_set` \| `last` (default `all`) | Same | See §16.3 |
-| `task_set` | Required if `applies_to = "task_set"` | Array of task IDs | Same | All entries must be declared task IDs |
+| `task_set` | Required if `applies_to = "task_set"` | Array of plan task names | Same | All entries must resolve to declared `[[tasks]].task_name` values before the kernel stores verifier runtime bindings |
 | `artifact` | Optional | Yes | Yes | Per §6 |
 | `artifact_max_bytes` | Optional | Yes | Yes | Per §6 |
 | `env` | Optional | Yes | Yes | `RAXIS_*` keys forbidden |

@@ -43,8 +43,12 @@ use raxis_supervisor::sentinel::{
 use raxis_supervisor::signal::{install_handlers, IntentionalShutdownFlag};
 use raxis_supervisor::supervisor::{run_supervisor_loop, FinalOutcome, SupervisorConfig};
 use raxis_supervisor::{
-    raise_nofile_soft_limit, DEFAULT_MAX_ATTEMPTS, DEFAULT_MIN_NOFILE, DEFAULT_RESTART_WINDOW_SECS,
-    DEFAULT_SHUTDOWN_GRACE_SECS, ENV_KERNEL_BINARY, ENV_MIN_NOFILE, ENV_OPT_IN,
+    raise_nofile_soft_limit, DEFAULT_MAX_ATTEMPTS, DEFAULT_MIN_NOFILE,
+    DEFAULT_READINESS_FAILURES_BEFORE_RESTART, DEFAULT_READINESS_INITIAL_GRACE_SECS,
+    DEFAULT_READINESS_INTERVAL_SECS, DEFAULT_READINESS_TIMEOUT_MS, DEFAULT_READINESS_URL,
+    DEFAULT_RESTART_WINDOW_SECS, DEFAULT_SHUTDOWN_GRACE_SECS, ENV_KERNEL_BINARY, ENV_MIN_NOFILE,
+    ENV_OPT_IN, ENV_READINESS_FAILURES_BEFORE_RESTART, ENV_READINESS_INITIAL_GRACE_SECS,
+    ENV_READINESS_INTERVAL_SECS, ENV_READINESS_TIMEOUT_MS, ENV_READINESS_URL,
     ENV_REQUIRE_INITIALIZED_DATA_DIR, ENV_SHUTDOWN_GRACE_SECS,
 };
 
@@ -72,6 +76,7 @@ fn print_usage_and_exit(code: i32) -> ! {
          RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS  Override grace period (default {DEFAULT_SHUTDOWN_GRACE_SECS}s)\n  \
          RAXIS_SUPERVISOR_MIN_NOFILE       Override pre-kernel FD soft-limit floor (default {DEFAULT_MIN_NOFILE})\n  \
          RAXIS_SUPERVISOR_REQUIRE_INITIALIZED_DATA_DIR=1  Wait for genesis artifacts before spawning\n  \
+         RAXIS_SUPERVISOR_READINESS_URL    Override readiness URL (default {DEFAULT_READINESS_URL})\n  \
          RAXIS_SUPERVISOR_KERNEL_BINARY    Override kernel binary path\n\
          "
     );
@@ -217,6 +222,23 @@ async fn cmd_start(
     let require_initialized_data_dir = std::env::var(ENV_REQUIRE_INITIALIZED_DATA_DIR)
         .map(|v| v == "1")
         .unwrap_or(false);
+    let readiness_url = std::env::var(ENV_READINESS_URL)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| Some(DEFAULT_READINESS_URL.to_owned()));
+    let readiness_initial_grace_secs = env_u64(
+        ENV_READINESS_INITIAL_GRACE_SECS,
+        DEFAULT_READINESS_INITIAL_GRACE_SECS,
+    );
+    let readiness_interval_secs =
+        env_u64(ENV_READINESS_INTERVAL_SECS, DEFAULT_READINESS_INTERVAL_SECS).max(1);
+    let readiness_timeout_ms =
+        env_u64(ENV_READINESS_TIMEOUT_MS, DEFAULT_READINESS_TIMEOUT_MS).max(100);
+    let readiness_failures_before_restart = env_u32(
+        ENV_READINESS_FAILURES_BEFORE_RESTART,
+        DEFAULT_READINESS_FAILURES_BEFORE_RESTART,
+    )
+    .max(1);
     let cfg = SupervisorConfig {
         data_dir: data_dir.to_path_buf(),
         kernel_binary: kernel_binary.to_path_buf(),
@@ -231,6 +253,11 @@ async fn cmd_start(
         restart_backoff_ms: 250,
         max_child_runs: None,
         require_initialized_data_dir,
+        readiness_url,
+        readiness_initial_grace_secs,
+        readiness_interval_secs,
+        readiness_timeout_ms,
+        readiness_failures_before_restart,
     };
 
     let intent_flag = IntentionalShutdownFlag::new();
@@ -244,6 +271,8 @@ async fn cmd_start(
             "max_attempts":         cfg.max_attempts,
             "window_secs":          cfg.window_secs,
             "shutdown_grace_secs":  cfg.shutdown_grace_secs,
+            "readiness_url":        cfg.readiness_url.as_deref(),
+            "readiness_timeout_ms": cfg.readiness_timeout_ms,
         }),
     );
 
@@ -281,6 +310,20 @@ fn configured_min_nofile() -> u64 {
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(DEFAULT_MIN_NOFILE)
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn env_u32(name: &str, default: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(default)
 }
 
 fn prepare_nofile_limit() {

@@ -43,6 +43,15 @@ export interface InitiativeListEntry {
   failed_tasks: number;
   created_at: number;
   updated_at: number;
+  tasks?: InitiativeTaskListEntry[];
+}
+
+export interface InitiativeTaskListEntry {
+  task_id: string;
+  task_name?: string | null;
+  title: string;
+  agent_type: string;
+  state: string;
 }
 
 // Structured failure reason attached to a Failed / Revoked / Rejected
@@ -175,6 +184,7 @@ export interface CustomToolCallView {
 
 export interface TaskView {
   task_id: string;
+  task_name?: string | null;
   initiative_id: string;
   initiative_display_name: string;
   agent_type: string;
@@ -403,6 +413,7 @@ export interface RecentSessionEntry {
   session_id: string;
   agent_type: string;
   task_id?: string | null;
+  task_name?: string | null;
   initiative_id?: string | null;
   initiative_display_name?: string | null;
   created_at: number;
@@ -696,6 +707,7 @@ export interface CredentialReveal {
 
 export interface DagNode {
   task_id: string;
+  task_name?: string | null;
   title: string;
   agent_type: string;
   state: string;
@@ -741,6 +753,7 @@ export interface SessionView {
   initiative_id: string | null;
   initiative_display_name?: string | null;
   task_id: string | null;
+  task_name?: string | null;
   state: string;
   provider: string | null;
   model: string | null;
@@ -955,6 +968,16 @@ export interface PolicySnapshotView {
   git_target_ref_locked: boolean;
   operators: PolicyOperatorView[];
   notification_routes: Record<string, string[]>;
+}
+
+export interface PolicyHistoryEntry {
+  epoch: number;
+  policy_sha256: string;
+  signed_by_authority: string;
+  triggered_by_operator: string;
+  advanced_at: number;
+  is_active: boolean;
+  artifact_available: boolean;
 }
 
 export interface PolicyAdvancement {

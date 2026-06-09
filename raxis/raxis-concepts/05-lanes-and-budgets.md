@@ -52,7 +52,7 @@ Each task in the plan specifies its lane:
 
 ```toml
 [[tasks]]
-task_id = "build-auth-module"
+task_name = "build-auth-module"
 lane_id = "feature-work"
 ```
 

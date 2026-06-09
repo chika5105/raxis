@@ -11,7 +11,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id            = "impossible"
+task_name            = "impossible"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
@@ -30,7 +30,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "block"
+task_name            = "block"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["impossible"]

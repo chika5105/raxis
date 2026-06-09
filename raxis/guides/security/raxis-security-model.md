@@ -772,7 +772,7 @@ at `approve_plan` time. It cannot be changed at runtime.
 
 ```toml
 [[tasks]]
-task_id        = "auth_implementer"
+task_name        = "auth_implementer"
 path_allowlist = ["src/auth/"]       # may write anything under src/auth/
 ```
 

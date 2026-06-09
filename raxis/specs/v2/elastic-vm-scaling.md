@@ -122,7 +122,7 @@ description = "..."
 elastic     = true                     # initiative-level default; optional
 
 [[tasks]]
-task_id            = "rate_limit_implementer"
+task_name            = "rate_limit_implementer"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]

@@ -117,7 +117,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id            = "probe"
+task_name            = "probe"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = []     # @raxis-explicit no-write-acknowledged

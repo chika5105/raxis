@@ -14,7 +14,7 @@ agents cannot bypass it via IPC.
 
 | Field | Type | Required | Effect |
 |---|---|---|---|
-| `predecessors` | `Vec<String>` | yes (may be empty) | List of `task_id`s that MUST reach `Completed` (Executors) or `Approved` (Reviewers) before this task activates. |
+| `predecessors` | `Vec<String>` | yes (may be empty) | List of `task_name`s that MUST reach `Completed` (Executors) or `Approved` (Reviewers) before this task activates. |
 
 The plan-side field is named **`predecessors`** (verified against
 `kernel/src/initiatives/lifecycle.rs::parse_plan_tasks`). Some
@@ -27,7 +27,7 @@ parser only reads `predecessors`.
 
 | Pattern | Reason |
 |---|---|
-| `predecessors = ["self"]` (where `task_id = "self"`) | Self-loop. |
+| `predecessors = ["self"]` (where `task_name = "self"`) | Self-loop. |
 | `predecessors = ["a"]` and `predecessors of a includes self` | Cycle. |
 | `predecessors = ["nonexistent"]` | Dangling reference. |
 | `predecessors = ["dup", "dup"]` | Duplicate entries inside the list. |
@@ -44,7 +44,7 @@ parser only reads `predecessors`.
 
 ```toml
 [[tasks]]
-task_id      = "design"
+task_name      = "design"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 description        = "Design"
@@ -52,7 +52,7 @@ prompt             = """Complete Design according to this plan's acceptance crit
 predecessors = []
 
 [[tasks]]
-task_id      = "implement"
+task_name      = "implement"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 description        = "Implement"
@@ -60,7 +60,7 @@ prompt             = """Complete Implement according to this plan's acceptance c
 predecessors = ["design"]
 
 [[tasks]]
-task_id      = "test"
+task_name      = "test"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 description        = "Test"
@@ -75,7 +75,7 @@ predecessors = ["implement"]
 
 ```toml
 [[tasks]]
-task_id      = "shared_setup"
+task_name      = "shared_setup"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 description        = "Shared Setup"
@@ -83,7 +83,7 @@ prompt             = """Complete Shared Setup according to this plan's acceptanc
 predecessors = []
 
 [[tasks]]
-task_id      = "frontend"
+task_name      = "frontend"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 description        = "Frontend"
@@ -91,7 +91,7 @@ prompt             = """Complete Frontend according to this plan's acceptance cr
 predecessors = ["shared_setup"]
 
 [[tasks]]
-task_id      = "backend"
+task_name      = "backend"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 description        = "Backend"
@@ -99,7 +99,7 @@ prompt             = """Complete Backend according to this plan's acceptance cri
 predecessors = ["shared_setup"]
 
 [[tasks]]
-task_id      = "integration_test"
+task_name      = "integration_test"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 description        = "Integration Test"
@@ -115,7 +115,7 @@ logical-AND.
 
 ```toml
 [[tasks]]
-task_id      = "implementer"
+task_name      = "implementer"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 description        = "Implementer"
@@ -123,7 +123,7 @@ prompt             = """Complete Implementer according to this plan's acceptance
 predecessors = []
 
 [[tasks]]
-task_id      = "reviewer_correctness"
+task_name      = "reviewer_correctness"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 description        = "Reviewer Correctness"
@@ -131,7 +131,7 @@ prompt             = """Complete Reviewer Correctness according to this plan's a
 predecessors = ["implementer"]
 
 [[tasks]]
-task_id      = "reviewer_style"
+task_name      = "reviewer_style"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 description        = "Reviewer Style"
@@ -139,7 +139,7 @@ prompt             = """Complete Reviewer Style according to this plan's accepta
 predecessors = ["implementer"]
 
 [[tasks]]
-task_id      = "reviewer_security"
+task_name      = "reviewer_security"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 description        = "Reviewer Security"
@@ -185,8 +185,8 @@ re-submit (rejection retry loop) and the Reviewer to re-evaluate.
 | Symptom | Fix |
 |---|---|
 | `FAIL_DAG_CYCLE` | Self-loops or cycles between two+ tasks. Inspect with `raxis plan validate`; the validator names the offending edge. |
-| `FAIL_DAG_DANGLING_PREDECESSOR` | A predecessor `task_id` doesn't exist in the plan. Spelling check. |
-| `FAIL_DAG_DUPLICATE_PREDECESSOR` | List contains the same `task_id` twice. Deduplicate. |
+| `FAIL_DAG_DANGLING_PREDECESSOR` | A predecessor task name doesn't exist in the plan. Spelling check. |
+| `FAIL_DAG_DUPLICATE_PREDECESSOR` | List contains the same task name twice. Deduplicate. |
 | Task never activates | Some predecessor is stuck (Failed, Aborted, BlockedRecoveryPending). `raxis explain <task>` shows which predecessor is unsatisfied. |
 | Reviewer activates and immediately rejects "no commit" | The predecessor Executor's `CompleteTask` was for a no-op (no diff). The Reviewer has nothing to review. |
 
@@ -197,7 +197,7 @@ re-submit (rejection retry loop) and the Reviewer to re-evaluate.
 | Command | Purpose |
 |---|---|
 | `raxis plan validate <plan.toml>` | Catches every DAG constraint above. |
-| `raxis explain <task_id>` | Decision tree explaining why a task is in its current state, including unsatisfied predecessors. |
+| `raxis explain <task_id>` | Decision tree explaining why a runtime task is in its current state, including unsatisfied predecessors. The dashboard shows the plan `task_name` next to the generated UUID. |
 | `raxis queue` | DAG scheduler view: READY (Admitted+GatesPending) and BLOCKED (BlockedRecoveryPending). |
 | `raxis log --kind PredecessorCompleted --since 1h` | Audit trail of dependency satisfaction. |
 

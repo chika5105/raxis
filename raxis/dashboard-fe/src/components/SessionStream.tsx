@@ -492,7 +492,7 @@ function StreamLine({ event }: { event: StreamEventEnvelope }) {
       // blending math) on the light-mode pane. Use the theme-
       // aware `bg-panel-high` so the hover affordance reads
       // identically in both modes.
-      className="grid grid-cols-[80px_110px_1fr] gap-2 hover:bg-panel-high px-1 py-0.5 cursor-pointer"
+      className="grid min-w-0 grid-cols-[80px_110px_minmax(0,1fr)] gap-2 hover:bg-panel-high px-1 py-0.5 cursor-pointer"
       onClick={onClick}
       data-testid="session-stream-row"
     >
@@ -500,7 +500,7 @@ function StreamLine({ event }: { event: StreamEventEnvelope }) {
       <span className={`uppercase text-[10px] font-bold ${tone}`}>
         {event.kind}
       </span>
-      <span className="whitespace-pre-wrap break-words">
+      <span className="min-w-0 whitespace-pre-wrap break-words">
         {expanded ? (
           <pre className="text-[11px] text-ink-muted whitespace-pre-wrap">
             {safeStringifyPayload(event.payload)}

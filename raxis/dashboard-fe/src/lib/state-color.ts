@@ -303,6 +303,54 @@ export function stateShouldPulse(state: string | null | undefined): boolean {
   return Boolean(stateVisualTreatment(state)?.pulse);
 }
 
+/// Operator-facing task state. A task row can stay in the kernel
+/// FSM state `Admitted` while an active subtask activation is
+/// already attached to it; for dashboard attention/filtering that
+/// is a live `Running` task, not queued work. Keep this as the
+/// single projection used by task legends, row dimming, DAG nodes,
+/// and focused panels.
+export function effectiveTaskState(
+  state: string | null | undefined,
+  isActive: boolean | null | undefined,
+): string {
+  if (isActive && state === "Admitted") return "Running";
+  return state ?? "";
+}
+
+const TASK_STATUS_FILTER_ORDER = [
+  "Running",
+  "Admitted",
+  "GatesPending",
+  "BlockedRecoveryPending",
+  "Completed",
+  "ReviewRejected",
+  "RetryExhausted",
+  "Failed",
+  "Aborted",
+  "Cancelled",
+] as const;
+
+/// Stable operator-facing order for task status filter chips.
+/// Running comes first because it is the active attention target;
+/// unknown future states retain a deterministic alphabetical tail.
+export function orderedTaskStatusCounts(
+  counts: Record<string, number>,
+): Record<string, number> {
+  const order = new Map<string, number>(
+    TASK_STATUS_FILTER_ORDER.map((state, idx) => [state, idx]),
+  );
+  return Object.fromEntries(
+    Object.entries(counts).sort(([a], [b]) => {
+      const ai = order.get(a);
+      const bi = order.get(b);
+      if (ai !== undefined && bi !== undefined) return ai - bi;
+      if (ai !== undefined) return -1;
+      if (bi !== undefined) return 1;
+      return a.localeCompare(b);
+    }),
+  );
+}
+
 export function stateTone(state: string | null | undefined): StateBadgeTone {
   if (!state) return "muted";
   const direct = MAP[state];

@@ -70,7 +70,7 @@ declaration is rejected at admission (`orchestrator_task_not_permitted`).
 - `predecessors = []` — activates immediately when the initiative starts.
 - `predecessors = ["task_a"]` — activates only after `task_a` reaches
   `Completed`.
-- Cycles, dangling references, self-loops, and duplicate `task_id`s are
+- Cycles, dangling references, self-loops, and duplicate `task_name`s are
   rejected at admission.
 
 ## How Agents Communicate
@@ -138,7 +138,7 @@ Then assign one or more profiles to an Executor task:
 
 ```toml
 [[tasks]]
-task_id = "build-mobile-demo"
+task_name = "build-mobile-demo"
 session_agent_type = "Executor"
 profiles          = ["unity_mobile"]
 ```

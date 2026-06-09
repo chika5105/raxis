@@ -822,12 +822,15 @@ the mechanical sequence the Orchestrator must follow when it receives
 1. Confirm all expected sub-tasks for this wave have sent AllReviewersPassed.
    (Do not merge a partial wave — wait for all expected tasks.)
 
-2. For each sub-task in merge order:
-   a. git fetch /workspace/.raxis/bundles/<task_id>.bundle
-   b. git merge refs/raxis/subtasks/<task_id>
-   c. If MERGE_HEAD exists after merge (merge commit):
-      - Write a descriptive merge commit message: "Merge <task_id>: <brief description>"
-   d. If git merge exits with conflicts:
+2. Collect every current approved executor SHA from
+   `capabilities.integration_merge.required_executor_shas`.
+   Run `prepare_integration_merge { base_sha, executor_shas }`.
+   This resets the integration workspace to the KSB `base_sha` and
+   merges only the current approved executor heads, not rejected retry
+   attempts or stale transfer refs.
+   a. If the tool returns a clean `head_sha`, submit
+      `integration_merge { base_sha, head_sha }`.
+   b. If the tool reports conflicts:
       - V2 update: Apply triviality criteria T1–T4 from
         kernel-mechanics-prompt.md §3.2 [KERNEL: CONFLICT RESOLUTION PROTOCOL].
         - If trivial (e.g., additive import / use / require collisions, struct field

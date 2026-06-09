@@ -11,7 +11,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id            = "backend"
+task_name            = "backend"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["backend/"]
@@ -22,7 +22,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "frontend"
+task_name            = "frontend"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["frontend/"]

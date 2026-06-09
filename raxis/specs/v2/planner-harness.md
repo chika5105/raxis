@@ -167,6 +167,13 @@ a `SubmitReview { approved, critique }` verdict. The harness question is:
 does the Reviewer's planner expose Language Server Protocol (LSP) tools
 (`rust-analyzer`, `tsserver`, `pyright`, `gopls`, etc.) to the LLM, or
 only text-search primitives (`read_file`, `glob_search`, `grep_search`)?
+`SubmitReview` is a RAXIS runtime contract, not an operator prompt
+requirement: the reviewer NNSP and tool manifest are kernel-installed for
+every Reviewer session. If the model answers in prose without calling the
+terminal reviewer tool, the runtime may take one corrective turn to request
+the structured verdict; if the VM still exits without `SubmitReview`, the
+kernel classifies it as a no-verdict reviewer runtime failure rather than a
+semantic `approved=false` review.
 
 LSPs provide structured semantic access (go-to-definition,
 find-all-references, hover-types). They also routinely execute project code
@@ -1527,10 +1534,10 @@ kernel-mediated and already have their own dedicated channels:
 
 | What the agent wants to communicate | Where it goes in RAXIS | Why `StructuredOutput` is wrong |
 |---|---|---|
-| Structured result to the Orchestrator | `IntentKind::CompleteTask` payload — already kernel-validated, already audit-captured | Bypasses the kernel; the Orchestrator never reads stdout from peer VMs |
+| Structured result to the Orchestrator | Task-completion payload — already kernel-validated, already audit-captured through the internal `CompleteTask` intent | Bypasses the kernel; the Orchestrator never reads stdout from peer VMs |
 | Status / progress signal to the operator | Kernel audit events (`SubTaskCompleted`, `ReviewSubmitted`, `EscalationRequest`, …) — signed, schema-validated, surfaced via `raxis log` | Operator tooling reads the audit chain, not raw stdout |
 | Intermediate scratch for the agent's own multi-turn reasoning | Conversation context (the LLM's own working memory, persisted in transcript) | A `StructuredOutput` call to "remember this for later" is just `TodoWrite` or a comment; no separate primitive needed |
-| Critique / verdict from a Reviewer | `IntentKind::SubmitReview { approved, critique }` payload | Same as `CompleteTask`: kernel-mediated, schema-validated |
+| Critique / verdict from a Reviewer | Review verdict payload | Same pattern as task completion: kernel-mediated, schema-validated |
 
 **Decision: exclude `StructuredOutput` from the planner harness for all
 roles.** The harness's `PermissionPolicy` denies the tool for
@@ -1834,8 +1841,9 @@ task limit.
 
 [ALERT: EscalationRequestStatus]
 EscalationRequest esc_4f3a (PathAllowlistAmendment) RESOLVED by operator at T+143s.
-Resolution: amendment approved with restrictions. Re-issue your CompleteTask intent
-to retry path-allowlist enforcement under the amended policy.
+Resolution: amendment approved with restrictions. Commit the corrected workspace
+state and call `task_complete` again so RAXIS can retry path-allowlist
+enforcement under the amended policy.
 ```
 
 The agent's training is straightforward: blocks formatted as

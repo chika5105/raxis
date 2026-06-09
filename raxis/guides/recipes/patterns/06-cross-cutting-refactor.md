@@ -80,7 +80,7 @@ target_ref  = "refs/heads/main"
 # orchestrator-side concern at merge time.
 
 [[tasks]]
-task_id            = "bump-auth"
+task_name            = "bump-auth"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/auth/", "tests/auth/", "Cargo.toml", "auth/Cargo.toml"]
@@ -89,7 +89,7 @@ description        = "Bump Auth"
 prompt             = """Bump tokio to 1.40 in auth/Cargo.toml. Update src/auth/ for any breaking-change adjustments."""
 
 [[tasks]]
-task_id            = "bump-api"
+task_name            = "bump-api"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/api/", "tests/api/", "api/Cargo.toml"]
@@ -98,7 +98,7 @@ description        = "Bump Api"
 prompt             = """Bump tokio to 1.40 in api/Cargo.toml."""
 
 [[tasks]]
-task_id            = "bump-db"
+task_name            = "bump-db"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/db/", "tests/db/", "db/Cargo.toml"]
@@ -108,7 +108,7 @@ prompt             = """Bump tokio to 1.40 in db/Cargo.toml."""
 
 # One Reviewer per Executor (panel optional — see pattern 02).
 [[tasks]]
-task_id            = "review-auth"
+task_name            = "review-auth"
 description        = "Review Auth"
 prompt             = """Complete Review Auth according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
@@ -117,7 +117,7 @@ path_allowlist     = ["src/auth/", "auth/Cargo.toml"]
 predecessors       = ["bump-auth"]
 
 [[tasks]]
-task_id            = "review-api"
+task_name            = "review-api"
 description        = "Review Api"
 prompt             = """Complete Review Api according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
@@ -126,7 +126,7 @@ path_allowlist     = ["src/api/", "api/Cargo.toml"]
 predecessors       = ["bump-api"]
 
 [[tasks]]
-task_id            = "review-db"
+task_name            = "review-db"
 description        = "Review Db"
 prompt             = """Complete Review Db according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"

@@ -108,7 +108,7 @@ mod tests {
 name = "Demo"
 
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 "#
                 .to_owned(),
             }),

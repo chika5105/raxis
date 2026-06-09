@@ -40,8 +40,8 @@ export function RepoBrowser({ worktreeName }: RepoBrowserProps) {
   const [selected, setSelected] = useState<string | null>(null);
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-4">
-      <aside className="card p-3 self-start xl:sticky xl:top-2 max-h-[80vh] overflow-y-auto overscroll-y-auto scroll-thin">
+    <div className="grid min-w-0 max-w-full grid-cols-1 xl:grid-cols-[320px_minmax(0,1fr)] gap-4">
+      <aside className="card p-3 min-w-0 self-start xl:sticky xl:top-2 max-h-[80vh] overflow-y-auto overscroll-y-auto scroll-thin">
         <header className="text-xs text-ink-subtle uppercase tracking-wider mb-2">
           Repository tree
         </header>
@@ -55,7 +55,7 @@ export function RepoBrowser({ worktreeName }: RepoBrowserProps) {
           onSelect={setSelected}
         />
       </aside>
-      <div className="min-w-0">
+      <div className="min-w-0 max-w-full">
         {selected ? (
           <FileView worktreeName={worktreeName} path={selected} />
         ) : (
@@ -431,7 +431,7 @@ function BinaryView({ raw }: { raw: string }) {
   }, [slice]);
   return (
     <>
-      <pre className="font-mono text-[11px] leading-relaxed overflow-auto overscroll-auto scroll-thin max-h-[70vh] text-ink-muted">
+      <pre className="min-w-0 max-w-full font-mono text-[11px] leading-relaxed overflow-auto overscroll-auto scroll-thin max-h-[70vh] text-ink-muted">
         {lines.join("\n")}
       </pre>
       {raw.length > HEX_PREVIEW_BYTES && (

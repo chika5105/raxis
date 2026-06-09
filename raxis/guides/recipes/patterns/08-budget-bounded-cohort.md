@@ -56,7 +56,7 @@ target_ref  = "refs/heads/main"
 
 # Twelve fan-out Executors — predecessor-free.
 [[tasks]]
-task_id            = "fmt-crate-a"
+task_name            = "fmt-crate-a"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["crates/a/"]
@@ -67,7 +67,7 @@ prompt             = """Apply the new rustfmt rules to crates/a/ and commit the 
 # ... repeat for crates b through l ...
 
 [[tasks]]
-task_id            = "fmt-crate-l"
+task_name            = "fmt-crate-l"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["crates/l/"]
@@ -77,7 +77,7 @@ prompt             = """Apply the new rustfmt rules to crates/l/ and commit the 
 
 # Twelve Reviewers — one per Executor.
 [[tasks]]
-task_id            = "review-fmt-crate-a"
+task_name            = "review-fmt-crate-a"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["crates/a/"]

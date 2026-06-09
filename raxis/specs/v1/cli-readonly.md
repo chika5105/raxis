@@ -567,7 +567,7 @@ raxis initiative list [--state active|completed|quarantined|all] [--limit N] [--
 
 | Bucket | Predicate (in `views::initiatives::list_filtered`) | Why |
 |---|---|---|
-| `active` | `state IN ('Draft', 'ApprovedPlan', 'Executing', 'Blocked')` | Non-terminal states only — answers "what is currently being worked on?". This is the default because it's the operator's most-frequent question. |
+| `active` | `state IN ('ApprovedPlan', 'Executing', 'Blocked')` | In-flight states only — answers "what is currently being worked on?". `Draft` is intentionally excluded because it is not approved work and may have no task rows yet. This is the default because it's the operator's most-frequent question. |
 | `completed` | `state = 'Completed'` | The successful terminal ONLY. `Failed` and `Aborted` are deliberately omitted because the operator's natural follow-up after "completed" is "tag and announce", which is wrong for the failure terminals. Power users reach `Failed` / `Aborted` via `--state all` or `raxis inspect-initiative`. |
 | `quarantined` | `EXISTS (SELECT 1 FROM initiative_quarantines q WHERE q.initiative_id = i.initiative_id)` | Orthogonal to the FSM. Returns ANY initiative with a quarantine row regardless of state — overlaps with `active` and `completed`. Modelled as a first-class bucket because "what is frozen for security right now?" is a distinct question. |
 | `all` | (no `WHERE` predicate) | Everything. Newest-first by `created_at`, capped by `--limit`. |
@@ -579,7 +579,7 @@ Initiatives (state=active, 3 rows):
   initiative_id              state          [Q]  created (rel) plan_sha256
   01J8…init-x                Executing           12m           abc123…
   01J8…init-y                Blocked        [Q]  1h            def456…
-  01J8…init-z                Draft               2h            beef00…
+  01J8…init-z                ApprovedPlan        2h            beef00…
   ([Q] = quarantined; see `raxis inspect-initiative <id>` for details.)
 ```
 

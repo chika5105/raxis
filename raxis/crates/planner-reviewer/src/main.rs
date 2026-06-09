@@ -15,12 +15,11 @@
 //! V2.4 lifecycle: the driver delegates to
 //! [`raxis_planner_core::run_role_session`] which runs the full
 //! dispatch loop end-to-end when the kernel-stamped prompt contract
-//! is present, and fails closed when it is not. Note: an `Idle`
-//! outcome on the reviewer is *acceptable*
-//! (the model declined to deliver a verdict) — the kernel records
-//! it but does not synthesise a `submit_review` on the model's
-//! behalf; the reviewer's session times out via the verifier
-//! deadline path.
+//! is present, and fails closed when it is not. Reviewer sessions
+//! get one runtime-owned corrective turn if the model answers in
+//! prose instead of calling `submit_review`; if the session still
+//! reaches `Idle`, the kernel classifies it as a missing-verdict
+//! runtime failure rather than a semantic rejection.
 
 use raxis_planner_core::{
     enforce_pid1_or_abort, harden_guest_for_agent, hydrate_from_proc_cmdline, init_pid1_filesystem,
@@ -159,11 +158,11 @@ async fn run() -> Result<(), PlannerError> {
             Ok(())
         }
         DriverOutcome::Idle { final_text } => {
-            // Reviewer Idle is informational. The kernel-side
-            // verifier deadline + admission semantics treat
-            // missing-verdict as the same failure class as a
-            // session crash, so we exit 0 here and let the
-            // kernel observe absence of `SubmitReview`.
+            // Reviewer Idle after the dispatch loop's corrective
+            // turn is a no-verdict runtime failure. We still exit
+            // 0 so the kernel can preserve the distinction between
+            // "VM crashed" and "reviewer ended without SubmitReview"
+            // in Mode-B post-exit synthesis.
             eprintln!(
                 "{{\"level\":\"info\",\"step\":\"planner-idle\",\
                   \"role\":\"reviewer\",\"final_text_len\":{len}}}",

@@ -48,7 +48,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 29;
+pub const SCHEMA_VERSION: u32 = 30;
 
 /// Apply all pending migrations to `conn`.
 /// Safe to call on every startup — skips already-applied migrations. Returns
@@ -148,6 +148,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 29 {
         apply_migration_29(conn)?;
+    }
+    if current_version < 30 {
+        apply_migration_30(conn)?;
     }
 
     Ok(())
@@ -2939,6 +2942,12 @@ fn apply_migration_29(conn: &Connection) -> Result<(), StoreError> {
         .map_err(|e| StoreError::Migration(format!("migration 29 failed: {e}")))
 }
 
+fn apply_migration_30(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_30_ddl();
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 30 failed: {e}")))
+}
+
 /// The complete migration-26 DDL.
 pub fn render_migration_26_ddl() -> String {
     let session_vm_env = Table::SessionVmEnv.as_str();
@@ -3120,6 +3129,41 @@ CREATE INDEX IF NOT EXISTS idx_managed_repositories_lifecycle
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (29, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+/// The complete migration-30 DDL.
+pub fn render_migration_30_ddl() -> String {
+    let tasks = Table::Tasks.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- kernel-owned task ids -- plan authors provide task_name; the kernel
+-- generates tasks.task_id as an internal UUID. Existing rows are
+-- backfilled with task_id so historical dashboards and CLI views have
+-- a stable display label.
+ALTER TABLE {tasks}
+    ADD COLUMN task_name TEXT;
+
+UPDATE {tasks}
+   SET task_name = task_id
+ WHERE task_name IS NULL OR task_name = '';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_initiative_task_name
+    ON {tasks} (initiative_id, task_name);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_task_name
+    ON {tasks} (task_name);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (30, strftime('%s', 'now'));
 
 COMMIT;
 "

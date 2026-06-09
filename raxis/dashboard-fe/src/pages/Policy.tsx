@@ -44,6 +44,7 @@ import type {
   BuilderValidationResponse,
   BuilderValidationSeverity,
   PolicyAdvancement,
+  PolicyHistoryEntry,
   PolicySnapshotView,
 } from "@/types/api";
 
@@ -316,10 +317,17 @@ export function PolicyPage() {
     !!profile && (profile.roles.includes("write_policy") || profile.roles.includes("admin"));
   const { theme } = useTheme();
   const monacoTheme = raxisMonacoTheme(theme);
+  const [selectedEpoch, setSelectedEpoch] = useState<number | null>(null);
 
   const snap = useQuery({
     queryKey: ["policy"],
     queryFn: ({ signal }) => dashboardApi.policy.snapshot(signal),
+    refetchInterval: 10_000,
+  });
+
+  const history = useQuery({
+    queryKey: ["policy-history"],
+    queryFn: ({ signal }) => dashboardApi.policy.history(100, signal),
     refetchInterval: 10_000,
   });
 
@@ -329,9 +337,33 @@ export function PolicyPage() {
     enabled: canWrite,
   });
 
+  const activeEpoch = snap.data?.epoch ?? 0;
+  const effectiveEpoch = selectedEpoch ?? activeEpoch;
+  const selectedHistoryRow = history.data?.find((row) => row.epoch === effectiveEpoch);
+  const showingHistorical = !!snap.data && effectiveEpoch !== activeEpoch;
+
+  const historicalToml = useQuery({
+    queryKey: ["policy-history-toml", effectiveEpoch],
+    queryFn: ({ signal }) => dashboardApi.policy.historyToml(effectiveEpoch, signal),
+    enabled: canWrite && showingHistorical && !!selectedHistoryRow?.artifact_available,
+  });
+
+  useEffect(() => {
+    if (!selectedEpoch || !history.data) return;
+    if (!history.data.some((row) => row.epoch === selectedEpoch)) {
+      setSelectedEpoch(null);
+    }
+  }, [history.data, selectedEpoch]);
+
   if (snap.isPending) return <PageSpinner />;
   if (snap.error) return <ErrorBox error={snap.error} onRetry={() => snap.refetch()} />;
   const s = snap.data;
+
+  const tomlPending = showingHistorical ? historicalToml.isPending : toml.isPending;
+  const tomlError = showingHistorical ? historicalToml.error : toml.error;
+  const tomlRefetch = showingHistorical ? historicalToml.refetch : toml.refetch;
+  const tomlValue = showingHistorical ? historicalToml.data : toml.data;
+  const tomlSha = showingHistorical ? selectedHistoryRow?.policy_sha256 : s.policy_sha256;
 
   return (
     <div className="space-y-5">
@@ -350,6 +382,17 @@ export function PolicyPage() {
 
       <PolicySnapshotSection snapshot={s} />
 
+      <PolicyHistorySection
+        activeEpoch={s.epoch}
+        canOpenToml={canWrite}
+        rows={history.data ?? []}
+        loading={history.isPending}
+        error={history.error}
+        selectedEpoch={effectiveEpoch}
+        onRetry={() => history.refetch()}
+        onSelectEpoch={(epoch) => setSelectedEpoch(epoch)}
+      />
+
       {!canWrite ? (
         <section className="card p-4 text-sm text-ink-muted">
           Current raw policy.toml is visible to operators with the{" "}
@@ -357,22 +400,26 @@ export function PolicyPage() {
           <code className="font-mono">admin</code> dashboard role. Your read-only
           policy snapshot above is still the active kernel state.
         </section>
-      ) : toml.isPending ? (
+      ) : tomlPending ? (
         <PageSpinner />
-      ) : toml.error ? (
-        <ErrorBox error={toml.error} onRetry={() => toml.refetch()} />
+      ) : tomlError ? (
+        <ErrorBox error={tomlError} onRetry={() => tomlRefetch()} />
       ) : (
         <section className="card p-0 overflow-hidden">
           <header className="px-4 py-3 border-b border-edge flex flex-wrap items-center justify-between gap-2">
             <div>
-              <h2 className="text-sm font-semibold text-ink">Current policy.toml</h2>
+              <h2 className="text-sm font-semibold text-ink">
+                {showingHistorical ? `Policy epoch #${effectiveEpoch}` : "Current policy.toml"}
+              </h2>
               <p className="mt-1 text-xs text-ink-muted">
-                Read-only view of the policy bytes currently loaded by the kernel.
+                {showingHistorical
+                  ? "Read-only view of the exact historical policy artifact preserved by RAXIS."
+                  : "Read-only view of the policy bytes currently loaded by the kernel."}
               </p>
             </div>
             <div className="text-[11px] text-ink-subtle font-mono flex items-center gap-2">
-              active sha256: <Mono>{shortSha(s.policy_sha256)}</Mono>
-              <CopyButton value={s.policy_sha256} />
+              sha256: <Mono>{shortSha(tomlSha)}</Mono>
+              {tomlSha && <CopyButton value={tomlSha} />}
             </div>
           </header>
           <div className="h-[60vh]">
@@ -381,7 +428,7 @@ export function PolicyPage() {
               defaultLanguage="toml"
               beforeMount={ensureTomlLanguage}
               theme={monacoTheme}
-              value={toml.data ?? ""}
+              value={tomlValue ?? ""}
               options={{
                 readOnly: true,
                 fontSize: 13,
@@ -1068,6 +1115,163 @@ function StatRow({ label, value, mono }: { label: string; value: string; mono?: 
 // ---------------------------------------------------------------------------
 // PolicySnapshotSection (unchanged, used by PolicyPage)
 // ---------------------------------------------------------------------------
+
+function PolicyHistorySection({
+  activeEpoch,
+  canOpenToml,
+  rows,
+  loading,
+  error,
+  selectedEpoch,
+  onRetry,
+  onSelectEpoch,
+}: {
+  activeEpoch: number;
+  canOpenToml: boolean;
+  rows: PolicyHistoryEntry[];
+  loading: boolean;
+  error: unknown;
+  selectedEpoch: number;
+  onRetry: () => void;
+  onSelectEpoch: (epoch: number) => void;
+}) {
+  return (
+    <section className="card p-0 overflow-hidden">
+      <header className="px-4 py-3 border-b border-edge flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-ink">Policy evolution</h2>
+          <p className="mt-1 text-xs text-ink-muted">
+            Previous signed policy epochs, newest first. Use this to track how the
+            organization security envelope changed over time.
+          </p>
+        </div>
+        <div className="text-[11px] text-ink-subtle font-mono">
+          active epoch <Mono>#{activeEpoch}</Mono>
+        </div>
+      </header>
+
+      {loading ? (
+        <div className="p-4 text-sm text-ink-muted flex items-center gap-2">
+          <Spinner className="h-4 w-4" /> Loading policy history...
+        </div>
+      ) : error ? (
+        <div className="p-4">
+          <ErrorBox error={error} onRetry={onRetry} />
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="p-4 text-sm text-ink-muted">
+          No policy history rows are available yet. Genesis and future epoch
+          advances will appear here once the kernel records them.
+        </div>
+      ) : (
+        <div className="divide-y divide-edge">
+          {rows.map((row) => {
+            const selected = row.epoch === selectedEpoch;
+            const canSelect = canOpenToml && (row.is_active || row.artifact_available);
+            return (
+              <div
+                key={row.epoch}
+                className={`px-4 py-3 grid gap-3 lg:grid-cols-[120px_1fr_auto] ${
+                  selected ? "bg-info-muted/30" : "bg-panel"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <Mono pill>#{row.epoch}</Mono>
+                  <span
+                    className={
+                      row.is_active
+                        ? "badge border-ok/40 bg-ok-muted text-ok"
+                        : "badge border-edge bg-panel-raised text-ink-muted"
+                    }
+                  >
+                    {row.is_active ? "Active" : "Historical"}
+                  </span>
+                </div>
+
+                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                  <HistoryDatum
+                    label="Advanced"
+                    value={fmtAbsolute(Number(row.advanced_at))}
+                  />
+                  <HistoryDatum
+                    label="Policy SHA"
+                    value={shortSha(row.policy_sha256)}
+                    copy={row.policy_sha256}
+                    mono
+                  />
+                  <HistoryDatum
+                    label="Signed by"
+                    value={shortFingerprint(row.signed_by_authority)}
+                    copy={row.signed_by_authority}
+                    mono
+                  />
+                  <HistoryDatum
+                    label="Triggered by"
+                    value={shortFingerprint(row.triggered_by_operator)}
+                    copy={row.triggered_by_operator}
+                    mono
+                  />
+                </div>
+
+                <div className="flex items-center justify-start lg:justify-end gap-2">
+                  <span
+                    className={
+                      row.is_active
+                        ? "badge border-info/40 bg-info-muted text-info"
+                        : row.artifact_available
+                        ? "badge border-ok/40 bg-ok-muted text-ok"
+                        : "badge border-warn/40 bg-warn/10 text-warn"
+                    }
+                  >
+                    {row.is_active
+                      ? "Loaded now"
+                      : row.artifact_available
+                        ? "Artifact kept"
+                        : "Artifact unavailable"}
+                  </span>
+                  {canOpenToml && (
+                    <button
+                      type="button"
+                      className={selected ? "btn-primary text-xs py-1" : "btn text-xs py-1"}
+                      disabled={!canSelect}
+                      onClick={() => onSelectEpoch(row.epoch)}
+                    >
+                      {row.is_active ? "View current" : "View TOML"}
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function HistoryDatum({
+  label,
+  value,
+  copy,
+  mono,
+}: {
+  label: string;
+  value: string;
+  copy?: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] uppercase tracking-wider text-ink-subtle">{label}</div>
+      <div className="mt-0.5 flex items-center gap-1 min-w-0">
+        <span className={`${mono ? "font-mono" : ""} text-xs text-ink truncate`}>
+          {value}
+        </span>
+        {copy && <CopyButton value={copy} />}
+      </div>
+    </div>
+  );
+}
 
 function PolicySnapshotSection({ snapshot: s }: { snapshot: PolicySnapshotView }) {
   return (

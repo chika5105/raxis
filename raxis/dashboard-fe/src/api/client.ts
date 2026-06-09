@@ -32,6 +32,7 @@ import type {
   GateStatsResponse,
   OrchestratorGapsResponse,
   PolicyAdvancement,
+  PolicyHistoryEntry,
   PolicySnapshotView,
   RecentSessionEntry,
   SessionCaptureView,
@@ -611,8 +612,18 @@ export const dashboardApi = {
   policy: {
     snapshot: (signal?: AbortSignal): Promise<PolicySnapshotView> =>
       apiFetch<PolicySnapshotView>("/api/policy", signal ? { signal } : {}),
+    history: (limit = 50, signal?: AbortSignal): Promise<PolicyHistoryEntry[]> =>
+      apiFetch<PolicyHistoryEntry[]>(
+        `/api/policy/history?limit=${encodeURIComponent(String(limit))}`,
+        signal ? { signal } : {},
+      ),
     rawToml: (signal?: AbortSignal): Promise<string> =>
       apiFetch<string>("/api/policy/toml", { asText: true, ...(signal ? { signal } : {}) }),
+    historyToml: (epoch: number, signal?: AbortSignal): Promise<string> =>
+      apiFetch<string>(`/api/policy/history/${encodeURIComponent(String(epoch))}/toml`, {
+        asText: true,
+        ...(signal ? { signal } : {}),
+      }),
     update: (
       body: { toml: string; signature_b64: string },
     ): Promise<PolicyAdvancement> =>

@@ -121,10 +121,14 @@ What a Reviewer's `path_allowlist` does today:
 - The kernel rejects entries that no predecessor Executor's
   allowlist covers — letting a Reviewer read code outside the
   initiative's effective scope would defeat scope discipline.
+- `raxis plan validate` warns, but does not reject, when a Reviewer
+  depends on a predecessor that exports paths the Reviewer read scope
+  does not cover. That warning is a DX hint: the runtime still fails
+  closed if the Reviewer later tries to read outside its sparse scope.
 
 ```toml
 [[tasks]]
-task_id            = "ex"
+task_name            = "ex"
 clone_strategy     = "blobless"
 description        = "Ex"
 prompt             = """Complete Ex according to this plan's acceptance criteria."""
@@ -132,7 +136,7 @@ session_agent_type = "Executor"
 path_allowlist     = ["src/auth/"]
 
 [[tasks]]
-task_id            = "rev"
+task_name            = "rev"
 clone_strategy     = "blobless"
 description        = "Rev"
 prompt             = """Complete Rev according to this plan's acceptance criteria."""
@@ -141,6 +145,26 @@ predecessors       = ["ex"]
 path_allowlist     = ["src/auth/"]            # OK — read scope = Executor's write scope
 # path_allowlist   = ["src/auth/v1/"]         # OK — subset
 # path_allowlist   = ["src/billing/"]         # REJECTED — not in union of predecessors' allowlists
+```
+
+When an Executor declares exported artifacts, keep the Reviewer's read
+scope aligned with the artifact under review:
+
+```toml
+[[tasks]]
+task_name                 = "produce-report"
+session_agent_type        = "Executor"
+clone_strategy            = "blobless"
+path_allowlist            = ["reports/"]
+path_export_to_successors = true
+path_export_globs         = ["reports/generated/summary.md"]
+
+[[tasks]]
+task_name          = "review-report"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+predecessors       = ["produce-report"]
+path_allowlist     = ["reports/generated/"]  # covers the exported artifact
 ```
 
 > **Spec direction (informational).** `INV-PLANNER-HARNESS-01`'s

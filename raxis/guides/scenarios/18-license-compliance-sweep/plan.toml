@@ -11,7 +11,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id            = "sweep"
+task_name            = "sweep"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["COMPLIANCE.md"]

@@ -94,7 +94,7 @@ each `InferenceCompleted` event.
 # plan.toml
 
 [[tasks]]
-task_id            = "auth_implementer"
+task_name            = "auth_implementer"
 session_agent_type = "Executor"
 vm_image           = "raxis/rust:1.87"
 

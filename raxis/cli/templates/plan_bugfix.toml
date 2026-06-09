@@ -17,7 +17,7 @@ lane_id    = "main"
 target_ref = "refs/heads/main"
 
 [[tasks]]
-task_id            = "reproduce"
+task_name            = "reproduce"
 name               = "Reproduce bug with a failing test"
 description        = "Reproduce bug with a failing test"
 prompt             = """
@@ -30,7 +30,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 
 [[tasks]]
-task_id            = "fix"
+task_name            = "fix"
 name               = "Apply the fix"
 description        = "Apply the fix"
 prompt             = """
@@ -42,7 +42,7 @@ session_agent_type = "Executor"
 predecessors       = ["reproduce"]
 
 [[tasks]]
-task_id            = "regression_test"
+task_name            = "regression_test"
 name               = "Run the regression test suite"
 description        = "Run the regression test suite"
 prompt             = """

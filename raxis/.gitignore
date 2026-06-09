@@ -1,0 +1,3 @@
+# Local guest-kernel copies staged by `cargo xtask images bake`.
+kernel/vmlinux
+kernel/vmlinux.config

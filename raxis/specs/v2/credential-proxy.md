@@ -1499,7 +1499,7 @@ ports    = [443]
 
 ```toml
 [[tasks]]
-task_id     = "deploy-staging"
+task_name     = "deploy-staging"
 description = "Build Docker image, push to staging registry, apply k8s manifests, run migrations"
 vm_image    = "raxis/python:3.12-kubectl"
 session_agent_type = "Executor"
@@ -1586,7 +1586,7 @@ real_target = "postgres-prod.company.internal:5432"
 **`plan.toml`:**
 ```toml
 [[tasks]]
-task_id     = "generate-revenue-report"
+task_name     = "generate-revenue-report"
 description = "Query production orders table and generate monthly revenue report"
 vm_image    = "raxis/python:3.12"
 
@@ -1800,7 +1800,7 @@ name = "User API credentials"
 lane_id = "feature-work"
 
 [[tasks]]
-task_id = "implement-user-api"
+task_name = "implement-user-api"
 name    = "Implement REST API with database + caching"
 
   [[tasks.credentials]]

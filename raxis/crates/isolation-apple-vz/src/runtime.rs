@@ -130,6 +130,18 @@ pub const VSOCK_CONNECT_BACKOFF_FAST_END: Duration = Duration::from_millis(300);
 /// guest time to recover (or the deadline to expire).
 pub const VSOCK_CONNECT_BACKOFF_RAMP_END: Duration = Duration::from_secs(2);
 
+/// Best-effort drain window for the host-side AVF console pump
+/// after VM stop completes or times out.
+///
+/// The console pump is forensic capture only. It must never become
+/// part of the security-critical VM shutdown path: a wedged AVF
+/// file-handle retain can keep the read side from seeing EOF, and
+/// an unconditional `JoinHandle::join()` would then park the kernel
+/// indefinitely during retry/revoke cleanup. We wait briefly for the
+/// happy path, join only if the thread has finished, and otherwise
+/// detach it so the scheduler/dashboard stay responsive.
+pub const CONSOLE_PUMP_JOIN_GRACE: Duration = Duration::from_millis(250);
+
 /// Pick the next inter-attempt sleep for the
 /// [`AvfRuntime::connect_vsock`] retry loop based on how long we've
 /// already been polling. Three regimes:
@@ -618,6 +630,28 @@ mod macos {
         Ok(pump)
     }
 
+    fn join_console_pump_best_effort(pump: std::thread::JoinHandle<()>, grace: Duration) {
+        let deadline = std::time::Instant::now() + grace;
+        while !pump.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if pump.is_finished() {
+            if pump.join().is_err() {
+                eprintln!("{{\"level\":\"warn\",\"event\":\"avf_console_pump_join_panic\"}}",);
+            }
+        } else {
+            // Drop detaches the thread. That may leak one forensic
+            // reader thread in the pathological AVF EOF-missing case,
+            // but it prevents a much worse failure mode: wedging the
+            // kernel on VM shutdown.
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"avf_console_pump_join_timeout\",\
+                 \"timeout_ms\":{}}}",
+                grace.as_millis(),
+            );
+        }
+    }
+
     impl AvfRuntime {
         /// Build a runtime; allocates the serial dispatch queue but
         /// no AVF objects yet. The first AVF call happens in
@@ -1050,13 +1084,13 @@ mod macos {
                 }),
             };
 
-            // Best-effort join the console-pump thread. The thread
-            // exits naturally on pipe EOF (which arrives once AVF
-            // releases the write-side NSFileHandle on VM teardown).
-            // We don't propagate panics from the pump — its only
-            // job is forensic capture, never observable behaviour.
+            // Best-effort bounded join of the console-pump thread.
+            // The thread exits naturally on pipe EOF (which arrives
+            // once AVF releases the write-side NSFileHandle on VM
+            // teardown). If EOF never arrives, detach instead of
+            // wedging the kernel on a forensic capture helper.
             if let Some(pump) = self.console_pump.take() {
-                let _ = pump.join();
+                join_console_pump_best_effort(pump, CONSOLE_PUMP_JOIN_GRACE);
             }
 
             result

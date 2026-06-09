@@ -92,7 +92,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id            = "refactor-auth"
+task_name            = "refactor-auth"
 description        = "Refactor Auth"
 prompt             = """Complete Refactor Auth according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
@@ -101,7 +101,7 @@ path_allowlist     = ["src/auth/", "tests/auth/"]
 predecessors       = []
 
 [[tasks]]
-task_id            = "review-auth"
+task_name            = "review-auth"
 description        = "Review Auth"
 prompt             = """Complete Review Auth according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"
@@ -110,7 +110,7 @@ path_allowlist     = ["src/auth/", "tests/auth/"]
 predecessors       = ["refactor-auth"]
 
 [[tasks]]
-task_id            = "refactor-api"
+task_name            = "refactor-api"
 description        = "Refactor Api"
 prompt             = """Complete Refactor Api according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
@@ -119,7 +119,7 @@ path_allowlist     = ["src/api/", "tests/api/"]
 predecessors       = []
 
 [[tasks]]
-task_id            = "review-api"
+task_name            = "review-api"
 description        = "Review Api"
 prompt             = """Complete Review Api according to this plan's acceptance criteria."""
 session_agent_type = "Reviewer"

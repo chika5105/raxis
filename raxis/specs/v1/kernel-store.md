@@ -2287,7 +2287,7 @@ These fields are part of the signed plan artifact. They are parsed at `approve_p
 
 ```toml
 [[tasks]]
-task_id = "task-a"
+task_name = "task-a"
 # ... existing fields (depends_on, description, etc.) ...
 
 # Glob patterns for paths this task is permitted to touch.

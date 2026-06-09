@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -508,19 +508,6 @@ export function OverviewWarnings({ gaps }: OverviewWarningsProps) {
   const [dismissedKeys, setDismissedKeys] = useState<Set<string>>(() =>
     readDismissedOrchestratorGapKeys(),
   );
-  const liveKeys = useMemo(
-    () => new Set(gaps.map(orchestratorGapDismissKey)),
-    [gaps],
-  );
-
-  useEffect(() => {
-    setDismissedKeys((prev) => {
-      const pruned = new Set([...prev].filter((key) => liveKeys.has(key)));
-      if (pruned.size === prev.size) return prev;
-      writeDismissedOrchestratorGapKeys(pruned);
-      return pruned;
-    });
-  }, [liveKeys]);
 
   if (gaps.length === 0) return null;
 
@@ -545,13 +532,8 @@ export function OverviewWarnings({ gaps }: OverviewWarningsProps) {
       return next;
     });
   };
-  const restoreDismissed = () => {
-    setDismissedKeys((prev) => {
-      const next = new Set([...prev].filter((key) => !liveKeys.has(key)));
-      writeDismissedOrchestratorGapKeys(next);
-      return next;
-    });
-  };
+
+  if (visibleGaps.length === 0) return null;
 
   return (
     <section
@@ -570,15 +552,6 @@ export function OverviewWarnings({ gaps }: OverviewWarningsProps) {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {dismissedCount > 0 && (
-            <button
-              type="button"
-              className="btn text-xs px-2 py-1"
-              onClick={restoreDismissed}
-            >
-              Restore dismissed
-            </button>
-          )}
           {visibleGaps.length > 1 && (
             <button
               type="button"
@@ -591,22 +564,15 @@ export function OverviewWarnings({ gaps }: OverviewWarningsProps) {
         </div>
       </header>
 
-      {visibleGaps.length > 0 ? (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          {visibleGaps.map((g) => (
-            <OrchestratorGapWarningCard
-              key={orchestratorGapDismissKey(g)}
-              a={g}
-              onDismiss={() => dismissGap(g)}
-            />
-          ))}
-        </div>
-      ) : (
-        <div className="card border-warn/30 bg-warn/5 p-3 text-sm text-ink-muted">
-          All current warnings dismissed. The kernel signal is still preserved
-          on task and session timelines.
-        </div>
-      )}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        {visibleGaps.map((g) => (
+          <OrchestratorGapWarningCard
+            key={orchestratorGapDismissKey(g)}
+            a={g}
+            onDismiss={() => dismissGap(g)}
+          />
+        ))}
+      </div>
     </section>
   );
 }

@@ -55,6 +55,11 @@ fn cfg_for(
         restart_backoff_ms: 10,
         max_child_runs,
         require_initialized_data_dir: false,
+        readiness_url: None,
+        readiness_initial_grace_secs: 20,
+        readiness_interval_secs: 5,
+        readiness_timeout_ms: 1_500,
+        readiness_failures_before_restart: 3,
     }
 }
 

@@ -86,10 +86,10 @@ use extended_e2e_support::{
         poll_for_dual_lifecycle_completion, realism_workspace_root, realistic_lifecycle_deadline,
         reap_avf_orphan_vms, require_canonical_images, require_disk_hygiene,
         require_gateway_binary, require_gcp_adc, require_live_provider_dev_keys,
-        require_tcp_reachable, resolved_install_dir, seed_realistic_main_repository,
-        spawn_kernel_normal, walk_chain_or_panic, write_credentials, write_provider_credentials,
-        ExampleRefreshInputs, OperatorIpc, LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED,
-        SHUTDOWN_DEADLINE,
+        require_tcp_reachable, resolved_install_dir, runtime_task_ids_for_names,
+        seed_realistic_main_repository, spawn_kernel_normal, walk_chain_or_panic,
+        write_credentials, write_provider_credentials, ExampleRefreshInputs, OperatorIpc,
+        LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED, SHUTDOWN_DEADLINE,
     },
     multi_initiative::{
         sibling_plan_toml, MultiInitiativeIsolationWitness, SIBLING_LANE_ID,
@@ -99,8 +99,9 @@ use extended_e2e_support::{
     path_allowlist::PathAllowlistPositiveWitness,
     plan_realistic::{
         realistic_plan_toml, TASK_ALLOWLIST_POSITIVE, TASK_CREDENTIAL_SUBSTITUTION_CANARY,
-        TASK_DEP_FETCH_EVIDENCE, TASK_LINT_DEFECT, TASK_MATERIALIZE, TASK_SERVICE_ROUND_TRIP,
-        TASK_TOOLING_MCP_UNITY, TASK_TRANSPARENT_PROXY_REALSCRIPTS, TASK_XFILE_REFACTOR,
+        TASK_DEP_FETCH_EVIDENCE, TASK_LINT_DEFECT, TASK_LINT_RUNNER_PYTHON, TASK_MATERIALIZE,
+        TASK_REVIEW_LINT_A, TASK_REVIEW_LINT_B, TASK_SERVICE_ROUND_TRIP, TASK_TOOLING_MCP_UNITY,
+        TASK_TRANSPARENT_PROXY_REALSCRIPTS, TASK_XFILE_REFACTOR,
     },
     reviewer_substantive_disagreement::ReviewerSubstantiveDisagreementWitness,
     seeds::{
@@ -425,22 +426,73 @@ fn realistic_session_lifecycle() {
         chain.len(),
     );
 
+    // Plan TOML uses operator-authored `task_name`. Runtime and
+    // audit-chain rows use kernel-owned UUID task IDs. Resolve
+    // names once, then use UUIDs for every witness predicate.
+    let primary_task_ids = runtime_task_ids_for_names(
+        kernel.data_dir(),
+        &initiative_primary,
+        [
+            TASK_MATERIALIZE,
+            TASK_XFILE_REFACTOR,
+            TASK_LINT_DEFECT,
+            TASK_LINT_RUNNER_PYTHON,
+            TASK_REVIEW_LINT_A,
+            TASK_REVIEW_LINT_B,
+            TASK_ALLOWLIST_POSITIVE,
+            TASK_SERVICE_ROUND_TRIP,
+            TASK_TRANSPARENT_PROXY_REALSCRIPTS,
+            TASK_CREDENTIAL_SUBSTITUTION_CANARY,
+            TASK_DEP_FETCH_EVIDENCE,
+            TASK_TOOLING_MCP_UNITY,
+        ],
+    );
+    let sibling_task_ids = runtime_task_ids_for_names(
+        kernel.data_dir(),
+        &initiative_sibling,
+        [TASK_SIBLING_MATERIALIZE],
+    );
+    let primary_task_id = |task_name: &str| -> &str {
+        primary_task_ids
+            .get(task_name)
+            .unwrap_or_else(|| panic!("missing resolved primary task_name={task_name}"))
+    };
+    let sibling_task_id = |task_name: &str| -> &str {
+        sibling_task_ids
+            .get(task_name)
+            .unwrap_or_else(|| panic!("missing resolved sibling task_name={task_name}"))
+    };
+    eprintln!(
+        "[realism-e2e] resolved runtime task ids: primary={} task(s), sibling {} -> {}",
+        primary_task_ids.len(),
+        TASK_SIBLING_MATERIALIZE,
+        sibling_task_id(TASK_SIBLING_MATERIALIZE),
+    );
+
     // ── Apply every realism witness ──────────────────────────
-    let primary_workdir =
-        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, TASK_XFILE_REFACTOR);
+    let primary_workdir = locate_executor_worktree_via_chain(
+        kernel.data_dir(),
+        &chain,
+        primary_task_id(TASK_XFILE_REFACTOR),
+    );
+    let positive_task_id = primary_task_id(TASK_ALLOWLIST_POSITIVE);
     let positive_workdir =
-        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, TASK_ALLOWLIST_POSITIVE);
-    let lint_session_id =
-        locate_session_id_for_task(&chain, TASK_LINT_DEFECT).unwrap_or_else(|| {
+        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, positive_task_id);
+    let lint_session_id = locate_session_id_for_task(&chain, primary_task_id(TASK_LINT_DEFECT))
+        .unwrap_or_else(|| {
             panic!(
                 "no SessionVmSpawned for {TASK_LINT_DEFECT}; \
-                    reviewer-substantive witness cannot attribute critique"
+                        reviewer-substantive witness cannot attribute critique"
             )
         });
     eprintln!("[realism-e2e] lint-defect session_id={lint_session_id}");
 
-    let sqlite_path = kernel.data_dir().join("kernel.db");
-    let reviewer_witness = ReviewerSubstantiveDisagreementWitness::for_realistic_plan(&sqlite_path);
+    let reviewer_witness = ReviewerSubstantiveDisagreementWitness {
+        executor_task_id: primary_task_id(TASK_LINT_RUNNER_PYTHON).to_owned(),
+        reviewer_a_task_id: primary_task_id(TASK_REVIEW_LINT_A).to_owned(),
+        reviewer_b_task_id: primary_task_id(TASK_REVIEW_LINT_B).to_owned(),
+        sqlite_path: kernel.data_dir().join("kernel.db"),
+    };
     let reviewer_report = reviewer_witness.evaluate(&chain);
     assert!(
         reviewer_report.is_pass(),
@@ -450,7 +502,7 @@ fn realistic_session_lifecycle() {
 
     let isolation = MultiInitiativeIsolationWitness::new(&initiative_primary, &initiative_sibling);
 
-    let crash_witness = CrashRecoveryWitness::new(TASK_MATERIALIZE);
+    let crash_witness = CrashRecoveryWitness::new(primary_task_id(TASK_MATERIALIZE));
 
     // iter65 — dep-fetch-evidence witness: pins Path A3 mediated
     // egress (the kernel admitted the executor's one HTTPS GET to
@@ -458,9 +510,10 @@ fn realistic_session_lifecycle() {
     // out/deps/install-evidence.json). Locate the executor's
     // worktree + session id off the chain — same shape as the
     // other on-disk witnesses above.
+    let dep_fetch_task_id = primary_task_id(TASK_DEP_FETCH_EVIDENCE);
     let dep_fetch_workdir =
-        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, TASK_DEP_FETCH_EVIDENCE);
-    let dep_fetch_session_id = locate_session_id_for_task(&chain, TASK_DEP_FETCH_EVIDENCE)
+        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, dep_fetch_task_id);
+    let dep_fetch_session_id = locate_session_id_for_task(&chain, dep_fetch_task_id)
         .unwrap_or_else(|| {
             panic!(
                 "no SessionVmSpawned for {TASK_DEP_FETCH_EVIDENCE}; \
@@ -472,21 +525,32 @@ fn realistic_session_lifecycle() {
          workdir={}",
         dep_fetch_workdir.display(),
     );
-    let dep_fetch_witness =
-        DepFetchEvidenceWitness::for_realistic_plan(&dep_fetch_session_id, &dep_fetch_workdir);
+    let dep_fetch_witness = DepFetchEvidenceWitness {
+        task_id: dep_fetch_task_id.to_owned(),
+        executor_session_id: dep_fetch_session_id,
+        workdir: dep_fetch_workdir,
+    };
 
     // Tooling / MCP custom tools: dashboard-visible primary-plan
     // task proving BYO tools arrive as bounded Executor-only
     // custom tools and produce operator-inspectable evidence.
+    let tooling_task_id = primary_task_id(TASK_TOOLING_MCP_UNITY);
     let tooling_workdir =
-        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, TASK_TOOLING_MCP_UNITY);
-    let tooling_witness = ToolingMcpEvidenceWitness::for_realistic_plan(&tooling_workdir);
+        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, tooling_task_id);
+    let tooling_witness = ToolingMcpEvidenceWitness {
+        task_id: tooling_task_id.to_owned(),
+        workdir: tooling_workdir.clone(),
+    };
 
     let global_witnesses: Vec<Box<dyn EnforcementWitness>> = vec![
         Box::new(NoSecurityViolationWitness),
-        Box::new(PathAllowlistPositiveWitness::for_realistic_plan(
-            &positive_workdir,
-        )),
+        Box::new(PathAllowlistPositiveWitness {
+            task_id: positive_task_id.to_owned(),
+            workdir: positive_workdir,
+            expected_path: PathBuf::from(
+                extended_e2e_support::path_allowlist::EXPECTED_GENERATED_PATH,
+            ),
+        }),
         Box::new(isolation),
         Box::new(crash_witness),
         Box::new(dep_fetch_witness),
@@ -496,12 +560,10 @@ fn realistic_session_lifecycle() {
     eprintln!("[realism-e2e] all chain-side + on-disk witnesses satisfied");
 
     // ── Service-evidence per-protocol round-trip ─────────────
+    let service_task_id = primary_task_id(TASK_SERVICE_ROUND_TRIP);
     let service_workdir =
-        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, TASK_SERVICE_ROUND_TRIP);
-    let service_scope = WitnessScope::new(
-        initiative_primary.clone(),
-        TASK_SERVICE_ROUND_TRIP.to_owned(),
-    );
+        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, service_task_id);
+    let service_scope = WitnessScope::new(initiative_primary.clone(), service_task_id.to_owned());
     let active_failures = collect_active_witness_failures(
         &chain,
         &service_workdir,
@@ -538,15 +600,9 @@ fn realistic_session_lifecycle() {
     // upstream egress (proxy is the only path). Together with the
     // service-evidence pass above this proves the transparency
     // contract end-to-end.
-    let tp_workdir = locate_executor_worktree_via_chain(
-        kernel.data_dir(),
-        &chain,
-        TASK_TRANSPARENT_PROXY_REALSCRIPTS,
-    );
-    let tp_scope = WitnessScope::new(
-        initiative_primary.clone(),
-        TASK_TRANSPARENT_PROXY_REALSCRIPTS.to_owned(),
-    );
+    let tp_task_id = primary_task_id(TASK_TRANSPARENT_PROXY_REALSCRIPTS);
+    let tp_workdir = locate_executor_worktree_via_chain(kernel.data_dir(), &chain, tp_task_id);
+    let tp_scope = WitnessScope::new(initiative_primary.clone(), tp_task_id.to_owned());
     let tp_expectations = TransparentProxyExpectations {
         postgres: pg_seed.clone(),
         mongodb: mongo_seed.clone(),
@@ -576,15 +632,10 @@ fn realistic_session_lifecycle() {
     // The witness asserts the real credential canary
     // (`raxis_test_pass`) does NOT appear anywhere in the
     // executor's worktree post-run.
-    let cred_sub_workdir = locate_executor_worktree_via_chain(
-        kernel.data_dir(),
-        &chain,
-        TASK_CREDENTIAL_SUBSTITUTION_CANARY,
-    );
-    let cred_sub_scope = WitnessScope::new(
-        initiative_primary.clone(),
-        TASK_CREDENTIAL_SUBSTITUTION_CANARY.to_owned(),
-    );
+    let cred_sub_task_id = primary_task_id(TASK_CREDENTIAL_SUBSTITUTION_CANARY);
+    let cred_sub_workdir =
+        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, cred_sub_task_id);
+    let cred_sub_scope = WitnessScope::new(initiative_primary.clone(), cred_sub_task_id.to_owned());
     if let Err(e) = cred_sub_evidence::assert_credential_substitution_round_trip(
         &chain,
         &cred_sub_workdir,

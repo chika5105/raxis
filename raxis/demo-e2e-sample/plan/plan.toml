@@ -24,7 +24,7 @@ lane_id    = "main"
 target_ref = "refs/heads/main"
 
 [[tasks]]
-task_id            = "implement_healthz"
+task_name            = "implement_healthz"
 name               = "Implement /healthz route"
 description        = """
 Add the /healthz route to the existing HTTP router. The handler returns
@@ -35,7 +35,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 
 [[tasks]]
-task_id            = "review_healthz"
+task_name            = "review_healthz"
 name               = "Review /healthz route"
 description        = """
 Review the implementation produced by `implement_healthz`. Confirm the

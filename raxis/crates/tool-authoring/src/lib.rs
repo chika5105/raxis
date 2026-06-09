@@ -294,28 +294,28 @@ pub fn append_custom_tool(
 
 pub fn attach_profile_to_task(
     plan_text: &str,
-    task_id: &str,
+    task_name: &str,
     profile: &str,
 ) -> Result<String, ToolAuthoringError> {
     validate_profile_name(profile)?;
     let mut doc = parse_document(plan_text)?;
     let Some(tasks) = doc["tasks"].as_array_of_tables_mut() else {
-        return Err(ToolAuthoringError::TaskNotFound(task_id.to_owned()));
+        return Err(ToolAuthoringError::TaskNotFound(task_name.to_owned()));
     };
 
     let mut found = false;
     for task in tasks.iter_mut() {
         if task
-            .get("task_id")
+            .get("task_name")
             .and_then(|v| v.as_value())
             .and_then(|v| v.as_str())
-            != Some(task_id)
+            != Some(task_name)
         {
             continue;
         }
         if task.contains_key("profile") {
             return Err(ToolAuthoringError::DeprecatedTaskProfile {
-                task: task_id.to_owned(),
+                task: task_name.to_owned(),
             });
         }
         let item = task
@@ -323,13 +323,13 @@ pub fn attach_profile_to_task(
             .or_insert_with(|| Item::Value(toml_edit::Value::Array(Array::new())));
         let Some(arr) = item.as_value_mut().and_then(|v| v.as_array_mut()) else {
             return Err(ToolAuthoringError::InvalidTaskProfiles {
-                task: task_id.to_owned(),
+                task: task_name.to_owned(),
             });
         };
         for existing in arr.iter() {
             if existing.as_str() == Some(profile) {
                 return Err(ToolAuthoringError::TaskAlreadyHasProfile {
-                    task: task_id.to_owned(),
+                    task: task_name.to_owned(),
                     profile: profile.to_owned(),
                 });
             }
@@ -342,7 +342,7 @@ pub fn attach_profile_to_task(
     if found {
         Ok(finish_doc(doc))
     } else {
-        Err(ToolAuthoringError::TaskNotFound(task_id.to_owned()))
+        Err(ToolAuthoringError::TaskNotFound(task_name.to_owned()))
     }
 }
 
@@ -431,32 +431,32 @@ pub fn validate_plan_tools(plan_text: &str) -> ToolValidationReport {
 
     if let Some(tasks) = doc.get("tasks").and_then(|v| v.as_array()) {
         for task in tasks {
-            let task_id = task
-                .get("task_id")
+            let task_name = task
+                .get("task_name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<unknown>");
             if task.get("custom_tool").is_some() {
                 report.errors.push(format!(
-                    "task {task_id:?} declares custom_tool; custom tools must live under profiles"
+                    "task {task_name:?} declares custom_tool; custom tools must live under profiles"
                 ));
             }
             if task.get("profile").is_some() {
                 report.errors.push(format!(
-                    "task {task_id:?} uses deprecated scalar profile; use profiles = [...]"
+                    "task {task_name:?} uses deprecated scalar profile; use profiles = [...]"
                 ));
             }
             if let Some(task_profiles_value) = task.get("profiles") {
                 let Some(arr) = task_profiles_value.as_array() else {
                     report
                         .errors
-                        .push(format!("task {task_id:?} profiles must be an array"));
+                        .push(format!("task {task_name:?} profiles must be an array"));
                     continue;
                 };
                 let mut seen_tools: BTreeMap<String, String> = BTreeMap::new();
                 for profile in arr.iter().filter_map(|v| v.as_str()) {
                     if !profile_tools.contains_key(profile) && !profiles.contains_key(profile) {
                         report.warnings.push(format!(
-                            "task {task_id:?} references profile {profile:?} with no custom tools"
+                            "task {task_name:?} references profile {profile:?} with no custom tools"
                         ));
                     }
                     if let Some(tools) = profile_tools.get(profile) {
@@ -464,7 +464,7 @@ pub fn validate_plan_tools(plan_text: &str) -> ToolValidationReport {
                             if let Some(prev) = seen_tools.insert(tool.clone(), profile.to_owned())
                             {
                                 report.warnings.push(format!(
-                                    "task {task_id:?} sees tool {tool:?} from both {prev:?} and {profile:?}; identical duplicates are allowed, conflicts reject at kernel admission"
+                                    "task {task_name:?} sees tool {tool:?} from both {prev:?} and {profile:?}; identical duplicates are allowed, conflicts reject at kernel admission"
                                 ));
                             }
                         }
@@ -472,7 +472,7 @@ pub fn validate_plan_tools(plan_text: &str) -> ToolValidationReport {
                 }
                 if seen_tools.len() > MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK {
                     report.errors.push(format!(
-                        "task {task_id:?} has {} effective custom tools, exceeding limit {MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK}",
+                        "task {task_name:?} has {} effective custom tools, exceeding limit {MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK}",
                         seen_tools.len()
                     ));
                 }
@@ -996,7 +996,7 @@ name = "Demo"
 lane_id = "default"
 
 [[tasks]]
-task_id = "impl"
+task_name = "impl"
 description = "Implement"
 session_agent_type = "Executor"
 "#;

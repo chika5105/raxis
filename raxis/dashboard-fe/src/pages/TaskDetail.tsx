@@ -16,6 +16,7 @@ import { TaskWitnesses } from "@/components/TaskWitnesses";
 import { TaskWorktreeSnapshots } from "@/components/TaskWorktreeSnapshots";
 import { fmtAbsolute, fmtRelative } from "@/lib/format";
 import {
+  effectiveTaskState,
   isTerminalFailureState,
   taskDisplayId,
 } from "@/lib/state-color";
@@ -62,13 +63,8 @@ export function TaskDetailPage() {
               {initiativeName}
             </Link>
             <span>/</span>
-            {/* INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01:
-                render the stable `«integration-merge»` display id for
-                the synthetic coordinator row instead of the verbatim
-                initiative UUID. Copy + routing stay on `t.task_id` so
-                wire identifiers remain stable. */}
             <Mono className="text-ink-muted">
-              {taskDisplayId(t.task_id, t.initiative_id)}
+              {t.task_name ?? taskDisplayId(t.task_id, t.initiative_id)}
             </Mono>
             <CopyButton value={t.task_id} />
           </div>
@@ -77,6 +73,13 @@ export function TaskDetailPage() {
             <Mono>{t.initiative_id}</Mono>
             <CopyButton value={t.initiative_id} />
           </div>
+          {t.task_name ? (
+            <div className="mt-1 flex items-center gap-2 text-[11px] text-ink-subtle">
+              <span>Runtime ID</span>
+              <Mono>{taskDisplayId(t.task_id, t.initiative_id)}</Mono>
+              <CopyButton value={t.task_id} />
+            </div>
+          ) : null}
           <h1 className="mt-1 text-xl font-semibold text-ink text-balance">
             {t.title}
           </h1>
@@ -85,9 +88,7 @@ export function TaskDetailPage() {
               {t.agent_type}
             </span>
             <StateBadge
-              state={
-                t.is_active && t.state === "Admitted" ? "Running" : t.state
-              }
+              state={effectiveTaskState(t.state, t.is_active)}
               pulse={t.is_active || t.state === "Running"}
             />
             <span className="text-xs text-ink-subtle">
@@ -211,7 +212,7 @@ export function TaskDetailPage() {
                       {fmtAbsolute(o.at)}
                     </span>
                   </div>
-                  <pre className="mt-2 text-[11px] font-mono text-ink-muted overflow-x-auto overscroll-x-auto scroll-thin max-h-64">
+                  <pre className="mt-2 min-w-0 max-w-full text-[11px] font-mono text-ink-muted overflow-auto overscroll-auto scroll-thin max-h-64">
                     {JSON.stringify(o.payload, null, 2)}
                   </pre>
                 </li>

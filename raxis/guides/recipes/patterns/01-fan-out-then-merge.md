@@ -77,7 +77,7 @@ target_ref  = "refs/heads/main"
 # module. The kernel admits all three immediately (predecessors=[]).
 
 [[tasks]]
-task_id            = "trace-auth"
+task_name            = "trace-auth"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/auth/"]
@@ -86,7 +86,7 @@ description        = "Trace Auth"
 prompt             = """Add OpenTelemetry tracing to src/auth/. Match the spans declared in spec/tracing.md."""
 
 [[tasks]]
-task_id            = "trace-api"
+task_name            = "trace-api"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/api/"]
@@ -95,7 +95,7 @@ description        = "Trace Api"
 prompt             = """Add OpenTelemetry tracing to src/api/."""
 
 [[tasks]]
-task_id            = "trace-db"
+task_name            = "trace-db"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/db/"]
@@ -110,7 +110,7 @@ prompt             = """Add OpenTelemetry tracing to src/db/."""
 # worktree mount (Reviewer VMs are RO and have no network).
 
 [[tasks]]
-task_id            = "review-auth"
+task_name            = "review-auth"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]
@@ -119,7 +119,7 @@ description        = "Review Auth"
 prompt             = """Verify span names and propagation match spec/tracing.md for src/auth/."""
 
 [[tasks]]
-task_id            = "review-api"
+task_name            = "review-api"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/api/"]
@@ -128,7 +128,7 @@ description        = "Review Api"
 prompt             = """Verify span names and propagation for src/api/."""
 
 [[tasks]]
-task_id            = "review-db"
+task_name            = "review-db"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/db/"]
@@ -148,7 +148,7 @@ Key points:
 - The three Executors have **disjoint** `path_allowlist`. They
   cannot write into each other's slices.
 - Each Reviewer reviews **one** Executor (`predecessors` is a
-  single Executor task_id). The kernel rejects a Reviewer with no
+  single Executor `task_name`). The kernel rejects a Reviewer with no
   predecessor or with a non-Executor predecessor.
 - There is **no "merge Reviewer".** The Orchestrator is the
   merger; you don't see it in `[[tasks]]`.

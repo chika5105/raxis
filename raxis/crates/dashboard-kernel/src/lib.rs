@@ -56,12 +56,13 @@ use raxis_dashboard::data::{
     BuilderValidationSeverity, ChainStatusView, CredentialMetadata, CredentialReveal,
     CustomToolCallView, DagEdge, DashboardData, DiagnosticFinding, DiagnosticsResponse,
     EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry, InitiativePlanView,
-    InitiativeRunSummary, InitiativeView, NotificationView, OperatorAuthResolution,
-    OrchestratorGapsResponse, PolicyAdvancement, PolicyOperatorView, PolicySnapshotView,
-    RecentSessionEntry, ReviewerPanelEntry, ReviewerVerdictView, SessionView, SessionVmEnvView,
-    StructuredOutputView, SubsystemDetailRow, SubsystemHealthCard, SubsystemHealthResponse,
-    TaskView, WorktreeDetail, WorktreeDiff, WorktreeFile, WorktreeListEntry, WorktreeLogEntry,
-    WorktreeTree, WorktreeTreeEntry, SUBSYSTEM_CATALOG,
+    InitiativeRunSummary, InitiativeTaskListEntry, InitiativeView, NotificationView,
+    OperatorAuthResolution, OrchestratorGapsResponse, PolicyAdvancement, PolicyHistoryEntry,
+    PolicyOperatorView, PolicySnapshotView, RecentSessionEntry, ReviewerPanelEntry,
+    ReviewerVerdictView, SessionView, SessionVmEnvView, StructuredOutputView, SubsystemDetailRow,
+    SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail, WorktreeDiff,
+    WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry,
+    SUBSYSTEM_CATALOG,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -80,6 +81,7 @@ const TBL_TASKS: &str = Table::Tasks.as_str();
 const TBL_TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
 const TBL_SUBTASK_ACTIVATIONS: &str = Table::SubtaskActivations.as_str();
 const TBL_SESSIONS: &str = Table::Sessions.as_str();
+const PLAN_TASK_ID_MAX_BYTES: usize = 128;
 
 mod git;
 pub mod lifecycle;
@@ -262,6 +264,12 @@ pub struct KernelDashboardData {
     /// (which don't boot the kernel) can opt out without
     /// silently exposing a no-op write surface.
     policy_advancer: Option<Arc<dyn PolicyAdvancer>>,
+    /// Immutable policy/plan/key artifact store. Policy history
+    /// rows live in SQLite; this store lets the dashboard open
+    /// the exact historical `policy.toml` bytes referenced by a
+    /// row's SHA-256. `None` keeps the ledger visible but marks
+    /// historical artifacts unavailable.
+    artifact_store: Option<Arc<raxis_artifact_store::ArtifactStore>>,
     /// Cached audit-chain integrity verdict + the
     /// monotonic-millis timestamp it was produced at, used by
     /// `audit_chain_status` to rate-limit chain re-walks per
@@ -357,6 +365,7 @@ impl KernelDashboardData {
             store,
             stream_capture,
             policy_advancer: None,
+            artifact_store: None,
             chain_status_cache: parking_lot::Mutex::new(None),
             audit_sink: None,
             reveal_rate_limit: parking_lot::Mutex::new(RevealRateLimitState::default()),
@@ -387,6 +396,7 @@ impl KernelDashboardData {
             store,
             stream_capture,
             policy_advancer: None,
+            artifact_store: None,
             chain_status_cache: parking_lot::Mutex::new(None),
             audit_sink: None,
             reveal_rate_limit: parking_lot::Mutex::new(RevealRateLimitState::default()),
@@ -448,6 +458,13 @@ impl KernelDashboardData {
     /// chain the call onto a `KernelDashboardData::new(...)`.
     pub fn with_advancer(mut self, advancer: Arc<dyn PolicyAdvancer>) -> Self {
         self.policy_advancer = Some(advancer);
+        self
+    }
+
+    /// Wire the immutable artifact store used by the policy
+    /// history raw-TOML endpoint.
+    pub fn with_artifact_store(mut self, store: Arc<raxis_artifact_store::ArtifactStore>) -> Self {
+        self.artifact_store = Some(store);
         self
     }
 
@@ -543,7 +560,7 @@ impl DashboardData for KernelDashboardData {
                     raxis_store::observability::QUERY_CLASS_INITIATIVE_COUNT,
                     || {
                         raxis_store::views::initiatives::counts_by_state(&conn)
-                            .map(|c| (c.draft + c.approved_plan + c.executing + c.blocked) as u32)
+                            .map(|c| (c.approved_plan + c.executing + c.blocked) as u32)
                             .unwrap_or(0)
                     },
                 );
@@ -961,6 +978,7 @@ impl DashboardData for KernelDashboardData {
             let task_count = tasks.len() as u32;
             let completed_tasks = tasks.iter().filter(|t| t.state == "Completed").count() as u32;
             let failed_tasks = tasks.iter().filter(|t| t.state == "Failed").count() as u32;
+            let task_summaries = tasks.iter().map(task_row_to_list_entry).collect();
             let updated_at = tasks
                 .iter()
                 .map(|t| t.transitioned_at)
@@ -980,6 +998,7 @@ impl DashboardData for KernelDashboardData {
                 failed_tasks,
                 created_at: r.created_at,
                 updated_at,
+                tasks: task_summaries,
             });
         }
         Ok(out)
@@ -1009,6 +1028,7 @@ impl DashboardData for KernelDashboardData {
         let task_count = task_rows.len() as u32;
         let completed_tasks = task_rows.iter().filter(|t| t.state == "Completed").count() as u32;
         let failed_tasks = task_rows.iter().filter(|t| t.state == "Failed").count() as u32;
+        let task_summaries = task_rows.iter().map(task_row_to_list_entry).collect();
         let updated_at = task_rows
             .iter()
             .map(|t| t.transitioned_at)
@@ -1063,6 +1083,7 @@ impl DashboardData for KernelDashboardData {
                 failed_tasks,
                 created_at: row.created_at,
                 updated_at,
+                tasks: task_summaries,
             },
             approved_by: None, // not stored on initiatives row
             plan_sha256: Some(row.plan_artifact_sha256),
@@ -1876,6 +1897,7 @@ impl DashboardData for KernelDashboardData {
                     initiative_id: None,
                     initiative_display_name,
                     task_id: None,
+                    task_name: None,
                     state,
                     provider: s.provider,
                     model: s.model,
@@ -1996,6 +2018,7 @@ impl DashboardData for KernelDashboardData {
             initiative_id: None,
             initiative_display_name,
             task_id: None,
+            task_name: None,
             state,
             provider: s.provider,
             model: s.model,
@@ -2336,6 +2359,80 @@ impl DashboardData for KernelDashboardData {
     fn policy_toml_bytes(&self) -> Result<String, ApiError> {
         std::fs::read_to_string(&self.policy_path).map_err(|e| ApiError::Internal {
             log_only: format!("policy.toml read: {e}"),
+        })
+    }
+
+    fn policy_history(&self, limit: usize) -> Result<Vec<PolicyHistoryEntry>, ApiError> {
+        let conn = self.open_ro()?;
+        let active_epoch = self.policy.load().epoch();
+        let rows = raxis_store::observability::time_query_result(
+            self.observability_hub.as_ref(),
+            raxis_store::observability::QUERY_CLASS_POLICY_HISTORY_GET,
+            || raxis_store::views::policy_history::list(&conn, limit.min(200)),
+        )
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("policy_history::list: {e}"),
+        })?;
+        let artifact_store = self.artifact_store.as_ref();
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let artifact_available = artifact_store
+                    .and_then(|store| {
+                        let key = raxis_artifact_store::ArtifactKey::parse_hex(&row.policy_sha256)
+                            .ok()?;
+                        Some(store.exists(raxis_artifact_store::Category::Policy, &key))
+                    })
+                    .unwrap_or(false);
+                PolicyHistoryEntry {
+                    epoch: row.epoch_id,
+                    policy_sha256: row.policy_sha256,
+                    signed_by_authority: row.signed_by_authority,
+                    triggered_by_operator: row.triggered_by_operator,
+                    advanced_at: row.advanced_at,
+                    is_active: row.epoch_id == active_epoch,
+                    artifact_available,
+                }
+            })
+            .collect())
+    }
+
+    fn policy_epoch_toml_bytes(&self, epoch: u64) -> Result<String, ApiError> {
+        let conn = self.open_ro()?;
+        let row = raxis_store::views::policy_history::list(&conn, 500)
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("policy_history::list: {e}"),
+            })?
+            .into_iter()
+            .find(|row| row.epoch_id == epoch)
+            .ok_or(ApiError::NotFound {
+                kind: "policy epoch".into(),
+            })?;
+        let store = self.artifact_store.as_ref().ok_or(ApiError::NotFound {
+            kind: "policy artifact".into(),
+        })?;
+        let key =
+            raxis_artifact_store::ArtifactKey::parse_hex(&row.policy_sha256).map_err(|e| {
+                ApiError::Internal {
+                    log_only: format!("policy history row has invalid sha256: {e}"),
+                }
+            })?;
+        let bytes = store
+            .read(raxis_artifact_store::Category::Policy, &key)
+            .map_err(|e| match &e {
+                raxis_artifact_store::ArtifactStoreError::Io { source, .. }
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    ApiError::NotFound {
+                        kind: "policy artifact".into(),
+                    }
+                }
+                _ => ApiError::Internal {
+                    log_only: format!("policy artifact read: {e}"),
+                },
+            })?;
+        String::from_utf8(bytes).map_err(|e| ApiError::Internal {
+            log_only: format!("policy artifact utf8 decode: {e}"),
         })
     }
 
@@ -3896,6 +3993,35 @@ fn diagnostic_notification_summary(n: &NotificationView) -> String {
 
 fn diagnostic_from_audit_row(row: &AuditEntryView) -> Option<DiagnosticFinding> {
     match row.event_kind.as_str() {
+        "ReviewRejectionCeilingExceeded" => Some(
+            DiagnosticFinding::new(
+                format!("audit:{}:{}", row.event_kind, row.seq),
+                "critical",
+                "reviews",
+                "Review retry budget exhausted",
+                "A reviewer rejected the executor output after the allowed repair attempts. Open the reviewer verdicts and latest critique before retrying with a revised plan or clearer task instructions.",
+            )
+            .maybe_initiative(row.initiative_id.clone())
+            .maybe_task(row.task_id.clone())
+            .maybe_session(row.session_id.clone())
+            .audit(row.event_kind.clone(), row.event_id.clone(), row.seq)
+            .observed_at(row.at)
+            .evidence("Audit sequence", row.seq.to_string())
+            .evidence("Event", row.event_kind.clone())
+            .action(
+                "Open Initiative",
+                "route",
+                row.initiative_id
+                    .as_ref()
+                    .map(|id| format!("/initiatives/{id}"))
+                    .unwrap_or_else(|| "/initiatives".to_owned()),
+            )
+            .action(
+                "Search Audit Chain",
+                "route",
+                "/audit?search=ReviewRejectionCeilingExceeded",
+            ),
+        ),
         "OrchestratorRespawnCeilingExceeded" => Some(
             DiagnosticFinding::new(
                 format!("audit:{}:{}", row.event_kind, row.seq),
@@ -4761,6 +4887,7 @@ impl KernelDashboardData {
                         let owning = SessionOwningTask {
                             initiative_id: initiative_id.clone(),
                             task_id: task_id.clone(),
+                            task_name: None,
                             input_tokens: 0,
                             output_tokens: 0,
                         };
@@ -5289,6 +5416,7 @@ pub(crate) const INTEGRATION_MERGE_TITLE: &str = "Integration merge";
 pub(crate) struct SessionOwningTask {
     pub initiative_id: Option<String>,
     pub task_id: Option<String>,
+    pub task_name: Option<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
 }
@@ -5310,7 +5438,7 @@ pub(crate) fn owning_task_for_session(
     session_id: &str,
 ) -> rusqlite::Result<SessionOwningTask> {
     let sql = format!(
-        "SELECT initiative_id, task_id, \
+        "SELECT initiative_id, task_id, task_name, \
                 cumulative_input_tokens, cumulative_output_tokens \
          FROM {tasks} \
          WHERE session_id = ?1 \
@@ -5323,8 +5451,9 @@ pub(crate) fn owning_task_for_session(
         Ok(SessionOwningTask {
             initiative_id: r.get::<_, Option<String>>(0)?,
             task_id: r.get::<_, Option<String>>(1)?,
-            input_tokens: r.get::<_, i64>(2)?.max(0) as u64,
-            output_tokens: r.get::<_, i64>(3)?.max(0) as u64,
+            task_name: r.get::<_, Option<String>>(2)?,
+            input_tokens: r.get::<_, i64>(3)?.max(0) as u64,
+            output_tokens: r.get::<_, i64>(4)?.max(0) as u64,
         })
     });
     match row {
@@ -5348,7 +5477,7 @@ fn orchestrator_coordinator_task_for_session(
     session_id: &str,
 ) -> rusqlite::Result<SessionOwningTask> {
     let sql = format!(
-        "SELECT s.initiative_id, t.task_id, \
+        "SELECT s.initiative_id, t.task_id, t.task_name, \
                 t.cumulative_input_tokens, t.cumulative_output_tokens \
          FROM {sessions} AS s \
          JOIN {tasks} AS t \
@@ -5366,8 +5495,9 @@ fn orchestrator_coordinator_task_for_session(
         Ok(SessionOwningTask {
             initiative_id: r.get::<_, Option<String>>(0)?,
             task_id: r.get::<_, Option<String>>(1)?,
-            input_tokens: r.get::<_, i64>(2)?.max(0) as u64,
-            output_tokens: r.get::<_, i64>(3)?.max(0) as u64,
+            task_name: r.get::<_, Option<String>>(2)?,
+            input_tokens: r.get::<_, i64>(3)?.max(0) as u64,
+            output_tokens: r.get::<_, i64>(4)?.max(0) as u64,
         })
     });
     match row {
@@ -5395,7 +5525,7 @@ fn owning_tasks_for_sessions(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT session_id, initiative_id, task_id, \
+        "SELECT session_id, initiative_id, task_id, task_name, \
                 cumulative_input_tokens, cumulative_output_tokens \
          FROM {tasks} \
          WHERE session_id IN ({placeholders}) \
@@ -5413,8 +5543,9 @@ fn owning_tasks_for_sessions(
                 SessionOwningTask {
                     initiative_id: r.get::<_, Option<String>>(1)?,
                     task_id: r.get::<_, Option<String>>(2)?,
-                    input_tokens: r.get::<_, i64>(3)?.max(0) as u64,
-                    output_tokens: r.get::<_, i64>(4)?.max(0) as u64,
+                    task_name: r.get::<_, Option<String>>(3)?,
+                    input_tokens: r.get::<_, i64>(4)?.max(0) as u64,
+                    output_tokens: r.get::<_, i64>(5)?.max(0) as u64,
                 },
             ))
         },
@@ -5450,7 +5581,7 @@ fn add_orchestrator_coordinator_tasks_for_sessions(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT s.session_id, s.initiative_id, t.task_id, \
+        "SELECT s.session_id, s.initiative_id, t.task_id, t.task_name, \
                 t.cumulative_input_tokens, t.cumulative_output_tokens \
          FROM {sessions} AS s \
          JOIN {tasks} AS t \
@@ -5472,8 +5603,9 @@ fn add_orchestrator_coordinator_tasks_for_sessions(
             SessionOwningTask {
                 initiative_id: r.get::<_, Option<String>>(1)?,
                 task_id: r.get::<_, Option<String>>(2)?,
-                input_tokens: r.get::<_, i64>(3)?.max(0) as u64,
-                output_tokens: r.get::<_, i64>(4)?.max(0) as u64,
+                task_name: r.get::<_, Option<String>>(3)?,
+                input_tokens: r.get::<_, i64>(4)?.max(0) as u64,
+                output_tokens: r.get::<_, i64>(5)?.max(0) as u64,
             },
         ))
     });
@@ -6241,6 +6373,9 @@ pub(crate) fn enrich_session_view_with_owning_task(
     if view.task_id.is_none() {
         view.task_id = owning_task.task_id;
     }
+    if view.task_name.is_none() {
+        view.task_name = owning_task.task_name;
+    }
     if view.input_tokens == 0 {
         view.input_tokens = owning_task.input_tokens;
     }
@@ -6280,14 +6415,32 @@ pub(crate) fn enrich_session_view_with_owning_task(
 /// Returns `Integration merge` for the synthetic coordinator
 /// row whose `task_id == initiative_id`
 /// (`INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01`),
-/// otherwise echoes the operator-authored `task_id` (the
-/// `tasks` table has no separate name column, so the id is the
-/// best human label we have).
-pub(crate) fn task_display_title(task_id: &str, initiative_id: &str) -> String {
+/// otherwise uses the operator-authored `task_name`. The runtime
+/// `task_id` is kernel-owned UUID plumbing and should not be the
+/// primary human label when `task_name` is available.
+pub(crate) fn task_display_title(
+    task_id: &str,
+    task_name: Option<&str>,
+    initiative_id: &str,
+) -> String {
     if task_id == initiative_id {
         INTEGRATION_MERGE_TITLE.to_owned()
     } else {
-        task_id.to_owned()
+        task_name.unwrap_or(task_id).to_owned()
+    }
+}
+
+fn task_row_to_list_entry(t: &raxis_store::views::tasks::TaskRow) -> InitiativeTaskListEntry {
+    InitiativeTaskListEntry {
+        task_id: t.task_id.clone(),
+        task_name: t.task_name.clone(),
+        title: task_display_title(&t.task_id, t.task_name.as_deref(), &t.initiative_id),
+        agent_type: if t.task_id == t.initiative_id {
+            "Orchestrator".to_owned()
+        } else {
+            t.actor.clone()
+        },
+        state: t.state.clone(),
     }
 }
 
@@ -6543,14 +6696,12 @@ fn task_row_to_view(
     // INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01:
     // detect the synthetic coordinator row by the
     // `task_id == initiative_id` predicate and stamp a stable
-    // human title. The detection is exact — sub-task ids are
-    // operator-authored strings and live in a disjoint space
-    // from UUID-shaped initiative ids by construction
-    // (`initiatives::lifecycle::auto_spawn_orchestrator_session_in_tx`
-    // doc comment §"task_id == initiative_id by construction").
-    let title = task_display_title(&t.task_id, &t.initiative_id);
+    // human title. Normal sub-task rows use `task_name`; the
+    // runtime `task_id` is UUID plumbing.
+    let title = task_display_title(&t.task_id, t.task_name.as_deref(), &t.initiative_id);
     Ok(TaskView {
         task_id: t.task_id.clone(),
+        task_name: t.task_name.clone(),
         initiative_id: t.initiative_id.clone(),
         initiative_display_name,
         agent_type,
@@ -7217,6 +7368,9 @@ struct PlanDraftTask {
     id: String,
     agent_type: String,
     predecessors: Vec<String>,
+    path_allowlist: Vec<String>,
+    path_export_to_successors: bool,
+    path_export_globs: Vec<String>,
 }
 
 fn validate_plan_draft_with_policy(
@@ -7369,29 +7523,49 @@ fn validate_plan_draft_with_policy(
             ));
             continue;
         };
-        let id = string_field(task, "task_id").unwrap_or_default().to_owned();
+        if task.contains_key("task_id") {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_TASK_ID_FORBIDDEN",
+                format!("tasks[{idx}] declares task_id."),
+                "Remove task_id. Raxis generates task IDs; use task_name for the plan-authored label.",
+            ));
+        }
+        if task.contains_key("name") {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_TASK_NAME_DEPRECATED",
+                format!("tasks[{idx}] declares deprecated name."),
+                "Use required task_name for the plan-authored label.",
+            ));
+        }
+        let id = string_field(task, "task_name")
+            .unwrap_or_default()
+            .to_owned();
         if id.is_empty() {
             issues.push(builder_issue(
                 BuilderValidationSeverity::Error,
-                "PLAN_TASK_ID",
-                format!("tasks[{idx}] is missing task_id."),
-                "Add a stable task_id such as implement-auth or review-auth.",
+                "PLAN_TASK_NAME",
+                format!("tasks[{idx}] is missing task_name."),
+                "Add a stable task_name such as implement-auth or review-auth.",
             ));
         } else {
             if !is_task_id(&id) {
                 issues.push(builder_issue(
                     BuilderValidationSeverity::Error,
-                    "PLAN_TASK_ID_FORMAT",
-                    format!("task_id {id:?} has an invalid shape."),
-                    "Start with a letter and use only letters, digits, underscores, and hyphens.",
+                    "PLAN_TASK_NAME_FORMAT",
+                    format!("task_name {id:?} has an invalid shape."),
+                    format!(
+                        "Start with a letter; use only letters, digits, underscores, and hyphens; keep it <= {PLAN_TASK_ID_MAX_BYTES} bytes."
+                    ),
                 ));
             }
             if !seen.insert(id.clone()) {
                 issues.push(builder_issue(
                     BuilderValidationSeverity::Error,
-                    "PLAN_TASK_ID_DUPLICATE",
-                    format!("task_id {id:?} appears more than once."),
-                    "Rename one task so every task_id is unique.",
+                    "PLAN_TASK_NAME_DUPLICATE",
+                    format!("task_name {id:?} appears more than once."),
+                    "Rename one task so every task_name is unique within the initiative.",
                 ));
             }
         }
@@ -7500,14 +7674,23 @@ fn validate_plan_draft_with_policy(
             }
         }
         let predecessors = string_array_field(task, "predecessors", &id, &mut issues);
+        let path_export_to_successors = task
+            .get("path_export_to_successors")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let path_export_globs = string_array_field(task, "path_export_globs", &id, &mut issues);
         task_drafts.push(PlanDraftTask {
             id,
             agent_type: agent_type.to_owned(),
             predecessors,
+            path_allowlist: paths,
+            path_export_to_successors,
+            path_export_globs,
         });
     }
 
     validate_task_dag(&task_drafts, &mut issues);
+    validate_reviewer_export_visibility(&task_drafts, &mut issues);
     if !task_drafts.iter().any(|t| t.agent_type == "Reviewer") {
         issues.push(builder_issue(
             BuilderValidationSeverity::Info,
@@ -8119,6 +8302,113 @@ fn validate_task_dag(tasks: &[PlanDraftTask], issues: &mut Vec<BuilderValidation
     }
 }
 
+fn validate_reviewer_export_visibility(
+    tasks: &[PlanDraftTask],
+    issues: &mut Vec<BuilderValidationIssue>,
+) {
+    let by_id: std::collections::HashMap<&str, &PlanDraftTask> = tasks
+        .iter()
+        .filter_map(|task| (!task.id.is_empty()).then_some((task.id.as_str(), task)))
+        .collect();
+
+    for reviewer in tasks.iter().filter(|task| task.agent_type == "Reviewer") {
+        for predecessor_name in &reviewer.predecessors {
+            let Some(predecessor) = by_id.get(predecessor_name.as_str()) else {
+                continue;
+            };
+            if !predecessor.path_export_to_successors {
+                continue;
+            }
+            if predecessor.path_export_globs.is_empty() {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Warning,
+                    "PLAN_REVIEWER_EXPORT_UNBOUNDED",
+                    format!(
+                        "Reviewer {:?} depends on {:?}, which exports its full touched set.",
+                        reviewer.id, predecessor.id
+                    ),
+                    format!(
+                        "Set path_export_globs on {:?} to the expected review artifacts and make sure the reviewer path_allowlist covers them.",
+                        predecessor.id
+                    ),
+                ));
+                continue;
+            }
+            for exported in &predecessor.path_export_globs {
+                if !export_pattern_covered_by_allowlist(exported, &reviewer.path_allowlist) {
+                    issues.push(builder_issue(
+                        BuilderValidationSeverity::Warning,
+                        "PLAN_REVIEWER_EXPORT_VISIBILITY",
+                        format!(
+                            "Reviewer {:?} may not be able to read predecessor {:?} export {:?}.",
+                            reviewer.id, predecessor.id, exported
+                        ),
+                        format!(
+                            "Add {:?} or a covering directory prefix to the reviewer path_allowlist, or remove the export if the reviewer should not inspect it.",
+                            suggested_allowlist_entry(exported)
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn export_pattern_covered_by_allowlist(pattern: &str, allowlist: &[String]) -> bool {
+    if contains_glob_meta(pattern) {
+        let prefix = literal_directory_prefix(pattern);
+        !prefix.is_empty()
+            && allowlist
+                .iter()
+                .any(|allow| allow_covers_path(allow, prefix))
+    } else {
+        allowlist
+            .iter()
+            .any(|allow| allow_covers_path(allow, pattern))
+    }
+}
+
+fn allow_covers_path(allow: &str, path: &str) -> bool {
+    if allow.ends_with('/') {
+        path.starts_with(allow)
+    } else {
+        path == allow
+    }
+}
+
+fn contains_glob_meta(value: &str) -> bool {
+    value
+        .chars()
+        .any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}'))
+}
+
+fn literal_directory_prefix(pattern: &str) -> &str {
+    let first_meta = pattern
+        .char_indices()
+        .find_map(|(idx, c)| matches!(c, '*' | '?' | '[' | ']' | '{' | '}').then_some(idx))
+        .unwrap_or(pattern.len());
+    let literal = &pattern[..first_meta];
+    literal.rfind('/').map(|idx| &literal[..=idx]).unwrap_or("")
+}
+
+fn suggested_allowlist_entry(pattern: &str) -> String {
+    if contains_glob_meta(pattern) {
+        let prefix = literal_directory_prefix(pattern);
+        if prefix.is_empty() {
+            "<covering-directory-prefix>/".to_owned()
+        } else {
+            prefix.to_owned()
+        }
+    } else if pattern.ends_with('/') {
+        pattern.to_owned()
+    } else {
+        pattern
+            .rfind('/')
+            .map(|idx| pattern[..=idx].to_owned())
+            .unwrap_or_else(|| pattern.to_owned())
+    }
+}
+
 fn dag_has_cycle<'a>(
     id: &'a str,
     tasks: &std::collections::HashMap<&'a str, &'a PlanDraftTask>,
@@ -8146,7 +8436,7 @@ fn dag_has_cycle<'a>(
 fn is_task_id(value: &str) -> bool {
     let mut chars = value.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
-        && value.len() <= 64
+        && value.len() <= PLAN_TASK_ID_MAX_BYTES
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
@@ -8230,6 +8520,20 @@ fn read_sessions_all_for_recent(
                          END \
                        ) AS task_id, \
                        COALESCE( \
+                         (SELECT t.task_name FROM {TBL_TASKS} t \
+                            WHERE t.session_id = s.session_id \
+                            ORDER BY t.task_id ASC LIMIT 1), \
+                         CASE \
+                           WHEN COALESCE(s.session_agent_type, '') = 'Orchestrator' \
+                            AND s.initiative_id IS NOT NULL \
+                           THEN (SELECT t.task_name FROM {TBL_TASKS} t \
+                                   WHERE t.task_id = s.initiative_id \
+                                     AND t.initiative_id = s.initiative_id \
+                                   LIMIT 1) \
+                           ELSE NULL \
+                         END \
+                       ) AS task_name, \
+                       COALESCE( \
                          (SELECT t.initiative_id FROM {TBL_TASKS} t \
                             WHERE t.session_id = s.session_id \
                             ORDER BY t.task_id ASC LIMIT 1), \
@@ -8249,18 +8553,28 @@ fn read_sessions_all_for_recent(
         let created_at: i64 = r.get(3)?;
         let revoked_at: Option<i64> = r.get(4)?;
         let task_id: Option<String> = r.get(5)?;
-        let init_id: Option<String> = r.get(6)?;
+        let task_name: Option<String> = r.get(6)?;
+        let init_id: Option<String> = r.get(7)?;
         Ok((
-            session_id, agent_type, role_id, task_id, init_id, created_at, revoked_at,
+            session_id, agent_type, role_id, task_id, task_name, init_id, created_at, revoked_at,
         ))
     });
     if let Ok(rows) = rows {
         for row in rows.flatten() {
-            let (session_id, raw_agent_type, role_id, task_id, init_id, created_at, revoked_at) =
-                row;
+            let (
+                session_id,
+                raw_agent_type,
+                role_id,
+                task_id,
+                task_name,
+                init_id,
+                created_at,
+                revoked_at,
+            ) = row;
             let owning = SessionOwningTask {
                 initiative_id: init_id.clone(),
                 task_id: task_id.clone(),
+                task_name: task_name.clone(),
                 input_tokens: 0,
                 output_tokens: 0,
             };
@@ -8274,6 +8588,7 @@ fn read_sessions_all_for_recent(
                 session_id,
                 agent_type,
                 task_id,
+                task_name,
                 initiative_id: init_id,
                 initiative_display_name,
                 created_at: created_at.max(0) as u64,
@@ -8559,7 +8874,7 @@ pub async fn start_dashboard(
 /// without a hub) the helpers degrade to the standard noop
 /// path. Production boot in `kernel/src/main.rs` MUST pass
 /// `Some(_)` — that's the seam the V3 Part 2 wiring closes.
-// 11-argument boot path mirrors the dashboard-spec contract
+// 12-argument boot path mirrors the dashboard-spec contract
 // (every collaborator that flows through `KernelDashboardData` is
 // passed positionally so call sites at `kernel/src/main.rs` can
 // opt out of any single seam by passing `None` / a no-op without
@@ -8573,6 +8888,7 @@ pub async fn start_dashboard_with_advancer(
     data_dir: PathBuf,
     policy_path: PathBuf,
     booted_at: u64,
+    artifact_store: Option<Arc<raxis_artifact_store::ArtifactStore>>,
     stream_capture: Arc<SessionStreamCapture>,
     advancer: Arc<dyn PolicyAdvancer>,
     audit_sink: Arc<dyn raxis_audit_tools::AuditSink>,
@@ -8590,6 +8906,9 @@ pub async fn start_dashboard_with_advancer(
     )
     .with_advancer(advancer)
     .with_audit_sink(audit_sink);
+    if let Some(store) = artifact_store {
+        data = data.with_artifact_store(store);
+    }
     if let Some(cap) = task_llm_capture {
         data = data.with_task_llm_capture(cap);
     }
@@ -8633,6 +8952,166 @@ mod tests {
     fn admin_requires_both_rotate_and_cert_install() {
         let r = roles_from_permitted_ops(&["RotateEpoch".into(), "OperatorCertInstall".into()]);
         assert!(r.contains(&DashboardRole::Admin));
+    }
+
+    #[test]
+    fn plan_builder_validation_accepts_generated_gtm_task_ids() {
+        let policy = PolicyBundle::for_tests_with_operators(Vec::new());
+        let response = validate_plan_draft_with_policy(
+            r#"[plan.initiative]
+description = "Run a bounded X discovery loop."
+
+[workspace]
+name = "RAXIS GTM X Discovery"
+lane_id = "default"
+repository = "raxis-gtm"
+target_ref = "refs/heads/main"
+
+[profiles.gtm_x_discovery]
+inherits_from = "Executor"
+
+[[profiles.gtm_x_discovery.custom_tool]]
+name = "x_discover"
+description = "Collect X discovery evidence from configured search queries."
+execution_locality = "host_subprocess"
+command = ["/Users/jinanwachikafavour/raxis-gtm-host-tools/gtm-host", "x-discover"]
+timeout_seconds = 180
+
+[profiles.gtm_x_discovery.custom_tool.schema]
+type = "object"
+additionalProperties = false
+
+[[tasks]]
+task_name = "discover_x_opportunities__20260609T120719Z_daily_x_discovery_plan_53550"
+description = "Collect, rank, and summarize X opportunities."
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+profiles = ["gtm_x_discovery"]
+path_allowlist = ["gtm/evidence/x/"]
+predecessors = []
+prompt = "Invoke x_discover, commit the generated evidence, and submit CompleteTask."
+"#,
+            &policy,
+        );
+
+        assert!(
+            response.ok,
+            "180s tool timeout should remain warning-only; got {:#?}",
+            response
+        );
+        assert!(
+            response
+                .issues
+                .iter()
+                .all(|issue| issue.code != "PLAN_TASK_NAME_FORMAT"),
+            "GTM generated task name must be accepted by the dashboard builder: {:#?}",
+            response
+        );
+        assert!(
+            response
+                .issues
+                .iter()
+                .any(|issue| issue.code == "TOOLS_TIMEOUT_LARGE"
+                    && issue.severity == BuilderValidationSeverity::Warning),
+            "large-but-admissible tool timeout should surface as a warning: {:#?}",
+            response
+        );
+    }
+
+    #[test]
+    fn plan_builder_warns_when_reviewer_cannot_read_exported_predecessor_path() {
+        let policy = PolicyBundle::for_tests_with_operators(Vec::new());
+        let response = validate_plan_draft_with_policy(
+            r#"[plan.initiative]
+description = "Review a generated report."
+
+[workspace]
+name = "fixture"
+lane_id = "default"
+repository = "main"
+target_ref = "refs/heads/main"
+
+[[tasks]]
+task_name = "produce-report"
+description = "Write the report."
+prompt = "Write the report."
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+path_allowlist = ["reports/"]
+path_export_to_successors = true
+path_export_globs = ["reports/generated/summary.md"]
+predecessors = []
+
+[[tasks]]
+task_name = "review-report"
+description = "Review the report."
+prompt = "Review the report."
+session_agent_type = "Reviewer"
+clone_strategy = "blobless"
+path_allowlist = ["src/"]
+predecessors = ["produce-report"]
+"#,
+            &policy,
+        );
+
+        assert!(
+            response.ok,
+            "review visibility mismatch should warn, not reject: {response:#?}"
+        );
+        assert!(
+            response.issues.iter().any(|issue| {
+                issue.code == "PLAN_REVIEWER_EXPORT_VISIBILITY"
+                    && issue.severity == BuilderValidationSeverity::Warning
+                    && issue.message.contains("reports/generated/summary.md")
+            }),
+            "expected reviewer export visibility warning: {response:#?}"
+        );
+    }
+
+    #[test]
+    fn plan_builder_does_not_warn_when_reviewer_allowlist_covers_exported_path() {
+        let policy = PolicyBundle::for_tests_with_operators(Vec::new());
+        let response = validate_plan_draft_with_policy(
+            r#"[plan.initiative]
+description = "Review a generated report."
+
+[workspace]
+name = "fixture"
+lane_id = "default"
+repository = "main"
+target_ref = "refs/heads/main"
+
+[[tasks]]
+task_name = "produce-report"
+description = "Write the report."
+prompt = "Write the report."
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+path_allowlist = ["reports/"]
+path_export_to_successors = true
+path_export_globs = ["reports/generated/*.md"]
+predecessors = []
+
+[[tasks]]
+task_name = "review-report"
+description = "Review the report."
+prompt = "Review the report."
+session_agent_type = "Reviewer"
+clone_strategy = "blobless"
+path_allowlist = ["reports/generated/"]
+predecessors = ["produce-report"]
+"#,
+            &policy,
+        );
+
+        assert!(response.ok, "response: {response:#?}");
+        assert!(
+            response
+                .issues
+                .iter()
+                .all(|issue| issue.code != "PLAN_REVIEWER_EXPORT_VISIBILITY"),
+            "covered exported path should not warn: {response:#?}"
+        );
     }
 
     #[test]
@@ -8748,7 +9227,7 @@ mod tests {
         let init_id = "019e254f-c2b1-7db2-8733-72753668a5d8";
         // task_id == initiative_id ⇒ Integration merge.
         assert_eq!(
-            task_display_title(init_id, init_id),
+            task_display_title(init_id, None, init_id),
             INTEGRATION_MERGE_TITLE,
             "coordinator row MUST stamp the stable human title, not the UUID",
         );
@@ -8760,13 +9239,14 @@ mod tests {
     }
 
     #[test]
-    fn inv_integration_merge_visible_subtask_keeps_authored_id() {
+    fn inv_integration_merge_visible_subtask_uses_task_name() {
         let init_id = "019e254f-c2b1-7db2-8733-72753668a5d8";
-        let sub_id = "sibling-materialize-records";
+        let sub_id = "00000000-0000-4000-8000-000000000042";
+        let task_name = "sibling-materialize-records";
         assert_eq!(
-            task_display_title(sub_id, init_id),
-            sub_id,
-            "sub-task rows MUST echo the operator-authored task_id (no rename)",
+            task_display_title(sub_id, Some(task_name), init_id),
+            task_name,
+            "sub-task rows MUST show the operator-authored task_name, not the UUID",
         );
     }
 
@@ -8840,6 +9320,7 @@ mod tests {
     fn synth_task_row(state: raxis_types::TaskState) -> raxis_store::views::tasks::TaskRow {
         raxis_store::views::tasks::TaskRow {
             task_id: "t-state".into(),
+            task_name: Some("t-state".into()),
             initiative_id: "init-state".into(),
             initiative_state: "Executing".into(),
             lane_id: "default".into(),
@@ -8906,7 +9387,7 @@ name = "State projection"
 lane_id = "default"
 
 [[tasks]]
-task_id = "t-state"
+task_name = "t-state"
 "# as &[u8]],
             )
             .unwrap();
@@ -8978,7 +9459,7 @@ name = "Summary fixture"
 lane_id = "default"
 
 [[tasks]]
-task_id = "t-ledger"
+task_name = "t-ledger"
 description = "ledger task"
 session_agent_type = "Executor"
 clone_strategy = "blobless"
@@ -8987,7 +9468,7 @@ cumulative_max_seconds = 30
 prompt = "do ledger work"
 
 [[tasks]]
-task_id = "t-capture"
+task_name = "t-capture"
 description = "capture task"
 session_agent_type = "Executor"
 clone_strategy = "blobless"
@@ -9271,7 +9752,7 @@ description = "Dashboard session enrichment fixture"
 name = "Existing initiative"
 
 [[tasks]]
-task_id = "task-a"
+task_name = "task-a"
 "#;
         g.execute(
             &format!(
@@ -9602,6 +10083,7 @@ task_id = "task-a"
             initiative_id: None,
             initiative_display_name: None,
             task_id: None,
+            task_name: None,
             state: "Active".into(),
             provider: None,
             model: None,
@@ -9617,6 +10099,7 @@ task_id = "task-a"
         let owning = SessionOwningTask {
             initiative_id: Some("init-a".into()),
             task_id: Some("task-a".into()),
+            task_name: Some("build-api".into()),
             input_tokens: 1234,
             output_tokens: 567,
         };
@@ -9631,6 +10114,7 @@ task_id = "task-a"
         );
         assert_eq!(out.initiative_id.as_deref(), Some("init-a"));
         assert_eq!(out.task_id.as_deref(), Some("task-a"));
+        assert_eq!(out.task_name.as_deref(), Some("build-api"));
         assert_eq!(out.input_tokens, 1234);
         assert_eq!(out.output_tokens, 567);
         assert_eq!(out.model.as_deref(), Some("claude-3-5-sonnet"));
@@ -9649,6 +10133,7 @@ task_id = "task-a"
             initiative_id: Some("init-existing".into()),
             initiative_display_name: Some("Existing initiative".into()),
             task_id: Some("task-existing".into()),
+            task_name: Some("existing-task".into()),
             state: "Active".into(),
             provider: Some("anthropic-prod".into()),
             model: Some("claude-3-haiku".into()),
@@ -9664,6 +10149,7 @@ task_id = "task-a"
         let owning = SessionOwningTask {
             initiative_id: Some("init-other".into()),
             task_id: Some("task-other".into()),
+            task_name: Some("other-task".into()),
             input_tokens: 1234,
             output_tokens: 567,
         };
@@ -9983,6 +10469,7 @@ task_id = "task-a"
         let owning = SessionOwningTask {
             initiative_id: Some("init-a".into()),
             task_id: Some("task-a".into()),
+            task_name: None,
             input_tokens: 0,
             output_tokens: 0,
         };
@@ -10011,6 +10498,7 @@ task_id = "task-a"
         let owning = SessionOwningTask {
             initiative_id: Some("init-a".into()),
             task_id: Some("task-a".into()),
+            task_name: None,
             input_tokens: 0,
             output_tokens: 0,
         };
@@ -10030,6 +10518,7 @@ task_id = "task-a"
         let owning = SessionOwningTask {
             initiative_id: Some("init-a".into()),
             task_id: Some("task-a".into()),
+            task_name: None,
             input_tokens: 12,
             output_tokens: 3,
         };
@@ -10052,6 +10541,7 @@ task_id = "task-a"
             initiative_id: None,
             initiative_display_name: None,
             task_id: None,
+            task_name: None,
             state: "Active".into(),
             provider: None,
             model: None,
@@ -10067,6 +10557,7 @@ task_id = "task-a"
         let owning = SessionOwningTask {
             initiative_id: Some("init-a".into()),
             task_id: Some("task-coordinator".into()),
+            task_name: None,
             input_tokens: 0,
             output_tokens: 0,
         };
@@ -10089,6 +10580,7 @@ task_id = "task-a"
             initiative_id: None,
             initiative_display_name: None,
             task_id: None,
+            task_name: None,
             state: "Active".into(),
             provider: None,
             model: None,
@@ -10104,6 +10596,7 @@ task_id = "task-a"
         let owning = SessionOwningTask {
             initiative_id: Some("init-a".into()),
             task_id: Some("task-a".into()),
+            task_name: None,
             input_tokens: 1_111,
             output_tokens: 222,
         };

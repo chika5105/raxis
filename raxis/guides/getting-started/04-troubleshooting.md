@@ -362,20 +362,24 @@ Reference: [`recipes/ops/05-investigate-stuck-task.md`](../recipes/ops/05-invest
 auto-generated Orchestrator row, but your declared Executor never
 appears or never admits.
 
-**Why.** The most common cause in repeated local demos is a reused
-`task_id`. Task IDs are globally indexed in `kernel.db`; reusing
-`task_id = "greeter"` in the same data dir can collide with an older
-demo run.
+**Why.** This used to happen when repeated local demos reused a
+plan-authored `task_id`. RAXIS now owns runtime task IDs: the plan only
+declares `task_name`, and the kernel generates a fresh UUID for every
+task on every approved initiative. If you still see this symptom, the
+likely cause is a plan-validation error, missing repository, failed
+gate, or an admission failure.
 
-**Fix.** Use a fresh data dir or generate unique task IDs for reruns:
+**Fix.** Run the same plan through validation and inspect the
+initiative diagnosis:
 
 ```bash
-export RAXIS_TASK_ID="greeter-$(date +%Y%m%d%H%M%S)"
+raxis plan validate ./plan.toml
+raxis initiative show <id> --with-tasks
+raxis doctor
 ```
 
-Then put `task_id = "$RAXIS_TASK_ID"` in the plan you submit. For the
-checked-in scenario plans, the simplest repeatable path is a fresh
-`RAXIS_DATA_DIR` per scenario suite.
+You can safely rerun a checked-in scenario plan with the same
+`task_name`s; they only need to be unique inside that one initiative.
 
 ---
 
@@ -624,8 +628,11 @@ embedded gateway under `$RAXIS_DATA_DIR/runtime/embedded-gateway`.
 `raxis-gateway` file owner-executable only. The next run then tries to
 replace the file and hits a host permission error.
 
-**Fix.** Stop the kernel, clear the materialised copy, and restart.
-The immutable Homebrew binary remains under the brew prefix.
+**Fix.** Current kernels repair this automatically by atomically
+rewriting the materialised gateway through a private temp file. If you
+are on an older kernel that still uses direct overwrite, stop the
+kernel, clear the materialised copy, and restart. The immutable
+Homebrew binary remains under the brew prefix.
 
 ```bash
 rm -rf "$RAXIS_DATA_DIR/runtime/embedded-gateway"

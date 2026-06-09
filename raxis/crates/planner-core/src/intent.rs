@@ -454,19 +454,25 @@ pub enum SubmitError {
 // Wire-side helpers for dispatch-loop callers
 // ---------------------------------------------------------------------------
 
-/// Strip the `head_sha` field from a terminal-tool input and
-/// return it. Used by the executor's main loop after a
-/// `task_complete` terminal tool fires.
+/// Executor completion tool input after planner-side normalization.
+///
+/// `task_complete` is intentionally semantic at the model boundary:
+/// the model says it is done, and the runtime derives the actual
+/// committed `head_sha` from the workspace. `head_sha` is therefore
+/// optional on raw model input but present after the tool's
+/// `input_override` has run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskCompleteInput {
     /// Final commit hash on the executor branch the kernel will record.
-    pub head_sha: String,
+    #[serde(default)]
+    pub head_sha: Option<String>,
+    /// Optional human summary. Never used as authority.
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 impl TaskCompleteInput {
     /// Parse a `task_complete` terminal-tool argument blob.
-    /// Returns [`SubmitError::MalformedInput`] if the model did not emit a
-    /// valid object with the expected `head_sha` string field.
     pub fn parse(v: &serde_json::Value) -> Result<Self, SubmitError> {
         serde_json::from_value(v.clone()).map_err(|e| {
             SubmitError::MalformedInput(format!("task_complete input not parseable: {e}"))
@@ -677,9 +683,10 @@ mod tests {
 
     #[test]
     fn task_complete_input_parse_round_trip() {
-        let v = serde_json::json!({ "head_sha": "deadbeef" });
+        let v = serde_json::json!({ "summary": "done" });
         let p = TaskCompleteInput::parse(&v).unwrap();
-        assert_eq!(p.head_sha, "deadbeef");
+        assert_eq!(p.head_sha, None);
+        assert_eq!(p.summary.as_deref(), Some("done"));
     }
 
     #[test]

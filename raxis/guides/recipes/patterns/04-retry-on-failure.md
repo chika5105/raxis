@@ -54,7 +54,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id              = "migrate-auth"
+task_name              = "migrate-auth"
 session_agent_type   = "Executor"
 clone_strategy       = "sparse"
 path_allowlist       = ["src/auth/", "tests/auth/"]
@@ -70,7 +70,7 @@ max_crash_retries     = 5
 max_review_rejections = 3
 
 [[tasks]]
-task_id              = "review-auth"
+task_name              = "review-auth"
 session_agent_type   = "Reviewer"
 clone_strategy       = "blobless"
 path_allowlist       = ["src/auth/", "tests/auth/"]

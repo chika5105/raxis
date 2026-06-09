@@ -191,7 +191,7 @@ based on what the plan declares the task needs.
 ```toml
 # plan.toml
 [[tasks]]
-task_id = "deploy-staging"
+task_name = "deploy-staging"
 
 [[tasks.credentials]]
 name    = "k8s-staging"      # references credentials/k8s-staging.env on the Kernel host
@@ -425,7 +425,7 @@ reached. This avoids creating spurious escalations for requests that would fail 
 
 ```toml
 [[tasks]]
-task_id = "deploy-staging"
+task_name = "deploy-staging"
 
 # Credentials this task needs — Kernel injects these at VM boot
 [[tasks.credentials]]
@@ -1379,7 +1379,7 @@ environments' credentials. The canonical pattern is:
 # WRONG — rejected with FAIL_TASK_ENVIRONMENT_INCONSISTENT.
 
 [[plan.tasks]]
-task_id = "promote_artifact"
+task_name = "promote_artifact"
 role    = "Executor"
 
 [[plan.tasks.credentials]]
@@ -1403,7 +1403,7 @@ name = "registry-prod-write"         # → bound to "production"
 # task-output store, depending on workflow).
 
 [[plan.tasks]]
-task_id = "fetch_from_beta"
+task_name = "fetch_from_beta"
 role    = "Executor"
 
 [[plan.tasks.credentials]]
@@ -1414,7 +1414,7 @@ name = "registry-beta-read"          # bound to "beta" — task is bound to "bet
 # credentials.
 
 [[plan.tasks]]
-task_id    = "publish_to_prod"
+task_name    = "publish_to_prod"
 role       = "Executor"
 depends_on = ["fetch_from_beta"]
 

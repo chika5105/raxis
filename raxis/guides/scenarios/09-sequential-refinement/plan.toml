@@ -12,7 +12,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id            = "draft"
+task_name            = "draft"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
@@ -25,7 +25,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "refine"
+task_name            = "refine"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
@@ -38,7 +38,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "polish"
+task_name            = "polish"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]

@@ -28,7 +28,7 @@ investigate elsewhere (`raxis explain <task>`).
 raxis initiative show <id> --bundle --to /tmp/forensic
 grep -A 5 "<task_id>" /tmp/forensic/plan.toml
 # [[tasks]]
-# task_id        = "implementer"
+# task_name      = "implementer"
 # allowed_egress = ["github.com:443", "api.openai.com:443"]
 # ...
 ```
@@ -47,7 +47,7 @@ Update the plan and resubmit:
 
 ```toml
 [[tasks]]
-task_id        = "implementer"
+task_name        = "implementer"
 allowed_egress = ["github.com:443", "api.example.com:443"]
 ```
 

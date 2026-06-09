@@ -38,7 +38,7 @@ use std::sync::Arc;
 use raxis_store::{Store, Table};
 use raxis_types::{
     unix_now_secs, BudgetSnapshot, InitiativeState, IntentKind, IntentOutcome, IntentRequest,
-    IntentResponse, PlannerErrorCode, SessionId, TaskState,
+    IntentResponse, PlannerErrorCode, ReviewVerdict, SessionAgentType, SessionId, TaskState,
 };
 use rusqlite::OptionalExtension;
 
@@ -481,7 +481,7 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
                         &evaluation_sha,
                         &worktree,
                         &policy_snapshot,
-                        ctx,
+                        &ctx,
                     )
                     .await;
                 }
@@ -2447,77 +2447,18 @@ fn run_phase_c(
                     // immediately, not Running.
                     task_state = TaskState::Completed;
 
-                    // Paired-write `IntegrationMergeCompleted` audit emit.
-                    // Gated on the FSM cascade succeeding so the audit
-                    // chain never carries a `IntegrationMergeCompleted`
-                    // record that lacks a paired
-                    // `TaskStateChanged(coordinator → Completed)`.
-                    if let Err(e) = ctx.audit.emit(
-                        raxis_audit_tools::AuditEventKind::IntegrationMergeCompleted {
-                            initiative_id: initiative_id_owned.clone(),
-                            session_id: session_id_str.clone(),
-                            commit_sha: applied_commit_sha.clone(),
-                            previous_sha: pre_state.base_sha_raw.clone(),
-                            operator_assisted,
-                            escalation_id,
-                            target_ref: initiative_target_ref.clone(),
-                        },
+                    emit_integration_merge_completion_audits(
+                        &ctx,
+                        &outcome,
                         Some(session_id_str.as_str()),
-                        Some(task_id_owned.as_str()),
-                        Some(initiative_id_owned.as_str()),
-                    ) {
-                        eprintln!(
-                            "{{\"level\":\"error\",\"event\":\"IntegrationMergeCompleted\",\
-                             \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
-                        );
-                    }
-
-                    // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` —
-                    // post-commit `TaskStateChanged` emits for every
-                    // FSM hop the coordinator took to reach Completed.
-                    // When the coordinator was already `Running` this
-                    // is just the terminal edge; when it had to
-                    // normalize from `GatesPending` / `Admitted` the
-                    // intermediate hops are emitted first so the
-                    // dashboard observes a contiguous path instead of
-                    // a sudden `GatesPending → Completed` jump.
-                    for rec in &outcome.normalization_records {
-                        emit_task_state_changed_audit(
-                            ctx.audit.as_ref(),
-                            rec,
-                            Some(session_id_str.as_str()),
-                        );
-                    }
-                    emit_task_state_changed_audit(
-                        ctx.audit.as_ref(),
-                        &outcome.task_record,
-                        Some(session_id_str.as_str()),
+                        task_id_owned.as_str(),
+                        initiative_id_owned.as_str(),
+                        applied_commit_sha.as_str(),
+                        pre_state.base_sha_raw.as_str(),
+                        initiative_target_ref.as_str(),
+                        operator_assisted,
+                        escalation_id,
                     );
-
-                    let from_state = outcome.initiative_from.clone();
-                    let to_state = outcome.initiative_to.clone();
-                    if !from_state.is_empty() && from_state != to_state {
-                        if let Err(e) = ctx.audit.emit(
-                            raxis_audit_tools::AuditEventKind::InitiativeStateChanged {
-                                initiative_id: initiative_id_owned.clone(),
-                                from_state: from_state.clone(),
-                                to_state: to_state.clone(),
-                            },
-                            Some(session_id_str.as_str()),
-                            Some(task_id_owned.as_str()),
-                            Some(initiative_id_owned.as_str()),
-                        ) {
-                            eprintln!(
-                                "{{\"level\":\"error\",\"event\":\"InitiativeStateChanged\",\
-                                 \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
-                            );
-                        }
-                        eprintln!(
-                            "{{\"level\":\"info\",\"event\":\"InitiativeCompletedAfterIntegrationMerge\",\
-                             \"initiative_id\":\"{initiative_id_owned}\",\
-                             \"from\":\"{from_state}\",\"to\":\"{to_state}\"}}",
-                        );
-                    }
                 }
                 Ok(None) => {
                     // Cascade was structurally inapplicable (initiative
@@ -3069,15 +3010,14 @@ fn handle_complete_task(
     // V2.5 — accept both `Admitted` and `Running` states.
     //
     // **Why `Admitted` is admissible.** The Executor's terminal
-    // intent contract (`render_system_prompt_for_role`) is a
-    // single `task_complete { head_sha }` per session — the
-    // planner makes one (or more) commits in /workspace then
-    // calls `task_complete` exactly once to flip the task to
-    // `Completed`. There is NO separate "admit the diff" intent
-    // in the normative path. If the Executor never submitted a
-    // witness intent (no inline `single_commit`), the task is
-    // still in `Admitted` when `task_complete` arrives — the
-    // common path for first-and-only commits.
+    // intent contract is a single `task_complete` per session —
+    // the planner makes one (or more) commits in /workspace, the
+    // runtime derives the actual Git HEAD, then the kernel flips
+    // the task to `Completed`. There is NO separate "admit the
+    // diff" intent in the normative path. If the Executor never
+    // submitted a witness intent (no inline `single_commit`), the
+    // task is still in `Admitted` when `task_complete` arrives —
+    // the common path for first-and-only commits.
     //
     // We fold Phase A (ancestry / topology / diff / path-allowlist
     // / range insert / Admitted → Running transition) into the
@@ -3116,9 +3056,10 @@ fn handle_complete_task(
 
     let req_head_str = req.head_sha.as_ref().map(|s| s.as_str()).unwrap_or("");
     let req_head = if req_head_str.is_empty() {
-        // §2.5.8 edge-case: empty head_sha + no recorded ranges + NULL
-        // H_bind = trivial vacuous pass. We model this as `None` and
-        // skip the trailing-segment branch entirely.
+        // Legacy Running-state edge case: empty head_sha + existing
+        // admitted ranges can skip the trailing-segment branch. Fresh
+        // Admitted completions reject empty head below before they can
+        // reach the completion commit.
         None
     } else {
         Some(
@@ -3132,11 +3073,11 @@ fn handle_complete_task(
     // Performed BEFORE Step 2's `read_completion_inputs`, so the
     // freshly-inserted `task_intent_ranges` row is observed by
     // the union loop below. The whole sequence is gated on a
-    // non-empty `req.head_sha` — a vacuous CompleteTask
-    // (head_sha=="") with no prior witness intents and no diff
-    // is the documented "task ran to completion with no commit"
-    // path; we let it through unchanged so the existing
-    // Running-state logic applies.
+    // non-empty `req.head_sha`. An empty completion
+    // (head_sha=="") or unchanged `(base, head)` on an `Admitted`
+    // executor is a validation rejection: a fresh executor that
+    // did not produce a commit must use ReportFailure rather than
+    // letting RAXIS attest an unchanged base as completed work.
     //
     // **Why `session.base_sha` is the admission base.** The
     // session row's `base_sha` was stamped by
@@ -3182,6 +3123,17 @@ fn handle_complete_task(
             }
             let _b = CommitSha::new(&base_str)
                 .map_err(|_| (PlannerErrorCode::InvalidRequest, task_state))?;
+            if head_str == base_str {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"CompleteTaskAdmitNoOp\",\
+                     \"task_id\":\"{}\",\"base\":\"{}\",\"head\":\"{}\",\
+                     \"diagnostic\":\"fresh executor completion did not advance HEAD\"}}",
+                    req.task_id.as_str(),
+                    base_str,
+                    head_str,
+                );
+                return Err((PlannerErrorCode::FailInvalidDiff, task_state));
+            }
 
             let rt_handle = tokio::runtime::Handle::current();
 
@@ -3286,6 +3238,14 @@ fn handle_complete_task(
                 emit_task_state_changed_audit(ctx.audit.as_ref(), &rec, Some(session_id.as_str()));
             }
             admitted_inline = true;
+        } else {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"CompleteTaskAdmitEmptyHead\",\
+                 \"task_id\":\"{}\",\"diagnostic\":\"fresh executor completion \
+                 carried no committed head SHA\"}}",
+                req.task_id.as_str(),
+            );
+            return Err((PlannerErrorCode::FailInvalidDiff, task_state));
         }
     }
 
@@ -4246,6 +4206,184 @@ fn increment_executor_review_reject_count(
     Ok(affected)
 }
 
+fn increment_executor_review_reject_count_and_read(
+    executor_task_id: &str,
+    store: &Store,
+) -> Result<Option<u32>, rusqlite::Error> {
+    let conn = store.lock_sync();
+    let affected = conn.execute(
+        &format!(
+            "UPDATE {SUBTASK_ACTIVATIONS}
+                SET review_reject_count = review_reject_count + 1
+              WHERE activation_id = (
+                  SELECT activation_id FROM {SUBTASK_ACTIVATIONS}
+                   WHERE task_id = ?1
+                   ORDER BY created_at DESC
+                   LIMIT 1
+              )"
+        ),
+        rusqlite::params![executor_task_id],
+    )?;
+    if affected == 0 {
+        return Ok(None);
+    }
+    let count: i64 = conn.query_row(
+        &format!(
+            "SELECT review_reject_count
+               FROM {SUBTASK_ACTIVATIONS}
+              WHERE task_id = ?1
+              ORDER BY created_at DESC
+              LIMIT 1"
+        ),
+        rusqlite::params![executor_task_id],
+        |r| r.get(0),
+    )?;
+    Ok(Some(u32::try_from(count.max(0)).unwrap_or(u32::MAX)))
+}
+
+struct ReviewCeilingTerminalization {
+    task_records: Vec<TaskTransitionRecord>,
+    initiative_from: String,
+    initiative_to: String,
+}
+
+fn terminalize_initiative_for_review_rejection_ceiling(
+    initiative_id: &str,
+    executor_task_id: &str,
+    reviewer_task_id: &str,
+    review_reject_count: u32,
+    max_review_rejections: u32,
+    critique: Option<&str>,
+    store: &Store,
+) -> Result<Option<ReviewCeilingTerminalization>, rusqlite::Error> {
+    let mut conn = store.lock_sync();
+    let tx = conn.transaction()?;
+    let initiative_from: Option<String> = tx
+        .query_row(
+            &format!(
+                "SELECT state FROM {INITIATIVES}
+                  WHERE initiative_id = ?1"
+            ),
+            rusqlite::params![initiative_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(initiative_from) = initiative_from else {
+        return Ok(None);
+    };
+    if matches!(
+        initiative_from.as_str(),
+        "Completed" | "Failed" | "Cancelled" | "Aborted"
+    ) {
+        return Ok(None);
+    }
+
+    let now = unix_now_secs();
+    let critique_suffix = critique
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(" latest reviewer critique: {s}"))
+        .unwrap_or_default();
+    let block_reason = format!(
+        "parent initiative failed: review rejection budget exhausted for \
+         executor {executor_task_id} after reviewer {reviewer_task_id} \
+         rejected round {review_reject_count}/{max_review_rejections}.{critique_suffix}"
+    );
+
+    let mut stmt = tx.prepare(&format!(
+        "SELECT task_id, state, policy_epoch
+           FROM {TASKS}
+          WHERE initiative_id = ?1
+            AND state IN ('Admitted','Running','GatesPending','BlockedRecoveryPending')
+          ORDER BY admitted_at ASC, task_id ASC"
+    ))?;
+    let task_snapshot: Vec<(String, String, i64)> = stmt
+        .query_map(rusqlite::params![initiative_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+
+    tx.execute(
+        &format!(
+            "DELETE FROM {reservations}
+              WHERE task_id IN (
+                  SELECT task_id FROM {TASKS}
+                   WHERE initiative_id = ?1
+                     AND state IN ('Admitted','Running','GatesPending','BlockedRecoveryPending')
+              )",
+            reservations = Table::LaneBudgetReservations.as_str(),
+        ),
+        rusqlite::params![initiative_id],
+    )?;
+    tx.execute(
+        &format!(
+            "UPDATE {SUBTASK_ACTIVATIONS}
+                SET activation_state = 'Failed',
+                    activated_at      = COALESCE(activated_at, ?2),
+                    terminated_at     = ?2
+              WHERE initiative_id     = ?1
+                AND activation_state IN ('PendingActivation','Active')
+                AND task_id IN (
+                    SELECT task_id FROM {TASKS}
+                     WHERE initiative_id = ?1
+                       AND state IN ('Admitted','Running','GatesPending','BlockedRecoveryPending')
+                )"
+        ),
+        rusqlite::params![initiative_id, now],
+    )?;
+    tx.execute(
+        &format!(
+            "UPDATE {TASKS}
+                SET state = 'Failed',
+                    transitioned_at = ?2,
+                    block_reason = ?3,
+                    actor = 'kernel'
+              WHERE initiative_id = ?1
+                AND state IN ('Admitted','Running','GatesPending','BlockedRecoveryPending')"
+        ),
+        rusqlite::params![initiative_id, now, &block_reason],
+    )?;
+    tx.execute(
+        &format!(
+            "UPDATE {INITIATIVES}
+                SET state = ?2,
+                    completed_at = ?3
+              WHERE initiative_id = ?1
+                AND state NOT IN ('Completed','Failed','Cancelled','Aborted')"
+        ),
+        rusqlite::params![initiative_id, InitiativeState::Failed.as_sql_str(), now],
+    )?;
+    tx.commit()?;
+
+    let task_records = task_snapshot
+        .into_iter()
+        .filter_map(|(task_id, from_state, policy_epoch)| {
+            let from_state = TaskState::from_sql_str(&from_state)?;
+            Some(TaskTransitionRecord {
+                task_id,
+                initiative_id: initiative_id.to_owned(),
+                from_state,
+                to_state: TaskState::Failed,
+                actor: TransitionActor::Kernel,
+                transitioned_at: now,
+                policy_epoch: policy_epoch.max(0) as u64,
+            })
+        })
+        .collect();
+
+    Ok(Some(ReviewCeilingTerminalization {
+        task_records,
+        initiative_from,
+        initiative_to: InitiativeState::Failed.as_sql_str().to_owned(),
+    }))
+}
+
 fn clear_executor_review_repair_feedback(
     executor_task_id: &str,
     store: &Store,
@@ -4829,12 +4967,13 @@ fn handle_submit_review(
         // emission below. The counter is the substrate the
         // `RetrySubTask` ceiling-check in `handle_retry_sub_task`
         // reads against the plan-declared `max_review_rejections`.
+        let mut review_ceiling_exhausted = false;
         if matches!(
             outcome.verdict,
             crate::initiatives::review_aggregation::AggregateReviewVerdict::AtLeastOneRejected,
         ) {
-            match increment_executor_review_reject_count(predecessor.as_str(), store) {
-                Ok(0) => {
+            match increment_executor_review_reject_count_and_read(predecessor.as_str(), store) {
+                Ok(None) => {
                     // The Executor's activation row vanished between
                     // the aggregator's read and this bump — a recovery
                     // sweep that's about to re-emit, an aborted
@@ -4849,7 +4988,110 @@ fn handle_submit_review(
                          \"reviewer_task_id\":\"{reviewer_task_id}\"}}",
                     );
                 }
-                Ok(_) => {}
+                Ok(Some(review_reject_count)) => {
+                    use crate::initiatives::plan_registry::TaskKey;
+                    let max_review_rejections = ctx
+                        .plan_registry
+                        .get(&TaskKey::new(
+                            initiative_id_str.as_str(),
+                            predecessor.as_str(),
+                        ))
+                        .map(|fields| fields.effective_max_review_rejections())
+                        .unwrap_or(
+                            crate::initiatives::plan_registry::DEFAULT_MAX_REVIEW_REJECTIONS,
+                        );
+                    if review_reject_count >= max_review_rejections {
+                        review_ceiling_exhausted = true;
+                        eprintln!(
+                            "{{\"level\":\"warn\",\
+                             \"event\":\"ReviewRejectionCeilingExceeded\",\
+                             \"initiative_id\":\"{initiative_id_str}\",\
+                             \"executor_task_id\":\"{predecessor}\",\
+                             \"reviewer_task_id\":\"{reviewer_task_id}\",\
+                             \"review_reject_count\":{review_reject_count},\
+                             \"max_review_rejections\":{max_review_rejections}}}",
+                        );
+
+                        match terminalize_initiative_for_review_rejection_ceiling(
+                            initiative_id_str.as_str(),
+                            predecessor.as_str(),
+                            reviewer_task_id.as_str(),
+                            review_reject_count,
+                            max_review_rejections,
+                            raw_rejection_critique.as_deref(),
+                            store,
+                        ) {
+                            Ok(Some(outcome)) => {
+                                for rec in &outcome.task_records {
+                                    emit_task_state_changed_audit(
+                                        ctx.audit.as_ref(),
+                                        rec,
+                                        Some(session_id_str.as_str()),
+                                    );
+                                }
+                                if outcome.initiative_from != outcome.initiative_to {
+                                    if let Err(e) = ctx.audit.emit(
+                                        raxis_audit_tools::AuditEventKind::InitiativeStateChanged {
+                                            initiative_id: initiative_id_str.clone(),
+                                            from_state: outcome.initiative_from.clone(),
+                                            to_state: outcome.initiative_to.clone(),
+                                        },
+                                        Some(session_id_str.as_str()),
+                                        Some(reviewer_task_id.as_str()),
+                                        Some(initiative_id_str.as_str()),
+                                    ) {
+                                        eprintln!(
+                                            "{{\"level\":\"error\",\
+                                             \"event\":\"InitiativeStateChanged\",\
+                                             \"audit_emit_failed\":\"{e}\",\
+                                             \"initiative_id\":\"{initiative_id_str}\"}}",
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                eprintln!(
+                                    "{{\"level\":\"info\",\
+                                     \"event\":\"ReviewRejectionCeilingTerminalizationSkipped\",\
+                                     \"initiative_id\":\"{initiative_id_str}\",\
+                                     \"executor_task_id\":\"{predecessor}\",\
+                                     \"reason\":\"initiative_missing_or_already_terminal\"}}",
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "{{\"level\":\"error\",\
+                                     \"event\":\"ReviewRejectionCeilingTerminalizationFailed\",\
+                                     \"initiative_id\":\"{initiative_id_str}\",\
+                                     \"executor_task_id\":\"{predecessor}\",\
+                                     \"error\":\"{e}\"}}",
+                                );
+                            }
+                        }
+
+                        if let Err(e) = ctx.audit.emit(
+                            raxis_audit_tools::AuditEventKind::ReviewRejectionCeilingExceeded {
+                                initiative_id: initiative_id_str.clone(),
+                                executor_task_id: predecessor.clone(),
+                                triggered_by_reviewer_task_id: reviewer_task_id.clone(),
+                                review_reject_count,
+                                max_review_rejections,
+                                critique: raw_rejection_critique.clone(),
+                            },
+                            Some(session_id_str.as_str()),
+                            Some(reviewer_task_id.as_str()),
+                            Some(initiative_id_str.as_str()),
+                        ) {
+                            eprintln!(
+                                "{{\"level\":\"error\",\
+                                 \"event\":\"ReviewRejectionCeilingExceeded\",\
+                                 \"audit_emit_failed\":\"{e}\",\
+                                 \"initiative_id\":\"{initiative_id_str}\",\
+                                 \"executor_task_id\":\"{predecessor}\"}}",
+                            );
+                        }
+                    }
+                }
                 Err(e) => {
                     eprintln!(
                         "{{\"level\":\"warn\",\
@@ -4927,7 +5169,7 @@ fn handle_submit_review(
                     })
                 }
                 crate::initiatives::review_aggregation::AggregateReviewVerdict::AtLeastOneRejected
-                    if !approved =>
+                    if !approved && !review_ceiling_exhausted =>
                 {
                     // Best-judgment scope (per the loop preamble):
                     // surface this submission's critique + session
@@ -5687,24 +5929,140 @@ async fn resolve_vm_image_override(
 fn missing_predecessors_for_activation(
     tx: &rusqlite::Transaction<'_>,
     task_id: &str,
+    plan_registry: &crate::initiatives::plan_registry::PlanRegistry,
 ) -> rusqlite::Result<Vec<(String, String)>> {
+    use crate::initiatives::plan_registry::TaskKey;
+
+    let successor_initiative_id: Option<String> = tx
+        .query_row(
+            &format!("SELECT initiative_id FROM {TASKS} WHERE task_id = ?1"),
+            rusqlite::params![task_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    let successor_agent_type = successor_initiative_id
+        .as_ref()
+        .and_then(|initiative_id| plan_registry.get(&TaskKey::new(initiative_id, task_id)))
+        .map(|fields| fields.session_agent_type);
+
     let mut stmt = tx.prepare(&format!(
-        "SELECT pred.task_id, pred.state \
+        "SELECT pred.task_id, pred.state, pred.initiative_id, \
+                COALESCE(succ.is_gate_fixup, 0), \
+                succ.parent_gate_failure_task_id \
            FROM {TASK_DAG_EDGES} AS e \
            JOIN {TASKS} AS pred \
              ON pred.task_id = e.predecessor_task_id \
            JOIN {TASKS} AS succ \
              ON succ.task_id = e.successor_task_id \
-          WHERE e.successor_task_id = ?1 \
-            AND pred.state != ?2 \
-            AND NOT (COALESCE(succ.is_gate_fixup, 0) = 1 \
-                     AND succ.parent_gate_failure_task_id = e.predecessor_task_id)"
+          WHERE e.successor_task_id = ?1"
     ))?;
-    let rows = stmt.query_map(
-        rusqlite::params![task_id, TaskState::Completed.as_sql_str()],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-    )?;
-    rows.collect()
+    let rows = stmt.query_map(rusqlite::params![task_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+
+    let mut missing = Vec::new();
+    for row in rows {
+        let (pred_task_id, pred_state, pred_initiative_id, succ_is_fixup, succ_parent) = row?;
+        let is_fixup_parent_edge =
+            succ_is_fixup == 1 && succ_parent.as_deref() == Some(pred_task_id.as_str());
+        if pred_state != TaskState::Completed.as_sql_str() {
+            if !is_fixup_parent_edge {
+                missing.push((pred_task_id, pred_state));
+            }
+            continue;
+        }
+
+        // Reviewer tasks are the gate itself. They must be allowed
+        // to start once their executor predecessor is mechanically
+        // complete; otherwise the reviewer panel can never close.
+        if successor_agent_type == Some(SessionAgentType::Reviewer) {
+            continue;
+        }
+
+        if let Some(verdict) = reviewer_gate_blocker_for_predecessor(
+            tx,
+            plan_registry,
+            &pred_initiative_id,
+            &pred_task_id,
+        )? {
+            missing.push((pred_task_id, verdict));
+        }
+    }
+    Ok(missing)
+}
+
+fn reviewer_gate_blocker_for_predecessor(
+    tx: &rusqlite::Transaction<'_>,
+    plan_registry: &crate::initiatives::plan_registry::PlanRegistry,
+    initiative_id: &str,
+    predecessor_task_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    use crate::initiatives::plan_registry::TaskKey;
+
+    let pred_agent_type = plan_registry
+        .get(&TaskKey::new(initiative_id, predecessor_task_id))
+        .map(|fields| fields.session_agent_type);
+    if pred_agent_type != Some(SessionAgentType::Executor) {
+        return Ok(None);
+    }
+
+    let mut stmt = tx.prepare(&format!(
+        "SELECT t.task_id, t.review_verdict \
+           FROM {TASK_DAG_EDGES} AS e \
+           JOIN {TASKS} AS t \
+             ON t.task_id = e.successor_task_id \
+          WHERE e.predecessor_task_id = ?1"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![predecessor_task_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+    })?;
+
+    let mut reviewer_count = 0u32;
+    let mut any_pending = false;
+    let mut any_rejected = false;
+    let mut registry_missing = false;
+    for row in rows {
+        let (successor_task_id, raw_verdict) = row?;
+        let key = TaskKey::new(initiative_id, successor_task_id.as_str());
+        let Some(fields) = plan_registry.get(&key) else {
+            registry_missing = true;
+            eprintln!(
+                "{{\"level\":\"warn\",\
+                 \"event\":\"review_gate_filter.missing_registry_entry\",\
+                 \"task_id\":\"{successor_task_id}\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"predecessor_task_id\":\"{predecessor_task_id}\"}}",
+            );
+            continue;
+        };
+        if fields.session_agent_type != SessionAgentType::Reviewer {
+            continue;
+        }
+        reviewer_count += 1;
+        match raw_verdict.as_deref().and_then(ReviewVerdict::from_sql_str) {
+            Some(ReviewVerdict::Approved) => {}
+            Some(ReviewVerdict::Rejected) => any_rejected = true,
+            None => any_pending = true,
+        }
+    }
+
+    if registry_missing {
+        Ok(Some("ReviewerGateRegistryMissing".to_owned()))
+    } else if reviewer_count == 0 {
+        Ok(None)
+    } else if any_pending {
+        Ok(Some("AwaitingReviewerVerdicts".to_owned()))
+    } else if any_rejected {
+        Ok(Some("AtLeastOneRejected".to_owned()))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Tear down a session whose VM came up successfully but whose
@@ -6167,16 +6525,16 @@ async fn handle_activate_sub_task(
                 //       `DEPENDENCY_NOT_MET` rejection contract), and
                 //       `specs/invariants.md
                 //       INV-KERNEL-DAG-AUTHORITY-01`.
-                let missing_predecessors = match missing_predecessors_for_activation(&tx, &task_id)
-                {
-                    Ok(v) => v,
-                    Err(_) => {
-                        return Err(ActivateRejection::standard(
-                            PlannerErrorCode::FailPolicyViolation,
-                            TaskState::Admitted,
-                        ))
-                    }
-                };
+                let missing_predecessors =
+                    match missing_predecessors_for_activation(&tx, &task_id, &plan_registry_arc) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            return Err(ActivateRejection::standard(
+                                PlannerErrorCode::FailPolicyViolation,
+                                TaskState::Admitted,
+                            ))
+                        }
+                    };
                 if !missing_predecessors.is_empty() {
                     return Err(ActivateRejection::DependencyNotMet {
                         missing: missing_predecessors,
@@ -7657,7 +8015,7 @@ fn classify_batch_candidates(
             continue;
         }
         // Predecessor closure — INV-KERNEL-DAG-AUTHORITY-01.
-        let missing = match missing_predecessors_for_activation(&tx, id_str) {
+        let missing = match missing_predecessors_for_activation(&tx, id_str, plan_registry) {
             Ok(v) => v,
             Err(_) => {
                 out.push(BatchClassify::NotAdmissible(
@@ -7942,6 +8300,16 @@ async fn handle_retry_sub_task(
         /// retry-after-review from retry-after-crash for the
         /// `ReviewerSubstantiveDisagreementWitness`.
         from_review_rejection: bool,
+        /// The executor attempt SHA being superseded by this retry.
+        /// Captured before the transaction clears `tasks.evaluation_sha`
+        /// so the post-commit Git scrub can log exactly which rejected
+        /// output was removed from the integration workspace.
+        superseded_evaluation_sha: Option<String>,
+        /// Clean anchor for the per-initiative orchestrator merge
+        /// workspace. On review-rejection retry the kernel resets the
+        /// mutable integration workspace to this SHA so any previously
+        /// merged rejected attempt is not carried into root closeout.
+        integration_reset_sha: Option<String>,
     }
 
     let decision: RetryDecision = {
@@ -8270,6 +8638,43 @@ async fn handle_retry_sub_task(
             let from_review_rejection_admit =
                 (prior_state == "Completed" || prior_state == "PendingActivation")
                     && review_reject_count > 0;
+            let superseded_evaluation_sha: Option<String> = if from_review_rejection_admit {
+                tx.query_row(
+                    &format!("SELECT evaluation_sha FROM {TASKS} WHERE task_id = ?1"),
+                    rusqlite::params![&task_id_clone],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map_err(|_| {
+                    emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                    (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+                })?
+                .flatten()
+            } else {
+                None
+            };
+            let integration_reset_sha: Option<String> = if from_review_rejection_admit {
+                tx.query_row(
+                    &format!(
+                        "SELECT base_sha
+                           FROM {SESSIONS}
+                          WHERE initiative_id = ?1
+                            AND session_agent_type = 'Orchestrator'
+                            AND base_sha IS NOT NULL
+                          ORDER BY created_at ASC, session_id ASC
+                          LIMIT 1"
+                    ),
+                    rusqlite::params![&initiative_id_clone],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|_| {
+                    emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                    (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+                })?
+            } else {
+                None
+            };
             let new_review_reject_count = review_reject_count;
             let new_activation_id = uuid::Uuid::new_v4().to_string();
             if !task_belongs_to_initiative(&tx, &task_id_clone, &initiative_id_clone).map_err(
@@ -8554,6 +8959,8 @@ async fn handle_retry_sub_task(
                 crash_retry_count,
                 review_reject_count: new_review_reject_count,
                 from_review_rejection: from_review_rejection_admit,
+                superseded_evaluation_sha,
+                integration_reset_sha,
             })
         })
         .await
@@ -8562,6 +8969,16 @@ async fn handle_retry_sub_task(
             (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
         })??
     };
+
+    if decision.from_review_rejection {
+        scrub_superseded_retry_from_orchestrator_workspace(
+            &ctx.data_dir,
+            initiative_id.as_str(),
+            task_id_owned.as_str(),
+            decision.superseded_evaluation_sha.as_deref(),
+            decision.integration_reset_sha.as_deref(),
+        );
+    }
 
     // ── Step 4: best-effort substrate VM termination. ──────────────────
     //
@@ -8843,6 +9260,64 @@ async fn handle_retry_sub_task(
     })
 }
 
+fn scrub_superseded_retry_from_orchestrator_workspace(
+    data_dir: &std::path::Path,
+    initiative_id: &str,
+    task_id: &str,
+    superseded_evaluation_sha: Option<&str>,
+    integration_reset_sha: Option<&str>,
+) {
+    let Some(reset_sha) = integration_reset_sha.filter(|s| !s.is_empty()) else {
+        eprintln!(
+            "{{\"level\":\"warn\",\
+             \"event\":\"RetrySubTaskIntegrationWorkspaceScrubSkipped\",\
+             \"initiative_id\":\"{initiative_id}\",\
+             \"task_id\":\"{task_id}\",\
+             \"superseded_evaluation_sha\":\"{}\",\
+             \"reason\":\"missing_orchestrator_anchor_sha\"}}",
+            superseded_evaluation_sha.unwrap_or(""),
+        );
+        return;
+    };
+
+    let orch_worktree =
+        crate::worktree_provisioning::orchestrator_worktree_path(data_dir, initiative_id);
+    match crate::worktree_provisioning::reset_orchestrator_workspace_after_superseded_retry(
+        &orch_worktree,
+        task_id,
+        reset_sha,
+    ) {
+        Ok(()) => {
+            eprintln!(
+                "{{\"level\":\"info\",\
+                 \"event\":\"RetrySubTaskIntegrationWorkspaceScrubbed\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"task_id\":\"{task_id}\",\
+                 \"superseded_evaluation_sha\":\"{}\",\
+                 \"reset_sha\":\"{reset_sha}\",\
+                 \"orch_worktree\":\"{}\"}}",
+                superseded_evaluation_sha.unwrap_or(""),
+                orch_worktree.display(),
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\
+                 \"event\":\"RetrySubTaskIntegrationWorkspaceScrubFailed\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"task_id\":\"{task_id}\",\
+                 \"superseded_evaluation_sha\":\"{}\",\
+                 \"reset_sha\":\"{reset_sha}\",\
+                 \"orch_worktree\":\"{}\",\
+                 \"error\":\"{}\"}}",
+                superseded_evaluation_sha.unwrap_or(""),
+                orch_worktree.display(),
+                e,
+            );
+        }
+    }
+}
+
 /// Atomically transition the task to `Completed` AND insert the export
 /// snapshot rows in ONE SQLite transaction (§2.5.8 line 2014).
 ///
@@ -8887,13 +9362,14 @@ fn commit_task_completion(
     )
     .map_err(|_| ())?;
 
-    // 2. Stamp `tasks.evaluation_sha` with the head SHA submitted by the
-    //    planner. Done as a follow-up UPDATE in the same tx because
-    //    `transition_task_in_tx` is FSM-only and intentionally does not
-    //    touch domain columns. `COALESCE(?, evaluation_sha)` preserves the
-    //    existing SHA on a vacuous CompleteTask (head_sha=None per §2.5.8
-    //    edge case): the kernel never overwrites a previously-stamped SHA
-    //    with NULL.
+    // 2. Stamp `tasks.evaluation_sha` with the head SHA observed by the
+    //    executor runtime and submitted through the kernel intent. Done as a
+    //    follow-up UPDATE in the same tx because `transition_task_in_tx` is
+    //    FSM-only and intentionally does not touch domain columns.
+    //    `COALESCE(?, evaluation_sha)` preserves an already-stamped SHA for
+    //    legacy Running-state completion paths that have prior admitted
+    //    ranges; fresh Admitted completions reject empty heads before this
+    //    function is called.
     if evaluation_sha.is_some() {
         tx.execute(
             &format!(
@@ -9709,7 +10185,7 @@ fn finalize_gate_fixup_completion(
     );
 }
 
-fn finalize_integration_merge_completion(
+pub(crate) fn finalize_integration_merge_completion(
     store: &Store,
     initiative_id: &str,
     task_id: &str,
@@ -9879,6 +10355,76 @@ fn finalize_integration_merge_completion(
         initiative_from: from_state,
         initiative_to: InitiativeState::Completed.as_sql_str().to_owned(),
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_integration_merge_completion_audits(
+    ctx: &HandlerContext,
+    outcome: &IntegrationMergeFinalizeOutcome,
+    session_id: Option<&str>,
+    task_id: &str,
+    initiative_id: &str,
+    commit_sha: &str,
+    previous_sha: &str,
+    target_ref: &str,
+    operator_assisted: bool,
+    escalation_id: Option<String>,
+) {
+    // Paired-write `IntegrationMergeCompleted` audit emit. Gated on
+    // the FSM cascade succeeding so the audit chain never carries an
+    // `IntegrationMergeCompleted` record that lacks paired
+    // `TaskStateChanged(coordinator -> Completed)` rows. Shared by
+    // the immediate no-gates intent path and the post-witness
+    // integration-verifier path.
+    let session_id_for_event = session_id.unwrap_or_default().to_owned();
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::IntegrationMergeCompleted {
+            initiative_id: initiative_id.to_owned(),
+            session_id: session_id_for_event,
+            commit_sha: commit_sha.to_owned(),
+            previous_sha: previous_sha.to_owned(),
+            operator_assisted,
+            escalation_id,
+            target_ref: target_ref.to_owned(),
+        },
+        session_id,
+        Some(task_id),
+        Some(initiative_id),
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"IntegrationMergeCompleted\",\
+             \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id}\"}}",
+        );
+    }
+
+    for rec in &outcome.normalization_records {
+        emit_task_state_changed_audit(ctx.audit.as_ref(), rec, session_id);
+    }
+    emit_task_state_changed_audit(ctx.audit.as_ref(), &outcome.task_record, session_id);
+
+    let from_state = outcome.initiative_from.clone();
+    let to_state = outcome.initiative_to.clone();
+    if !from_state.is_empty() && from_state != to_state {
+        if let Err(e) = ctx.audit.emit(
+            raxis_audit_tools::AuditEventKind::InitiativeStateChanged {
+                initiative_id: initiative_id.to_owned(),
+                from_state: from_state.clone(),
+                to_state: to_state.clone(),
+            },
+            session_id,
+            Some(task_id),
+            Some(initiative_id),
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"InitiativeStateChanged\",\
+                 \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id}\"}}",
+            );
+        }
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"InitiativeCompletedAfterIntegrationMerge\",\
+             \"initiative_id\":\"{initiative_id}\",\"from\":\"{from_state}\",\"to\":\"{to_state}\"}}",
+        );
+    }
 }
 
 fn lane_budget_snapshot(
@@ -13078,6 +13624,127 @@ path_allowlist = ["**/*"]
         }
     }
 
+    #[test]
+    fn submit_review_fails_initiative_when_review_rejection_ceiling_is_exhausted() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let policy = default_test_policy();
+
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+        seed_executor_activation_row(&store, "exe1");
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!(
+                    "UPDATE {TASKS}
+                        SET state = ?1
+                      WHERE task_id = 'exe1'"
+                ),
+                rusqlite::params![TaskState::Completed.as_sql_str()],
+            )
+            .unwrap();
+        }
+        {
+            use crate::initiatives::plan_registry::{TaskKey, TaskPlanFields};
+            ctx.plan_registry.insert(
+                TaskKey::new("init-rev", "exe1"),
+                TaskPlanFields {
+                    session_agent_type: raxis_types::SessionAgentType::Executor,
+                    max_review_rejections: Some(1),
+                    ..Default::default()
+                },
+            );
+            ctx.plan_registry.insert(
+                TaskKey::new("init-rev", "rev1"),
+                TaskPlanFields {
+                    session_agent_type: raxis_types::SessionAgentType::Reviewer,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let req = make_submit_review_request("rev1", Some(false), Some("counts are wrong"));
+        handle_submit_review(
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .unwrap();
+
+        let conn = store.lock_sync();
+        let initiative_state: String = conn
+            .query_row(
+                &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id = 'init-rev'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(
+            initiative_state,
+            InitiativeState::Failed.as_sql_str(),
+            "review rejection ceiling should fail the initiative immediately"
+        );
+        assert_eq!(
+            task_state_of(&store, "exe1"),
+            TaskState::Completed.as_sql_str(),
+            "executor work remains completed; the rejected aggregate is the failure cause"
+        );
+        assert_eq!(
+            task_state_of(&store, "rev1"),
+            TaskState::Completed.as_sql_str(),
+            "reviewer task completed by submitting its rejected verdict"
+        );
+
+        let events = sink.events();
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.kind,
+                raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted {
+                    verdict,
+                    ..
+                } if verdict == "AtLeastOneRejected"
+            )),
+            "the canonical aggregate review row must still be emitted"
+        );
+        let ceiling_events: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    raxis_audit_tools::AuditEventKind::ReviewRejectionCeilingExceeded { .. },
+                )
+            })
+            .collect();
+        assert_eq!(
+            ceiling_events.len(),
+            1,
+            "exhausted review loop should emit exactly one terminal cause"
+        );
+        match &ceiling_events[0].kind {
+            raxis_audit_tools::AuditEventKind::ReviewRejectionCeilingExceeded {
+                initiative_id,
+                executor_task_id,
+                triggered_by_reviewer_task_id,
+                review_reject_count,
+                max_review_rejections,
+                critique,
+            } => {
+                assert_eq!(initiative_id, "init-rev");
+                assert_eq!(executor_task_id, "exe1");
+                assert_eq!(triggered_by_reviewer_task_id, "rev1");
+                assert_eq!(*review_reject_count, 1);
+                assert_eq!(*max_review_rejections, 1);
+                assert_eq!(critique.as_deref(), Some("counts are wrong"));
+            }
+            _ => unreachable!(),
+        }
+    }
+
     /// Insert an Active `subtask_activations` row for `task_id` with a
     /// freshly-minted activation_id, `review_reject_count = 0`, and
     /// `terminated_at = NULL`. Mirror of the row populated by
@@ -15003,6 +15670,164 @@ path_allowlist = ["**/*"]
         );
     }
 
+    /// Review-rejection retry must also scrub the mutable
+    /// orchestrator integration worktree. SQL cleanup removes stale
+    /// `tasks.evaluation_sha`, but a prior root-orchestrator turn
+    /// may already have merged the rejected attempt into
+    /// `worktrees/orch-<initiative>`. If that Git-side scratch state
+    /// survives, the approved retry can overlap the same added files
+    /// and strand root closeout in an AA conflict.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_from_review_rejection_scrubs_orchestrator_integration_workspace() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, registry, _sink) = build_retry_test_ctx(store.clone());
+        let orch_worktree =
+            crate::worktree_provisioning::orchestrator_worktree_path(&ctx.data_dir, "init-retry");
+        std::fs::create_dir_all(&orch_worktree).unwrap();
+
+        let run_git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&orch_worktree)
+                .output()
+                .expect("git command");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}{}",
+                args,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run_git(&["init", "-q"]);
+        run_git(&["checkout", "-q", "-b", "main"]);
+        run_git(&["config", "user.email", "test@raxis.local"]);
+        run_git(&["config", "user.name", "raxis-test"]);
+        std::fs::write(orch_worktree.join("README.md"), b"base\n").unwrap();
+        run_git(&["add", "README.md"]);
+        run_git(&["commit", "-q", "-m", "base"]);
+        let base_sha = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&orch_worktree)
+                .output()
+                .expect("git rev-parse");
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+
+        std::fs::write(orch_worktree.join("rejected-output.md"), b"rejected\n").unwrap();
+        run_git(&["add", "rejected-output.md"]);
+        run_git(&[
+            "commit",
+            "-q",
+            "-m",
+            "rejected attempt was merged too early",
+        ]);
+        let rejected_sha = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&orch_worktree)
+                .output()
+                .expect("git rev-parse rejected");
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        let ref_name = format!(
+            "{}{}",
+            crate::worktree_provisioning::TRANSFER_REF_PREFIX,
+            "exe-review-scrub"
+        );
+        run_git(&["update-ref", ref_name.as_str(), &rejected_sha]);
+
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        let orch_worktree_for_seed = orch_worktree.clone();
+        let base_sha_for_seed = base_sha.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_orchestrator_session(&store_for_seed);
+            seed_completed_review_rejected_executor_for_retry(
+                &store_for_seed,
+                &registry_for_seed,
+                "exe-review-scrub",
+                /*review_count*/ 1,
+                /*max_review*/ Some(3),
+            );
+            let conn = store_for_seed.lock_sync();
+            conn.execute(
+                &format!(
+                    "UPDATE {TASKS}
+                        SET evaluation_sha = ?1
+                      WHERE task_id = ?2"
+                ),
+                rusqlite::params![&rejected_sha, "exe-review-scrub"],
+            )
+            .unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {SESSIONS} (
+                        session_id, role_id, session_token, sequence_number,
+                        worktree_root, base_sha, base_tracking_ref,
+                        lineage_id, fetch_quota, created_at, expires_at, revoked,
+                        session_agent_type, can_delegate, initiative_id
+                     ) VALUES (?1, 'Orchestrator', 'tok-orch-anchor', 0,
+                              ?2, ?3, 'refs/heads/main',
+                              'lineage-orch-anchor', 1000, ?4, ?5, 0,
+                              'Orchestrator', 1, 'init-retry')"
+                ),
+                rusqlite::params![
+                    "22222222-3333-4444-8555-666666666666",
+                    orch_worktree_for_seed.display().to_string(),
+                    &base_sha_for_seed,
+                    unix_now_secs(),
+                    unix_now_secs() + 86_400,
+                ],
+            )
+            .unwrap();
+        })
+        .await
+        .unwrap();
+
+        let resp = handle_retry_sub_task(
+            make_retry_request("exe-review-scrub", 1),
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            &ctx,
+        )
+        .await
+        .expect("review-rejection retry must admit and scrub integration workspace");
+        assert_eq!(resp.task_state, TaskState::Admitted);
+
+        let head_after = {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&orch_worktree)
+                .output()
+                .expect("git rev-parse after scrub");
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        assert_eq!(
+            head_after, base_sha,
+            "review-rejection retry must reset root integration scratch \
+             back to the initiative anchor"
+        );
+        assert!(
+            !orch_worktree.join("rejected-output.md").exists(),
+            "rejected output merged into root scratch must be removed"
+        );
+        let show_ref = std::process::Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", ref_name.as_str()])
+            .current_dir(&orch_worktree)
+            .status()
+            .expect("git show-ref after scrub");
+        assert!(
+            !show_ref.success(),
+            "stale transfer ref for superseded executor attempt must be deleted"
+        );
+    }
+
     /// Crash ceiling: counter == ceiling means "no further retries".
     /// The handler MUST reject with `INVALID_REQUEST` (per the spec
     /// wire surface on `IntentKind::RetrySubTask`).
@@ -16344,6 +17169,7 @@ path_allowlist = ["**/*"]
 
         let disk = DiskStore::new();
         let initiative_id = "init-dag-authority-01";
+        let registry = crate::initiatives::PlanRegistry::new();
 
         // ── Seed: 1 initiative + 2 tasks (both Admitted) + edge A→B ──
         {
@@ -16386,7 +17212,7 @@ path_allowlist = ["**/*"]
         {
             let mut g = disk.store().lock_sync();
             let tx = g.transaction().unwrap();
-            let missing = missing_predecessors_for_activation(&tx, "task-B")
+            let missing = missing_predecessors_for_activation(&tx, "task-B", &registry)
                 .expect("predecessor query (A=Admitted)");
             assert_eq!(
                 missing,
@@ -16410,13 +17236,145 @@ path_allowlist = ["**/*"]
         {
             let mut g = disk.store().lock_sync();
             let tx = g.transaction().unwrap();
-            let missing = missing_predecessors_for_activation(&tx, "task-B")
+            let missing = missing_predecessors_for_activation(&tx, "task-B", &registry)
                 .expect("predecessor query (A=Completed)");
             assert!(
                 missing.is_empty(),
                 "INV-KERNEL-DAG-AUTHORITY-01: with A=Completed, B's \
                  predecessor gate MUST admit (no missing predecessors); \
                  got {missing:?}",
+            );
+        }
+    }
+
+    /// Reviewer-gate ordering regression: a downstream Executor
+    /// MUST NOT become activatable merely because its predecessor
+    /// Executor reached `Completed`. If that predecessor has a
+    /// Reviewer successor, non-Reviewer dependents wait until the
+    /// reviewer aggregation is `AllPassed`.
+    ///
+    /// This pins the observed GTM bug class:
+    /// `data_interpreter Completed` → `draft_release` started
+    /// before `data_skeptic_reviewer` voted. Reviewer tasks
+    /// themselves remain activatable; they are the gate closure
+    /// mechanism.
+    #[test]
+    fn inv_kernel_dag_authority_01_blocks_downstream_until_reviewer_gate_passes() {
+        use crate::initiatives::plan_registry::{TaskKey, TaskPlanFields};
+
+        let initiatives = raxis_store::Table::Initiatives.as_str();
+        let tasks = raxis_store::Table::Tasks.as_str();
+        let edges = raxis_store::Table::TaskDagEdges.as_str();
+
+        let disk = DiskStore::new();
+        let initiative_id = "init-reviewer-gate-order";
+        let registry = crate::initiatives::PlanRegistry::new();
+        for (task_id, agent_type) in [
+            ("data-interpreter", SessionAgentType::Executor),
+            ("data-skeptic-reviewer", SessionAgentType::Reviewer),
+            ("draft-release", SessionAgentType::Executor),
+        ] {
+            registry.insert(
+                TaskKey::new(initiative_id, task_id),
+                TaskPlanFields {
+                    session_agent_type: agent_type,
+                    ..Default::default()
+                },
+            );
+        }
+
+        {
+            let g = disk.store().lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {initiatives} \
+                        (initiative_id, state, terminal_criteria_json, \
+                         plan_artifact_sha256, created_at, git_apply_pending) \
+                     VALUES (?1, 'Executing', '{{}}', 'deadbeef', 100, 0)"
+                ),
+                rusqlite::params![initiative_id],
+            )
+            .unwrap();
+            for (task_id, state, verdict) in [
+                ("data-interpreter", "Completed", None::<&str>),
+                ("data-skeptic-reviewer", "Admitted", None::<&str>),
+                ("draft-release", "Admitted", None::<&str>),
+            ] {
+                g.execute(
+                    &format!(
+                        "INSERT INTO {tasks} \
+                            (task_id, initiative_id, lane_id, state, actor, \
+                             policy_epoch, admitted_at, transitioned_at, \
+                             review_verdict) \
+                         VALUES (?1, ?2, 'lane-0', ?3, 'op-0', 0, 100, 100, ?4)"
+                    ),
+                    rusqlite::params![task_id, initiative_id, state, verdict],
+                )
+                .unwrap();
+            }
+            for succ in ["data-skeptic-reviewer", "draft-release"] {
+                g.execute(
+                    &format!(
+                        "INSERT INTO {edges} \
+                            (initiative_id, predecessor_task_id, successor_task_id, \
+                             predecessor_satisfied) \
+                         VALUES (?1, 'data-interpreter', ?2, 0)"
+                    ),
+                    rusqlite::params![initiative_id, succ],
+                )
+                .unwrap();
+            }
+        }
+
+        {
+            let mut g = disk.store().lock_sync();
+            let tx = g.transaction().unwrap();
+            let reviewer_missing =
+                missing_predecessors_for_activation(&tx, "data-skeptic-reviewer", &registry)
+                    .expect("reviewer predecessor query");
+            assert!(
+                reviewer_missing.is_empty(),
+                "the reviewer is the gate and must be allowed to start \
+                 once the executor predecessor is mechanically complete"
+            );
+
+            let downstream_missing =
+                missing_predecessors_for_activation(&tx, "draft-release", &registry)
+                    .expect("downstream predecessor query");
+            assert_eq!(
+                downstream_missing,
+                vec![(
+                    "data-interpreter".to_owned(),
+                    "AwaitingReviewerVerdicts".to_owned()
+                )],
+                "downstream executors must wait for reviewer aggregation, \
+                 not merely predecessor executor completion"
+            );
+        }
+
+        {
+            let g = disk.store().lock_sync();
+            g.execute(
+                &format!(
+                    "UPDATE {tasks}
+                        SET state = 'Completed',
+                            review_verdict = 'Approved'
+                      WHERE task_id = 'data-skeptic-reviewer'"
+                ),
+                [],
+            )
+            .unwrap();
+        }
+        {
+            let mut g = disk.store().lock_sync();
+            let tx = g.transaction().unwrap();
+            let downstream_missing =
+                missing_predecessors_for_activation(&tx, "draft-release", &registry)
+                    .expect("downstream post-review predecessor query");
+            assert!(
+                downstream_missing.is_empty(),
+                "once all reviewer successors approve, the downstream \
+                 executor becomes activatable"
             );
         }
     }
@@ -16433,6 +17391,7 @@ path_allowlist = ["**/*"]
 
         let disk = DiskStore::new();
         let initiative_id = "init-dag-authority-gate-fixup";
+        let registry = crate::initiatives::PlanRegistry::new();
 
         {
             let g = disk.store().lock_sync();
@@ -16498,7 +17457,7 @@ path_allowlist = ["**/*"]
 
         let mut g = disk.store().lock_sync();
         let tx = g.transaction().unwrap();
-        let fixup_missing = missing_predecessors_for_activation(&tx, "fixup-child")
+        let fixup_missing = missing_predecessors_for_activation(&tx, "fixup-child", &registry)
             .expect("fixup predecessor query");
         assert!(
             fixup_missing.is_empty(),
@@ -16506,8 +17465,9 @@ path_allowlist = ["**/*"]
              GatesPending; parent→fixup is a repair lineage edge"
         );
 
-        let ordinary_missing = missing_predecessors_for_activation(&tx, "ordinary-child")
-            .expect("ordinary predecessor query");
+        let ordinary_missing =
+            missing_predecessors_for_activation(&tx, "ordinary-child", &registry)
+                .expect("ordinary predecessor query");
         assert_eq!(
             ordinary_missing,
             vec![("parent-gated".to_owned(), "GatesPending".to_owned())],
@@ -16528,6 +17488,7 @@ path_allowlist = ["**/*"]
 
         let disk = DiskStore::new();
         let initiative_id = "init-dag-authority-fan-in";
+        let registry = crate::initiatives::PlanRegistry::new();
 
         {
             let g = disk.store().lock_sync();
@@ -16578,8 +17539,8 @@ path_allowlist = ["**/*"]
 
         let mut g = disk.store().lock_sync();
         let tx = g.transaction().unwrap();
-        let mut missing =
-            missing_predecessors_for_activation(&tx, "task-D").expect("predecessor query");
+        let mut missing = missing_predecessors_for_activation(&tx, "task-D", &registry)
+            .expect("predecessor query");
         // SQLite row order is `task_dag_edges` insertion order in
         // practice but is not guaranteed by the spec; sort so the
         // assertion is order-independent.

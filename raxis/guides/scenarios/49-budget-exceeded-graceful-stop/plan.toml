@@ -15,7 +15,7 @@ max_tokens          = 500
 max_wall_clock_secs = 60
 
 [[tasks]]
-task_id            = "verbose-task"
+task_name            = "verbose-task"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]

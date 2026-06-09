@@ -19,7 +19,11 @@ import {
   serializeStatusParam,
   toggleStatus,
 } from "@/lib/status-filter";
-import { taskDisplayId } from "@/lib/state-color";
+import {
+  effectiveTaskState,
+  orderedTaskStatusCounts,
+  taskDisplayId,
+} from "@/lib/state-color";
 // `stateTone`/`toneClasses` previously colored static badge chips
 // in this view; they now live inside the interactive
 // `<StatusLegend>` component above.
@@ -81,7 +85,8 @@ export function InitiativeDagPage() {
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
     for (const n of dag.data?.nodes ?? []) {
-      c[n.state] = (c[n.state] ?? 0) + 1;
+      const state = effectiveTaskState(n.state, n.is_active);
+      c[state] = (c[state] ?? 0) + 1;
     }
     return c;
   }, [dag.data]);
@@ -99,7 +104,7 @@ export function InitiativeDagPage() {
   const edges = dag.data.edges;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 min-w-0 max-w-full">
       <header className="flex items-start justify-between gap-4 flex-wrap">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm text-ink-subtle">
@@ -181,9 +186,7 @@ export function InitiativeDagPage() {
           aria-label="Task status legend"
         >
           <StatusLegend
-            counts={Object.fromEntries(
-              Object.entries(counts).sort(([a], [b]) => a.localeCompare(b)),
-            )}
+            counts={orderedTaskStatusCounts(counts)}
             activeStatuses={activeStatuses}
             onToggle={handleToggle}
             onClear={handleClear}
@@ -205,9 +208,9 @@ export function InitiativeDagPage() {
         />
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
+      <div className="grid min-w-0 max-w-full grid-cols-1 xl:grid-cols-[minmax(0,1fr)_320px] gap-4">
         {/* Graph */}
-        <section className="card p-3">
+        <section className="card p-3 min-w-0 max-w-full overflow-hidden">
           {nodes.length === 0 ? (
             <Empty
               title="This initiative has no tasks yet."
@@ -240,7 +243,7 @@ export function InitiativeDagPage() {
         </section>
 
         {/* Focused-node panel */}
-        <aside className="card p-4 self-start">
+        <aside className="card p-4 min-w-0 self-start">
           <h2 className="text-sm font-semibold text-ink mb-2">
             {focusedNode ? "Focused task" : "Click a task"}
           </h2>
@@ -253,10 +256,7 @@ export function InitiativeDagPage() {
                 {focusedNode.title}
               </Link>
               <div className="text-xs text-ink-subtle mt-0.5 flex items-center gap-1">
-                {/* INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01:
-                    substitute the stable display id for the
-                    synthetic IntegrationMerge coordinator row;
-                    copy still emits the wire-stable UUID. */}
+                <span>{focusedNode.task_name ? "Runtime ID" : "Task"}</span>
                 <Mono>{taskDisplayId(focusedNode.task_id, id)}</Mono>
                 <CopyButton value={focusedNode.task_id} />
               </div>
@@ -270,11 +270,10 @@ export function InitiativeDagPage() {
                   // and the row treatment on `InitiativeDetail` /
                   // `TaskDetail`. The raw FSM state is still
                   // available on the node for forensic copy.
-                  state={
-                    focusedNode.is_active && focusedNode.state === "Admitted"
-                      ? "Running"
-                      : focusedNode.state
-                  }
+                  state={effectiveTaskState(
+                    focusedNode.state,
+                    focusedNode.is_active,
+                  )}
                   pulse={
                     focusedNode.state === "Running" ||
                     Boolean(focusedNode.is_active)

@@ -51,7 +51,7 @@ credential:
 
 ```toml
 [[tasks]]
-task_id = "deploy-aws-staging"
+task_name = "deploy-aws-staging"
 
   [[tasks.credentials]]
   name           = "aws-staging"
@@ -72,7 +72,7 @@ task_id = "deploy-aws-staging"
 
 ```toml
 [[tasks]]
-task_id = "deploy-gcp-staging"
+task_name = "deploy-gcp-staging"
 
   [[tasks.credentials]]
   name       = "gcp-staging"
@@ -98,7 +98,7 @@ task_id = "deploy-gcp-staging"
 
 ```toml
 [[tasks]]
-task_id = "deploy-azure-staging"
+task_name = "deploy-azure-staging"
 
   [[tasks.credentials]]
   name       = "azure-staging"

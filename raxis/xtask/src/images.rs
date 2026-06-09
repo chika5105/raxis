@@ -3731,6 +3731,30 @@ mod tests {
     }
 
     #[test]
+    fn image_bake_manifest_versions_match_workspace_package_version() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask crate has workspace parent")
+            .to_path_buf();
+        let cargo_toml = std::fs::read_to_string(workspace_root.join("Cargo.toml")).unwrap();
+        let value: toml::Value = toml::from_str(&cargo_toml).unwrap();
+        let workspace_version = value
+            .get("workspace")
+            .and_then(|v| v.get("package"))
+            .and_then(|v| v.get("version"))
+            .and_then(|v| v.as_str())
+            .expect("[workspace.package].version");
+
+        for role in Role::all() {
+            let found = read_kernel_version_for(&workspace_root, *role).unwrap();
+            assert_eq!(
+                found, workspace_version,
+                "image manifest for {role:?} must match workspace package version",
+            );
+        }
+    }
+
+    #[test]
     fn dev_stage_args_default_target_matches_host_arch() {
         let argv = vec!["--role".to_owned(), "orchestrator".to_owned()];
         let args = DevStageArgs::parse(&argv).expect("parse");

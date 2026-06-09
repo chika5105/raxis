@@ -86,3 +86,28 @@ pub const ENV_REQUIRE_INITIALIZED_DATA_DIR: &str = "RAXIS_SUPERVISOR_REQUIRE_INI
 pub const ENV_MIN_NOFILE: &str = "RAXIS_SUPERVISOR_MIN_NOFILE";
 
 pub const DEFAULT_MIN_NOFILE: u64 = 4096;
+
+/// Env var operator override for the dashboard readiness URL the
+/// supervisor probes while the kernel is alive.
+pub const ENV_READINESS_URL: &str = "RAXIS_SUPERVISOR_READINESS_URL";
+
+/// Env var override for the initial boot grace before readiness
+/// checks begin.
+pub const ENV_READINESS_INITIAL_GRACE_SECS: &str = "RAXIS_SUPERVISOR_READINESS_INITIAL_GRACE_SECS";
+
+/// Env var override for readiness probe interval.
+pub const ENV_READINESS_INTERVAL_SECS: &str = "RAXIS_SUPERVISOR_READINESS_INTERVAL_SECS";
+
+/// Env var override for per-probe readiness timeout.
+pub const ENV_READINESS_TIMEOUT_MS: &str = "RAXIS_SUPERVISOR_READINESS_TIMEOUT_MS";
+
+/// Env var override for consecutive readiness failures before a
+/// supervised restart.
+pub const ENV_READINESS_FAILURES_BEFORE_RESTART: &str =
+    "RAXIS_SUPERVISOR_READINESS_FAILURES_BEFORE_RESTART";
+
+pub const DEFAULT_READINESS_URL: &str = "http://127.0.0.1:9820/api/health";
+pub const DEFAULT_READINESS_INITIAL_GRACE_SECS: u64 = 20;
+pub const DEFAULT_READINESS_INTERVAL_SECS: u64 = 5;
+pub const DEFAULT_READINESS_TIMEOUT_MS: u64 = 1_500;
+pub const DEFAULT_READINESS_FAILURES_BEFORE_RESTART: u32 = 3;

@@ -1,7 +1,11 @@
 //! Policy view + write endpoints.
 //!
 //! * `GET  /api/policy`          — structured snapshot (read role).
+//! * `GET  /api/policy/history`  — policy epoch ledger (read role).
 //! * `GET  /api/policy/toml`     — raw TOML bytes (write_policy role).
+//! * `GET  /api/policy/history/:epoch/toml`
+//!                                — raw historical TOML bytes
+//!                                  (write_policy role).
 //! * `PUT  /api/policy/toml`     — install a new signed policy
 //!   artifact + detached signature (write_policy role).
 //!
@@ -14,7 +18,7 @@
 //! key (the air-gapped operator signs offline and pastes the
 //! signature into the editor).
 
-use axum::extract::State;
+use axum::extract::{Path, Query, State};
 use axum::http::header;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -22,7 +26,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::DashboardRole;
-use crate::data::{PolicyAdvancement, PolicySnapshotView};
+use crate::data::{PolicyAdvancement, PolicyHistoryEntry, PolicySnapshotView};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
 
@@ -53,6 +57,34 @@ where
     Ok(Json(view))
 }
 
+/// Query shape for `GET /api/policy/history`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PolicyHistoryQuery {
+    /// Maximum number of rows to return. Clamped by the route.
+    pub limit: Option<usize>,
+}
+
+/// `GET /api/policy/history` — newest-first policy epoch ledger.
+pub async fn history<D>(
+    State(state): State<AppState<D>>,
+    op: AuthorizedOperator,
+    Query(query): Query<PolicyHistoryQuery>,
+) -> ApiResult<Json<Vec<PolicyHistoryEntry>>>
+where
+    D: crate::data::DashboardData,
+{
+    if !op.has_role(DashboardRole::Read)
+        && !op.has_role(DashboardRole::WritePolicy)
+        && !op.has_role(DashboardRole::Admin)
+    {
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
+    }
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    Ok(Json(state.data.policy_history(limit)?))
+}
+
 /// `GET /api/policy/toml` — raw TOML bytes (write_policy role).
 ///
 /// Audit discipline: pure read-only browse. The
@@ -75,6 +107,28 @@ where
         });
     }
     let body = state.data.policy_toml_bytes()?;
+    Ok((
+        [(header::CONTENT_TYPE, "application/toml; charset=utf-8")],
+        body,
+    ))
+}
+
+/// `GET /api/policy/history/:epoch/toml` — exact historical
+/// policy artifact bytes from the immutable artifact store.
+pub async fn historical_toml<D>(
+    State(state): State<AppState<D>>,
+    op: AuthorizedOperator,
+    Path(epoch): Path<u64>,
+) -> ApiResult<impl IntoResponse>
+where
+    D: crate::data::DashboardData,
+{
+    if !op.has_role(DashboardRole::WritePolicy) && !op.has_role(DashboardRole::Admin) {
+        return Err(ApiError::Forbidden {
+            required: "write_policy".into(),
+        });
+    }
+    let body = state.data.policy_epoch_toml_bytes(epoch)?;
     Ok((
         [(header::CONTENT_TYPE, "application/toml; charset=utf-8")],
         body,

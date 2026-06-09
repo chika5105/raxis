@@ -109,7 +109,7 @@ permitted set.
 
 ```toml
 [[tasks]]
-task_id            = "research_executor"
+task_name            = "research_executor"
 session_agent_type = "Executor"
 
   [[tasks.allowed_egress]]
@@ -125,7 +125,7 @@ session_agent_type = "Executor"
   max_requests       = 30
 
 [[tasks]]
-task_id            = "auth_implementer"
+task_name            = "auth_implementer"
 session_agent_type = "Executor"
 # no allowed_egress — this task is fully air-gapped (current default for all tasks)
 ```

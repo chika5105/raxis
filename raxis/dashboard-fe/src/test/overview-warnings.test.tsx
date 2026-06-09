@@ -69,23 +69,31 @@ describe("<OverviewWarnings>", () => {
     expect(screen.getByText("act_greeter_b")).toBeInTheDocument();
   });
 
-  it("can dismiss and restore all current warnings", () => {
-    renderWarnings();
+  it("dismisses all current warnings permanently", () => {
+    const view = renderWarnings();
 
     fireEvent.click(screen.getByRole("button", { name: "Dismiss all" }));
 
-    expect(screen.getByText("Warnings (0)")).toBeInTheDocument();
-    expect(screen.getByText(/2 dismissed/)).toBeInTheDocument();
+    expect(screen.queryByTestId("overview-warnings")).toBeNull();
     expect(
-      screen.getByText(/All current warnings dismissed/),
-    ).toBeInTheDocument();
+      JSON.parse(
+        window.localStorage.getItem(
+          "raxis.overview.dismissedOrchestratorGaps.v1",
+        ) ?? "[]",
+      ),
+    ).toEqual([dismissKey(GAP_A), dismissKey(GAP_B)]);
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Restore dismissed" }),
+    view.rerender(
+      <TestMemoryRouter>
+        <OverviewWarnings gaps={[]} />
+      </TestMemoryRouter>,
+    );
+    view.rerender(
+      <TestMemoryRouter>
+        <OverviewWarnings gaps={[GAP_A, GAP_B]} />
+      </TestMemoryRouter>,
     );
 
-    expect(screen.getByText("Warnings (2)")).toBeInTheDocument();
-    expect(screen.queryByText(/dismissed/)).toBeNull();
-    expect(screen.getAllByTestId("lifecycle-orchestrator-gap")).toHaveLength(2);
+    expect(screen.queryByTestId("overview-warnings")).toBeNull();
   });
 });

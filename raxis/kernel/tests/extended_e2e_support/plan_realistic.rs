@@ -553,8 +553,7 @@ maxLength = 160"#;
 
 const REALISTIC_PLAN_MATERIALIZER_HEAD: &str = r#"# ── Materializer Executor (re-used from extended scenario) ──
 [[tasks]]
-task_id            = "materialize-records"
-name               = "Materialize seeded postgres rows + mongo docs to JSON files"
+task_name            = "materialize-records"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 # 25 postgres rows + 25 mongo docs + 50 file writes + commit + verify.
@@ -581,8 +580,7 @@ const REALISTIC_PLAN_MATERIALIZER_CREDS: &str = r#"
 
 const REALISTIC_PLAN_XFILE_HEAD: &str = r#"# ── Cross-file refactor Executor (P3-2) ─────────────────
 [[tasks]]
-task_id            = "xfile-refactor"
-name               = "Cross-file rename across Rust / TS / Python"
+task_name            = "xfile-refactor"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 # Mechanical cross-file rename across 3 language trees: read, edit,
@@ -599,8 +597,7 @@ prompt = """
 
 const REALISTIC_PLAN_LINT_DEFECT_HEAD: &str = r#"# ── Lint-defect Executor (P3-3) ─────────────────────────
 [[tasks]]
-task_id            = "lint-defect"
-name               = "Introduce exactly one real Python lint defect (iter55 pin)"
+task_name            = "lint-defect"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 predecessors       = ["xfile-refactor"]
@@ -679,8 +676,7 @@ prompt = """
 // occasional planner exploration.
 const REALISTIC_PLAN_LINT_RUNNER_PYTHON: &str = r#"# ── Lint-runner Executor — Python (P3-3 / iter55 split) ──
 [[tasks]]
-task_id            = "lint-runner-python"
-name               = "Capture python -m ruff check output for the Python Reviewer panel"
+task_name            = "lint-runner-python"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 predecessors       = ["lint-defect"]
@@ -780,8 +776,7 @@ includes `py-pkg/` precisely so you can land the fix here:
 
 const REALISTIC_PLAN_LINT_RUNNER_RUST: &str = r#"# ── Lint-runner Executor — Rust (P3-3 / iter55 split) ────
 [[tasks]]
-task_id            = "lint-runner-rust"
-name               = "Capture cargo clippy + fmt output for the Rust Reviewer"
+task_name            = "lint-runner-rust"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 predecessors       = ["lint-defect"]
@@ -872,8 +867,7 @@ admits `rust-crate/` for this purpose.
 
 const REALISTIC_PLAN_LINT_RUNNER_JS: &str = r#"# ── Lint-runner Executor — JS / TS (P3-3 / iter55 split) ─
 [[tasks]]
-task_id            = "lint-runner-js"
-name               = "Capture eslint + prettier + tsc output for the JS / TS Reviewer"
+task_name            = "lint-runner-js"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 predecessors       = ["lint-defect"]
@@ -949,8 +943,7 @@ const REALISTIC_PLAN_LINT_REVIEWERS: &str = r#"# ── Lint-defect Reviewers (P
 # fires on the dual pair (see plan_realistic.rs::TASK_LINT_RUNNER_PYTHON
 # docstring for the structural rationale).
 [[tasks]]
-task_id            = "review-lint-defect-A"
-name               = "Reviewer A — substantive review of lint-defect diff (Python pair)"
+task_name            = "review-lint-defect-A"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["lint-runner-python"]
@@ -1008,8 +1001,7 @@ basenames (`greet.py`) verbatim.
 """
 
 [[tasks]]
-task_id            = "review-lint-defect-B"
-name               = "Reviewer B — substantive review of lint-defect diff (Python pair)"
+task_name            = "review-lint-defect-B"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["lint-runner-python"]
@@ -1055,8 +1047,7 @@ the Round-1 rejection.
 """
 
 [[tasks]]
-task_id            = "review-lint-defect-rust"
-name               = "Reviewer — Rust lint-runner (single, rubber-stamp on clean)"
+task_name            = "review-lint-defect-rust"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["lint-runner-rust"]
@@ -1087,8 +1078,7 @@ image ships only `raxis-planner` + `ripgrep` per
 """
 
 [[tasks]]
-task_id            = "review-lint-defect-js"
-name               = "Reviewer — JS / TS lint-runner (single, rubber-stamp on clean)"
+task_name            = "review-lint-defect-js"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["lint-runner-js"]
@@ -1119,8 +1109,7 @@ VM image ships only `raxis-planner` + `ripgrep` per
 
 const REALISTIC_PLAN_ALLOWLIST_POSITIVE_HEAD: &str = r#"# ── Positive path-allowlist Executor (P3-4) ─────────────
 [[tasks]]
-task_id            = "allowlist-positive-codegen"
-name               = "Generate a build-meta file into target/codegen/"
+task_name            = "allowlist-positive-codegen"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 # Trivial single-file generation task; write build_meta.txt under the
@@ -1151,8 +1140,7 @@ const REALISTIC_PLAN_ALLOWLIST_POSITIVE_VERIFIER: &str = r#"
 
 const REALISTIC_PLAN_SERVICE_ROUND_TRIP_HEAD: &str = r#"# -- Service-evidence round-trip Executor (P3-9) ----------
 [[tasks]]
-task_id            = "service-round-trip"
-name               = "Round-trip every configured backing service + commit canonical outputs"
+task_name            = "service-round-trip"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 predecessors       = ["allowlist-positive-codegen"]
@@ -1209,8 +1197,7 @@ const REALISTIC_PLAN_SERVICE_ROUND_TRIP_CREDS: &str = r#"
 
 const REALISTIC_PLAN_TRANSPARENT_PROXY_HEAD: &str = r#"# -- Service-integrity real-scripts Executor (P3-10) ------
 [[tasks]]
-task_id            = "transparent-proxy-realscripts"
-name               = "Run stock-Python service-integrity scripts; commit per-service outputs"
+task_name            = "transparent-proxy-realscripts"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 predecessors       = ["service-round-trip"]
@@ -1270,8 +1257,7 @@ const REALISTIC_PLAN_TRANSPARENT_PROXY_CREDS: &str = r#"
 /// the proxy's substitution discipline, not a fresh credential.
 const REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_HEAD: &str = r#"# -- Credential-substitution canary Executor --------------
 [[tasks]]
-task_id            = "credential-substitution-canary"
-name               = "Authenticate via operator-staged FAKE .env creds; proxy substitutes real creds upstream"
+task_name            = "credential-substitution-canary"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 predecessors       = ["service-round-trip"]
@@ -1349,8 +1335,7 @@ const REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_CREDS: &str = r#"
 // at the end of the run alongside the other global witnesses).
 const REALISTIC_PLAN_DEP_FETCH_EVIDENCE_HEAD: &str = r#"# -- Dep-fetch-evidence Executor ----
 [[tasks]]
-task_id            = "dep-fetch-evidence"
-name               = "Fetch example.com over HTTPS + pip install certifi from PyPI"
+task_name            = "dep-fetch-evidence"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 # iter69 — bumped from 30 → 90 to absorb the additional pip
@@ -1366,8 +1351,7 @@ prompt = """
 
 const REALISTIC_PLAN_TOOLING_MCP_UNITY_HEAD: &str = r#"# -- Tooling / MCP custom tools Executor ----------------
 [[tasks]]
-task_id            = "tooling-mcp-unity"
-name               = "Call bounded Unity MCP adapter tools and commit evidence"
+task_name            = "tooling-mcp-unity"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 profiles          = ["unity_mcp_tools"]
@@ -1400,7 +1384,7 @@ mod tests {
             .expect("[[tasks]] array present");
         let ids: Vec<&str> = tasks
             .iter()
-            .filter_map(|t| t.get("task_id").and_then(|i| i.as_str()))
+            .filter_map(|t| t.get("task_name").and_then(|i| i.as_str()))
             .collect();
         for needle in [
             TASK_MATERIALIZE,
@@ -1422,7 +1406,7 @@ mod tests {
         ] {
             assert!(
                 ids.contains(&needle),
-                "expected task_id `{needle}` in realistic plan; got {ids:?}",
+                "expected task_name `{needle}` in realistic plan; got {ids:?}",
             );
         }
 
@@ -1438,7 +1422,9 @@ mod tests {
 
         let allowlist_task = tasks
             .iter()
-            .find(|t| t.get("task_id").and_then(|id| id.as_str()) == Some(TASK_ALLOWLIST_POSITIVE))
+            .find(|t| {
+                t.get("task_name").and_then(|id| id.as_str()) == Some(TASK_ALLOWLIST_POSITIVE)
+            })
             .expect("allowlist-positive-codegen task present");
         let task_verifiers = allowlist_task
             .get("verifiers")
@@ -1480,7 +1466,7 @@ mod tests {
 
         let xfile = tasks
             .iter()
-            .find(|t| t.get("task_id").and_then(|id| id.as_str()) == Some(TASK_XFILE_REFACTOR))
+            .find(|t| t.get("task_name").and_then(|id| id.as_str()) == Some(TASK_XFILE_REFACTOR))
             .expect("xfile-refactor task present");
         let xfile_allowlist: Vec<&str> = xfile
             .get("path_allowlist")
@@ -1497,7 +1483,7 @@ mod tests {
 
         let tooling = tasks
             .iter()
-            .find(|t| t.get("task_id").and_then(|id| id.as_str()) == Some(TASK_TOOLING_MCP_UNITY))
+            .find(|t| t.get("task_name").and_then(|id| id.as_str()) == Some(TASK_TOOLING_MCP_UNITY))
             .expect("tooling-mcp-unity task present");
         assert_eq!(
             tooling.get("session_agent_type").and_then(|v| v.as_str()),
@@ -1668,7 +1654,7 @@ mod tests {
         for (runner_id, capture_path, expected_allowlist, reviewer_ids) in cases {
             let runner = tasks
                 .iter()
-                .find(|t| t.get("task_id").and_then(|i| i.as_str()) == Some(*runner_id))
+                .find(|t| t.get("task_name").and_then(|i| i.as_str()) == Some(*runner_id))
                 .unwrap_or_else(|| panic!("`{runner_id}` task present"));
 
             assert_eq!(
@@ -1721,7 +1707,9 @@ mod tests {
             for reviewer_task_id in reviewer_ids.iter() {
                 let reviewer = tasks
                     .iter()
-                    .find(|t| t.get("task_id").and_then(|i| i.as_str()) == Some(*reviewer_task_id))
+                    .find(|t| {
+                        t.get("task_name").and_then(|i| i.as_str()) == Some(*reviewer_task_id)
+                    })
                     .unwrap_or_else(|| panic!("reviewer task `{reviewer_task_id}` present"));
                 let rev_preds: Vec<&str> = reviewer
                     .get("predecessors")
@@ -1765,7 +1753,7 @@ mod tests {
         for (reviewer_task_id, capture_path) in cases {
             let reviewer = tasks
                 .iter()
-                .find(|t| t.get("task_id").and_then(|i| i.as_str()) == Some(*reviewer_task_id))
+                .find(|t| t.get("task_name").and_then(|i| i.as_str()) == Some(*reviewer_task_id))
                 .unwrap_or_else(|| panic!("reviewer task `{reviewer_task_id}` present"));
             let prompt = reviewer
                 .get("prompt")
@@ -1810,7 +1798,7 @@ mod tests {
             .expect("[[tasks]] array present");
         let lint = tasks
             .iter()
-            .find(|t| t.get("task_id").and_then(|i| i.as_str()) == Some(TASK_LINT_DEFECT))
+            .find(|t| t.get("task_name").and_then(|i| i.as_str()) == Some(TASK_LINT_DEFECT))
             .expect("lint-defect task present");
         let predecessors = lint
             .get("predecessors")
@@ -1833,7 +1821,7 @@ mod tests {
             .expect("[[tasks]] array present");
         let srt = tasks
             .iter()
-            .find(|t| t.get("task_id").and_then(|i| i.as_str()) == Some(TASK_SERVICE_ROUND_TRIP))
+            .find(|t| t.get("task_name").and_then(|i| i.as_str()) == Some(TASK_SERVICE_ROUND_TRIP))
             .expect("service-round-trip task present");
         let allowlist = srt
             .get("path_allowlist")
@@ -1894,7 +1882,7 @@ mod tests {
         let tp = tasks
             .iter()
             .find(|t| {
-                t.get("task_id").and_then(|i| i.as_str())
+                t.get("task_name").and_then(|i| i.as_str())
                     == Some(TASK_TRANSPARENT_PROXY_REALSCRIPTS)
             })
             .expect("transparent-proxy-realscripts task present");
@@ -1964,8 +1952,13 @@ mod tests {
         for needle in [
             "scripts/",
             "out/services/",
+            "run_all_services.sh",
             "last_run_summary.txt",
             "check_postgres.py",
+            "postgres:",
+            "mongodb:",
+            "redis:",
+            "smtp:",
         ] {
             assert!(
                 prompt.contains(needle),

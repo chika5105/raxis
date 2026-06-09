@@ -13,11 +13,11 @@ reference. Other recipes drill deeper into individual fields.
 
 | Field | Type | Required | Effect |
 |---|---|---|---|
-| `task_id` | `String` | yes | Stable, plan-unique identifier. Must match `^[A-Za-z][A-Za-z0-9_-]{0,63}$`. Referenced by other tasks' `predecessors`. |
+| `task_name` | `String` | yes | Human-readable plan identifier. Must be unique within this initiative. Referenced by other tasks' `predecessors`. RAXIS generates the runtime `task_id` UUID. |
 | `session_agent_type` | `String` | yes | One of `"Executor"` or `"Reviewer"`. `"Orchestrator"` is REJECTED — the Orchestrator is kernel-managed. |
 | `clone_strategy` | `String` | yes | One of `"full"`, `"blobless"`, `"sparse"`. Reviewers can use `full` or `blobless`; Executors prefer `blobless` or `sparse`; sparse on Orchestrators is rejected. |
 | `path_allowlist` | `Vec<String>` | yes | Which paths the agent may **write**. See *path_allowlist rules* recipe for the precise semantics. |
-| `predecessors` | `Vec<String>` | yes (may be empty) | List of `task_id`s that MUST reach `Completed` before this task activates. Empty list = activates immediately. |
+| `predecessors` | `Vec<String>` | yes (may be empty) | List of `task_name`s that MUST reach `Completed` before this task activates. Empty list = activates immediately. |
 | `description` | `String` | yes | Short human-readable task summary for dashboards, logs, and audit pivots. Keep it brief. |
 | `prompt` | `String` (multi-line OK) | yes | The precise task-scoped instruction body the agent executes. Do not put the main instructions in `description`. |
 | `vm_image` | `String` | optional | `[[vm_images]] name` to use. Omit to use `[default_executor_image]` or the kernel-canonical starter. **Reviewers cannot declare this**; the Reviewer image is kernel-canonical. |
@@ -54,7 +54,7 @@ repository = "main"
 target_ref = "refs/heads/main"
 
 [[tasks]]
-task_id            = "rate_limit_implementer"
+task_name            = "rate_limit_implementer"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/auth/"]
@@ -69,7 +69,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "security_reviewer"
+task_name            = "security_reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]            # subset (or equal) to Executor's
@@ -117,10 +117,10 @@ A `session_agent_type = "Reviewer"` task has additional invariants:
 
 | Symptom | Fix |
 |---|---|
-| `task_id duplicate` | Two `[[tasks]]` share an id. Rename. |
-| `task_id format invalid` | Must start with a letter, alphanumeric + `_-`, ≤ 64 chars. |
+| `task_name duplicate` | Two `[[tasks]]` share the same name in one initiative. Rename one of them. |
+| `task_id present` | `task_id` is kernel-owned. Remove it from `plan.toml` and use `task_name` instead. |
 | `session_agent_type Orchestrator` | Forbidden — the Orchestrator is kernel-managed. |
-| `predecessors cycle` / `self-loop` / `dangling` | The DAG check rejects cycles, self-references, and references to non-existent task_ids. |
+| `predecessors cycle` / `self-loop` / `dangling` | The DAG check rejects cycles, self-references, and references to non-existent task names. |
 | `Reviewer with empty predecessors` | A Reviewer must depend on the Executor it reviews. |
 | `Reviewer path_allowlist superset of Executor` | The Reviewer can't read paths the Executor didn't write. Tighten. |
 | `Reviewer with vm_image set` | Remove the field. |

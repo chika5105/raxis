@@ -65,6 +65,7 @@ describe("mapTasksToDagNodes", () => {
     expect(nodes).toHaveLength(3);
     expect(nodes[0]).toEqual({
       task_id: "T1",
+      task_name: undefined,
       title: "execute-a",
       agent_type: "Executor",
       state: "Admitted",
@@ -76,6 +77,7 @@ describe("mapTasksToDagNodes", () => {
     });
     expect(nodes[1]).toEqual({
       task_id: "T2",
+      task_name: undefined,
       title: "execute-b",
       agent_type: "Executor",
       state: "Admitted",
@@ -87,6 +89,7 @@ describe("mapTasksToDagNodes", () => {
     });
     expect(nodes[2]).toEqual({
       task_id: "T3",
+      task_name: undefined,
       title: "execute-c",
       agent_type: "Executor",
       state: "Running",

@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn idempotent_on_canonical_input() {
-        let input = "[workspace]\nlane_id = \"default\"\n\n[[tasks]]\ntask_id = \"a\"\n";
+        let input = "[workspace]\nlane_id = \"default\"\n\n[[tasks]]\ntask_name = \"a\"\n";
         let once = canonicalize(input).unwrap();
         let twice = canonicalize(&once).unwrap();
         assert_eq!(once, twice, "fmt must be idempotent");

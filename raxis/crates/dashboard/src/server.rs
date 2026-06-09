@@ -470,6 +470,11 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         )
         // Policy.
         .route("/api/policy", get(policy::snapshot::<D>))
+        .route("/api/policy/history", get(policy::history::<D>))
+        .route(
+            "/api/policy/history/:epoch/toml",
+            get(policy::historical_toml::<D>),
+        )
         .route(
             "/api/policy/toml",
             get(policy::raw_toml::<D>)

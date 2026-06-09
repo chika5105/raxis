@@ -17,7 +17,7 @@ target_ref = "refs/heads/main"
 
 # ── Phase 1 — implement the feature ───────────────────────────────────
 [[tasks]]
-task_id            = "implement_feature"
+task_name            = "implement_feature"
 name               = "Implement feature"
 description        = "Implement feature"
 prompt             = """
@@ -31,7 +31,7 @@ clone_strategy     = "blobless"
 
 # ── Phase 2 — Reviewer gate before merge ──────────────────────────────
 [[tasks]]
-task_id            = "review_feature"
+task_name            = "review_feature"
 name               = "Review feature"
 description        = "Review feature"
 prompt             = """

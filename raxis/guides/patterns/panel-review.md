@@ -45,7 +45,7 @@ target_ref = "refs/heads/main"
 
 # ── Executor ──────────────────────────────────────────────────────────────────
 [[tasks]]
-task_id            = "payments_implementer"
+task_name            = "payments_implementer"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/payments/"]
@@ -64,7 +64,7 @@ prompt             = """
 # The Logical AND verdict applies: ALL must approve for the task to pass.
 
 [[tasks]]
-task_id            = "security_reviewer"
+task_name            = "security_reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/payments/"]
@@ -80,7 +80,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "correctness_reviewer"
+task_name            = "correctness_reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/payments/"]
@@ -96,7 +96,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "style_reviewer"
+task_name            = "style_reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/payments/"]
@@ -215,7 +215,7 @@ Good: `security_reviewer` checks for data leakage; `correctness_reviewer` checks
 ```toml
 # WRONG — this makes them serial, not parallel
 [[tasks]]
-task_id    = "reviewer_b"
+task_name    = "reviewer_b"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 description        = "Reviewer B"

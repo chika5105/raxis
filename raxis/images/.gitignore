@@ -2,3 +2,9 @@
 # pipeline (see images/README.md). Never check in.
 */rootfs/
 out/
+
+# Local canonical-image bake outputs. Release workflows publish these
+# artifacts; the repository tracks only image recipes and manifests.
+raxis-*.bake.json
+raxis-*.img
+raxis-*.manifest.toml

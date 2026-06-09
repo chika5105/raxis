@@ -468,7 +468,7 @@ function SessionEnvironmentPanel({ env }: { env: SessionVmEnvView[] }) {
           No environment variables match <Mono>{query}</Mono>.
         </div>
       ) : (
-        <div className="overflow-x-auto overscroll-x-auto scroll-thin">
+        <div className="min-w-0 max-w-full overflow-x-auto overflow-y-hidden overscroll-x-contain scroll-thin">
           <table className="min-w-[1120px] w-full text-sm">
             <thead className="bg-panel-high text-left text-xs uppercase tracking-wide text-ink-subtle">
               <tr>

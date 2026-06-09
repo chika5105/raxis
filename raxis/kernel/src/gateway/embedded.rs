@@ -28,8 +28,8 @@
 //!
 //! When the feature is on the materialiser writes
 //! `<data_dir>/runtime/embedded-gateway/raxis-gateway` with mode
-//! `0500` inside a parent directory at mode `0700`. We rewrite
-//! the file every kernel boot so a kernel upgrade implicitly
+//! `0500` inside a parent directory at mode `0700`. We atomically
+//! rewrite the file every kernel boot so a kernel upgrade implicitly
 //! replaces the materialised binary; no separate upgrade dance.
 //!
 //! Linux `memfd_create` would let us avoid the on-disk hop
@@ -38,6 +38,7 @@
 //! kernel-private directory is the V2 floor; `memfd_create` /
 //! macOS `fcntl(F_NOCACHE)` are V3.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Compile-time-embedded gateway bytes. `None` when the
@@ -102,13 +103,57 @@ pub fn materialize(data_dir: &Path) -> Result<Option<PathBuf>, MaterializeError>
     set_dir_mode_0700(&dir)?;
 
     let bin = dir.join("raxis-gateway");
-    std::fs::write(&bin, bytes).map_err(|e| MaterializeError::Write {
-        path: bin.clone(),
-        source: e,
-    })?;
-    set_file_mode_0500(&bin)?;
+    write_executable_atomically(&dir, &bin, bytes)?;
 
     Ok(Some(bin))
+}
+
+fn write_executable_atomically(
+    dir: &Path,
+    bin: &Path,
+    bytes: &[u8],
+) -> Result<(), MaterializeError> {
+    let tmp = dir.join(format!(
+        ".raxis-gateway.tmp.{}.{}",
+        std::process::id(),
+        unique_temp_suffix()
+    ));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| MaterializeError::Write {
+                path: tmp.clone(),
+                source: e,
+            })?;
+        file.write_all(bytes).map_err(|e| MaterializeError::Write {
+            path: tmp.clone(),
+            source: e,
+        })?;
+        file.sync_all().map_err(|e| MaterializeError::Write {
+            path: tmp.clone(),
+            source: e,
+        })?;
+        set_file_mode_0500(&tmp)?;
+        drop(file);
+        std::fs::rename(&tmp, bin).map_err(|e| MaterializeError::Write {
+            path: bin.to_path_buf(),
+            source: e,
+        })?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn unique_temp_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 #[cfg(unix)]
@@ -177,5 +222,24 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(md.permissions().mode() & 0o7777, 0o500);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_rewrite_repairs_execute_only_existing_gateway() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("runtime").join("embedded-gateway");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("raxis-gateway");
+        std::fs::write(&bin, b"old").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        write_executable_atomically(&dir, &bin, b"new").unwrap();
+
+        assert_eq!(std::fs::read(&bin).unwrap(), b"new");
+        let mode = std::fs::metadata(&bin).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o500);
     }
 }

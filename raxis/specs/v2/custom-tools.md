@@ -170,7 +170,7 @@ Attach profiles to Executor tasks with `profiles = [...]`:
 
 ```toml
 [[tasks]]
-task_id            = "implement_api"
+task_name            = "implement_api"
 session_agent_type = "Executor"
 profiles           = ["repo_tools", "db_tools"]
 path_allowlist     = ["src/api/"]

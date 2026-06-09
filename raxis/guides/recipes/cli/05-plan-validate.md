@@ -25,7 +25,8 @@ raxis plan validate <plan.toml>
 - `session_agent_type = "Orchestrator"` declarations.
 - Invalid `clone_strategy` values.
 - Sparse + Orchestrator combinations.
-- Duplicate `task_id`s.
+- Duplicate `task_name`s.
+- Forbidden user-authored `task_id` fields.
 - Self-loop, dangling, or cyclic predecessors.
 - Globs / `..` / leading `/` in `path_allowlist` or
   `cross_cutting_artifacts`.
@@ -48,8 +49,8 @@ Sample success:
 
 ```text
 [OK] [workspace] lane_id = auth-work declared in policy.
-[OK] [[tasks]] task_id "implementer" — Executor, sparse clone, 1 path entry.
-[OK] [[tasks]] task_id "reviewer" — Reviewer, blobless clone, predecessor satisfied.
+[OK] [[tasks]] task_name "implementer" — Executor, sparse clone, 1 path entry.
+[OK] [[tasks]] task_name "reviewer" — Reviewer, blobless clone, predecessor satisfied.
 [OK] [orchestrator] cross_cutting_artifacts = ["Cargo.lock"] — exact filenames.
 [OK] DAG: 2 tasks, 1 edge, 0 cycles.
 [OK] Plan validates structurally.
@@ -59,7 +60,7 @@ Sample failure:
 
 ```text
 [OK] [workspace] lane_id = auth-work.
-[FAIL] [[tasks]] task_id "reviewer" path_allowlist references "src/billing/" which is NOT in any predecessor Executor's allowlist.
+[FAIL] [[tasks]] task_name "reviewer" path_allowlist references "src/billing/" which is NOT in any predecessor Executor's allowlist.
 ```
 
 The validator stops at the first failure and exits 1.

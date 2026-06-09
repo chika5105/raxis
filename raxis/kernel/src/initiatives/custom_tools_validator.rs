@@ -19,7 +19,7 @@
 //!    an absolute path inside the VM filesystem"; `§3.2`).
 //! 6. `timeout_seconds` ≤ `policy.toml`
 //!    `max_custom_tool_timeout_seconds` (default 300; `§3.2`).
-//! 7. `[plan.tasks.<id>.custom_tool]` is rejected with
+//! 7. `[plan.tasks.<name>.custom_tool]` is rejected with
 //!    `FAIL_CUSTOM_TOOL_TASK_LEVEL_NOT_ALLOWED` (`§3.4`).
 //!
 //! V2 deliberately stops short of the full Draft-07 schema
@@ -170,24 +170,24 @@ pub enum CustomToolValidationError {
     /// Effective profile or task-level merged bundle exceeds the V2 count cap.
     #[error("FAIL_CUSTOM_TOOL_COUNT_EXCEEDED: scope={scope}, count={count}, limit={limit}")]
     CountExceeded {
-        /// Profile or task id being validated.
+        /// Profile or plan task name being validated.
         scope: String,
         /// Effective tool count.
         count: usize,
         /// Hard limit.
         limit: usize,
     },
-    /// `[plan.tasks.<id>.custom_tool]` is declared (custom tools
+    /// `[plan.tasks.<name>.custom_tool]` is declared (custom tools
     /// must live at the profile level only).
-    #[error("FAIL_CUSTOM_TOOL_TASK_LEVEL_NOT_ALLOWED: task_id={task_id} declares custom_tool; custom tools must live at the profile level")]
+    #[error("FAIL_CUSTOM_TOOL_TASK_LEVEL_NOT_ALLOWED: task_name={task_id} declares custom_tool; custom tools must live at the profile level")]
     TaskLevelNotAllowed {
-        /// Offending task id.
+        /// Offending plan task name.
         task_id: String,
     },
     /// A task references a profile that is not declared.
-    #[error("FAIL_CUSTOM_TOOL_PROFILE_UNKNOWN: task_id={task_id} references unknown profile={profile:?}")]
+    #[error("FAIL_CUSTOM_TOOL_PROFILE_UNKNOWN: task_name={task_id} references unknown profile={profile:?}")]
     ProfileUnknown {
-        /// Offending task id.
+        /// Offending plan task name.
         task_id: String,
         /// Missing profile name.
         profile: String,
@@ -215,9 +215,9 @@ pub enum CustomToolValidationError {
         profile: String,
     },
     /// Task profile role and task session_agent_type disagree.
-    #[error("FAIL_CUSTOM_TOOL_PROFILE_AGENT_MISMATCH: task_id={task_id}, profile={profile:?} is {profile_role}, task is {task_role}")]
+    #[error("FAIL_CUSTOM_TOOL_PROFILE_AGENT_MISMATCH: task_name={task_id}, profile={profile:?} is {profile_role}, task is {task_role}")]
     ProfileAgentMismatch {
-        /// Offending task id.
+        /// Offending plan task name.
         task_id: String,
         /// Referenced profile.
         profile: String,
@@ -299,14 +299,14 @@ pub fn validate_plan_custom_tools(
 /// validation failures.
 pub fn custom_tool_bundle_json_for_task(
     plan_toml: &str,
-    task_id: &str,
+    task_name: &str,
     task_role: &'static str,
 ) -> Result<Option<String>, CustomToolValidationError> {
     let doc: toml::Value =
         toml::from_str(plan_toml).map_err(|e| CustomToolValidationError::SchemaInvalid {
             reason: format!("plan TOML parse error: {e}"),
         })?;
-    let profile_names = task_profile_names(&doc, task_id)?;
+    let profile_names = task_profile_names(&doc, task_name)?;
     if profile_names.is_empty() {
         return Ok(None);
     }
@@ -317,7 +317,7 @@ pub fn custom_tool_bundle_json_for_task(
         let resolved = resolve_profile(&profiles, &profile_name).map_err(|e| match e {
             CustomToolValidationError::SchemaInvalid { .. } => {
                 CustomToolValidationError::ProfileUnknown {
-                    task_id: task_id.to_owned(),
+                    task_id: task_name.to_owned(),
                     profile: profile_name.clone(),
                 }
             }
@@ -330,7 +330,7 @@ pub fn custom_tool_bundle_json_for_task(
         }
         if resolved.role.as_str() != task_role {
             return Err(CustomToolValidationError::ProfileAgentMismatch {
-                task_id: task_id.to_owned(),
+                task_id: task_name.to_owned(),
                 profile: profile_name,
                 profile_role: resolved.role.as_str(),
                 task_role,
@@ -352,7 +352,7 @@ pub fn custom_tool_bundle_json_for_task(
     }
     if merged_tools.len() > MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK {
         return Err(CustomToolValidationError::CountExceeded {
-            scope: format!("task:{task_id}"),
+            scope: format!("task:{task_name}"),
             count: merged_tools.len(),
             limit: MAX_EFFECTIVE_CUSTOM_TOOLS_PER_TASK,
         });
@@ -410,7 +410,7 @@ fn reject_task_level_custom_tools(doc: &toml::Value) -> Result<(), CustomToolVal
             if let Some(table) = task.as_table() {
                 if table.contains_key("custom_tool") {
                     let task_id = table
-                        .get("task_id")
+                        .get("task_name")
                         .and_then(|v| v.as_str())
                         .map(str::to_owned)
                         .unwrap_or_else(|| format!("tasks[{idx}]"));
@@ -853,7 +853,7 @@ fn comparable_tool_json(value: &serde_json::Value) -> serde_json::Value {
 
 fn task_profile_names(
     doc: &toml::Value,
-    task_id: &str,
+    task_name: &str,
 ) -> Result<Vec<String>, CustomToolValidationError> {
     let Some(tasks) = doc.get("tasks").and_then(|v| v.as_array()) else {
         return Ok(Vec::new());
@@ -862,11 +862,11 @@ fn task_profile_names(
         let Some(table) = task.as_table() else {
             continue;
         };
-        if table.get("task_id").and_then(|v| v.as_str()) == Some(task_id) {
+        if table.get("task_name").and_then(|v| v.as_str()) == Some(task_name) {
             if table.contains_key("profile") {
                 return Err(CustomToolValidationError::SchemaInvalid {
                     reason: format!(
-                        "[[tasks]] (task `{task_id}`) uses deprecated `profile`; use profiles = [\"...\"]"
+                        "[[tasks]] (task `{task_name}`) uses deprecated `profile`; use profiles = [\"...\"]"
                     ),
                 });
             }
@@ -882,7 +882,7 @@ fn task_profile_names(
                                 if !seen.insert(profile.clone()) {
                                     return Err(CustomToolValidationError::SchemaInvalid {
                                         reason: format!(
-                                            "[[tasks]] (task `{task_id}`) declares duplicate profile {profile:?}"
+                                            "[[tasks]] (task `{task_name}`) declares duplicate profile {profile:?}"
                                         ),
                                     });
                                 }
@@ -891,7 +891,7 @@ fn task_profile_names(
                             _ => {
                                 return Err(CustomToolValidationError::SchemaInvalid {
                                     reason: format!(
-                                        "[[tasks]] (task `{task_id}`) profiles must be an array of non-empty strings"
+                                        "[[tasks]] (task `{task_name}`) profiles must be an array of non-empty strings"
                                     ),
                                 });
                             }
@@ -901,7 +901,7 @@ fn task_profile_names(
                 }
                 Some(_) => Err(CustomToolValidationError::SchemaInvalid {
                     reason: format!(
-                        "[[tasks]] (task `{task_id}`) profiles must be an array of non-empty strings"
+                        "[[tasks]] (task `{task_name}`) profiles must be an array of non-empty strings"
                     ),
                 }),
             };
@@ -1013,7 +1013,7 @@ command     = ["/usr/local/bin/query.sh"]
     fn stamps_kernel_owned_execution_locality_into_task_bundle() {
         let plan = r#"
 [[tasks]]
-task_id            = "unity-build"
+task_name            = "unity-build"
 session_agent_type = "Executor"
 profiles          = ["unity_mobile"]
 
@@ -1068,7 +1068,7 @@ execution_locality = "browser_extension"
     fn resolves_inherited_executor_profile_bundle_for_task() {
         let plan = r#"
 [[tasks]]
-task_id            = "unity-build"
+task_name            = "unity-build"
 session_agent_type = "Executor"
 profiles          = ["unity_mobile"]
 
@@ -1108,7 +1108,7 @@ type = "object"
     fn resolves_multiple_executor_profiles_for_task_in_declared_order() {
         let plan = r#"
 [[tasks]]
-task_id            = "repo-db"
+task_name            = "repo-db"
 session_agent_type = "Executor"
 profiles          = ["repo_tools", "db_tools"]
 
@@ -1146,7 +1146,7 @@ command     = ["/usr/local/bin/raxis-tool", "db-schema"]
         let mut plan = String::from(
             r#"
 [[tasks]]
-task_id            = "repo-db"
+task_name            = "repo-db"
 session_agent_type = "Executor"
 profiles          = [
 "#,
@@ -1187,7 +1187,7 @@ command     = ["/usr/local/bin/raxis-tool", "tool-{idx}"]
     fn rejects_duplicate_tool_name_across_selected_task_profiles() {
         let plan = r#"
 [[tasks]]
-task_id            = "repo-db"
+task_name            = "repo-db"
 session_agent_type = "Executor"
 profiles          = ["repo_tools", "db_tools"]
 
@@ -1220,7 +1220,7 @@ command     = ["/usr/local/bin/raxis-tool", "db-schema"]
     fn deduplicates_identical_tool_name_across_selected_task_profiles() {
         let plan = r#"
 [[tasks]]
-task_id            = "repo-db"
+task_name            = "repo-db"
 session_agent_type = "Executor"
 profiles          = ["repo_tools", "db_tools"]
 
@@ -1255,7 +1255,7 @@ command     = ["/usr/local/bin/raxis-tool", "lookup"]
     fn rejects_deprecated_singular_task_profile() {
         let plan = r#"
 [[tasks]]
-task_id            = "repo-db"
+task_name            = "repo-db"
 session_agent_type = "Executor"
 profile            = "repo_tools"
 
@@ -1270,7 +1270,7 @@ inherits_from = "Executor"
     fn rejects_duplicate_task_profile_selection() {
         let plan = r#"
 [[tasks]]
-task_id            = "repo-db"
+task_name            = "repo-db"
 session_agent_type = "Executor"
 profiles          = ["repo_tools", "repo_tools"]
 
@@ -1304,7 +1304,7 @@ command     = ["/usr/local/bin/raxis-tool-mcp", "unity", "inspect"]
     fn task_profile_role_must_match_task_agent_type() {
         let plan = r#"
 [[tasks]]
-task_id            = "review-unity"
+task_name            = "review-unity"
 session_agent_type = "Reviewer"
 profiles          = ["unity_mobile"]
 

@@ -88,8 +88,11 @@ pub struct DagView {
 /// One DAG node.
 #[derive(Debug, Serialize)]
 pub struct DagNode {
-    /// Task id.
+    /// Kernel-owned runtime task id.
     pub task_id: String,
+    /// Operator-authored `[[tasks]].task_name`, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_name: Option<String>,
     /// Task title.
     pub title: String,
     /// Semantic agent type (`Orchestrator`, `Executor`, `Reviewer`).
@@ -153,6 +156,7 @@ where
         .iter()
         .map(|t| DagNode {
             task_id: t.task_id.clone(),
+            task_name: t.task_name.clone(),
             title: t.title.clone(),
             agent_type: t.agent_type.clone(),
             state: t.state.clone(),

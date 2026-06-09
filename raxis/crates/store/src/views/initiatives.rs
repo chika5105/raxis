@@ -264,9 +264,9 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<InitiativeRow> {
 // chosen for the operator's recurring at-a-glance question:
 //
 //   * Active     — "what is currently being worked on?" =
-//                  non-terminal states (Draft | ApprovedPlan |
-//                  Executing | Blocked) per kernel-store.md §2.5.1
-//                  Table 2 (the FSM diagram).
+//                  admitted/running states (ApprovedPlan | Executing |
+//                  Blocked). Draft plans are not in flight: they have
+//                  no approved work and may have no task rows yet.
 //   * Completed  — "what shipped?" = the Completed terminal state
 //                  ONLY. Failed / Aborted are deliberately omitted
 //                  because the operator's natural follow-up after
@@ -297,7 +297,7 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<InitiativeRow> {
 pub enum InitiativeListFilter {
     /// Every initiative; no `WHERE` predicate.
     All,
-    /// Non-terminal states: `Draft | ApprovedPlan | Executing | Blocked`.
+    /// In-flight states: `ApprovedPlan | Executing | Blocked`.
     Active,
     /// `state = 'Completed'` only — the successful terminal.
     Completed,
@@ -337,7 +337,7 @@ pub fn list_filtered(
     let where_clause = match filter {
         InitiativeListFilter::All => String::new(),
         InitiativeListFilter::Active => " WHERE i.state IN \
-            ('Draft', 'ApprovedPlan', 'Executing', 'Blocked')"
+            ('ApprovedPlan', 'Executing', 'Blocked')"
             .to_owned(),
         InitiativeListFilter::Completed => " WHERE i.state = 'Completed'".to_owned(),
         InitiativeListFilter::Quarantined => " WHERE q.initiative_id IS NOT NULL".to_owned(),
@@ -463,7 +463,7 @@ mod tests {
     /// Like `fresh_store_with_seed` but also seeds two
     /// `initiative_quarantines` rows so the bucketed-list join paths
     /// (`Quarantined`, plus the per-row `quarantined` flag) are
-    /// exercised. We pick `init-fresh` (active) and `init-old`
+    /// exercised. We pick `init-other` (active) and `init-old`
     /// (terminal) so the Active and Completed buckets each surface
     /// at least one quarantined row, plus the Quarantined bucket
     /// returns exactly the expected two rows.
@@ -473,7 +473,7 @@ mod tests {
         let store = Store::open(&db).unwrap();
         let guard = store.lock_sync();
         const QUARANTINES: &str = Table::InitiativeQuarantines.as_str();
-        for (id, qa) in [("init-fresh", 310_i64), ("init-old", 105)] {
+        for (id, qa) in [("init-other", 310_i64), ("init-old", 105)] {
             guard
                 .execute(
                     &format!(
@@ -669,10 +669,11 @@ mod tests {
             .iter()
             .map(|r| r.initiative.initiative_id.as_str())
             .collect();
-        // Active = Draft + ApprovedPlan + Executing + Blocked. Seed has
-        // one Draft (init-fresh) and two Executing (init-other, init-mid),
-        // plus terminal Completed (init-old) and Failed (init-fail).
-        assert_eq!(ids, vec!["init-fresh", "init-other", "init-mid"]);
+        // Active = ApprovedPlan + Executing + Blocked. Seed has one
+        // Draft (init-fresh), which is intentionally omitted because
+        // it is not in flight, plus two Executing rows and terminal
+        // Completed / Failed rows.
+        assert_eq!(ids, vec!["init-other", "init-mid"]);
     }
 
     #[test]
@@ -698,7 +699,7 @@ mod tests {
             .iter()
             .map(|r| r.initiative.initiative_id.as_str())
             .collect();
-        assert_eq!(ids, vec!["init-fresh", "init-old"]);
+        assert_eq!(ids, vec!["init-other", "init-old"]);
         assert!(
             rows.iter().all(|r| r.quarantined),
             "every row of the Quarantined bucket MUST carry quarantined=true"
@@ -707,18 +708,18 @@ mod tests {
 
     #[test]
     fn list_filtered_active_surfaces_quarantine_flag_on_overlap() {
-        // `init-fresh` is Draft (active) AND quarantined — the bucket
-        // is "active", but the per-row flag MUST be true so the CLI
-        // can render `[Q]` on the row.
+        // `init-other` is Executing (active) AND quarantined — the
+        // bucket is "active", but the per-row flag MUST be true so the
+        // CLI can render `[Q]` on the row.
         let tmp = fresh_store_with_seed_and_quarantines();
         let conn = open_ro(tmp.path()).unwrap();
         let rows = list_filtered(&conn, InitiativeListFilter::Active, 10).unwrap();
-        let fresh = rows
+        let other = rows
             .iter()
-            .find(|r| r.initiative.initiative_id == "init-fresh")
-            .expect("init-fresh must appear in the Active bucket");
+            .find(|r| r.initiative.initiative_id == "init-other")
+            .expect("init-other must appear in the Active bucket");
         assert!(
-            fresh.quarantined,
+            other.quarantined,
             "Active row MUST surface quarantined=true when overlap holds"
         );
         let mid = rows

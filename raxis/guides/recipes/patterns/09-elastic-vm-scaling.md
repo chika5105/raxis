@@ -90,7 +90,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id              = "compile-types"
+task_name              = "compile-types"
 session_agent_type   = "Executor"
 clone_strategy       = "blobless"
 path_allowlist       = ["crates/types/"]
@@ -115,7 +115,7 @@ for this task (`INV-ELASTIC-05`).
 
 ```toml
 [[tasks]]
-task_id              = "wide-fanout-merge"
+task_name              = "wide-fanout-merge"
 session_agent_type   = "Executor"
 clone_strategy       = "sparse"
 path_allowlist       = ["src/", "tests/"]

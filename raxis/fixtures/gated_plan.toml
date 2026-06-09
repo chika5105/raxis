@@ -9,7 +9,7 @@ description    = "Single task with one TestCoverage gate"
 version        = "1"
 
 [[tasks]]
-task_id        = "task-beta"
+task_name        = "task-beta"
 description    = "Implement and test the feature"
 intent_kinds   = ["SingleCommit", "CompleteTask"]
 path_allowlist    = ["src/", "tests/"]

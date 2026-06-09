@@ -996,13 +996,13 @@ Coverage shipped in V2:
 - TOML parse (line/col diagnostic from the `toml` crate).
 - Required sections: `[workspace]`, `[[tasks]]`.
 - `[workspace] lane_id` non-empty.
-- Per-task: `task_id` required, no `lane_id` per-task override
+- Per-task: `task_name` required, user-authored `task_id` forbidden, no `lane_id` per-task override
   (V2 §28 single-lane propagation), no
   `session_agent_type = "Orchestrator"` (V2 §27 rule 1), valid
   `clone_strategy` ∈ {`full`, `blobless`, `sparse`}, valid
   `session_agent_type` ∈ {`Executor`, `Reviewer`}.
 - DAG family (mirrors `kernel/src/initiatives/lifecycle.rs::validate_plan_dag`):
-  duplicate `task_id`, self-loop, dangling predecessor, cyclic
+  duplicate `task_name`, self-loop, dangling predecessor, cyclic
   dependency (iterative DFS with three-color marking).
 - `cross_cutting_artifacts` syntax (mirrors
   `validate_cross_cutting_artifacts`): empty entry, leading `!`,
@@ -1345,7 +1345,7 @@ raxis-cli initiative list [--state <s>] [--mine] [--limit <n>] [--since <duratio
 
 | Flag | Default | Effect | Origin |
 |---|---|---|---|
-| `--state` | `active` (v1 default; v2 keeps it) | v1 buckets: `active`, `completed`, `quarantined`, `all`. **v2 additions**: also accept the canonical FSM states `Draft`, `ApprovedPlan`, `Executing`, `Blocked`, `Paused`, `Completed`, `Failed`, `Aborted`, comma-separated. The four v1 buckets are sugar that expands to the underlying state set. | v1 + v2 ext. |
+| `--state` | `active` (v1 default; v2 keeps it) | v1 buckets: `active`, `completed`, `quarantined`, `all`. `active` means in-flight admitted work (`ApprovedPlan`, `Executing`, `Blocked`), not `Draft`. **v2 additions**: also accept the canonical FSM states `Draft`, `ApprovedPlan`, `Executing`, `Blocked`, `Paused`, `Completed`, `Failed`, `Aborted`, comma-separated. The four v1 buckets are sugar that expands to the underlying state set. | v1 + v2 ext. |
 | `--limit` | `50` (v1) / `20` (v2 default after §15.4 migration) | Maximum rows. v2 lowers the default after the description column lands so the table fits one screen. | v1 + v2 tweak |
 | `--json` | off | Emit one JSON object instead of the human table. v1 alias for `--format json`. | v1 |
 | `--mine` | off | **v2 only.** Filter to initiatives whose plan was signed by the currently-loaded operator key (`signed_plan_artifacts.signed_by_fingerprint == <my fingerprint>`). | v2 |

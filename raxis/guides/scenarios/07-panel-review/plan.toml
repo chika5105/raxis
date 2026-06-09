@@ -14,7 +14,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id            = "implementer"
+task_name            = "implementer"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
@@ -30,7 +30,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "correctness_review"
+task_name            = "correctness_review"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
@@ -43,7 +43,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "style_review"
+task_name            = "style_review"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
@@ -57,7 +57,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "security_review"
+task_name            = "security_review"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]

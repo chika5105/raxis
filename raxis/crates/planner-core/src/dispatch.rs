@@ -492,6 +492,24 @@ impl DispatchLoop {
         self
     }
 
+    fn should_apply_reviewer_terminal_correction(&self) -> bool {
+        self.terminal_tools.len() == 1 && self.terminal_tools[0] == "submit_review"
+    }
+
+    fn reviewer_terminal_correction_message() -> Message {
+        Message {
+            role: "user".to_owned(),
+            content: vec![ContentBlock::Text {
+                text: "RAXIS reviewer protocol correction: your last response did not call the \
+                       required terminal reviewer tool. Do not continue with prose. Submit \
+                       exactly one `submit_review` tool call now with `approved` and an \
+                       optional concise `critique`. If the artifact should not pass, set \
+                       `approved` to false and put the actionable reason in `critique`."
+                    .to_owned(),
+            }],
+        }
+    }
+
     /// Drive one dispatch session to a terminal outcome.
     /// `system_prompt` is the rendered KSB + role NNSP (see
     /// [`raxis_ksb`] and `kernel-mechanics-prompt.md`).
@@ -553,6 +571,7 @@ impl DispatchLoop {
         // fresh loop per session so this reset is defensive.
         self.cum_cache_creation_input_tokens = 0;
         self.cum_cache_read_input_tokens = 0;
+        let mut reviewer_terminal_correction_sent = false;
 
         for turn in 0..self.config.max_turns {
             let resp = self.model.create_message(&req).await?;
@@ -650,6 +669,23 @@ impl DispatchLoop {
             }
 
             if tool_uses.is_empty() {
+                if self.should_apply_reviewer_terminal_correction() {
+                    if !reviewer_terminal_correction_sent
+                        && turn.saturating_add(1) < self.config.max_turns
+                    {
+                        reviewer_terminal_correction_sent = true;
+                        req.messages
+                            .push(Self::reviewer_terminal_correction_message());
+                        continue;
+                    }
+                    if turn.saturating_add(1) >= self.config.max_turns {
+                        return Ok(DispatchOutcome::MaxTurnsExceeded {
+                            turns: self.config.max_turns,
+                            cum_input_tokens: cum_in,
+                            cum_output_tokens: cum_out,
+                        });
+                    }
+                }
                 // No tools called — either Idle or MaxTurns will fire.
                 return Ok(DispatchOutcome::Idle {
                     final_text: text_acc,
@@ -809,6 +845,7 @@ impl DispatchLoop {
         // does not care which path produced the cumulative count.
         self.cum_cache_creation_input_tokens = 0;
         self.cum_cache_read_input_tokens = 0;
+        let mut reviewer_terminal_correction_sent = false;
 
         for turn in 0..self.config.max_turns {
             // ── Stream consumption with mid-stream budget check ──
@@ -962,6 +999,23 @@ impl DispatchLoop {
             }
 
             if tool_uses.is_empty() {
+                if self.should_apply_reviewer_terminal_correction() {
+                    if !reviewer_terminal_correction_sent
+                        && turn.saturating_add(1) < self.config.max_turns
+                    {
+                        reviewer_terminal_correction_sent = true;
+                        req.messages
+                            .push(Self::reviewer_terminal_correction_message());
+                        continue;
+                    }
+                    if turn.saturating_add(1) >= self.config.max_turns {
+                        return Ok(DispatchOutcome::MaxTurnsExceeded {
+                            turns: self.config.max_turns,
+                            cum_input_tokens: cum_in,
+                            cum_output_tokens: cum_out,
+                        });
+                    }
+                }
                 return Ok(DispatchOutcome::Idle {
                     final_text: text_acc,
                     cum_input_tokens: cum_in,
@@ -1286,16 +1340,14 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_tool_short_circuits_loop() {
-        let r1 = tool_use_response(
-            "tu1",
-            "task_complete",
-            serde_json::json!({ "head_sha": "abc123def456" }),
-        );
+        let r1 = tool_use_response("tu1", "finish", serde_json::json!({ "ok": true }));
         // No second response queued: the dispatch loop must
         // short-circuit on the terminal tool BEFORE asking the
         // model again.
         let model = Arc::new(MockModelClient::new(vec![r1]));
-        let registry = Arc::new(crate::tools::build_executor_registry());
+        let mut registry = crate::tools::ToolRegistry::new();
+        registry.register(Arc::new(RecoverableTerminalTool));
+        let registry = Arc::new(registry);
         let ws = fixture_workspace();
         let mut d = DispatchLoop::new(
             model,
@@ -1303,16 +1355,96 @@ mod tests {
             DispatchConfig::new("test-model"),
             ToolContext::for_workspace(ws.path()),
         )
-        .with_terminal_tools(vec!["task_complete"]);
+        .with_terminal_tools(vec!["finish"]);
         let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
         match out {
             DispatchOutcome::TerminalTool {
                 tool_name, input, ..
             } => {
-                assert_eq!(tool_name, "task_complete");
-                assert_eq!(input["head_sha"], "abc123def456");
+                assert_eq!(tool_name, "finish");
+                assert_eq!(input["normalized"], true);
             }
             other => panic!("expected TerminalTool, got {other:?}"),
+        }
+    }
+
+    /// Reviewer sessions are the one role where a prose-only
+    /// end_turn is especially misleading: the semantic contract is
+    /// a structured `submit_review` verdict. The runtime gets one
+    /// internal corrective turn so operators do not have to teach
+    /// that RAXIS protocol detail in their campaign prompt.
+    #[tokio::test]
+    async fn reviewer_text_only_answer_gets_protocol_correction_turn() {
+        let r1 = empty_response_end_turn("Looks good to me.");
+        let r2 = tool_use_response(
+            "tu2",
+            "submit_review",
+            serde_json::json!({ "approved": true }),
+        );
+        let model = Arc::new(MockModelClient::new(vec![r1, r2]));
+        let captured = model.seen.clone();
+        let registry = Arc::new(crate::tools::build_reviewer_registry());
+        let ws = fixture_workspace();
+        let mut cfg = DispatchConfig::new("test-model");
+        cfg.max_turns = 3;
+        let mut d = DispatchLoop::new(model, registry, cfg, ToolContext::for_workspace(ws.path()))
+            .with_terminal_tools(vec!["submit_review"]);
+
+        let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
+        match out {
+            DispatchOutcome::TerminalTool {
+                tool_name, input, ..
+            } => {
+                assert_eq!(tool_name, "submit_review");
+                assert_eq!(input["approved"], true);
+            }
+            other => panic!("expected submit_review terminal tool, got {other:?}"),
+        }
+
+        let seen = captured.lock().await;
+        assert_eq!(
+            seen.len(),
+            2,
+            "reviewer correction should consume exactly one extra model turn"
+        );
+        let t2 = &seen[1];
+        let correction = t2.messages.last().expect("correction message present");
+        assert_eq!(correction.role, "user");
+        match &correction.content[0] {
+            ContentBlock::Text { text } => {
+                assert!(
+                    text.contains("RAXIS reviewer protocol correction"),
+                    "correction must identify the runtime contract; got {text:?}"
+                );
+                assert!(
+                    text.contains("submit_review"),
+                    "correction must name the missing terminal tool; got {text:?}"
+                );
+            }
+            other => panic!("expected correction Text block, got {other:?}"),
+        }
+    }
+
+    /// If the reviewer spends its final allowed turn on prose,
+    /// the right outcome is budget exhaustion for the reviewer
+    /// protocol, not an operator-authored prompt failure.
+    #[tokio::test]
+    async fn reviewer_text_only_on_final_turn_surfaces_max_turns() {
+        let r1 = empty_response_end_turn("I approve this.");
+        let model = Arc::new(MockModelClient::new(vec![r1]));
+        let registry = Arc::new(crate::tools::build_reviewer_registry());
+        let ws = fixture_workspace();
+        let mut cfg = DispatchConfig::new("test-model");
+        cfg.max_turns = 1;
+        let mut d = DispatchLoop::new(model, registry, cfg, ToolContext::for_workspace(ws.path()))
+            .with_terminal_tools(vec!["submit_review"]);
+
+        let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
+        match out {
+            DispatchOutcome::MaxTurnsExceeded { turns, .. } => {
+                assert_eq!(turns, 1);
+            }
+            other => panic!("expected reviewer MaxTurnsExceeded, got {other:?}"),
         }
     }
 

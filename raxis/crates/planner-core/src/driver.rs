@@ -1157,8 +1157,13 @@ pub async fn run_role_session_with_connected_transport(
         },
         _ => None,
     };
+    let task_complete_base_sha = match (role, ksb_snapshot.as_ref()) {
+        (Role::Executor, Some(snap)) if !snap.base_sha.is_empty() => Some(snap.base_sha.clone()),
+        _ => None,
+    };
     let ctx = ToolContext::for_workspace(workspace.clone())
-        .with_integration_merge_context(integration_merge_ctx);
+        .with_integration_merge_context(integration_merge_ctx)
+        .with_task_complete_base_sha(task_complete_base_sha);
     let mut loop_ = DispatchLoop::new(model, Arc::clone(&registry), config, ctx)
         .with_terminal_tools(terminal_tools.clone());
 
@@ -1440,10 +1445,12 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
              call `retry_subtask`; `retry_admissible` is orchestrator context.\n\
              \n\
              Work minimally: inspect, edit, run focused checks, commit with \
-             `git_commit`. End with exactly one terminal tool: \
-             `task_complete { head_sha }`, `single_commit { base_sha, head_sha }`, \
-             or `report_failure { justification }`. SHAs must be full 40-char \
-             lowercase hex. Free text without a terminal tool is an Idle failure."
+             `git_commit`. Finish with exactly one tool: `task_complete` \
+             after committed work, `single_commit { base_sha, head_sha }` \
+             only when you already have an explicit range, or \
+             `report_failure { justification }`. Do not paste a SHA into \
+             `task_complete`; RAXIS derives the committed HEAD. Free text \
+             without a finish tool is an Idle failure."
         }
         Role::Reviewer => {
             "You are the RAXIS reviewer for task `{TASK}` in initiative `{INIT}`.\n\
@@ -1461,8 +1468,9 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
              `planner_max_turns=N`; reviewer budgets are tight.\n\
              \n\
              End with exactly one terminal tool: \
-             `submit_review { approved, critique? }`. Free text without \
-             `submit_review` is an Idle failure."
+             `submit_review { approved, critique? }`. A prose answer like \
+             \"approved\" or \"rejected\" is not a verdict; the runtime may \
+             give one correction, then no tool is an Idle failure."
         }
         Role::Orchestrator => {
             "You are the RAXIS orchestrator for initiative `{INIT}`.\n\
@@ -2273,6 +2281,8 @@ mod tests {
         assert!(prompt.contains("task `task-1`"));
         assert!(prompt.contains("initiative `init-A`"));
         assert!(prompt.contains("task_complete"));
+        assert!(prompt.contains("RAXIS derives the committed HEAD"));
+        assert!(!prompt.contains("task_complete { head_sha }"));
         assert!(prompt.contains("report_failure"));
     }
 
@@ -2335,6 +2345,10 @@ mod tests {
         assert!(
             !executor.contains("do not install packages"),
             "executor prompt must not tell agents to give up on package installs"
+        );
+        assert!(
+            !executor.contains("task_complete { head_sha }"),
+            "executor prompt must not ask the model to provide completion plumbing"
         );
         for required in ["read-only", "evaluation_sha", "submit_review"] {
             assert!(

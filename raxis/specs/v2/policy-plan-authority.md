@@ -2008,7 +2008,7 @@ required_for_environments = ["production"]                 # composes with envir
 | `timeout` | Required | Wall-clock timeout, parsed as a duration string | ≥ 5 seconds and ≤ kernel hard cap (`max_verifier_timeout_seconds`) |
 | `on_failure` | Required | Failure routing | MUST be `"block_merge"` (operator-side declarations cannot be downgraded to `warn_only`); `"block_review"` is rejected per `FAIL_VERIFIER_INVALID_ON_FAILURE` |
 | `applies_to` | Optional | Scope filter per [`verifier-processes.md §16.3`](verifier-processes.md) | `"all"` (default) \| `"task_set"` \| `"last"` |
-| `task_set` | Required if `applies_to = "task_set"` | Array of task IDs whose presence in `merged_task_ids` triggers this verifier | All entries must be syntactically valid task IDs (resolution against the plan happens at runtime, since policy is plan-agnostic) |
+| `task_set` | Required if `applies_to = "task_set"` | Array of plan task names whose resolved runtime UUIDs trigger this verifier when present in `merged_task_ids` | All entries must resolve to declared `[[tasks]].task_name` values in the plan that uses the verifier |
 | `required_for_environments` | Optional | Bind to environment-access-control framework | All entries must resolve to declared `[environments.<label>]` per [`environment-access-control.md §5b`](environment-access-control.md); otherwise `FAIL_POLICY_ENV_LABEL_UNDECLARED` |
 | `artifact` | Optional | Absolute path inside verifier VM whose contents stage into `staging/merge/<integration_merge_id>/<verifier_name>/` | Must start with `/raxis/`; max 256 chars |
 | `artifact_max_bytes` | Optional | Cap on staged artifact size | Default 1 MiB; max 64 MiB |

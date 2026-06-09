@@ -14,7 +14,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id            = "designer_a"
+task_name            = "designer_a"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
@@ -28,7 +28,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "designer_b"
+task_name            = "designer_b"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
@@ -43,7 +43,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "implementer"
+task_name            = "implementer"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/", "docs/"]

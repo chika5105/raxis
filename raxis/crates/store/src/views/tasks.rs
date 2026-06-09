@@ -27,6 +27,10 @@ use crate::Table;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRow {
     pub task_id: String,
+    /// Operator-authored task name from `[[tasks]].task_name`.
+    /// Runtime task ids are kernel-owned UUIDs; this is the human
+    /// label used for plan/DAG display and dependency references.
+    pub task_name: Option<String>,
     pub initiative_id: String,
     pub initiative_state: String,
     pub lane_id: String,
@@ -126,7 +130,7 @@ pub fn counts_by_state(conn: &RoConn) -> Result<TaskStateCounts, TaskViewError> 
 /// than treating it as an error.
 pub fn by_id(conn: &RoConn, task_id: &str) -> Result<Option<TaskRow>, TaskViewError> {
     let sql = format!(
-        "SELECT t.task_id, t.initiative_id, i.state, t.lane_id, t.state, \
+        "SELECT t.task_id, t.task_name, t.initiative_id, i.state, t.lane_id, t.state, \
                 t.block_reason, t.actor, t.policy_epoch, t.admitted_at, \
                 t.transitioned_at, t.session_id, t.evaluation_sha, \
                 t.base_sha, t.admission_reserved_units, t.actual_cost \
@@ -140,20 +144,21 @@ pub fn by_id(conn: &RoConn, task_id: &str) -> Result<Option<TaskRow>, TaskViewEr
         .query_row(&sql, rusqlite::params![task_id], |r| {
             Ok(TaskRow {
                 task_id: r.get(0)?,
-                initiative_id: r.get(1)?,
-                initiative_state: r.get(2)?,
-                lane_id: r.get(3)?,
-                state: r.get(4)?,
-                block_reason: r.get(5)?,
-                actor: r.get(6)?,
-                policy_epoch: r.get::<_, i64>(7)?.max(0) as u64,
-                admitted_at: r.get::<_, i64>(8)?.max(0) as u64,
-                transitioned_at: r.get::<_, i64>(9)?.max(0) as u64,
-                session_id: r.get(10)?,
-                evaluation_sha: r.get(11)?,
-                base_sha: r.get(12)?,
-                admission_reserved_units: r.get(13)?,
-                actual_cost: r.get(14)?,
+                task_name: r.get(1)?,
+                initiative_id: r.get(2)?,
+                initiative_state: r.get(3)?,
+                lane_id: r.get(4)?,
+                state: r.get(5)?,
+                block_reason: r.get(6)?,
+                actor: r.get(7)?,
+                policy_epoch: r.get::<_, i64>(8)?.max(0) as u64,
+                admitted_at: r.get::<_, i64>(9)?.max(0) as u64,
+                transitioned_at: r.get::<_, i64>(10)?.max(0) as u64,
+                session_id: r.get(11)?,
+                evaluation_sha: r.get(12)?,
+                base_sha: r.get(13)?,
+                admission_reserved_units: r.get(14)?,
+                actual_cost: r.get(15)?,
             })
         })
         .optional()?;
@@ -203,7 +208,7 @@ pub fn ready_set(
 /// FSM). Same ordering + paging contract as [`ready_set`].
 pub fn blocked_set(conn: &RoConn, limit: usize) -> Result<Vec<TaskRow>, TaskViewError> {
     let sql = format!(
-        "SELECT t.task_id, t.initiative_id, i.state, t.lane_id, t.state, \
+        "SELECT t.task_id, t.task_name, t.initiative_id, i.state, t.lane_id, t.state, \
                 t.block_reason, t.actor, t.policy_epoch, t.admitted_at, \
                 t.transitioned_at, t.session_id, t.evaluation_sha, \
                 t.base_sha, t.admission_reserved_units, t.actual_cost \
@@ -219,20 +224,21 @@ pub fn blocked_set(conn: &RoConn, limit: usize) -> Result<Vec<TaskRow>, TaskView
         .query_map(rusqlite::params![limit as i64], |r| {
             Ok(TaskRow {
                 task_id: r.get(0)?,
-                initiative_id: r.get(1)?,
-                initiative_state: r.get(2)?,
-                lane_id: r.get(3)?,
-                state: r.get(4)?,
-                block_reason: r.get(5)?,
-                actor: r.get(6)?,
-                policy_epoch: r.get::<_, i64>(7)?.max(0) as u64,
-                admitted_at: r.get::<_, i64>(8)?.max(0) as u64,
-                transitioned_at: r.get::<_, i64>(9)?.max(0) as u64,
-                session_id: r.get(10)?,
-                evaluation_sha: r.get(11)?,
-                base_sha: r.get(12)?,
-                admission_reserved_units: r.get(13)?,
-                actual_cost: r.get(14)?,
+                task_name: r.get(1)?,
+                initiative_id: r.get(2)?,
+                initiative_state: r.get(3)?,
+                lane_id: r.get(4)?,
+                state: r.get(5)?,
+                block_reason: r.get(6)?,
+                actor: r.get(7)?,
+                policy_epoch: r.get::<_, i64>(8)?.max(0) as u64,
+                admitted_at: r.get::<_, i64>(9)?.max(0) as u64,
+                transitioned_at: r.get::<_, i64>(10)?.max(0) as u64,
+                session_id: r.get(11)?,
+                evaluation_sha: r.get(12)?,
+                base_sha: r.get(13)?,
+                admission_reserved_units: r.get(14)?,
+                actual_cost: r.get(15)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -263,7 +269,7 @@ pub fn list_by_initiative(
     limit: usize,
 ) -> Result<Vec<TaskRow>, TaskViewError> {
     let sql = format!(
-        "SELECT t.task_id, t.initiative_id, i.state, t.lane_id, t.state, \
+        "SELECT t.task_id, t.task_name, t.initiative_id, i.state, t.lane_id, t.state, \
                 t.block_reason, t.actor, t.policy_epoch, t.admitted_at, \
                 t.transitioned_at, t.session_id, t.evaluation_sha, \
                 t.base_sha, t.admission_reserved_units, t.actual_cost \
@@ -280,20 +286,21 @@ pub fn list_by_initiative(
         .query_map(rusqlite::params![initiative_id, limit as i64], |r| {
             Ok(TaskRow {
                 task_id: r.get(0)?,
-                initiative_id: r.get(1)?,
-                initiative_state: r.get(2)?,
-                lane_id: r.get(3)?,
-                state: r.get(4)?,
-                block_reason: r.get(5)?,
-                actor: r.get(6)?,
-                policy_epoch: r.get::<_, i64>(7)?.max(0) as u64,
-                admitted_at: r.get::<_, i64>(8)?.max(0) as u64,
-                transitioned_at: r.get::<_, i64>(9)?.max(0) as u64,
-                session_id: r.get(10)?,
-                evaluation_sha: r.get(11)?,
-                base_sha: r.get(12)?,
-                admission_reserved_units: r.get(13)?,
-                actual_cost: r.get(14)?,
+                task_name: r.get(1)?,
+                initiative_id: r.get(2)?,
+                initiative_state: r.get(3)?,
+                lane_id: r.get(4)?,
+                state: r.get(5)?,
+                block_reason: r.get(6)?,
+                actor: r.get(7)?,
+                policy_epoch: r.get::<_, i64>(8)?.max(0) as u64,
+                admitted_at: r.get::<_, i64>(9)?.max(0) as u64,
+                transitioned_at: r.get::<_, i64>(10)?.max(0) as u64,
+                session_id: r.get(11)?,
+                evaluation_sha: r.get(12)?,
+                base_sha: r.get(13)?,
+                admission_reserved_units: r.get(14)?,
+                actual_cost: r.get(15)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;

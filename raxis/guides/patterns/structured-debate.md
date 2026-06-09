@@ -73,7 +73,7 @@ target_ref = "refs/heads/main"
 # ── Round 1: Initial Positions ────────────────────────────────────────────────
 
 [[tasks]]
-task_id            = "proposer_a_r1"
+task_name            = "proposer_a_r1"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"              # needs to READ the full repo for context
 path_allowlist     = ["docs/design/proposal-a-r1.md"]   # can only WRITE this file
@@ -91,7 +91,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "proposer_b_r1"
+task_name            = "proposer_b_r1"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/proposal-b-r1.md"]
@@ -108,7 +108,7 @@ prompt             = """
 # ── Round 2: Rebuttals ────────────────────────────────────────────────────────
 
 [[tasks]]
-task_id            = "proposer_a_r2"
+task_name            = "proposer_a_r2"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/proposal-a-r2.md"]
@@ -125,7 +125,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "proposer_b_r2"
+task_name            = "proposer_b_r2"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/proposal-b-r2.md"]
@@ -144,7 +144,7 @@ prompt             = """
 # It does not debate — it decides. Its output is the spec the Implementer follows.
 
 [[tasks]]
-task_id            = "design_synthesizer"
+task_name            = "design_synthesizer"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/final-design.md"]
@@ -168,7 +168,7 @@ prompt             = """
 # Catch logical inconsistencies or security issues in the design itself.
 
 [[tasks]]
-task_id            = "design_reviewer"
+task_name            = "design_reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/final-design.md"]
@@ -184,7 +184,7 @@ prompt             = """
 # ── Implementation ────────────────────────────────────────────────────────────
 
 [[tasks]]
-task_id            = "auth_implementer"
+task_name            = "auth_implementer"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"                # only needs src/auth/ to write
 path_allowlist     = ["src/auth/"]
@@ -203,7 +203,7 @@ prompt             = """
 # ── Implementation Reviewer ───────────────────────────────────────────────────
 
 [[tasks]]
-task_id            = "impl_reviewer"
+task_name            = "impl_reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]

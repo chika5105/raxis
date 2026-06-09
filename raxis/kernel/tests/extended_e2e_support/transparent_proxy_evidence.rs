@@ -269,9 +269,9 @@ pub enum TransparentProxyEvidenceError {
     },
 
     /// `scripts/last_run_summary.txt` exists but does not contain
-    /// the service name verbatim. The wrapper prints one line per
-    /// service; the absence of the matching line implies the
-    /// service was not exercised through the scripts substrate.
+    /// the wrapper's canonical `<service>:` transcript label. The
+    /// absence of the matching line implies the service was not
+    /// exercised through the scripts substrate.
     WrapperSummaryMissesService {
         service: &'static str,
         path: PathBuf,
@@ -346,8 +346,9 @@ impl fmt::Display for TransparentProxyEvidenceError {
             Self::WrapperSummaryMissesService { service, path } => write!(
                 f,
                 "[transparent-proxy:{service}] `{}` exists but does not \
-                 mention the service `{service}` verbatim — the wrapper \
-                 either did not run or did not exercise this service",
+                 contain the wrapper transcript label `{service}:` — the \
+                 wrapper either did not run, the transcript was rewritten, \
+                 or the wrapper did not exercise this service",
                 path.display(),
             ),
         }
@@ -1158,7 +1159,10 @@ mod tests {
         )
         .expect_err("wrapper without service line => WrapperSummaryMissesService");
         let rendered = format!("{err}");
-        assert!(rendered.contains("does not mention"), "render: {rendered}");
+        assert!(
+            rendered.contains("wrapper transcript label"),
+            "render: {rendered}"
+        );
         assert!(rendered.contains("postgres"), "render: {rendered}");
     }
 

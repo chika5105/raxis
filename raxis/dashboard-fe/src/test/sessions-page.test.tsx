@@ -33,6 +33,7 @@ function session(over: Partial<SessionView>): SessionView {
     initiative_id: "init-a",
     initiative_display_name: "Alpha pipeline",
     task_id: "task-a",
+    task_name: "ship-api",
     state: "Active",
     provider: "anthropic-prod",
     model: "claude-sonnet-4-5-20250929",
@@ -71,7 +72,7 @@ describe("<SessionsPage>", () => {
 
     fireEvent.change(
       screen.getByPlaceholderText(
-        "Search workspace / session / initiative / provider...",
+        "Search workspace / task / session / provider...",
       ),
       { target: { value: "openai" } },
     );
@@ -79,6 +80,35 @@ describe("<SessionsPage>", () => {
     await waitFor(() => {
       expect(screen.getByText("openai-prod")).toBeInTheDocument();
       expect(screen.queryByText("anthropic-prod")).toBeNull();
+    });
+  });
+
+  it("searches by operator task name as well as runtime task id", async () => {
+    vi.spyOn(dashboardApi.sessions, "list").mockResolvedValue([
+      session({ task_id: "uuid-build-api", task_name: "build-api" }),
+      session({
+        session_id: "sess-review-1234567890",
+        task_id: "uuid-review-api",
+        task_name: "review-api",
+      }),
+    ]);
+
+    renderWithProviders(<SessionsPage />);
+
+    expect(await screen.findByText("build-api")).toBeInTheDocument();
+    expect(screen.getByText("review-api")).toBeInTheDocument();
+
+    fireEvent.change(
+      screen.getByPlaceholderText(
+        "Search workspace / task / session / provider...",
+      ),
+      { target: { value: "review-api" } },
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByText("build-api")).toBeNull();
+      expect(screen.getByText("review-api")).toBeInTheDocument();
+      expect(screen.getByText("uuid-review-api")).toBeInTheDocument();
     });
   });
 

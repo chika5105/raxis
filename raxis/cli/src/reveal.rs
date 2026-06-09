@@ -171,9 +171,11 @@ fn map_reveal_error(e: PlanFieldsError) -> CliError {
         PlanFieldsError::TaskNotInPlan {
             initiative_id,
             task_id,
+            task_name,
         } => CliError::Policy(format!(
             "plan for initiative {initiative_id:?} has no [[tasks]] entry for \
-                 task_id={task_id:?} — kernel may have admitted a task outside the signed plan"
+                 task_name={task_name:?} (runtime task_id={task_id:?}) — kernel may have admitted \
+                 a task outside the signed plan"
         )),
         PlanFieldsError::Sqlite(e) => CliError::Policy(format!("plan_fields sqlite error: {e}")),
     }

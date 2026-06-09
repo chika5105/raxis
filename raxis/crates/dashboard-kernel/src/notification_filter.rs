@@ -165,6 +165,7 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
         // string surface; without parity, Critical-only filters
         // missed the iter64 ceiling event entirely.
         | "OrchestratorRespawnCeilingExceeded"
+        | "ReviewRejectionCeilingExceeded"
         // `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
         // (iter65-review) — generalised permanent-failure anchor.
         // Mirror of the typed `K::InitiativePermanentFailureEscalated`
@@ -460,6 +461,7 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // kernel will refuse all subsequent orchestrator respawns
         // for the offending initiative.
         K::OrchestratorRespawnCeilingExceeded { .. } => Some(Critical),
+        K::ReviewRejectionCeilingExceeded { .. } => Some(Critical),
         // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — operator
         // resolution surface for a kernel-initiated logical-deadlock
         // escalation. Routed at `Medium` priority: the operator has
@@ -1375,6 +1377,7 @@ mod tests {
             ("KernelDeadlockDetected", Critical),
             ("KernelRestartHaltedCircuitOpen", Critical),
             ("OrchestratorRespawnCeilingExceeded", Critical),
+            ("ReviewRejectionCeilingExceeded", Critical),
             ("InitiativePermanentFailureEscalated", Critical),
             ("KernelPanicCaught", Critical),
             ("KernelSafetyInvariantViolated", Critical),

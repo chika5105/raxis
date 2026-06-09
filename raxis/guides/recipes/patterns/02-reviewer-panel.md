@@ -62,7 +62,7 @@ target_ref  = "refs/heads/main"
 # SingleCommit; closes with CompleteTask.
 
 [[tasks]]
-task_id            = "implementer"
+task_name            = "implementer"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/auth/saml/", "tests/auth/saml/"]
@@ -76,7 +76,7 @@ prompt             = """Implement SAML SSO per spec/saml.md."""
 # SubmitReview verdict; the kernel aggregates them.
 
 [[tasks]]
-task_id            = "review-security"
+task_name            = "review-security"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/saml/", "tests/auth/saml/"]
@@ -85,7 +85,7 @@ description        = "Review Security"
 prompt             = """Security review: confirm the implementation matches the threat model in spec/saml-threat-model.md. Reject on any unmitigated finding."""
 
 [[tasks]]
-task_id            = "review-spec-conformance"
+task_name            = "review-spec-conformance"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/saml/", "tests/auth/saml/"]
@@ -94,7 +94,7 @@ description        = "Review Spec Conformance"
 prompt             = """Confirm conformance with spec/saml.md sections 3-7. Reject on any deviation."""
 
 [[tasks]]
-task_id            = "review-tests"
+task_name            = "review-tests"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/saml/", "tests/auth/saml/"]

@@ -1651,14 +1651,14 @@ The signed plan artifact includes a task list and a dependency graph. The kernel
 
 ```toml
 [[tasks]]
-task_id       = "task-auth-tests"
+task_name       = "task-auth-tests"
 lane_id       = "default"
 description   = "Fix and verify the auth token reuse regression"
 intent_kinds  = ["SingleCommit", "CompleteTask"]
 depends_on    = []           # no predecessors; eligible immediately
 
 [[tasks]]
-task_id       = "task-integration"
+task_name       = "task-integration"
 lane_id       = "default"
 description   = "Run integration suite after auth fix"
 intent_kinds  = ["CompleteTask"]
@@ -1666,7 +1666,7 @@ depends_on    = ["task-auth-tests"]   # blocked until task-auth-tests is Complet
 ```
 
 **Validation at `ApprovedPlan` time:**
-1. All `depends_on` references must resolve to task IDs within the same initiative.
+1. All `depends_on` references must resolve to task names within the same initiative; the kernel resolves those names to runtime task IDs during admission.
 2. The DAG must be acyclic — the kernel runs a topological sort and rejects the plan if a cycle exists.
 3. All `lane_id` values must be present in the signed policy artifact.
 4. All `intent_kinds` must be valid `IntentKind` variants.
@@ -2159,4 +2159,3 @@ the canonical statement and its justification live here.
 > Gap 4 completes the core kernel FSM specifications (Gaps 1–4). Part 2.5 closes the remaining Part 2 gaps — store DDL, plan artifact signing contract, key inventory, operator authentication protocol, and [[gates]] normative schema — before Part 3 begins.
 
 ---
-

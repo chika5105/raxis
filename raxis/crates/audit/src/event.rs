@@ -1753,6 +1753,29 @@ pub enum AuditEventKind {
         review_reject_count: u32,
     },
 
+    /// The Reviewer aggregate rejected an Executor and the
+    /// Executor's review-retry budget is now exhausted. This is the
+    /// terminal cause for the review loop: the Reviewer task may be
+    /// `Completed` because it submitted a verdict, but the initiative
+    /// must fail closed instead of repeatedly respawning the
+    /// Orchestrator until the generic no-progress ceiling trips.
+    ReviewRejectionCeilingExceeded {
+        /// Initiative that was failed closed.
+        initiative_id: String,
+        /// Executor whose aggregate Reviewer verdict was rejected.
+        executor_task_id: String,
+        /// Reviewer whose `SubmitReview` completed the rejected
+        /// aggregate round.
+        triggered_by_reviewer_task_id: String,
+        /// Current cumulative review rejection count after the bump.
+        review_reject_count: u32,
+        /// Plan-resolved ceiling for this Executor.
+        max_review_rejections: u32,
+        /// Latest Reviewer critique, when present.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        critique: Option<String>,
+    },
+
     /// iter62 — `INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01`.
     ///
     /// Emitted when the kernel rejects a planner's terminal
@@ -4764,6 +4787,7 @@ impl AuditEventKind {
             Self::ReviewAggregationCompleted { .. } => "ReviewAggregationCompleted",
             Self::ReviewerVerdictRecorded { .. } => "ReviewerVerdictRecorded",
             Self::ExecutorRespawnFromReviewRejection { .. } => "ExecutorRespawnFromReviewRejection",
+            Self::ReviewRejectionCeilingExceeded { .. } => "ReviewRejectionCeilingExceeded",
             Self::IntentValidationRejected { .. } => "IntentValidationRejected",
             Self::OrchestratorRespawnCeilingExceeded { .. } => "OrchestratorRespawnCeilingExceeded",
             Self::OperatorApprovedRespawnEscalation { .. } => "OperatorApprovedRespawnEscalation",

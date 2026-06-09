@@ -63,7 +63,7 @@ function renderWithProviders(ui: React.ReactElement) {
   );
 }
 
-const SAMPLE_TOML = `# original\n[plan.initiative]\ntitle = "ship-auth"\n\n[[tasks]]\ntask_id = "t-1"\npath_allowlist = ["src/auth/**"]\n`;
+const SAMPLE_TOML = `# original\n[plan.initiative]\ntitle = "ship-auth"\n\n[[tasks]]\ntask_name = "implement-auth"\npath_allowlist = ["src/auth/**"]\n`;
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });

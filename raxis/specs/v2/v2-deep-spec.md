@@ -203,7 +203,9 @@ appears in the main repo's history. A format-patch pipeline breaks this chain.
 
 #### The Adopted Design: `git bundle` + `git fetch`
 
-**Decision (Step 3 / Step 9):** When an Executor submits `CompleteTask { head_sha }`:
+**Decision (Step 3 / Step 9):** When an Executor finishes, the executor runtime
+derives the committed `head_sha` from the clean Git workspace and submits the
+kernel's internal `CompleteTask` intent with that observed SHA:
 
 1. The Kernel runs (host-side, outside any VM):
    ```bash
@@ -1245,16 +1247,16 @@ error is surfaced, the operator must reconstruct what went wrong from audit even
 
 **Decision (Step 17):** All 7 checks run inside the `approve_plan` handler, before any row
 is written, in the order listed. Failure returns `INVALID_PLAN_SCHEMA` with a structured
-diagnostic: `{ rule: "<name>", offending_task: "<task_id>", suggestion: "<concrete fix>" }`.
+diagnostic: `{ rule: "<name>", offending_task: "<task_name>", suggestion: "<concrete fix>" }`.
 The diagnostic must always include a concrete remediation suggestion, not just the violation.
 
 | # | Rule | What is checked |
 |---|------|-----------------|
-| 1 | Referential integrity | Every `task_id` in `[[subtasks]]` maps to a declared `[[tasks]]` entry. Prevents FK violations at `admit_in_tx`. |
+| 1 | Referential integrity | Every task reference in `[[subtasks]]` maps to a declared `[[tasks]].task_name` entry. Prevents FK violations at `admit_in_tx`. |
 | 2 | Meta-authority | Exactly one task has `session_agent_type = Orchestrator` and `can_delegate = true`. Zero or multiple Orchestrators are rejected. |
 | 3 | Path subset | `UNION(subtask.path_allowlists) ⊆ orchestrator.path_allowlist`. No sub-task touches paths the Orchestrator cannot integrate. |
 | 4 | Path format | Every `path_allowlist` entry is either an exact filename (no `/` suffix) or a directory prefix with a trailing `/`. No arbitrary globs. |
-| 5 | DAG acyclicity | Topological sort on `depends_on` arrays. Reject on: cycle, dangling reference (task_id in `depends_on` not in plan), Orchestrator listed as a dependency of any sub-task, duplicate `task_id`, or a task listing itself as a dependency. |
+| 5 | DAG acyclicity | Topological sort on dependency arrays. Reject on: cycle, dangling reference (task name in `predecessors` not in plan), Orchestrator listed as a dependency of any sub-task, duplicate `task_name`, or a task listing itself as a dependency. |
 | 6 | Sparse-Orchestrator exclusion | `clone_strategy = sparse` is rejected if `session_agent_type = Orchestrator`. |
 | 7 | Single lane propagation | No `[[subtasks]]` block declares its own `lane_id`. Only the plan root declares `lane_id`. |
 
@@ -2215,7 +2217,7 @@ conflicts safely. All of this must be in its non-negotiable system prompt.
 **Alternative A — Include all sub-tasks in the initial prompt; let the Orchestrator track
 dependency state itself.**
 Rejected. An LLM cannot reliably maintain a dependency graph across many turns. It will
-confuse task IDs, forget to update internal state, or incorrectly reason about which tasks are
+confuse plan task names and runtime task UUIDs, forget to update internal state, or incorrectly reason about which tasks are
 ready. Premature `ActivateSubTask` calls (caught by `DEPENDENCY_NOT_MET`) are wasteful
 round-trips. More critically, if the Orchestrator incorrectly concludes a task is never
 activatable (and abandons it), the initiative silently stalls with no Kernel-level detection.
@@ -2240,8 +2242,8 @@ required. The Kernel's Rust DAG code is the sole authority.
 **Layer 2 prompt hiding (defense in depth):** The Orchestrator's initial system prompt only
 lists sub-tasks with `predecessor_satisfied = 1` at session creation time. Tasks behind
 unsatisfied dependencies are invisible in the initial prompt — the Orchestrator cannot even
-hallucinate their task IDs to call `ActivateSubTask` for them. `DEPENDENCY_NOT_MET` is the
-backstop for the Orchestrator hallucinating a task ID it learned about from `newly_activatable`
+hallucinate runtime task UUIDs to call `ActivateSubTask` for them. `DEPENDENCY_NOT_MET` is the
+backstop for the Orchestrator hallucinating a task UUID it learned about from `newly_activatable`
 before that batch was fully ready.
 
 #### 29.2 The 4-Step Merge Duty Prompt
@@ -2250,18 +2252,24 @@ The Orchestrator's non-negotiable system prompt includes the merge duty verbatim
 
 ```text
 MERGE DUTY
-Upon receiving KernelPush::SubTaskCompleted { task_id, newly_activatable }:
+When the KSB marks capabilities.integration_merge.ready=true:
 
-Step 1 — FETCH
-  git fetch /workspace/.raxis/bundles/<task_id>.bundle \
-      refs/raxis/subtasks/<task_id>:refs/raxis/subtasks/<task_id>
+Step 1 — COLLECT CURRENT APPROVED SHAS
+  Read capabilities.integration_merge.base_sha and every
+  capabilities.integration_merge.required_executor_shas[*].sha.
+  These are the only executor outputs eligible for final integration.
+  Do not merge historical retry attempts or stale transfer refs.
 
-Step 2 — MERGE
-  git merge refs/raxis/subtasks/<task_id>
-  Resolve conflicts inline if present.
+Step 2 — PREPARE
+  Call prepare_integration_merge { base_sha, executor_shas }.
+  The tool resets the integration workspace to base_sha and merges
+  exactly the current approved executor heads.
 
-Step 3 — ATTEST
-  Submit IntentKind::IntegrationMerge { commit_sha: <HEAD after merge> }
+Step 3 — RESOLVE OR ATTEST
+  If prepare_integration_merge reports conflicts, resolve only eligible
+  trivial conflicts inline. Otherwise submit
+  IntentKind::IntegrationMerge { base_sha, head_sha } using the returned
+  head_sha.
 
 Step 4 — ACTIVATE NEWLY READY TASKS
   For each task_id in newly_activatable:
@@ -3142,7 +3150,7 @@ Backwards-compatible with existing JWT cookie sessions.
 # kernel-mechanics-prompt.md §3.2 [KERNEL: INITIATIVE GUIDANCE].
 
 [[tasks]]
-task_id            = "auth_implementer"
+task_name            = "auth_implementer"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]
@@ -3154,7 +3162,7 @@ existing JWT cookie sessions.
 # inherits plan.vm_image
 
 [[tasks]]
-task_id            = "frontend_implementer"
+task_name            = "frontend_implementer"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["web/"]
@@ -3165,7 +3173,7 @@ Add the frontend screens and API calls needed for the OAuth2 device-code flow.
 """
 
 [[tasks]]
-task_id            = "auth_reviewer"
+task_name            = "auth_reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/", "web/"]
@@ -3299,7 +3307,7 @@ RUST_LOG   = "info"
 NODE_ENV   = "production"
 
 [[tasks]]
-task_id            = "auth_implementer"
+task_name            = "auth_implementer"
 session_agent_type = "Executor"
 
 [tasks.env]                         # per-task override — merged with plan.env
@@ -3508,7 +3516,7 @@ rules — it doesn't enforce those rules against itself. Three specific reasons:
 **How the agent gets what it actually needs from the plan:**
 The Kernel Prompt Assembler reads the full plan internally and writes only the relevant
 portion into `/raxis/system_prompt.txt` before VM boot. The Orchestrator's prompt
-includes its sub-task IDs and descriptions. An Executor's prompt includes only its own
+includes sub-task names, runtime UUIDs, and descriptions. An Executor's prompt includes only its own
 task description and allowlist context. The raw plan never crosses the host→VM boundary.
 
 ---

@@ -51,4 +51,34 @@ describe("<DiffView>", () => {
       screen.getByText((_, node) => node?.textContent === "+    new();"),
     ).toBeInTheDocument();
   });
+
+  it("keeps long hunks inside their own horizontal scroller", () => {
+    render(<DiffView diff={diff} />);
+
+    const hunkScroller = screen.getByTestId("diff-hunk-scroll");
+    expect(hunkScroller).toHaveClass("max-w-full");
+    expect(hunkScroller).toHaveClass("overflow-x-auto");
+    expect(hunkScroller).toHaveClass("overflow-y-hidden");
+  });
+
+  it("extends diff row tone backgrounds across the horizontal scroll range", () => {
+    render(<DiffView diff={diff} />);
+
+    const inlineAddedRow = screen
+      .getByText((_, node) => node?.textContent === "+    new();")
+      .closest("div");
+    expect(inlineAddedRow).toHaveClass("inline-grid");
+    expect(inlineAddedRow).toHaveClass("min-w-full");
+    expect(inlineAddedRow).toHaveClass("w-max");
+    expect(inlineAddedRow).toHaveClass("bg-ok-muted/20");
+
+    fireEvent.click(screen.getByText("Raw"));
+    const rawAddedRow = screen.getByText(
+      (_, node) => node?.textContent === "+    new();",
+    );
+    expect(rawAddedRow).toHaveClass("inline-grid");
+    expect(rawAddedRow).toHaveClass("min-w-full");
+    expect(rawAddedRow).toHaveClass("w-max");
+    expect(rawAddedRow).toHaveClass("bg-ok-muted/20");
+  });
 });

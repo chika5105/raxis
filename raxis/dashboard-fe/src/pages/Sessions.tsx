@@ -99,6 +99,7 @@ export function SessionsPage() {
           s.session_id,
           s.role,
           s.task_id ?? "",
+          s.task_name ?? "",
           s.initiative_id ?? "",
           s.initiative_display_name ?? "",
           s.provider ?? "",
@@ -189,7 +190,7 @@ export function SessionsPage() {
           </div>
           <input
             className="input w-56"
-            placeholder="Search workspace / session / initiative / provider..."
+            placeholder="Search workspace / task / session / provider..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -369,14 +370,18 @@ export function SessionsPage() {
                         </div>
                       )}
                       {s.task_id && (
-                        <div>
+                        <div className="mt-1">
                           <Link
                             to={`/tasks/${s.task_id}`}
                             onClick={(e) => e.stopPropagation()}
-                            className="text-ink-muted hover:text-accent font-mono text-[11px]"
+                            className="text-ink-muted hover:text-accent text-[11px]"
+                            title={s.task_id}
                           >
-                            {s.task_id}
+                            {s.task_name ?? "Task"}
                           </Link>
+                          <div className="font-mono text-[10px] text-ink-subtle break-all">
+                            {s.task_id}
+                          </div>
                         </div>
                       )}
                     </td>

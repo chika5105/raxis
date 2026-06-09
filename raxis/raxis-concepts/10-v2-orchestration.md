@@ -44,13 +44,13 @@ The kernel enforces the DAG ordering, the role boundaries, and the retry limits.
 # rule = "unknown_agent_type" rejects "Orchestrator" in [[tasks]]).
 
 [[tasks]]
-task_id            = "implement"
+task_name            = "implement"
 session_agent_type = "Executor"
 lane_id            = "feature-work"
 predecessors       = []
 
 [[tasks]]
-task_id            = "review"
+task_name            = "review"
 session_agent_type = "Reviewer"
 lane_id            = "feature-work"
 predecessors       = ["implement"]
@@ -62,21 +62,32 @@ predecessors       = ["implement"]
 
 ## Step 2: Kernel Enforces DAG Dependencies
 
-When the Orchestrator submits `ActivateSubTask { task_id: "review" }`:
+When the Orchestrator activates the reviewer, it references the
+kernel-owned runtime task UUID that RAXIS resolved from
+`task_name = "review"`:
 
 1. The kernel checks: are all declared `predecessors` (here, `"implement"`) in the `Completed` state?
-2. If not → `DEPENDENCY_NOT_MET` → the Orchestrator must wait
-3. If yes → the kernel spawns a session for the Reviewer
+2. If the target is a Reviewer, that is enough: the Reviewer is the gate-closing task, so the kernel spawns it.
+3. If the target is any non-Reviewer task, the kernel also checks whether any completed Executor predecessor has Reviewer successors still awaiting verdicts.
+4. If reviewer gates are still open → `DEPENDENCY_NOT_MET` → the Orchestrator must wait.
+5. If predecessor work is complete and all reviewer gates have passed → the kernel spawns the downstream session.
 
 ```mermaid
 flowchart LR
     Orchestrate["orchestrator<br/>(auto-spawned)"]
     Implement["implement<br/>(executor)"]
     Review["review<br/>(reviewer)"]
+    Publish["publish<br/>(executor)"]
 
     Orchestrate --> Implement
     Implement --> Review
+    Implement -. "review gate blocks until passed" .-> Publish
 ```
+
+Reviewer gates are blocking authority, not cleanup hints. A downstream
+Executor must not start merely because its predecessor Executor completed
+mechanically; if that predecessor has Reviewer successors, the downstream
+Executor waits until reviewer aggregation passes.
 
 ---
 
@@ -103,7 +114,7 @@ Adding a new `IntentKind` variant **breaks compilation** until a row is added to
 
 After the Executor completes its code:
 
-1. Orchestrator submits `ActivateSubTask { task_id: "review" }`
+1. Orchestrator submits `ActivateSubTask` for the runtime UUID bound to `task_name = "review"`
 2. Kernel spawns a Reviewer session with the Executor's `evaluation_sha`
 3. Reviewer inspects the code diff
 4. Reviewer submits `SubmitReview { approved: true/false, critique: "..." }`
@@ -113,9 +124,11 @@ After the Executor completes its code:
 - Orchestrator is notified via `KernelPush::SubTaskCompleted`
 
 ### On rejection:
-- Executor's task transitions to `Failed`
-- Orchestrator receives `KernelPush::SubTaskFailed`
-- Orchestrator can issue `RetrySubTask` (subject to retry counters)
+- Executor's completed attempt is marked review-rejected by the review aggregate.
+- Orchestrator receives the rejection with the reviewer critique.
+- Orchestrator can issue `RetrySubTask` (subject to retry counters).
+- The retry creates a fresh activation. The previously rejected `evaluation_sha`
+  is superseded and is not eligible for final integration.
 
 ---
 
@@ -178,7 +191,7 @@ The plan validator detects cycles at load time → `PlanError::CyclicDependency`
 
 ### 4. Orchestrator tries to spawn a task that doesn't exist in the plan
 
-`ActivateSubTask { task_id: "nonexistent" }` → `FAIL_INVALID_REQUEST`. Task IDs are validated against the plan at admission time.
+`ActivateSubTask` for an unknown runtime task UUID → `FAIL_INVALID_REQUEST`. Task names are validated against the plan at admission time and resolved to kernel-owned UUIDs before runtime scheduling.
 
 ### 5. All retry counters exhausted
 

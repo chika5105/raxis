@@ -86,6 +86,23 @@ pub struct SupervisorConfig {
     /// supervisor waits for the genesis artifacts instead of spawning
     /// the kernel into a guaranteed policy/db boot failure.
     pub require_initialized_data_dir: bool,
+    /// Optional readiness probe URL. When set, the supervisor
+    /// periodically performs a cheap HTTP GET and restarts the
+    /// kernel as `DeadlockDetected` after consecutive failures.
+    /// Any timely HTTP response counts as healthy; auth failures
+    /// still prove the dashboard runtime is making progress.
+    pub readiness_url: Option<String>,
+    /// Initial grace before the first readiness probe. Lets a fresh
+    /// kernel bind the dashboard and finish boot-time recovery.
+    pub readiness_initial_grace_secs: u64,
+    /// Interval between readiness probes after the initial grace.
+    pub readiness_interval_secs: u64,
+    /// Per-probe timeout. A TCP accept with no HTTP response within
+    /// this window is the stale-dashboard symptom this watchdog is
+    /// meant to catch.
+    pub readiness_timeout_ms: u64,
+    /// Number of consecutive failed probes required before restart.
+    pub readiness_failures_before_restart: u32,
 }
 
 impl SupervisorConfig {
@@ -101,6 +118,11 @@ impl SupervisorConfig {
             restart_backoff_ms: 250,
             max_child_runs: None,
             require_initialized_data_dir: false,
+            readiness_url: None,
+            readiness_initial_grace_secs: 20,
+            readiness_interval_secs: 5,
+            readiness_timeout_ms: 1_500,
+            readiness_failures_before_restart: 3,
         }
     }
 }
@@ -496,6 +518,14 @@ pub async fn run_supervisor_loop(
         for (k, v) in &cfg.kernel_env {
             command.env(k, v);
         }
+        // Own the entire supervised process group. If the kernel
+        // wedges while helper children / substrate subprocesses are
+        // still alive, restart/stop must signal the whole group
+        // before a replacement kernel is spawned.
+        #[cfg(unix)]
+        {
+            command.process_group(0);
+        }
         let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -535,6 +565,13 @@ pub async fn run_supervisor_loop(
             Duration::from_secs(5),
         );
         sentinel_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut readiness_heartbeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(cfg.readiness_initial_grace_secs),
+            Duration::from_secs(cfg.readiness_interval_secs),
+        );
+        readiness_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut readiness_failures = 0u32;
+        let readiness_url = cfg.readiness_url.clone();
         let waited_outcome: WaitedOutcome = loop {
             let outcome = tokio::select! {
                 biased;
@@ -567,16 +604,67 @@ pub async fn run_supervisor_loop(
                     );
                     None
                 }
+                _ = readiness_heartbeat.tick(), if readiness_url.is_some() => {
+                    let url = readiness_url.as_deref().unwrap_or("");
+                    match probe_readiness_url(
+                        url,
+                        Duration::from_millis(cfg.readiness_timeout_ms),
+                    ).await {
+                        Ok(()) => {
+                            if readiness_failures > 0 {
+                                log.emit(
+                                    "info",
+                                    "kernel_readiness_recovered",
+                                    &json!({
+                                        "kernel_pid": kernel_pid,
+                                        "url": url,
+                                        "prior_failures": readiness_failures,
+                                    }),
+                                );
+                            }
+                            readiness_failures = 0;
+                            None
+                        }
+                        Err(reason) => {
+                            readiness_failures = readiness_failures.saturating_add(1);
+                            log.emit(
+                                "warn",
+                                "kernel_readiness_probe_failed",
+                                &json!({
+                                    "kernel_pid": kernel_pid,
+                                    "url": url,
+                                    "failure_count": readiness_failures,
+                                    "failure_threshold": cfg.readiness_failures_before_restart,
+                                    "reason": reason.as_str(),
+                                }),
+                            );
+                            if readiness_failures >= cfg.readiness_failures_before_restart {
+                                Some(terminate_unresponsive_child_for_restart(
+                                    &mut child,
+                                    cfg.shutdown_grace_secs,
+                                    log.as_ref(),
+                                    url,
+                                    &reason,
+                                ).await)
+                            } else {
+                                None
+                            }
+                        }
+                    }
+                }
             };
             if let Some(outcome) = outcome {
                 break outcome;
             }
         };
 
-        let (status_for_classify, force_used) = match waited_outcome {
-            WaitedOutcome::Exited(s) => (Some(s), false),
+        let (status_for_classify, force_used, synthetic_outcome) = match waited_outcome {
+            WaitedOutcome::Exited(s) => (Some(s), false, None),
             WaitedOutcome::ForwardedSignalThenExited { status, force_used } => {
-                (Some(status), force_used)
+                (Some(status), force_used, None)
+            }
+            WaitedOutcome::ReadinessFailedThenExited { status, force_used } => {
+                (Some(status), force_used, Some(Outcome::DeadlockDetected))
             }
             WaitedOutcome::WaitErr(e) => {
                 log.emit(
@@ -588,12 +676,12 @@ pub async fn run_supervisor_loop(
             }
         };
         let supervisor_sent = intent_flag.take();
-        let outcome = match status_for_classify {
+        let outcome = synthetic_outcome.unwrap_or_else(|| match status_for_classify {
             Some(s) => classify_exit_status(s, supervisor_sent),
             None => Outcome::CleanExit {
                 prev_run_exit_code: 0,
             },
-        };
+        });
         last_exit_code = outcome.prev_run_exit_code();
         log.emit(
             "info",
@@ -731,7 +819,181 @@ enum WaitedOutcome {
         status: std::process::ExitStatus,
         force_used: bool,
     },
+    ReadinessFailedThenExited {
+        status: std::process::ExitStatus,
+        force_used: bool,
+    },
     WaitErr(std::io::Error),
+}
+
+#[derive(Debug, Clone)]
+struct ReadinessTarget {
+    host: String,
+    port: u16,
+    path: String,
+}
+
+fn parse_http_readiness_url(url: &str) -> Result<ReadinessTarget, String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| "only http:// readiness URLs are supported".to_owned())?;
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, format!("/{path}")),
+        None => (rest, "/".to_owned()),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port_s)) => {
+            let port = port_s
+                .parse::<u16>()
+                .map_err(|_| format!("invalid readiness port: {port_s}"))?;
+            (host.to_owned(), port)
+        }
+        None => (authority.to_owned(), 80),
+    };
+    if host.is_empty() {
+        return Err("readiness URL host is empty".to_owned());
+    }
+    Ok(ReadinessTarget { host, port, path })
+}
+
+async fn probe_readiness_url(url: &str, timeout: Duration) -> Result<(), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let target = parse_http_readiness_url(url)?;
+    let addr = format!("{}:{}", target.host, target.port);
+    let mut stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr))
+        .await
+        .map_err(|_| format!("connect timed out after {timeout:?}"))?
+        .map_err(|e| format!("connect {addr}: {e}"))?;
+    let req = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        target.path, target.host,
+    );
+    tokio::time::timeout(timeout, stream.write_all(req.as_bytes()))
+        .await
+        .map_err(|_| format!("write timed out after {timeout:?}"))?
+        .map_err(|e| format!("write readiness request: {e}"))?;
+    let mut one = [0u8; 1];
+    let n = tokio::time::timeout(timeout, stream.read(&mut one))
+        .await
+        .map_err(|_| format!("read timed out after {timeout:?}"))?
+        .map_err(|e| format!("read readiness response: {e}"))?;
+    if n == 0 {
+        return Err("readiness endpoint closed without a response byte".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn send_signal_to_kernel_process_group(
+    pid: u32,
+    signal: nix::sys::signal::Signal,
+    log: &SupervisorLog,
+    event: &str,
+) {
+    match crate::signal::send_signal_to_process_group(pid, signal) {
+        Ok(()) => {
+            log.emit(
+                "info",
+                event,
+                &serde_json::json!({ "kernel_pid": pid, "process_group": pid }),
+            );
+        }
+        Err(group_err) => {
+            log.emit(
+                "warn",
+                "kernel_process_group_signal_failed_falling_back_to_pid",
+                &serde_json::json!({
+                    "kernel_pid": pid,
+                    "process_group": pid,
+                    "signal": format!("{signal:?}"),
+                    "reason": group_err.to_string(),
+                }),
+            );
+            if let Err(pid_err) = crate::signal::send_signal(pid, signal) {
+                log.emit(
+                    "error",
+                    "kernel_pid_signal_failed",
+                    &serde_json::json!({
+                        "kernel_pid": pid,
+                        "signal": format!("{signal:?}"),
+                        "reason": pid_err.to_string(),
+                    }),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn terminate_unresponsive_child_for_restart(
+    child: &mut tokio::process::Child,
+    shutdown_grace_secs: u64,
+    log: &SupervisorLog,
+    readiness_url: &str,
+    readiness_error: &str,
+) -> WaitedOutcome {
+    use nix::sys::signal::Signal;
+
+    let pid = match child.id() {
+        Some(p) => p,
+        None => {
+            return match child.wait().await {
+                Ok(s) => WaitedOutcome::ReadinessFailedThenExited {
+                    status: s,
+                    force_used: false,
+                },
+                Err(e) => WaitedOutcome::WaitErr(e),
+            }
+        }
+    };
+    log.emit(
+        "error",
+        "kernel_readiness_failed_restarting",
+        &serde_json::json!({
+            "kernel_pid": pid,
+            "url": readiness_url,
+            "reason": readiness_error,
+            "restart_reason": "DeadlockDetected",
+        }),
+    );
+    send_signal_to_kernel_process_group(
+        pid,
+        Signal::SIGTERM,
+        log,
+        "kernel_readiness_restart_sigterm_sent",
+    );
+    let grace = Duration::from_secs(shutdown_grace_secs);
+    match tokio::time::timeout(grace, child.wait()).await {
+        Ok(Ok(status)) => WaitedOutcome::ReadinessFailedThenExited {
+            status,
+            force_used: false,
+        },
+        Ok(Err(e)) => WaitedOutcome::WaitErr(e),
+        Err(_) => {
+            log.emit(
+                "warn",
+                "kernel_readiness_restart_grace_exceeded_escalating_sigkill",
+                &serde_json::json!({
+                    "kernel_pid": pid,
+                    "shutdown_grace_secs": shutdown_grace_secs,
+                }),
+            );
+            send_signal_to_kernel_process_group(
+                pid,
+                Signal::SIGKILL,
+                log,
+                "kernel_readiness_restart_sigkill_sent",
+            );
+            match child.wait().await {
+                Ok(status) => WaitedOutcome::ReadinessFailedThenExited {
+                    status,
+                    force_used: true,
+                },
+                Err(e) => WaitedOutcome::WaitErr(e),
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -760,13 +1022,7 @@ async fn forward_signal_and_wait(
             "force_stop_request_observed",
             &serde_json::json!({ "kernel_pid": pid, "action": "send_sigkill" }),
         );
-        if let Err(e) = crate::signal::send_signal(pid, Signal::SIGKILL) {
-            log.emit(
-                "error",
-                "kernel_sigkill_failed",
-                &serde_json::json!({ "kernel_pid": pid, "reason": e.to_string() }),
-            );
-        }
+        send_signal_to_kernel_process_group(pid, Signal::SIGKILL, log, "kernel_sigkill_sent");
         return match child.wait().await {
             Ok(status) => WaitedOutcome::ForwardedSignalThenExited {
                 status,
@@ -775,19 +1031,7 @@ async fn forward_signal_and_wait(
             Err(e) => WaitedOutcome::WaitErr(e),
         };
     }
-    if let Err(e) = crate::signal::send_signal(pid, Signal::SIGTERM) {
-        log.emit(
-            "warn",
-            "kernel_sigterm_failed",
-            &serde_json::json!({ "kernel_pid": pid, "reason": e.to_string() }),
-        );
-    } else {
-        log.emit(
-            "info",
-            "kernel_sigterm_sent",
-            &serde_json::json!({ "kernel_pid": pid }),
-        );
-    }
+    send_signal_to_kernel_process_group(pid, Signal::SIGTERM, log, "kernel_sigterm_sent");
     let grace = Duration::from_secs(shutdown_grace_secs);
     match tokio::time::timeout(grace, child.wait()).await {
         Ok(Ok(status)) => WaitedOutcome::ForwardedSignalThenExited {
@@ -806,13 +1050,7 @@ async fn forward_signal_and_wait(
                     "shutdown_grace_secs": shutdown_grace_secs,
                 }),
             );
-            if let Err(e) = crate::signal::send_signal(pid, Signal::SIGKILL) {
-                log.emit(
-                    "error",
-                    "kernel_sigkill_failed",
-                    &serde_json::json!({ "kernel_pid": pid, "reason": e.to_string() }),
-                );
-            }
+            send_signal_to_kernel_process_group(pid, Signal::SIGKILL, log, "kernel_sigkill_sent");
             match child.wait().await {
                 Ok(status) => WaitedOutcome::ForwardedSignalThenExited {
                     status,
@@ -821,5 +1059,32 @@ async fn forward_signal_and_wait(
                 Err(e) => WaitedOutcome::WaitErr(e),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readiness_url_parser_defaults_path_and_port() {
+        let target = parse_http_readiness_url("http://127.0.0.1").unwrap();
+        assert_eq!(target.host, "127.0.0.1");
+        assert_eq!(target.port, 80);
+        assert_eq!(target.path, "/");
+    }
+
+    #[test]
+    fn readiness_url_parser_accepts_dashboard_health_url() {
+        let target = parse_http_readiness_url("http://127.0.0.1:9820/api/health").unwrap();
+        assert_eq!(target.host, "127.0.0.1");
+        assert_eq!(target.port, 9820);
+        assert_eq!(target.path, "/api/health");
+    }
+
+    #[test]
+    fn readiness_url_parser_rejects_https_for_now() {
+        let err = parse_http_readiness_url("https://127.0.0.1:9820/api/health").unwrap_err();
+        assert!(err.contains("only http://"));
     }
 }

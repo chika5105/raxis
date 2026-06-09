@@ -5,8 +5,10 @@ import {
   KERNEL_INITIATIVE_STATES,
   KERNEL_SESSION_STATES,
   KERNEL_TASK_STATES,
+  effectiveTaskState,
   hasExplicitStateEntry,
   isIntegrationMergeTask,
+  orderedTaskStatusCounts,
   shortStateLabel,
   stateDescription,
   stateGlyph,
@@ -68,6 +70,27 @@ describe("stateTone", () => {
     const badClasses = toneClasses("bad");
     expect(badClasses).toContain("text-rose-800");
     expect(badClasses).toContain("dark:text-rose-200");
+  });
+});
+
+describe("task status projection", () => {
+  it("lifts active Admitted tasks to Running for filters and counters", () => {
+    expect(effectiveTaskState("Admitted", true)).toBe("Running");
+    expect(effectiveTaskState("Admitted", false)).toBe("Admitted");
+    expect(effectiveTaskState("Running", true)).toBe("Running");
+  });
+
+  it("orders Running before queued and terminal task states", () => {
+    expect(
+      Object.keys(
+        orderedTaskStatusCounts({
+          Completed: 5,
+          Admitted: 1,
+          Running: 1,
+          Failed: 1,
+        }),
+      ),
+    ).toEqual(["Running", "Admitted", "Completed", "Failed"]);
   });
 });
 

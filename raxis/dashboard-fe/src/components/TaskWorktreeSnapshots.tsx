@@ -301,13 +301,13 @@ function BlobViewer({
   }
   if (kind === "diff") {
     return (
-      <div className="text-[11px] font-mono overflow-x-auto overscroll-x-auto scroll-thin max-h-96 bg-panel border border-edge rounded">
+      <div className="min-w-0 max-w-full text-[11px] font-mono overflow-auto overscroll-auto scroll-thin max-h-96 bg-panel border border-edge rounded">
         <TerminalDiffBlock diffText={q.data} />
       </div>
     );
   }
   return (
-    <pre className="text-[11px] font-mono text-ink-muted overflow-x-auto overscroll-x-auto scroll-thin max-h-96 bg-panel border border-edge rounded p-2">
+    <pre className="min-w-0 max-w-full text-[11px] font-mono text-ink-muted overflow-auto overscroll-auto scroll-thin max-h-96 bg-panel border border-edge rounded p-2">
       {q.data}
     </pre>
   );

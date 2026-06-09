@@ -199,6 +199,10 @@ pub struct ToolContext {
     /// and, when conflict-free, auto-prepare the exact integrated
     /// head the kernel requires.
     pub integration_merge: Option<IntegrationMergeToolContext>,
+    /// Executor-only base SHA copied from the KSB. Terminal
+    /// `task_complete` uses this to reject no-op completion before
+    /// the kernel sees an unchanged `(base, head)` pair.
+    pub task_complete_base_sha: Option<String>,
 }
 
 /// Orchestrator-visible final merge context for local tool validation.
@@ -227,6 +231,7 @@ impl ToolContext {
             workspace_root: workspace_root.into(),
             deadline: None,
             integration_merge: None,
+            task_complete_base_sha: None,
         }
     }
 
@@ -236,6 +241,12 @@ impl ToolContext {
         integration_merge: Option<IntegrationMergeToolContext>,
     ) -> Self {
         self.integration_merge = integration_merge;
+        self
+    }
+
+    /// Attach executor completion state from the KSB.
+    pub fn with_task_complete_base_sha(mut self, base_sha: Option<String>) -> Self {
+        self.task_complete_base_sha = base_sha;
         self
     }
 }
@@ -829,10 +840,9 @@ impl Tool for GitCommitTool {
             )));
         }
         // Return the FULL HEAD SHA (40 hex chars) so the model can
-        // pass it verbatim to `task_complete.head_sha`. The kernel's
-        // `CommitSha::new` validator rejects short SHAs as
-        // `INVALID_REQUEST` — `--short` here would silently
-        // burn the activation on the first tool round-trip.
+        // inspect what was committed. `task_complete` derives the
+        // authoritative HEAD itself, so the model never has to copy
+        // this value into the completion tool.
         let sha = match tokio::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&ctx.workspace_root)
@@ -1284,9 +1294,10 @@ fn parse_structured_output_input(
 // `DispatchOutcome::Idle` (no terminal tool fired). That was the
 // observed orchestrator failure mode pre-V2 §3.2 fix.
 
-/// Declaration-only `task_complete` — fires the executor's
-/// terminal "I am done" signal. Argument: `head_sha` (the executor's
-/// commit). The dispatch loop intercepts before `execute` is called.
+/// Executor `task_complete` — fires the executor's terminal "I am
+/// done" signal after mechanically deriving the committed Git HEAD.
+/// The model does not supply authority-bearing SHAs; this tool
+/// overwrites terminal input with the observed `head_sha`.
 struct TaskCompleteTool;
 
 #[async_trait::async_trait]
@@ -1295,20 +1306,26 @@ impl Tool for TaskCompleteTool {
         "task_complete"
     }
     fn description(&self) -> &'static str {
-        "TERMINAL — finish after committing the task. `head_sha` is the \
-         full 40-char SHA, usually from `git_commit`."
+        "TERMINAL — finish after committing the task. No SHA input is \
+         required; RAXIS verifies the workspace is clean and derives the \
+         committed HEAD."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
-            "type":     "object",
-            "required": ["head_sha"],
+            "type": "object",
+            "additionalProperties": false,
             "properties": {
+                "summary": {
+                    "type": "string",
+                    "maxLength": 500,
+                    "description": "Optional human summary. Not used as authority."
+                },
                 "head_sha": {
                     "type":        "string",
                     "minLength":   40,
                     "maxLength":   40,
                     "pattern":     "^[0-9a-f]{40}$",
-                    "description": "40-char lowercase-hex SHA of the executor's commit."
+                    "description": "Deprecated; ignored. RAXIS derives the actual HEAD."
                 }
             }
         })
@@ -1316,9 +1333,68 @@ impl Tool for TaskCompleteTool {
     async fn execute(
         &self,
         _input: &serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        Ok(ToolOutput::ok("task_complete"))
+        if let Err(e) = run_git_for_workspace(ctx, &["rev-parse", "--is-inside-work-tree"]).await {
+            return Ok(ToolOutput::err(format!(
+                "task_complete: workspace is not a git repo: {e}"
+            )));
+        }
+        let status = match run_git_for_workspace(ctx, &["status", "--porcelain"]).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "task_complete: could not inspect workspace cleanliness: {e}"
+                )))
+            }
+        };
+        if !status.trim().is_empty() {
+            return Ok(ToolOutput::err(format!(
+                "task_complete: workspace has uncommitted changes. Commit the \
+                 completed work with git_commit before finishing, or use \
+                 report_failure if the task cannot be completed.\n{}",
+                status.trim()
+            )));
+        }
+        let head = match run_git_for_workspace(ctx, &["rev-parse", "HEAD"]).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "task_complete: could not resolve committed HEAD: {e}"
+                )))
+            }
+        };
+        let head_sha = head.trim();
+        if !is_lower_hex_40(head_sha) {
+            return Ok(ToolOutput::err(format!(
+                "task_complete: git returned malformed HEAD {head_sha:?}"
+            )));
+        }
+        if let Some(base_sha) = ctx
+            .task_complete_base_sha
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
+            if !is_lower_hex_40(base_sha) {
+                return Ok(ToolOutput::err(format!(
+                    "task_complete: KSB base SHA is malformed ({base_sha:?}); \
+                     report_failure so the operator can inspect the spawn state"
+                )));
+            }
+            if base_sha == head_sha {
+                return Ok(ToolOutput::err(
+                    "task_complete: HEAD still equals the session base. Commit \
+                     completed changes before finishing, or use report_failure \
+                     if no valid change can be produced."
+                        .to_owned(),
+                ));
+            }
+        }
+
+        Ok(ToolOutput::ok_with_input(
+            format!("task_complete verified committed HEAD {head_sha}"),
+            serde_json::json!({ "head_sha": head_sha }),
+        ))
     }
 }
 
@@ -1690,7 +1766,12 @@ impl Tool for PrepareIntegrationMergeTool {
 
         match prepare_integration_merge(ctx, base_sha, &executor_shas).await {
             Ok(prepared) => Ok(ToolOutput::ok(format!(
-                "prepared integration merge\nbase_sha: {base_sha}\nhead_sha: {}\nexecutor_shas:\n- {}",
+                "prepared integration merge\n\
+                 Next required terminal call: integration_merge with exactly this base_sha and head_sha.\n\
+                 Do not reuse base_sha as head_sha.\n\
+                 base_sha: {base_sha}\n\
+                 head_sha: {}\n\
+                 executor_shas:\n- {}",
                 prepared.head_sha,
                 prepared.merged.join("\n- ")
             ))),
@@ -1775,7 +1856,7 @@ fn is_lower_hex_40(s: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
-async fn run_git_for_merge(ctx: &ToolContext, args: &[&str]) -> Result<String, String> {
+async fn run_git_for_workspace(ctx: &ToolContext, args: &[&str]) -> Result<String, String> {
     let child = tokio::process::Command::new("git")
         .args(args)
         .current_dir(&ctx.workspace_root)
@@ -1809,6 +1890,10 @@ async fn run_git_for_merge(ctx: &ToolContext, args: &[&str]) -> Result<String, S
             stderr
         ))
     }
+}
+
+async fn run_git_for_merge(ctx: &ToolContext, args: &[&str]) -> Result<String, String> {
+    run_git_for_workspace(ctx, args).await
 }
 
 /// Declaration-only `integration_merge` — orchestrator's terminal
@@ -1873,6 +1958,14 @@ impl Tool for IntegrationMergeTool {
                     "integration_merge: `head_sha` must be 40 lowercase hex chars",
                 ));
             };
+            if base_sha == head_sha {
+                return Ok(ToolOutput::err(
+                    "integration_merge: base_sha and head_sha are identical. A no-op merge is \
+                     never a valid terminal publish for a plan with executor/reviewer tasks. \
+                     Re-read KSB capabilities.integration_merge, run prepare_integration_merge, \
+                     then call integration_merge with the integrated head_sha.",
+                ));
+            }
             return Ok(ToolOutput::ok_with_input(
                 "integration_merge verified input shape",
                 serde_json::json!({ "base_sha": base_sha, "head_sha": head_sha }),
@@ -1915,18 +2008,6 @@ impl Tool for IntegrationMergeTool {
         }
 
         if let Some(head_sha) = input_head.filter(|s| is_lower_hex_40(s)) {
-            if required.len() == 1 && required[0] == head_sha {
-                return Ok(ToolOutput::ok_with_input(
-                    format!(
-                        "integration_merge verified\nbase_sha: {}\nhead_sha: {head_sha}\ncontains_required_executor_shas: 1",
-                        merge_ctx.base_sha,
-                    ),
-                    serde_json::json!({
-                        "base_sha": merge_ctx.base_sha,
-                        "head_sha": head_sha,
-                    }),
-                ));
-            }
             let missing =
                 missing_required_executor_shas(ctx, head_sha, &merge_ctx.required_executor_shas)
                     .await;
@@ -1948,7 +2029,11 @@ impl Tool for IntegrationMergeTool {
         match prepare_integration_merge(ctx, &merge_ctx.base_sha, &required).await {
             Ok(prepared) => Ok(ToolOutput::ok_with_input(
                 format!(
-                    "integration_merge auto-prepared missing executor commits before submit\nbase_sha: {}\nhead_sha: {}\nexecutor_shas:\n- {}",
+                    "integration_merge auto-prepared a valid integrated head before submit\n\
+                     Use this exact terminal input now:\n\
+                     base_sha: {}\n\
+                     head_sha: {}\n\
+                     required_executor_shas:\n- {}",
                     merge_ctx.base_sha,
                     prepared.head_sha,
                     prepared.merged.join("\n- ")
@@ -2712,6 +2797,83 @@ mod tests {
         assert!(out.content.contains("<no matches for"));
     }
 
+    fn fixture_task_repo() -> (TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        run_git_sync(dir.path(), &["init"]);
+        run_git_sync(dir.path(), &["config", "user.name", "RAXIS Test"]);
+        run_git_sync(
+            dir.path(),
+            &["config", "user.email", "raxis-test@localhost"],
+        );
+        std::fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+        run_git_sync(dir.path(), &["add", "base.txt"]);
+        run_git_sync(dir.path(), &["commit", "-m", "base"]);
+        let base = run_git_sync(dir.path(), &["rev-parse", "HEAD"]);
+        (dir, base)
+    }
+
+    #[tokio::test]
+    async fn task_complete_derives_head_and_overrides_model_input() {
+        let (repo, base) = fixture_task_repo();
+        std::fs::write(repo.path().join("done.txt"), "done\n").unwrap();
+        run_git_sync(repo.path(), &["add", "done.txt"]);
+        run_git_sync(repo.path(), &["commit", "-m", "done"]);
+        let head = run_git_sync(repo.path(), &["rev-parse", "HEAD"]);
+        let ctx = ToolContext::for_workspace(repo.path()).with_task_complete_base_sha(Some(base));
+
+        let out = TaskCompleteTool
+            .execute(
+                &serde_json::json!({
+                    "summary": "done",
+                    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.is_error, None, "tool output: {}", out.content);
+        let input = out.input_override.expect("terminal input override");
+        assert_eq!(input["head_sha"], head);
+    }
+
+    #[tokio::test]
+    async fn task_complete_rejects_dirty_workspace_before_kernel_submit() {
+        let (repo, base) = fixture_task_repo();
+        std::fs::write(repo.path().join("dirty.txt"), "not committed\n").unwrap();
+        let ctx = ToolContext::for_workspace(repo.path()).with_task_complete_base_sha(Some(base));
+
+        let out = TaskCompleteTool
+            .execute(&serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(out.is_error, Some(true));
+        assert!(
+            out.content.contains("uncommitted changes"),
+            "tool output: {}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn task_complete_rejects_unchanged_session_base() {
+        let (repo, base) = fixture_task_repo();
+        let ctx = ToolContext::for_workspace(repo.path()).with_task_complete_base_sha(Some(base));
+
+        let out = TaskCompleteTool
+            .execute(&serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(out.is_error, Some(true));
+        assert!(
+            out.content.contains("equals the session base"),
+            "tool output: {}",
+            out.content
+        );
+    }
+
     #[tokio::test]
     async fn prepare_integration_merge_rejects_malformed_sha_without_git() {
         let ws = fixture_workspace();
@@ -2735,7 +2897,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integration_merge_single_executor_head_does_not_require_git_probe() {
+    async fn integration_merge_single_executor_head_requires_git_or_prepare() {
         let ws = tempfile::tempdir().unwrap();
         let base = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
         let head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned();
@@ -2760,10 +2922,35 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(out.is_error, None, "tool output: {}", out.content);
+        assert_eq!(out.is_error, Some(true), "tool output: {}", out.content);
         assert!(
-            out.content.contains("contains_required_executor_shas: 1"),
-            "expected local single-SHA verification, got: {}",
+            out.content.contains("automatic preparation failed"),
+            "expected single-SHA path to require git verification or prepare, got: {}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_merge_rejects_noop_without_ksb_context() {
+        let ws = tempfile::tempdir().unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let ctx = ToolContext::for_workspace(ws.path());
+
+        let out = IntegrationMergeTool
+            .execute(
+                &serde_json::json!({
+                    "base_sha": sha,
+                    "head_sha": sha,
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.is_error, Some(true), "tool output: {}", out.content);
+        assert!(
+            out.content.contains("no-op merge"),
+            "expected local no-op rejection, got: {}",
             out.content
         );
     }

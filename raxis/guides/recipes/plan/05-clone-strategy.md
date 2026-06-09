@@ -47,7 +47,7 @@ don't pick this for Orchestrators directly.
 
 ```toml
 [[tasks]]
-task_id            = "implementer"
+task_name            = "implementer"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/auth/"]
@@ -70,7 +70,7 @@ A monorepo with millions of files clones in seconds.
 
 ```toml
 [[tasks]]
-task_id            = "reviewer"
+task_name            = "reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]
@@ -88,7 +88,7 @@ fetched on demand (kernel's git proxy caches them).
 
 ```toml
 [[tasks]]
-task_id            = "executor"
+task_name            = "executor"
 session_agent_type = "Executor"
 clone_strategy     = "full"
 path_allowlist     = ["src/"]

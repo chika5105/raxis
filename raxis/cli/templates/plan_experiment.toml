@@ -16,7 +16,7 @@ lane_id    = "main"
 target_ref = "refs/heads/main"
 
 [[tasks]]
-task_id            = "setup"
+task_name            = "setup"
 name               = "Set up experiment environment"
 description        = "Set up experiment environment"
 prompt             = """
@@ -28,7 +28,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 
 [[tasks]]
-task_id            = "run"
+task_name            = "run"
 name               = "Run the experiment"
 description        = "Run the experiment"
 prompt             = """
@@ -40,7 +40,7 @@ session_agent_type = "Executor"
 predecessors       = ["setup"]
 
 [[tasks]]
-task_id            = "cleanup"
+task_name            = "cleanup"
 name               = "Tear down experiment artefacts"
 description        = "Tear down experiment artefacts"
 prompt             = """

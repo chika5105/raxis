@@ -69,6 +69,34 @@ afterEach(() => {
 });
 
 describe("<WorktreeDetailPage>", () => {
+  it("bounds the diff column so long hunks do not stretch the route scroller", async () => {
+    const longDiff: WorktreeDiff = {
+      name: "session-a",
+      from_sha: fromSha,
+      to_sha: toSha,
+      files: [
+        {
+          path: "src/very_long_line.rs",
+          status: "M",
+          insertions: 1,
+          deletions: 0,
+          hunk: `@@ -1 +1 @@\n+${"x".repeat(2_000)}\n`,
+        },
+      ],
+    };
+
+    vi.spyOn(dashboardApi.git, "get").mockResolvedValue(worktree());
+    vi.spyOn(dashboardApi.git, "diffDefault").mockResolvedValue(longDiff);
+    vi.spyOn(dashboardApi.git, "log").mockResolvedValue([]);
+
+    renderWithProviders();
+
+    await screen.findByText("src/very_long_line.rs");
+    const grid = screen.getByTestId("worktree-diff-grid");
+    expect(grid).toHaveClass("min-w-0");
+    expect(grid.className).toContain("xl:grid-cols-[320px_minmax(0,1fr)]");
+  });
+
   it("opens an agent commit and renders its parent-to-commit diff", async () => {
     const logEntry: WorktreeLogEntry = {
       sha: toSha,

@@ -71,7 +71,7 @@ target_ref  = "refs/heads/main"
 # CANARY: change exactly one call site, with a perf-benchmark
 # verifier that catches a regression before merge.
 [[tasks]]
-task_id            = "canary-auth"
+task_name            = "canary-auth"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/auth/session.rs"]
@@ -87,7 +87,7 @@ prompt             = """Replace deprecated `trace!` with `debug!` in src/auth/se
   on_failure = "block_review"
 
 [[tasks]]
-task_id            = "review-canary"
+task_name            = "review-canary"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/session.rs"]
@@ -98,7 +98,7 @@ prompt             = """Verify only one call site changed and the bench delta is
 # BROAD: every other call site, only after the canary is merged
 # AND the bench verifier produced a passing witness.
 [[tasks]]
-task_id            = "broad-replace"
+task_name            = "broad-replace"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/", "tests/"]
@@ -107,7 +107,7 @@ description        = "Broad Replace"
 prompt             = """Replace ALL remaining `trace!` call sites with `debug!`. Reuse the migration documented in canary-auth."""
 
 [[tasks]]
-task_id            = "review-broad"
+task_name            = "review-broad"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/", "tests/"]

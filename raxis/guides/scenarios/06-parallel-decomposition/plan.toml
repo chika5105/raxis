@@ -14,7 +14,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id            = "auth_module"
+task_name            = "auth_module"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]
@@ -30,7 +30,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "billing_module"
+task_name            = "billing_module"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/billing/"]

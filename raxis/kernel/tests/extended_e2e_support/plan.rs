@@ -101,8 +101,7 @@ target_ref = "refs/heads/main""#;
 
 const EXTENDED_PLAN_MATERIALIZER_HEAD: &str = r#"# ── Materializer Executor ───────────────────────────────
 [[tasks]]
-task_id            = "materialize-records"
-name               = "Materialize seeded postgres rows + mongo docs to JSON files"
+task_name            = "materialize-records"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["out/postgres/", "out/mongo/", "out/manifest.json"]
@@ -123,8 +122,7 @@ const EXTENDED_PLAN_MATERIALIZER_CREDS: &str = r#"
 
 const EXTENDED_PLAN_FANOUT_BLOCKS: &str = r#"# ── Fan-out tasks (concurrent group) ────────────────────
 [[tasks]]
-task_id            = "fanout-readme"
-name               = "Write a small README"
+task_name            = "fanout-readme"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["README-e2e.md"]
@@ -135,8 +133,7 @@ e2e scenario fan-out task — readme". Then call task_complete.
 """
 
 [[tasks]]
-task_id            = "fanout-fmt"
-name               = "Write a fixed formatter stub"
+task_name            = "fanout-fmt"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/fmt.txt"]
@@ -147,8 +144,7 @@ call task_complete.
 """
 
 [[tasks]]
-task_id            = "fanout-manifest"
-name               = "Emit a small manifest file"
+task_name            = "fanout-manifest"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["out/manifest.json"]
@@ -160,8 +156,7 @@ Then call task_complete.
 
 const EXTENDED_PLAN_REVIEWERS: &str = r#"# ── Reviewers (forced disagreement → re-review) ────────
 [[tasks]]
-task_id            = "review-materialize-A"
-name               = "Reviewer A — Round 1 reject"
+task_name            = "review-materialize-A"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["materialize-records"]
@@ -176,8 +171,7 @@ circumstance on this task.
 """
 
 [[tasks]]
-task_id            = "review-materialize-B"
-name               = "Reviewer B — Round 2 approve"
+task_name            = "review-materialize-B"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["materialize-records"]
@@ -190,8 +184,7 @@ SubmitReview with approved = true.
 
 const EXTENDED_PLAN_INJECT_HEAD: &str = r#"# ── Injection Executor (deny-path exercise) ────────────
 [[tasks]]
-task_id            = "inject-evil"
-name               = "Injection-payload deny-path exercise"
+task_name            = "inject-evil"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 predecessors       = ["materialize-records"]

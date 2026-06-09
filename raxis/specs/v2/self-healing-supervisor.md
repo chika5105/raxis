@@ -464,25 +464,54 @@ underlying exit code or signal.
 | `WIFSIGNALED + SIGKILL` | NO (OOM-killer or someone killed only the child) | restart with circuit breaker | `Restarting (OomKilled)` | supervisor cannot reliably distinguish OOM from `kill -9 <kernel_pid>`; operators who want force-stop must use `raxis-supervisor stop --force`, which sets shutdown intent before SIGKILL |
 | `WIFSIGNALED + SIGKILL` | YES (shutdown-grace-timeout escalation) | per the original cause | `Restarting` or `Halted` | the SIGKILL was the supervisor's escalation step; classification follows the original cause that started the shutdown. If `intentional_shutdown == true`, halt; else, treat as crash and restart. |
 | `WIFSIGNALED + SIGABRT/SIGSEGV/SIGBUS` | n/a | restart with circuit breaker | `Restarting (SignalCrash)` | kernel crashed itself; same path as exit 70 |
+| readiness probe accepts but no response / times out repeatedly | YES (supervisor health restart) | restart with circuit breaker | `Restarting (DeadlockDetected)` | the kernel process is alive but not making progress; liveness is not enough |
 | supervisor receives `SIGHUP` | YES | **NO restart** | `Halted (OperatorStop)` | controlling-terminal hangup / service-manager stop intent; supervisor forwards shutdown to the child rather than masking it |
 | child exits from direct `SIGHUP` | NO | restart with circuit breaker | `Restarting (SignalCrash)` | a direct child hangup bypassed the supervisor's operator-intent channel, so treat it as an abnormal crash |
 | `WIFSIGNALED + any other signal` | n/a | restart with circuit breaker | `Restarting (SignalCrash)` | conservative: any unrecognised signal that killed the kernel is treated as a crash |
 
 ### §4.5 Operator-signal contract (`INV-SUPERVISOR-SIGTERM-RESPECT-01`, `INV-SUPERVISOR-SIGINT-RESPECT-01`, `INV-SUPERVISOR-SHUTDOWN-GRACE-01`)
 
-The supervisor installs handlers for `SIGTERM`, `SIGINT`, and `SIGHUP` BEFORE spawning the kernel child:
+The supervisor installs handlers for `SIGTERM`, `SIGINT`, and `SIGHUP` BEFORE spawning the kernel child. The kernel is spawned into its own process group; every supervisor stop, force-stop, and readiness-triggered restart targets that process group first, with PID-only signalling as a fallback. A replacement kernel MUST NOT start beside stale helper children or a stale kernel still owning the dashboard port.
 
 1. **`SIGTERM` / `SIGINT` / `SIGHUP` received.** Atomically set:
     * `intentional_shutdown = true`
-2. **Forward** the signal to the kernel child via `nix::sys::signal::kill(child_pid, signal)`. The kernel's own signal handlers (`signal::ctrl_c` in `kernel/src/main.rs`) flow the shutdown through `dashboard::DashboardServer::serve_with_shutdown` and the IPC graceful-drain seam ([`dashboard-hardening.md §1.5`](dashboard-hardening.md)).
+2. **Forward** the signal to the kernel process group via negative-PGID `kill`. The kernel's own signal handlers (`signal::ctrl_c` in `kernel/src/main.rs`) flow the shutdown through `dashboard::DashboardServer::serve_with_shutdown` and the IPC graceful-drain seam ([`dashboard-hardening.md §1.5`](dashboard-hardening.md)).
 3. **Wait** up to `RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS` (default `30`) for the kernel to exit naturally.
 4. **Escalation.** If the grace deadline expires AND the kernel is still alive:
     * Log a structured `KernelGracefulShutdownTimedOut { grace_secs, child_pid }` line on supervisor stderr.
-    * Send `SIGKILL` to the kernel child. (Per §4.4 row "supervisor SENT SIGKILL", classification follows the original cause — `intentional_shutdown == true` → halt.)
+    * Send `SIGKILL` to the kernel process group. (Per §4.4 row "supervisor SENT SIGKILL", classification follows the original cause — `intentional_shutdown == true` → halt.)
 5. **Wait** for the kernel exit, classify per the §4.4 table, write the final sentinel state, supervisor exits `0`.
 6. **`SIGHUP`** follows the same operator-intent halt path as SIGTERM. A future reload flow must use a distinct command path so it does not weaken the shutdown contract.
 
 The `intentional_shutdown` flag is **load-bearing**: any kernel exit observed after it flips to `true` is operator-intent, regardless of the kernel's actual exit code (a kernel that segfaults in the middle of its graceful-shutdown cleanup still classifies as a `Halted` outcome, not `Restarting (SignalCrash)`, because the operator has already declared intent).
+
+### §4.5a Readiness watchdog (`INV-SUPERVISOR-READINESS-01`)
+
+The supervisor does not treat "kernel process exists" as healthy. While the kernel child is alive, it probes `RAXIS_SUPERVISOR_READINESS_URL` (default `http://127.0.0.1:9820/api/health`) after `RAXIS_SUPERVISOR_READINESS_INITIAL_GRACE_SECS` and then every `RAXIS_SUPERVISOR_READINESS_INTERVAL_SECS`.
+
+The readiness probe is deliberately cheap and local:
+
+1. Open a TCP connection to the configured HTTP URL.
+2. Send a minimal `GET`.
+3. Require at least one response byte before `RAXIS_SUPERVISOR_READINESS_TIMEOUT_MS`.
+
+Any timely HTTP response counts as ready, including an auth failure, because it proves the dashboard runtime is making progress. A TCP accept followed by zero bytes, repeated timeout, or closed-without-response means the kernel is alive but wedged. After `RAXIS_SUPERVISOR_READINESS_FAILURES_BEFORE_RESTART` consecutive failures, the supervisor:
+
+1. Logs `kernel_readiness_failed_restarting`.
+2. Sends `SIGTERM` to the kernel process group.
+3. Waits the same shutdown grace as operator stop.
+4. Escalates to process-group `SIGKILL` if needed.
+5. Classifies the episode as `DeadlockDetected` so the normal circuit breaker applies.
+
+This covers the observed failure mode where `127.0.0.1:9820` accepted connections but the dashboard returned no bytes. The system must be supervised by readiness, not liveness.
+
+### §4.5b Singleton dashboard binding (`INV-SUPERVISOR-SINGLETON-01`)
+
+If the dashboard listener is enabled and the replacement kernel cannot bind its configured dashboard address, boot fails with `BOOT_ERR_SOCKET_BIND`. The replacement kernel must not continue running without a dashboard while an older kernel still owns the port. In supervised production this turns "stale port owner" into a normal crash-class restart/circuit-breaker episode instead of two side-by-side kernels with ambiguous authority.
+
+### §4.5c Bounded AVF teardown (`INV-AVF-SHUTDOWN-BOUNDED-01`)
+
+Apple Virtualization teardown is allowed to wait for the VM stop completion deadline, but non-security-critical helper joins must be bounded. In particular, the AVF console pump is forensic capture only: after VM stop, the runtime waits a short best-effort grace and joins only if the pump has already finished. If the console reader misses EOF, it is detached and the kernel continues. Retry, revoke, or session cleanup paths must never block indefinitely on `pthread_join`.
 
 ### §4.6 Sentinel file
 
@@ -654,6 +683,9 @@ Launchd / systemd spawns `raxis-kernel` directly; the in-kernel deadlock detecto
 | `INV-SUPERVISOR-SIGINT-RESPECT-01` | same shape with SIGINT; verify sentinel `Halted (OperatorStop)` and no replacement child spawned | `raxis/crates/supervisor/tests/supervisor_signal_witness.rs` |
 | `INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01` | one sub-test per row of the §4.4 table; assert `classify(outcome, intentional_shutdown) == expected_action` for each | `raxis/crates/supervisor/src/classify.rs::*` |
 | `INV-SUPERVISOR-SHUTDOWN-GRACE-01` | spawn fake child that ignores SIGTERM; supervisor escalates to SIGKILL after grace and records `OperatorStopForced` | `raxis/crates/supervisor/tests/supervisor_signal_witness.rs::slow_sigterm_kernel_triggers_sigkill_escalation_and_operator_stop_forced` |
+| `INV-SUPERVISOR-READINESS-01` | run parser/probe witnesses and an integration fake that accepts TCP but never returns bytes; supervisor restarts after N failures and classifies as `DeadlockDetected` | `raxis/crates/supervisor/src/supervisor.rs::*readiness*` + integration witness |
+| `INV-SUPERVISOR-SINGLETON-01` | start a kernel with dashboard enabled while the configured port is already held; verify boot exits `BOOT_ERR_SOCKET_BIND` and does not continue without dashboard | `raxis/kernel/tests/dashboard_bind_singleton.rs` |
+| `INV-AVF-SHUTDOWN-BOUNDED-01` | simulate a non-finishing AVF console pump and verify VM stop returns after the bounded best-effort join grace | `raxis/crates/isolation-apple-vz/src/runtime.rs::*console_pump*` |
 | `INV-DASHBOARD-KERNEL-LIFECYCLE-01` | write sentinel `Restarting (DeadlockDetected, attempt 1/3)`, mount `KernelLifecycleBanner`, assert it renders the yellow banner within 5 s; mutate sentinel to `Halted (CircuitOpen)`, assert it transitions to red within the next 5 s | `raxis/dashboard-fe/src/components/banners/__tests__/KernelLifecycleBanner.test.tsx` + `raxis/crates/dashboard/tests/kernel_lifecycle_endpoint.rs` |
 
 ---
@@ -669,10 +701,13 @@ Launchd / systemd spawns `raxis-kernel` directly; the in-kernel deadlock detecto
 | Notification priority routing | `raxis/crates/dashboard-kernel/src/notification_filter.rs` |
 | Supervisor binary | `raxis/crates/supervisor/src/main.rs` |
 | Spawn-and-wait loop | `raxis/crates/supervisor/src/lib.rs::run` |
+| Readiness probe + process-group restart | `raxis/crates/supervisor/src/supervisor.rs` |
 | Circuit breaker | `raxis/crates/supervisor/src/circuit_breaker.rs` |
 | Sentinel writer | `raxis/crates/supervisor/src/sentinel.rs` |
 | Exit-code classifier | `raxis/crates/supervisor/src/classify.rs` |
 | Signal handler + grace | `raxis/crates/supervisor/src/signal.rs` |
+| Fatal dashboard bind | `raxis/kernel/src/main.rs` |
+| Bounded AVF console-pump join | `raxis/crates/isolation-apple-vz/src/runtime.rs` |
 | Dashboard sentinel handler | `raxis/crates/dashboard/src/routes/health.rs::kernel_lifecycle` |
 | Dashboard React banner | `raxis/dashboard-fe/src/components/banners/KernelLifecycleBanner.tsx` |
 | Operator recipe | `raxis/guides/operator/19-supervisor-and-restart.md` |

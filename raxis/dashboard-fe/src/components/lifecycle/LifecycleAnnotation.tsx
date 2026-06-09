@@ -58,7 +58,7 @@ export function LifecycleAnnotation({ annotation }: Props) {
           <div className="font-mono text-[10px] uppercase tracking-wide">
             unrecognised lifecycle annotation
           </div>
-          <pre className="mt-1 overflow-x-auto overscroll-x-auto scroll-thin whitespace-pre-wrap text-[10px]">
+          <pre className="mt-1 min-w-0 max-w-full overflow-x-auto overflow-y-hidden overscroll-x-contain scroll-thin whitespace-pre-wrap text-[10px]">
             {JSON.stringify(annotation, null, 2)}
           </pre>
         </div>

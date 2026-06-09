@@ -11,7 +11,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id            = "speed-it-up"
+task_name            = "speed-it-up"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/", "benches/"]

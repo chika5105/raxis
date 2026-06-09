@@ -30,7 +30,7 @@ fn cli_signing_round_trips_against_kernel_verifier() {
 name = "round-trip-test"
 
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 lane_id = "default"
 "#;
 

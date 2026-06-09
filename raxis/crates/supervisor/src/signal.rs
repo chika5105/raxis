@@ -154,6 +154,22 @@ pub fn send_signal(pid: u32, signal: nix::sys::signal::Signal) -> nix::Result<()
     nix::sys::signal::kill(pid, signal)
 }
 
+/// Send `signal` to the process group whose id is `pgid`.
+///
+/// The supervised kernel is spawned in its own session/process
+/// group, so group delivery lets restart/stop tear down helper
+/// subprocesses that inherited the kernel's process group. This is
+/// the supervisor boundary: a replacement kernel must never start
+/// beside stale children from the prior run.
+#[cfg(unix)]
+pub fn send_signal_to_process_group(
+    pgid: u32,
+    signal: nix::sys::signal::Signal,
+) -> nix::Result<()> {
+    let pgid = nix::unistd::Pid::from_raw(-(pgid as i32));
+    nix::sys::signal::kill(pgid, signal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

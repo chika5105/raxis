@@ -72,16 +72,13 @@ raxis doctor
 
 ---
 
-## Reruns and Task IDs
+## Reruns and Task Names
 
-Checked-in scenario plans use readable task IDs like `greeter`,
-`adder`, and `reviewer`. Those are good for learning, but task IDs are
-stored globally in `kernel.db`. If you rerun the same plan in the same
-data dir and see odd admission behavior, use a fresh `RAXIS_DATA_DIR`
-or edit the scenario plan to make the task IDs unique.
-
-The getting-started page shows a timestamped task ID pattern for
-repeatable local demos.
+Checked-in scenario plans use readable task names like `greeter`,
+`adder`, and `reviewer`. These names are only required to be unique
+within one initiative. RAXIS generates fresh runtime `task_id` UUIDs at
+plan approval, so the same scenario can be submitted repeatedly in the
+same data dir without hand-editing identifiers.
 
 ---
 

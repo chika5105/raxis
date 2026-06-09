@@ -19,7 +19,7 @@ max_wall_clock_secs = 1800
 # --- Phase 1: parallel backend + frontend ---
 
 [[tasks]]
-task_id            = "backend-version-endpoint"
+task_name            = "backend-version-endpoint"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
@@ -36,7 +36,7 @@ command = ["cargo", "build", "--release", "--quiet"]
 exit_code_eq = 0
 
 [[tasks]]
-task_id            = "frontend-status-badge"
+task_name            = "frontend-status-badge"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["frontend/"]
@@ -50,7 +50,7 @@ prompt             = """
 # --- Phase 2: integration test (depends on both phase-1 tasks) ---
 
 [[tasks]]
-task_id            = "integration-test"
+task_name            = "integration-test"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["tests/"]
@@ -69,7 +69,7 @@ exit_code_eq = 0
 # --- Phase 3: docs (depends on integration-test) ---
 
 [[tasks]]
-task_id            = "docs"
+task_name            = "docs"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
@@ -83,7 +83,7 @@ prompt             = """
 # --- Phase 4: panel review ---
 
 [[tasks]]
-task_id            = "review-security"
+task_name            = "review-security"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["docs"]
@@ -94,7 +94,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "review-style"
+task_name            = "review-style"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["docs"]
@@ -105,7 +105,7 @@ prompt             = """
 """
 
 [[tasks]]
-task_id            = "review-correctness"
+task_name            = "review-correctness"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["docs"]

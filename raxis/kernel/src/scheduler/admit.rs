@@ -78,17 +78,18 @@ pub fn admit_in_tx(
     // submitted_claims_json, admission_reserved_units) are nullable
     // and stay NULL until the intent handler populates them.
     //
-    // `name` is held on PlanTask for audit-event readability but the
-    // DDL has no `name` column — it's deliberately not persisted.
+    // `task_name` is the operator-authored display identity. The
+    // kernel-owned `task_id` remains the internal UUID foreign key.
     conn.execute(
         &format!(
             "INSERT INTO {TASKS}
-                (task_id, initiative_id, lane_id, state, actor,
+                (task_id, task_name, initiative_id, lane_id, state, actor,
                  policy_epoch, admitted_at, transitioned_at, actual_cost)
-             VALUES (?1, ?2, ?3, ?4, 'kernel', ?5, ?6, ?6, 0)"
+             VALUES (?1, ?2, ?3, ?4, ?5, 'kernel', ?6, ?7, ?7, 0)"
         ),
         rusqlite::params![
             &task.task_id,
+            &task.name,
             &task.initiative_id,
             &task.lane_id,
             state,

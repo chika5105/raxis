@@ -26,6 +26,8 @@ import { StateBadge } from "@/components/StateBadge";
 import {
   isIntegrationMergeTask,
   isTerminalFailureState,
+  effectiveTaskState,
+  orderedTaskStatusCounts,
   taskDisplayId,
   toneClasses,
   type StateBadgeTone,
@@ -75,6 +77,7 @@ import type {
 export function mapTasksToDagNodes(tasks: TaskView[]): DagGraphNode[] {
   return tasks.map((t) => ({
     task_id: t.task_id,
+    task_name: t.task_name,
     title: t.title,
     agent_type: t.agent_type,
     state: t.state,
@@ -90,6 +93,7 @@ export function InitiativeDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [selectedTask, setSelectedTask] = useState<string | null>(null);
+  const [taskSearch, setTaskSearch] = useState("");
 
   // URL-driven status filter — same `?status=Running,Completed`
   // shape as the rest of the dashboard. Reads survive reload and
@@ -167,7 +171,8 @@ export function InitiativeDetailPage() {
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
     for (const t of q.data?.tasks ?? []) {
-      c[t.state] = (c[t.state] ?? 0) + 1;
+      const state = effectiveTaskState(t.state, t.is_active);
+      c[state] = (c[state] ?? 0) + 1;
     }
     return c;
   }, [q.data]);
@@ -183,6 +188,23 @@ export function InitiativeDetailPage() {
     selectedTask && init.tasks.find((t) => t.task_id === selectedTask);
   const activeSet = new Set(activeStatuses);
   const filterActive = activeStatuses.length > 0;
+  const taskSearchNeedle = taskSearch.trim().toLowerCase();
+  const taskSearchFiltered = taskSearchNeedle
+    ? init.tasks.filter((t) =>
+        [
+          t.task_id,
+          t.task_name ?? "",
+          t.title,
+          t.agent_type,
+          t.state,
+          effectiveTaskState(t.state, t.is_active),
+          t.session_id ?? "",
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(taskSearchNeedle),
+      )
+    : init.tasks;
 
   return (
     <div className="space-y-5">
@@ -269,7 +291,7 @@ export function InitiativeDetailPage() {
           aria-label="Task status legend"
         >
           <StatusLegend
-            counts={counts}
+            counts={orderedTaskStatusCounts(counts)}
             activeStatuses={activeStatuses}
             onToggle={handleToggle}
             onClear={handleClear}
@@ -330,14 +352,26 @@ export function InitiativeDetailPage() {
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
         {/* Task list */}
         <section className="card p-0 overflow-hidden xl:col-span-2">
-          <header className="px-4 py-3 border-b border-edge flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-ink">Tasks</h2>
-            <span className="text-xs text-ink-subtle">
-              {plural(init.tasks.length, "task")}
-            </span>
+          <header className="px-4 py-3 border-b border-edge flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="text-sm font-semibold text-ink">Tasks</h2>
+              <span className="text-xs text-ink-subtle">
+                {taskSearchNeedle
+                  ? `${plural(taskSearchFiltered.length, "match", "matches")} of ${plural(init.tasks.length, "task")}`
+                  : plural(init.tasks.length, "task")}
+              </span>
+            </div>
+            <input
+              className="input h-8 w-full sm:w-72 text-xs"
+              placeholder="Search task name, runtime id, state…"
+              value={taskSearch}
+              onChange={(e) => setTaskSearch(e.target.value)}
+            />
           </header>
           {init.tasks.length === 0 ? (
             <Empty title="No tasks." />
+          ) : taskSearchFiltered.length === 0 ? (
+            <Empty title="No tasks match your search." />
           ) : (
             <table className="w-full text-sm">
               <thead className="text-xs text-ink-subtle">
@@ -353,8 +387,9 @@ export function InitiativeDetailPage() {
                 </tr>
               </thead>
               <tbody>
-                {init.tasks.map((t) => {
-                  const dimmed = filterActive && !activeSet.has(t.state);
+                {taskSearchFiltered.map((t) => {
+                  const displayState = effectiveTaskState(t.state, t.is_active);
+                  const dimmed = filterActive && !activeSet.has(displayState);
                   return (
                   <tr
                     key={t.task_id}
@@ -384,15 +419,21 @@ export function InitiativeDetailPage() {
                         {t.title}
                       </Link>
                       <div className="text-[11px] text-ink-subtle">
-                        {/* INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01:
-                            render `«integration-merge»` instead of the
-                            initiative UUID for the synthetic coordinator
-                            row. Routing in the parent `<Link>` keeps using
-                            the real `task_id` so deep-links survive. */}
-                        <Mono>
-                          {taskDisplayId(t.task_id, init.initiative_id)}
-                        </Mono>
+                        {t.task_name ? (
+                          <>
+                            Task name <Mono>{t.task_name}</Mono>
+                          </>
+                        ) : (
+                          <Mono>{taskDisplayId(t.task_id, init.initiative_id)}</Mono>
+                        )}
                       </div>
+                      {t.task_name && (
+                        <div className="mt-0.5 flex items-center gap-1 text-[11px] text-ink-subtle">
+                          <span>Runtime ID</span>
+                          <Mono>{taskDisplayId(t.task_id, init.initiative_id)}</Mono>
+                          <CopyButton value={t.task_id} />
+                        </div>
+                      )}
                     </td>
                     <td className="px-4 py-2 align-top">
                       <div className="flex flex-col items-start gap-1">
@@ -405,11 +446,7 @@ export function InitiativeDetailPage() {
                             hides every executor "Running" period
                             from the dashboard index. */}
                         <StateBadge
-                          state={
-                            t.is_active && t.state === "Admitted"
-                              ? "Running"
-                              : t.state
-                          }
+                          state={displayState}
                           pulse={t.is_active || t.state === "Running"}
                         />
                         {isTerminalFailureState(t.state) && (
@@ -471,13 +508,15 @@ export function InitiativeDetailPage() {
                 {focusedTask.title}
               </Link>
               <div className="text-xs text-ink-subtle mt-0.5 flex items-center gap-1">
+                <span>
+                  {focusedTask.task_name ? "Runtime ID" : "Task"}
+                </span>
                 <Mono>
                   {taskDisplayId(focusedTask.task_id, init.initiative_id)}
                 </Mono>
                 {/* Copy still uses the real task_id so operators
                     can paste a wire-stable id into kernel CLI /
-                    audit queries. The display ribbon is a
-                    render-time friendly label only. */}
+                    audit queries. The task name is the human label. */}
                 <CopyButton value={focusedTask.task_id} />
               </div>
               <div className="mt-3 flex items-center gap-2">
@@ -498,11 +537,10 @@ export function InitiativeDetailPage() {
                     every actively-executing task pulses in this
                     surface too. */}
                 <StateBadge
-                  state={
-                    focusedTask.is_active && focusedTask.state === "Admitted"
-                      ? "Running"
-                      : focusedTask.state
-                  }
+                  state={effectiveTaskState(
+                    focusedTask.state,
+                    focusedTask.is_active,
+                  )}
                   pulse={focusedTask.is_active || focusedTask.state === "Running"}
                 />
                 <ReviewRetryPill task={focusedTask} />
@@ -885,10 +923,10 @@ function InitiativeIntegrationState({
   const gates = integrationNode?.gate_verdict_summary ?? [];
   const pendingGates = gates.filter((gate) => gate.latest_verdict === "Pending");
   const failedGates = gates.filter((gate) => gateTone(gate.latest_verdict) === "bad");
-  const displayState =
-    integrationTask.is_active && integrationTask.state === "Admitted"
-      ? "Running"
-      : integrationTask.state;
+  const displayState = effectiveTaskState(
+    integrationTask.state,
+    integrationTask.is_active,
+  );
   const awaitingGates =
     displayState === "GatesPending" ||
     (gates.length > 0 && pendingGates.length > 0 && !finalSnapshot);
@@ -1121,7 +1159,7 @@ function IntegrationSnapshotSummary({
   >(null);
   return (
     <div className="mt-3 space-y-3">
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3 items-start">
+      <div className="grid min-w-0 max-w-full grid-cols-1 lg:grid-cols-[minmax(0,1fr)_auto] gap-3 items-start">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
           <MergeField label="Trigger">
             <span className="badge bg-accent-muted/40 border-accent text-accent">
@@ -1211,7 +1249,7 @@ function SnapshotBlobPanel({
     return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
   }
   return (
-    <pre className="text-[11px] font-mono text-ink-muted overflow-x-auto overscroll-x-auto scroll-thin max-h-96 bg-panel border border-edge rounded p-2">
+    <pre className="min-w-0 max-w-full text-[11px] font-mono text-ink-muted overflow-auto overscroll-auto scroll-thin max-h-96 bg-panel border border-edge rounded p-2">
       {q.data}
     </pre>
   );

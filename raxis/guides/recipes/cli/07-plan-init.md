@@ -53,7 +53,7 @@ repository = "main"
 target_ref = "refs/heads/main"
 
 [[tasks]]
-task_id            = "implementer"
+task_name            = "implementer"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
@@ -62,7 +62,7 @@ description        = "Implement rate limiting"
 prompt             = """TODO: concrete two-to-five-sentence executor instructions."""
 
 [[tasks]]
-task_id            = "reviewer"
+task_name            = "reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]

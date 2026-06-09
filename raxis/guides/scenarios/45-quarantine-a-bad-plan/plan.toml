@@ -12,7 +12,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id            = "escapes-the-jail"
+task_name            = "escapes-the-jail"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["../etc/passwd"]

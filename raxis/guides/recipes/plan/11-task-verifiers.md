@@ -47,7 +47,7 @@ schema. Use `name`, `timeout`, and `on_failure`.
 
 ```toml
 [[tasks]]
-task_id            = "implementer"
+task_name            = "implementer"
 prompt             = """Complete Implementer according to this plan's acceptance criteria."""
 session_agent_type = "Executor"
 clone_strategy     = "blobless"

@@ -16,7 +16,7 @@ lane_id    = "main"
 target_ref = "refs/heads/main"
 
 [[tasks]]
-task_id            = "upgrade"
+task_name            = "upgrade"
 name               = "Bump dependency version"
 description        = "Bump dependency version"
 prompt             = """
@@ -29,7 +29,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 
 [[tasks]]
-task_id            = "test"
+task_name            = "test"
 name               = "Run regression suite against the upgrade"
 description        = "Run regression suite against the upgrade"
 prompt             = """

@@ -77,16 +77,11 @@ pub enum LifecycleError {
     #[error("plan TOML invalid: {reason}")]
     PlanInvalid { reason: String },
 
-    /// **V2 recurring-plan integrity — `FAIL_PLAN_TASK_ID_ALREADY_EXISTS`.**
-    /// `tasks.task_id` is a global primary key in the current SQLite
-    /// schema, so a new initiative may not reuse a task id that already
-    /// exists anywhere in the store. This is checked before
-    /// `BEGIN TRANSACTION`: relying on SQLite's global PK would surface
-    /// an opaque constraint failure, and relying on `INSERT OR IGNORE`
-    /// in the scheduler can create a cross-initiative
-    /// `subtask_activations` row pointing at an older task. The task id
-    /// namespace can become composite only with a deliberate schema
-    /// migration; until then, reused ids are fail-closed at approval.
+    /// **Kernel-owned task-id integrity.** `tasks.task_id` is a
+    /// kernel-generated UUID primary key. This branch should be
+    /// unreachable outside a UUID collision or corrupt store, but it
+    /// keeps the approval path fail-closed before any dependent
+    /// `subtask_activations` row can point at the wrong initiative.
     #[error("FAIL_PLAN_TASK_ID_ALREADY_EXISTS: task_id {task_id:?} already exists under initiative {existing_initiative_id}")]
     PlanTaskIdAlreadyExists {
         task_id: String,
@@ -278,7 +273,7 @@ pub enum LifecycleError {
     /// **before** `BEGIN TRANSACTION`, so a malformed plan never
     /// allocates a row.
     /// `rule` is one of the four canonical Step 17 DAG rules:
-    ///   * `"duplicate_task_id"` — two tasks share the same `task_id`.
+    ///   * `"duplicate_task_name"` — two tasks share the same plan task name.
     ///   * `"self_loop"`         — `task.predecessors` lists `task`.
     ///   * `"dangling_dependency"` — predecessor not declared in plan.
     ///   * `"cyclic_dependency"` — directed cycle through `predecessors`.
@@ -328,7 +323,7 @@ pub enum LifecycleError {
     ///   * `"task_set_inconsistent"` — `task_set` populated but
     ///     `applies_to ∈ {"all", "last"}`.
     ///   * `"task_set_unknown_task"` — a `task_set` entry does not
-    ///     reference any declared `[[tasks]]` `task_id`.
+    ///     reference any declared `[[tasks]]` `task_name`.
     ///   * `"artifact_path_invalid"` /
     ///     `"artifact_path_too_long"` — `artifact` does not start
     ///     with `/raxis/` or exceeds 256 chars.
@@ -519,7 +514,7 @@ pub struct PlanApproved {
     /// TOML's `[plan.initiative] description` field. Always
     /// non-empty: the parser rejects plans whose `[plan.initiative]
     /// description` is missing or empty (same `FAIL_PLAN_PARSE_ERROR`
-    /// class as missing `task_id`). The post-commit
+    /// class as missing `task_name`). The post-commit
     /// `ctx.orchestrator_spawn.spawn_for_initiative(...)` callsite
     /// stamps this verbatim into the spawned VM's
     /// `RAXIS_PLANNER_TASK_PROMPT` env var.
@@ -896,13 +891,13 @@ pub fn approve_plan(
     // V2 (`verifier-processes.md §15`) — parse plan-source pre-merge
     // verifiers. Empty `Vec` for plans that don't declare any.
     // Structural per-field rules run inside the validator below.
-    let plan_pre_merge_verifiers = parse_plan_integration_merge_verifiers(&plan_toml_str)?;
+    let mut plan_pre_merge_verifiers = parse_plan_integration_merge_verifiers(&plan_toml_str)?;
 
     // V2 Step 17 — shift-left plan validation. Each helper runs BEFORE
     // `BEGIN TRANSACTION`, so a malformed plan never mutates kernel
     // state. We run the DAG check first because a structurally broken
     // plan can confuse later validators (e.g. a path-allowlist entry
-    // on a duplicate task_id), and the path-format check second because
+    // on a duplicate task_name), and the path-format check second because
     // it is purely syntactic and cannot depend on graph well-formedness.
     // V2 §Step 11 cross_cutting_artifacts validator runs alongside —
     // it has no dependency on graph well-formedness either, but lives
@@ -927,6 +922,7 @@ pub fn approve_plan(
     // image resolution against `[[vm_images]]`, hard-cap timeout
     // enforcement) run at IntegrationMerge admission (Check 5d).
     validate_plan_integration_merge_verifiers(&plan_pre_merge_verifiers, &plan_tasks)?;
+    resolve_plan_task_name_references(&mut plan_tasks, &mut plan_pre_merge_verifiers)?;
     orchestrator_fields.integration_merge_verifiers = plan_pre_merge_verifiers.clone();
     // V2 `credential-proxy.md §3` shift-left: any
     // `[[tasks.credentials]]` block declaring an unknown
@@ -1625,7 +1621,7 @@ pub fn repopulate_plan_registry(
     let mut inserted = 0usize;
 
     const PLAN_BUNDLE_ARTIFACTS: &str = "plan_bundle_artifacts";
-    for init_id in initiative_ids {
+    'initiative: for init_id in initiative_ids {
         // Load the immutable plan blob for this initiative.
         // V1 path (`signed_plan_artifacts`) handles every plan
         // approved before V2 sealed-bundle admission landed. V2.1
@@ -1679,8 +1675,19 @@ pub fn repopulate_plan_registry(
             }
         };
 
+        let task_ids_by_name = match persisted_task_ids_by_name(&conn, &init_id) {
+            Ok(map) => map,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"plan_registry_repopulate\",\
+                     \"initiative_id\":\"{init_id}\",\"reason\":\"task_name_lookup_failed: {e}\"}}",
+                );
+                continue;
+            }
+        };
+
         let plan_str = String::from_utf8_lossy(&plan_bytes);
-        let parsed = match parse_plan_tasks(&plan_str) {
+        let mut parsed = match parse_plan_tasks(&plan_str) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!(
@@ -1690,6 +1697,41 @@ pub fn repopulate_plan_registry(
                 continue;
             }
         };
+        for pt in parsed.iter_mut() {
+            let Some(runtime_task_id) = task_ids_by_name.get(pt.name.as_str()) else {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"plan_registry_repopulate\",\
+                     \"initiative_id\":\"{init_id}\",\"task_name\":\"{}\",\
+                     \"reason\":\"task_name_missing_from_store\"}}",
+                    pt.name
+                );
+                continue 'initiative;
+            };
+            pt.task_id = runtime_task_id.clone();
+        }
+
+        let mut resolved_plan_pre_merge_verifiers =
+            match parse_plan_integration_merge_verifiers(&plan_str) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"plan_registry_repopulate\",\
+                     \"initiative_id\":\"{init_id}\",\
+                     \"reason\":\"integration_merge_verifiers_parse_failed_at_restart: {e}\"}}",
+                    );
+                    Vec::new()
+                }
+            };
+        if let Err(e) =
+            resolve_plan_task_name_references(&mut parsed, &mut resolved_plan_pre_merge_verifiers)
+        {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"plan_registry_repopulate\",\
+                 \"initiative_id\":\"{init_id}\",\
+                 \"reason\":\"task_name_resolution_failed_at_restart: {e}\"}}",
+            );
+            continue;
+        }
 
         for pt in parsed {
             registry.insert(
@@ -1809,19 +1851,7 @@ pub fn repopulate_plan_registry(
                         continue;
                     }
                 };
-                orch.integration_merge_verifiers = match parse_plan_integration_merge_verifiers(
-                    &plan_str,
-                ) {
-                    Ok(entries) => entries,
-                    Err(e) => {
-                        eprintln!(
-                                "{{\"level\":\"warn\",\"event\":\"plan_registry_repopulate\",\
-                             \"initiative_id\":\"{init_id}\",\
-                             \"reason\":\"integration_merge_verifiers_resolution_failed_at_restart: {e}\"}}",
-                            );
-                        Vec::new()
-                    }
-                };
+                orch.integration_merge_verifiers = resolved_plan_pre_merge_verifiers.clone();
                 registry.insert_orchestrator(&init_id, orch);
             }
             Err(e) => eprintln!(
@@ -1832,6 +1862,26 @@ pub fn repopulate_plan_registry(
     }
 
     Ok(inserted)
+}
+
+fn persisted_task_ids_by_name(
+    conn: &rusqlite::Connection,
+    initiative_id: &str,
+) -> rusqlite::Result<std::collections::HashMap<String, String>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT task_name, task_id FROM {TASKS}
+         WHERE initiative_id = ?1 AND task_name IS NOT NULL"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![initiative_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut out = std::collections::HashMap::new();
+    for row in rows {
+        let (task_name, task_id) = row?;
+        out.insert(task_name, task_id);
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -2268,7 +2318,10 @@ pub fn retry_task(
 /// workspace-root value before persisting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlanTask {
+    /// Kernel-owned UUID primary key. Never accepted from plan TOML.
     task_id: String,
+    /// Operator-authored display/dependency identity. Unique within a
+    /// single initiative and persisted as `tasks.task_name`.
     name: String,
     /// Plan-author-declared lane override; `""` when omitted. The
     /// approve_plan path replaces this with the `[workspace] lane_id`
@@ -2405,10 +2458,11 @@ struct PlanTask {
 }
 
 /// Parse `[[tasks]]` array from plan TOML.
-/// Required: `task_id`, `description`, `prompt`, `clone_strategy`,
+/// Required: `task_name`, `description`, `prompt`, `clone_strategy`,
 ///           `session_agent_type`.
-/// Optional: `name` (defaults to `task_id`),
-///           `predecessors` (defaults to empty list).
+/// Optional: `predecessors` (defaults to empty list). Predecessor
+/// entries are task names at the TOML boundary; approval translates
+/// them into kernel-owned UUID task ids before writing `task_dag_edges`.
 /// **V2 §Step 28 — `lane_id` is intentionally NOT defaulted here.** A
 /// `[[tasks]] lane_id = "..."` override is parsed verbatim into
 /// `PlanTask::lane_id` so `validate_single_lane_propagation` can
@@ -2437,18 +2491,46 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
 
     let mut tasks = Vec::with_capacity(tasks_array.len());
     for (i, entry) in tasks_array.iter().enumerate() {
-        let task_id = entry
-            .get("task_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| LifecycleError::PlanInvalid {
-                reason: format!("tasks[{i}] missing task_id"),
-            })?
-            .to_owned();
-        let name = entry
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&task_id)
-            .to_owned();
+        if entry.get("task_id").is_some() {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "tasks[{i}] declares forbidden `task_id`; task_id is kernel-owned. \
+                     Use required `task_name` for the human-readable plan label."
+                ),
+            });
+        }
+        if entry.get("name").is_some() {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!("tasks[{i}] declares deprecated `name`; use required `task_name`."),
+            });
+        }
+        let name = match entry.get("task_name") {
+            Some(toml::Value::String(s)) if !s.trim().is_empty() => s.trim().to_owned(),
+            Some(toml::Value::String(_)) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!("tasks[{i}] has empty task_name"),
+                });
+            }
+            Some(v) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "tasks[{i}] task_name must be a TOML string, got {:?}",
+                        v.type_str()
+                    ),
+                });
+            }
+            None => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!("tasks[{i}] missing required task_name"),
+                });
+            }
+        };
+        let kernel_task_id = uuid::Uuid::new_v4().to_string();
+        // Within this parser block, keep existing diagnostic text
+        // readable by binding `task_id` to the operator-authored
+        // task name. The kernel-owned UUID is only persisted at the
+        // final `PlanTask` construction below.
+        let task_id = name.clone();
         // V2 §Step 28: do NOT default to "default" here. Empty marker
         // means "operator omitted lane_id"; any non-empty value is a
         // per-task override that `validate_single_lane_propagation`
@@ -2873,7 +2955,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
         }
 
         tasks.push(PlanTask {
-            task_id,
+            task_id: kernel_task_id,
             name,
             lane_id,
             predecessors,
@@ -3758,7 +3840,7 @@ fn validate_plan_integration_merge_verifiers(
     use std::collections::HashSet;
 
     let mut seen_names: HashSet<&str> = HashSet::with_capacity(plan_verifiers.len());
-    let declared_task_ids: HashSet<&str> = plan_tasks.iter().map(|t| t.task_id.as_str()).collect();
+    let declared_task_names: HashSet<&str> = plan_tasks.iter().map(|t| t.name.as_str()).collect();
 
     for entry in plan_verifiers {
         // Rule — name shape + uniqueness within plan-source.
@@ -3851,18 +3933,18 @@ fn validate_plan_integration_merge_verifiers(
                         offending_verifier: entry.name.clone(),
                         suggestion: "`applies_to = \"task_set\"` requires a \
                                      non-empty `task_set = [...]` array \
-                                     listing the contributing task IDs."
+                                     listing the contributing task names."
                             .to_owned(),
                     });
                 }
-                for task_id in &entry.task_set {
-                    if !declared_task_ids.contains(task_id.as_str()) {
+                for task_name in &entry.task_set {
+                    if !declared_task_names.contains(task_name.as_str()) {
                         return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
                             rule: "task_set_unknown_task",
                             offending_verifier: entry.name.clone(),
                             suggestion: format!(
-                                "`task_set` entry `{task_id}` does not match any declared \
-                                 `[[tasks]]` task_id in this plan. Either remove the entry \
+                                "`task_set` entry `{task_name}` does not match any declared \
+                                 `[[tasks]]` task_name in this plan. Either remove the entry \
                                  or declare the task."
                             ),
                         });
@@ -4262,17 +4344,16 @@ fn validate_cross_cutting_artifacts(
 /// (no `tasks` rows yet), in deterministic order so the operator
 /// always sees the *first* offending rule rather than a confusing
 /// cascade:
-///   1. **`duplicate_task_id`** — two `[[tasks]]` blocks share the same
-///      `task_id`. SQLite's `tasks.task_id PRIMARY KEY` would catch
-///      this in the tx, but the FK error is opaque ("constraint failed");
-///      the shift-left rule produces a structured diagnostic naming
-///      the duplicate.
+///   1. **`duplicate_task_name`** — two `[[tasks]]` blocks share the
+///      same `task_name`. Task names are the operator-authored graph
+///      identity inside a single initiative; `task_id` is generated by
+///      the kernel and is never accepted from plan TOML.
 ///   2. **`self_loop`** — `task.predecessors` lists the task itself.
 ///      A task can never be its own predecessor; this is a degenerate
 ///      cycle case that we surface separately for clearer operator
 ///      diagnostics ("did you mean to depend on a sibling?").
 ///   3. **`dangling_dependency`** — `task.predecessors` lists a
-///      `task_id` that is not declared anywhere in the plan. SQLite's
+///      task name that is not declared anywhere in the plan. SQLite's
 ///      `task_dag_edges.predecessor_task_id REFERENCES tasks(task_id)`
 ///      with `defer_foreign_keys = 1` would catch this at COMMIT,
 ///      but again the FK message is opaque.
@@ -4303,17 +4384,17 @@ fn validate_cross_cutting_artifacts(
 fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
     use std::collections::{HashMap, HashSet};
 
-    // ── Rule 1: duplicate_task_id ────────────────────────────────────
+    // ── Rule 1: duplicate_task_name ──────────────────────────────────
     let mut seen = HashSet::with_capacity(tasks.len());
     for pt in tasks {
-        if !seen.insert(pt.task_id.as_str()) {
+        if !seen.insert(pt.name.as_str()) {
             return Err(LifecycleError::PlanDagInvalid {
-                rule: "duplicate_task_id",
-                offending_task: pt.task_id.clone(),
+                rule: "duplicate_task_name",
+                offending_task: pt.name.clone(),
                 suggestion: format!(
-                    "Two `[[tasks]]` blocks declare task_id = {:?}. \
-                     Pick a unique identifier for each task.",
-                    pt.task_id,
+                    "Two `[[tasks]]` blocks declare task_name = {:?}. \
+                     Pick a unique task_name inside this initiative.",
+                    pt.name,
                 ),
             });
         }
@@ -4323,14 +4404,14 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
     // Cheaper than full cycle detection; surface it first so the
     // operator gets the most specific diagnostic.
     for pt in tasks {
-        if pt.predecessors.iter().any(|d| d == &pt.task_id) {
+        if pt.predecessors.iter().any(|d| d == &pt.name) {
             return Err(LifecycleError::PlanDagInvalid {
                 rule: "self_loop",
-                offending_task: pt.task_id.clone(),
+                offending_task: pt.name.clone(),
                 suggestion: format!(
                     "Task {:?} lists itself in `predecessors`. \
                      A task cannot depend on itself; remove that entry.",
-                    pt.task_id,
+                    pt.name,
                 ),
             });
         }
@@ -4338,7 +4419,7 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
 
     // Build a lookup table for the dangling-ref check and the DFS.
     let task_index: HashMap<&str, &PlanTask> =
-        tasks.iter().map(|pt| (pt.task_id.as_str(), pt)).collect();
+        tasks.iter().map(|pt| (pt.name.as_str(), pt)).collect();
 
     // ── Rule 3: dangling_dependency ──────────────────────────────────
     for pt in tasks {
@@ -4346,13 +4427,13 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
             if !task_index.contains_key(dep.as_str()) {
                 return Err(LifecycleError::PlanDagInvalid {
                     rule: "dangling_dependency",
-                    offending_task: pt.task_id.clone(),
+                    offending_task: pt.name.clone(),
                     suggestion: format!(
                         "Task {:?} declares `predecessors = [..., {:?}, ...]`, \
-                         but no `[[tasks]]` block defines a task with that id. \
+                         but no `[[tasks]]` block defines that task_name. \
                          Either add the missing task or fix the typo in \
                          `predecessors`.",
-                        pt.task_id, dep,
+                        pt.name, dep,
                     ),
                 });
             }
@@ -4376,18 +4457,18 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
     }
     let mut color: HashMap<&str, Color> = tasks
         .iter()
-        .map(|pt| (pt.task_id.as_str(), Color::White))
+        .map(|pt| (pt.name.as_str(), Color::White))
         .collect();
 
     // Each DFS frame remembers the task and the next predecessor index
     // to inspect, so we can resume after recursing without using the
     // call stack (avoids `MAX_DAG_DEPTH` issues for large plans).
     for start in tasks {
-        if color[start.task_id.as_str()] != Color::White {
+        if color[start.name.as_str()] != Color::White {
             continue;
         }
-        let mut stack: Vec<(&str, usize)> = vec![(start.task_id.as_str(), 0)];
-        color.insert(start.task_id.as_str(), Color::Gray);
+        let mut stack: Vec<(&str, usize)> = vec![(start.name.as_str(), 0)];
+        color.insert(start.name.as_str(), Color::Gray);
 
         while let Some((node_id, idx)) = stack.pop() {
             let preds = &task_index[node_id].predecessors;
@@ -4430,14 +4511,12 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
     Ok(())
 }
 
-/// Recurring-plan integrity guard. The current store schema makes
-/// `tasks.task_id` globally unique (`PRIMARY KEY(task_id)`), so
-/// approval must reject any plan whose declared task id already exists
-/// under a prior initiative. Without this shift-left check, a lower
-/// layer that accidentally ignores a duplicate task insert can still
-/// write `subtask_activations(initiative_id = new, task_id = old)`,
-/// causing the orchestrator's KSB/DAG to reason over another
-/// initiative's failed task.
+/// Generated-runtime-id integrity guard. The store schema makes
+/// `tasks.task_id` globally unique (`PRIMARY KEY(task_id)`). Plan authors
+/// no longer provide this value; the parser generates a UUID for each
+/// task. This check should therefore only catch an impossible UUID
+/// collision or storage corruption, but it still fails closed before
+/// writing task rows.
 fn validate_plan_task_ids_globally_unused(
     conn: &rusqlite::Connection,
     tasks: &[PlanTask],
@@ -4457,6 +4536,72 @@ fn validate_plan_task_ids_globally_unused(
             });
         }
     }
+    Ok(())
+}
+
+/// Translate every plan-authored task-name reference into the
+/// kernel-owned UUID task id before persistence/runtime use.
+///
+/// At the TOML boundary:
+///   * `[[tasks]].task_name` is the human graph identity.
+///   * `predecessors = [...]` lists task names.
+///   * `[[plan.integration_merge_verifiers]].task_set` lists task names.
+///
+/// After this function returns:
+///   * `PlanTask::predecessors` contains internal task UUIDs for
+///     `task_dag_edges`.
+///   * verifier `task_set` contains internal task UUIDs for runtime
+///     `merged_task_ids` comparisons.
+fn resolve_plan_task_name_references(
+    tasks: &mut [PlanTask],
+    pre_merge_verifiers: &mut [raxis_policy::IntegrationMergeVerifierEntry],
+) -> Result<(), LifecycleError> {
+    use std::collections::HashMap;
+
+    let by_name: HashMap<String, String> = tasks
+        .iter()
+        .map(|task| (task.name.clone(), task.task_id.clone()))
+        .collect();
+
+    for task in tasks.iter_mut() {
+        for pred in &mut task.predecessors {
+            let Some(task_id) = by_name.get(pred.as_str()) else {
+                return Err(LifecycleError::PlanDagInvalid {
+                    rule: "dangling_dependency",
+                    offending_task: task.name.clone(),
+                    suggestion: format!(
+                        "Task {:?} declares unknown predecessor task_name {:?}. \
+                         Fix the predecessor list before approving the plan.",
+                        task.name, pred
+                    ),
+                });
+            };
+            *pred = task_id.clone();
+        }
+    }
+
+    for verifier in pre_merge_verifiers.iter_mut() {
+        if !matches!(
+            verifier.applies_to,
+            raxis_policy::IntegrationMergeVerifierAppliesTo::TaskSet
+        ) {
+            continue;
+        }
+        for name in &mut verifier.task_set {
+            let Some(task_id) = by_name.get(name.as_str()) else {
+                return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                    rule: "task_set_unknown_task",
+                    offending_verifier: verifier.name.clone(),
+                    suggestion: format!(
+                        "`task_set` entry `{name}` does not match any declared \
+                         `[[tasks]] task_name` in this plan."
+                    ),
+                });
+            };
+            *name = task_id.clone();
+        }
+    }
+
     Ok(())
 }
 
@@ -5349,19 +5494,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_plan_tasks_requires_task_id() {
-        // Entry without task_id must produce PlanInvalid error.
-        let toml = "[[tasks]]\nname = \"no-id\"\n";
+    fn parse_plan_tasks_requires_task_name() {
+        // Entry without task_name must produce PlanInvalid error.
+        let toml = "[[tasks]]\ndescription = \"no name\"\n";
         let err = parse_plan_tasks(toml).unwrap_err();
-        assert!(err.to_string().contains("task_id"));
+        assert!(err.to_string().contains("task_name"));
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_user_supplied_task_id() {
+        let toml = "[[tasks]]\ntask_id = \"t1\"\ntask_name = \"do-work\"\ndescription = \"do thing\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\nprompt = \"do thing\"\n";
+        let err = parse_plan_tasks(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("forbidden `task_id`"), "got: {msg}");
+        assert!(msg.contains("kernel-owned"), "got: {msg}");
     }
 
     #[test]
     fn parse_plan_tasks_empty_array_ok() {
-        let toml = "[meta]\nversion = 1\n[[tasks]]\ntask_id = \"t1\"\ndescription = \"do thing\"\n";
+        let toml =
+            "[meta]\nversion = 1\n[[tasks]]\ntask_name = \"t1\"\ndescription = \"do thing\"\n";
         let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].task_id, "t1");
+        assert_eq!(tasks[0].name, "t1");
+        uuid::Uuid::parse_str(&tasks[0].task_id).expect("task_id is kernel-owned UUID");
+        assert_ne!(tasks[0].task_id, "t1");
     }
 
     #[test]
@@ -5370,7 +5527,7 @@ mod tests {
         // internal "operator did not declare" marker. The approve_plan
         // path replaces this with the workspace-root value after
         // `validate_single_lane_propagation` accepts the plan.
-        let toml = "[[tasks]]\ntask_id = \"t2\"\ndescription = \"do thing\"\n";
+        let toml = "[[tasks]]\ntask_name = \"t2\"\ndescription = \"do thing\"\n";
         let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks[0].lane_id, "");
     }
@@ -5383,7 +5540,7 @@ mod tests {
         // path never reaches the propagation step in this case.
         let toml = r#"
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 lane_id = "rogue-lane"
 description = "do thing"
 "#;
@@ -5392,8 +5549,8 @@ description = "do thing"
     }
 
     #[test]
-    fn parse_plan_tasks_name_defaults_to_task_id() {
-        let toml = "[[tasks]]\ntask_id = \"t3\"\ndescription = \"do thing\"\n";
+    fn parse_plan_tasks_task_name_is_display_name() {
+        let toml = "[[tasks]]\ntask_name = \"t3\"\ndescription = \"do thing\"\n";
         let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
         assert_eq!(tasks[0].name, "t3");
     }
@@ -5410,8 +5567,8 @@ description = "do thing"
     fn parse_plan_tasks_rejects_missing_description() {
         // No `description` field at all: parser must reject with a
         // structured PlanInvalid that names both the task and the
-        // missing field, in the same shape as missing `task_id`.
-        let toml = "[[tasks]]\ntask_id = \"t1\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\nprompt = \"do thing\"\n";
+        // missing field, in the same shape as missing `task_name`.
+        let toml = "[[tasks]]\ntask_name = \"t1\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\nprompt = \"do thing\"\n";
         let err = parse_plan_tasks(toml).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -5428,7 +5585,7 @@ description = "do thing"
     fn parse_plan_tasks_rejects_empty_description() {
         // Empty / whitespace-only descriptions are functionally
         // equivalent to missing — reject both with the same shape.
-        let toml = "[[tasks]]\ntask_id = \"t1\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\ndescription = \"   \"\nprompt = \"do thing\"\n";
+        let toml = "[[tasks]]\ntask_name = \"t1\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\ndescription = \"   \"\nprompt = \"do thing\"\n";
         let err = parse_plan_tasks(toml).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -5441,7 +5598,7 @@ description = "do thing"
     fn parse_plan_tasks_rejects_non_string_description() {
         // Type errors must surface a precise diagnostic, not a
         // silent fallback to empty.
-        let toml = "[[tasks]]\ntask_id = \"t1\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\ndescription = 42\nprompt = \"do thing\"\n";
+        let toml = "[[tasks]]\ntask_name = \"t1\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\ndescription = 42\nprompt = \"do thing\"\n";
         let err = parse_plan_tasks(toml).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -5453,7 +5610,7 @@ description = "do thing"
     #[test]
     fn parse_plan_tasks_uses_prompt_as_primary_instruction() {
         let toml = r#"[[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "Create a greeting file."
 prompt = """
 Write HELLO.md with the exact text: hello from alex.
@@ -5477,7 +5634,7 @@ Write HELLO.md with the exact text: hello from alex.
     #[test]
     fn parse_plan_tasks_rejects_deprecated_context_field() {
         let toml = r#"[[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "Create a greeting file."
 session_agent_type = "Executor"
 clone_strategy = "blobless"
@@ -5498,7 +5655,7 @@ context = "Write HELLO.md."
     #[test]
     fn parse_plan_tasks_rejects_empty_prompt() {
         let toml = r#"[[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "Create a greeting file."
 session_agent_type = "Executor"
 clone_strategy = "blobless"
@@ -5526,7 +5683,7 @@ prompt = "   "
         // these would silently weaken path enforcement for every plan
         // that omits the field.
         let toml = r#"[[tasks]]
-        task_id     = "t-default"
+        task_name     = "t-default"
         description = "exercise lockdown defaults"
         "#;
         let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
@@ -5552,7 +5709,7 @@ prompt = "   "
         // ordering invariant only; `validate_path_allowlist_v2_format`
         // is the syntax gate (see tests below) and runs in approve_plan.
         let toml = r#"[[tasks]]
-        task_id        = "t-globs"
+        task_name        = "t-globs"
         description    = "exercise allowlist ordering"
         path_allowlist = ["src/", "tests/", "README.md"]
         "#;
@@ -5563,7 +5720,7 @@ prompt = "   "
     #[test]
     fn parse_plan_tasks_reads_path_export_optin_and_globs() {
         let toml = r#"[[tasks]]
-        task_id                   = "t-export"
+        task_name                   = "t-export"
         description               = "exercise export opt-in"
         path_export_to_successors = true
         path_export_globs         = ["src/ipc/**"]
@@ -5576,7 +5733,7 @@ prompt = "   "
     #[test]
     fn parse_plan_tasks_reads_canonical_task_verifiers() {
         let toml = r#"[[tasks]]
-        task_id            = "implementation"
+        task_name            = "implementation"
         description        = "exercise per-task verifier parser"
         session_agent_type = "Executor"
         clone_strategy     = "blobless"
@@ -5623,7 +5780,7 @@ prompt = "   "
     #[test]
     fn parse_plan_tasks_rejects_legacy_task_verifier_schema() {
         let toml = r#"[[tasks]]
-        task_id     = "legacy"
+        task_name     = "legacy"
         description = "legacy verifier schema must not parse silently"
         session_agent_type = "Executor"
         clone_strategy = "blobless"
@@ -5653,7 +5810,7 @@ prompt = "   "
     #[test]
     fn parse_plan_tasks_rejects_warn_only_verifier_with_unsafe_artifact_path() {
         let toml = r#"[[tasks]]
-        task_id     = "warn"
+        task_name     = "warn"
         description = "warn-only verifier still has artifact discipline"
         session_agent_type = "Executor"
         clone_strategy = "blobless"
@@ -5679,7 +5836,7 @@ prompt = "   "
     #[test]
     fn parse_plan_tasks_reads_path_scope_override() {
         let toml = r#"[[tasks]]
-        task_id             = "t-override"
+        task_name             = "t-override"
         description         = "exercise path scope override"
         path_scope_override = true
         "#;
@@ -5694,7 +5851,7 @@ prompt = "   "
         // non-string entries rather than panicking. (Matches the existing
         // `predecessors` behaviour.)
         let toml = r#"[[tasks]]
-        task_id        = "t"
+        task_name        = "t"
         description    = "exercise non-string array entries"
         path_allowlist = ["src/", 123, "ok.rs"]
         "#;
@@ -5893,7 +6050,7 @@ prompt = "   "
     }
 
     // ── V2 Step 17 — `validate_plan_dag` shift-left DAG checks ────────────
-    // Each of the four canonical rules (`duplicate_task_id`,
+    // Each of the four canonical rules (`duplicate_task_name`,
     // `self_loop`, `dangling_dependency`, `cyclic_dependency`) MUST
     // be exercised. We additionally pin the *deterministic ordering*
     // of detection — the operator must always see the most-specific
@@ -6001,9 +6158,9 @@ prompt = "   "
     }
 
     #[test]
-    fn validate_plan_dag_rejects_duplicate_task_id() {
+    fn validate_plan_dag_rejects_duplicate_task_name() {
         let plan = vec![dag_task("t", &[]), dag_task("t", &[])];
-        assert_dag_invalid(plan, "duplicate_task_id", "t", "Pick a unique");
+        assert_dag_invalid(plan, "duplicate_task_name", "t", "Pick a unique");
     }
 
     #[test]
@@ -6067,14 +6224,14 @@ prompt = "   "
 
     #[test]
     fn validate_plan_dag_rule_priority_duplicate_before_self_loop() {
-        // Both rules fire; pin that `duplicate_task_id` wins, because
+        // Both rules fire; pin that `duplicate_task_name` wins, because
         // until duplicates are resolved we cannot reliably attribute
         // the self-loop to a specific task instance.
         let plan = vec![
             dag_task("dup", &[]),
             dag_task("dup", &["dup"]), // would also be a self_loop
         ];
-        assert_dag_invalid(plan, "duplicate_task_id", "dup", "Pick a unique");
+        assert_dag_invalid(plan, "duplicate_task_name", "dup", "Pick a unique");
     }
 
     #[test]
@@ -6212,7 +6369,7 @@ prompt = "   "
     fn parse_plan_tasks_reads_max_crash_retries_and_max_review_rejections() {
         let toml = r#"
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "test"
 max_crash_retries = 5
 max_review_rejections = 7
@@ -6233,7 +6390,7 @@ max_review_rejections = 7
         // plans.
         let toml = r#"
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "test"
 "#;
         let tasks = parse_plan_tasks(&canonical_task_fixture(toml)).unwrap();
@@ -6251,7 +6408,7 @@ description = "test"
         // and the retry handler reads it as a hard gate.
         let toml = r#"
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "test"
 max_crash_retries = 0
 max_review_rejections = 0
@@ -6269,7 +6426,7 @@ max_review_rejections = 0
     fn parse_plan_tasks_rejects_negative_max_crash_retries() {
         let toml = r#"
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "test"
 max_crash_retries = -1
 "#;
@@ -6293,7 +6450,7 @@ max_crash_retries = -1
     fn parse_plan_tasks_rejects_non_integer_max_review_rejections() {
         let toml = r#"
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "test"
 max_review_rejections = "three"
 "#;
@@ -6319,7 +6476,7 @@ max_review_rejections = "three"
         // parser must NOT silently overflow into i64 ⇒ u32 conversion
         // failure.
         let toml = format!(
-            "[[tasks]]\ntask_id = \"t1\"\ndescription = \"x\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\nprompt = \"x\"\n\
+            "[[tasks]]\ntask_name = \"t1\"\ndescription = \"x\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\nprompt = \"x\"\n\
              max_crash_retries = {}\n",
             u32::MAX,
         );
@@ -6333,7 +6490,7 @@ max_review_rejections = "three"
         // overflow rejection so a future widening to u64 doesn't
         // silently let pathological values past validation.
         let toml = format!(
-            "[[tasks]]\ntask_id = \"t1\"\ndescription = \"x\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\nprompt = \"x\"\n\
+            "[[tasks]]\ntask_name = \"t1\"\ndescription = \"x\"\nsession_agent_type = \"Executor\"\nclone_strategy = \"blobless\"\nprompt = \"x\"\n\
              max_crash_retries = {}\n",
             (u32::MAX as i64) + 1,
         );
@@ -6357,7 +6514,7 @@ max_review_rejections = "three"
 
     #[test]
     fn parse_plan_tasks_rejects_omitted_clone_strategy() {
-        let toml = "[[tasks]]\ntask_id = \"t1\"\ndescription = \"do thing\"\nsession_agent_type = \"Executor\"\nprompt = \"do thing\"\n";
+        let toml = "[[tasks]]\ntask_name = \"t1\"\ndescription = \"do thing\"\nsession_agent_type = \"Executor\"\nprompt = \"do thing\"\n";
         let err = parse_plan_tasks(toml).unwrap_err();
         match err {
             LifecycleError::PlanCloneStrategyInvalid { rule, .. } => {
@@ -6371,7 +6528,7 @@ max_review_rejections = "three"
     fn parse_plan_tasks_reads_clone_strategy_full() {
         let toml = r#"
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "do thing"
 clone_strategy = "full"
 "#;
@@ -6383,7 +6540,7 @@ clone_strategy = "full"
     fn parse_plan_tasks_reads_clone_strategy_sparse() {
         let toml = r#"
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "do thing"
 clone_strategy = "sparse"
 "#;
@@ -6395,7 +6552,7 @@ clone_strategy = "sparse"
     fn parse_plan_tasks_rejects_unknown_clone_strategy() {
         let toml = r#"
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "do thing"
 clone_strategy = "treeless"
 "#;
@@ -6420,7 +6577,7 @@ clone_strategy = "treeless"
     #[test]
     fn parse_plan_tasks_rejects_omitted_session_agent_type() {
         let toml =
-            "[[tasks]]\ntask_id = \"t1\"\ndescription = \"do thing\"\nclone_strategy = \"blobless\"\nprompt = \"do thing\"\n";
+            "[[tasks]]\ntask_name = \"t1\"\ndescription = \"do thing\"\nclone_strategy = \"blobless\"\nprompt = \"do thing\"\n";
         let err = parse_plan_tasks(toml).unwrap_err();
         match err {
             LifecycleError::PlanCloneStrategyInvalid { rule, .. } => {
@@ -6434,7 +6591,7 @@ clone_strategy = "treeless"
     fn parse_plan_tasks_reads_session_agent_type_reviewer() {
         let toml = r#"
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "do thing"
 session_agent_type = "Reviewer"
 "#;
@@ -6452,7 +6609,7 @@ session_agent_type = "Reviewer"
         // become an unstructured `PlanInvalid`).
         let toml = r#"
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "do thing"
 session_agent_type = "Orchestrator"
 "#;
@@ -6464,7 +6621,7 @@ session_agent_type = "Orchestrator"
     fn parse_plan_tasks_rejects_unknown_session_agent_type() {
         let toml = r#"
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 description = "do thing"
 session_agent_type = "Coordinator"
 "#;
@@ -6612,7 +6769,7 @@ name = "fixture"
 lane_id = "default"
 
 [[tasks]]
-task_id            = "rogue-orch"
+task_name            = "rogue-orch"
 description        = "fixture task"
 session_agent_type = "Orchestrator"
 "#;
@@ -6652,7 +6809,7 @@ name = "fixture"
 lane_id = "default"
 
 [[tasks]]
-task_id        = "t1"
+task_name        = "t1"
 description    = "fixture task"
 clone_strategy = "treeless"
 "#;
@@ -6688,19 +6845,19 @@ name = "fixture"
 lane_id = "default"
 
 [[tasks]]
-task_id        = "build-svc"
+task_name        = "build-svc"
 description    = "build the service"
 clone_strategy = "blobless"
 
 [[tasks]]
-task_id        = "run-tests"
+task_name        = "run-tests"
 description    = "run the test suite"
 clone_strategy = "sparse"
 path_allowlist = ["tests/", "Cargo.toml"]
 predecessors   = ["build-svc"]
 
 [[tasks]]
-task_id            = "review-it"
+task_name            = "review-it"
 description        = "review the diff"
 session_agent_type = "Reviewer"
 clone_strategy     = "full"
@@ -6720,19 +6877,22 @@ predecessors       = ["run-tests"]
         // `Step 24` and `Step 24b` will read at provisioning time.
         let by_id: std::collections::HashMap<String, _> =
             registry.tasks_in_initiative(&init_id).into_iter().collect();
-        assert_eq!(by_id["build-svc"].clone_strategy, CloneStrategy::Blobless);
+        let build_svc_id = task_id_by_name(&store, &init_id, "build-svc");
+        let run_tests_id = task_id_by_name(&store, &init_id, "run-tests");
+        let review_it_id = task_id_by_name(&store, &init_id, "review-it");
+        assert_eq!(by_id[&build_svc_id].clone_strategy, CloneStrategy::Blobless);
         assert_eq!(
-            by_id["build-svc"].session_agent_type,
+            by_id[&build_svc_id].session_agent_type,
             SessionAgentType::Executor
         );
-        assert_eq!(by_id["run-tests"].clone_strategy, CloneStrategy::Sparse);
+        assert_eq!(by_id[&run_tests_id].clone_strategy, CloneStrategy::Sparse);
         assert_eq!(
-            by_id["run-tests"].session_agent_type,
+            by_id[&run_tests_id].session_agent_type,
             SessionAgentType::Executor
         );
-        assert_eq!(by_id["review-it"].clone_strategy, CloneStrategy::Full);
+        assert_eq!(by_id[&review_it_id].clone_strategy, CloneStrategy::Full);
         assert_eq!(
-            by_id["review-it"].session_agent_type,
+            by_id[&review_it_id].session_agent_type,
             SessionAgentType::Reviewer
         );
     }
@@ -6755,16 +6915,16 @@ name = "fixture"
 lane_id = "default"
 
 [[tasks]]
-task_id     = "build-svc"
+task_name     = "build-svc"
 description = "build the service"
 
 [[tasks]]
-task_id      = "run-tests"
+task_name      = "run-tests"
 description  = "run the test suite"
 predecessors = ["build-svc"]
 
 [[tasks]]
-task_id            = "review-it"
+task_name            = "review-it"
 description        = "review the diff"
 session_agent_type = "Reviewer"
 predecessors       = ["run-tests"]
@@ -6800,15 +6960,17 @@ predecessors       = ["run-tests"]
         // requires this).
         let mut stmt = conn
             .prepare(&format!(
-                "SELECT task_id, activation_state, session_id,
+                "SELECT a.task_id, t.task_name, a.activation_state, a.session_id,
                         activated_at, terminated_at,
-                        crash_retry_count, review_reject_count
-                 FROM {SUBTASK_ACTIVATIONS}
-                 WHERE initiative_id = ?1
-                 ORDER BY task_id"
+                        a.crash_retry_count, a.review_reject_count
+                 FROM {SUBTASK_ACTIVATIONS} a
+                 JOIN {TASKS} t ON t.task_id = a.task_id
+                 WHERE a.initiative_id = ?1
+                 ORDER BY t.task_name"
             ))
             .unwrap();
         type ActivationRow = (
+            String,
             String,
             String,
             Option<String>,
@@ -6827,40 +6989,50 @@ predecessors       = ["run-tests"]
                     r.get(4)?,
                     r.get(5)?,
                     r.get(6)?,
+                    r.get(7)?,
                 ))
             })
             .unwrap()
             .map(Result::unwrap)
             .collect();
         assert_eq!(rows.len(), 3);
-        for (task_id, state, session_id, activated_at, terminated_at, crash, review) in &rows {
+        for (task_id, task_name, state, session_id, activated_at, terminated_at, crash, review) in
+            &rows
+        {
             assert_eq!(
                 state, "PendingActivation",
-                "{task_id}: expected PendingActivation, got {state}",
+                "{task_name}/{task_id}: expected PendingActivation, got {state}",
             );
             assert!(
                 session_id.is_none(),
-                "{task_id}: PendingActivation rows must have NULL session_id"
+                "{task_name}/{task_id}: PendingActivation rows must have NULL session_id"
             );
             assert!(
                 activated_at.is_none(),
-                "{task_id}: PendingActivation rows must have NULL activated_at"
+                "{task_name}/{task_id}: PendingActivation rows must have NULL activated_at"
             );
             assert!(
                 terminated_at.is_none(),
-                "{task_id}: PendingActivation rows must have NULL terminated_at"
+                "{task_name}/{task_id}: PendingActivation rows must have NULL terminated_at"
             );
-            assert_eq!(*crash, 0, "{task_id}: crash_retry_count must start at 0");
-            assert_eq!(*review, 0, "{task_id}: review_reject_count must start at 0");
+            assert_eq!(
+                *crash, 0,
+                "{task_name}/{task_id}: crash_retry_count must start at 0"
+            );
+            assert_eq!(
+                *review, 0,
+                "{task_name}/{task_id}: review_reject_count must start at 0"
+            );
+            uuid::Uuid::parse_str(task_id).expect("runtime task_id must be a UUID");
         }
 
         // The Orchestrator's auto-spawned session row (Step 6) must
         // NOT carry an activation row of its own — it's activated by
         // the kernel itself, not by another agent's ActivateSubTask.
-        let task_ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
-        assert!(task_ids.contains(&"build-svc"));
-        assert!(task_ids.contains(&"run-tests"));
-        assert!(task_ids.contains(&"review-it"));
+        let task_names: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
+        assert!(task_names.contains(&"build-svc"));
+        assert!(task_names.contains(&"run-tests"));
+        assert!(task_names.contains(&"review-it"));
     }
 
     // ── V2 `credential-proxy.md §3` — task-credential shift-left
@@ -6883,7 +7055,7 @@ name = "fixture"
 lane_id = "default"
 
 [[tasks]]
-task_id     = "build-svc"
+task_name     = "build-svc"
 description = "build the service"
 
   [[tasks.credentials]]
@@ -6895,7 +7067,7 @@ description = "build the service"
     allow_only_select = true
 
 [[tasks]]
-task_id      = "test-it"
+task_name      = "test-it"
 description  = "run the tests"
 predecessors = ["build-svc"]
 
@@ -6910,7 +7082,7 @@ predecessors = ["build-svc"]
     allowed_methods = ["GET", "POST"]
 
 [[tasks]]
-task_id      = "send-receipts"
+task_name      = "send-receipts"
 description  = "send the receipts"
 predecessors = ["test-it"]
 
@@ -6974,7 +7146,7 @@ name = "fixture"
 lane_id = "default"
 
 [[tasks]]
-task_id     = "build-svc"
+task_name     = "build-svc"
 description = "build the service"
 
   [[tasks.credentials]]
@@ -6986,7 +7158,7 @@ description = "build the service"
     allow_only_select = true
 
 [[tasks]]
-task_id      = "deploy"
+task_name      = "deploy"
 description  = "deploy the service"
 predecessors = ["build-svc"]
 
@@ -7155,7 +7327,7 @@ name = "fixture"
 lane_id = "default"
 
 [[tasks]]
-task_id     = "send-email"
+task_name     = "send-email"
 description = "send the email"
 
   [[tasks.credentials]]
@@ -7219,7 +7391,7 @@ name = "fixture"
 lane_id = "default"
 
 [[tasks]]
-task_id     = "x"
+task_name     = "x"
 description = "do thing"
 
   [[tasks.credentials]]
@@ -7537,7 +7709,7 @@ name = "fixture"
 lane_id = "x"
 
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 "#;
         let entries = parse_plan_integration_merge_verifiers(toml).unwrap();
         assert!(entries.is_empty());
@@ -7551,7 +7723,7 @@ name = "fixture"
 lane_id = "x"
 
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 
 [[plan.integration_merge_verifiers]]
 name        = "e2e_smoke"
@@ -7593,7 +7765,7 @@ name = "fixture"
 lane_id = "x"
 
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 
 [[plan.integration_merge_verifiers]]
 name        = "bad"
@@ -7624,7 +7796,7 @@ name = "fixture"
 lane_id = "default"
 
 [[tasks]]
-task_id     = "implement_auth"
+task_name     = "implement_auth"
 description = "implement the auth flow"
 
 [[plan.integration_merge_verifiers]]
@@ -7675,7 +7847,7 @@ name = "fixture"
 lane_id = "default"
 
 [[tasks]]
-task_id     = "t1"
+task_name     = "t1"
 description = "do thing"
 
 [[plan.integration_merge_verifiers]]
@@ -7703,7 +7875,7 @@ name = "fixture"
 lane_id = "feature-work"
 
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 "#;
         let lane = parse_plan_workspace_lane(toml).unwrap();
         assert_eq!(lane.as_deref(), Some("feature-work"));
@@ -7711,7 +7883,7 @@ task_id = "t1"
 
     #[test]
     fn parse_plan_workspace_lane_missing_returns_none() {
-        let toml = "[[tasks]]\ntask_id = \"t1\"\n";
+        let toml = "[[tasks]]\ntask_name = \"t1\"\n";
         let lane = parse_plan_workspace_lane(toml).unwrap();
         assert_eq!(lane, None);
     }
@@ -8341,6 +8513,24 @@ max_concurrent_admissions   = 7
         seed_draft_initiative_raw(store, &plan_with_lane, sk)
     }
 
+    fn task_id_by_name(store: &Store, initiative_id: &str, task_name: &str) -> String {
+        store
+            .lock_sync()
+            .query_row(
+                &format!(
+                    "SELECT task_id FROM {TASKS}
+                      WHERE initiative_id = ?1 AND task_name = ?2"
+                ),
+                rusqlite::params![initiative_id, task_name],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "missing runtime task_id for initiative={initiative_id} task_name={task_name}: {e}"
+                )
+            })
+    }
+
     /// Like `seed_draft_initiative` but preserves the workspace-lane and
     /// initiative-description surfaces. It still fills unrelated
     /// canonical fixture fields (`workspace.name`, `repository`,
@@ -8474,11 +8664,11 @@ max_concurrent_admissions   = 7
             version = 1
 
             [[tasks]]
-            task_id  = "t1"
+            task_name  = "t1"
             name     = "first"
 
             [[tasks]]
-            task_id      = "t2"
+            task_name      = "t2"
             name         = "second"
             predecessors = ["t1"]
         "#;
@@ -8597,7 +8787,7 @@ max_concurrent_admissions   = 7
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [[tasks]]
-            task_id = "only"
+            task_name = "only"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -8691,7 +8881,7 @@ max_concurrent_admissions   = 7
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [[tasks]]
-            task_id = "only"
+            task_name = "only"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -8790,7 +8980,7 @@ max_concurrent_admissions   = 7
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [[tasks]]
-            task_id = "t"
+            task_name = "t"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -8831,7 +9021,7 @@ max_concurrent_admissions   = 7
     fn approve_plan_orchestrator_session_is_unique_per_initiative() {
         let plan = r#"
             [[tasks]]
-            task_id = "t"
+            task_name = "t"
         "#;
 
         let approve = |store: &Store| -> String {
@@ -8883,11 +9073,11 @@ max_concurrent_admissions   = 7
         // Two-node cycle: t1 → t2 → t1.
         let plan = r#"
             [[tasks]]
-            task_id      = "t1"
+            task_name      = "t1"
             predecessors = ["t2"]
 
             [[tasks]]
-            task_id      = "t2"
+            task_name      = "t2"
             predecessors = ["t1"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -8948,7 +9138,7 @@ max_concurrent_admissions   = 7
             name = "fixture"
 
             [[tasks]]
-            task_id     = "t1"
+            task_name     = "t1"
             description = "fixture task"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
@@ -8993,7 +9183,7 @@ max_concurrent_admissions   = 7
             lane_id = ""
 
             [[tasks]]
-            task_id     = "t1"
+            task_name     = "t1"
             description = "fixture task"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
@@ -9026,11 +9216,11 @@ max_concurrent_admissions   = 7
             lane_id = "feature-work"
 
             [[tasks]]
-            task_id     = "t1"
+            task_name     = "t1"
             description = "fixture task 1"
 
             [[tasks]]
-            task_id      = "t2"
+            task_name      = "t2"
             description  = "fixture task 2"
             lane_id      = "rogue-lane"
             predecessors = ["t1"]
@@ -9075,16 +9265,16 @@ name = "fixture"
             lane_id = "feature-work"
 
             [[tasks]]
-            task_id     = "t1"
+            task_name     = "t1"
             description = "do thing 1"
 
             [[tasks]]
-            task_id      = "t2"
+            task_name      = "t2"
             description  = "do thing 2"
             predecessors = ["t1"]
 
             [[tasks]]
-            task_id      = "t3"
+            task_name      = "t3"
             description  = "do thing 3"
             predecessors = ["t2"]
         "#;
@@ -9138,11 +9328,11 @@ name = "fixture"
             version = 1
 
             [[tasks]]
-            task_id      = "t1"
+            task_name      = "t1"
             predecessors = ["t2"]
 
             [[tasks]]
-            task_id      = "t2"
+            task_name      = "t2"
             predecessors = ["t1"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -9282,7 +9472,7 @@ name = "fixture"
             lane_id = "ghost-lane"
 
             [[tasks]]
-            task_id = "t1"
+            task_name = "t1"
             description = "smoke task — fixture for lane validation rejection"
         "#;
         // Use the raw seeder so our `[workspace] lane_id` override is
@@ -9368,7 +9558,7 @@ name = "fixture"
             lane_id = "feature-work"
 
             [[tasks]]
-            task_id = "t1"
+            task_name = "t1"
             description = "smoke task — fixture for lane validation happy path"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
@@ -9455,18 +9645,18 @@ name = "fixture"
     }
 
     #[test]
-    fn approve_plan_rejects_duplicate_task_id_shift_left() {
+    fn approve_plan_rejects_duplicate_task_name_shift_left() {
         let plan = r#"
             [[tasks]]
-            task_id = "dup"
+            task_name = "dup"
             [[tasks]]
-            task_id = "dup"
+            task_name = "dup"
         "#;
-        assert_dag_rule_blocks_approve_plan(plan, "duplicate_task_id");
+        assert_dag_rule_blocks_approve_plan(plan, "duplicate_task_name");
     }
 
     #[test]
-    fn approve_plan_rejects_task_id_reused_by_prior_initiative_shift_left() {
+    fn approve_plan_allows_task_name_reuse_across_initiatives() {
         let store = Store::open_in_memory().unwrap();
         let now = unix_now_secs();
         {
@@ -9505,36 +9695,37 @@ name = "fixture"
 lane_id = "default"
 
 [[tasks]]
-task_id = "ingest_metrics"
+task_name = "ingest_metrics"
 description = "ingest metrics again"
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+prompt = "ingest metrics again"
 "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let err = approve_plan_for_test(
+        approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
         )
-        .unwrap_err();
-        match err {
-            LifecycleError::PlanTaskIdAlreadyExists {
-                task_id,
-                existing_initiative_id,
-            } => {
-                assert_eq!(task_id, "ingest_metrics");
-                assert_eq!(existing_initiative_id, "old-init");
-            }
-            other => panic!("expected PlanTaskIdAlreadyExists, got {other:?}"),
-        }
+        .expect("task_name reuse across initiatives must be valid");
 
-        assert_eq!(read_initiative_state(&store, &init_id), "Draft");
-        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0);
-        assert_eq!(
-            count_initiative_rows(&store, "subtask_activations", &init_id),
-            0
-        );
-        assert!(audit.events().is_empty());
-        assert!(registry.is_empty());
+        assert_eq!(read_initiative_state(&store, &init_id), "Executing");
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 2);
+        let conn = store.lock_sync();
+        let new_task_id: String = conn
+            .query_row(
+                &format!(
+                    "SELECT task_id FROM {TASKS}
+                      WHERE initiative_id = ?1 AND task_name = 'ingest_metrics'"
+                ),
+                [init_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        uuid::Uuid::parse_str(&new_task_id).expect("new runtime task id is a UUID");
+        assert_ne!(new_task_id, "ingest_metrics");
+        assert!(!registry.is_empty());
     }
 
     #[test]
@@ -9600,7 +9791,7 @@ description = "ingest metrics again"
     fn approve_plan_rejects_self_loop_shift_left() {
         let plan = r#"
             [[tasks]]
-            task_id      = "solo"
+            task_name      = "solo"
             predecessors = ["solo"]
         "#;
         assert_dag_rule_blocks_approve_plan(plan, "self_loop");
@@ -9610,9 +9801,9 @@ description = "ingest metrics again"
     fn approve_plan_rejects_dangling_dependency_shift_left() {
         let plan = r#"
             [[tasks]]
-            task_id      = "t1"
+            task_name      = "t1"
             [[tasks]]
-            task_id      = "t2"
+            task_name      = "t2"
             predecessors = ["phantom"]
         "#;
         assert_dag_rule_blocks_approve_plan(plan, "dangling_dependency");
@@ -9624,7 +9815,7 @@ description = "ingest metrics again"
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [[tasks]]
-            task_id = "t1"
+            task_name = "t1"
         "#;
         let (init_id, _correct_pk) = seed_draft_initiative(&store, plan, &sk);
 
@@ -9661,7 +9852,7 @@ description = "ingest metrics again"
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [[tasks]]
-            task_id = "only"
+            task_name = "only"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -9711,7 +9902,7 @@ description = "ingest metrics again"
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"[[tasks]]
-        task_id = "t1"
+        task_name = "t1"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -9746,7 +9937,7 @@ description = "ingest metrics again"
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"[[tasks]]
-        task_id = "t1"
+        task_name = "t1"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -9811,7 +10002,7 @@ description = "ingest metrics again"
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [[tasks]]
-            task_id                   = "t1"
+            task_name                   = "t1"
             # V2 Step 19: directory prefix `src/` (recursive) +
             # exact filename `README.md`. `path_export_globs` keeps
             # V1 glob syntax — it's a *filter*, not containment.
@@ -9820,7 +10011,7 @@ description = "ingest metrics again"
             path_export_globs         = ["src/ipc/**"]
 
             [[tasks]]
-            task_id        = "t2"
+            task_name        = "t2"
             path_allowlist = ["docs/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -9832,17 +10023,22 @@ description = "ingest metrics again"
         )
         .unwrap();
 
+        let t1_task_id = task_id_by_name(&store, &init_id, "t1");
+        let t2_task_id = task_id_by_name(&store, &init_id, "t2");
+        uuid::Uuid::parse_str(&t1_task_id).expect("t1 runtime task id must be a UUID");
+        uuid::Uuid::parse_str(&t2_task_id).expect("t2 runtime task id must be a UUID");
+
         let f1 = registry
-            .get(&TaskKey::new(&init_id, "t1"))
-            .expect("registry must contain t1");
+            .get(&TaskKey::new(&init_id, &t1_task_id))
+            .expect("registry must contain t1 runtime task id");
         assert_eq!(f1.path_allowlist, vec!["src/", "README.md"]);
         assert!(f1.path_export_to_successors);
         assert_eq!(f1.path_export_globs, vec!["src/ipc/**"]);
         assert!(!f1.path_scope_override);
 
         let f2 = registry
-            .get(&TaskKey::new(&init_id, "t2"))
-            .expect("registry must contain t2");
+            .get(&TaskKey::new(&init_id, &t2_task_id))
+            .expect("registry must contain t2 runtime task id");
         assert_eq!(f2.path_allowlist, vec!["docs/"]);
         assert!(
             !f2.path_export_to_successors,
@@ -9865,7 +10061,7 @@ description = "ingest metrics again"
             cross_cutting_artifacts = ["Cargo.lock", "package-lock.json"]
 
             [[tasks]]
-            task_id        = "t1"
+            task_name        = "t1"
             path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -9901,14 +10097,14 @@ description = "ingest metrics again"
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [[tasks]]
-            task_id      = "with-prompt"
+            task_name      = "with-prompt"
             description  = "Health endpoint"
             clone_strategy = "blobless"
             session_agent_type = "Executor"
             prompt = "Add a /healthz endpoint that returns 200 OK"
 
             [[tasks]]
-            task_id      = "second"
+            task_name      = "second"
             description  = "Health endpoint integration test"
             clone_strategy = "blobless"
             session_agent_type = "Executor"
@@ -9924,9 +10120,12 @@ description = "ingest metrics again"
         )
         .unwrap();
 
+        let with_prompt_task_id = task_id_by_name(&store, &init_id, "with-prompt");
+        let second_task_id = task_id_by_name(&store, &init_id, "second");
+
         let with_prompt = registry
-            .get(&TaskKey::new(&init_id, "with-prompt"))
-            .expect("registry must contain with-prompt");
+            .get(&TaskKey::new(&init_id, &with_prompt_task_id))
+            .expect("registry must contain with-prompt runtime task id");
         assert_eq!(
             with_prompt.description,
             "Task summary:\nHealth endpoint\n\nPrimary instructions:\nAdd a /healthz endpoint that returns 200 OK",
@@ -9934,8 +10133,8 @@ description = "ingest metrics again"
         );
 
         let second = registry
-            .get(&TaskKey::new(&init_id, "second"))
-            .expect("registry must contain second");
+            .get(&TaskKey::new(&init_id, &second_task_id))
+            .expect("registry must contain second runtime task id");
         assert_eq!(
             second.description,
             "Task summary:\nHealth endpoint integration test\n\nPrimary instructions:\nRun the integration test against /healthz",
@@ -9963,7 +10162,7 @@ name = "fixture"
             lane_id = "default"
 
             [[tasks]]
-            task_id = "only"
+            task_name = "only"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -9999,7 +10198,7 @@ name = "fixture"
             lane_id = "default"
 
             [[tasks]]
-            task_id     = "only"
+            task_name     = "only"
             description = "fixture task"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
@@ -10032,7 +10231,7 @@ name = "fixture"
         let plan = format!(
             r#"
             [[tasks]]
-            task_id     = "huge"
+            task_name     = "huge"
             description = "{huge}"
             "#,
         );
@@ -10064,7 +10263,7 @@ name = "fixture"
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [[tasks]]
-            task_id        = "lone-task"
+            task_name        = "lone-task"
             path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -10096,7 +10295,7 @@ name = "fixture"
             cross_cutting_artifacts = ["Cargo.*"]
 
             [[tasks]]
-            task_id        = "t1"
+            task_name        = "t1"
             path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -10143,7 +10342,7 @@ name = "fixture"
             cross_cutting_artifacts = ["vendor/"]
 
             [[tasks]]
-            task_id        = "t1"
+            task_name        = "t1"
             path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -10180,7 +10379,7 @@ name = "fixture"
             cross_cutting_artifacts = ["Cargo.lock", "go.sum"]
 
             [[tasks]]
-            task_id        = "t1"
+            task_name        = "t1"
             path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -10226,7 +10425,7 @@ name = "fixture"
             repository = "api"
 
             [[tasks]]
-            task_id        = "t1"
+            task_name        = "t1"
             path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -10276,15 +10475,15 @@ name = "fixture"
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [[tasks]]
-            task_id             = "t-normal"
+            task_name             = "t-normal"
             path_allowlist      = ["src/"]
 
             [[tasks]]
-            task_id             = "t-override-1"
+            task_name             = "t-override-1"
             path_scope_override = true
 
             [[tasks]]
-            task_id             = "t-override-2"
+            task_name             = "t-override-2"
             path_scope_override = true
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -10359,7 +10558,7 @@ name = "fixture"
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [[tasks]]
-            task_id        = "t1"
+            task_name        = "t1"
             path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -10395,13 +10594,13 @@ name = "fixture"
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [[tasks]]
-            task_id                   = "t1"
+            task_name                   = "t1"
             path_allowlist            = ["src/"]
             path_export_to_successors = true
             path_export_globs         = ["src/ipc/**"]
 
             [[tasks]]
-            task_id             = "t2"
+            task_name             = "t2"
             path_scope_override = true
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -10427,8 +10626,11 @@ name = "fixture"
             .unwrap();
         assert_eq!(n, 2, "two tasks must be re-inserted from the plan");
 
+        let t1_task_id = task_id_by_name(&store, &init_id, "t1");
+        let t2_task_id = task_id_by_name(&store, &init_id, "t2");
+
         let f1 = restarted_registry
-            .get(&TaskKey::new(&init_id, "t1"))
+            .get(&TaskKey::new(&init_id, &t1_task_id))
             .unwrap();
         assert_eq!(f1.path_allowlist, vec!["src/"]);
         assert!(f1.path_export_to_successors);
@@ -10436,7 +10638,7 @@ name = "fixture"
         assert!(!f1.path_scope_override);
 
         let f2 = restarted_registry
-            .get(&TaskKey::new(&init_id, "t2"))
+            .get(&TaskKey::new(&init_id, &t2_task_id))
             .unwrap();
         assert!(f2.path_scope_override);
     }
@@ -10450,7 +10652,7 @@ name = "fixture"
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"[[tasks]]
-        task_id = "t1"
+        task_name = "t1"
         path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -10485,7 +10687,7 @@ name = "fixture"
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"[[tasks]]
-        task_id = "t1"
+        task_name = "t1"
         path_allowlist = ["src/"]
         "#;
         let (_init_id, _pk) = seed_draft_initiative(&store, plan, &sk);
@@ -10528,7 +10730,7 @@ name = "fixture"
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"[[tasks]]
-        task_id = "t1"
+        task_name = "t1"
         path_allowlist = ["src/"]
         "#;
         let (init_id, pk) = seed_draft_initiative(&store, plan, &sk);
@@ -10542,8 +10744,11 @@ name = "fixture"
             let conn = store.lock_sync();
             let task_state: String = conn
                 .query_row(
-                    &format!("SELECT state FROM {TASKS} WHERE task_id='t1'"),
-                    [],
+                    &format!(
+                        "SELECT state FROM {TASKS}
+                          WHERE initiative_id = ?1 AND task_name = 't1'"
+                    ),
+                    rusqlite::params![&init_id],
                     |r| r.get(0),
                 )
                 .unwrap();
@@ -10564,8 +10769,11 @@ name = "fixture"
         let conn = store.lock_sync();
         let task_state: String = conn
             .query_row(
-                &format!("SELECT state FROM {TASKS} WHERE task_id='t1'"),
-                [],
+                &format!(
+                    "SELECT state FROM {TASKS}
+                      WHERE initiative_id = ?1 AND task_name = 't1'"
+                ),
+                rusqlite::params![&init_id],
                 |r| r.get(0),
             )
             .unwrap();
@@ -10600,11 +10808,11 @@ name = "fixture"
 lane_id = "default"
 
 [[tasks]]
-task_id     = "build-svc"
+task_name     = "build-svc"
 description = "build the service"
 
 [[tasks]]
-task_id            = "review-it"
+task_name            = "review-it"
 description        = "review the diff"
 session_agent_type = "Reviewer"
 predecessors       = ["build-svc"]
@@ -10614,6 +10822,7 @@ predecessors       = ["build-svc"]
         let live_registry = PlanRegistry::new();
         approve_plan_for_test(&init_id, "op", None, &pk, 1, &store, &audit, &live_registry)
             .unwrap();
+        let build_task_id = task_id_by_name(&store, &init_id, "build-svc");
 
         {
             let conn = store.lock_sync();
@@ -10643,9 +10852,9 @@ predecessors       = ["build-svc"]
                         SET activation_state = 'Active',
                             session_id        = 'sess-active',
                             activated_at      = ?1
-                      WHERE task_id = 'build-svc'"
+                      WHERE task_id = ?2"
                 ),
-                rusqlite::params![now],
+                rusqlite::params![now, &build_task_id],
             )
             .unwrap();
         }
@@ -10686,8 +10895,11 @@ predecessors       = ["build-svc"]
 
         let (actor, block_reason): (String, Option<String>) = conn
             .query_row(
-                &format!("SELECT actor, block_reason FROM {TASKS} WHERE task_id = 'build-svc'"),
-                [],
+                &format!(
+                    "SELECT actor, block_reason FROM {TASKS}
+                      WHERE task_id = ?1"
+                ),
+                rusqlite::params![&build_task_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
@@ -10714,7 +10926,7 @@ predecessors       = ["build-svc"]
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"[[tasks]]
-        task_id = "t-paired"
+        task_name = "t-paired"
         path_allowlist = ["src/"]
         "#;
         let (init_id, pk) = seed_draft_initiative(&store, plan, &sk);
@@ -10731,6 +10943,7 @@ predecessors       = ["build-svc"]
             &live_registry,
         )
         .unwrap();
+        let paired_task_id = task_id_by_name(&store, &init_id, "t-paired");
 
         // Fresh sink for the abort path so the witness only counts
         // events emitted by `abort_initiative` itself.
@@ -10747,7 +10960,7 @@ predecessors       = ["build-svc"]
             .iter()
             .filter_map(|e| match &e.kind {
                 k @ raxis_audit_tools::AuditEventKind::TaskStateChanged { task_id, .. }
-                    if task_id == "t-paired" =>
+                    if task_id == &paired_task_id =>
                 {
                     Some(k)
                 }
@@ -10818,7 +11031,7 @@ predecessors       = ["build-svc"]
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"[[tasks]]
-        task_id = "t-abort-paired"
+        task_name = "t-abort-paired"
         path_allowlist = ["src/"]
         "#;
         let (init_id, pk) = seed_draft_initiative(&store, plan, &sk);
@@ -10835,16 +11048,17 @@ predecessors       = ["build-svc"]
             &live_registry,
         )
         .unwrap();
+        let abort_task_id = task_id_by_name(&store, &init_id, "t-abort-paired");
 
         let abort_audit = FakeAuditSink::new();
-        abort_task("t-abort-paired", "op", &store, Some(&abort_audit)).unwrap();
+        abort_task(&abort_task_id, "op", &store, Some(&abort_audit)).unwrap();
 
         let events = abort_audit.events();
         let task_state_changed: Vec<&raxis_audit_tools::AuditEventKind> = events
             .iter()
             .filter_map(|e| match &e.kind {
                 k @ raxis_audit_tools::AuditEventKind::TaskStateChanged { task_id, .. }
-                    if task_id == "t-abort-paired" =>
+                    if task_id == &abort_task_id =>
                 {
                     Some(k)
                 }
@@ -10879,8 +11093,8 @@ predecessors       = ["build-svc"]
         let block_reason: Option<String> = store
             .lock_sync()
             .query_row(
-                &format!("SELECT block_reason FROM {TASKS} WHERE task_id='t-abort-paired'"),
-                [],
+                &format!("SELECT block_reason FROM {TASKS} WHERE task_id = ?1"),
+                rusqlite::params![&abort_task_id],
                 |r| r.get(0),
             )
             .unwrap();
@@ -10916,7 +11130,7 @@ predecessors       = ["build-svc"]
 [meta]
 version = 1
 [[tasks]]
-task_id     = "t-zero-turns"
+task_name     = "t-zero-turns"
 description = "should be rejected at admission"
 max_turns   = 0
 "#;
@@ -10945,7 +11159,7 @@ max_turns   = 0
 [meta]
 version = 1
 [[tasks]]
-task_id     = "t-one-turn"
+task_name     = "t-one-turn"
 description = "minimum admissible budget"
 max_turns   = 1
 "#;
@@ -10968,7 +11182,7 @@ max_turns   = 1
 [meta]
 version = 1
 [[tasks]]
-task_id     = "t-omitted"
+task_name     = "t-omitted"
 description = "no per-task override; defer to policy / compiled fallback"
 "#;
         let tasks = parse_plan_tasks(&canonical_task_fixture(toml))
@@ -10998,7 +11212,7 @@ description = "no per-task override; defer to policy / compiled fallback"
 [meta]
 version = 1
 [[tasks]]
-task_id        = "t-zero-step"
+task_name        = "t-zero-step"
 description    = "zero-step retry MUST fail admission"
 max_turns      = 30
 max_turns_step = 0
@@ -11029,7 +11243,7 @@ max_turns_step = 0
 [meta]
 version = 1
 [[tasks]]
-task_id        = "t-one-step"
+task_name        = "t-one-step"
 description    = "minimum admissible step"
 max_turns      = 30
 max_turns_step = 1
@@ -11054,7 +11268,7 @@ max_turns_step = 1
 [meta]
 version = 1
 [[tasks]]
-task_id     = "t-step-omitted"
+task_name     = "t-step-omitted"
 description = "no per-task step override; defer to policy / derived default"
 max_turns   = 30
 "#;

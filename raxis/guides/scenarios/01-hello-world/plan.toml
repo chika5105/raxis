@@ -32,7 +32,7 @@ target_ref  = "refs/heads/main"
 # need HELLO.md for this scenario, but a leading `./` is the canonical
 # "everything" expression).
 [[tasks]]
-task_id            = "greeter"
+task_name            = "greeter"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["./"]

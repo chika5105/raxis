@@ -14,7 +14,7 @@ repository  = "main"
 target_ref  = "refs/heads/main"
 
 [[tasks]]
-task_id            = "regression_test"
+task_name            = "regression_test"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
@@ -40,7 +40,7 @@ on_failure  = "block_review"
 
 # ── fixer (depends on regression_test) ─────────────────────────────────────
 [[tasks]]
-task_id            = "fixer"
+task_name            = "fixer"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]

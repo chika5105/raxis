@@ -28,7 +28,7 @@ nothing kills the task on time alone.
 
 ```toml
 [[tasks]]
-task_id                = "fix-typo"
+task_name                = "fix-typo"
 prompt             = """Complete Fix Typo according to this plan's acceptance criteria."""
 session_agent_type     = "Executor"
 clone_strategy         = "blobless"
@@ -44,7 +44,7 @@ the agent is doing something wrong; the cap forces a fail-loud.
 
 ```toml
 [[tasks]]
-task_id                = "rebuild-from-scratch"
+task_name                = "rebuild-from-scratch"
 description        = "Rebuild From Scratch"
 prompt             = """Complete Rebuild From Scratch according to this plan's acceptance criteria."""
 session_agent_type     = "Executor"
@@ -60,7 +60,7 @@ hour; budget for it.
 
 ```toml
 [[tasks]]
-task_id                = "code-reviewer"
+task_name                = "code-reviewer"
 prompt             = """Complete Code Reviewer according to this plan's acceptance criteria."""
 session_agent_type     = "Reviewer"
 clone_strategy         = "blobless"

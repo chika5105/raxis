@@ -552,7 +552,7 @@ mod tests {
 [meta]
 title = "demo plan"
 [[tasks]]
-task_id = "t1"
+task_name = "t1"
 "#;
         assert!(scan_for_misconfig_bypass(plan).is_empty());
     }

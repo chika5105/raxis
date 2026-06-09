@@ -139,8 +139,7 @@ target_ref = "refs/heads/main""#;
 // witness pin against the regression returning.
 const SIBLING_PLAN_MATERIALIZER_HEAD: &str = r#"# ── Sibling materializer Executor (P3-6) ────────────────
 [[tasks]]
-task_id            = "sibling-materialize-records"
-name               = "Sibling-initiative materializer (audit-chain isolation witness)"
+task_name            = "sibling-materialize-records"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 # Same workload as `materialize-records` (25 pg rows + 25 mongo docs +
@@ -348,7 +347,7 @@ mod tests {
             .expect("[[tasks]] array");
         let ids: Vec<&str> = tasks
             .iter()
-            .filter_map(|t| t.get("task_id").and_then(|i| i.as_str()))
+            .filter_map(|t| t.get("task_name").and_then(|i| i.as_str()))
             .collect();
         assert_eq!(ids, vec![TASK_SIBLING_MATERIALIZE]);
 
@@ -439,7 +438,10 @@ mod tests {
         let max_turns_per_task: Vec<(&str, i64)> = tasks
             .iter()
             .map(|t| {
-                let id = t.get("task_id").and_then(|i| i.as_str()).expect("task_id");
+                let id = t
+                    .get("task_name")
+                    .and_then(|i| i.as_str())
+                    .expect("task_name");
                 let mt = t.get("max_turns").and_then(|m| m.as_integer()).expect(
                     "INV-PLANNER-MAX-TURNS-PRECEDENCE-01 parity: \
                          every sibling-plan task MUST declare an explicit \

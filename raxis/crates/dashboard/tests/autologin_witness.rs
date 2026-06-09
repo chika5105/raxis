@@ -245,6 +245,7 @@ async fn autologin_jwt_outlives_realistic_kernel_uptime_and_authorizes_reads() {
             failed_tasks: 0,
             created_at: 1_700_000_000,
             updated_at: 1_700_000_000,
+            tasks: Vec::new(),
         },
         approved_by: None,
         plan_sha256: None,
@@ -252,6 +253,7 @@ async fn autologin_jwt_outlives_realistic_kernel_uptime_and_authorizes_reads() {
         policy_epoch: 1,
         tasks: Vec::new(),
         edges: Vec::new(),
+        run_summary: Default::default(),
         failure: None,
     });
 

@@ -436,7 +436,7 @@ patterns = ["*.githubusercontent.com"]
 
 # ─── Per-task credential-proxy mount (no bytes ever in VM) ────
 [[tasks]]
-task_id            = "service-round-trip"
+task_name            = "service-round-trip"
 session_agent_type = "Executor"
 
   [[tasks.credentials]]

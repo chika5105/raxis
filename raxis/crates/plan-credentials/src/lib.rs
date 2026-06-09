@@ -889,12 +889,12 @@ pub struct AzureResourceActions {
 pub enum ParseError {
     /// The `[[tasks.credentials]]` array is structurally malformed
     /// (e.g. a non-table element, or missing required field).
-    #[error("[[tasks.credentials]] entry {index} of task {task_id:?}: {detail}")]
+    #[error("[[tasks.credentials]] entry {index} of task {task_name:?}: {detail}")]
     Malformed {
         /// Index within the tasks.credentials array.
         index: usize,
-        /// Owning task id from the plan TOML.
-        task_id: String,
+        /// Owning task name from the plan TOML.
+        task_name: String,
         /// Free-form diagnostic.
         detail: String,
     },
@@ -904,11 +904,11 @@ pub enum ParseError {
     /// proxy unreachable. Caught at plan admission (shift-left) so
     /// the operator gets an immediate, actionable diagnostic.
     #[error(
-        "task {task_id:?}: duplicate mount_as `{mount_as}` on credentials `{first}` and `{second}`"
+        "task {task_name:?}: duplicate mount_as `{mount_as}` on credentials `{first}` and `{second}`"
     )]
     DuplicateMountAs {
-        /// Owning task id.
-        task_id: String,
+        /// Owning task name.
+        task_name: String,
         /// The colliding env-var name.
         mount_as: String,
         /// Credential name of the first declaration.
@@ -930,8 +930,8 @@ pub enum ParseError {
 /// absent.
 pub fn parse_for_task(task_value: &toml::Value) -> Result<Vec<TaskCredentialDecl>, ParseError> {
     let task_table = task_value.as_table().ok_or(ParseError::TaskNotTable)?;
-    let task_id = task_table
-        .get("task_id")
+    let task_name = task_table
+        .get("task_name")
         .and_then(|v| v.as_str())
         .unwrap_or("<unknown>")
         .to_owned();
@@ -941,7 +941,7 @@ pub fn parse_for_task(task_value: &toml::Value) -> Result<Vec<TaskCredentialDecl
         Some(other) => {
             return Err(ParseError::Malformed {
                 index: 0,
-                task_id,
+                task_name,
                 detail: format!(
                     "credentials must be a TOML array of tables, got {}",
                     other.type_str(),
@@ -955,7 +955,7 @@ pub fn parse_for_task(task_value: &toml::Value) -> Result<Vec<TaskCredentialDecl
     for (i, entry) in arr.iter().enumerate() {
         let parsed = parse_one_decl(entry).map_err(|detail| ParseError::Malformed {
             index: i,
-            task_id: task_id.clone(),
+            task_name: task_name.clone(),
             detail,
         })?;
         out.push(parsed);
@@ -971,7 +971,7 @@ pub fn parse_for_task(task_value: &toml::Value) -> Result<Vec<TaskCredentialDecl
         for decl in &out {
             if let Some(&first_name) = seen.get(decl.mount_as.as_str()) {
                 return Err(ParseError::DuplicateMountAs {
-                    task_id: task_id.clone(),
+                    task_name: task_name.clone(),
                     mount_as: decl.mount_as.clone(),
                     first: first_name.to_owned(),
                     second: decl.name.as_str().to_owned(),
@@ -1042,7 +1042,7 @@ mod tests {
     fn no_credentials_yields_empty_vec() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
         "#;
         assert!(parse(toml).unwrap().is_empty());
     }
@@ -1051,7 +1051,7 @@ mod tests {
     fn parses_postgres_decl_with_default_restrictions() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "db-staging"
@@ -1074,7 +1074,7 @@ mod tests {
     fn parses_postgres_decl_with_allow_only_select() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "db-prod-readonly"
@@ -1098,7 +1098,7 @@ mod tests {
     fn parses_http_bearer() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name         = "kube-prod"
@@ -1125,7 +1125,7 @@ mod tests {
     fn parses_http_basic_with_user() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name         = "saas-prod"
@@ -1150,7 +1150,7 @@ mod tests {
     fn parses_http_with_method_and_path_prefix_restrictions() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name         = "api-readonly"
@@ -1182,7 +1182,7 @@ mod tests {
     fn parses_k8s_proxy_type() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "kube-staging"
@@ -1205,7 +1205,7 @@ mod tests {
     fn parses_aws_decl_with_default_restrictions() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "aws-staging"
@@ -1237,7 +1237,7 @@ mod tests {
     fn parses_aws_decl_with_custom_lease_and_path_allowlist() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name           = "aws-prod"
@@ -1269,7 +1269,7 @@ mod tests {
     fn parses_redis_decl_with_default_restrictions() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name               = "redis-staging"
@@ -1296,7 +1296,7 @@ mod tests {
     fn parses_redis_decl_with_command_allowlist() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name               = "redis-prod"
@@ -1323,7 +1323,7 @@ mod tests {
     fn parses_gcp_decl_with_default_restrictions() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "gcp-staging"
@@ -1354,7 +1354,7 @@ mod tests {
     fn parses_gcp_decl_with_numeric_project_and_path_allowlist() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name             = "gcp-prod"
@@ -1394,7 +1394,7 @@ mod tests {
     fn parses_azure_decl_with_resource_allowlist() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name      = "azure-staging"
@@ -1437,7 +1437,7 @@ mod tests {
     fn parses_azure_decl_with_client_id_and_custom_lease() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name          = "azure-mi"
@@ -1468,7 +1468,7 @@ mod tests {
     fn parses_mysql_decl_with_allow_only_select() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "mysql-staging"
@@ -1491,7 +1491,7 @@ mod tests {
     fn parses_mssql_decl_with_allow_only_select() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "mssql-staging"
@@ -1514,7 +1514,7 @@ mod tests {
     fn parses_mongodb_decl_with_allow_read_only() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "mongo-staging"
@@ -1537,7 +1537,7 @@ mod tests {
     fn parses_smtp_decl_with_default_auth_mode_and_no_restrictions() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name               = "smtp-relay-staging"
@@ -1569,7 +1569,7 @@ mod tests {
     fn parses_smtp_decl_with_full_restrictions_and_login_auth() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name                 = "smtp-prod"
@@ -1626,7 +1626,7 @@ mod tests {
     fn unknown_proxy_type_is_preserved_as_unknown_variant() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "future"
@@ -1641,7 +1641,7 @@ mod tests {
     fn missing_name_is_structured_error() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               proxy_type = "postgres"
@@ -1650,11 +1650,11 @@ mod tests {
         let err = parse(toml).unwrap_err();
         match err {
             ParseError::Malformed {
-                task_id,
+                task_name,
                 index,
                 detail,
             } => {
-                assert_eq!(task_id, "demo");
+                assert_eq!(task_name, "demo");
                 assert_eq!(index, 0);
                 assert!(detail.contains("name"), "got {detail:?}");
             }
@@ -1666,7 +1666,7 @@ mod tests {
     fn missing_mount_as_is_structured_error() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "x"
@@ -1685,7 +1685,7 @@ mod tests {
     fn missing_proxy_type_is_structured_error() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name     = "x"
@@ -1704,7 +1704,7 @@ mod tests {
     fn multiple_credentials_in_one_task() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "db"
@@ -1728,7 +1728,7 @@ mod tests {
     fn duplicate_mount_as_rejected_at_parse_time() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "users-db"
@@ -1764,7 +1764,7 @@ mod tests {
     fn distinct_mount_as_across_same_proxy_type_is_valid() {
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "users-db"
@@ -1789,7 +1789,7 @@ mod tests {
         // value per key.
         let toml = r#"
             [[tasks]]
-            task_id = "demo"
+            task_name = "demo"
 
               [[tasks.credentials]]
               name       = "prod-db"

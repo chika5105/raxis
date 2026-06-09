@@ -214,7 +214,7 @@ export function FailureReasonPanel({
         <div id="failure-details" className="space-y-2">
           {fields.length > 0 && (
             <dl
-              className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-[12.5px] bg-panel-raised rounded p-2 border border-edge"
+              className="grid min-w-0 max-w-full grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 text-[12.5px] bg-panel-raised rounded p-2 border border-edge"
               data-testid="failure-fields"
             >
               {fields.map((f, i) => (

@@ -402,6 +402,7 @@ mod tests {
     fn sample_task(state: &str) -> TaskRow {
         TaskRow {
             task_id: "t-1".to_owned(),
+            task_name: Some("sample-task".to_owned()),
             initiative_id: "init-1".to_owned(),
             initiative_state: "Executing".to_owned(),
             lane_id: "default".to_owned(),

@@ -8,7 +8,7 @@ description    = "Minimal single-task plan with no gates and no dependencies"
 version        = "1"
 
 [[tasks]]
-task_id        = "task-alpha"
+task_name        = "task-alpha"
 description    = "Implement the feature"
 intent_kinds   = ["SingleCommit", "CompleteTask"]
 path_allowlist    = ["src/", "tests/"]

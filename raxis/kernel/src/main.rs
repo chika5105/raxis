@@ -2206,6 +2206,7 @@ async fn main() {
                         data_dir.clone(),
                         policy_path.clone(),
                         started_at,
+                        Some(Arc::clone(&artifact_store)),
                         stream_capture,
                         advancer,
                         Arc::clone(&audit),
@@ -2278,10 +2279,10 @@ async fn main() {
                         }
                         Err(e) => {
                             eprintln!(
-                                "{{\"level\":\"warn\",\"event\":\"dashboard_start_failed\",\
+                                "{{\"level\":\"error\",\"event\":\"dashboard_start_failed\",\
                                  \"reason\":\"{e}\"}}"
                             );
-                            None
+                            std::process::exit(crate::errors::BOOT_ERR_SOCKET_BIND);
                         }
                     }
                 }

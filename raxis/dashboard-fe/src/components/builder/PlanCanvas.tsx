@@ -726,8 +726,8 @@ function InlineTaskEditor({
         className="nodrag nopan nowheel flex-1 overflow-y-auto overscroll-y-auto scroll-thin p-4 pb-8 space-y-3 [touch-action:pan-y]"
         onPointerDown={(event) => event.stopPropagation()}
       >
-        <div className="grid grid-cols-[1fr_8.5rem] gap-2">
-          <CardField label="Task id">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_8.5rem] gap-2">
+          <CardField label="Task name">
             <input
               value={task.id}
               onChange={(e) => onUpdate({ id: e.target.value })}
@@ -780,7 +780,7 @@ function InlineTaskEditor({
           )}
         </CardField>
 
-        <div className="grid grid-cols-[1fr_8.5rem] gap-2">
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_8.5rem] gap-2">
           <CardField label="Path allowlist">
             <input
               value={task.paths}
@@ -1072,7 +1072,7 @@ function InlineTaskEditor({
                           Remove
                         </button>
                       </div>
-                      <div className="grid grid-cols-[1fr_7.5rem] gap-2">
+                      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_7.5rem] gap-2">
                         <CardField label="Name">
                           <input
                             value={credential.name}
@@ -1175,7 +1175,7 @@ function InlineTaskEditor({
               </select>
             </CardField>
           </div>
-          <div className="grid grid-cols-[1fr_8rem] gap-2">
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_8rem] gap-2">
             <CardField label="Command">
               <input
                 value={task.verifierCommand}
@@ -1193,7 +1193,7 @@ function InlineTaskEditor({
               />
             </CardField>
           </div>
-          <div className="grid grid-cols-[1fr_8rem] gap-2">
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_8rem] gap-2">
             <CardField label="Artifact">
               <input
                 value={task.verifierArtifact}

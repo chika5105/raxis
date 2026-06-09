@@ -51,7 +51,7 @@ pub fn run_add(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         opts.plan.display()
     );
     println!(
-        "Next: attach it with `raxis tools attach --plan {} --task <task_id> --profile {}`.",
+        "Next: attach it with `raxis tools attach --plan {} --task <task_name> --profile {}`.",
         opts.plan.display(),
         spec.profile
     );
@@ -437,7 +437,7 @@ fn print_add_help() {
 }
 
 fn print_attach_help() {
-    println!("Usage: raxis tools attach --plan <plan.toml> --task <task_id> --profile <name>");
+    println!("Usage: raxis tools attach --plan <plan.toml> --task <task_name> --profile <name>");
 }
 
 fn print_test_help() {

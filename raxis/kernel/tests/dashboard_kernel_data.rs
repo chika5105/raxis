@@ -75,11 +75,11 @@ async fn seed_initiatives(store: &Store) {
         description = "Dashboard fixture initiative A"
 
         [[tasks]]
-        task_id = "task-A1"
+        task_name = "task-A1"
         session_agent_type = "Executor"
 
         [[tasks]]
-        task_id = "task-A2"
+        task_name = "task-A2"
         session_agent_type = "Reviewer"
     "#;
     let plan_b = br#"
@@ -90,7 +90,7 @@ async fn seed_initiatives(store: &Store) {
         description = "Dashboard fixture initiative B"
 
         [[tasks]]
-        task_id = "task-B1"
+        task_name = "task-B1"
         session_agent_type = "Executor"
     "#;
     conn.execute(
@@ -231,6 +231,19 @@ async fn get_initiative_includes_tasks_and_dag_edges() {
 async fn health_snapshot_reports_ok_when_chain_and_store_are_clean() {
     let (tmp, store) = fresh_data_dir();
     seed_initiatives(&store).await;
+    {
+        let conn = store.lock().await;
+        let initiatives = raxis_store::Table::Initiatives.as_str();
+        conn.execute(
+            &format!(
+                "INSERT INTO {initiatives} \
+                 (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                 VALUES ('init-draft', 'Draft', '{{}}', 'sha-draft', 300)"
+            ),
+            [],
+        )
+        .unwrap();
+    }
     let policy = policy_with_operator([0xBBu8; 32], vec![]);
 
     let data = raxis_dashboard_kernel::KernelDashboardData::new(
@@ -248,7 +261,10 @@ async fn health_snapshot_reports_ok_when_chain_and_store_are_clean() {
         h
     );
     assert_eq!(h.policy_epoch, 0); // for_tests_with_operators starts at epoch 0
-    assert_eq!(h.active_initiatives, 1, "only Executing counts as active");
+    assert_eq!(
+        h.active_initiatives, 1,
+        "Draft rows must not count as active/in-flight"
+    );
 }
 
 #[tokio::test]

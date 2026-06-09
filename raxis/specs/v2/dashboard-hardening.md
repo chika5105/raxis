@@ -1758,6 +1758,16 @@ machinery.
 | `EscalationRateLimitExceeded` | **No** | Approve is structural no-op (the storm pattern needs out-of-band investigation). Operator should Deny. | N/A. |
 | `SessionEgressStallDetected` | Yes | Flip `Failed → Executing`; orchestrator's next decision-cycle re-runs the egress-blocked session. | If egress still stalled, fresh anchor with the stalled session_id in `cause_seq`. |
 
+`ReviewRejectionCeilingExceeded` is deliberately **not** part of
+the approve-to-resume table. It means a Reviewer supplied a
+concrete rejection, the Executor consumed its
+`max_review_rejections` repair budget, and the initiative failed
+closed with the Reviewer critique as the terminal cause. The
+operator recovery path is to revise the plan, prompt, policy, or
+source inputs and submit a fresh initiative; blindly resuming the
+same exhausted review loop would re-trip immediately and hide the
+real reviewer finding behind orchestration noise.
+
 ### §10.2 — Anti-loop guarantee
 
 The helper's `cause_seq` always includes a per-instance

@@ -55,7 +55,7 @@ target_ref  = "refs/heads/main"
 
 # Stage 1: Land the gate (feature-flagged stub).
 [[tasks]]
-task_id            = "pricing-stub"
+task_name            = "pricing-stub"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/pricing/", "tests/pricing/"]
@@ -64,7 +64,7 @@ description        = "Pricing Stub"
 prompt             = """Add a `flat_fee` vs `percent_fee` enum behind the off-by-default `RAXIS_PRICING_PERCENT` flag. No behaviour change at runtime."""
 
 [[tasks]]
-task_id            = "review-stub"
+task_name            = "review-stub"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/pricing/", "tests/pricing/"]
@@ -75,7 +75,7 @@ prompt             = """Verify the gate exists, defaults to off, and is exercise
 # Stage 2: Real implementation. CANNOT START until Stage 1 is
 # Completed (`predecessors = ["review-stub"]` is the contract).
 [[tasks]]
-task_id            = "pricing-impl"
+task_name            = "pricing-impl"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/pricing/", "tests/pricing/"]
@@ -84,7 +84,7 @@ description        = "Pricing Impl"
 prompt             = """Implement percent-based pricing in the new `percent_fee` arm of the enum from stage 1. Flag remains off in production."""
 
 [[tasks]]
-task_id            = "review-impl"
+task_name            = "review-impl"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/pricing/", "tests/pricing/"]
@@ -95,7 +95,7 @@ prompt             = """Verify the percent-fee arithmetic (boundary tests, overf
 # Stage 3: The flag flip. Touches a different path, must wait
 # for the impl to merge first.
 [[tasks]]
-task_id            = "pricing-flip"
+task_name            = "pricing-flip"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["config/feature-flags.toml"]
@@ -104,7 +104,7 @@ description        = "Pricing Flip"
 prompt             = """Set `pricing.percent_fee_enabled = true` in config/feature-flags.toml."""
 
 [[tasks]]
-task_id            = "review-flip"
+task_name            = "review-flip"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["config/feature-flags.toml"]
@@ -204,7 +204,7 @@ concurrency, see the fan-out pattern.
 | `pricing-flip` never starts | Its predecessor (`review-impl`) didn't reach `Completed`. Reviewers `Complete` only after a `SubmitReview` whose `approved = true` chain merges. Inspect `raxis initiative show <id>` for the upstream task state. | Push the upstream task to completion, or abort. |
 | `FAIL_TASK_NOT_ADMITTED` on `ActivateSubTask` for a downstream task | Operator (or orchestrator) tried to start a task before its predecessors completed. | The orchestrator should only `ActivateSubTask` after the kernel emits `KernelPush::TaskAdmitted`. |
 | Plan parse error: cycle in predecessors | A → B → A. The parser detects this and rejects with `LifecycleError::PlanInvalid`. | Refactor — Raxis plans are strict DAGs (no cycles, no self-edges). |
-| Predecessor declared but not present in `[[tasks]]` | Typo. The parser cross-validates that every entry in `predecessors` matches a `task_id`. | Fix the typo, re-submit. |
+| Predecessor declared but not present in `[[tasks]]` | Typo. The parser cross-validates that every entry in `predecessors` matches a declared `task_name`. | Fix the typo, re-submit. |
 | Reviewer can run while stub is still in PR | You forgot `predecessors = ["pricing-stub"]` on `review-stub`. Without it, the kernel admits the Reviewer immediately and it has nothing to review. | Add the edge. The plan-validator (`raxis plan validate`) catches Reviewers without a single Executor predecessor. |
 
 ---

@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 
 import {
+  effectiveTaskState,
   shortStateLabel,
   stateTone,
   toneClasses,
@@ -10,6 +11,7 @@ import {
 
 export interface DagGraphNode {
   task_id: string;
+  task_name?: string | null;
   title: string;
   agent_type?: string;
   state: string;
@@ -47,8 +49,7 @@ export interface DagGraphNode {
 /// task with FSM state `Admitted` is rendered as Running because
 /// from the operator's perspective an executor IS doing work.
 function effectiveState(node: DagGraphNode): string {
-  if (node.is_active && node.state === "Admitted") return "Running";
-  return node.state;
+  return effectiveTaskState(node.state, node.is_active);
 }
 
 function visualState(node: DagGraphNode): string {
@@ -387,7 +388,7 @@ export function DagGraph({
                 {"\n"}
                 {isGate
                   ? `task: ${n.parent_task_id}`
-                  : `${n.agent_type ?? "Task"}: ${n.task_id}`}
+                  : `${n.agent_type ?? "Task"}${n.task_name ? ` name: ${n.task_name}` : ""}\nruntime id: ${n.task_id}`}
                 {"\n"}
                 {isGate
                   ? `source: ${gateSourceLabel(n.gate_source)}\nhook: ${hookLabel(n.gate_hook)}\nverdict: ${n.latest_verdict ?? "Pending"}`

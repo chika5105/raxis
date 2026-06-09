@@ -107,7 +107,7 @@ the kernel's stderr with shape:
 PlannerMaxTurnsResolved {
   source        = "task" | "policy" | "compiled-default",
   resolved      = N,
-  task_id       = "<task_id>",        // "<orchestrator>" for orchestrator spawns
+  task_id       = "<runtime task UUID>", // "<orchestrator>" for orchestrator spawns
   session_id    = "sess-…",
   initiative_id = "init-…",
 }
@@ -258,7 +258,7 @@ A representative spawn env:
 
 ```bash
 RAXIS_KERNEL_PLANNER_SOCKET=/run/raxis/sockets/planner-c4f1e8.sock
-RAXIS_PLANNER_KSB={"session_id":"c4f1e8...","task_id":"implementer",...}
+RAXIS_PLANNER_KSB={"session_id":"c4f1e8...","task_id":"019ea...", "task_name":"implementer",...}
 RAXIS_PLANNER_TASK_PROMPT="Implement IP-based rate limiting on POST /auth/login. ..."
 RAXIS_PLANNER_BASE_URL=https://api.anthropic.com
 RAXIS_PLANNER_MAX_TURNS=100

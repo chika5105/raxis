@@ -20,7 +20,7 @@ target_ref  = "refs/heads/main"
 
 # ── Executor ────────────────────────────────────────────────────────────────
 [[tasks]]
-task_id            = "adder"
+task_name            = "adder"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
@@ -42,7 +42,7 @@ prompt             = """
 # the kernel — the Reviewer reads `evaluation_sha` from its activation
 # envelope.
 [[tasks]]
-task_id            = "reviewer"
+task_name            = "reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]

@@ -231,7 +231,7 @@ Assign it to an Executor:
 
 ```toml
 [[tasks]]
-task_id = "build-mobile-demo"
+task_name = "build-mobile-demo"
 description = "Build the mobile demo artifact."
 session_agent_type = "Executor"
 profiles          = ["unity_mobile"]

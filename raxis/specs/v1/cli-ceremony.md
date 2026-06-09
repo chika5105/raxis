@@ -1035,7 +1035,7 @@ description    = "Minimal single-task plan with no gates and no dependencies"
 version        = "1"
 
 [[tasks]]
-task_id        = "task-alpha"
+task_name        = "task-alpha"
 description    = "Implement the feature"
 intent_kinds   = ["SingleCommit", "CompleteTask"]
 path_allowlist = ["src/", "tests/"]
@@ -1066,7 +1066,7 @@ description    = "Single task with one TestCoverage gate"
 version        = "1"
 
 [[tasks]]
-task_id        = "task-beta"
+task_name        = "task-beta"
 description    = "Implement and test the feature"
 intent_kinds   = ["SingleCommit", "CompleteTask"]
 path_allowlist = ["src/", "tests/"]
@@ -1097,7 +1097,7 @@ description    = "Three-task dependency chain"
 version        = "1"
 
 [[tasks]]
-task_id        = "task-1-foundation"
+task_name        = "task-1-foundation"
 description    = "Build the foundation layer"
 intent_kinds   = ["SingleCommit", "CompleteTask"]
 path_allowlist = ["src/foundation/"]
@@ -1105,7 +1105,7 @@ predecessors   = []
 gates          = []
 
 [[tasks]]
-task_id        = "task-2-feature"
+task_name        = "task-2-feature"
 description    = "Build the feature on top"
 intent_kinds   = ["SingleCommit", "CompleteTask"]
 path_allowlist = ["src/feature/"]
@@ -1113,7 +1113,7 @@ predecessors   = ["task-1-foundation"]
 gates          = []
 
 [[tasks]]
-task_id        = "task-3-integration"
+task_name        = "task-3-integration"
 description    = "Integration wiring"
 intent_kinds   = ["SingleCommit", "CompleteTask"]
 path_allowlist = ["src/integration/", "tests/integration/"]
@@ -1144,7 +1144,7 @@ description    = "Two agent tasks plus one integration merge task"
 version        = "1"
 
 [[tasks]]
-task_id        = "task-agent-a"
+task_name        = "task-agent-a"
 description    = "Agent A feature branch"
 intent_kinds   = ["SingleCommit", "CompleteTask"]
 path_allowlist = ["src/feature-a/"]
@@ -1152,7 +1152,7 @@ predecessors   = []
 gates          = []
 
 [[tasks]]
-task_id        = "task-agent-b"
+task_name        = "task-agent-b"
 description    = "Agent B feature branch"
 intent_kinds   = ["SingleCommit", "CompleteTask"]
 path_allowlist = ["src/feature-b/"]
@@ -1160,7 +1160,7 @@ predecessors   = []
 gates          = []
 
 [[tasks]]
-task_id        = "task-integration"
+task_name        = "task-integration"
 description    = "Merge agent branches onto main"
 intent_kinds   = ["IntegrationMerge", "CompleteTask"]
 path_allowlist = ["src/feature-a/", "src/feature-b/"]

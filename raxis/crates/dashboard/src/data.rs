@@ -606,6 +606,10 @@ pub struct RecentSessionEntry {
     /// Owning task id, when the kernel recorded one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    /// Operator-authored task name, when the kernel can bind the
+    /// session to a real plan task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_name: Option<String>,
     /// Owning initiative id, when the kernel recorded one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative_id: Option<String>,
@@ -1009,6 +1013,30 @@ pub struct InitiativeListEntry {
     pub created_at: u64,
     /// Unix-seconds latest-update timestamp.
     pub updated_at: u64,
+    /// Compact task identities for search/preview on the
+    /// initiatives index. Detailed task rows still live on
+    /// [`InitiativeView::tasks`]; this bounded summary lets the
+    /// list page search by both kernel task id and operator task
+    /// name without another browser-side fetch per row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<InitiativeTaskListEntry>,
+}
+
+/// Compact task identity emitted inside [`InitiativeListEntry`].
+#[derive(Debug, Clone, Serialize)]
+pub struct InitiativeTaskListEntry {
+    /// Kernel-owned immutable task id.
+    pub task_id: String,
+    /// Operator-authored task name from `plan.toml`, when this is
+    /// a real plan task rather than a synthetic kernel task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_name: Option<String>,
+    /// Dashboard display title for the task.
+    pub title: String,
+    /// `Orchestrator` / `Executor` / `Reviewer`.
+    pub agent_type: String,
+    /// Current task FSM state.
+    pub state: String,
 }
 
 /// Detailed initiative view.
@@ -1154,8 +1182,13 @@ pub struct InitiativePlanView {
 /// Task detail view.
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskView {
-    /// Task id (`task_…`).
+    /// Kernel-owned runtime task id. In V3 this is a UUID and is
+    /// used for links, audit correlation, and IPC protocol state.
     pub task_id: String,
+    /// Operator-authored `[[tasks]].task_name`, unique only within
+    /// one initiative. This is the human DAG/display identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_name: Option<String>,
     /// Owning initiative id.
     pub initiative_id: String,
     /// Operator-authored `[workspace].name`.
@@ -1528,6 +1561,11 @@ pub struct SessionView {
     pub initiative_display_name: Option<String>,
     /// Owning task id (None for orchestrator).
     pub task_id: Option<String>,
+    /// Operator-authored task name, when known. This is separate
+    /// from `task_id`: task ids are immutable kernel UUIDs, while
+    /// task names are the human labels operators search for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_name: Option<String>,
     /// FSM state.
     pub state: String,
     /// Provider id (e.g. `anthropic`, `openai`, `bedrock`).
@@ -1882,6 +1920,30 @@ pub struct PolicySnapshotView {
     pub notification_routes: HashMap<String, Vec<String>>,
 }
 
+/// One row from `policy_epoch_history`, enriched for the dashboard
+/// history surface. The row itself is the source-of-truth ledger;
+/// `artifact_available` only tells the UI whether the exact
+/// historical `policy.toml` bytes can be opened from the immutable
+/// artifact store.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PolicyHistoryEntry {
+    /// Policy epoch id.
+    pub epoch: u64,
+    /// SHA-256 of the policy artifact bytes.
+    pub policy_sha256: String,
+    /// Authority/operator fingerprint recorded as signer.
+    pub signed_by_authority: String,
+    /// Operator fingerprint that triggered the epoch advance.
+    pub triggered_by_operator: String,
+    /// Unix-seconds timestamp recorded by the kernel.
+    pub advanced_at: u64,
+    /// Whether this row is the currently loaded policy.
+    pub is_active: bool,
+    /// Whether the content-addressed `policy.toml` artifact exists
+    /// and can be offered through the raw history endpoint.
+    pub artifact_available: bool,
+}
+
 /// Per-operator summary in [`PolicySnapshotView`].
 #[derive(Debug, Clone, Serialize)]
 pub struct PolicyOperatorView {
@@ -1922,7 +1984,7 @@ pub struct PolicyAdvancement {
 }
 
 /// Severity for a Plan/Policy Builder validation issue.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BuilderValidationSeverity {
     /// The artifact should not be submitted until fixed.
@@ -2964,6 +3026,15 @@ pub trait DashboardData: Send + Sync + 'static {
     /// `write_policy`-role policy editor.
     fn policy_toml_bytes(&self) -> Result<String, ApiError>;
 
+    /// Policy epoch ledger, newest first. Readable by the same
+    /// operators who can view the structured policy snapshot.
+    fn policy_history(&self, limit: usize) -> Result<Vec<PolicyHistoryEntry>, ApiError>;
+
+    /// Raw historical `policy.toml` bytes for a specific epoch.
+    /// Implementations MUST verify the artifact's SHA-256 against
+    /// the history row before returning bytes.
+    fn policy_epoch_toml_bytes(&self, epoch: u64) -> Result<String, ApiError>;
+
     /// Validate a draft `plan.toml` from the dashboard Plan Builder.
     ///
     /// This is intentionally read-only: it must never write the plan
@@ -3239,6 +3310,8 @@ struct InMemoryInner {
     notifications: Vec<NotificationView>,
     policy: Option<PolicySnapshotView>,
     policy_toml: String,
+    policy_history: Vec<PolicyHistoryEntry>,
+    policy_history_toml: HashMap<u64, String>,
     health: Option<HealthSnapshot>,
     /// (entry, detail, log entries, default-diff, ranged-diff store)
     worktrees: Vec<WorktreeFixture>,
@@ -3399,8 +3472,47 @@ impl InMemoryDashboardData {
         toml: impl Into<String>,
     ) -> &Arc<Self> {
         let mut g = self.inner.write();
+        let toml = toml.into();
+        let entry = PolicyHistoryEntry {
+            epoch: snap.epoch,
+            policy_sha256: snap.policy_sha256.clone(),
+            signed_by_authority: snap.signed_by.clone(),
+            triggered_by_operator: "fixture".into(),
+            advanced_at: snap.signed_at.max(0) as u64,
+            is_active: true,
+            artifact_available: true,
+        };
+        g.policy_history.retain(|h| h.epoch != entry.epoch);
+        for h in &mut g.policy_history {
+            h.is_active = false;
+        }
+        g.policy_history.insert(0, entry);
+        g.policy_history_toml.insert(snap.epoch, toml.clone());
         g.policy = Some(snap);
-        g.policy_toml = toml.into();
+        g.policy_toml = toml;
+        self
+    }
+
+    /// Seed one policy-history row in tests. The optional TOML
+    /// payload mirrors artifact availability: `Some(_)` means the
+    /// historical raw TOML endpoint can serve it, `None` means the
+    /// row remains visible but the artifact is unavailable.
+    pub fn push_policy_history(
+        self: &Arc<Self>,
+        mut entry: PolicyHistoryEntry,
+        toml: Option<String>,
+    ) -> &Arc<Self> {
+        let mut g = self.inner.write();
+        if let Some(active) = g.policy.as_ref() {
+            entry.is_active = entry.epoch == active.epoch;
+        }
+        entry.artifact_available = toml.is_some();
+        g.policy_history.retain(|h| h.epoch != entry.epoch);
+        if let Some(toml) = toml {
+            g.policy_history_toml.insert(entry.epoch, toml);
+        }
+        g.policy_history.push(entry);
+        g.policy_history.sort_by(|a, b| b.epoch.cmp(&a.epoch));
         self
     }
 
@@ -3785,6 +3897,24 @@ impl DashboardData for InMemoryDashboardData {
         Ok(g.policy_toml.clone())
     }
 
+    fn policy_history(&self, limit: usize) -> Result<Vec<PolicyHistoryEntry>, ApiError> {
+        let mut rows = self.inner.read().policy_history.clone();
+        rows.sort_by(|a, b| b.epoch.cmp(&a.epoch));
+        rows.truncate(limit.min(200));
+        Ok(rows)
+    }
+
+    fn policy_epoch_toml_bytes(&self, epoch: u64) -> Result<String, ApiError> {
+        self.inner
+            .read()
+            .policy_history_toml
+            .get(&epoch)
+            .cloned()
+            .ok_or(ApiError::NotFound {
+                kind: "policy artifact".into(),
+            })
+    }
+
     fn validate_plan_builder_toml(
         &self,
         _operator_fingerprint: &str,
@@ -4095,6 +4225,21 @@ impl DashboardData for InMemoryDashboardData {
             .as_ref()
             .map(|p| p.signed_by.clone())
             .unwrap_or_else(|| operator_fingerprint.to_owned());
+        for h in &mut g.policy_history {
+            h.is_active = false;
+        }
+        g.policy_history.push(PolicyHistoryEntry {
+            epoch: new_epoch,
+            policy_sha256: policy_sha256.clone(),
+            signed_by_authority: signed_by_authority.clone(),
+            triggered_by_operator: operator_fingerprint.to_owned(),
+            advanced_at: 0,
+            is_active: true,
+            artifact_available: true,
+        });
+        g.policy_history.sort_by(|a, b| b.epoch.cmp(&a.epoch));
+        g.policy_history_toml
+            .insert(new_epoch, String::from_utf8_lossy(toml_bytes).into_owned());
         Ok(PolicyAdvancement {
             previous_epoch: prev_epoch,
             new_epoch,
@@ -4369,6 +4514,7 @@ pub mod recent_activity_filter {
         // self-healing path bottomed out.
         "KernelRestartHaltedCircuitOpen",
         "OrchestratorRespawnCeilingExceeded",
+        "ReviewRejectionCeilingExceeded",
         "CredentialProxyUpstreamFailed",
         "OperatorRotatedDashboardJwtSecret",
         // 5. Integration merge.
@@ -4583,6 +4729,7 @@ mod tests {
                 failed_tasks: 0,
                 created_at: 100,
                 updated_at: 200,
+                tasks: Vec::new(),
             },
             approved_by: Some("alice".into()),
             plan_sha256: Some("deadbeef".into()),
@@ -4591,6 +4738,7 @@ mod tests {
             tasks: vec![
                 TaskView {
                     task_id: format!("{id}-t1"),
+                    task_name: Some("first".into()),
                     initiative_id: id.into(),
                     initiative_display_name: format!("Initiative {id}"),
                     agent_type: "Executor".into(),
@@ -4619,6 +4767,7 @@ mod tests {
                 },
                 TaskView {
                     task_id: format!("{id}-t2"),
+                    task_name: Some("second".into()),
                     initiative_id: id.into(),
                     initiative_display_name: format!("Initiative {id}"),
                     agent_type: "Executor".into(),
@@ -4722,6 +4871,7 @@ mod tests {
     fn task_view_omits_failure_field_when_none() {
         let t = TaskView {
             task_id: "t-1".into(),
+            task_name: Some("t".into()),
             initiative_id: "i-1".into(),
             initiative_display_name: "Initiative i-1".into(),
             agent_type: "Executor".into(),
@@ -4765,6 +4915,7 @@ mod tests {
     fn task_view_with_failure_serialises_full_shape() {
         let t = TaskView {
             task_id: "t-1".into(),
+            task_name: Some("t".into()),
             initiative_id: "i-1".into(),
             initiative_display_name: "Initiative i-1".into(),
             agent_type: "Executor".into(),
