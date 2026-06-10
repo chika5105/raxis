@@ -41,7 +41,9 @@
 //!
 //! 1. Confirms `<worktree_root>/<expected_file>` exists.
 //! 2. Reads the file, canonicalises both seed and file content,
-//!    and byte-compares.
+//!    and compares the semantic bytes. A missing terminal newline
+//!    is tolerated because it does not change the rows/envelope;
+//!    any other byte drift fails closed with a bounded diff.
 //! 3. Walks the audit chain for the per-service canonical event
 //!    sequence (`CredentialProxyStarted` →
 //!    `CredentialProxyUpstreamConnected` → per-protocol command
@@ -533,7 +535,7 @@ fn compare_file_against_canonical(
         path: abs.clone(),
         reason: format!("{e}"),
     })?;
-    if bytes != canonical {
+    if !canonical_eq_tolerating_missing_terminal_newline(canonical, &bytes) {
         return Err(ServiceEvidenceError::FileContentMismatch {
             service,
             path: abs,
@@ -543,6 +545,15 @@ fn compare_file_against_canonical(
         });
     }
     Ok(())
+}
+
+fn canonical_eq_tolerating_missing_terminal_newline(canonical: &[u8], actual: &[u8]) -> bool {
+    if actual == canonical {
+        return true;
+    }
+    canonical.ends_with(b"\n")
+        && actual.len() + 1 == canonical.len()
+        && canonical[..actual.len()] == *actual
 }
 
 // ---------------------------------------------------------------------------
@@ -2048,6 +2059,23 @@ mod tests {
         assert!(rendered.contains("expected sha256"), "render: {rendered}");
         assert!(rendered.contains("observed sha256"), "render: {rendered}");
         assert!(rendered.contains("first divergence"), "render: {rendered}");
+    }
+
+    #[test]
+    fn file_compare_tolerates_only_missing_terminal_newline() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(SERVICE_OUTPUT_DIR)).unwrap();
+        let canonical = b"row-1\nrow-2\n";
+        std::fs::write(tmp.path().join(POSTGRES_OUTPUT_FILE), b"row-1\nrow-2").unwrap();
+        compare_file_against_canonical("postgres", tmp.path(), POSTGRES_OUTPUT_FILE, canonical)
+            .expect("missing terminal newline should not fail service evidence");
+
+        std::fs::write(tmp.path().join(POSTGRES_OUTPUT_FILE), b"row-1\nrow-X").unwrap();
+        let err =
+            compare_file_against_canonical("postgres", tmp.path(), POSTGRES_OUTPUT_FILE, canonical)
+                .expect_err("non-newline content drift must still fail");
+        let rendered = format!("{err}");
+        assert!(rendered.contains("content mismatch"), "render: {rendered}");
     }
 
     #[test]

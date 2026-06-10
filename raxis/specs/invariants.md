@@ -304,6 +304,12 @@ The reviewer can start, but `publish` remains unschedulable until
 the review aggregate passes. The gate prevents publish from starting
 and later needing cleanup.
 
+**Reviewer predecessor rule.** A plan MUST NOT declare a Reviewer task
+as a direct predecessor of any task. Reviewers emit verdicts, not
+workspace artifacts or `evaluation_sha` values. Downstream work that
+must wait for review depends on the reviewed Executor task; the kernel
+then applies the Reviewer gate before admitting the downstream task.
+
 ---
 
 ### INV-INIT-04 — `evaluate_terminal_criteria` is synchronous after every transition
@@ -819,6 +825,11 @@ is the gate. `B` remains blocked with `AwaitingReviewerVerdicts` until
 `review-A` submits an approved verdict. RAXIS must prevent `B` from
 starting early rather than starting it and revoking/retrying it after
 the reviewer result arrives.
+
+If a plan instead declares `B depends on review-A`, plan approval must
+fail. `review-A` has no `evaluation_sha` to materialize into B's
+executor worktree; the dependency edge belongs on A, with review-A
+enforced as A's approval gate.
 
 ### INV-KERNEL-DAG-AUTHORITY-02 — Review-rejection retry supersedes prior integration candidates
 

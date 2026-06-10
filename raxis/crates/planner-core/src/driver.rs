@@ -1090,6 +1090,30 @@ pub async fn run_role_session_with_connected_transport(
     })?;
     let submitter = Arc::new(IntentSubmitter::new(Arc::clone(&transport), task_id));
 
+    // ── Step 1c: deterministic orchestrator retry. ────────────────
+    //
+    // Review-rejection retry is a kernel-state transition, not a
+    // reasoning task. When the KSB already proves an executor has
+    // `retry_admissible=true`, asking the model to rediscover that
+    // fact can burn orchestrator respawn budget on stale
+    // `batch_activate_subtasks` / `integration_merge` attempts. Keep
+    // the normal IPC/audit path by submitting the same `RetrySubTask`
+    // terminal intent the model would have submitted, but do it before
+    // the model turn so the role runtime honors the KSB deterministically.
+    if let Some(retry_task_id) =
+        deterministic_orchestrator_retry_candidate(role, ksb_snapshot.as_ref())?
+    {
+        ensure_terminal_accepted(
+            "retry_subtask",
+            submitter.submit_retry_subtask(retry_task_id).await?,
+        )?;
+        let driver_outcome = DriverOutcome::Completed {
+            tool_name: "retry_subtask".to_owned(),
+        };
+        submit_exit_notice_best_effort(submitter.as_ref(), &driver_outcome, max_turns).await;
+        return Ok(driver_outcome);
+    }
+
     // ── Step 2: build per-role registry + terminal tool list. ───────
     if !custom_tools.is_empty() && !matches!(role, Role::Executor) {
         return Err(DriverError::CustomToolsNotAllowed { role });
@@ -1263,7 +1287,41 @@ pub async fn run_role_session_with_connected_transport(
     // the notice never lands (SIGKILL / OOM / panic before exit
     // cleanup), so we don't gate the role binary's exit on the
     // ack.
-    let exit_outcome = driver_outcome_to_exit_outcome(&driver_outcome, max_turns);
+    submit_exit_notice_best_effort(submitter.as_ref(), &driver_outcome, max_turns).await;
+
+    Ok(driver_outcome)
+}
+
+fn deterministic_orchestrator_retry_candidate(
+    role: Role,
+    ksb_snapshot: Option<&raxis_ksb::KsbSnapshot>,
+) -> Result<Option<TaskId>, DriverError> {
+    if !matches!(role, Role::Orchestrator) {
+        return Ok(None);
+    }
+    let Some(snap) = ksb_snapshot else {
+        return Ok(None);
+    };
+    let Some(raxis_ksb::Capabilities::Orchestrator(caps)) = snap.capabilities.as_ref() else {
+        return Ok(None);
+    };
+    let Some(task) = caps.tasks.iter().find(|task| task.retry_admissible) else {
+        return Ok(None);
+    };
+    TaskId::parse(&task.task_id).map(Some).map_err(|e| {
+        DriverError::InvalidTaskId(format!(
+            "KSB retry_admissible task id `{}` failed validation: {e}",
+            task.task_id
+        ))
+    })
+}
+
+async fn submit_exit_notice_best_effort(
+    submitter: &IntentSubmitter,
+    driver_outcome: &DriverOutcome,
+    max_turns: u32,
+) {
+    let exit_outcome = driver_outcome_to_exit_outcome(driver_outcome, max_turns);
     if let Err(e) = submitter.submit_exit_notice(exit_outcome).await {
         // Anchors `INV-FAILURE-REASON-CONCRETE-01`: the kernel
         // logs `worker_post_exit_synth_*` events that already
@@ -1277,8 +1335,6 @@ pub async fn run_role_session_with_connected_transport(
             e.to_string(),
         );
     }
-
-    Ok(driver_outcome)
 }
 
 /// **`INV-FAILURE-REASON-CONCRETE-01`** — map a [`DriverOutcome`]
@@ -1797,6 +1853,92 @@ mod tests {
             }
             other => panic!("expected ExplicitGiveUp, got {other:?}"),
         }
+    }
+
+    fn orchestrator_retry_snapshot(task_id: &str) -> raxis_ksb::KsbSnapshot {
+        use raxis_ksb::{
+            Capabilities, ConcurrencyCapabilityView, InitiativeCapabilityView,
+            IntegrationMergeCapabilityView, MaxTurnsScalingView, OrchestratorCapabilities,
+            SessionCapabilityView, TaskCapabilityView,
+        };
+
+        raxis_ksb::KsbSnapshot {
+            version: raxis_ksb::KSB_SCHEMA_VERSION,
+            initiative_id: "init-retry".to_owned(),
+            task_id: None,
+            role: "orchestrator".to_owned(),
+            evaluation_sha: String::new(),
+            path_allowlist: Vec::new(),
+            token_budget_remaining: 0,
+            wallclock_budget_remaining_s: 0,
+            dag_rows: Vec::new(),
+            task_description: "retry rejected executor".to_owned(),
+            target_ref: "refs/heads/main".to_owned(),
+            base_sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            reviewer_verdicts: Vec::new(),
+            pending_escalations: Vec::new(),
+            gate_statuses: Vec::new(),
+            credential_ports: Vec::new(),
+            capabilities: Some(Capabilities::Orchestrator(OrchestratorCapabilities {
+                session: SessionCapabilityView {
+                    session_id: "session-orch".to_owned(),
+                    role: "orchestrator".to_owned(),
+                    planner_max_turns: 100,
+                },
+                initiative: InitiativeCapabilityView {
+                    initiative_id: "init-retry".to_owned(),
+                    orchestrator_no_progress_respawn_count: 0,
+                    max_orchestrator_no_progress_respawns: 3,
+                    orchestrator_respawns_remaining: 3,
+                },
+                tasks: vec![TaskCapabilityView {
+                    task_id: task_id.to_owned(),
+                    crash_retry_count: 0,
+                    review_reject_count: 1,
+                    max_crash_retries: 3,
+                    max_review_rejections: 2,
+                    crash_retries_remaining: 3,
+                    review_retries_remaining: 1,
+                    retry_admissible: true,
+                    retry_inadmissible_reason: None,
+                }],
+                ready_now: Vec::new(),
+                concurrency: ConcurrencyCapabilityView {
+                    cap: 3,
+                    active_count: 0,
+                    headroom: 3,
+                },
+                integration_merge: IntegrationMergeCapabilityView {
+                    ready: false,
+                    base_sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    required_executor_shas: Vec::new(),
+                    blockers: vec![format!("{task_id} aggregate=AtLeastOneRejected")],
+                },
+                max_turns_scaling: MaxTurnsScalingView {
+                    max_turns_attempt: 1,
+                    max_turns_base: 100,
+                    max_turns_step: 50,
+                    max_turns_hard_ceiling: 240,
+                },
+            })),
+            last_critique: None,
+            gate_fixup: None,
+        }
+    }
+
+    #[test]
+    fn deterministic_orchestrator_retry_candidate_reads_ksb_capability() {
+        let snap = orchestrator_retry_snapshot("task-retry");
+        let selected = deterministic_orchestrator_retry_candidate(Role::Orchestrator, Some(&snap))
+            .expect("valid task id")
+            .expect("retry candidate");
+        assert_eq!(selected.as_str(), "task-retry");
+        assert!(
+            deterministic_orchestrator_retry_candidate(Role::Executor, Some(&snap))
+                .expect("executor ignored")
+                .is_none(),
+            "only orchestrator sessions may short-circuit retry_subtask"
+        );
     }
 
     /// Construct a minimal `IntentSubmitter` for `build_role` tests.
@@ -2890,6 +3032,119 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn orchestrator_retry_admissible_short_circuits_without_model_turn() {
+        use raxis_ipc::frame::{read_frame, write_frame};
+        use raxis_ipc::IpcMessage;
+        use raxis_types::{IntentKind, IntentOutcome, IntentResponse};
+
+        let model = Arc::new(MockModelClient::new(vec![MessageResponse {
+            id: "msg_should_not_be_used".to_owned(),
+            kind: "message".to_owned(),
+            role: "assistant".to_owned(),
+            model: "mock".to_owned(),
+            content: vec![ContentBlock::Text {
+                text: "this model turn should not happen".to_owned(),
+            }],
+            stop_reason: Some("end_turn".to_owned()),
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+        }]));
+        let model_for_inspect: Arc<MockModelClient> = Arc::clone(&model);
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("planner.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+
+        let kernel_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+
+            let inbound: IpcMessage = read_frame(&mut stream).await.unwrap();
+            match inbound {
+                IpcMessage::IntentRequest(req) => {
+                    assert_eq!(req.intent_kind, IntentKind::RetrySubTask);
+                    assert_eq!(req.task_id.as_str(), "task-retry");
+                    let tokens = req.tokens_used.expect("zero-token report present");
+                    assert_eq!(tokens.input_tokens, 0);
+                    assert_eq!(tokens.output_tokens, 0);
+                    write_frame(
+                        &mut stream,
+                        &IpcMessage::KernelIntentResponse(IntentResponse {
+                            sequence_number: req.sequence_number,
+                            task_state: TaskState::Admitted,
+                            outcome: IntentOutcome::Accepted {
+                                remaining_budget: raxis_types::BudgetSnapshot {
+                                    admission_units: 0,
+                                },
+                                warn_delegation_stale: false,
+                            },
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                }
+                other => panic!("expected RetrySubTask IntentRequest, got {other:?}"),
+            }
+
+            let inbound: IpcMessage = read_frame(&mut stream).await.unwrap();
+            match inbound {
+                IpcMessage::PlannerExitNotice { outcome } => {
+                    assert_eq!(
+                        outcome,
+                        raxis_types::PlannerExitOutcome::CleanCompletion {
+                            tool_name: "retry_subtask".to_owned()
+                        }
+                    );
+                    write_frame(&mut stream, &IpcMessage::KernelPlannerExitNoticeAck)
+                        .await
+                        .unwrap();
+                }
+                other => panic!("expected PlannerExitNotice, got {other:?}"),
+            }
+        });
+
+        let outcome = run_role_session_with_model(
+            Role::Orchestrator,
+            BootArgs {
+                initiative_id: "init-retry".to_owned(),
+                task_id: None,
+            },
+            BootEnv {
+                session_id: "session-orch".to_owned(),
+            },
+            "orchestrate".to_owned(),
+            KernelTransportConfig::Uds {
+                socket_path: sock_path.clone(),
+            },
+            dir.path().to_path_buf(),
+            "mock".to_owned(),
+            5,
+            512,
+            TokenCaps::default(),
+            None,
+            model as Arc<dyn ModelClient>,
+            Some(orchestrator_retry_snapshot("task-retry")),
+        )
+        .await
+        .unwrap();
+
+        match outcome {
+            DriverOutcome::Completed { tool_name } => assert_eq!(tool_name, "retry_subtask"),
+            other => panic!("expected retry_subtask completion, got {other:?}"),
+        }
+        kernel_task.await.unwrap();
+
+        let seen = model_for_inspect.seen.lock().await;
+        assert!(
+            seen.is_empty(),
+            "retry_admissible orchestrator sessions must not call the model"
+        );
+    }
+
     /// When no KSB snapshot is supplied by the lower-level test
     /// helper, the driver falls back to the NNSP-only system prompt.
     /// The KSB delimiters MUST
@@ -3047,11 +3302,12 @@ mod tests {
         assert!(read_task_prompt(&env_fn).is_none());
     }
 
-    /// End-to-end driver test: pinned `MockModelClient` drives the
-    /// dispatch loop to `Idle` via a single `Text` block; the
-    /// driver returns `Idle` (no IPC submission needed). This
-    /// pins the `run_role_session_with_model` happy-path without
-    /// requiring a live kernel UDS.
+    /// End-to-end driver test: pinned `MockModelClient` drives an
+    /// executor dispatch loop to `Idle` via a single `Text` block;
+    /// the driver returns `Idle` and emits the best-effort exit
+    /// notice. Reviewers are intentionally excluded from this
+    /// fixture: prose-only reviewer turns receive a protocol
+    /// correction and must terminate with `submit_review`.
     #[tokio::test]
     async fn run_role_session_with_model_returns_idle_when_loop_finishes_without_terminal() {
         let model = Arc::new(MockModelClient::new(vec![MessageResponse {
@@ -3087,7 +3343,7 @@ mod tests {
         });
 
         let outcome = run_role_session_with_model(
-            Role::Reviewer,
+            Role::Executor,
             BootArgs {
                 initiative_id: "init-A".to_owned(),
                 task_id: Some("task-1".to_owned()),

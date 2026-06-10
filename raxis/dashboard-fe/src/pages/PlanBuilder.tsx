@@ -3385,11 +3385,20 @@ function validatePlan(input: {
       push("error", `${id}.clone_strategy`, `Task ${id || "(blank)"} needs a clone strategy.`, "Choose blobless, sparse, or full explicitly.");
     }
     for (const pred of splitList(task.predecessors)) {
-      if (!input.tasks.some((candidate) => candidate.id.trim() === pred)) {
+      const predecessorTask = input.tasks.find((candidate) => candidate.id.trim() === pred);
+      if (!predecessorTask) {
         push("error", `${id}.predecessors`, `Task ${id || "(blank)"} references unknown predecessor ${pred}.`, "Drag an edge from an existing task or remove the stale predecessor.");
       }
       if (pred === id) {
         push("error", `${id}.predecessors`, `Task ${id} cannot depend on itself.`, "Remove the self-edge.");
+      }
+      if (predecessorTask?.agentType === "Reviewer") {
+        push(
+          "error",
+          `${id}.predecessors`,
+          `Task ${id || "(blank)"} cannot depend directly on reviewer ${pred}.`,
+          "Make this task depend on the executor that reviewer inspects. RAXIS will enforce the reviewer gate before downstream work starts.",
+        );
       }
     }
     if (task.agentType === "Executor") {

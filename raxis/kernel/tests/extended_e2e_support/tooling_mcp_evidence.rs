@@ -18,9 +18,9 @@
 //!
 //! The witness deliberately checks both the committed evidence file and
 //! the kernel-owned `CustomToolInvoked` audit events. The evidence file
-//! proves the agent used the returned tool data; the audit events prove
-//! the subprocesses actually ran instead of an executor merely forging a
-//! workspace side-effect file.
+//! proves the agent used the returned vendor/MCP payload; the audit
+//! events prove the specific RAXIS tool contracts actually ran instead
+//! of an executor merely forging a workspace side-effect file.
 
 use std::path::{Path, PathBuf};
 
@@ -36,9 +36,6 @@ pub const EVIDENCE_FILE_REL_PATH: &str = "out/tools/unity-mcp-smoke.json";
 
 const REQUIRED_NEEDLES: &[&str] = &[
     "unity-editor-mcp-fixture",
-    "unity_list_scenes",
-    "unity_run_playmode_tests",
-    "unity_build_player",
     "unity.listScenes",
     "unity.runPlaymodeTests",
     "unity.buildPlayer",
@@ -354,5 +351,47 @@ mod tests {
             .collect();
         assert!(!witness.satisfied_by(&chain));
         assert!(witness.tool_audit_check(&chain).is_err());
+    }
+
+    #[test]
+    fn vendor_payload_without_raxis_tool_names_still_satisfies_with_audit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out_dir = tmp.path().join("out/tools");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let body = serde_json::json!({
+            "scene_listing": {
+                "adapter": "unity-editor-mcp-fixture",
+                "mcp_method": "unity.listScenes",
+                "scenes": [
+                    "Assets/Scenes/Main.unity",
+                    "Assets/Scenes/CombatArena.unity"
+                ]
+            },
+            "playmode_smoke_test": {
+                "adapter": "unity-editor-mcp-fixture",
+                "mcp_method": "unity.runPlaymodeTests",
+                "passed": 12,
+                "failed": 0
+            },
+            "ios_build": {
+                "adapter": "unity-editor-mcp-fixture",
+                "mcp_method": "unity.buildPlayer",
+                "artifact": "Builds/iOS/RaxisDemo.ipa"
+            }
+        });
+        std::fs::write(
+            out_dir.join("unity-mcp-smoke.json"),
+            serde_json::to_vec_pretty(&body).unwrap(),
+        )
+        .unwrap();
+
+        let witness = ToolingMcpEvidenceWitness::for_realistic_plan(tmp.path());
+        let chain = synthetic_commit_chain();
+        assert!(
+            witness.satisfied_by(&chain),
+            "vendor payload shape should satisfy because RAXIS tool names \
+             are independently anchored in CustomToolInvoked audit events: {}",
+            witness.diagnostic(&chain),
+        );
     }
 }

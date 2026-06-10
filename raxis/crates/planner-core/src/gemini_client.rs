@@ -51,6 +51,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::model::{
     ContentBlock, MessageRequest, MessageResponse, ModelClient, ModelError, ToolSpec, Usage,
@@ -120,7 +121,7 @@ struct GeminiTools<'a> {
 struct GeminiFunctionDecl<'a> {
     name: &'a str,
     description: &'a str,
-    parameters: &'a serde_json::Value,
+    parameters: Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -269,10 +270,32 @@ fn build_tools<'a>(tools: &'a [ToolSpec]) -> Vec<GeminiTools<'a>> {
             .map(|t| GeminiFunctionDecl {
                 name: t.name.as_str(),
                 description: t.description.as_str(),
-                parameters: &t.input_schema,
+                parameters: sanitize_gemini_tool_schema(&t.input_schema),
             })
             .collect(),
     }]
+}
+
+fn sanitize_gemini_tool_schema(schema: &Value) -> Value {
+    match schema {
+        Value::Object(obj) => {
+            let mut out = Map::with_capacity(obj.len());
+            for (key, value) in obj {
+                if key == "additionalProperties" {
+                    continue;
+                }
+                out.insert(key.clone(), sanitize_gemini_tool_schema(value));
+            }
+            Value::Object(out)
+        }
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(sanitize_gemini_tool_schema)
+                .collect::<Vec<_>>(),
+        ),
+        other => other.clone(),
+    }
 }
 
 fn build_request_body<'a>(req: &'a MessageRequest) -> GeminiRequest<'a> {
@@ -558,6 +581,47 @@ mod tests {
         let fc = &parts[0]["functionCall"];
         assert_eq!(fc["name"], "calc");
         assert_eq!(fc["args"]["expr"], "1+1");
+    }
+
+    #[test]
+    fn request_translation_sanitizes_json_schema_for_function_declarations() {
+        let mut r = req();
+        r.tools = vec![ToolSpec {
+            name: "strict_tool".to_owned(),
+            description: "strict normalized schema".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "query": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "text": { "type": "string" }
+                        }
+                    }
+                },
+                "required": ["query"]
+            }),
+        }];
+
+        let body = build_request_body(&r);
+        let json = serde_json::to_value(&body).unwrap();
+        let params = &json["tools"][0]["functionDeclarations"][0]["parameters"];
+        assert!(
+            params.get("additionalProperties").is_none(),
+            "Gemini rejects additionalProperties at functionDeclarations[].parameters"
+        );
+        assert!(
+            params["properties"]["query"]
+                .get("additionalProperties")
+                .is_none(),
+            "Gemini schema sanitization must also recurse into nested objects"
+        );
+        assert_eq!(
+            r.tools[0].input_schema["additionalProperties"], false,
+            "provider adaptation must not mutate the RAXIS-normalized schema"
+        );
     }
 
     #[test]

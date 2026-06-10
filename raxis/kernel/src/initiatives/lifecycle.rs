@@ -272,10 +272,11 @@ pub enum LifecycleError {
     /// graph. Surfaced by `validate_plan_dag` at `approve_plan` time,
     /// **before** `BEGIN TRANSACTION`, so a malformed plan never
     /// allocates a row.
-    /// `rule` is one of the four canonical Step 17 DAG rules:
+    /// `rule` is one of the five canonical Step 17 DAG rules:
     ///   * `"duplicate_task_name"` — two tasks share the same plan task name.
     ///   * `"self_loop"`         — `task.predecessors` lists `task`.
     ///   * `"dangling_dependency"` — predecessor not declared in plan.
+    ///   * `"reviewer_as_predecessor"` — predecessor is a Reviewer task.
     ///   * `"cyclic_dependency"` — directed cycle through `predecessors`.
     ///     `offending_task` names the task whose entry triggered the rule
     ///     (for cycles, an arbitrary task on the cycle — sufficient for
@@ -4357,13 +4358,16 @@ fn validate_cross_cutting_artifacts(
 ///      `task_dag_edges.predecessor_task_id REFERENCES tasks(task_id)`
 ///      with `defer_foreign_keys = 1` would catch this at COMMIT,
 ///      but again the FK message is opaque.
-///   4. **`cyclic_dependency`** — directed cycle in the proposed
+///   4. **`reviewer_as_predecessor`** — `task.predecessors` lists a
+///      Reviewer task. Reviewers are gates, not artifact producers; a
+///      downstream task must depend on the reviewed Executor instead.
+///   5. **`cyclic_dependency`** — directed cycle in the proposed
 ///      `predecessors` graph. Implemented as iterative DFS over the
 ///      in-memory plan (Kahn's algorithm would also work; DFS gives
 ///      us "an arbitrary task on the cycle" for the diagnostic).
 ///      The in-tx `scheduler::dag::detect_cycle_in` is retained as a
 ///      defense-in-depth backstop — see `LifecycleError::PlanDagInvalid`.
-///      All four rules emit `LifecycleError::PlanDagInvalid { rule,
+///      All five rules emit `LifecycleError::PlanDagInvalid { rule,
 /// offending_task, suggestion }`. The `suggestion` field is mandatory
 ///      per the spec; it is a concrete fix the operator can apply, not a
 ///      generic restatement of the rule name.
@@ -4440,7 +4444,40 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
         }
     }
 
-    // ── Rule 4: cyclic_dependency ────────────────────────────────────
+    // ── Rule 4: reviewer_as_predecessor ───────────────────────────────
+    //
+    // Reviewer tasks are approval gates over executor artifacts. They
+    // intentionally do not stamp `tasks.evaluation_sha`, so making any
+    // plan task depend directly on a Reviewer would create an impossible
+    // activation shape (`ActivateSubTask...PredecessorNoEvalSha`). The
+    // correct graph is:
+    //
+    //   review-A depends on A
+    //   B        depends on A
+    //
+    // The kernel's reviewer-gate admission rule then blocks B until
+    // review-A aggregates to AllPassed.
+    for pt in tasks {
+        for dep in &pt.predecessors {
+            let pred = task_index[dep.as_str()];
+            if pred.session_agent_type == SessionAgentType::Reviewer {
+                return Err(LifecycleError::PlanDagInvalid {
+                    rule: "reviewer_as_predecessor",
+                    offending_task: pt.name.clone(),
+                    suggestion: format!(
+                        "Task {:?} lists Reviewer task {:?} in `predecessors`. \
+                         Reviewers are gates and do not produce an evaluation_sha. \
+                         Make {:?} depend on the Executor that {:?} reviews; \
+                         RAXIS will enforce the reviewer gate before admitting \
+                         downstream work.",
+                        pt.name, dep, pt.name, dep,
+                    ),
+                });
+            }
+        }
+    }
+
+    // ── Rule 5: cyclic_dependency ────────────────────────────────────
     // Iterative DFS with the standard three-color visit pattern:
     //   * `White` — never visited
     //   * `Gray`  — on the current DFS stack (cycle witness)
@@ -6050,8 +6087,9 @@ prompt = "   "
     }
 
     // ── V2 Step 17 — `validate_plan_dag` shift-left DAG checks ────────────
-    // Each of the four canonical rules (`duplicate_task_name`,
-    // `self_loop`, `dangling_dependency`, `cyclic_dependency`) MUST
+    // Each canonical rule (`duplicate_task_name`, `self_loop`,
+    // `dangling_dependency`, `reviewer_as_predecessor`,
+    // `cyclic_dependency`) MUST
     // be exercised. We additionally pin the *deterministic ordering*
     // of detection — the operator must always see the most-specific
     // rule first when multiple are violated — and the structural
@@ -6085,6 +6123,12 @@ prompt = "   "
             min_memory_mb: None,
             max_memory_mb: None,
         }
+    }
+
+    fn dag_task_with_role(id: &str, deps: &[&str], role: SessionAgentType) -> PlanTask {
+        let mut task = dag_task(id, deps);
+        task.session_agent_type = role;
+        task
     }
 
     fn assert_dag_invalid(
@@ -6176,6 +6220,29 @@ prompt = "   "
         // not at the missing `phantom`.
         let plan = vec![dag_task("t1", &[]), dag_task("t2", &["phantom"])];
         assert_dag_invalid(plan, "dangling_dependency", "t2", "phantom");
+    }
+
+    #[test]
+    fn validate_plan_dag_rejects_reviewer_as_direct_predecessor() {
+        let plan = vec![
+            dag_task_with_role("data-interpreter", &[], SessionAgentType::Executor),
+            dag_task_with_role(
+                "data-skeptic-reviewer",
+                &["data-interpreter"],
+                SessionAgentType::Reviewer,
+            ),
+            dag_task_with_role(
+                "draft-release",
+                &["data-skeptic-reviewer"],
+                SessionAgentType::Executor,
+            ),
+        ];
+        assert_dag_invalid(
+            plan,
+            "reviewer_as_predecessor",
+            "draft-release",
+            "depend on the Executor",
+        );
     }
 
     #[test]

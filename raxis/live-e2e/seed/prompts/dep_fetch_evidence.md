@@ -29,6 +29,11 @@ Top-level fields:
 - `transport`
 - `pip_install`
 
+Set `body_contains_example_domain` by checking whether the response body
+contains the exact text `Example Domain`. Do not check for the literal
+hostname `example.com`; the current IANA page may not include that hostname in
+the body text.
+
 `pip_install` should include:
 
 - `requested`

@@ -94,6 +94,41 @@ prompt = "Approve only if the recommendations are grounded and safe."
     expect(issues.filter((issue) => issue.field.endsWith(".task_name"))).toEqual([]);
   });
 
+  it("errors when a task depends directly on a reviewer", () => {
+    const parsed = __planBuilderTest.parsePlanToml(gtmXDiscoveryPlan);
+    const reviewTaskName =
+      "x_strategy_reviewer__20260609T120719Z_daily_x_discovery_plan_53550";
+    const sourceTask = parsed.tasks.find(
+      (task) =>
+        task.id ===
+        "interpret_x_opportunities__20260609T120719Z_daily_x_discovery_plan_53550",
+    );
+    expect(sourceTask).toBeDefined();
+
+    const issues = __planBuilderTest.validatePlan({
+      ...parsed,
+      credentialSetups: [],
+      tasks: [
+        ...parsed.tasks,
+        {
+          ...sourceTask!,
+          id: "draft_release",
+          description: "Draft a release after review.",
+          predecessors: reviewTaskName,
+        },
+      ],
+    });
+
+    expect(
+      issues.find(
+        (issue) =>
+          issue.severity === "error" &&
+          issue.field === "draft_release.predecessors" &&
+          issue.message.includes("cannot depend directly on reviewer"),
+      ),
+    ).toBeDefined();
+  });
+
   it("renders multiline initiative descriptions as valid multiline TOML", () => {
     const parsed = __planBuilderTest.parsePlanToml(primaryPlan);
     const rendered = __planBuilderTest.renderPlan(parsed);
