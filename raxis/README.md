@@ -86,6 +86,8 @@ What you have checked out is the **RAXIS** codebase: a **Rust workspace** meant 
 
 Do not confuse the workspace root with **where the kernel keeps live state**. Databases, sockets, audit log segments, witness blobs, and the policy cache live under **`$RAXIS_DATA_DIR`**. Source builds default to **`~/.raxis/`**; Homebrew-installed binaries default to Homebrew's persistent **`var/lib/raxis`** under the active Homebrew prefix (for example `/opt/homebrew/var/lib/raxis` on Apple Silicon macOS). An explicit `--data-dir` flag or `RAXIS_DATA_DIR` environment variable always wins. `raxis doctor` and `raxis status` print the detected install origin so operators can tell whether they are using a source/dev binary or the Homebrew/prod binary.
 
+Planner IPC backpressure is also host-runtime configuration, not a plan field. `RAXIS_PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_SECS` controls how long the kernel waits while writing a response frame back to a planner or verifier stream. The default is **30 seconds** and numeric values are clamped to **1..300 seconds**. Use a larger value, such as 60, for AVF or planner-heavy runs that move large model/tool responses. The kernel logs the resolved value at startup.
+
 For operator actions (genesis, plan approval, escalations,
 audit-chain verification, and the rest), the spec names one binary:
 **`raxis`**. Details are in Part 4

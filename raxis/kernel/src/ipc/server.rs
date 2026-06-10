@@ -28,10 +28,23 @@ use crate::ipc::auth;
 use crate::ipc::context::HandlerContext;
 use crate::ipc::operator;
 
+/// Env var used by operators to tune planner/verifier response-write
+/// backpressure tolerance. This is host runtime configuration, not a
+/// plan field: planners must not be able to widen kernel IPC budgets.
+pub(crate) const PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_ENV: &str =
+    "RAXIS_PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_SECS";
+
 /// Bound response writes to planner/verifier streams. A guest that
 /// stops reading must not pin its per-connection dispatch task forever
 /// after the kernel has already completed the handler work.
-const PLANNER_IPC_RESPONSE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+///
+/// 30s is intentionally more tolerant than the old 10s constant: AVF
+/// sessions and planner-heavy runs can briefly back up while moving
+/// larger model/tool responses, but the kernel still fails closed on a
+/// genuinely stuck reader.
+pub(crate) const PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_DEFAULT_SECS: u64 = 30;
+pub(crate) const PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_MIN_SECS: u64 = 1;
+pub(crate) const PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_MAX_SECS: u64 = 300;
 
 // ---------------------------------------------------------------------------
 // ShutdownReason — why the dispatch loop exited.
@@ -156,6 +169,8 @@ pub async fn start(
         }
     };
 
+    let response_write_timeout = planner_ipc_response_write_timeout();
+    server_log::planner_ipc_response_write_timeout_configured(response_write_timeout.as_secs());
     server_log::sockets_bound(
         &operator_path.display().to_string(),
         &planner_path.display().to_string(),
@@ -1170,26 +1185,19 @@ async fn write_planner_frame<S>(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    match tokio::time::timeout(
-        PLANNER_IPC_RESPONSE_WRITE_TIMEOUT,
-        raxis_ipc::write_frame(stream, msg),
-    )
-    .await
-    {
+    let timeout = planner_ipc_response_write_timeout();
+    match tokio::time::timeout(timeout, raxis_ipc::write_frame(stream, msg)).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(Box::new(e)),
         Err(_) => {
             eprintln!(
                 "{{\"level\":\"warn\",\"event\":\"planner_ipc_response_write_timeout\",\
                  \"message_kind\":\"{message_kind}\",\"timeout_ms\":{}}}",
-                PLANNER_IPC_RESPONSE_WRITE_TIMEOUT.as_millis(),
+                timeout.as_millis(),
             );
             Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!(
-                    "planner IPC response write timed out after {:?}",
-                    PLANNER_IPC_RESPONSE_WRITE_TIMEOUT
-                ),
+                format!("planner IPC response write timed out after {timeout:?}"),
             )))
         }
     }
@@ -1311,6 +1319,26 @@ pub(crate) fn planner_ipc_idle_timeout() -> Option<std::time::Duration> {
     }
 }
 
+/// Resolve the planner/verifier response-write timeout from a host
+/// runtime env var. Invalid values fall back to the default; numeric
+/// values are clamped to the hard range so a typo cannot create either
+/// an immediate failure loop (`0`) or an unbounded hung writer.
+pub(crate) fn planner_ipc_response_write_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(parse_planner_ipc_response_write_timeout_secs(
+        std::env::var(PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_ENV).ok(),
+    ))
+}
+
+fn parse_planner_ipc_response_write_timeout_secs(raw: Option<String>) -> u64 {
+    raw.as_deref()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_DEFAULT_SECS)
+        .clamp(
+            PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_MIN_SECS,
+            PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_MAX_SECS,
+        )
+}
+
 // ---------------------------------------------------------------------------
 // Gateway accept loop has moved to `crate::gateway::accept`
 // ---------------------------------------------------------------------------
@@ -1380,6 +1408,25 @@ pub(crate) mod server_log {
         let mut body = Map::new();
         body.insert("reason".into(), json!(reason.audit_reason()));
         finalize_line(level::INFO, MODULE, "sockets_unbound", body, ts_unix)
+    }
+
+    pub(crate) fn build_planner_ipc_response_write_timeout_configured_line(
+        timeout_secs: u64,
+        ts_unix: i64,
+    ) -> String {
+        let mut body = Map::new();
+        body.insert("timeout_secs".into(), json!(timeout_secs));
+        body.insert(
+            "env_var".into(),
+            json!(super::PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_ENV),
+        );
+        finalize_line(
+            level::INFO,
+            MODULE,
+            "planner_ipc_response_write_timeout_configured",
+            body,
+            ts_unix,
+        )
     }
 
     pub(crate) fn build_socket_remove_failed_line(path: &str, error: &str, ts_unix: i64) -> String {
@@ -1480,6 +1527,16 @@ pub(crate) mod server_log {
         eprintln!(
             "{}",
             build_sockets_unbound_line(reason, raxis_types::unix_now_secs()),
+        );
+    }
+
+    pub(super) fn planner_ipc_response_write_timeout_configured(timeout_secs: u64) {
+        eprintln!(
+            "{}",
+            build_planner_ipc_response_write_timeout_configured_line(
+                timeout_secs,
+                raxis_types::unix_now_secs(),
+            ),
         );
     }
 
@@ -2130,6 +2187,16 @@ mod server_log_tests {
     }
 
     #[test]
+    fn response_write_timeout_config_log_carries_env_and_seconds() {
+        let line = server_log::build_planner_ipc_response_write_timeout_configured_line(30, 0);
+        let v = parse(&line);
+        assert_eq!(v["event"], "planner_ipc_response_write_timeout_configured");
+        assert_eq!(v["level"], "info");
+        assert_eq!(v["timeout_secs"], 30);
+        assert_eq!(v["env_var"], super::PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_ENV);
+    }
+
+    #[test]
     fn signal_handler_install_failed_at_error_with_signal_name() {
         let line = server_log::build_signal_handler_install_failed_line("SIGTERM", "ENOSYS", 0);
         let v = parse(&line);
@@ -2171,6 +2238,56 @@ mod server_log_tests {
             server_log::build_operator_accept_error_line(r#"bind: "address already in use""#, 0);
         let v = parse(&line);
         assert_eq!(v["error"], r#"bind: "address already in use""#);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — planner IPC timeout configuration.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod planner_ipc_timeout_config_tests {
+    use super::{
+        parse_planner_ipc_response_write_timeout_secs,
+        PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_DEFAULT_SECS,
+        PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_MAX_SECS, PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_MIN_SECS,
+    };
+
+    #[test]
+    fn response_write_timeout_defaults_to_thirty_seconds() {
+        assert_eq!(
+            parse_planner_ipc_response_write_timeout_secs(None),
+            PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_DEFAULT_SECS,
+        );
+        assert_eq!(PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_DEFAULT_SECS, 30);
+    }
+
+    #[test]
+    fn response_write_timeout_accepts_operator_value() {
+        assert_eq!(
+            parse_planner_ipc_response_write_timeout_secs(Some("60".to_owned())),
+            60,
+        );
+    }
+
+    #[test]
+    fn response_write_timeout_uses_default_for_invalid_value() {
+        assert_eq!(
+            parse_planner_ipc_response_write_timeout_secs(Some("not-a-number".to_owned())),
+            PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_DEFAULT_SECS,
+        );
+    }
+
+    #[test]
+    fn response_write_timeout_clamps_to_hard_range() {
+        assert_eq!(
+            parse_planner_ipc_response_write_timeout_secs(Some("0".to_owned())),
+            PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_MIN_SECS,
+        );
+        assert_eq!(
+            parse_planner_ipc_response_write_timeout_secs(Some("9999".to_owned())),
+            PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_MAX_SECS,
+        );
     }
 }
 
