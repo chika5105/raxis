@@ -124,15 +124,16 @@ reviewer_chain     = ["gpt-5.3-codex", "claude-haiku-4-5", "gemini-2.5-flash"]
 domains = ["api.anthropic.com", "api.openai.com", "generativelanguage.googleapis.com", "example.com", "pypi.org", "files.pythonhosted.org"]
 patterns = []
 
+# Pricing is intentionally omitted on the primary realism providers.
+# The live e2e primary initiative should exercise the runtime/bundled
+# pricing-provenance path; policy overrides are exact-provider scoped
+# and should not mask the primary run's usage.
 [[providers]]
 provider_id           = "anthropic-realism-e2e"
 kind                  = "Anthropic"
 credentials_file      = "anthropic-realism-e2e.toml"
 inference_timeout_ms  = 120000
 data_fetch_timeout_ms = 30000
-pricing.input_tokens_per_dollar      = 200000
-pricing.output_tokens_per_dollar     = 50000
-pricing.cache_read_tokens_per_dollar = 2000000
 
 [[providers]]
 provider_id           = "gemini-realism-e2e"
@@ -140,9 +141,6 @@ kind                  = "Gemini"
 credentials_file      = "gemini-realism-e2e.toml"
 inference_timeout_ms  = 120000
 data_fetch_timeout_ms = 30000
-pricing.input_tokens_per_dollar      = 200000
-pricing.output_tokens_per_dollar     = 50000
-pricing.cache_read_tokens_per_dollar = 2000000
 
 [[providers]]
 provider_id           = "openai-realism-e2e"
@@ -150,9 +148,6 @@ kind                  = "OpenAI"
 credentials_file      = "openai-realism-e2e.toml"
 inference_timeout_ms  = 120000
 data_fetch_timeout_ms = 30000
-pricing.input_tokens_per_dollar      = 200000
-pricing.output_tokens_per_dollar     = 50000
-pricing.cache_read_tokens_per_dollar = 2000000
 
 # ── [[lanes]] registration (V2 §Step 28 + INV-SCHED-03) ─────────
 # The realistic-scenario plans declare `[workspace] lane_id =

@@ -365,6 +365,16 @@ fn policy_pricing_for_report<'a>(
         {
             return Some(exact);
         }
+
+        // A generic provider-family report such as `anthropic`,
+        // `openai`, or `gemini` is already a complete pricing scope.
+        // Do not fall through to an arbitrary same-kind provider row:
+        // doing so lets one named deployment's operator override
+        // silently price another deployment/initiative that intentionally
+        // omitted pricing to use runtime/bundled provenance.
+        if provider_kind_id(provider_id).is_some() {
+            return None;
+        }
     }
 
     let provider_kind = provider_id_from_report(report);
@@ -1153,7 +1163,7 @@ mod tests {
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
             model_id: "gpt-5.3-codex".to_owned(),
-            provider_id: "openai".to_owned(),
+            provider_id: String::new(),
         };
         let priced = price_tokens_for_report(&report, &policy);
         assert_eq!(priced.micros, 2_500_000);
@@ -1161,6 +1171,33 @@ mod tests {
             priced.source,
             TokenPricingSource::OperatorPolicyOverride {
                 provider_id: "openai-prod".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn generic_provider_report_does_not_borrow_named_override() {
+        let mut policy = PolicyBundle::for_tests_with_operators(Vec::<OperatorEntry>::new());
+        let mut openai = make_provider("openai-contract", 2_000_000, 500_000);
+        openai.kind = "OpenAI".to_owned();
+        policy.set_providers_for_tests(vec![openai]);
+
+        let report = raxis_types::TokensReport {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            model_id: "gpt-5.3-codex".to_owned(),
+            provider_id: "openai".to_owned(),
+        };
+
+        let priced = price_tokens_for_report(&report, &policy);
+        assert_eq!(priced.micros, 5_000_000);
+        assert_eq!(
+            priced.source,
+            TokenPricingSource::BundledEstimate {
+                provider_id: "openai".to_owned(),
+                registry_version: BUNDLED_PRICING_REGISTRY_VERSION,
             }
         );
     }

@@ -199,4 +199,82 @@ describe("<GitPage>", () => {
       ).toBeInTheDocument();
     });
   });
+
+  it("shows every managed repository in the repositories tab", async () => {
+    vi.spyOn(dashboardApi.git, "list").mockResolvedValue([
+      worktree({
+        name: "main-repository",
+        label: "main",
+        kind: "Main",
+        surface: "Repository",
+        repository_id: "main",
+        path: "/tmp/raxis/repositories/main",
+        session_id: null,
+        task_id: null,
+        initiative_id: null,
+        initiative_display_name: null,
+        agent_type: null,
+        session_state: null,
+        observed_head_sha: "c".repeat(40),
+        observed_branch: "main",
+        observed_dirty_paths: 0,
+        base_sha: null,
+        comparison_head_sha: null,
+      }),
+      worktree({
+        name: "main-repository-raxis-gtm",
+        label: "raxis-gtm",
+        kind: "Main",
+        surface: "Repository",
+        repository_id: "raxis-gtm",
+        path: "/tmp/raxis/repositories/raxis-gtm",
+        session_id: null,
+        task_id: null,
+        initiative_id: null,
+        initiative_display_name: null,
+        agent_type: null,
+        session_state: null,
+        observed_head_sha: "d".repeat(40),
+        observed_branch: "main",
+        observed_dirty_paths: 0,
+        base_sha: null,
+        comparison_head_sha: null,
+      }),
+      worktree({
+        name: "main-integration-init-a",
+        label: "Main:Alpha pipeline",
+        kind: "Main",
+        surface: "Integration",
+        repository_id: "main",
+        path: "/tmp/raxis/repositories/main",
+        session_id: null,
+        task_id: "init-a",
+        initiative_id: "init-a",
+        initiative_display_name: "Alpha pipeline",
+        agent_type: null,
+        session_state: null,
+        observed_head_sha: "b".repeat(40),
+        observed_branch: "main",
+        observed_dirty_paths: 0,
+        base_sha: "a".repeat(40),
+        comparison_head_sha: "b".repeat(40),
+      }),
+    ]);
+
+    renderWithProviders(<GitPage />);
+
+    expect(await screen.findByText("Repository: main")).toBeInTheDocument();
+    expect(screen.getByText("Repository: raxis-gtm")).toBeInTheDocument();
+    expect(
+      screen.getByText("Integrated result: Alpha pipeline"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Repositories" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Repository: main")).toBeInTheDocument();
+      expect(screen.getByText("Repository: raxis-gtm")).toBeInTheDocument();
+      expect(screen.queryByText("Integrated result: Alpha pipeline")).toBeNull();
+    });
+  });
 });

@@ -53,6 +53,9 @@ checked-in examples always match the most recent passing iter:
 # GEMINI-API-DEV-KEY, and OPEN-AI-API-DEV-KEY
 # executor primaries rotate across those three providers and keep
 # the other two as fallback models
+# provider pricing overrides are intentionally omitted from the
+# default realism policy so the primary run exercises non-override
+# pricing provenance
 RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 \
   RAXIS_E2E_REFRESH_EXAMPLES=1 \
   cargo test -p raxis-kernel \

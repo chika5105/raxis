@@ -482,7 +482,20 @@ function deriveRecovery(
   reason: FailureInfo,
   actions: DiagnosticAction[],
 ): FailureRecovery | null {
-  if (reason.recovery) return reason.recovery;
+  if (reason.recovery) {
+    if (
+      reason.recovery.status === "unrecoverable" &&
+      hasRecoveryEscalationAction(actions)
+    ) {
+      return {
+        status: "operator_action_required",
+        label: "Parent initiative recovery available",
+        detail:
+          "This task is not directly retryable, but a recovery escalation is available. Open Escalations to review the cause and approve or deny the signed resume disposition.",
+      };
+    }
+    return reason.recovery;
+  }
 
   if (
     actions.some(
@@ -498,11 +511,7 @@ function deriveRecovery(
   }
 
   if (
-    actions.some(
-      (a) =>
-        /approve recovery/i.test(a.label) ||
-        /open recovery escalations/i.test(a.label),
-    )
+    hasRecoveryEscalationAction(actions)
   ) {
     return {
       status: "operator_action_required",
@@ -522,6 +531,14 @@ function deriveRecovery(
   }
 
   return null;
+}
+
+function hasRecoveryEscalationAction(actions: DiagnosticAction[]): boolean {
+  return actions.some(
+    (a) =>
+      /approve recovery/i.test(a.label) ||
+      /open recovery escalations/i.test(a.label),
+  );
 }
 
 function recoveryLabel(status: string): string {

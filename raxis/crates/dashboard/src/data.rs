@@ -929,6 +929,136 @@ pub struct DiagnosticsResponse {
     pub generated_at: u64,
     /// Findings ordered by severity, then most-recent observation.
     pub findings: Vec<DiagnosticFinding>,
+    /// VM/session and command telemetry derived from durable
+    /// session rows plus `CustomToolInvoked` audit-chain rows.
+    ///
+    /// This projection intentionally carries metadata, hashes,
+    /// byte counts, truncation flags, and structured errors. It
+    /// does not inline arbitrary stdout/stderr bodies into the
+    /// diagnostics list; raw capture/artifact retrieval remains a
+    /// separate, scoped operator action.
+    #[serde(default)]
+    pub vm: VmDiagnosticsView,
+}
+
+/// VM-focused diagnostics panel data.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct VmDiagnosticsView {
+    /// Recent sessions backing agent VMs, newest first.
+    pub sessions: Vec<VmSessionDiagnosticView>,
+    /// Recent command/tool invocations observed at the VM/tool
+    /// boundary, newest first.
+    pub commands: Vec<VmCommandDiagnosticView>,
+}
+
+/// Session row shaped for the diagnostics VM tab.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct VmSessionDiagnosticView {
+    /// Session id.
+    pub session_id: String,
+    /// `Orchestrator` / `Executor` / `Reviewer`.
+    pub role: String,
+    /// FSM state.
+    pub state: String,
+    /// Owning initiative id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiative_id: Option<String>,
+    /// Operator-authored workspace/initiative name, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiative_display_name: Option<String>,
+    /// Owning task id, when this is not an orchestrator-only row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Operator-authored task name, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_name: Option<String>,
+    /// Primary provider attached to the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Primary model attached to the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Total input tokens attributed to the session.
+    pub input_tokens: u64,
+    /// Total output tokens attributed to the session.
+    pub output_tokens: u64,
+    /// Unix-seconds creation timestamp.
+    pub created_at: u64,
+    /// Unix-seconds latest-update timestamp.
+    pub updated_at: u64,
+}
+
+/// One VM/tool command surface visible in diagnostics.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct VmCommandDiagnosticView {
+    /// Audit-chain sequence number for deep forensic correlation.
+    pub seq: u64,
+    /// Audit event id, when present on the chain row.
+    pub event_id: String,
+    /// Unix-seconds emit timestamp.
+    pub at: u64,
+    /// Owning initiative id, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiative_id: Option<String>,
+    /// Operator-authored workspace/initiative name, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiative_display_name: Option<String>,
+    /// Owning task id, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Operator-authored task name, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_name: Option<String>,
+    /// Owning session id, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Tool id from the tool profile.
+    pub tool_name: String,
+    /// Tool profile id that authorized the call.
+    pub profile_name: String,
+    /// Execution locality (`guest_subprocess`, `host_mcp`,
+    /// `remote_mcp`, etc.).
+    pub execution_locality: String,
+    /// Outcome string emitted by the kernel (`Success`, `Failed`,
+    /// `TimedOut`, ...).
+    pub outcome: String,
+    /// Wall-clock tool duration.
+    pub duration_ms: u64,
+    /// Process exit code when the locality has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Process signal when the locality has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
+    /// Configured timeout ceiling for the invocation.
+    pub timeout_ms: u64,
+    /// SHA-256 of the normalized command argv / invocation
+    /// descriptor.
+    pub command_argv_sha256: String,
+    /// Total stdin bytes supplied to the tool.
+    pub stdin_bytes_total: u64,
+    /// SHA-256 of stdin bytes.
+    pub stdin_sha256: String,
+    /// Total stdout bytes produced by the tool.
+    pub stdout_bytes_total: u64,
+    /// Captured stdout bytes persisted by the kernel.
+    pub stdout_bytes_captured: u64,
+    /// SHA-256 of stdout bytes.
+    pub stdout_sha256: String,
+    /// True when stdout was larger than the capture budget.
+    pub stdout_truncated: bool,
+    /// Total stderr bytes produced by the tool.
+    pub stderr_bytes_total: u64,
+    /// Captured stderr bytes persisted by the kernel.
+    pub stderr_bytes_captured: u64,
+    /// SHA-256 of stderr bytes.
+    pub stderr_sha256: String,
+    /// True when stderr was larger than the capture budget.
+    pub stderr_truncated: bool,
+    /// Structured error, when the tool failed before or during
+    /// execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// One actionable diagnostic finding.
@@ -2854,6 +2984,7 @@ pub trait DashboardData: Send + Sync + 'static {
         Ok(DiagnosticsResponse {
             generated_at: 0,
             findings: Vec::new(),
+            vm: VmDiagnosticsView::default(),
         })
     }
 

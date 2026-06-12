@@ -635,7 +635,15 @@ NOT reintroduce the reverted narrow per-DB tools
 produce a complete, bootable set of canonical images from a
 fresh checkout. It owns the role rootfs bake, binary staging,
 image packing/signing, trust-anchor injection, and guest-kernel
-staging in one idempotent pipeline. The driver:
+staging in one idempotent pipeline.
+
+The live realistic e2e harness delegates image freshness to this
+pipeline on every source-tree run unless `RAXIS_LIVE_E2E_SKIP_AUTO_BAKE=1`
+is set. `RAXIS_LIVE_E2E_FORCE_REBAKE=1` passes `--no-cache` through
+to the bake command so a test run can force fresh guest planner
+bytes after IPC/schema changes.
+
+The driver:
 
 1. **Preflights every required input** (read-only). Container
    builder + daemon, signing key, musl linker (macOS),

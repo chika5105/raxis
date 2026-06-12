@@ -71,6 +71,12 @@ pub const DEFAULT_GATEWAY_BUILD_TIMEOUT_SECS: u64 = 300;
 pub const MIN_GATEWAY_BUILD_TIMEOUT_SECS: u64 = 60;
 pub const MAX_GATEWAY_BUILD_TIMEOUT_SECS: u64 = 900;
 
+/// Force the live-e2e auto-bake path to pass `--no-cache` through to
+/// `cargo xtask images bake`. Use when guest planner/source changes
+/// must produce fresh canonical image bytes even if an older image is
+/// structurally complete.
+pub const ENV_FORCE_IMAGE_REBAKE: &str = "RAXIS_LIVE_E2E_FORCE_REBAKE";
+
 /// Mirrors the source-setup/images/doctor default so live-e2e runs
 /// do not fail before preflight on a fresh shell that has already
 /// used the standard install layout.
@@ -815,7 +821,7 @@ pub fn require_canonical_images() {
     // pre-populate `RAXIS_INSTALL_DIR` from a packaged tarball and
     // do NOT have docker / podman / buildah on the host).
     if std::env::var("RAXIS_LIVE_E2E_SKIP_AUTO_BAKE").is_err() {
-        ensure_canonical_images_baked(&install_dir, kernel_version);
+        ensure_canonical_images_baked(&install_dir);
         // INV-LIVE-E2E-VMLINUX-PRESENT-01 (auto-stage): the AVF /
         // Firecracker substrates resolve their boot kernel from
         // `<install_dir>/kernel/vmlinux` via
@@ -1001,11 +1007,18 @@ fn required_globs_for_canonical_role(role: &str) -> &'static [&'static str] {
 }
 
 /// Drive the public one-shot `cargo xtask images bake` pipeline for
-/// any canonical role whose
-/// `<install_dir>/images/raxis-<role>-<v>.img` is missing or is a
-/// binary-only stub. Idempotent: roles that already pass the cpio
-/// preflight are skipped — we never re-run the docker bake when a
-/// good image is already on disk.
+/// every canonical role the live realistic harness can boot.
+///
+/// This deliberately delegates freshness to xtask's per-role
+/// `*.bake.json` integrity manifest instead of pre-skipping when the
+/// cpio merely "looks complete". A cpio-only check catches stub
+/// images, but it cannot prove the guest planner binary was compiled
+/// from the same IPC/schema sources as the host kernel. The xtask
+/// bake manifest fingerprints the relevant source tree and outputs,
+/// so a normal run gets a cheap no-op when everything is fresh and a
+/// rebuild when source or artefact bytes drift. Operators can force a
+/// full rebuild via [`ENV_FORCE_IMAGE_REBAKE`], which passes
+/// `--no-cache` to xtask.
 ///
 /// This is the live-e2e harness's "self-contained on a fresh dev
 /// host" feature. Without it, operators could accidentally boot stale
@@ -1029,34 +1042,20 @@ fn required_globs_for_canonical_role(role: &str) -> &'static [&'static str] {
 /// runs integration tests from the per-crate manifest dir, not from
 /// the workspace root, and we want this helper to work whether the
 /// operator runs `cargo test --workspace` or `cd kernel && cargo test`.
-fn ensure_canonical_images_baked(install_dir: &Path, kernel_version: &str) {
+fn ensure_canonical_images_baked(install_dir: &Path) {
     let workspace_root = workspace_root_from_manifest_dir();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let force_rebake = env_flag_truthy(ENV_FORCE_IMAGE_REBAKE);
+
+    if force_rebake {
+        eprintln!(
+            "[live-e2e auto-bake] {}=1; passing --no-cache to xtask for every role",
+            ENV_FORCE_IMAGE_REBAKE,
+        );
+    }
 
     for role in &["orchestrator-core", "executor-starter", "reviewer-core"] {
-        let img = install_dir
-            .join("images")
-            .join(format!("raxis-{role}-{kernel_version}.img"));
-        let manifest = install_dir
-            .join("images")
-            .join(format!("raxis-{role}-{kernel_version}.manifest.toml"));
-
-        // Idempotency check: skip if BOTH the image and manifest
-        // exist AND the cpio walk finds every required binary. This
-        // matches the assertion `require_canonical_images` does next,
-        // so a green idempotency check guarantees no rebake.
-        if img.exists() && manifest.exists() && cpio_passes_preflight(&img, role) {
-            eprintln!(
-                "[live-e2e auto-bake] skip {role} (canonical image already complete at {})",
-                img.display(),
-            );
-            continue;
-        }
-
-        eprintln!(
-            "[live-e2e auto-bake] {role}: rebaking (img missing or stub at {})",
-            img.display(),
-        );
+        eprintln!("[live-e2e auto-bake] {role}: checking freshness through xtask bake manifest",);
 
         // The harness identifies roles by their `images/<subdir>/`
         // (orchestrator-core / reviewer-core / executor-starter) so
@@ -1070,8 +1069,27 @@ fn ensure_canonical_images_baked(install_dir: &Path, kernel_version: &str) {
         // live-e2e helpers drove the retired intermediate subcommands
         // (`bake-rootfs`, `dev-stage`, `build-all`) and could drift out of
         // lockstep with production. Exercise the same path operators use.
-        run_xtask_images_bake_or_panic(&cargo, &workspace_root, role, xtask_role, install_dir);
+        run_xtask_images_bake_or_panic(
+            &cargo,
+            &workspace_root,
+            role,
+            xtask_role,
+            install_dir,
+            force_rebake,
+        );
     }
+}
+
+fn env_flag_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Assert the canonical AVF / Firecracker boot kernel binary at
@@ -1231,6 +1249,7 @@ fn run_xtask_images_bake_or_panic(
     role: &str,
     xtask_role: &str,
     install_dir: &Path,
+    no_cache: bool,
 ) {
     let install_dir = install_dir.to_str().unwrap_or_else(|| {
         panic!(
@@ -1238,7 +1257,7 @@ fn run_xtask_images_bake_or_panic(
             install_dir.display(),
         )
     });
-    let argv: Vec<&str> = vec![
+    let mut argv: Vec<&str> = vec![
         "xtask",
         "images",
         "bake",
@@ -1247,6 +1266,9 @@ fn run_xtask_images_bake_or_panic(
         "--install-dir",
         install_dir,
     ];
+    if no_cache {
+        argv.push("--no-cache");
+    }
     eprintln!(
         "[live-e2e auto-bake] {role}: running {} {}",
         cargo,
@@ -1451,15 +1473,17 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          domains = [\"api.anthropic.com\", \"api.openai.com\", \"generativelanguage.googleapis.com\", \"example.com\", \"pypi.org\", \"files.pythonhosted.org\"]\n\
          patterns = []\n\
          \n\
+         # Pricing is intentionally omitted on the primary realism providers.\n\
+         # This keeps the primary initiative on the runtime/bundled pricing\n\
+         # provenance path; policy overrides should be exact-provider scoped\n\
+         # and tested separately so they cannot mask primary usage.\n\
+         \n\
          [[providers]]\n\
          provider_id           = \"anthropic-realism-e2e\"\n\
          kind                  = \"Anthropic\"\n\
          credentials_file      = \"anthropic-realism-e2e.toml\"\n\
          inference_timeout_ms  = 120000\n\
          data_fetch_timeout_ms = 30000\n\
-         pricing.input_tokens_per_dollar      = 200000\n\
-         pricing.output_tokens_per_dollar     = 50000\n\
-         pricing.cache_read_tokens_per_dollar = 2000000\n\
          \n\
          [[providers]]\n\
          provider_id           = \"gemini-realism-e2e\"\n\
@@ -1467,9 +1491,6 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          credentials_file      = \"gemini-realism-e2e.toml\"\n\
          inference_timeout_ms  = 120000\n\
          data_fetch_timeout_ms = 30000\n\
-         pricing.input_tokens_per_dollar      = 200000\n\
-         pricing.output_tokens_per_dollar     = 50000\n\
-         pricing.cache_read_tokens_per_dollar = 2000000\n\
          \n\
          [[providers]]\n\
          provider_id           = \"openai-realism-e2e\"\n\
@@ -1477,9 +1498,6 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          credentials_file      = \"openai-realism-e2e.toml\"\n\
          inference_timeout_ms  = 120000\n\
          data_fetch_timeout_ms = 30000\n\
-         pricing.input_tokens_per_dollar      = 200000\n\
-         pricing.output_tokens_per_dollar     = 50000\n\
-         pricing.cache_read_tokens_per_dollar = 2000000\n\
          \n\
          # ── [[lanes]] registration (V2 §Step 28 + INV-SCHED-03) ─────────\n\
          # The realistic-scenario plans declare `[workspace] lane_id =\n\
@@ -3281,7 +3299,7 @@ pub fn walk_chain_or_panic(data_dir: &Path) -> Vec<AuditEvent> {
 // ---------------------------------------------------------------------------
 
 /// Resolve the on-disk path of the executor / reviewer worktree
-/// for `task_id` by walking the audit chain to the matching
+/// for `task_id` by walking the audit chain to the latest matching
 /// `SessionVmSpawned.session_id`.
 ///
 /// **Why audit-chain-based.** The kernel's worktree provisioner
@@ -3297,16 +3315,17 @@ pub fn walk_chain_or_panic(data_dir: &Path) -> Vec<AuditEvent> {
 ///
 /// This helper takes the resolved audit chain (from
 /// `poll_for_dual_lifecycle_completion` / `walk_chain_or_panic`)
-/// and resolves `task_id -> session_id` via
-/// `locate_session_id_for_task`, then returns the matching
-/// worktree path. Panics with a precise diagnostic if either step
-/// fails.
+/// and resolves `task_id -> latest session_id`, then returns the
+/// matching worktree path. Latest matters because review rejection
+/// can respawn an executor; on-disk evidence belongs to the
+/// terminal accepted attempt, not the superseded first attempt.
+/// Panics with a precise diagnostic if either step fails.
 pub fn locate_executor_worktree_via_chain(
     data_dir: &Path,
     chain: &[AuditEvent],
     task_id: &str,
 ) -> PathBuf {
-    let session_id = locate_session_id_for_task(chain, task_id).unwrap_or_else(|| {
+    let session_id = locate_latest_session_id_for_task(chain, task_id).unwrap_or_else(|| {
         panic!(
             "no SessionVmSpawned event for task_id={task_id} in audit chain \
              ({} events); cannot locate executor worktree without a session_id",
@@ -3431,6 +3450,21 @@ pub fn locate_session_id_for_task(chain: &[AuditEvent], task_id: &str) -> Option
     })
 }
 
+/// Latest `SessionVmSpawned.session_id` for `task_id`. Witnesses
+/// that inspect committed worktree artifacts should use this rather
+/// than [`locate_session_id_for_task`] because retries deliberately
+/// supersede earlier executor attempts.
+pub fn locate_latest_session_id_for_task(chain: &[AuditEvent], task_id: &str) -> Option<String> {
+    chain.iter().rev().find_map(|ev| match typed(ev) {
+        Some(AuditEventKind::SessionVmSpawned {
+            session_id,
+            task_id: Some(t),
+            ..
+        }) if t == task_id => Some(session_id),
+        _ => None,
+    })
+}
+
 /// Earliest `seq` of any `SessionVmSpawned{task_id}`. Used by
 /// the crash-recovery driver to mark the moment "this task is
 /// in-flight" just before delivering SIGTERM.
@@ -3498,6 +3532,49 @@ mod tests {
         assert_eq!(
             paths[1],
             PathBuf::from("/tmp/raxis-workspace/target/debug/raxis-gateway")
+        );
+    }
+
+    #[test]
+    fn latest_session_locator_uses_retry_attempt_for_artifact_witnesses() {
+        fn spawned(seq: u64, session_id: &str, task_id: &str) -> AuditEvent {
+            let payload = AuditEventKind::SessionVmSpawned {
+                session_id: session_id.to_owned(),
+                initiative_id: "init-retry".to_owned(),
+                task_id: Some(task_id.to_owned()),
+                backend_id: "apple-vz-14.x".to_owned(),
+                egress_tier: "None".to_owned(),
+                admission_loopback: "127.0.0.1:10000".to_owned(),
+                credential_proxies: 0,
+            };
+            AuditEvent {
+                seq,
+                event_id: uuid::Uuid::nil(),
+                event_kind: "SessionVmSpawned".to_owned(),
+                session_id: Some(session_id.to_owned()),
+                task_id: Some(task_id.to_owned()),
+                initiative_id: Some("init-retry".to_owned()),
+                payload: serde_json::to_value(payload).unwrap(),
+                emitted_at: 1_700_000_000 + seq as i64,
+                prev_sha256: "00".repeat(32),
+            }
+        }
+
+        let chain = vec![
+            spawned(10, "sess-superseded", "task-tooling"),
+            spawned(20, "sess-final", "task-tooling"),
+            spawned(30, "sess-other", "task-other"),
+        ];
+
+        assert_eq!(
+            locate_session_id_for_task(&chain, "task-tooling").as_deref(),
+            Some("sess-superseded"),
+            "legacy locator remains first-spawn for callers that need it",
+        );
+        assert_eq!(
+            locate_latest_session_id_for_task(&chain, "task-tooling").as_deref(),
+            Some("sess-final"),
+            "artifact witnesses must bind to the terminal retry attempt",
         );
     }
 

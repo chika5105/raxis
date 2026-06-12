@@ -132,6 +132,20 @@ export function InitiativeDetailPage() {
     else sp.set("credentials", "open");
     setSearchParams(sp, { replace: true });
   };
+  const summaryPanelOpen = searchParams.get("summary") !== "closed";
+  const toggleSummaryPanel = () => {
+    const sp = new URLSearchParams(searchParams);
+    if (summaryPanelOpen) sp.set("summary", "closed");
+    else sp.delete("summary");
+    setSearchParams(sp, { replace: true });
+  };
+  const diagnosisPanelOpen = searchParams.get("diagnosis") !== "closed";
+  const toggleDiagnosisPanel = () => {
+    const sp = new URLSearchParams(searchParams);
+    if (diagnosisPanelOpen) sp.set("diagnosis", "closed");
+    else sp.delete("diagnosis");
+    setSearchParams(sp, { replace: true });
+  };
   const operatorRoles = useOperatorRoles();
   const writeStatuses = (next: string[]) => {
     const sp = new URLSearchParams(searchParams);
@@ -253,25 +267,64 @@ export function InitiativeDetailPage() {
         />
       )}
 
-      <InitiativeRunSummaryCard summary={init.run_summary} />
+      <InitiativeRunSummaryCard
+        summary={init.run_summary}
+        open={summaryPanelOpen}
+        onToggle={toggleSummaryPanel}
+      />
 
       {diagnosticFindings.length > 0 && (
         <section className="space-y-2">
           <header className="flex items-center justify-between gap-3">
-            <div>
-              <h2 className="text-sm font-semibold text-ink">Diagnosis</h2>
-              <p className="text-xs text-ink-muted">
-                Active root-cause hints for this initiative.
-              </p>
-            </div>
-            <Link
-              to={`/diagnostics?initiative_id=${encodeURIComponent(init.initiative_id)}`}
-              className="text-xs text-accent hover:underline"
+            <button
+              type="button"
+              onClick={toggleDiagnosisPanel}
+              aria-expanded={diagnosisPanelOpen}
+              aria-controls="initiative-diagnosis-panel"
+              className="group flex min-w-0 flex-1 items-start gap-2 rounded text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
             >
-              Open diagnostics →
-            </Link>
+              <span
+                aria-hidden
+                className="mt-0.5 text-ink-subtle group-hover:text-ink"
+              >
+                {diagnosisPanelOpen ? "▾" : "▸"}
+              </span>
+              <span className="min-w-0">
+                <span className="flex items-center gap-2">
+                  <h2 className="text-sm font-semibold text-ink">Diagnosis</h2>
+                  <span className="badge bg-panel-high border-edge text-ink-subtle">
+                    {diagnosticFindings.length}
+                  </span>
+                </span>
+                <span className="block text-xs text-ink-muted">
+                  Active root-cause hints for this initiative.
+                </span>
+              </span>
+            </button>
+            <div className="flex items-center gap-3 text-xs">
+              <button
+                type="button"
+                onClick={toggleDiagnosisPanel}
+                className="text-ink-subtle hover:text-ink"
+              >
+                {diagnosisPanelOpen ? "Collapse" : "Expand"}
+              </button>
+              <Link
+                to={`/diagnostics?initiative_id=${encodeURIComponent(init.initiative_id)}`}
+                className="text-accent hover:underline"
+              >
+                Open diagnostics →
+              </Link>
+            </div>
           </header>
-          <DiagnosticFindingsPanel findings={diagnosticFindings.slice(0, 3)} compact />
+          {diagnosisPanelOpen && (
+            <div id="initiative-diagnosis-panel">
+              <DiagnosticFindingsPanel
+                findings={diagnosticFindings.slice(0, 3)}
+                compact
+              />
+            </div>
+          )}
         </section>
       )}
 
@@ -737,8 +790,12 @@ function ReviewRetryPill({
 
 function InitiativeRunSummaryCard({
   summary,
+  open,
+  onToggle,
 }: {
   summary: InitiativeRunSummary;
+  open: boolean;
+  onToggle: () => void;
 }) {
   const totalTokens =
     summary.input_tokens +
@@ -760,151 +817,188 @@ function InitiativeRunSummaryCard({
   return (
     <section className="card p-4">
       <header className="flex items-start justify-between gap-3 flex-wrap">
-        <div>
-          <div className="flex items-center gap-2">
-            <h2 className="text-sm font-semibold text-ink">
-              Resource summary
-            </h2>
-            <span
-              className={clsx(
-                "badge",
-                summary.terminal ? toneClasses("ok") : toneClasses("info"),
-              )}
-            >
-              {summary.terminal ? "final" : "so far"}
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          aria-controls="initiative-resource-summary-panel"
+          className="group flex min-w-0 flex-1 items-start gap-2 rounded text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+        >
+          <span
+            aria-hidden
+            className="mt-0.5 text-ink-subtle group-hover:text-ink"
+          >
+            {open ? "▾" : "▸"}
+          </span>
+          <span className="min-w-0">
+            <span className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold text-ink">
+                Resource summary
+              </h2>
+              <span
+                className={clsx(
+                  "badge",
+                  summary.terminal ? toneClasses("ok") : toneClasses("info"),
+                )}
+              >
+                {summary.terminal ? "final" : "so far"}
+              </span>
             </span>
+            <span className="mt-1 block text-xs text-ink-muted">
+              Kernel ledger for sessions, turns, tokens, budget ceilings, and
+              cost.
+            </span>
+          </span>
+        </button>
+        <div className="flex items-start gap-4 text-right text-xs text-ink-subtle">
+          <div>
+            <div>{plural(summary.session_count, "session")}</div>
+            <div>
+              {fmtTokens(totalTokens)} tokens ·{" "}
+              {fmtMicroDollars(summary.token_cost_micros)}
+            </div>
           </div>
-          <p className="mt-1 text-xs text-ink-muted">
-            Kernel ledger for sessions, turns, tokens, budget ceilings, and cost.
-          </p>
-        </div>
-        <div className="text-right text-xs text-ink-subtle">
-          <div>{plural(summary.session_count, "session")}</div>
           {summary.active_session_count > 0 && (
             <div>{summary.active_session_count} still active</div>
           )}
+          <button
+            type="button"
+            onClick={onToggle}
+            className="text-ink-subtle hover:text-ink"
+          >
+            {open ? "Collapse" : "Expand"}
+          </button>
         </div>
       </header>
 
-      <div className="mt-4 grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-2">
-        <SummaryMetric
-          label="Turns"
-          value={turnBudget}
-          hint={
-            summary.declared_turn_budget != null
-              ? "used / declared"
-              : "no declared cap"
-          }
-        />
-        <SummaryMetric
-          label="Tokens"
-          value={fmtTokens(totalTokens)}
-          hint={`in ${fmtTokens(summary.input_tokens)} · out ${fmtTokens(summary.output_tokens)}`}
-        />
-        <SummaryMetric
-          label="Cache"
-          value={fmtTokens(
-            summary.cache_read_tokens + summary.cache_creation_tokens,
+      {open && (
+        <div id="initiative-resource-summary-panel">
+          <div className="mt-4 grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-2">
+            <SummaryMetric
+              label="Turns"
+              value={turnBudget}
+              hint={
+                summary.declared_turn_budget != null
+                  ? "used / declared"
+                  : "no declared cap"
+              }
+            />
+            <SummaryMetric
+              label="Tokens"
+              value={fmtTokens(totalTokens)}
+              hint={`in ${fmtTokens(summary.input_tokens)} · out ${fmtTokens(summary.output_tokens)}`}
+            />
+            <SummaryMetric
+              label="Cache"
+              value={fmtTokens(
+                summary.cache_read_tokens + summary.cache_creation_tokens,
+              )}
+              hint={`read ${fmtTokens(summary.cache_read_tokens)} · write ${fmtTokens(summary.cache_creation_tokens)}`}
+            />
+            <SummaryMetric
+              label="Cost"
+              value={fmtMicroDollars(summary.token_cost_micros)}
+              hint={pricingHint}
+            />
+            <SummaryMetric
+              label="Elapsed"
+              value={wallBudget}
+              hint={
+                summary.declared_wallclock_budget_seconds != null
+                  ? "used / declared"
+                  : "no declared cap"
+              }
+            />
+            <SummaryMetric
+              label="Admission"
+              value={fmtTokens(summary.admission_reserved_units)}
+              hint="reserved units"
+            />
+            <SummaryMetric
+              label="Actual"
+              value={fmtTokens(summary.actual_cost_units)}
+              hint="admission units"
+            />
+          </div>
+          <p className="mt-3 text-[11px] leading-relaxed text-ink-muted">
+            Provider reported {fmtTokens(summary.input_tokens)} input /{" "}
+            {fmtTokens(summary.output_tokens)} output tokens; {pricingNote}
+          </p>
+          {(summary.token_cost_breakdown?.length ?? 0) > 0 && (
+            <div className="mt-3 overflow-hidden rounded border border-edge">
+              <div className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1.2fr)_minmax(7rem,0.8fr)_minmax(6rem,0.6fr)_minmax(6rem,0.6fr)] gap-2 border-b border-edge bg-panel-muted px-3 py-2 text-[10px] uppercase tracking-wider text-ink-subtle max-lg:hidden">
+                <div>Provider</div>
+                <div>Model</div>
+                <div>Source</div>
+                <div className="text-right">Tokens</div>
+                <div className="text-right">Cost</div>
+              </div>
+              <div className="divide-y divide-edge">
+                {summary.token_cost_breakdown!.map((row, index) => {
+                  const rowTokens =
+                    row.input_tokens +
+                    row.output_tokens +
+                    row.cache_read_tokens +
+                    row.cache_creation_tokens;
+                  return (
+                    <div
+                      key={`${row.provider_id}-${row.model_id}-${row.pricing_source}-${index}`}
+                      className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1.2fr)_minmax(7rem,0.8fr)_minmax(6rem,0.6fr)_minmax(6rem,0.6fr)] gap-2 px-3 py-2 text-xs max-lg:grid-cols-1"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
+                          Provider
+                        </div>
+                        <div className="truncate font-mono text-ink">
+                          {row.provider_id || "unknown"}
+                        </div>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
+                          Model
+                        </div>
+                        <div className="truncate font-mono text-ink-muted">
+                          {row.model_id || "unknown"}
+                        </div>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
+                          Source
+                        </div>
+                        <span
+                          className={clsx(
+                            "badge",
+                            pricingSourceTone(row.pricing_source),
+                          )}
+                        >
+                          {pricingLabel(row.pricing_source)}
+                        </span>
+                        <div className="mt-1 truncate text-[11px] text-ink-muted">
+                          {row.pricing_note}
+                        </div>
+                      </div>
+                      <div className="text-right font-mono text-ink max-lg:text-left">
+                        <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
+                          Tokens
+                        </div>
+                        {fmtTokens(rowTokens)}
+                        <div className="text-[11px] text-ink-muted">
+                          in {fmtTokens(row.input_tokens)} · out{" "}
+                          {fmtTokens(row.output_tokens)}
+                        </div>
+                      </div>
+                      <div className="text-right font-mono text-ink max-lg:text-left">
+                        <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
+                          Cost
+                        </div>
+                        {fmtMicroDollars(row.token_cost_micros)}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           )}
-          hint={`read ${fmtTokens(summary.cache_read_tokens)} · write ${fmtTokens(summary.cache_creation_tokens)}`}
-        />
-        <SummaryMetric
-          label="Cost"
-          value={fmtMicroDollars(summary.token_cost_micros)}
-          hint={pricingHint}
-        />
-        <SummaryMetric
-          label="Elapsed"
-          value={wallBudget}
-          hint={
-            summary.declared_wallclock_budget_seconds != null
-              ? "used / declared"
-              : "no declared cap"
-          }
-        />
-        <SummaryMetric
-          label="Admission"
-          value={fmtTokens(summary.admission_reserved_units)}
-          hint="reserved units"
-        />
-        <SummaryMetric
-          label="Actual"
-          value={fmtTokens(summary.actual_cost_units)}
-          hint="admission units"
-        />
-      </div>
-      <p className="mt-3 text-[11px] leading-relaxed text-ink-muted">
-        Provider reported {fmtTokens(summary.input_tokens)} input /{" "}
-        {fmtTokens(summary.output_tokens)} output tokens; {pricingNote}
-      </p>
-      {(summary.token_cost_breakdown?.length ?? 0) > 0 && (
-        <div className="mt-3 overflow-hidden rounded border border-edge">
-          <div className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1.2fr)_minmax(7rem,0.8fr)_minmax(6rem,0.6fr)_minmax(6rem,0.6fr)] gap-2 border-b border-edge bg-panel-muted px-3 py-2 text-[10px] uppercase tracking-wider text-ink-subtle max-lg:hidden">
-            <div>Provider</div>
-            <div>Model</div>
-            <div>Source</div>
-            <div className="text-right">Tokens</div>
-            <div className="text-right">Cost</div>
-          </div>
-          <div className="divide-y divide-edge">
-            {summary.token_cost_breakdown!.map((row, index) => {
-              const rowTokens =
-                row.input_tokens +
-                row.output_tokens +
-                row.cache_read_tokens +
-                row.cache_creation_tokens;
-              return (
-                <div
-                  key={`${row.provider_id}-${row.model_id}-${row.pricing_source}-${index}`}
-                  className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1.2fr)_minmax(7rem,0.8fr)_minmax(6rem,0.6fr)_minmax(6rem,0.6fr)] gap-2 px-3 py-2 text-xs max-lg:grid-cols-1"
-                >
-                  <div className="min-w-0">
-                    <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
-                      Provider
-                    </div>
-                    <div className="truncate font-mono text-ink">
-                      {row.provider_id || "unknown"}
-                    </div>
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
-                      Model
-                    </div>
-                    <div className="truncate font-mono text-ink-muted">
-                      {row.model_id || "unknown"}
-                    </div>
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
-                      Source
-                    </div>
-                    <span className={clsx("badge", pricingSourceTone(row.pricing_source))}>
-                      {pricingLabel(row.pricing_source)}
-                    </span>
-                    <div className="mt-1 truncate text-[11px] text-ink-muted">
-                      {row.pricing_note}
-                    </div>
-                  </div>
-                  <div className="text-right font-mono text-ink max-lg:text-left">
-                    <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
-                      Tokens
-                    </div>
-                    {fmtTokens(rowTokens)}
-                    <div className="text-[11px] text-ink-muted">
-                      in {fmtTokens(row.input_tokens)} · out{" "}
-                      {fmtTokens(row.output_tokens)}
-                    </div>
-                  </div>
-                  <div className="text-right font-mono text-ink max-lg:text-left">
-                    <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
-                      Cost
-                    </div>
-                    {fmtMicroDollars(row.token_cost_micros)}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
         </div>
       )}
     </section>

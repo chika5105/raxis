@@ -154,6 +154,44 @@ describe("<FailureReasonPanel>", () => {
     );
   });
 
+  it("prefers parent recovery when an escalation action is present", () => {
+    render(
+      <FailureReasonPanel
+        reason={{
+          kind: "TaskFailed",
+          message:
+            "parent initiative requires recovery: orchestrator no-progress respawn ceiling exceeded",
+          recovery: {
+            status: "unrecoverable",
+            label: "Not recoverable in place",
+            detail:
+              "This terminal task state is preserved. Use a new run instead.",
+          },
+          actions: [
+            {
+              label: "Open recovery escalations",
+              kind: "route",
+              target: "/escalations",
+            },
+            {
+              label: "Open task",
+              kind: "route",
+              target: "/tasks/019ebbb5",
+            },
+          ],
+        }}
+      />,
+    );
+
+    const recovery = screen.getByTestId("failure-recovery-actions");
+    expect(screen.getAllByTestId("failure-recovery-status")[0]).toHaveTextContent(
+      "Operator action required",
+    );
+    expect(recovery).toHaveTextContent("Parent initiative recovery available");
+    expect(recovery).toHaveTextContent("Open recovery escalations");
+    expect(recovery).not.toHaveTextContent("No in-place recovery command");
+  });
+
   it("collapses details when collapsible=true", () => {
     render(<FailureReasonPanel reason={FULL_REASON} collapsible />);
     // Details visible by default.

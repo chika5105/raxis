@@ -95,6 +95,14 @@ document the live provider key shapes. Real provider keys
   hooks behind their back is its own footgun); the README under
   `examples/` documents the wire-up.
 
+The realism provider entries intentionally omit `pricing.*`
+overrides. That keeps the primary initiative on the non-operator-
+override pricing path (runtime provider pricing when implemented,
+otherwise bundled estimates with explicit provenance). Policy
+pricing overrides are exact-provider scoped; a named sibling or
+contract provider must not silently price the primary run just
+because it has the same provider kind.
+
 The other test-tenant credentials in the bundle
 (`test-pg-dev.env` / `test-mongo-dev.env` / `test-redis-dev.env` /
 `test-smtp-dev.env`) are explicitly OK to commit — they only
@@ -1041,6 +1049,25 @@ RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1 RAXIS_E2E_KEEP_ALIVE_DURATION_SECS=7200 \
     realistic_session_lifecycle -- --nocapture --test-threads=1
 ```
 
+The harness runs `cargo xtask images bake` before booting the
+kernel unless `RAXIS_LIVE_E2E_SKIP_AUTO_BAKE=1` is set. Normal
+runs let xtask's `*.bake.json` integrity manifests decide whether
+each image can be a fast no-op. If you suspect stale guest planner
+bytes after an IPC/schema change, force a refresh without running
+the bake by hand:
+
+```bash
+RAXIS_LIVE_E2E_FORCE_REBAKE=1 \
+RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 \
+RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1 RAXIS_E2E_KEEP_ALIVE_DURATION_SECS=7200 \
+  cargo test -p raxis-kernel \
+    --test extended_e2e_realistic_scenario \
+    realistic_session_lifecycle -- --nocapture --test-threads=1
+```
+
+`RAXIS_LIVE_E2E_FORCE_REBAKE=1` passes `--no-cache` to xtask for
+the canonical planner images the realistic harness boots.
+
 The older short aliases `RAXIS_KEEP_ALIVE=1` and
 `RAXIS_KEEP_ALIVE_DURATION_SECS=7200` are accepted too.
 
@@ -1322,22 +1349,23 @@ an enum reordering on `PlannerIntent`, etc.) breaks bincode
 round-tripping the moment the kernel tries to deserialise
 a frame produced by the older planner.
 
-`cargo xtask images bake`'s default content-addressed
-`bake_role_no_op` arm
-(`reason: "inputs_unchanged_outputs_intact"`) is a known
-load-bearing seam here: when only **transitive** workspace
-dependencies of the planner crates change (`raxis-types`,
-`raxis-ipc`, `raxis-ksb`, `raxis-planner-core`), the
-per-role `bake.json` input hash can still match because the
-input set the bake hashes is narrower than the actual cargo
-build's dependency closure. The bake reports `bake_ok` for
-every role, the staged images stay stale, the next live-e2e
-run fails the way above.
-
-**Fix: force a full rebake.**
+`cargo xtask images bake` records source fingerprints and output
+hashes in each per-role `*.bake.json`, so the normal auto-bake path
+should rebuild when the planner/source inputs drift and no-op when
+they do not. If you need to rule out stale guest bytes completely,
+force a full rebake.
 
 ```bash
 cargo xtask images bake --no-cache
+```
+
+Or, for the live realistic harness:
+
+```bash
+RAXIS_LIVE_E2E_FORCE_REBAKE=1 RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1 \
+  cargo test -p raxis-kernel --release \
+    --test extended_e2e_realistic_scenario \
+    realistic_session_lifecycle -- --nocapture --test-threads=1
 ```
 
 `--no-cache` bypasses the input-hash short-circuit and

@@ -62,9 +62,9 @@ use raxis_dashboard::data::{
     OrchestratorGapsResponse, PolicyAdvancement, PolicyHistoryEntry, PolicyOperatorView,
     PolicySnapshotView, RecentSessionEntry, ReviewerPanelEntry, ReviewerVerdictView, SessionView,
     SessionVmEnvView, StructuredOutputView, SubsystemDetailRow, SubsystemHealthCard,
-    SubsystemHealthResponse, TaskView, TokenCostBreakdownRow, WorktreeDetail, WorktreeDiff,
-    WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry,
-    SUBSYSTEM_CATALOG,
+    SubsystemHealthResponse, TaskView, TokenCostBreakdownRow, VmCommandDiagnosticView,
+    VmDiagnosticsView, VmSessionDiagnosticView, WorktreeDetail, WorktreeDiff, WorktreeFile,
+    WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry, SUBSYSTEM_CATALOG,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -979,11 +979,13 @@ impl DashboardData for KernelDashboardData {
             extend_diagnostics_from_log_tail(&mut findings, initiative_id, &path, &text, now);
         }
 
+        let vm = build_vm_diagnostics(self, initiative_id, limit).unwrap_or_default();
         dedupe_and_sort_diagnostics(&mut findings);
         findings.truncate(limit.min(200) as usize);
         Ok(DiagnosticsResponse {
             generated_at: now,
             findings,
+            vm,
         })
     }
 
@@ -3950,6 +3952,136 @@ fn infer_environment_from_credential_name(name: &str) -> Option<String> {
         .map(|label| (*label).to_owned())
 }
 
+#[derive(Debug, Clone, Default)]
+struct VmScope {
+    initiative_id: Option<String>,
+    initiative_display_name: Option<String>,
+    task_id: Option<String>,
+    task_name: Option<String>,
+}
+
+fn build_vm_diagnostics(
+    data: &KernelDashboardData,
+    initiative_id: Option<&str>,
+    limit: u32,
+) -> Result<VmDiagnosticsView, ApiError> {
+    let cap = limit.clamp(1, 200) as usize;
+    let session_rows = data.list_sessions(limit.clamp(1, 200), initiative_id)?;
+    let mut by_session: BTreeMap<String, VmScope> = BTreeMap::new();
+    let mut by_task: BTreeMap<String, VmScope> = BTreeMap::new();
+    let sessions: Vec<VmSessionDiagnosticView> = session_rows
+        .into_iter()
+        .map(|s| {
+            let scope = VmScope {
+                initiative_id: s.initiative_id.clone(),
+                initiative_display_name: s.initiative_display_name.clone(),
+                task_id: s.task_id.clone(),
+                task_name: s.task_name.clone(),
+            };
+            by_session.insert(s.session_id.clone(), scope.clone());
+            if let Some(task_id) = &s.task_id {
+                by_task.insert(task_id.clone(), scope);
+            }
+            VmSessionDiagnosticView {
+                session_id: s.session_id,
+                role: s.role,
+                state: s.state,
+                initiative_id: s.initiative_id,
+                initiative_display_name: s.initiative_display_name,
+                task_id: s.task_id,
+                task_name: s.task_name,
+                provider: s.provider,
+                model: s.model,
+                input_tokens: s.input_tokens,
+                output_tokens: s.output_tokens,
+                created_at: s.created_at,
+                updated_at: s.updated_at,
+            }
+        })
+        .collect();
+
+    let audit_chain = collect_lifecycle_audit_rows(&data.audit_dir);
+    let mut command_rows: Vec<&lifecycle::AuditRow> = audit_chain
+        .iter()
+        .filter(|row| row.event_kind == "CustomToolInvoked")
+        .filter(|row| {
+            let row_initiative = row
+                .initiative_id
+                .as_deref()
+                .or_else(|| payload_str(row, "initiative_id"));
+            match initiative_id {
+                Some(expected) => row_initiative == Some(expected),
+                None => true,
+            }
+        })
+        .collect();
+    command_rows.sort_by(|a, b| b.seq.cmp(&a.seq));
+    command_rows.truncate(cap);
+
+    let mut commands = Vec::with_capacity(command_rows.len());
+    for row in command_rows {
+        let one = [row];
+        let Some(call) = extract_custom_tool_calls_from_rows(&one).into_iter().next() else {
+            continue;
+        };
+        let session_id = row
+            .session_id
+            .clone()
+            .or_else(|| payload_str(row, "session_id").map(str::to_owned));
+        let task_id = row
+            .task_id
+            .clone()
+            .or_else(|| payload_str(row, "task_id").map(str::to_owned));
+        let mut scope = session_id
+            .as_ref()
+            .and_then(|id| by_session.get(id))
+            .cloned()
+            .or_else(|| task_id.as_ref().and_then(|id| by_task.get(id)).cloned())
+            .unwrap_or_default();
+        if scope.initiative_id.is_none() {
+            scope.initiative_id = row
+                .initiative_id
+                .clone()
+                .or_else(|| payload_str(row, "initiative_id").map(str::to_owned));
+        }
+        if scope.task_id.is_none() {
+            scope.task_id = task_id.clone();
+        }
+        commands.push(VmCommandDiagnosticView {
+            seq: call.seq,
+            event_id: call.event_id,
+            at: call.at,
+            initiative_id: scope.initiative_id,
+            initiative_display_name: scope.initiative_display_name,
+            task_id: scope.task_id,
+            task_name: scope.task_name,
+            session_id,
+            tool_name: call.tool_name,
+            profile_name: call.profile_name,
+            execution_locality: call.execution_locality,
+            outcome: call.outcome,
+            duration_ms: call.duration_ms,
+            exit_code: call.exit_code,
+            signal: call.signal,
+            timeout_ms: call.timeout_ms,
+            command_argv_sha256: call.command_argv_sha256,
+            stdin_bytes_total: call.stdin_bytes_total,
+            stdin_sha256: call.stdin_sha256,
+            stdout_bytes_total: call.stdout_bytes_total,
+            stdout_bytes_captured: call.stdout_bytes_captured,
+            stdout_sha256: call.stdout_sha256,
+            stdout_truncated: call.stdout_truncated,
+            stderr_bytes_total: call.stderr_bytes_total,
+            stderr_bytes_captured: call.stderr_bytes_captured,
+            stderr_sha256: call.stderr_sha256,
+            stderr_truncated: call.stderr_truncated,
+            error: call.error,
+        });
+    }
+
+    Ok(VmDiagnosticsView { sessions, commands })
+}
+
 trait DiagnosticFindingExt {
     fn maybe_initiative(self, id: Option<String>) -> Self;
     fn maybe_task(self, id: Option<String>) -> Self;
@@ -6019,6 +6151,18 @@ fn dashboard_pricing_source_for_task(
         {
             return DashboardTokenPricingSource::OperatorPolicyOverride;
         }
+
+        // Generic provider-family labels (`anthropic`, `openai`,
+        // `gemini`) must not inherit a pricing override from an
+        // arbitrary named same-kind provider row. That would make one
+        // deployment's contract rate appear to price another run that
+        // intentionally left pricing unset.
+        if dashboard_kind_id(provider).is_some() {
+            if matches!(provider, "anthropic" | "openai" | "gemini" | "bedrock") {
+                return DashboardTokenPricingSource::BundledEstimate;
+            }
+            return DashboardTokenPricingSource::Unknown;
+        }
     }
 
     let provider_kind = dashboard_provider_kind(provider, row.model.as_deref()).or_else(|| {
@@ -6994,6 +7138,8 @@ fn classify_task_failure_kind(
         && (reason.contains("IntegrationMerge") || reason.contains("integration merge"))
     {
         "IntegrationMergeFailed"
+    } else if task_reason_needs_parent_initiative_recovery(reason) {
+        "ParentInitiativeRecoveryRequired"
     } else if reason.contains("review rejection budget exhausted") {
         "ReviewRejectionBudgetExhausted"
     } else if reason.contains("ActivateSubTask substrate spawn failed")
@@ -7029,6 +7175,12 @@ fn attach_task_recovery_actions(
                 "command",
                 format!("raxis task resume {}", shell_quote(&t.task_id)),
             );
+    } else if task_reason_needs_parent_initiative_recovery(reason) {
+        info = info.with_recovery(
+            "operator_action_required",
+            "Parent initiative recovery available",
+            "This task is not directly retryable, but the parent initiative has a recovery escalation. Open Escalations to review the cause and approve or deny the signed resume disposition.",
+        );
     } else if reason.contains("operator approval")
         || reason.contains("RecoveryRequired")
         || reason.contains("LogicalDeadlock")
@@ -7062,6 +7214,7 @@ fn attach_task_recovery_actions(
         || reason.contains("RecoveryRequired")
         || reason.contains("LogicalDeadlock")
         || reason.contains("IntegrationMerge")
+        || task_reason_needs_parent_initiative_recovery(reason)
     {
         info = info.with_action("Open recovery escalations", "route", "/escalations");
     }
@@ -7087,6 +7240,23 @@ fn attach_initiative_recovery_actions(
                 "route",
                 format!("/tasks/{}", task.task_id),
             );
+    } else if task
+        .block_reason
+        .as_deref()
+        .is_some_and(task_reason_needs_parent_initiative_recovery)
+    {
+        info = info
+            .with_recovery(
+                "operator_action_required",
+                "Parent initiative recovery available",
+                "The initiative reached a terminal task state, but the causal failure points at a recovery escalation. Open Escalations to approve or deny the signed resume disposition.",
+            )
+            .with_action("Open recovery escalations", "route", "/escalations")
+            .with_action(
+                "Open causal task",
+                "route",
+                format!("/tasks/{}", task.task_id),
+            );
     } else if matches!(state, "Failed" | "Aborted") {
         info = info.with_recovery(
             "unrecoverable",
@@ -7101,6 +7271,17 @@ fn attach_initiative_recovery_actions(
         );
     }
     info
+}
+
+fn task_reason_needs_parent_initiative_recovery(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("parent initiative requires recovery")
+        || lower.contains("recovery escalation")
+        || (lower.contains("operator approval required")
+            && (lower.contains("orchestrator")
+                || lower.contains("logicaldeadlock")
+                || lower.contains("logical deadlock")
+                || lower.contains("respawn")))
 }
 
 fn shell_quote(value: &str) -> String {
@@ -9713,6 +9894,69 @@ predecessors = ["produce-report"]
     }
 
     #[test]
+    fn git_repositories_skip_parent_repo_walk_and_include_real_managed_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let homebrew_like_root = tmp.path().join("homebrew");
+        std::fs::create_dir_all(&homebrew_like_root).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&homebrew_like_root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "fixture parent git init failed");
+
+        let data_dir = homebrew_like_root.join("var/lib/raxis");
+        let repos_dir = data_dir.join("repositories");
+        let bogus_main = repos_dir.join("main");
+        let real_repo = repos_dir.join("raxis-gtm");
+        std::fs::create_dir_all(&bogus_main).unwrap();
+        std::fs::create_dir_all(&real_repo).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&real_repo)
+            .status()
+            .unwrap();
+        assert!(status.success(), "fixture managed repo git init failed");
+
+        let store = Arc::new(Store::open(&data_dir.join("kernel.db")).unwrap());
+        let mut policy = PolicyBundle::for_tests_with_operators(Vec::new());
+        policy.set_allowed_worktree_roots_for_tests(vec![data_dir
+            .join("worktrees")
+            .display()
+            .to_string()]);
+        let policy = Arc::new(ArcSwap::from_pointee(policy));
+        let data = KernelDashboardData::new(
+            store,
+            policy,
+            data_dir.clone(),
+            data_dir.join("policy/policy.toml"),
+            1,
+        )
+        .unwrap();
+
+        let rows = data.collect_worktrees().unwrap();
+        let repo_rows: Vec<_> = rows
+            .iter()
+            .filter(|row| row.summary.surface.as_deref() == Some("Repository"))
+            .collect();
+
+        assert_eq!(
+            repo_rows.len(),
+            1,
+            "only exact managed repository roots should be surfaced: {repo_rows:#?}",
+        );
+        assert_eq!(
+            repo_rows[0].summary.repository_id.as_deref(),
+            Some("raxis-gtm")
+        );
+        assert_eq!(repo_rows[0].summary.name, "main-repository-raxis-gtm");
+        assert!(
+            rows.iter().all(|row| row.summary.repository_id.as_deref() != Some("main")),
+            "empty repositories/main must not be misidentified through the parent Git checkout: {rows:#?}",
+        );
+    }
+
+    #[test]
     fn load_dashboard_config_returns_none_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let r = load_dashboard_config(&tmp.path().join("does-not-exist.toml")).unwrap();
@@ -10186,6 +10430,39 @@ lane_id = "default"
     }
 
     #[test]
+    fn task_failure_parent_recovery_is_operator_action_not_unrecoverable() {
+        let mut row = synth_task_row(raxis_types::TaskState::Failed);
+        row.task_id = "019ebbb5-775f-7ef2-8671-7cfed37d5298".into();
+        row.initiative_id = row.task_id.clone();
+        row.task_name = None;
+        row.block_reason = Some(
+            "parent initiative requires recovery: orchestrator no-progress respawn ceiling \
+             exceeded (INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01)"
+                .into(),
+        );
+
+        let failure = task_failure_from_block_reason(&row, "Integration merge")
+            .expect("parent-recovery task failure must project");
+
+        assert_eq!(failure.kind, "ParentInitiativeRecoveryRequired");
+        assert_eq!(
+            failure.recovery.as_ref().map(|r| r.status.as_str()),
+            Some("operator_action_required")
+        );
+        assert_eq!(
+            failure.recovery.as_ref().map(|r| r.label.as_str()),
+            Some("Parent initiative recovery available")
+        );
+        assert!(failure.actions.iter().any(|action| {
+            action.label == "Open recovery escalations" && action.target == "/escalations"
+        }));
+        assert!(!failure
+            .recovery
+            .as_ref()
+            .is_some_and(|r| r.status == "unrecoverable"));
+    }
+
+    #[test]
     fn initiative_failure_uses_latest_causal_task_block_reason() {
         let mut first = synth_task_row(raxis_types::TaskState::Failed);
         first.task_id = "task-old".into();
@@ -10223,6 +10500,36 @@ lane_id = "default"
             failure.recovery.as_ref().map(|r| r.status.as_str()),
             Some("operator_action_required")
         );
+    }
+
+    #[test]
+    fn failed_initiative_with_parent_recovery_reason_points_to_escalations() {
+        let mut causal = synth_task_row(raxis_types::TaskState::Failed);
+        causal.task_id = "019ebbb5-775f-7ef2-8671-7cfed37d5298".into();
+        causal.initiative_id = causal.task_id.clone();
+        causal.task_name = None;
+        causal.block_reason = Some(
+            "parent initiative requires recovery: orchestrator no-progress respawn ceiling \
+             exceeded. Operator approval required to reset the respawn counter and retry."
+                .into(),
+        );
+        causal.transitioned_at = 42;
+
+        let failure = initiative_failure_from_task_rows("Failed", &[causal])
+            .expect("failed initiative should project causal recovery reason");
+
+        assert_eq!(failure.kind, "InitiativeFailed");
+        assert_eq!(
+            failure.recovery.as_ref().map(|r| r.status.as_str()),
+            Some("operator_action_required")
+        );
+        assert_eq!(
+            failure.recovery.as_ref().map(|r| r.label.as_str()),
+            Some("Parent initiative recovery available")
+        );
+        assert!(failure.actions.iter().any(|action| {
+            action.label == "Open recovery escalations" && action.target == "/escalations"
+        }));
     }
 
     #[test]
@@ -10356,6 +10663,47 @@ prompt = "do capture work"
         assert_eq!(summary.actual_cost_units, 7);
         assert_eq!(summary.declared_turn_budget, Some(12));
         assert_eq!(summary.declared_wallclock_budget_seconds, Some(70));
+    }
+
+    #[test]
+    fn generic_provider_label_does_not_inherit_named_policy_override() {
+        let mut policy = PolicyBundle::for_tests_with_operators(Vec::new());
+        policy.set_providers_for_tests(vec![raxis_policy::ProviderEntry {
+            provider_id: "anthropic-contract".to_owned(),
+            kind: "Anthropic".to_owned(),
+            credentials_file: "anthropic-contract.toml".to_owned(),
+            inference_timeout_ms: 30_000,
+            data_fetch_timeout_ms: 10_000,
+            max_response_bytes: 16 * 1024 * 1024,
+            stream_idle_timeout_ms: None,
+            sidecar_endpoint: None,
+            sidecar_hmac_secret: None,
+            sidecar_health_check_path: None,
+            pricing: Some(raxis_policy::ProviderPricing {
+                input_tokens_per_dollar: 200_000,
+                output_tokens_per_dollar: 50_000,
+                cache_read_tokens_per_dollar: None,
+                cache_creation_tokens_per_dollar: None,
+            }),
+        }]);
+
+        let row = InitiativeTaskAccounting {
+            task_id: "t-primary".to_owned(),
+            provider: Some("anthropic".to_owned()),
+            model: Some("claude-haiku-4-5".to_owned()),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            token_cost_micros: 1,
+            admission_reserved_units: 0,
+            actual_cost_units: 0,
+        };
+
+        assert_eq!(
+            dashboard_pricing_source_for_task(&policy, &row),
+            DashboardTokenPricingSource::BundledEstimate
+        );
     }
 
     // ── iter69 — observability-pusher health classification ─────────────

@@ -41,10 +41,12 @@ export function GitPage() {
       if (scope === "worktree" && worktreeSurface(w) !== "Worktree") {
         return false;
       }
-      if (scope === "repository" && worktreeSurface(w) === "Worktree") {
+      if (scope === "repository" && worktreeSurface(w) !== "Repository") {
         return false;
       }
-      if (!matchesLifecycleScope(w, lifecycleScope)) return false;
+      if (scope !== "repository" && !matchesLifecycleScope(w, lifecycleScope)) {
+        return false;
+      }
       if (
         workspaceName !== "All" &&
         (w.initiative_display_name ?? "") !== workspaceName
@@ -91,7 +93,7 @@ export function GitPage() {
     [filtered, groupBy],
   );
   const repositoryCount = items.filter(
-    (w) => worktreeSurface(w) !== "Worktree",
+    (w) => worktreeSurface(w) === "Repository",
   ).length;
   const worktreeCount = items.filter(
     (w) => worktreeSurface(w) === "Worktree",

@@ -3086,9 +3086,16 @@ canonical order:
 
 **Live-e2e auto-bake.** The `extended_e2e_*` realistic-scenario
 harnesses call `require_canonical_images()` before the kernel
-boots; if any required image is missing OR is detected as a stub
-via the cpio-walk preflight (next bullet), the harness
-automatically runs `cargo xtask images bake` before proceeding.
+boots; unless `RAXIS_LIVE_E2E_SKIP_AUTO_BAKE=1` is set, the harness
+delegates to `cargo xtask images bake` for each booted canonical
+planner image before proceeding. The harness MUST NOT pre-skip
+based only on cpio completeness: a structurally complete image can
+still contain stale planner binaries after an IPC/schema change.
+Freshness belongs to xtask's per-role `*.bake.json` integrity
+manifest, which fingerprints planner/source inputs and output
+hashes. Operators can force a full live-e2e refresh with
+`RAXIS_LIVE_E2E_FORCE_REBAKE=1`, which passes `--no-cache` through
+to xtask.
 
 **Per-role required-binary cpio-walk preflight.** The live-e2e
 support code (`kernel/tests/extended_e2e_support/cpio_inspect.rs`

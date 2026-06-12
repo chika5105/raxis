@@ -127,6 +127,36 @@ export interface FailureInfo {
 export interface DiagnosticsResponse {
   generated_at: number;
   findings: DiagnosticFinding[];
+  vm?: VmDiagnosticsView;
+}
+
+export interface VmDiagnosticsView {
+  sessions: VmSessionDiagnosticView[];
+  commands: VmCommandDiagnosticView[];
+}
+
+export interface VmSessionDiagnosticView {
+  session_id: string;
+  role: string;
+  state: string;
+  initiative_id?: string | null;
+  initiative_display_name?: string | null;
+  task_id?: string | null;
+  task_name?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface VmCommandDiagnosticView extends CustomToolCallView {
+  initiative_id?: string | null;
+  initiative_display_name?: string | null;
+  task_id?: string | null;
+  task_name?: string | null;
+  session_id?: string | null;
 }
 
 export interface DiagnosticFinding {
