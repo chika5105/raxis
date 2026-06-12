@@ -24,7 +24,9 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::DashboardRole;
-use crate::data::{DagEdge, InitiativeListEntry, InitiativePlanView, InitiativeView, TaskView};
+use crate::data::{
+    DagEdge, FailureInfo, InitiativeListEntry, InitiativePlanView, InitiativeView, TaskView,
+};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
 
@@ -112,6 +114,12 @@ pub struct DagNode {
     /// True when the review-rejection ceiling has been reached.
     #[serde(default)]
     pub review_retry_exhausted: bool,
+    /// Structured failure reason when the task is failed/recovery
+    /// blocked. Mirrors `TaskView::failure` so the full-DAG focus
+    /// panel can explain failures without forcing the operator to
+    /// leave the graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<FailureInfo>,
     /// `true` when an executor/reviewer subtask activation is live
     /// for this task. Mirrors `TaskView::is_active`: the FSM state
     /// can be `Admitted` while the task is mid-execution between
@@ -164,6 +172,7 @@ where
             review_reject_count: t.review_reject_count,
             max_review_rejections: t.max_review_rejections,
             review_retry_exhausted: t.review_retry_exhausted,
+            failure: t.failure.clone(),
             is_active: t.is_active,
             gate_verdict_summary: chip_map.get(&t.task_id).cloned().unwrap_or_default(),
         })

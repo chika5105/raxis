@@ -14,7 +14,7 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 // InitiativeState
 // DDL: CHECK (status IN ('Draft','ApprovedPlan','Executing','Blocked',
-//                        'Completed','Failed','Aborted'))
+//                        'RecoveryRequired','Completed','Failed','Aborted'))
 // kernel-store.md §2.5.1 Table 2
 // ---------------------------------------------------------------------------
 
@@ -25,9 +25,12 @@ use std::fmt;
 ///   Draft → Aborted (reject_plan)
 ///   ApprovedPlan → Executing (first task Running)
 ///   Executing → Blocked (evaluate_terminal_criteria under partial-failure policies)
+///   Executing / Blocked → RecoveryRequired (recoverable kernel stop; operator action required)
+///   RecoveryRequired → Executing (operator-approved recovery)
+///   RecoveryRequired → Failed (operator denies recovery / forensic close)
 ///   Executing → Completed (evaluate_terminal_criteria: all success criteria met)
 ///   Executing → Failed (evaluate_terminal_criteria: failure criterion met)
-///   Executing / Blocked → Aborted (abort_initiative)
+///   Executing / Blocked / RecoveryRequired → Aborted (abort_initiative)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum InitiativeState {
@@ -35,6 +38,7 @@ pub enum InitiativeState {
     ApprovedPlan,
     Executing,
     Blocked,
+    RecoveryRequired,
     Completed,
     Failed,
     Aborted,
@@ -52,11 +56,12 @@ impl InitiativeState {
     /// `migration::tests::migration_1_ddl_fingerprint_is_pinned` hash
     /// guard catches any silent drift between this array and the
     /// rendered Migration 1 DDL.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Draft,
         Self::ApprovedPlan,
         Self::Executing,
         Self::Blocked,
+        Self::RecoveryRequired,
         Self::Completed,
         Self::Failed,
         Self::Aborted,
@@ -64,6 +69,9 @@ impl InitiativeState {
 
     /// Returns true for terminal states (no further transitions possible).
     /// kernel-core.md: "terminal state" = Completed | Failed | Aborted.
+    /// `RecoveryRequired` is intentionally non-terminal: execution is
+    /// paused until an operator either approves a signed recovery path
+    /// back to `Executing` or denies/closes it into `Failed`.
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Aborted)
     }
@@ -75,6 +83,7 @@ impl InitiativeState {
             Self::ApprovedPlan => "ApprovedPlan",
             Self::Executing => "Executing",
             Self::Blocked => "Blocked",
+            Self::RecoveryRequired => "RecoveryRequired",
             Self::Completed => "Completed",
             Self::Failed => "Failed",
             Self::Aborted => "Aborted",
@@ -88,6 +97,7 @@ impl InitiativeState {
             "ApprovedPlan" => Some(Self::ApprovedPlan),
             "Executing" => Some(Self::Executing),
             "Blocked" => Some(Self::Blocked),
+            "RecoveryRequired" => Some(Self::RecoveryRequired),
             "Completed" => Some(Self::Completed),
             "Failed" => Some(Self::Failed),
             "Aborted" => Some(Self::Aborted),

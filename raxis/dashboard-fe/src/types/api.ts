@@ -81,6 +81,15 @@ export interface FailureArtifact {
   href: string;
 }
 
+export interface FailureRecovery {
+  /// Stable operator-facing disposition. Known values:
+  /// `recoverable`, `operator_action_required`,
+  /// `diagnosis_only`, and `unrecoverable`.
+  status: string;
+  label: string;
+  detail: string;
+}
+
 export interface FailureInfo {
   /// PascalCase error class, e.g. `SessionVmFailedFinal`,
   /// `WorktreeProvisionFailed`, `ReviewerRejected`. Used as the
@@ -97,6 +106,14 @@ export interface FailureInfo {
   /// Click-through links (`kernel.stderr.log`, worktree path,
   /// audit-chain deep link, …). Empty array ⇒ no artifact block.
   artifacts?: FailureArtifact[];
+  /// Suggested recovery / diagnosis steps. These are operator
+  /// affordances only; the kernel still enforces roles, signatures,
+  /// epochs, and policy when the action is actually performed.
+  actions?: DiagnosticAction[];
+  /// Explicit recovery disposition. When omitted by an older
+  /// backend, the dashboard derives a conservative label from
+  /// actions/kind.
+  recovery?: FailureRecovery | null;
   /// Audit-chain anchor (event_id + seq) so the FE can deep-link
   /// to the originating row. `null` when the reason was synthesised
   /// outside the audit chain (rare).
@@ -568,10 +585,11 @@ export interface InitiativeView extends InitiativeListEntry {
   tasks: TaskView[];
   edges: DagEdge[];
   run_summary: InitiativeRunSummary;
-  /// Failure reason, set when the initiative is in a
-  /// terminal-failure state (`Failed`, `Aborted`). The dashboard
-  /// renders this in `<FailureReasonPanel>` at the top of the
-  /// initiative detail page.
+  /// Failure reason, set when the initiative is in a failed or
+  /// recovery-required state (`Failed`, `Aborted`,
+  /// `RecoveryRequired`, …). The dashboard renders this in
+  /// `<FailureReasonPanel>` at the top of the initiative detail
+  /// page.
   failure?: FailureInfo | null;
 }
 
@@ -586,10 +604,25 @@ export interface InitiativeRunSummary {
   cache_read_tokens: number;
   cache_creation_tokens: number;
   token_cost_micros: number;
+  token_cost_pricing_source: string;
+  token_cost_pricing_note: string;
+  token_cost_breakdown?: TokenCostBreakdownRow[];
   admission_reserved_units: number;
   actual_cost_units: number;
   declared_turn_budget?: number | null;
   declared_wallclock_budget_seconds?: number | null;
+}
+
+export interface TokenCostBreakdownRow {
+  provider_id: string;
+  model_id: string;
+  pricing_source: string;
+  pricing_note: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  token_cost_micros: number;
 }
 
 /// `GET /api/initiatives/:id/plan` response body — the original
@@ -715,6 +748,10 @@ export interface DagNode {
   review_reject_count?: number;
   max_review_rejections?: number;
   review_retry_exhausted?: boolean;
+  /// Structured failure reason for failed/recovery-blocked tasks.
+  /// Mirrors `TaskView.failure` so DAG focus panels can explain
+  /// a selected failed node without opening a separate task page.
+  failure?: FailureInfo | null;
   /// Mirror of `TaskView.is_active`: backend sets this when an
   /// executor/reviewer subtask activation is live for the task.
   /// The DAG renderer treats `is_active` as Running for tone +
@@ -1080,6 +1117,10 @@ export interface KernelLifecycleResponse {
   /// post-restart pill — green for full auto-resume, amber when
   /// at least one task stayed paused.
   auto_resume?: KernelAutoResumeSummary | null;
+  /// Clean host-restart recovery checklist. Present when the
+  /// durable store contains interrupted tasks left at
+  /// `BlockedRecoveryPending` for operator disposition.
+  host_restart_recovery?: HostRestartRecoverySummary | null;
 }
 
 /// Serde-stable summary of one supervisor-aware auto-resume
@@ -1111,6 +1152,27 @@ export interface KernelAutoResumeSummary {
   /// dashboard handler suppresses the field if this is more
   /// than `AUTO_RESUME_VISIBILITY_WINDOW_SECS` (5 minutes) ago.
   recorded_at_unix_secs: number;
+}
+
+/// Host restart recovery checklist returned alongside
+/// `KernelLifecycleResponse`. These rows are intentionally
+/// copy-command based: the dashboard browser does not hold the
+/// private operator key required to sign a resume.
+export interface HostRestartRecoverySummary {
+  generated_at: number;
+  tasks: HostRestartRecoveryTask[];
+}
+
+export interface HostRestartRecoveryTask {
+  task_id: string;
+  task_name?: string | null;
+  initiative_id: string;
+  initiative_display_name?: string | null;
+  agent_type: string;
+  state: string;
+  block_reason?: string | null;
+  updated_at: number;
+  resume_command: string;
 }
 
 export interface WorktreeListEntry {

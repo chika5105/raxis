@@ -34,6 +34,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -434,6 +435,196 @@ impl Tool for ReadFileTool {
     }
 }
 
+/// `list_files` — read-only workspace-relative path discovery.
+/// Schema: `{ path?: string, max_entries?: integer }`. Returns
+/// deterministic metadata only; it never reads file contents and
+/// never follows symlinked directories. This is intentionally
+/// available to reviewers so they can find the exact artifact file
+/// without receiving shell access.
+pub struct ListFilesTool;
+
+const LIST_FILES_DEFAULT_MAX_ENTRIES: usize = 200;
+const LIST_FILES_HARD_MAX_ENTRIES: usize = 1000;
+
+#[async_trait::async_trait]
+impl Tool for ListFilesTool {
+    fn name(&self) -> &'static str {
+        "list_files"
+    }
+
+    fn description(&self) -> &'static str {
+        "List workspace-relative files/directories under a path without reading \
+         contents. Rejects absolute paths and `..`; output is sorted and capped."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Workspace-relative file or directory to list. Defaults to '.'.",
+                },
+                "max_entries": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": LIST_FILES_HARD_MAX_ENTRIES,
+                    "description": "Maximum entries to return; defaults to 200.",
+                }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let max_entries = input
+            .get("max_entries")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.clamp(1, LIST_FILES_HARD_MAX_ENTRIES as u64) as usize)
+            .unwrap_or(LIST_FILES_DEFAULT_MAX_ENTRIES);
+        let resolved = resolve_workspace_path(&ctx.workspace_root, path).map_err(|e| match e {
+            ToolError::InvalidInput { reason, .. } => ToolError::InvalidInput {
+                tool: "list_files".to_owned(),
+                reason,
+            },
+            other => other,
+        })?;
+
+        let workspace_root = ctx.workspace_root.clone();
+        let requested_path = if path.is_empty() { "." } else { path }.to_owned();
+        let listed = tokio::task::spawn_blocking(move || {
+            collect_workspace_listing(&workspace_root, &resolved, max_entries)
+        })
+        .await
+        .map_err(|e| ToolError::Internal {
+            tool: "list_files".to_owned(),
+            reason: format!("join failed: {e}"),
+        })?;
+
+        match listed {
+            Ok(WorkspaceListing {
+                mut rows,
+                truncated,
+            }) => {
+                rows.sort();
+                if rows.is_empty() {
+                    Ok(ToolOutput::ok(format!(
+                        "list_files under {requested_path:?}: <empty>"
+                    )))
+                } else {
+                    let truncated_note = if truncated {
+                        format!(
+                            "\n... <truncated at {max_entries} entries; narrow `path` to inspect more>"
+                        )
+                    } else {
+                        String::new()
+                    };
+                    Ok(ToolOutput::ok(format!(
+                        "list_files under {requested_path:?} ({} entries):\n{}{}",
+                        rows.len(),
+                        rows.join("\n"),
+                        truncated_note
+                    )))
+                }
+            }
+            Err(message) => Ok(ToolOutput::err(format!(
+                "list_files({requested_path:?}) failed: {message}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct WorkspaceListing {
+    rows: Vec<String>,
+    truncated: bool,
+}
+
+fn collect_workspace_listing(
+    workspace_root: &Path,
+    start: &Path,
+    max_entries: usize,
+) -> Result<WorkspaceListing, String> {
+    let mut rows = Vec::new();
+    let mut truncated = false;
+    let meta =
+        std::fs::symlink_metadata(start).map_err(|e| format!("metadata({start:?}) failed: {e}"))?;
+    if meta.file_type().is_file() {
+        rows.push(format!(
+            "file {}",
+            workspace_relative_display(workspace_root, start)
+        ));
+        return Ok(WorkspaceListing { rows, truncated });
+    }
+    if meta.file_type().is_symlink() {
+        rows.push(format!(
+            "link {}",
+            workspace_relative_display(workspace_root, start)
+        ));
+        return Ok(WorkspaceListing { rows, truncated });
+    }
+    if !meta.file_type().is_dir() {
+        return Err("path is not a regular file or directory".to_owned());
+    }
+
+    let mut stack = vec![start.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut children = Vec::new();
+        for entry in
+            std::fs::read_dir(&dir).map_err(|e| format!("read_dir({dir:?}) failed: {e}"))?
+        {
+            let entry = entry.map_err(|e| format!("read_dir entry failed: {e}"))?;
+            children.push(entry.path());
+        }
+        children.sort();
+        children.reverse();
+
+        for child in children {
+            if child.file_name() == Some(OsStr::new(".git")) {
+                continue;
+            }
+            let child_meta = match std::fs::symlink_metadata(&child) {
+                Ok(m) => m,
+                Err(e) => {
+                    rows.push(format!(
+                        "error {} metadata failed: {e}",
+                        workspace_relative_display(workspace_root, &child)
+                    ));
+                    continue;
+                }
+            };
+            let rel = workspace_relative_display(workspace_root, &child);
+            if child_meta.file_type().is_dir() {
+                rows.push(format!("dir  {rel}/"));
+                stack.push(child);
+            } else if child_meta.file_type().is_file() {
+                rows.push(format!("file {rel}"));
+            } else if child_meta.file_type().is_symlink() {
+                rows.push(format!("link {rel}"));
+            } else {
+                rows.push(format!("other {rel}"));
+            }
+            if rows.len() >= max_entries {
+                truncated = true;
+                return Ok(WorkspaceListing { rows, truncated });
+            }
+        }
+    }
+
+    Ok(WorkspaceListing { rows, truncated })
+}
+
+fn workspace_relative_display(workspace_root: &Path, path: &Path) -> String {
+    path.strip_prefix(workspace_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 /// `edit_file` — overwrite a workspace file with the supplied
 /// contents. Creates parent directories as needed.
 /// Schema: `{ path: string, contents: string }`.
@@ -626,8 +817,9 @@ impl Tool for BashTool {
 
 /// `grep_search` — `rg -n` / `grep -rn` over the workspace.
 /// Schema: `{ pattern: string, path: string? }`. Prefer `rg` because
-/// the canonical scratch reviewer image ships only ripgrep; fall back
-/// to `grep` for developer shells and older images.
+/// the canonical scratch reviewer image ships only ripgrep at
+/// `/usr/bin/rg`; fall back to `grep` for developer shells and older
+/// images.
 pub struct GrepSearchTool;
 
 #[async_trait::async_trait]
@@ -677,17 +869,8 @@ impl Tool for GrepSearchTool {
             other => other,
         })?;
         let rel_arg = if path.is_empty() { "." } else { path };
-        let out = match tokio::process::Command::new("rg")
-            .arg("-n")
-            .arg("--color")
-            .arg("never")
-            .arg("--no-heading")
-            .arg(pattern)
-            .arg(rel_arg)
-            .current_dir(&ctx.workspace_root)
-            .output()
-            .await
-        {
+        let out = run_ripgrep_with_canonical_fallback(&ctx.workspace_root, pattern, rel_arg).await;
+        let out = match out {
             Ok(o) => Ok(o),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tokio::process::Command::new("grep")
@@ -727,6 +910,36 @@ impl Tool for GrepSearchTool {
             None => Ok(ToolOutput::err("grep_search: signalled".to_owned())),
         }
     }
+}
+
+async fn run_ripgrep_with_canonical_fallback(
+    workspace_root: &Path,
+    pattern: &str,
+    rel_arg: &str,
+) -> std::io::Result<std::process::Output> {
+    let mut last_not_found: Option<std::io::Error> = None;
+    for candidate in ["rg", "/usr/bin/rg"] {
+        match tokio::process::Command::new(candidate)
+            .arg("-n")
+            .arg("--color")
+            .arg("never")
+            .arg("--no-heading")
+            .arg(pattern)
+            .arg(rel_arg)
+            .current_dir(workspace_root)
+            .output()
+            .await
+        {
+            Ok(o) => return Ok(o),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                last_not_found = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_not_found.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "ripgrep binary not found")
+    }))
 }
 
 /// `git_commit` — `git add` + `git commit -m <message>` in the
@@ -2103,15 +2316,16 @@ pub fn build_executor_registry() -> ToolRegistry {
 }
 
 /// **Reviewer registry.** Read-only by construction:
-/// `read_file`, `grep_search`. NO `edit_file`, NO `bash`, NO
-/// `git_commit`, NO `sleep` (INV-PLANNER-HARNESS-02 — Pure-Static
-/// Reviewer has no external process to wait for). Pinned by
-/// `planner-harness.md §14.3 INV-PLANNER-HARNESS-04`. Includes the
-/// `submit_review` terminal-tool declaration so the model knows to
-/// call it.
+/// `read_file`, `list_files`, `grep_search`. NO `edit_file`, NO
+/// `bash`, NO `git_commit`, NO `sleep`
+/// (INV-PLANNER-HARNESS-02 — Pure-Static Reviewer has no external
+/// process to wait for). Pinned by `planner-harness.md §14.3
+/// INV-PLANNER-HARNESS-04`. Includes the `submit_review`
+/// terminal-tool declaration so the model knows to call it.
 pub fn build_reviewer_registry() -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
+    r.register(Arc::new(ListFilesTool));
     r.register(Arc::new(GrepSearchTool));
     // V2 `INV-EXEC-DISCOVERY-01` — capability discovery is read-
     // only (no workspace mutation, no egress, no shell exec
@@ -2308,6 +2522,7 @@ mod tests {
         );
         // Read-only tools ARE expected:
         assert!(r.get("read_file").is_some());
+        assert!(r.get("list_files").is_some());
         assert!(r.get("grep_search").is_some());
     }
 
@@ -2704,6 +2919,60 @@ mod tests {
         match err {
             ToolError::InvalidInput { tool, reason } => {
                 assert_eq!(tool, "read_file");
+                assert!(reason.contains(".."));
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_files_tool_lists_nested_entries_sorted() {
+        let ws = fixture_workspace();
+        std::fs::create_dir_all(ws.path().join("gtm/analysis/x_engagement")).unwrap();
+        std::fs::write(
+            ws.path().join("gtm/analysis/x_engagement/current.md"),
+            "analysis",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.path().join("gtm/analysis/x_engagement/notes.md"),
+            "notes",
+        )
+        .unwrap();
+        let ctx = ToolContext::for_workspace(ws.path());
+        let out = ListFilesTool
+            .execute(
+                &serde_json::json!({ "path": "gtm/analysis/x_engagement" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.is_error, None);
+        assert!(
+            out.content
+                .contains("file gtm/analysis/x_engagement/current.md"),
+            "list_files output should include current.md: {}",
+            out.content
+        );
+        assert!(
+            out.content
+                .contains("file gtm/analysis/x_engagement/notes.md"),
+            "list_files output should include notes.md: {}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn list_files_tool_rejects_path_escape() {
+        let ws = fixture_workspace();
+        let ctx = ToolContext::for_workspace(ws.path());
+        let err = ListFilesTool
+            .execute(&serde_json::json!({ "path": "../outside" }), &ctx)
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput { tool, reason } => {
+                assert_eq!(tool, "list_files");
                 assert!(reason.contains(".."));
             }
             other => panic!("expected InvalidInput, got {other:?}"),

@@ -714,18 +714,19 @@ fn synthesize_concurrent_target_merge(
         .output()
         .map_err(|e| MainMergeError::RefUpdateFailed(format!("git merge spawn failed: {e}")))?;
     if !merge.status.success() {
-        let _ = std::process::Command::new("git")
-            .args(["merge", "--abort"])
-            .current_dir(&temp_dir)
-            .output();
-        cleanup_merge_worktree(main_repo_root, &temp_dir);
+        // Preserve the conflicted worktree for operator recovery. Older
+        // builds aborted and deleted it, leaving only stdout/stderr in the
+        // audit row. For a recoverable concurrent merge failure, the exact
+        // conflicted tree is the useful artifact: dashboard/CLI surfaces can
+        // point the operator at it and a future conflict editor can open it.
         return Err(MainMergeError::ConcurrentMergeFailed {
             target_ref: target_ref.to_owned(),
             previous_sha,
             candidate_sha,
             reason: format!(
-                "git merge exited {:?}: {}{}",
+                "git merge exited {:?}; conflict_worktree={}: {}{}",
                 merge.status.code(),
+                temp_dir.display(),
                 String::from_utf8_lossy(&merge.stdout),
                 String::from_utf8_lossy(&merge.stderr)
             ),
@@ -1267,6 +1268,15 @@ mod tests {
                 assert!(
                     reason.contains("CONFLICT") || reason.contains("conflict"),
                     "conflict diagnostic should mention the merge conflict: {reason}"
+                );
+                let conflict_worktree = reason
+                    .split_once("conflict_worktree=")
+                    .and_then(|(_, rest)| rest.split_once(": "))
+                    .map(|(path, _)| path)
+                    .expect("conflict diagnostic should preserve a recovery worktree path");
+                assert!(
+                    Path::new(conflict_worktree).exists(),
+                    "conflict recovery worktree should be preserved: {conflict_worktree}"
                 );
             }
             other => panic!("expected ConcurrentMergeFailed, got {other:?}"),

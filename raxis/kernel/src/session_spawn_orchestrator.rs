@@ -2898,9 +2898,9 @@ pub async fn respawn_orchestrator_for_initiative(
     //   1. INSERT escalations (class='LogicalDeadlock', initiator='Kernel')
     //      via `orch_respawn_ceiling::insert_logical_deadlock_escalation_in_tx`
     //      so the operator can either approve a counter-reset retry or
-    //      deny and preserve the Failed terminal state
+    //      deny and close the initiative as a Failed terminal
     //      (`INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01`).
-    //   2. UPDATE initiatives SET state='Failed', completed_at=now
+    //   2. UPDATE initiatives SET state='RecoveryRequired'
     //      (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`).
     //   3. (already done by step 0: increment counter)
     //
@@ -3048,22 +3048,22 @@ pub async fn respawn_orchestrator_for_initiative(
                 policy_epoch_for_escalation,
             )?;
 
-            // Step 2: mark the initiative `Failed` per
-            // `InitiativeState::Failed` (`fsm.rs`). The on-the-wire
+            // Step 2: pause the initiative in `RecoveryRequired` per
+            // `InitiativeState::RecoveryRequired` (`fsm.rs`). The on-the-wire
             // reason ("orchestrator no-progress respawn ceiling
             // exceeded") lives in the `OrchestratorRespawnCeilingExceeded`
             // audit event the caller emits post-commit — the
             // `initiatives` table itself does not carry a
             // `failure_reason` column at the V2 baseline schema
             // (kernel-store.md §2.5.1 Table 2). The dashboard's
-            // failure-surface joins `initiatives.state = 'Failed'`
-            // against the chain-side audit row for the operator-
-            // facing string.
+            // recovery surface joins `initiatives.state =
+            // 'RecoveryRequired'` against the chain-side audit row
+            // for the operator-facing string.
             tx.execute(
                 &format!(
                     "UPDATE {init}
-                        SET state        = 'Failed',
-                            completed_at = strftime('%s','now')
+                        SET state        = 'RecoveryRequired',
+                            completed_at = NULL
                       WHERE initiative_id = ?1",
                     init = raxis_store::Table::Initiatives.as_str(),
                 ),
@@ -3073,7 +3073,7 @@ pub async fn respawn_orchestrator_for_initiative(
             // INV-FAILURE-REASON-MANDATORY-01: cascade non-terminal
             // tasks under this initiative to `Failed` with an
             // explicit `block_reason`. Without this cascade the
-            // initiative shows `Failed` on the dashboard while the
+            // initiative shows `RecoveryRequired` on the dashboard while the
             // tasks under it remain stranded in `Admitted` /
             // `Running` / `GatesPending` / `BlockedRecoveryPending`
             // — the operator sees a Failed initiative whose tasks
@@ -3089,7 +3089,7 @@ pub async fn respawn_orchestrator_for_initiative(
             // initiative-wide explanation. The `block_reason` text
             // is the operator-facing per-task surface.
             let cascade_reason =
-                "parent initiative failed: orchestrator no-progress respawn ceiling exceeded \
+                "parent initiative requires recovery: orchestrator no-progress respawn ceiling exceeded \
                  (INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01)";
             tx.execute(
                 &format!(
@@ -3272,12 +3272,12 @@ pub async fn respawn_orchestrator_for_initiative(
 
             // Audit emission is the chain-side half of the paired
             // write. The SQLite-side state mutation
-            // (`initiatives.state = 'Failed' + failure_reason`)
+            // (`initiatives.state = 'RecoveryRequired'`)
             // already committed in the spawn_blocking above; this
             // emission runs post-commit per `audit-paired-writes.md
             // §4`. A crash between commit + emit leaves a
-            // consistent SQLite state (`Failed`, no further
-            // respawns) with a missing audit anchor; the recovery
+            // consistent SQLite state (`RecoveryRequired`, no
+            // further respawns) with a missing audit anchor; the recovery
             // sweep is advisory per `INV-AUDIT-PAIRED-06`.
             if let Err(e) = ctx.audit.emit(
                 raxis_audit_tools::AuditEventKind::OrchestratorRespawnCeilingExceeded {

@@ -29,6 +29,7 @@ The slices' docstrings carry the per-slice contract.
 | `azure-proxy-real-endpoint`                  | `https://login.microsoftonline.com/` | 🟡 V3 witness | Skip-by-default; opt in with `RAXIS_LIVE_CLOUD_NET=1`. Pins the AAD OAuth2 RFC 6749 §5.2 `error` + AAD-specific `error_codes` envelope for the V3 forwarding work. NOT a V2 coverage path — see Phase B notes below.        |
 | `http-proxy*`, `gateway-anthropic`           | real HTTPS endpoints            | 🟢 active   | Drive real `https://` upstreams; nothing to un-mock.                                                             |
 | `egress-enforcement`, `session-spawn`        | n/a (kernel-internal)           | 🟢 active   | Exercise the kernel's own state machines, not external services.                                                 |
+| `recovery-required-lifecycle`                | n/a (kernel-internal store)     | 🟢 active   | Applies real store migrations and pins the recovery boundary: approve resumes `RecoveryRequired`, deny closes it as `Failed`, and terminal `Failed` does not resume in place. |
 
 ---
 

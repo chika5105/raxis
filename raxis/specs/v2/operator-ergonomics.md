@@ -61,7 +61,7 @@ If you want zero defaulting, write a fully-explicit plan and skip `plan prepare`
 
 - The default-resolution model: what fields are defaultable, how defaults are resolved against the loaded policy, the operator-signs-everything posture, the annotation-as-operator-metadata convention (§3, §4).
 - The `raxis-cli plan prepare` command: the canonical pre-submit step that fills defaults into the operator's plan.toml (§5).
-- The full V2 operator CLI surface: `plan init`, `plan validate`, `plan diff`, `plan explain`, `plan fmt`, `plan cost-estimate`, `submit plan --dry-run`, `initiative watch`, `initiative resume`, `setup wizard`, `doctor` extensions (§6 – §17). **Note:** `initiative list` is an exception — its v1 baseline already ships in `cli-readonly.md §5.5.6b`; §15 below documents only the v2 *extensions* on top of that baseline.
+- The full V2 operator CLI surface: `plan init`, `plan validate`, `plan diff`, `plan explain`, `plan fmt`, `plan cost-estimate`, `submit plan --dry-run`, `initiative watch`, recovery approval via escalation approve/deny, `initiative fork-from-failed`, `setup wizard`, `doctor` extensions (§6 – §17). **Note:** `initiative list` is an exception — its v1 baseline already ships in `cli-readonly.md §5.5.6b`; §15 below documents only the v2 *extensions* on top of that baseline.
 - Policy schema additions: `[token_policy_defaults]`, `[default_protected_paths]`, `[default_executor_image]`, `[prepare]` (§18).
 - IPC schema additions: read-only `ProposeDefaults` operator-socket request, `DryRunAdmit`, etc. (§19).
 - Failure codes: `FAIL_PLAN_REQUIRES_PREPARE`, `FAIL_PREPARE_DEFAULT_UPGRADE_REQUIRED`, `FAIL_PLAN_INIT_TEMPLATE_NOT_FOUND` (§20).
@@ -1180,8 +1180,8 @@ raxis-cli plan cost-estimate <plan.toml> [--scenario typical|worst-case]
 Calls a new IPC `OperatorRequest::EstimateCost { plan_bytes }`; the kernel:
 1. Parses the plan; resolves defaults per §4.
 2. For each task, projects the token cost using the same `tokenize` admin interface used by custom-tool budget projection ([`custom-tools.md §9.2`](custom-tools.md)).
-3. Multiplies by the configured provider rates from `policy.toml [provider_rates.<provider>]`.
-4. Returns a per-task and per-initiative cost breakdown.
+3. Prices the projected usage through the same precedence used by runtime budget admission: operator `[[providers]].pricing` overrides first, runtime/provider pricing where available, then bundled estimate fallback.
+4. Returns a per-task and per-initiative cost breakdown with pricing provenance.
 
 Output:
 
@@ -1201,7 +1201,7 @@ Run `submit plan --dry-run` to verify admission against current policy.
 
 ### 11.4 Failure modes
 
-`FAIL_COST_ESTIMATE_PROVIDER_RATE_MISSING { provider }` — the policy doesn't declare rates for one of the configured providers. The estimate is approximate without rates; the operator can pass `--ignore-missing-rates` to get a token-only projection.
+`WARN_COST_ESTIMATE_BUNDLED_RATE_FALLBACK { provider, registry_version }` — the policy does not declare an override and the runtime provider pricing hook did not return a usable rate, so the estimate used the bundled fallback registry. The estimate is still returned, but must be labelled as an estimate in CLI and dashboard output.
 
 ---
 
@@ -1292,42 +1292,55 @@ Subscribes to `KernelPush::InitiativeEvent { initiative_id, event }` for the tar
 
 ---
 
-## §14 — `raxis-cli initiative resume`
+## §14 — Initiative Recovery And `fork-from-failed`
 
 ### 14.1 Purpose
 
-Single command to resume a paused initiative. The pause cause (token-limit exceeded, escalation pending, etc.) is auto-detected; the appropriate kernel IPC is sent.
+RAXIS distinguishes recoverable initiative pauses from terminal
+history. Recoverable kernel stops enter `RecoveryRequired` and are
+resumed only by signed operator approval of the pending escalation.
+Terminal `Failed` initiatives are not resumed in place; the
+forensic/admin escape is `fork-from-failed`, which prints lineage
+metadata for a new signed initiative.
 
 ### 14.2 Invocation
 
 ```bash
-raxis-cli initiative resume <initiative_id> [--reason <text>]
+raxis initiative list --state recovery
+raxis escalation approve <escalation_id> --reason <text>
+raxis escalation deny <escalation_id> --reason <text>
+raxis initiative fork-from-failed <initiative_id>
 ```
 
 ### 14.3 Behavior
 
 ```text
-1. Open operator socket.
-2. Send OperatorRequest::DescribeInitiativePause { initiative_id }.
-3. Kernel responds with the pause cause (TokenBudgetExceeded, EscalationPending,
-   PolicyEpochDriftHalt, etc.) and the recommended remediation IPC.
-4. CLI prompts the operator (interactively, or accepts via flags) to confirm
-   the remediation:
-   - For TokenBudgetExceeded: prompt to grant additional budget.
-   - For EscalationPending: print the escalation; prompt to approve / reject.
-   - For PolicyEpochDriftHalt: print the drifted fields; prompt to acknowledge
-     and proceed under the current epoch.
-5. Send the corresponding IPC; await confirmation.
-6. Report new initiative state.
+1. Kernel detects a recoverable initiative-level stop.
+2. Kernel inserts a Pending, kernel-initiated escalation and sets the initiative
+   to RecoveryRequired.
+3. Operator reviews the escalation, dashboard context, audit chain, and worktree
+   state.
+4. Approval transitions RecoveryRequired -> Executing and resets the recovery
+   counter/state needed by that cause.
+5. Denial transitions RecoveryRequired -> Failed.
+6. If the initiative is already Failed, `fork-from-failed` refuses to mutate it
+   and prints parent bundle / artifact metadata for a new signed run.
 ```
 
-### 14.4 Why a single command
+### 14.4 Why there is no `initiative resume`
 
-Today an operator faced with a paused initiative must look up the pause cause, find the right `raxis-cli` subcommand for that cause, construct the right arguments, and invoke it. `initiative resume` collapses this into one decision tree and one prompt flow.
+The word "resume" suggests a terminal failed run can be continued in
+place. That breaks the audit model. The correct product model is:
+`RecoveryRequired` is resumable by signed approval; `Failed` is closed
+history and can only be used as a parent for a new signed initiative.
 
 ### 14.5 Failure modes
 
-`FAIL_INITIATIVE_NOT_PAUSED { state }` — the initiative is not in a paused state; nothing to resume.
+`FAIL_INITIATIVE_NOT_FAILED { state }` — `fork-from-failed` was called
+on a non-Failed initiative.
+
+`FAIL_RECOVERY_APPROVAL_NOT_APPLICABLE { state }` — approval landed on
+an escalation whose initiative is no longer `RecoveryRequired`.
 
 ---
 
@@ -1335,7 +1348,7 @@ Today an operator faced with a paused initiative must look up the pause cause, f
 
 ### 15.1 Purpose
 
-Operator overview of in-flight and recent work. The **v1 baseline** ships a four-bucket read-only listing — see `cli-readonly.md §5.5.6b` for the canonical v1 spec. **V2 strictly extends** the v1 surface: it adds flags (`--mine`, `--since`, `--format`), adds per-row columns (operator, task progress, description), and accepts a richer set of `--state` values (canonical FSM states + `paused` once `initiative resume` is wired in §14). It NEVER removes or changes the meaning of any v1 flag — a v1-style invocation `raxis initiative list --state active` continues to work unchanged on a v2 deployment.
+Operator overview of in-flight and recent work. The **v1 baseline** ships a four-bucket read-only listing — see `cli-readonly.md §5.5.6b` for the canonical v1 spec. **V2 strictly extends** the v1 surface: it adds flags (`--mine`, `--since`, `--format`), adds per-row columns (operator, task progress, description), and accepts a richer set of `--state` values including the canonical `RecoveryRequired` bucket via `--state recovery`. It NEVER removes or changes the meaning of any v1 flag — a v1-style invocation `raxis initiative list --state active` continues to work unchanged on a v2 deployment.
 
 ### 15.2 Invocation
 
@@ -1762,14 +1775,9 @@ OperatorRequest::SubscribeInitiative {
 }
 // Response: stream of KernelPush::InitiativeEvent
 
-// §14: initiative resume
-OperatorRequest::DescribeInitiativePause {
-    initiative_id: InitiativeId,
-}
-OperatorResponse::InitiativePauseDescribed {
-    cause:                InitiativePauseCause,
-    recommended_action:   RecommendedAction,
-}
+// §14: recovery approval uses the existing escalation approve/deny
+// operator IPC. `fork-from-failed` is CLI-local/read-only and prints
+// lineage metadata from the store.
 ```
 
 All new IPC requests MUST go through the existing operator-socket challenge-response handshake; no new authentication path is introduced.
@@ -1809,8 +1817,8 @@ Both events are rate-limited per operator fingerprint to prevent DoS via repeate
 | `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` | Policy load | `[default_executor_image] alias` doesn't resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Executor"`. |
 | `FAIL_PLAN_INIT_TEMPLATE_NOT_FOUND { name }` | `plan init` (CLI-local) | Template not in CLI-bundled set. |
 | `FAIL_PLAN_INIT_OUTPUT_EXISTS { path }` | `plan init` (CLI-local) | Output path already exists; `--force` not passed. |
-| `FAIL_COST_ESTIMATE_PROVIDER_RATE_MISSING { provider }` | `plan cost-estimate` IPC | Policy doesn't declare rates for a configured provider. |
-| `FAIL_INITIATIVE_NOT_PAUSED { state }` | `initiative resume` | Initiative is not in a paused state; nothing to resume. |
+| `WARN_COST_ESTIMATE_BUNDLED_RATE_FALLBACK { provider, registry_version }` | `plan cost-estimate` IPC | Estimate used bundled fallback rates because neither an operator override nor runtime provider pricing was available. |
+| `FAIL_INITIATIVE_NOT_FAILED { state }` | `initiative fork-from-failed` | Initiative is not terminal Failed; use the normal recovery approval path for RecoveryRequired. |
 <!-- spec-graph:cross-ref-row -->
 | `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_REFERENCES_NONPERMITTED_MODEL { role, missing_models }` | Policy load (cross-reference) | A `[provider_aliases_defaults.<role>] chain` entry references a model not in `[providers] permitted_models`. Canonical home: [`provider-model-selection.md §10`](provider-model-selection.md). |
 <!-- spec-graph:cross-ref-row -->
@@ -1880,7 +1888,7 @@ The `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes fir
 - [ ] `raxis-cli plan cost-estimate [--scenario typical|worst-case]` per §11.
 - [ ] `raxis-cli submit plan --dry-run` per §12 (extends the existing `submit plan` command).
 - [ ] `raxis-cli initiative watch <id> [--follow] [--task]` per §13.
-- [ ] `raxis-cli initiative resume <id>` per §14.
+- [x] `raxis initiative fork-from-failed <id>` per §14 — CLI-local/read-only lineage inspection for terminal Failed initiatives.
 - [x] `raxis-cli initiative list [--state] [--limit] [--json]` v1 baseline per `cli-readonly.md §5.5.6b` — landed in v1, not deferred to v2.
 - [ ] `raxis-cli initiative list [--mine] [--since] [--format table|json]` v2 extensions per §15 — strictly extend the v1 baseline (added flags + columns; never removes a v1 flag).
 - [ ] `raxis-cli setup wizard [--non-interactive --config <path>]` per §16.
@@ -1894,7 +1902,7 @@ The `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes fir
 - [ ] `OperatorRequest::EstimateCost` handler per §11.3; uses `tokenize` admin interface.
 - [ ] `OperatorRequest::DryRunAdmit` handler per §12.3; runs full admission check chain but does NOT seal the bundle.
 - [ ] `OperatorRequest::SubscribeInitiative` and `KernelPush::InitiativeEvent` per §13.
-- [ ] `OperatorRequest::DescribeInitiativePause` per §14.
+- [x] `OperatorRequest::DescribeInitiativePause` is deprecated/compat-only; recovery uses escalation approve/deny for `RecoveryRequired`, and terminal `Failed` uses CLI-local `fork-from-failed`.
 - [ ] `[default_executor_image]` policy section parsed and validated; `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` at policy load.
 - [ ] `[default_verifier_images]` policy section parsed and validated; `FAIL_POLICY_DEFAULT_VERIFIER_IMAGE_UNRESOLVABLE`, `WARN_DEFAULT_VERIFIER_IMAGE_UNKNOWN_LANGUAGE` at policy load (per [`policy-plan-authority.md §4 [default_verifier_images]`](policy-plan-authority.md)).
 - [ ] `[token_policy_defaults.<role>]` policy section parsed.
@@ -1952,7 +1960,7 @@ The `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes fir
 - [ ] `plan cost-estimate` returns a non-empty per-task projection for a plan with declared providers.
 - [ ] `submit plan --dry-run` runs the full admission chain; on success, the kernel's `plan_bundles` table is unchanged.
 - [ ] `initiative watch` streams events for the targeted initiative only (not other operators' initiatives).
-- [ ] `initiative resume` on an Active initiative → `FAIL_INITIATIVE_NOT_PAUSED { state: Executing }`.
+- [ ] `initiative fork-from-failed` on an Executing initiative → `FAIL_INITIATIVE_NOT_FAILED { state: Executing }`.
 - [ ] `setup wizard` end-to-end: produces a working install with passing smoke test in under 5 minutes on a fresh host.
 - [ ] `setup wizard` phase 6: no language starters selected → wizard skips writing `[default_verifier_images]`; smoke test still passes (symbol-index auto-injection no-op on the trivial plan).
 - [ ] `setup wizard` phase 6: at least one language starter selected → wizard writes the `[[vm_images]]` entry with the release-notes-published `oci_digest`; the second smoke plan (per phase 9) exercises the @-shortcut resolution path AND the auto-injected symbol-index verifier; both `VerifierActivated` and `VerifierCompleted` audit events fire for both verifiers.

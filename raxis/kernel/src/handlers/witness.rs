@@ -972,51 +972,36 @@ async fn gate_recheck(
         remaining.sort();
         remaining.dedup();
         if remaining.is_empty() {
-            let outcome = {
-                let store = ctx.store.clone();
-                let initiative_id_owned = task_row.initiative_id.clone();
-                let task_id_owned = task_id.to_owned();
-                tokio::task::spawn_blocking(move || {
-                    crate::handlers::intent::finalize_integration_merge_completion(
-                        store.as_ref(),
-                        &initiative_id_owned,
-                        &task_id_owned,
-                    )
-                })
-                .await
-                .map_err(|e| HandlerError::Store(format!("finalize integration merge join: {e}")))?
-                .map_err(|e| {
-                    HandlerError::Store(format!("finalize integration merge after gates: {e}"))
-                })?
-            };
-
-            if let Some(outcome) = outcome {
-                let target_ref = ctx
-                    .plan_registry
-                    .orchestrator(&task_row.initiative_id)
-                    .map(|o| o.target_ref)
-                    .unwrap_or_else(|| {
-                        crate::initiatives::OrchestratorPlanFields::DEFAULT_TARGET_REF.to_owned()
-                    });
-                crate::handlers::intent::emit_integration_merge_completion_audits(
-                    ctx,
-                    &outcome,
-                    task_row.session_id.as_deref(),
-                    task_id,
-                    &task_row.initiative_id,
-                    evaluation_sha,
-                    task_row.base_sha.as_deref().unwrap_or_default(),
-                    &target_ref,
+            let ctx_owned = ctx.clone();
+            let initiative_id_owned = task_row.initiative_id.clone();
+            let task_id_owned = task_id.to_owned();
+            let session_id_owned = task_row.session_id.clone();
+            let worktree_root_owned = worktree_root.clone();
+            let evaluation_sha_owned = evaluation_sha.to_owned();
+            let base_sha_owned = task_row.base_sha.clone().unwrap_or_default();
+            tokio::task::spawn_blocking(move || {
+                let closeout = crate::handlers::intent::complete_integration_merge_closeout(
+                    &ctx_owned,
+                    &initiative_id_owned,
+                    &task_id_owned,
+                    session_id_owned.as_deref(),
+                    &worktree_root_owned,
+                    &evaluation_sha_owned,
+                    &base_sha_owned,
                     false,
                     None,
                 );
-            } else {
                 eprintln!(
-                    "{{\"level\":\"info\",\"event\":\"IntegrationMergeFinalizeAfterGatesSkipped\",\
-                     \"task_id\":\"{task_id}\",\"initiative_id\":\"{}\"}}",
-                    task_row.initiative_id
+                    "{{\"level\":\"info\",\"event\":\"IntegrationMergeCloseoutAfterGates\",\
+                     \"task_id\":\"{task_id_owned}\",\"initiative_id\":\"{initiative_id_owned}\",\
+                     \"repository_id\":\"{}\",\"target_ref\":\"{}\",\
+                     \"host_merge_succeeded\":{},\"task_completed\":{}}}",
+                    closeout.repository_id,
+                    closeout.target_ref,
+                    closeout.host_merge_succeeded,
+                    closeout.task_completed,
                 );
-            }
+            });
             eprintln!(
                 "{{\"level\":\"info\",\"event\":\"IntegrationMergeVerifiersCleared\",\
                  \"task_id\":\"{task_id}\",\"final_witness_run_id\":\"(recheck-pass)\"}}",

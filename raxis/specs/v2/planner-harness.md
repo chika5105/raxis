@@ -108,9 +108,9 @@ authoritative enforcement layer for any tool that produces an `IntentKind`.
 | Tool | Orchestrator | Executor | Reviewer | Source / Notes |
 |---|---|---|---|---|
 | `read_file` | ✅ | ✅ | ✅ | claw-code `file_ops` |
+| `list_files` | ❌ | ❌ | ✅ | RAXIS reviewer discovery primitive; metadata-only, workspace-scoped, no content reads, no shell |
 | `write_file` | ✅ | ✅ | ❌ | claw-code `file_ops` |
 | `edit_file` | ✅ | ✅ | ❌ | claw-code `file_ops` |
-| `glob_search` | ✅ | ✅ | ✅ | claw-code `file_ops`; Reviewer impl uses direct `execvp` (no shell) |
 | `grep_search` | ✅ | ✅ | ✅ | claw-code `file_ops`; Reviewer impl uses direct `execvp` of `ripgrep` (no shell) |
 | `bash` (synchronous) | ✅ | ✅ | ❌ | claw-code `bash`; Orchestrator gets bash for semantic conflict resolution per §4.8; Reviewer build target excludes the `bash` module entirely (§4.2) |
 | `bash` (`run_in_background`) | ❌ | ✅ | ❌ | New harness primitive (§5); cgroup-contained. Orchestrator excluded per §4.8 — semantic merge work is synchronous; no legitimate use case for long-lived processes in an Orchestrator session. |
@@ -166,7 +166,7 @@ Reviewer's runtime environment kernel-owned.
 a `SubmitReview { approved, critique }` verdict. The harness question is:
 does the Reviewer's planner expose Language Server Protocol (LSP) tools
 (`rust-analyzer`, `tsserver`, `pyright`, `gopls`, etc.) to the LLM, or
-only text-search primitives (`read_file`, `glob_search`, `grep_search`)?
+only read-only inspection primitives (`read_file`, `list_files`, `grep_search`)?
 `SubmitReview` is a RAXIS runtime contract, not an operator prompt
 requirement: the reviewer NNSP and tool manifest are kernel-installed for
 every Reviewer session. If the model answers in prose without calling the
@@ -209,7 +209,7 @@ the Reviewer's verdict as "honest given the inputs, where the inputs may
 be weaponized."
 
 *Option B — Exclude LSP for the Reviewer role.* Reviewers operate on raw
-text only — `read_file`, `glob_search`, `grep_search`. No LSP, no
+text only — `read_file`, `list_files`, `grep_search`. No LSP, no
 compilers, no tool that executes code from the worktree. The LLM performs
 semantic analysis from text the same way a human PR reviewer reads a
 GitHub diff. Test execution and other code-running verification is
@@ -357,7 +357,7 @@ surfaced to the Reviewer via the KSB.
 ship the Reviewer with an image that contains no shell at all; perform
 all code-running verification in separate Kernel-spawned verifier
 processes.** The Reviewer becomes a pure read-only static-analysis engine:
-its only operations on the worktree are `read_file`, `glob_search`,
+its only operations on the worktree are `read_file`, `list_files`,
 `grep_search`, none of which can execute worktree code.
 
 **Rationale.**
@@ -410,6 +410,15 @@ its only operations on the worktree are `read_file`, `glob_search`,
   for that backend (still invoked via direct `execvp`, never through a
   shell). The decision is shell-exclusion, not ripgrep-specifically.
 
+- *"What if the Reviewer does not know the exact artifact filename?"*
+  The Reviewer gets `list_files`, a deterministic metadata-only tool
+  scoped to the mounted workspace/path allowlist. It lists candidate
+  paths without reading contents and without shell access; the Reviewer
+  then uses `read_file` on exact files or `grep_search` for content
+  search. Canonical reviewer images MUST ship `/usr/bin/rg`, and the
+  reviewer PID 1 preflights that search backend before advertising the
+  review loop.
+
 - *"This forces operators to maintain a separate Reviewer image."* Not
   under the canonical-image decision (§4.3) — the Reviewer image is
   RAXIS-built and kernel-enforced. Operators do not maintain it.
@@ -451,7 +460,7 @@ responsibility, including the bytes that are now structurally invalid.
 ### 4.3 Decision — Canonical Reviewer Image (Kernel-Owned, Operator-Inaccessible)
 
 **Context.** The previous two decisions (§4.1, §4.2) reduce the Reviewer's
-tool set to `read_file`, `glob_search`, `grep_search`, `TodoWrite`,
+tool set to `read_file`, `list_files`, `grep_search`, `TodoWrite`,
 `SubmitReview`. This means the Reviewer image needs **no language
 toolchain, no LSP, no compiler, no shell, no `git`, no curl, no editor,
 no package manager**. Its sole runtime contents are: `raxis-planner` (PID
@@ -532,9 +541,9 @@ activation the kernel boots Reviewer VMs from this image unconditionally.
 |---|---|---|
 | Linux kernel ≥ 5.14 | ✅ | Needed for `cgroup.kill` (§5.3); RAXIS V2 baseline |
 | cgroup v2 mounted at `/sys/fs/cgroup/`, `cpu` + `memory` + `pids` controllers in `cgroup.subtree_control` | ✅ | Required for the harness's per-call cgroup containment, even though the Reviewer cannot itself create bash sessions (the harness uses cgroups internally to reap `ripgrep` subprocesses on timeout) |
-| `raxis-planner` binary (PID 1, statically linked with `bash` module **excluded** at link time, `grep_search`/`glob_search` using direct `execvp` rather than `sh -lc` wrapper) | ✅ | The agent runtime |
-| `ripgrep` binary (statically linked, called by `raxis-planner` via `execvp` for `grep_search` backend) | ✅ | Backend for text search |
-| Dynamic loader, libc | ✅ if `raxis-planner` and `ripgrep` are dynamically linked. **Recommended to ship both fully static**, eliminating libc ABI from the trust surface entirely. | Either is acceptable; static is preferred |
+| `raxis-reviewer` binary (PID 1, statically linked with `bash` module **excluded** at link time, `list_files` implemented in-process, `grep_search` using direct `execvp` rather than `sh -lc` wrapper) | ✅ | The agent runtime |
+| `/usr/bin/rg` ripgrep binary, plus its ELF interpreter/shared-library closure when dynamically linked (called by `raxis-reviewer` via `execvp` for `grep_search`; startup preflight fails if unavailable) | ✅ | Backend for text search |
+| Dynamic loader, libc | ✅ when any shipped executable is dynamically linked. The bake verifier must prove the interpreter path exists so dynamic binaries cannot fail as ENOENT at boot. | Required for dynamic tool closures |
 | `/bin/sh`, `/bin/bash`, `busybox`, any other shell | ❌ | No shell of any kind |
 | Any LSP server (`rust-analyzer`, `tsserver`, `pyright`, `gopls`, `clangd`, …) | ❌ | Excluded under §4.1 |
 | Any compiler or language runtime (`rustc`, `cargo`, `node`, `npm`, `python`, `pip`, `go`, `ruby`, …) | ❌ | Tests run in verifier VMs; not the Reviewer |
@@ -638,9 +647,10 @@ are blocked until the operator resolves the install state.
 >   internally invokes the above.**
 >
 > The Reviewer's tool set is restricted to: read-only file inspection
-> (`read_file`), text search (`glob_search`, `grep_search` — implemented
-> via direct `execvp` of a parser-only search binary such as `ripgrep`,
-> never through a shell), self-organization (`TodoWrite`), verdict
+> (`read_file`), metadata-only path discovery (`list_files`), text
+> search (`grep_search` — implemented via direct `execvp` of a
+> parser-only search binary such as `ripgrep`, never through a shell),
+> self-organization (`TodoWrite`), verdict
 > submission (`SubmitReview`), and any other tools explicitly authorized
 > by the Kernel dispatch matrix for the Reviewer role that satisfy the
 > above prohibition. Code-running verification (test execution, linting
@@ -660,11 +670,11 @@ are blocked until the operator resolves the install state.
 >    forbidden tool names out of the LLM's available-tools list
 >    (`PermissionPolicy` for pre-prompt filtering). The `bash`
 >    claw-code module is not linked into the Reviewer build target.
->    The `file_ops` module's `grep_search` and `glob_search`
->    implementations MUST use direct `execvp` of the search binary (no
->    `sh -lc` wrapper), so that no code path inside the planner can
->    spawn a shell even if a future tool addition mistakenly wires one
->    in.
+>    The `file_ops` module's `grep_search` implementation MUST use
+>    direct `execvp` of the search binary (no `sh -lc` wrapper), and
+>    `list_files` MUST stay in-process as metadata-only path enumeration,
+>    so that no code path inside the planner can spawn a shell even if a
+>    future tool addition mistakenly wires one in.
 > 3. **Kernel dispatch layer** — the Kernel's intent-dispatch matrix
 >    remains the authoritative enforcement layer; any intent forbidden
 >    for the Reviewer role is rejected at admission regardless of
@@ -1994,13 +2004,13 @@ The image is a minimal OCI bundle containing:
 
 ```text
 /                   (rootfs)
-├── /sbin/init      → /raxis-planner   (symlink, raxis-planner is PID 1)
-├── /raxis-planner  (statically-linked binary, with bash module
+├── /init           → /usr/local/bin/raxis-reviewer
+├── /usr/local/bin/raxis-reviewer
+│                   (statically-linked binary, with bash module
 │                    excluded at link time, grep_search using direct
 │                    execvp)
-├── /usr/bin/rg     (statically-linked ripgrep)
-├── /lib/           (only if raxis-planner / ripgrep are dynamically
-│                    linked; recommended to ship both fully static)
+├── /usr/bin/rg     (ripgrep)
+├── /lib/           (loader + libc when rg is dynamically linked)
 └── /sys/fs/cgroup/ (mountpoint, populated by raxis-planner at boot)
 ```
 
@@ -2239,7 +2249,11 @@ rustup std/test sysroot (Rust) trees exist in the rootfs.
 versions in a documentary `[lint_toolchain]` table so an
 operator auditing a built image can answer "which ruff /
 eslint / prettier / tsc shipped here?" without re-running
-`pip show` / `npm ls -g` inside the rootfs. Operators pinning a
+`pip show` / `npm ls -g` inside the rootfs. RAXIS discovery also
+MUST NOT invoke npm-family binaries for version or package-list
+metadata; it reads `node_modules/<pkg>/package.json` directly so
+the guest cannot create package-registry egress during startup
+introspection. Operators pinning a
 BYO image are NOT bound to this list — the in-VM discovery
 surface (next paragraph) is what the LLM consults.
 
@@ -2507,8 +2521,9 @@ are marked ⏳; items deferred to post-V2-GA are marked 🔮.
   `bash bg_*` operations registered as harness-local tools (no
   `IntentKind` since they're in-VM, not kernel-mediated).
 - ⏳ `raxis-planner` build configuration — Reviewer build target excludes
-  `bash` claw-code module at link time. Reviewer's `grep_search` /
-  `glob_search` use direct `execvp` (no `sh -lc` wrapper). One binary
+  `bash` claw-code module at link time. Reviewer's `grep_search` uses
+  direct `execvp` (no `sh -lc` wrapper) and `list_files` stays
+  in-process / metadata-only. One binary
   with runtime branching is rejected because shell code remains
   linked-in and reachable.
 - ⏳ `policy.toml` `[[vm_images]]` — `role_restriction` field becomes
@@ -2842,13 +2857,13 @@ Cross-cutting compile-time guard: `crates/raxis-planner-core/build.rs` emits a `
 Three planner binaries:
 
 - `binaries/raxis-planner-executor/Cargo.toml`, `src/main.rs` — ~30 LoC: load NNSP, construct `Role::Executor` registry, call `raxis_planner_core::loop_engine::run`.
-- `binaries/raxis-planner-reviewer/Cargo.toml`, `src/main.rs` — same shape but with `Role::Reviewer`. The dependency graph **excludes** `raxis-planner-tools` entirely; instead it depends on a much smaller `crates/raxis-planner-reviewer-tools/` crate that only provides `read_file`, `glob_search`, and `grep_search` (no `bash`, no `write_file`, no `edit_file` — Reviewer cannot mutate state per §4.4).
+- `binaries/raxis-planner-reviewer/Cargo.toml`, `src/main.rs` — same shape but with `Role::Reviewer`. The dependency graph **excludes** shell/write tooling entirely; its registry provides only read-only inspection (`read_file`, `list_files`, `grep_search`), capability discovery, and `submit_review` (no `bash`, no `write_file`, no `edit_file` — Reviewer cannot mutate state per §4.4).
 - `binaries/raxis-planner-orchestrator/Cargo.toml`, `src/main.rs` — same shape as Executor, with `Role::Orchestrator`.
 
 `crates/raxis-planner-reviewer-tools/`:
 
-- `crates/raxis-planner-reviewer-tools/Cargo.toml` — minimal: `read_file`, `grep_search`, `glob_search` only. No `bash`, no `edit_file`, no `write_file`. Compile-time guard via `#![forbid(unsafe_code)]` plus a `cargo deny` rule that bans transitive deps containing the `nix::sys::wait::waitpid` symbol (heuristic for forking).
-- `crates/raxis-planner-reviewer-tools/src/lib.rs` — three tool impls + the `verifier_witnesses` consumer (the Reviewer's only authoritative source for code-running outcomes per §4.2).
+- `crates/raxis-planner-reviewer-tools/Cargo.toml` — minimal: `read_file`, `list_files`, `grep_search` only. No `bash`, no `edit_file`, no `write_file`. Compile-time guard via `#![forbid(unsafe_code)]` plus a `cargo deny` rule that bans transitive deps containing the `nix::sys::wait::waitpid` symbol (heuristic for forking).
+- `crates/raxis-planner-reviewer-tools/src/lib.rs` — read-only inspection tool impls + the `verifier_witnesses` consumer (the Reviewer's only authoritative source for code-running outcomes per §4.2).
 - `crates/raxis-planner-reviewer-tools/tests/no_exec.rs` — runtime test that scans the linker output of `raxis-planner-reviewer` for the symbols `execve`, `execvp`, `posix_spawn`, `system`, `popen` and asserts none are present in any reachable code path. Uses `nm` + `cargo-call-stack` style analysis; if either tool is unavailable the test is skipped with a warning logged into the test report.
 
 `crates/raxis-image-builder/`:
@@ -3035,7 +3050,7 @@ canonical order:
    | ------------------ | ---------------------------------------------------------------- |
    | `ExecutorStarter`  | `bin/bash`, `usr/bin/python3`, `usr/bin/python`, `usr/bin/git`   |
    | `Orchestrator`     | `bin/bash`, `usr/bin/git`, `usr/bin/rg`                          |
-   | `Reviewer`         | — (intentionally binary-only per `INV-PLANNER-HARNESS-02`)       |
+   | `Reviewer`         | `usr/bin/rg` plus its ELF interpreter/shared-library closure      |
 
    The guard treats both regular files and symlinks-to-files as
    satisfied (real Linux rootfs trees use both:

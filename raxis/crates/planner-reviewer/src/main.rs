@@ -141,6 +141,8 @@ async fn run() -> Result<(), PlannerError> {
     // Scrubbing here is defence-in-depth.
     scrub_sensitive_env_for_agent();
 
+    preflight_reviewer_readonly_tools().await?;
+
     let outcome = run_role_session(ctx.role, ctx.args.clone(), ctx.env.clone())
         .await
         .map_err(driver_to_planner_error)?;
@@ -186,6 +188,49 @@ async fn run() -> Result<(), PlannerError> {
             Err(PlannerError::TokensExceeded { which, ceiling })
         }
     }
+}
+
+async fn preflight_reviewer_readonly_tools() -> Result<(), PlannerError> {
+    let mut last_error: Option<String> = None;
+    for candidate in ["rg", "/usr/bin/rg"] {
+        match tokio::process::Command::new(candidate)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await
+        {
+            Ok(out) if out.status.success() => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"step\":\"reviewer-tool-preflight\",\
+                      \"tool\":\"grep_search\",\"binary\":{:?},\"outcome\":\"ok\"}}",
+                    candidate,
+                );
+                return Ok(());
+            }
+            Ok(out) => {
+                last_error = Some(format!(
+                    "{candidate} --version exit {}\n{}",
+                    out.status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "<signalled>".to_owned()),
+                    String::from_utf8_lossy(&out.stderr),
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                last_error = Some(format!("{candidate}: not found"));
+            }
+            Err(e) => {
+                last_error = Some(format!("{candidate}: {e}"));
+            }
+        }
+    }
+    Err(PlannerError::DriverFailure(format!(
+        "reviewer read-only search preflight failed: grep_search requires ripgrep \
+         (`rg` or `/usr/bin/rg`) but no usable binary was found ({})",
+        last_error.unwrap_or_else(|| "no candidate attempted".to_owned())
+    )))
 }
 
 fn driver_to_planner_error(e: DriverError) -> PlannerError {

@@ -8,10 +8,11 @@
 //!   1. Flips `escalations.status: Pending → Approved`.
 //!   2. Resets `initiatives.orchestrator_no_progress_respawn_count`
 //!      to 0.
-//!   3. Flips `initiatives.state: Failed → Executing` (when
-//!      applicable; the WHERE clause `state = 'Failed'` makes
-//!      this a no-op for races where the initiative was already
-//!      moved by another transition).
+//!   3. Flips `initiatives.state: RecoveryRequired → Executing`
+//!      only when the initiative is still `RecoveryRequired`.
+//!      Terminal `Failed` initiatives are deliberately not resumable
+//!      in place and stale pending recovery escalations do not get
+//!      approved.
 //!
 //! The anti-loop guarantee is exercised separately: a re-fire
 //! of the helper after approve writes a NEW escalation row
@@ -33,7 +34,7 @@ fn fresh_disk_conn() -> (tempfile::TempDir, Connection) {
     (tmp, conn)
 }
 
-fn seed_failed_initiative_with_escalation(
+fn seed_recovery_required_initiative_with_escalation(
     conn: &mut Connection,
     initiative_id: &str,
     session_id: &str,
@@ -54,7 +55,7 @@ fn seed_failed_initiative_with_escalation(
                 (initiative_id, state, terminal_criteria_json,
                  plan_artifact_sha256, created_at, completed_at,
                  orchestrator_no_progress_respawn_count)
-             VALUES (?1, 'Failed', '{{}}', '', ?2, ?2, ?3)"
+             VALUES (?1, 'RecoveryRequired', '{{}}', '', ?2, NULL, ?3)"
         ),
         params![initiative_id, now, counter_value],
     )
@@ -118,7 +119,7 @@ fn seed_failed_initiative_with_escalation(
 
 /// Schema-level mirror of `approve_logical_deadlock_escalation_in_tx`.
 /// Returns `(approved_status, counter_after, state_after,
-/// transitioned_from_failed)`.
+/// transitioned_from_recovery_required)`.
 fn schema_approve_logical_deadlock(
     conn: &mut Connection,
     escalation_id: &str,
@@ -128,19 +129,43 @@ fn schema_approve_logical_deadlock(
     let now = raxis_types::unix_now_secs();
     let tx = conn.transaction().expect("tx");
 
-    let initiative_id: String = tx
+    let (initiative_id, initiative_state): (String, String) = tx
         .query_row(
             &format!(
-                "SELECT initiative_id FROM {escalations}
-                  WHERE escalation_id = ?1
-                    AND class = 'LogicalDeadlock'
-                    AND initiator = 'Kernel'
-                    AND status = 'Pending'"
+                "SELECT e.initiative_id, i.state
+                   FROM {escalations} e
+                   JOIN {initiatives} i ON i.initiative_id = e.initiative_id
+                  WHERE e.escalation_id = ?1
+                    AND e.class = 'LogicalDeadlock'
+                    AND e.initiator = 'Kernel'
+                    AND e.status = 'Pending'"
             ),
             params![escalation_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .expect("escalation row exists in approvable shape");
+
+    if initiative_state != "RecoveryRequired" {
+        tx.commit().expect("commit no-op");
+        let status: String = conn
+            .query_row(
+                &format!("SELECT status FROM {escalations} WHERE escalation_id = ?1"),
+                params![escalation_id],
+                |r| r.get(0),
+            )
+            .expect("read status");
+        let counter: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT orchestrator_no_progress_respawn_count
+                       FROM {initiatives} WHERE initiative_id = ?1"
+                ),
+                params![&initiative_id],
+                |r| r.get(0),
+            )
+            .expect("read counter");
+        return (status, counter, initiative_state, false);
+    }
 
     tx.execute(
         &format!(
@@ -167,7 +192,7 @@ fn schema_approve_logical_deadlock(
             &format!(
                 "UPDATE {initiatives}
                     SET state = 'Executing', completed_at = NULL
-                  WHERE initiative_id = ?1 AND state = 'Failed'"
+                  WHERE initiative_id = ?1 AND state = 'RecoveryRequired'"
             ),
             params![&initiative_id],
         )
@@ -203,19 +228,60 @@ fn schema_approve_logical_deadlock(
     (approved, counter, state, state_change_rows == 1)
 }
 
+#[test]
+fn approve_refuses_terminal_failed_initiative_without_mutating_escalation() {
+    let (_tmp, mut conn) = fresh_disk_conn();
+    let escalation_id = seed_recovery_required_initiative_with_escalation(
+        &mut conn,
+        "init-terminal-failed",
+        "sess-terminal",
+        "task-terminal",
+        "lin-terminal",
+        "kernel-initiative-permanent-failure:init-terminal-failed:PushFailed:remote=origin;ref=refs/heads/main",
+        7,
+    );
+
+    let initiatives = Table::Initiatives.as_str();
+    conn.execute(
+        &format!(
+            "UPDATE {initiatives}
+                SET state = 'Failed', completed_at = ?2
+              WHERE initiative_id = ?1"
+        ),
+        params!["init-terminal-failed", raxis_types::unix_now_secs()],
+    )
+    .expect("close initiative as terminal Failed");
+
+    let (status, counter, state, transitioned) =
+        schema_approve_logical_deadlock(&mut conn, &escalation_id);
+    assert_eq!(
+        status, "Pending",
+        "stale recovery approval MUST NOT approve escalation once initiative is terminal Failed",
+    );
+    assert_eq!(
+        counter, 7,
+        "stale recovery approval MUST NOT reset no-progress counter on terminal Failed",
+    );
+    assert_eq!(state, "Failed");
+    assert!(
+        !transitioned,
+        "terminal Failed must not report a RecoveryRequired -> Executing transition",
+    );
+}
+
 /// `INV-OPERATOR-APPROVE-RECOVERY-SEMANTICS-01`. Approve on a
 /// Pending kernel-initiated LogicalDeadlock escalation MUST:
 ///
 ///   * Flip `escalations.status: Pending → Approved`.
 ///   * Reset `initiatives.orchestrator_no_progress_respawn_count`
 ///     to 0.
-///   * Flip `initiatives.state: Failed → Executing`.
-///   * Report `transitioned_from_failed = true` so the operator
+///   * Flip `initiatives.state: RecoveryRequired → Executing`.
+///   * Report `transitioned_from_recovery_required = true` so the operator
 ///     handler emits the paired `InitiativeStateChanged` audit.
 #[test]
 fn approve_happy_path_flips_status_resets_counter_unfails_initiative() {
     let (_tmp, mut conn) = fresh_disk_conn();
-    let escalation_id = seed_failed_initiative_with_escalation(
+    let escalation_id = seed_recovery_required_initiative_with_escalation(
         &mut conn,
         "init-approve-1",
         "sess-1",
@@ -230,11 +296,11 @@ fn approve_happy_path_flips_status_resets_counter_unfails_initiative() {
     assert_eq!(counter, 0, "approve MUST reset NNSP counter to 0");
     assert_eq!(
         state, "Executing",
-        "approve MUST flip Failed → Executing for the next decision-cycle to pick up",
+        "approve MUST flip RecoveryRequired → Executing for the next decision-cycle to pick up",
     );
     assert!(
         transitioned,
-        "approve MUST report transitioned_from_failed=true so the operator handler emits paired InitiativeStateChanged",
+        "approve MUST report transitioned_from_recovery_required=true so the operator handler emits paired InitiativeStateChanged",
     );
 }
 
@@ -250,7 +316,7 @@ fn approve_happy_path_flips_status_resets_counter_unfails_initiative() {
 #[test]
 fn refailure_after_approve_inserts_new_escalation_row_not_dedup() {
     let (_tmp, mut conn) = fresh_disk_conn();
-    let first_escalation_id = seed_failed_initiative_with_escalation(
+    let first_escalation_id = seed_recovery_required_initiative_with_escalation(
         &mut conn,
         "init-refail",
         "sess-1",
@@ -296,6 +362,19 @@ fn refailure_after_approve_inserts_new_escalation_row_not_dedup() {
         ],
     )
     .expect("re-fire insert MUST succeed (different idempotency key)");
+
+    let initiatives = Table::Initiatives.as_str();
+    conn.execute(
+        &format!(
+            "UPDATE {initiatives}
+                SET state = 'RecoveryRequired',
+                    orchestrator_no_progress_respawn_count = 6,
+                    completed_at = NULL
+              WHERE initiative_id = ?1"
+        ),
+        params!["init-refail"],
+    )
+    .expect("re-failure must pause initiative in RecoveryRequired before approval");
 
     let count: i64 = conn
         .query_row(

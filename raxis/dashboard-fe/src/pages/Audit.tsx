@@ -353,9 +353,9 @@ export function AuditPage() {
                         toggle();
                       }
                     }}
-                    className="w-full text-left px-4 py-2.5 flex items-center gap-3 cursor-pointer hover:bg-panel-high focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
+                    className="w-full min-w-0 text-left px-4 py-2.5 flex flex-wrap items-start gap-3 cursor-pointer hover:bg-panel-high focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
                   >
-                    <span className="text-[11px] text-ink-subtle font-mono w-14 text-right">
+                    <span className="shrink-0 text-[11px] text-ink-subtle font-mono w-14 text-right">
                       #{a.seq}
                     </span>
                     <span className={auditBadgeClasses(a.event_kind)}>
@@ -373,7 +373,8 @@ export function AuditPage() {
                       <Link
                         to={`/initiatives/${encodeURIComponent(a.initiative_id)}`}
                         onClick={(e) => e.stopPropagation()}
-                        className="text-xs text-accent hover:underline font-mono"
+                        title={a.initiative_id}
+                        className="min-w-0 max-w-full break-all font-mono text-xs text-accent [overflow-wrap:anywhere] hover:underline"
                       >
                         {a.initiative_id}
                       </Link>
@@ -382,7 +383,8 @@ export function AuditPage() {
                       <Link
                         to={`/tasks/${encodeURIComponent(a.task_id)}`}
                         onClick={(e) => e.stopPropagation()}
-                        className="text-[11px] text-ink-muted hover:text-accent font-mono"
+                        title={a.task_id}
+                        className="min-w-0 max-w-full break-all font-mono text-[11px] text-ink-muted [overflow-wrap:anywhere] hover:text-accent"
                       >
                         · {a.task_id}
                       </Link>
@@ -390,7 +392,7 @@ export function AuditPage() {
                     {isFailure && (
                       <FailurePill failed reason={reason} compact />
                     )}
-                    <span className="ml-auto text-xs text-ink-subtle">
+                    <span className="ml-auto shrink-0 text-xs text-ink-subtle">
                       {fmtRelative(a.at)}
                     </span>
                     <span

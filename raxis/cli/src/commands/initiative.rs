@@ -7,6 +7,10 @@
 
 use raxis_types::operator_wire::OperatorRequest;
 
+use raxis_store::open_ro;
+use raxis_store::views::initiatives::{by_id as initiative_by_id, plan_bundle_sha256_by_id};
+use raxis_store::views::plan_bundles::header_by_sha256;
+
 use crate::commands::plan::{handle_response, open_conn, to_wire};
 use crate::errors::CliError;
 use crate::GlobalFlags;
@@ -65,6 +69,88 @@ pub fn run_quarantine(flags: &GlobalFlags, args: &[String]) -> Result<(), CliErr
             );
         }
     })
+}
+
+/// `raxis initiative fork-from-failed <initiative_id>` — forensic/admin-only
+/// escape hatch for terminal Failed initiatives.
+///
+/// This command intentionally does NOT mutate kernel state. Normal recovery is
+/// `RecoveryRequired -> Executing` via signed escalation approval. A terminal
+/// `Failed` row is closed history; "forking" means creating a new signed
+/// initiative whose operator-authored artifacts explicitly reference this
+/// failed parent.
+pub fn run_fork_from_failed(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    let initiative_id = args.first().ok_or_else(|| {
+        CliError::Usage("initiative fork-from-failed requires <initiative_id>".to_owned())
+    })?;
+    if args.len() > 1 {
+        return Err(CliError::Usage(
+            "initiative fork-from-failed accepts only <initiative_id>".to_owned(),
+        ));
+    }
+
+    let conn = open_ro(flags.data_dir())
+        .map_err(|e| CliError::Policy(format!("kernel.db open failed: {e}")))?;
+    let Some(row) = initiative_by_id(&conn, initiative_id)
+        .map_err(|e| CliError::Policy(format!("initiative lookup failed: {e}")))?
+    else {
+        return Err(CliError::Usage(format!(
+            "initiative {initiative_id} does not exist"
+        )));
+    };
+
+    if row.state != "Failed" {
+        return Err(CliError::Usage(format!(
+            "initiative {initiative_id} is {state}, not terminal Failed. \
+             Use signed escalation approval for RecoveryRequired initiatives; \
+             fork-from-failed is only for closed failed history.",
+            state = row.state,
+        )));
+    }
+
+    let bundle_sha = plan_bundle_sha256_by_id(&conn, initiative_id)
+        .map_err(|e| CliError::Policy(format!("plan bundle lookup failed: {e}")))?;
+    let bundle_sha_hex = bundle_sha
+        .as_ref()
+        .map(|sha| hex::encode(sha.as_bytes()))
+        .unwrap_or_else(|| "(legacy initiative without plan_bundle_sha256)".to_owned());
+    let bundle_summary = if let Some(sha) = bundle_sha.as_ref() {
+        match header_by_sha256(&conn, sha) {
+            Ok(Some(header)) => format!(
+                "schema={} signed_by={} artifacts={} bytes={}",
+                header.schema_version,
+                hex::encode(header.signed_by.as_bytes()),
+                header.artifact_count,
+                header.bundle_bytes_len,
+            ),
+            Ok(None) => "bundle header missing".to_owned(),
+            Err(e) => format!("bundle header lookup failed: {e}"),
+        }
+    } else {
+        "legacy V1 plan artifact only".to_owned()
+    };
+
+    println!("Initiative {initiative_id} is terminal Failed and will not be resumed in place.");
+    println!("Create a new signed initiative instead, with explicit parent lineage:");
+    println!("  parent_initiative_id       = \"{initiative_id}\"");
+    println!("  parent_plan_bundle_sha256  = \"{bundle_sha_hex}\"");
+    println!(
+        "  parent_plan_artifact_sha256 = \"{}\"",
+        row.plan_artifact_sha256
+    );
+    println!("  parent_created_at          = {}", row.created_at);
+    println!(
+        "  parent_completed_at        = {}",
+        row.completed_at.unwrap_or(0)
+    );
+    println!("  bundle                     = {bundle_summary}");
+    println!();
+    println!("Suggested forensic flow:");
+    println!("  raxis initiative show {initiative_id} --bundle --with-tasks");
+    println!("  raxis initiative show {initiative_id} --bundle --to ./raxis-fork-{initiative_id}");
+    println!("  # author a new plan/amendment that names the parent above");
+    println!("  raxis submit plan ./new-plan.toml --no-dry-run");
+    Ok(())
 }
 
 /// `raxis initiative watch <initiative_id>` — subscribe to the

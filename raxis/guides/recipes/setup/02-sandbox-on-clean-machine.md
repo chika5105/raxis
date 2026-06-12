@@ -139,8 +139,12 @@ kind          = "Anthropic"
 credentials   = "anthropic-prod.toml"
 default_model = "claude-haiku-4-5"
 
-  pricing.input_tokens_per_dollar  = 200000
-  pricing.output_tokens_per_dollar = 50000
+  # Optional operator pricing override for enterprise contracts or
+  # volume discounts. Leave unset to let RAXIS label provider-reported
+  # usage with runtime/provider pricing where available, then bundled
+  # estimates.
+  # pricing.input_tokens_per_dollar  = 200000
+  # pricing.output_tokens_per_dollar = 50000
 ```
 
 Re-sign:
@@ -151,10 +155,11 @@ raxis policy sign \
   --key "$RAXIS_OPERATOR_KEY"
 ```
 
-`pricing.*` is mandatory for any LLM-bearing provider entry —
-`PolicyBundle::validate` rejects entries without it. The two
-example values mirror Anthropic's published Sonnet rates so the
-budget heuristic is realistic without being load-bearing.
+`pricing.*` is optional for LLM provider entries. Use it only when
+your contract or volume discount should override the default pricing
+resolver. Without an override, the dashboard makes the provenance
+explicit: provider-reported tokens, runtime/provider pricing when
+available, and bundled estimate as the final fallback.
 
 ---
 

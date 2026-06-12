@@ -53,6 +53,7 @@ and invariant/test surface that ships today.
 | [`worktree-snapshots.md`](v3/worktree-snapshots.md) | Active: kernel/GC storage landed; dashboard surface is called out in the spec status. |
 | [`prompt-caching.md`](v3/prompt-caching.md) | Active provider dispatch behavior. |
 | [`canonical-image-trust-anchor.md`](v3/canonical-image-trust-anchor.md) | Active fail-loud image trust-anchor contract. |
+| [`recovery-required-and-fork-from-failed.md`](v3/recovery-required-and-fork-from-failed.md) | Active initiative recovery boundary: `RecoveryRequired` resumes by signed approval; terminal `Failed` only forks into new signed history. |
 | [`otel-observability.md`](v3/otel-observability.md) and [`observability-prometheus.md`](v3/observability-prometheus.md) | Active observability pipeline: kernel ring exporter, `raxis-otel-pusher`, and dev/perf Prometheus + Grafana stack. |
 | [`live-e2e-keep-alive.md`](v3/live-e2e-keep-alive.md) | Implemented dev/test post-mortem keep-alive control. |
 | [`audit-retention.md`](v3/audit-retention.md), [`gdpr-audit-erasure.md`](v3/gdpr-audit-erasure.md), and other non-active V3 docs | Design/deferred unless the header says otherwise. |

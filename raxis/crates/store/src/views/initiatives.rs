@@ -10,7 +10,7 @@
 //!     `initiative_quarantines` so each row carries a `quarantined`
 //!     flag without a per-row follow-up query.
 //!   * [`InitiativeListFilter`] — typed bucket used by §5.5.6b's
-//!     `--state` flag (`active|completed|quarantined|all`).
+//!     `--state` flag (`active|recovery|completed|quarantined|all`).
 
 use rusqlite::OptionalExtension;
 use thiserror::Error;
@@ -30,7 +30,7 @@ pub struct InitiativeRow {
     pub completed_at: Option<u64>,
 }
 
-/// Per-state row count. All seven FSM states from kernel-store.md
+/// Per-state row count. All initiative FSM states from kernel-store.md
 /// §2.5.1 Table 2 + a `total` aggregate.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct InitiativeStateCounts {
@@ -38,6 +38,7 @@ pub struct InitiativeStateCounts {
     pub approved_plan: u64,
     pub executing: u64,
     pub blocked: u64,
+    pub recovery_required: u64,
     pub completed: u64,
     pub failed: u64,
     pub aborted: u64,
@@ -67,6 +68,7 @@ pub fn counts_by_state(conn: &RoConn) -> Result<InitiativeStateCounts, Initiativ
             "ApprovedPlan" => counts.approved_plan = n,
             "Executing" => counts.executing = n,
             "Blocked" => counts.blocked = n,
+            "RecoveryRequired" => counts.recovery_required = n,
             "Completed" => counts.completed = n,
             "Failed" => counts.failed = n,
             "Aborted" => counts.aborted = n,
@@ -267,6 +269,10 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<InitiativeRow> {
 //                  admitted/running states (ApprovedPlan | Executing |
 //                  Blocked). Draft plans are not in flight: they have
 //                  no approved work and may have no task rows yet.
+//   * Recovery   — "what requires operator action before it can make
+//                  progress?" = RecoveryRequired only. This is
+//                  deliberately not Active because no VM/session should
+//                  be running work for it.
 //   * Completed  — "what shipped?" = the Completed terminal state
 //                  ONLY. Failed / Aborted are deliberately omitted
 //                  because the operator's natural follow-up after
@@ -299,6 +305,8 @@ pub enum InitiativeListFilter {
     All,
     /// In-flight states: `ApprovedPlan | Executing | Blocked`.
     Active,
+    /// Recoverable pause: operator recovery decision required.
+    Recovery,
     /// `state = 'Completed'` only — the successful terminal.
     Completed,
     /// Any initiative with a row in `initiative_quarantines`.
@@ -339,6 +347,7 @@ pub fn list_filtered(
         InitiativeListFilter::Active => " WHERE i.state IN \
             ('ApprovedPlan', 'Executing', 'Blocked')"
             .to_owned(),
+        InitiativeListFilter::Recovery => " WHERE i.state = 'RecoveryRequired'".to_owned(),
         InitiativeListFilter::Completed => " WHERE i.state = 'Completed'".to_owned(),
         InitiativeListFilter::Quarantined => " WHERE q.initiative_id IS NOT NULL".to_owned(),
     };
@@ -445,6 +454,7 @@ mod tests {
             ("init-old", "Completed", 100_i64),
             ("init-mid", "Executing", 200),
             ("init-fresh", "Draft", 300),
+            ("init-recovery", "RecoveryRequired", 225),
             ("init-fail", "Failed", 150),
             ("init-other", "Executing", 250),
         ] {
@@ -496,8 +506,9 @@ mod tests {
         assert_eq!(counts.executing, 2);
         assert_eq!(counts.draft, 1);
         assert_eq!(counts.completed, 1);
+        assert_eq!(counts.recovery_required, 1);
         assert_eq!(counts.failed, 1);
-        assert_eq!(counts.total, 5);
+        assert_eq!(counts.total, 6);
         assert_eq!(counts.aborted, 0);
     }
 
@@ -615,6 +626,7 @@ mod tests {
             vec![
                 "init-fresh",
                 "init-other",
+                "init-recovery",
                 "init-mid",
                 "init-fail",
                 "init-old"
@@ -649,6 +661,7 @@ mod tests {
             vec![
                 "init-fresh",
                 "init-other",
+                "init-recovery",
                 "init-mid",
                 "init-fail",
                 "init-old"
@@ -670,10 +683,22 @@ mod tests {
             .map(|r| r.initiative.initiative_id.as_str())
             .collect();
         // Active = ApprovedPlan + Executing + Blocked. Seed has one
-        // Draft (init-fresh), which is intentionally omitted because
-        // it is not in flight, plus two Executing rows and terminal
-        // Completed / Failed rows.
+        // Draft (init-fresh) and RecoveryRequired (init-recovery) are
+        // intentionally omitted because neither is in flight, plus two
+        // Executing rows and terminal Completed / Failed rows.
         assert_eq!(ids, vec!["init-other", "init-mid"]);
+    }
+
+    #[test]
+    fn list_filtered_recovery_returns_only_recovery_required_rows() {
+        let tmp = fresh_store_with_seed();
+        let conn = open_ro(tmp.path()).unwrap();
+        let rows = list_filtered(&conn, InitiativeListFilter::Recovery, 10).unwrap();
+        let ids: Vec<&str> = rows
+            .iter()
+            .map(|r| r.initiative.initiative_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["init-recovery"]);
     }
 
     #[test]

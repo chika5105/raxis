@@ -731,6 +731,12 @@ pub struct ReviewerCapabilities {
     pub session: SessionCapabilityView,
     /// Task id of the executor artifact under review.
     pub artifact_task_id: String,
+    /// Kernel-bound evaluation SHA of the executor artifact under
+    /// review. This is diagnostic/context only: the reviewer does
+    /// not supply it back to the kernel, and `submit_review` remains
+    /// bound to the task/session authority the kernel already holds.
+    #[serde(default)]
+    pub artifact_evaluation_sha: String,
 }
 
 /// One DAG row visible in the KSB.
@@ -1443,7 +1449,9 @@ fn check_capabilities_delimiter(caps: &Capabilities) -> Result<(), KsbError> {
         }
     }
     if let Capabilities::Reviewer(r) = caps {
-        if r.artifact_task_id.contains(KSB_DELIMITER_CLOSE) {
+        if r.artifact_task_id.contains(KSB_DELIMITER_CLOSE)
+            || r.artifact_evaluation_sha.contains(KSB_DELIMITER_CLOSE)
+        {
             return Err(KsbError::DelimiterInjection {
                 field: "capabilities",
             });
@@ -1540,6 +1548,9 @@ fn push_capabilities(buf: &mut String, caps: &Capabilities) {
             // `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`).
             buf.push_str("  artifact_task_id=");
             buf.push_str(&r.artifact_task_id);
+            buf.push('\n');
+            buf.push_str("  artifact_evaluation_sha=");
+            buf.push_str(&r.artifact_evaluation_sha);
             buf.push('\n');
         }
     }
@@ -2428,6 +2439,7 @@ mod tests {
         snap.capabilities = Some(Capabilities::Reviewer(ReviewerCapabilities {
             session: caps_session_view("reviewer", 5),
             artifact_task_id: "task-42".to_owned(),
+            artifact_evaluation_sha: "abc123".to_owned(),
         }));
         let s = render_ksb(&snap).unwrap();
         assert!(
@@ -2437,6 +2449,10 @@ mod tests {
         assert!(
             s.contains("planner_max_turns=5"),
             "reviewer capabilities line MUST carry `planner_max_turns=5`; got: {s}"
+        );
+        assert!(
+            s.contains("artifact_evaluation_sha=abc123"),
+            "reviewer capabilities MUST carry artifact_evaluation_sha; got: {s}"
         );
     }
 }

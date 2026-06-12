@@ -272,6 +272,43 @@ codepath narrows the exception window for).
 
 ---
 
+## 5c. Recovery after a clean host restart
+
+A laptop reboot, user logout, service stop, or full machine
+shutdown is different from a supervisor-classified kernel
+incident. The kernel still recovers durable state on the next
+boot, but it does not pretend every interrupted VM continued
+cleanly. Interrupted tasks remain at `BlockedRecoveryPending`
+until an operator chooses to resume them.
+
+The dashboard surfaces this as **Recovery after host restart** in
+the global lifecycle banner. For each paused task it shows the
+task name, task id, initiative, agent type, block reason, and a
+copyable command:
+
+```bash
+raxis task resume '<task_id>'
+```
+
+Run that command from a shell that has `RAXIS_OPERATOR_KEY` set
+or pass `--operator-key` as you normally do for signed operator
+actions. The dashboard intentionally does not store or use the
+private operator key, so the first version gives you exact CLI
+commands rather than a browser-only one-click resume button.
+
+Rule of thumb:
+
+- **Supervisor incident restart:** RAXIS may auto-resume because
+  the external supervisor classified the prior exit as kernel
+  pathology.
+- **Clean host restart:** RAXIS preserves work and asks the
+  operator to resume because the shutdown may have been human or
+  host intent.
+
+Cross-reference: `specs/v2/self-healing-supervisor.md §3.6`.
+
+---
+
 ## 6. Forensic evidence after a halt
 
 Every supervisor decision lands in three places — collect all

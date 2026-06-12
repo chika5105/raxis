@@ -37,6 +37,7 @@ raxis-test-support         = { path = "../crates/test-support" }
 raxis-audit-tools          = { path = "../crates/audit" }
 raxis-types                = { path = "../crates/types" }
 raxis-planner-core         = { path = "../crates/planner-core" }
+raxis-store                = { path = "../crates/store" }
 
 tokio       = { workspace = true }
 # Outbound HTTPS client for the V3-readiness real-endpoint cloud
@@ -48,6 +49,7 @@ reqwest     = { workspace = true }
 serde_json  = { workspace = true }
 hex         = { workspace = true }
 uuid        = { workspace = true }
+rusqlite    = { workspace = true }
 tempfile    = "3"
 ed25519-dalek = { workspace = true }
 toml        = { workspace = true }

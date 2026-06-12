@@ -29,7 +29,7 @@ export function DiagnosticsPage() {
     refetchIntervalInBackground: true,
   });
 
-  const findings = q.data?.findings ?? [];
+  const findings = useMemo(() => q.data?.findings ?? [], [q.data?.findings]);
   const counts = useMemo(() => countSeverities(findings), [findings]);
   const filtered = useMemo(() => {
     if (severity === "all") return findings;

@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 CREATE TABLE IF NOT EXISTS initiatives (
     initiative_id          TEXT    NOT NULL PRIMARY KEY,
     state                  TEXT    NOT NULL
-        CHECK (state IN ('Draft', 'ApprovedPlan', 'Executing', 'Blocked', 'Completed', 'Failed', 'Aborted')),
+        CHECK (state IN ('Draft', 'ApprovedPlan', 'Executing', 'Blocked', 'RecoveryRequired', 'Completed', 'Failed', 'Aborted')),
     terminal_criteria_json TEXT    NOT NULL,
     plan_artifact_sha256   TEXT    NOT NULL,
     created_at             INTEGER NOT NULL,

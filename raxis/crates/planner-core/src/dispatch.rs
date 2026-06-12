@@ -443,6 +443,11 @@ pub struct DispatchLoop {
     /// reset semantics, but folds
     /// `Usage::cache_read_input_tokens`.
     cum_cache_read_input_tokens: u64,
+    /// Provider-reported model id from the latest response in the
+    /// most recent run. This is the billing attribution seam for
+    /// fallback chains: the primary configured model may not be the
+    /// model that ultimately answered.
+    last_response_model: Option<String>,
 }
 
 impl DispatchLoop {
@@ -463,6 +468,7 @@ impl DispatchLoop {
             terminal_tools: Vec::new(),
             cum_cache_creation_input_tokens: 0,
             cum_cache_read_input_tokens: 0,
+            last_response_model: None,
         }
     }
 
@@ -480,6 +486,12 @@ impl DispatchLoop {
     /// `cache_read_input_tokens` instead.
     pub fn last_cumulative_cache_read_tokens(&self) -> u64 {
         self.cum_cache_read_input_tokens
+    }
+
+    /// Provider-reported model id from the latest successful model
+    /// response in the most recent dispatch run.
+    pub fn last_response_model(&self) -> Option<&str> {
+        self.last_response_model.as_deref()
     }
 
     /// Declare which tool names short-circuit the loop. The role
@@ -571,10 +583,12 @@ impl DispatchLoop {
         // fresh loop per session so this reset is defensive.
         self.cum_cache_creation_input_tokens = 0;
         self.cum_cache_read_input_tokens = 0;
+        self.last_response_model = None;
         let mut reviewer_terminal_correction_sent = false;
 
         for turn in 0..self.config.max_turns {
             let resp = self.model.create_message(&req).await?;
+            self.last_response_model = Some(resp.model.clone());
             // fold this turn's `Usage` into the
             // running totals before any other side effect, so a
             // ceiling that fires post-turn still records the call.
@@ -845,6 +859,7 @@ impl DispatchLoop {
         // does not care which path produced the cumulative count.
         self.cum_cache_creation_input_tokens = 0;
         self.cum_cache_read_input_tokens = 0;
+        self.last_response_model = None;
         let mut reviewer_terminal_correction_sent = false;
 
         for turn in 0..self.config.max_turns {
@@ -906,6 +921,7 @@ impl DispatchLoop {
                     )));
                 }
             };
+            self.last_response_model = Some(resp.model.clone());
 
             // ── Canonical post-turn usage fold (same as `run()`) ──
             let Usage {

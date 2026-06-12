@@ -75,22 +75,24 @@ naturally retry on their next intent.
 
 ## Provider config recap
 
-Providers are declared in `policy.toml` under `[[providers.entries]]`:
+Providers are declared in `policy.toml` under `[[providers]]`:
 
 ```toml
-[[providers.entries]]
-id            = "anthropic-1"
-base_url      = "https://api.anthropic.com"
-default_model = "claude-3-5-sonnet-20241022"
-credential_id = "anthropic-key"
-[providers.entries.pricing]
-input_per_1k_tokens  = 0.003
-output_per_1k_tokens = 0.015
+[[providers]]
+provider_id           = "anthropic-1"
+kind                  = "Anthropic"
+credentials_file      = "anthropic-key.toml"
+inference_timeout_ms  = 120000
+data_fetch_timeout_ms = 30000
+
+# Optional operator pricing override.
+# pricing.input_tokens_per_dollar  = 200000
+# pricing.output_tokens_per_dollar = 50000
 ```
 
 See the [providers section recipe](../policy/10-providers-section.md)
-for the full schema. The `credential_id` references a credential
-registered with `raxis credential add --kind generic`.
+for the full schema. The `credentials_file` references provider
+credentials stored under `<data-dir>/providers/`.
 
 ---
 

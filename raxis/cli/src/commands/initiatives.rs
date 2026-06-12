@@ -24,7 +24,7 @@
 //!
 //! # Filter
 //!
-//! `--state active|completed|quarantined|all`. Default is `active`
+//! `--state active|recovery|completed|quarantined|all`. Default is `active`
 //! because the operator's recurring at-a-glance question is "what is
 //! currently being worked on?" — listing every historical initiative
 //! by default would bury the actionable rows. Spec §5.5.6b.
@@ -104,7 +104,8 @@ fn parse_args(args: &[String]) -> Result<InitiativeListOpts, CliError> {
                 i += 1;
                 let raw = args.get(i).ok_or_else(|| {
                     CliError::Usage(
-                        "--state requires one of active|completed|quarantined|all".to_owned(),
+                        "--state requires one of active|recovery|completed|quarantined|all"
+                            .to_owned(),
                     )
                 })?;
                 opts.filter = parse_state(raw)?;
@@ -128,7 +129,7 @@ fn parse_args(args: &[String]) -> Result<InitiativeListOpts, CliError> {
             other => {
                 return Err(CliError::Usage(format!(
                     "unknown initiative list flag: {other:?} \
-                     (try --state active|completed|quarantined|all, --limit N, --json, --help)"
+                     (try --state active|recovery|completed|quarantined|all, --limit N, --json, --help)"
                 )));
             }
         }
@@ -143,12 +144,13 @@ fn parse_state(raw: &str) -> Result<InitiativeListFilter, CliError> {
     // the canonical FSM-state spelling in `kernel-store.md`.
     match raw.to_ascii_lowercase().as_str() {
         "active" => Ok(InitiativeListFilter::Active),
+        "recovery" | "recoveryrequired" | "recovery-required" => Ok(InitiativeListFilter::Recovery),
         "completed" => Ok(InitiativeListFilter::Completed),
         "quarantined" => Ok(InitiativeListFilter::Quarantined),
         "all" => Ok(InitiativeListFilter::All),
         other => Err(CliError::Usage(format!(
             "unknown --state value {other:?} \
-             (expected active|completed|quarantined|all)"
+             (expected active|recovery|completed|quarantined|all)"
         ))),
     }
 }
@@ -158,12 +160,14 @@ fn print_help() {
         "raxis initiative list — list initiatives by bucket\n\
          \n\
          USAGE:\n\
-         \traxis initiative list [--state active|completed|quarantined|all] [--limit N] [--json]\n\
+         \traxis initiative list [--state active|recovery|completed|quarantined|all] [--limit N] [--json]\n\
          \n\
          FLAGS:\n\
          \t--state FILTER   Bucket to filter on (default: active).\n\
          \t                 - active      = in-flight FSM states (ApprovedPlan,\n\
          \t                                 Executing, Blocked). Draft is not in flight.\n\
+         \t                 - recovery    = RecoveryRequired only; paused until an\n\
+         \t                                 operator approves recovery or closes it.\n\
          \t                 - completed   = the Completed terminal only. Failed and\n\
          \t                                 Aborted are reachable via `--state all` or\n\
          \t                                 `raxis initiative show <id>`.\n\
@@ -255,6 +259,7 @@ fn filter_label(f: InitiativeListFilter) -> &'static str {
     match f {
         InitiativeListFilter::All => "all",
         InitiativeListFilter::Active => "active",
+        InitiativeListFilter::Recovery => "recovery",
         InitiativeListFilter::Completed => "completed",
         InitiativeListFilter::Quarantined => "quarantined",
     }
@@ -335,6 +340,9 @@ mod tests {
             ("active", InitiativeListFilter::Active),
             ("Active", InitiativeListFilter::Active),
             ("ACTIVE", InitiativeListFilter::Active),
+            ("recovery", InitiativeListFilter::Recovery),
+            ("RecoveryRequired", InitiativeListFilter::Recovery),
+            ("recovery-required", InitiativeListFilter::Recovery),
             ("completed", InitiativeListFilter::Completed),
             ("quarantined", InitiativeListFilter::Quarantined),
             ("Quarantined", InitiativeListFilter::Quarantined),
@@ -350,7 +358,10 @@ mod tests {
         let err = parse_args(&["--state".to_owned(), "bogus".to_owned()]).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
         if let CliError::Usage(m) = err {
-            assert!(m.contains("active|completed|quarantined|all"), "got: {m}");
+            assert!(
+                m.contains("active|recovery|completed|quarantined|all"),
+                "got: {m}"
+            );
         }
     }
 
@@ -526,6 +537,7 @@ mod tests {
         for v in [
             InitiativeListFilter::All,
             InitiativeListFilter::Active,
+            InitiativeListFilter::Recovery,
             InitiativeListFilter::Completed,
             InitiativeListFilter::Quarantined,
         ] {

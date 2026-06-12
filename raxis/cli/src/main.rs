@@ -91,7 +91,14 @@ const PLAN_SUBCOMMANDS: &[&str] = &["approve", "reject", "validate", "fmt", "ini
 /// `operator-cert`) will plug in here without a third rename.
 const SUBMIT_SUBCOMMANDS: &[&str] = &["plan"];
 const TOOLS_SUBCOMMANDS: &[&str] = &["add", "attach", "validate", "test"];
-const INITIATIVE_SUBCOMMANDS: &[&str] = &["abort", "list", "quarantine", "show", "watch"];
+const INITIATIVE_SUBCOMMANDS: &[&str] = &[
+    "abort",
+    "fork-from-failed",
+    "list",
+    "quarantine",
+    "show",
+    "watch",
+];
 const OPERATOR_SUBCOMMANDS: &[&str] = &["quarantine-plans-by"];
 const TASK_SUBCOMMANDS: &[&str] = &["abort", "resume", "retry", "outputs"];
 const SESSION_SUBCOMMANDS: &[&str] = &["create", "revoke"];
@@ -265,6 +272,9 @@ fn run() -> Result<(), CliError> {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
                 "abort" => commands::initiative::run_abort(&flags, &rest[1..]),
+                "fork-from-failed" => {
+                    commands::initiative::run_fork_from_failed(&flags, &rest[1..])
+                }
                 "list" => commands::initiatives::run(&flags, &rest[1..]),
                 "quarantine" => commands::initiative::run_quarantine(&flags, &rest[1..]),
                 "show" => commands::initiative_show::run(&flags, &rest[1..]),
@@ -666,9 +676,19 @@ SUBCOMMANDS:
     initiative abort <initiative_id>
         Force-terminate an initiative and bulk-cancel all non-terminal tasks.
 
-    initiative list [--state active|completed|quarantined|all] [--limit N] [--json]
+    initiative fork-from-failed <initiative_id>
+        Forensic/admin-only escape for a terminal Failed initiative.
+        This is intentionally NOT resume: normal recoverable runs land
+        in RecoveryRequired and resume only through signed escalation
+        approval. This command refuses non-Failed initiatives and prints
+        the plan-bundle lineage needed to create a new, explicitly
+        parent-linked initiative.
+
+    initiative list [--state active|recovery|completed|quarantined|all] [--limit N] [--json]
         Read-only bucketed listing of initiatives. Default bucket is
-        `active` (non-terminal states only). The `quarantined` bucket
+        `active` (in-flight states only). Use `--state recovery` for
+        RecoveryRequired initiatives that need operator action but are
+        not running. The `quarantined` bucket
         is orthogonal to the FSM — it returns ANY initiative with a
         row in `initiative_quarantines`, regardless of state. Each
         row carries a `[Q]` marker (or `quarantined: true` in JSON)

@@ -2987,11 +2987,12 @@ pub struct ProviderEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar_health_check_path: Option<String>,
 
-    /// **per-provider pricing table.**
-    /// Required for every model-bearing provider kind (`Anthropic`,
-    /// `OpenAI`, `Gemini`, `Bedrock`, `http_sidecar`); MUST be unset
-    /// for non-LLM providers (kernel rejects with
-    /// `MalformedArtifact` either way).
+    /// **Optional per-provider pricing override.**
+    /// May be set for model-bearing provider kinds (`Anthropic`,
+    /// `OpenAI`, `Gemini`, `Bedrock`, `http_sidecar`) when an
+    /// operator wants RAXIS to use contract-specific rates instead of
+    /// runtime provider billing/cost APIs or bundled fallback
+    /// estimates. MUST be unset for non-LLM providers.
     /// ```toml
     /// [[providers]]
     /// provider_id      = "anthropic-prod"
@@ -3111,9 +3112,9 @@ impl ProviderPricing {
 }
 
 /// `[[providers]] kind` values that reach a model provider and
-/// therefore MUST declare `pricing`. Anything outside this list is
-/// treated as a non-LLM provider (e.g. a future `"DataFetch"` kind)
-/// and MUST leave `pricing` unset; mismatches are rejected at
+/// therefore MAY declare a `pricing` override. Anything outside this
+/// list is treated as a non-LLM provider (e.g. a future `"DataFetch"`
+/// kind) and MUST leave `pricing` unset; mismatches are rejected at
 /// `PolicyBundle::validate` time.
 pub(crate) const LLM_PROVIDER_KINDS: &[&str] =
     &["Anthropic", "OpenAI", "Gemini", "Bedrock", "http_sidecar"];
@@ -5330,23 +5331,17 @@ impl PolicyBundle {
                 }
             }
 
-            // `pricing` is REQUIRED
-            // for every model-bearing provider kind and FORBIDDEN
-            // for everything else. The kernel needs the rate table
-            // to convert per-intent `Usage` into a dollar cost; a
-            // missing rate would silently bypass the per-task cost
-            // ceiling.
+            // `pricing` is an OPTIONAL operator override for every
+            // model-bearing provider kind and FORBIDDEN for
+            // everything else. When it is absent, the kernel's
+            // runtime pricing resolver uses provider/cost APIs where
+            // available and otherwise falls back to explicitly
+            // labelled bundled estimates. This keeps default policies
+            // easy to write while preserving strict validation for
+            // declared override math.
             let is_llm_kind = LLM_PROVIDER_KINDS.iter().any(|k| *k == p.kind);
             match (&p.pricing, is_llm_kind) {
-                (None, true) => {
-                    return Err(PolicyError::MalformedArtifact(format!(
-                        "[[providers]] {:?} kind={:?} is a model provider but has no \
-                         `pricing` table — operators MUST declare \
-                         `pricing.input_tokens_per_dollar` and \
-                         `pricing.output_tokens_per_dollar`",
-                        p.provider_id, p.kind
-                    )));
-                }
+                (None, true) => { /* LLM provider, no override — OK */ }
                 (Some(_), false) => {
                     return Err(PolicyError::MalformedArtifact(format!(
                         "[[providers]] {:?} kind={:?} is not a model provider but \
@@ -7508,27 +7503,21 @@ reviewer_model     = \"gpt-5.3-codex\"\n";
     // ── V2 §2.5 provider pricing — validation + cost math ──────────────
 
     /// Anthropic / OpenAI / Gemini / Bedrock / http_sidecar all
-    /// land in `LLM_PROVIDER_KINDS`. Omitting `pricing` on ANY of
-    /// them MUST fail at policy-validate time with a clear message
-    /// pointing at §2.5.
+    /// land in `LLM_PROVIDER_KINDS`. Omitting `pricing` on any of
+    /// them is valid: pricing is an operator override, not a
+    /// required policy field.
     #[test]
-    fn llm_provider_without_pricing_is_rejected() {
+    fn llm_provider_without_pricing_is_allowed() {
         for kind in &["Anthropic", "OpenAI", "Gemini", "Bedrock"] {
-            let mut t = minimal_policy_toml();
+            let mut t = minimal_policy_with_model_routing_toml();
             t.push_str(&format!(
                 "\n[[providers]]\n\
                  provider_id      = \"prov-{kind}\"\n\
                  kind             = \"{kind}\"\n\
                  credentials_file = \"creds.toml\"\n",
             ));
-            let err = write_and_load(&t)
-                .expect_err(&format!("{kind} without pricing must be rejected (§2.5)"));
-            let s = format!("{err}");
-            assert!(s.contains("pricing"), "[{kind}] msg = {s}");
-            assert!(
-                s.contains(" "),
-                "[{kind}] error must cite the spec; got: {s}"
-            );
+            write_and_load(&t)
+                .unwrap_or_else(|e| panic!("{kind} without pricing should be accepted: {e}"));
         }
     }
 
@@ -10513,8 +10502,8 @@ mod implicit_provider_grants_tests {
     const SIDECAR_TEST_SECRET: &str =
         "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
-    /// LLM pricing block — every `LLM_PROVIDER_KINDS` entry MUST
-    /// declare pricing or the validator rejects it.
+    /// LLM pricing override block. Model providers may omit this and
+    /// use the runtime/bundled pricing resolver instead.
     const LLM_PRICING_BLOCK: &str = "  pricing.input_tokens_per_dollar  = 200000\n\
           pricing.output_tokens_per_dollar = 50000\n";
 

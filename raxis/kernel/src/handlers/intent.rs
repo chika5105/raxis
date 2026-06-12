@@ -32,8 +32,9 @@
 // INV-INIT-04: All task state changes go through task_transitions::transition_task.
 // No direct `UPDATE tasks SET state=…` is permitted in this file.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use raxis_store::{Store, Table};
 use raxis_types::{
@@ -54,6 +55,7 @@ const WITNESS_RECORDS: &str = Table::WitnessRecords.as_str();
 const SUBTASK_ACTIVATIONS: &str = Table::SubtaskActivations.as_str();
 const SESSIONS: &str = Table::Sessions.as_str();
 const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
+const INTEGRATION_MERGE_QUEUE: &str = Table::IntegrationMergeQueue.as_str();
 
 use crate::authority;
 use crate::gates::{self, GateEvalResult};
@@ -983,10 +985,12 @@ fn run_phase_a(
     // The planner stamps `IntentRequest::tokens_used` with the
     // running-total `(input, output, cache_read, cache_creation)`
     // tokens it has consumed so far. We compute the current dollar
-    // cost from the policy's worst-of-N LLM pricing
+    // cost from the kernel pricing resolver
     // (`scheduler::budget::cost_micros_for_tokens`) and compare to
     // the per-task ceiling (`policy.max_cost_per_task` in USD cents
-    // → micros). Over-budget intents fail-closed with
+    // → micros). The resolver uses operator policy overrides first,
+    // runtime provider-pricing hooks next, and explicitly labelled
+    // bundled estimates last. Over-budget intents fail-closed with
     // `FailPolicyViolation`; admitted intents have the new running
     // total persisted on the task row so the next intent's check
     // sees the monotonically-non-decreasing cumulative cost.
@@ -1071,34 +1075,33 @@ fn run_phase_a(
             // sessions UPDATE failure must not retroactively
             // fail the intent. The dashboard's read-side
             // enrichment compensates on the next render.
-            if !report.provider_id.is_empty() {
+            let provider_for_session =
+                (!report.provider_id.is_empty()).then_some(report.provider_id.as_str());
+            let model_for_session =
+                (!report.model_id.is_empty()).then_some(report.model_id.as_str());
+            if provider_for_session.is_some() || model_for_session.is_some() {
                 let _ = raxis_store::views::sessions::set_session_provider_model_if_unset(
                     &conn,
                     session_id.as_str(),
-                    Some(report.provider_id.as_str()),
-                    // `report` does not carry the model id (the
-                    // planner does not surface it at this seam).
-                    // The dashboard's read-side enrichment lifts
-                    // `body.model` from the latest LLM turn
-                    // capture and back-fills via the same
-                    // COALESCE-protected writer when it
-                    // observes a non-empty value. See
-                    // `KernelDashboardData::get_session`.
-                    None,
+                    provider_for_session,
+                    model_for_session,
                 );
             }
             drop(conn);
 
             // iter62 — `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01`
-            // metric emission. Use the planner's `provider_id` as
-            // the `model` label proxy (the kernel does not see the
-            // model id at this seam — the gateway has it, but the
-            // fetch round-trip is one process boundary deeper).
+            // metric emission. Prefer the planner's billed
+            // `model_id`, falling back to provider id for
+            // deterministic short-circuits and legacy reports.
             // `role` is the session's agent type
             // (`executor` / `reviewer` / `orchestrator`); the
             // helper is a no-op when the hub is disabled or the
             // delta is zero.
-            let model_label = report.provider_id.as_str();
+            let model_label = if report.model_id.is_empty() {
+                report.provider_id.as_str()
+            } else {
+                report.model_id.as_str()
+            };
             let role_label = session
                 .session_agent_type
                 .map(|a| a.as_sql_str().to_ascii_lowercase())
@@ -2155,325 +2158,28 @@ fn run_phase_c(
             None => (false, None),
         };
 
-        // ── V2 §1.2 Phase 2 — host-side target-ref advancement ─────
-        let orch_worktree_root = pre_state.worktree_path.clone();
-        let orch_fields = ctx.plan_registry.orchestrator(&initiative_id_owned);
-        let initiative_target_ref = orch_fields
-            .as_ref()
-            .map(|o| o.target_ref.clone())
-            .unwrap_or_else(|| {
-                crate::initiatives::OrchestratorPlanFields::DEFAULT_TARGET_REF.to_owned()
-            });
-        let repository_id = orch_fields
-            .as_ref()
-            .map(|o| o.repository_id.clone())
-            .unwrap_or_else(|| crate::managed_repositories::DEFAULT_REPOSITORY_ID.to_owned());
-        let main_repo_root =
-            crate::managed_repositories::managed_repository_path(&ctx.data_dir, &repository_id);
-        let host_merge_result = raxis_domain_git::commit_merge_to_target_ref(
-            &main_repo_root,
-            &orch_worktree_root,
-            &pre_state.head_sha_raw,
-            &initiative_target_ref,
+        let closeout = complete_integration_merge_closeout(
+            &ctx,
+            initiative_id_owned.as_str(),
+            task_id_owned.as_str(),
+            Some(session_id_str.as_str()),
+            &pre_state.worktree_path,
+            pre_state.head_sha_raw.as_str(),
+            pre_state.base_sha_raw.as_str(),
+            operator_assisted,
+            escalation_id,
         );
-        let mut applied_commit_sha = pre_state.head_sha_raw.clone();
-        let host_merge_succeeded = match &host_merge_result {
-            Ok(advance) => {
-                applied_commit_sha = advance.current_sha.clone();
-                eprintln!(
-                    "{{\"level\":\"info\",\"event\":\"IntegrationMergeTargetAdvanced\",\
-                     \"initiative_id\":\"{initiative_id_owned}\",\
-                     \"target_ref\":\"{initiative_target_ref}\",\
-                     \"requested_sha\":\"{req}\",\"current_sha\":\"{cur}\",\
-                     \"already_at_target\":{aat}}}",
-                    req = pre_state.head_sha_raw,
-                    cur = advance.current_sha,
-                    aat = advance.already_at_target,
-                );
-
-                {
-                    let conn = store.lock_sync();
-                    match raxis_store::managed_repositories::record_publish_pending(
-                        &conn,
-                        &repository_id,
-                        Some(&applied_commit_sha),
-                    ) {
-                        Ok(0) => {
-                            eprintln!(
-	                                "{{\"level\":\"warn\",\"event\":\"ManagedRepoPublishStateMissing\",\
-	                                 \"initiative_id\":\"{initiative_id_owned}\",\
-	                                 \"repository_id\":\"{repository_id}\",\
-	                                 \"publish_state\":\"pending\",\
-	                                 \"diagnostic\":\"repository metadata row not found; run raxis repo repair\"}}",
-	                            );
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!(
-	                                "{{\"level\":\"warn\",\"event\":\"ManagedRepoPublishStateUpdateFailed\",\
-	                                 \"initiative_id\":\"{initiative_id_owned}\",\
-	                                 \"repository_id\":\"{repository_id}\",\
-	                                 \"publish_state\":\"pending\",\
-	                                 \"diagnostic\":\"{e}\"}}",
-	                            );
-                        }
-                    }
-                }
-
-                // ── V2.5 §11.1 Phase 3: clear git_apply_pending ─────────
-                //
-                // Best-effort: a SQLite failure here would re-trigger
-                // boot recovery on next start (recovery is idempotent
-                // — `commit_merge_to_target_ref` short-circuits when
-                // `target_ref` already points at the merge commit and
-                // emits `GitConsistencyVerified` instead of
-                // `GitConsistencyRepaired`). We log the failure so the
-                // operator notices, but we do NOT fail the merge —
-                // Phase 2 already succeeded and rolling it back is
-                // impossible.
-                {
-                    let conn = store.lock_sync();
-                    match raxis_store::views::initiatives::clear_git_apply_pending(
-                        &conn,
-                        initiative_id_owned.as_str(),
-                    ) {
-                        Ok(1) => {}
-                        Ok(n) => {
-                            eprintln!(
-                                "{{\"level\":\"warn\",\"event\":\"GitApplyPendingClearMissed\",\
-                                 \"initiative_id\":\"{initiative_id_owned}\",\"updated_rows\":{n},\
-                                 \"diagnostic\":\"clear matched {n} rows; expected 1 — boot recovery will reconcile\"}}",
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "{{\"level\":\"error\",\"event\":\"GitApplyPendingClearFailed\",\
-                                 \"initiative_id\":\"{initiative_id_owned}\",\"diagnostic\":\"{e}\"}}",
-                            );
-                        }
-                    }
-                }
-
-                // iter68/v3 worktree snapshots — the integration witness
-                // runs before this host-side target-ref advancement, so the only
-                // faithful "what reached main?" snapshot is taken here,
-                // after `<data_dir>/repositories/main` points at the
-                // accepted evaluation SHA.
-                match crate::worktree_snapshot::snapshot_worktree(
-                    &ctx.store,
-                    &ctx.data_dir,
-                    crate::worktree_snapshot::SnapshotInput {
-                        task_id: task_id_owned.clone(),
-                        session_id: Some(session_id_str.clone()),
-                        initiative_id: Some(initiative_id_owned.clone()),
-                        trigger: crate::worktree_snapshot::SnapshotTrigger::IntegrationMerge,
-                        worktree_root: main_repo_root.clone(),
-                        base_sha: pre_state.base_sha_raw.clone(),
-                    },
-                ) {
-                    Ok(rec) => {
-                        eprintln!(
-                            "{{\"level\":\"info\",\"event\":\"WorktreeSnapshotted\",\
-                             \"trigger\":\"IntegrationMerge\",\
-                             \"task_id\":\"{}\",\"snapshot_id\":\"{}\",\
-                             \"head_sha\":\"{}\",\"commit_count\":{}}}",
-                            task_id_owned, rec.snapshot_id, rec.head_sha, rec.commit_count,
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "{{\"level\":\"warn\",\"event\":\"WorktreeSnapshotFailed\",\
-                             \"trigger\":\"IntegrationMerge\",\
-                             \"task_id\":\"{}\",\"error\":\"{}\"}}",
-                            task_id_owned, e,
-                        );
-                    }
-                }
-
-                true
-            }
-            Err(err) => {
-                let (category, reason) = classify_merge_ff_error(err);
-                eprintln!(
-                    "{{\"level\":\"error\",\"event\":\"IntegrationMergeTargetAdvanceFailed\",\
-                     \"initiative_id\":\"{initiative_id_owned}\",\
-                     \"target_ref\":\"{initiative_target_ref}\",\
-                     \"category\":\"{category}\",\"reason\":\"{reason}\"}}",
-                );
-                // INV-FAILURE-REASON-MANDATORY-01: surface the merge
-                // failure as a real `block_reason` on the synthetic
-                // coordinator task (`task_id == initiative_id`) and
-                // cascade the parent initiative to `Failed` so the
-                // dashboard's failure-surface attributes the cause
-                // instead of leaving them stranded in `Running` /
-                // `Executing`. Best-effort raw UPDATE: a SQL failure
-                // here is logged and ignored — the merge already
-                // didn't succeed and re-trying boot recovery is the
-                // operator's recourse.
-                let merge_failure_reason =
-                    format!("IntegrationMerge target advance failed ({category}): {reason}",);
-                {
-                    let conn = store.lock_sync();
-                    if let Err(e) = conn.execute(
-                        &format!(
-                            "UPDATE {tasks}
-                                SET state        = 'Failed',
-                                    block_reason = ?2
-                              WHERE task_id = ?1
-                                AND state IN ('Admitted','Running','GatesPending','BlockedRecoveryPending')",
-                            tasks = raxis_store::Table::Tasks.as_str(),
-                        ),
-                        rusqlite::params![&task_id_owned, &merge_failure_reason],
-                    ) {
-                        eprintln!(
-                            "{{\"level\":\"warn\",\"event\":\"IntegrationMergeFailedTaskCascadeSqlFailed\",\
-                             \"initiative_id\":\"{initiative_id_owned}\",\"task_id\":\"{task_id_owned}\",\
-                             \"diagnostic\":\"{e}\"}}",
-                        );
-                    }
-                    if let Err(e) = conn.execute(
-                        &format!(
-                            "UPDATE {init}
-                                SET state        = 'Failed',
-                                    completed_at = strftime('%s','now')
-                              WHERE initiative_id = ?1
-                                AND state IN ('Executing','Approved','PendingApproval','AwaitingApproval')",
-                            init = raxis_store::Table::Initiatives.as_str(),
-                        ),
-                        rusqlite::params![&initiative_id_owned],
-                    ) {
-                        eprintln!(
-                            "{{\"level\":\"warn\",\"event\":\"IntegrationMergeFailedInitiativeCascadeSqlFailed\",\
-                             \"initiative_id\":\"{initiative_id_owned}\",\
-                             \"diagnostic\":\"{e}\"}}",
-                        );
-                    }
-                }
-                if let Err(e) = ctx.audit.emit(
-                    raxis_audit_tools::AuditEventKind::MergeFastForwardFailed {
-                        initiative_id: initiative_id_owned.clone(),
-                        commit_sha: pre_state.head_sha_raw.clone(),
-                        target_ref: initiative_target_ref.clone(),
-                        category: category.to_owned(),
-                        reason: reason.clone(),
-                    },
-                    Some(session_id_str.as_str()),
-                    Some(task_id_owned.as_str()),
-                    Some(initiative_id_owned.as_str()),
-                ) {
-                    eprintln!(
-                        "{{\"level\":\"error\",\"event\":\"MergeFastForwardFailed\",\
-                         \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
-                    );
-                }
-                // `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
-                // (iter65-review). The target-ref advancement failure cascades the
-                // initiative to `Failed` (the SQL UPDATE above already
-                // ran); fire the generalised permanent-failure
-                // helper so the operator inbox surfaces a Critical-
-                // priority paired-write escalation in addition to the
-                // High-priority `MergeFastForwardFailed` audit event.
-                // The helper is fire-and-forget (`.spawn`) so the
-                // intent handler does not block on the SQLite
-                // round-trip + audit emit; failure to escalate is
-                // logged structurally but never propagated to the
-                // intent caller.
-                let ctx_for_escalation = Arc::clone(&ctx);
-                let init_for_escalation = initiative_id_owned.clone();
-                let category_for_escalation = category.to_owned();
-                let reason_for_escalation = reason.clone();
-                let target_ref_for_escalation = initiative_target_ref.clone();
-                tokio::spawn(async move {
-                    let _ = crate::initiative_escalation::escalate_initiative_on_permanent_failure(
-                        ctx_for_escalation,
-                        init_for_escalation,
-                        crate::initiative_escalation::PermanentFailureCause::MergeFastForwardFailed {
-                            target_ref: target_ref_for_escalation,
-                            category: format!("{category_for_escalation}: {reason_for_escalation}"),
-                        },
-                    )
-                    .await;
-                });
-                false
-            }
-        };
-
-        // ── Synthetic coordinator + initiative completion cascade ──────────
-        //
-        // INV-INTEGRATION-MERGE-COMPLETES-SYNTHETIC-TASK-01
-        // INV-INITIATIVE-COMPLETES-WHEN-INTEGRATION-MERGE-SUCCEEDS-01
-        //
-        // The IntegrationMerge intent is the orchestrator's "I'm done"
-        // signal — once Phase 2 (host-side target-ref advancement) succeeds, the
-        // synthetic coordinator task (`task_id == initiative_id`, see
-        // `lifecycle.rs::spawn_orchestrator_session_for_initiative`)
-        // transitions Running → Completed and the parent initiative
-        // transitions Executing → Completed in the same SQL transaction.
-        //
-        // Without this cascade the dashboard surfaces the initiative as
-        // perpetually `Executing` and the synthetic coordinator task as
-        // perpetually `Running` even though all useful work has already
-        // merged into `target_ref` — the operator-visible UX bug
-        // observed during iter54.
-        //
-        // Ordering note (2026-05-16 fix): the `IntegrationMergeCompleted`
-        // audit emit happens INSIDE the `Ok(Some(...))` arm below, AFTER
-        // `finalize_integration_merge_completion` confirms both the
-        // synthetic-task FSM cascade AND the initiative-state cascade
-        // committed. Previously the emit ran unconditionally before
-        // `finalize_*` was called, which (a) produced ghost
-        // `IntegrationMergeCompleted` audit rows when the FSM cascade
-        // silently failed (primary stranded in `GatesPending`) and
-        // (b) produced duplicate rows when a retry submission re-entered
-        // the handler on an already-merged ref (sibling's two emits for
-        // the same `commit_sha`). Gating the emit on the success arm
-        // makes audit emission and FSM cascade observably paired.
-        //
-        // The push step below is best-effort and runs AFTER the cascade
-        // — push failure does not regress the now-Completed initiative.
-        // The cascade itself is also best-effort: a SQLite or FSM error
-        // is logged and skipped (the recovery sweep on next boot will
-        // reconcile via the same idempotent code path).
-        if host_merge_succeeded {
-            match finalize_integration_merge_completion(
-                store,
-                initiative_id_owned.as_str(),
-                task_id_owned.as_str(),
-            ) {
-                Ok(Some(outcome)) => {
-                    // Reflect the synthetic coordinator's terminal
-                    // state in the IntentResponse so the dashboard
-                    // (and the orchestrator's own KSB) sees Completed
-                    // immediately, not Running.
-                    task_state = TaskState::Completed;
-
-                    emit_integration_merge_completion_audits(
-                        &ctx,
-                        &outcome,
-                        Some(session_id_str.as_str()),
-                        task_id_owned.as_str(),
-                        initiative_id_owned.as_str(),
-                        applied_commit_sha.as_str(),
-                        pre_state.base_sha_raw.as_str(),
-                        initiative_target_ref.as_str(),
-                        operator_assisted,
-                        escalation_id,
-                    );
-                }
-                Ok(None) => {
-                    // Cascade was structurally inapplicable (initiative
-                    // already terminal, synthetic task already terminal,
-                    // or initiative row missing). Already logged inside
-                    // the helper — nothing to do here.
-                }
-                Err(e) => {
-                    eprintln!(
-                        "{{\"level\":\"error\",\"event\":\"IntegrationMergeInitiativeCascadeFailed\",\
-                         \"initiative_id\":\"{initiative_id_owned}\",\"diagnostic\":\"{e}\"}}",
-                    );
-                }
-            }
+        if closeout.task_completed {
+            // Reflect the synthetic coordinator's terminal state in the
+            // IntentResponse so the dashboard and orchestrator KSB see
+            // Completed immediately, not Running.
+            task_state = TaskState::Completed;
         }
+        let host_merge_succeeded = closeout.host_merge_succeeded;
+        let applied_commit_sha = closeout.applied_commit_sha;
+        let initiative_target_ref = closeout.target_ref;
+        let repository_id = closeout.repository_id;
+        let main_repo_root = closeout.main_repo_root;
 
         // kernel push protocol. After IntegrationMerge,
         // if `[git] auto_push = true`, push the configured target_ref
@@ -4285,7 +3991,7 @@ fn terminalize_initiative_for_review_rejection_ceiling(
         .map(|s| format!(" latest reviewer critique: {s}"))
         .unwrap_or_default();
     let block_reason = format!(
-        "parent initiative failed: review rejection budget exhausted for \
+        "parent initiative requires recovery: review rejection budget exhausted for \
          executor {executor_task_id} after reviewer {reviewer_task_id} \
          rejected round {review_reject_count}/{max_review_rejections}.{critique_suffix}"
     );
@@ -4353,11 +4059,14 @@ fn terminalize_initiative_for_review_rejection_ceiling(
         &format!(
             "UPDATE {INITIATIVES}
                 SET state = ?2,
-                    completed_at = ?3
+                    completed_at = NULL
               WHERE initiative_id = ?1
                 AND state NOT IN ('Completed','Failed','Cancelled','Aborted')"
         ),
-        rusqlite::params![initiative_id, InitiativeState::Failed.as_sql_str(), now],
+        rusqlite::params![
+            initiative_id,
+            InitiativeState::RecoveryRequired.as_sql_str()
+        ],
     )?;
     tx.commit()?;
 
@@ -4380,7 +4089,7 @@ fn terminalize_initiative_for_review_rejection_ceiling(
     Ok(Some(ReviewCeilingTerminalization {
         task_records,
         initiative_from,
-        initiative_to: InitiativeState::Failed.as_sql_str().to_owned(),
+        initiative_to: InitiativeState::RecoveryRequired.as_sql_str().to_owned(),
     }))
 }
 
@@ -9935,6 +9644,457 @@ fn wait_for_git_apply_pending_clear(
     }
 }
 
+static INTEGRATION_MERGE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+
+fn integration_merge_lock_for(repository_id: &str, target_ref: &str) -> Arc<Mutex<()>> {
+    let key = format!("{repository_id}\u{0}{target_ref}");
+    let locks = INTEGRATION_MERGE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(guard.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+}
+
+pub(crate) struct IntegrationMergeCloseoutResult {
+    pub host_merge_succeeded: bool,
+    pub task_completed: bool,
+    pub applied_commit_sha: String,
+    pub target_ref: String,
+    pub repository_id: String,
+    pub main_repo_root: PathBuf,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_integration_merge_queue_enqueued(
+    store: &Store,
+    queue_id: &str,
+    initiative_id: &str,
+    task_id: &str,
+    session_id: Option<&str>,
+    repository_id: &str,
+    target_ref: &str,
+    requested_sha: &str,
+    base_sha: &str,
+    worktree_root: &Path,
+) {
+    let now = unix_now_secs();
+    let conn = store.lock_sync();
+    if let Err(e) = conn.execute(
+        &format!(
+            "INSERT OR REPLACE INTO {INTEGRATION_MERGE_QUEUE}
+                (queue_id, initiative_id, task_id, orchestrator_session_id,
+                 repository_id, target_ref, requested_commit_sha, base_sha,
+                 worktree_root, state, enqueued_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'Queued', ?10)"
+        ),
+        rusqlite::params![
+            queue_id,
+            initiative_id,
+            task_id,
+            session_id,
+            repository_id,
+            target_ref,
+            requested_sha,
+            base_sha,
+            worktree_root.display().to_string(),
+            now,
+        ],
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"IntegrationMergeQueueRecordFailed\",\
+             \"phase\":\"enqueue\",\"initiative_id\":\"{initiative_id}\",\
+             \"repository_id\":\"{repository_id}\",\"target_ref\":\"{target_ref}\",\
+             \"diagnostic\":\"{e}\"}}",
+        );
+    }
+}
+
+fn record_integration_merge_queue_running(store: &Store, queue_id: &str) {
+    let now = unix_now_secs();
+    let conn = store.lock_sync();
+    if let Err(e) = conn.execute(
+        &format!(
+            "UPDATE {INTEGRATION_MERGE_QUEUE}
+                SET state='Running', started_at=?2
+              WHERE queue_id=?1"
+        ),
+        rusqlite::params![queue_id, now],
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"IntegrationMergeQueueRecordFailed\",\
+             \"phase\":\"running\",\"queue_id\":\"{queue_id}\",\"diagnostic\":\"{e}\"}}",
+        );
+    }
+}
+
+fn record_integration_merge_queue_completed(
+    store: &Store,
+    queue_id: &str,
+    applied_commit_sha: &str,
+    previous_sha: Option<&str>,
+) {
+    let now = unix_now_secs();
+    let conn = store.lock_sync();
+    if let Err(e) = conn.execute(
+        &format!(
+            "UPDATE {INTEGRATION_MERGE_QUEUE}
+                SET state='Completed',
+                    finished_at=?2,
+                    applied_commit_sha=?3,
+                    previous_sha=?4
+              WHERE queue_id=?1"
+        ),
+        rusqlite::params![queue_id, now, applied_commit_sha, previous_sha],
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"IntegrationMergeQueueRecordFailed\",\
+             \"phase\":\"completed\",\"queue_id\":\"{queue_id}\",\"diagnostic\":\"{e}\"}}",
+        );
+    }
+}
+
+fn record_integration_merge_queue_recovery_required(
+    store: &Store,
+    queue_id: &str,
+    category: &str,
+    reason: &str,
+    operator_hint: &str,
+) {
+    let now = unix_now_secs();
+    let conn = store.lock_sync();
+    if let Err(e) = conn.execute(
+        &format!(
+            "UPDATE {INTEGRATION_MERGE_QUEUE}
+                SET state='RecoveryRequired',
+                    finished_at=?2,
+                    failure_category=?3,
+                    failure_reason=?4,
+                    operator_hint=?5
+              WHERE queue_id=?1"
+        ),
+        rusqlite::params![queue_id, now, category, reason, operator_hint],
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"IntegrationMergeQueueRecordFailed\",\
+             \"phase\":\"recovery_required\",\"queue_id\":\"{queue_id}\",\
+             \"diagnostic\":\"{e}\"}}",
+        );
+    }
+}
+
+fn ensure_git_apply_pending(store: &Store, initiative_id: &str) {
+    let conn = store.lock_sync();
+    match raxis_store::views::initiatives::set_git_apply_pending(&conn, initiative_id) {
+        Ok(1) => {}
+        Ok(n) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"GitApplyPendingSetUnexpectedRows\",\
+                 \"initiative_id\":\"{initiative_id}\",\"updated_rows\":{n}}}",
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"GitApplyPendingSetFailed\",\
+                 \"initiative_id\":\"{initiative_id}\",\"diagnostic\":\"{e}\"}}",
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn complete_integration_merge_closeout(
+    ctx: &HandlerContext,
+    initiative_id: &str,
+    task_id: &str,
+    session_id: Option<&str>,
+    orch_worktree_root: &Path,
+    requested_sha: &str,
+    base_sha: &str,
+    operator_assisted: bool,
+    escalation_id: Option<String>,
+) -> IntegrationMergeCloseoutResult {
+    let store = ctx.store.as_ref();
+    let orch_fields = ctx.plan_registry.orchestrator(initiative_id);
+    let target_ref = orch_fields
+        .as_ref()
+        .map(|o| o.target_ref.clone())
+        .unwrap_or_else(|| {
+            crate::initiatives::OrchestratorPlanFields::DEFAULT_TARGET_REF.to_owned()
+        });
+    let repository_id = orch_fields
+        .as_ref()
+        .map(|o| o.repository_id.clone())
+        .unwrap_or_else(|| crate::managed_repositories::DEFAULT_REPOSITORY_ID.to_owned());
+    let main_repo_root =
+        crate::managed_repositories::managed_repository_path(&ctx.data_dir, &repository_id);
+    let queue_id = uuid::Uuid::new_v4().hyphenated().to_string();
+
+    record_integration_merge_queue_enqueued(
+        store,
+        &queue_id,
+        initiative_id,
+        task_id,
+        session_id,
+        &repository_id,
+        &target_ref,
+        requested_sha,
+        base_sha,
+        orch_worktree_root,
+    );
+
+    let lock = integration_merge_lock_for(&repository_id, &target_ref);
+    let _repo_ref_guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    record_integration_merge_queue_running(store, &queue_id);
+    ensure_git_apply_pending(store, initiative_id);
+
+    let host_merge_result = raxis_domain_git::commit_merge_to_target_ref(
+        &main_repo_root,
+        orch_worktree_root,
+        requested_sha,
+        &target_ref,
+    );
+    let mut applied_commit_sha = requested_sha.to_owned();
+    let mut task_completed = false;
+
+    match &host_merge_result {
+        Ok(advance) => {
+            applied_commit_sha = advance.current_sha.clone();
+            record_integration_merge_queue_completed(
+                store,
+                &queue_id,
+                &applied_commit_sha,
+                advance.previous_sha.as_deref(),
+            );
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"IntegrationMergeTargetAdvanced\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"repository_id\":\"{repository_id}\",\
+                 \"target_ref\":\"{target_ref}\",\
+                 \"requested_sha\":\"{req}\",\"current_sha\":\"{cur}\",\
+                 \"already_at_target\":{aat}}}",
+                req = requested_sha,
+                cur = advance.current_sha,
+                aat = advance.already_at_target,
+            );
+
+            {
+                let conn = store.lock_sync();
+                match raxis_store::managed_repositories::record_publish_pending(
+                    &conn,
+                    &repository_id,
+                    Some(&applied_commit_sha),
+                ) {
+                    Ok(0) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"ManagedRepoPublishStateMissing\",\
+                             \"initiative_id\":\"{initiative_id}\",\
+                             \"repository_id\":\"{repository_id}\",\
+                             \"publish_state\":\"pending\",\
+                             \"diagnostic\":\"repository metadata row not found; run raxis repo repair\"}}",
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"ManagedRepoPublishStateUpdateFailed\",\
+                             \"initiative_id\":\"{initiative_id}\",\
+                             \"repository_id\":\"{repository_id}\",\
+                             \"publish_state\":\"pending\",\
+                             \"diagnostic\":\"{e}\"}}",
+                        );
+                    }
+                }
+            }
+
+            {
+                let conn = store.lock_sync();
+                match raxis_store::views::initiatives::clear_git_apply_pending(&conn, initiative_id)
+                {
+                    Ok(1) => {}
+                    Ok(n) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"GitApplyPendingClearMissed\",\
+                             \"initiative_id\":\"{initiative_id}\",\"updated_rows\":{n},\
+                             \"diagnostic\":\"clear matched {n} rows; expected 1 — boot recovery will reconcile\"}}",
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"GitApplyPendingClearFailed\",\
+                             \"initiative_id\":\"{initiative_id}\",\"diagnostic\":\"{e}\"}}",
+                        );
+                    }
+                }
+            }
+
+            match crate::worktree_snapshot::snapshot_worktree(
+                &ctx.store,
+                &ctx.data_dir,
+                crate::worktree_snapshot::SnapshotInput {
+                    task_id: task_id.to_owned(),
+                    session_id: session_id.map(str::to_owned),
+                    initiative_id: Some(initiative_id.to_owned()),
+                    trigger: crate::worktree_snapshot::SnapshotTrigger::IntegrationMerge,
+                    worktree_root: main_repo_root.clone(),
+                    base_sha: base_sha.to_owned(),
+                },
+            ) {
+                Ok(rec) => {
+                    eprintln!(
+                        "{{\"level\":\"info\",\"event\":\"WorktreeSnapshotted\",\
+                         \"trigger\":\"IntegrationMerge\",\
+                         \"task_id\":\"{}\",\"snapshot_id\":\"{}\",\
+                         \"head_sha\":\"{}\",\"commit_count\":{}}}",
+                        task_id, rec.snapshot_id, rec.head_sha, rec.commit_count,
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"WorktreeSnapshotFailed\",\
+                         \"trigger\":\"IntegrationMerge\",\
+                         \"task_id\":\"{}\",\"error\":\"{}\"}}",
+                        task_id, e,
+                    );
+                }
+            }
+
+            match finalize_integration_merge_completion(store, initiative_id, task_id) {
+                Ok(Some(outcome)) => {
+                    task_completed = true;
+                    emit_integration_merge_completion_audits(
+                        ctx,
+                        &outcome,
+                        session_id,
+                        task_id,
+                        initiative_id,
+                        &applied_commit_sha,
+                        base_sha,
+                        &target_ref,
+                        operator_assisted,
+                        escalation_id,
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"IntegrationMergeInitiativeCascadeFailed\",\
+                         \"initiative_id\":\"{initiative_id}\",\"diagnostic\":\"{e}\"}}",
+                    );
+                }
+            }
+        }
+        Err(err) => {
+            let (category, reason) = classify_merge_ff_error(err);
+            let operator_hint = format!(
+                "RAXIS serialized IntegrationMerge for repository '{repository_id}' on {target_ref}, \
+                 but the candidate {requested_sha} could not be reconciled with the current managed-repo tip. \
+                 Open the managed repository at {} and the orchestrator worktree at {} to inspect the conflict, \
+                 then use the RecoveryRequired escalation to retry after resolving or fork from failed if the plan must change.",
+                main_repo_root.display(),
+                orch_worktree_root.display(),
+            );
+            record_integration_merge_queue_recovery_required(
+                store,
+                &queue_id,
+                category,
+                &reason,
+                &operator_hint,
+            );
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"IntegrationMergeTargetAdvanceFailed\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"repository_id\":\"{repository_id}\",\
+                 \"target_ref\":\"{target_ref}\",\
+                 \"category\":\"{category}\",\"reason\":\"{reason}\"}}",
+            );
+
+            let merge_failure_reason = format!(
+                "IntegrationMerge target advance failed ({category}) for repository {repository_id} {target_ref}: {reason}\n\nRecovery: {operator_hint}"
+            );
+            {
+                let conn = store.lock_sync();
+                if let Err(e) = conn.execute(
+                    &format!(
+                        "UPDATE {tasks}
+                            SET state        = 'Failed',
+                                block_reason = ?2
+                          WHERE task_id = ?1
+                            AND state IN ('Admitted','Running','GatesPending','BlockedRecoveryPending')",
+                        tasks = raxis_store::Table::Tasks.as_str(),
+                    ),
+                    rusqlite::params![task_id, &merge_failure_reason],
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"IntegrationMergeFailedTaskCascadeSqlFailed\",\
+                         \"initiative_id\":\"{initiative_id}\",\"task_id\":\"{task_id}\",\
+                         \"diagnostic\":\"{e}\"}}",
+                    );
+                }
+                if let Err(e) = conn.execute(
+                    &format!(
+                        "UPDATE {init}
+                            SET state        = 'RecoveryRequired',
+                                completed_at = NULL
+                          WHERE initiative_id = ?1
+                            AND state IN ('Executing','ApprovedPlan','Blocked')",
+                        init = raxis_store::Table::Initiatives.as_str(),
+                    ),
+                    rusqlite::params![initiative_id],
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"IntegrationMergeFailedInitiativeCascadeSqlFailed\",\
+                         \"initiative_id\":\"{initiative_id}\",\
+                         \"diagnostic\":\"{e}\"}}",
+                    );
+                }
+            }
+            if let Err(e) = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::MergeFastForwardFailed {
+                    initiative_id: initiative_id.to_owned(),
+                    commit_sha: requested_sha.to_owned(),
+                    target_ref: target_ref.clone(),
+                    category: category.to_owned(),
+                    reason: format!("{reason}\n\n{operator_hint}"),
+                },
+                session_id,
+                Some(task_id),
+                Some(initiative_id),
+            ) {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"MergeFastForwardFailed\",\
+                     \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id}\"}}",
+                );
+            }
+
+            let ctx_for_escalation = Arc::new(ctx.clone());
+            let init_for_escalation = initiative_id.to_owned();
+            let target_ref_for_escalation = target_ref.clone();
+            let category_for_escalation = category.to_owned();
+            let reason_for_escalation = reason.clone();
+            tokio::spawn(async move {
+                let _ = crate::initiative_escalation::escalate_initiative_on_permanent_failure(
+                    ctx_for_escalation,
+                    init_for_escalation,
+                    crate::initiative_escalation::PermanentFailureCause::MergeFastForwardFailed {
+                        target_ref: target_ref_for_escalation,
+                        category: format!("{category_for_escalation}: {reason_for_escalation}"),
+                    },
+                )
+                .await;
+            });
+        }
+    }
+
+    IntegrationMergeCloseoutResult {
+        host_merge_succeeded: host_merge_result.is_ok(),
+        task_completed,
+        applied_commit_sha,
+        target_ref,
+        repository_id,
+        main_repo_root,
+    }
+}
+
 /// Synthetic-coordinator + initiative completion cascade fired from
 /// the `IntegrationMerge` intent handler when Phase 2 (host-side
 /// fast-forward) succeeds.
@@ -10481,6 +10641,27 @@ mod tests {
     fn parse_unknown_defaults_to_admitted() {
         // Defensive: unknown DB value should not panic; treated as non-runnable.
         assert_eq!(parse_task_state("CorruptValue"), TaskState::Admitted);
+    }
+
+    #[test]
+    fn integration_merge_lock_is_scoped_by_repository_and_target_ref() {
+        let same_a = integration_merge_lock_for("repo-a", "refs/heads/main");
+        let same_b = integration_merge_lock_for("repo-a", "refs/heads/main");
+        let other_ref = integration_merge_lock_for("repo-a", "refs/heads/release");
+        let other_repo = integration_merge_lock_for("repo-b", "refs/heads/main");
+
+        assert!(
+            std::sync::Arc::ptr_eq(&same_a, &same_b),
+            "same repo/ref must share one closeout mutex"
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&same_a, &other_ref),
+            "different target refs must not block each other"
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&same_a, &other_repo),
+            "different repositories must not block each other"
+        );
     }
 
     // ─── iter62 — INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01 ────────────
@@ -13686,8 +13867,8 @@ path_allowlist = ["**/*"]
         drop(conn);
         assert_eq!(
             initiative_state,
-            InitiativeState::Failed.as_sql_str(),
-            "review rejection ceiling should fail the initiative immediately"
+            InitiativeState::RecoveryRequired.as_sql_str(),
+            "review rejection ceiling should pause the initiative for operator recovery"
         );
         assert_eq!(
             task_state_of(&store, "exe1"),

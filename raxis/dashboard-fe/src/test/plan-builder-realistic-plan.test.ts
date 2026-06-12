@@ -221,6 +221,28 @@ prompt = "Approve only if the recommendations are grounded and safe."
     ).toBeUndefined();
   });
 
+  it("builds an import catalog from registered policy tool profiles", () => {
+    const activeProfiles = __planBuilderTest.parseRegisteredToolProfiles(
+      gtmXDiscoveryPlan,
+      "active",
+    );
+    const draftProfiles = __planBuilderTest.parseRegisteredToolProfiles(
+      gtmXDiscoveryPlan,
+      "draft",
+    );
+    const merged = __planBuilderTest.mergeRegisteredToolProfiles([
+      ...activeProfiles,
+      ...draftProfiles,
+    ]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged.map((entry) => `${entry.source}:${entry.profile.id}`)).toEqual([
+      "draft:gtm_x_discovery",
+    ]);
+    expect(merged[0].profile.tools[0].name).toBe("x_discover");
+    expect(merged[0].profile.tools[0].locality).toBe("host_subprocess");
+  });
+
   it("maps generated TOML sections back to builder surfaces", () => {
     const parsed = __planBuilderTest.parsePlanToml(primaryPlan);
     const rendered = __planBuilderTest.renderPlan(parsed);

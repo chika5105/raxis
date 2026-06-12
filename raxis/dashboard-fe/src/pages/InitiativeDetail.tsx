@@ -753,6 +753,10 @@ function InitiativeRunSummaryCard({
     summary.declared_wallclock_budget_seconds != null
       ? `${fmtDuration(summary.elapsed_seconds)} / ${fmtDuration(summary.declared_wallclock_budget_seconds)}`
       : fmtDuration(summary.elapsed_seconds);
+  const pricingNote =
+    summary.token_cost_pricing_note ||
+    "Token cost pricing source was not recorded by this kernel version.";
+  const pricingHint = pricingHintForSource(summary.token_cost_pricing_source);
   return (
     <section className="card p-4">
       <header className="flex items-start justify-between gap-3 flex-wrap">
@@ -807,7 +811,7 @@ function InitiativeRunSummaryCard({
         <SummaryMetric
           label="Cost"
           value={fmtMicroDollars(summary.token_cost_micros)}
-          hint="token ledger"
+          hint={pricingHint}
         />
         <SummaryMetric
           label="Elapsed"
@@ -829,8 +833,135 @@ function InitiativeRunSummaryCard({
           hint="admission units"
         />
       </div>
+      <p className="mt-3 text-[11px] leading-relaxed text-ink-muted">
+        Provider reported {fmtTokens(summary.input_tokens)} input /{" "}
+        {fmtTokens(summary.output_tokens)} output tokens; {pricingNote}
+      </p>
+      {(summary.token_cost_breakdown?.length ?? 0) > 0 && (
+        <div className="mt-3 overflow-hidden rounded border border-edge">
+          <div className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1.2fr)_minmax(7rem,0.8fr)_minmax(6rem,0.6fr)_minmax(6rem,0.6fr)] gap-2 border-b border-edge bg-panel-muted px-3 py-2 text-[10px] uppercase tracking-wider text-ink-subtle max-lg:hidden">
+            <div>Provider</div>
+            <div>Model</div>
+            <div>Source</div>
+            <div className="text-right">Tokens</div>
+            <div className="text-right">Cost</div>
+          </div>
+          <div className="divide-y divide-edge">
+            {summary.token_cost_breakdown!.map((row, index) => {
+              const rowTokens =
+                row.input_tokens +
+                row.output_tokens +
+                row.cache_read_tokens +
+                row.cache_creation_tokens;
+              return (
+                <div
+                  key={`${row.provider_id}-${row.model_id}-${row.pricing_source}-${index}`}
+                  className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1.2fr)_minmax(7rem,0.8fr)_minmax(6rem,0.6fr)_minmax(6rem,0.6fr)] gap-2 px-3 py-2 text-xs max-lg:grid-cols-1"
+                >
+                  <div className="min-w-0">
+                    <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
+                      Provider
+                    </div>
+                    <div className="truncate font-mono text-ink">
+                      {row.provider_id || "unknown"}
+                    </div>
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
+                      Model
+                    </div>
+                    <div className="truncate font-mono text-ink-muted">
+                      {row.model_id || "unknown"}
+                    </div>
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
+                      Source
+                    </div>
+                    <span className={clsx("badge", pricingSourceTone(row.pricing_source))}>
+                      {pricingLabel(row.pricing_source)}
+                    </span>
+                    <div className="mt-1 truncate text-[11px] text-ink-muted">
+                      {row.pricing_note}
+                    </div>
+                  </div>
+                  <div className="text-right font-mono text-ink max-lg:text-left">
+                    <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
+                      Tokens
+                    </div>
+                    {fmtTokens(rowTokens)}
+                    <div className="text-[11px] text-ink-muted">
+                      in {fmtTokens(row.input_tokens)} · out{" "}
+                      {fmtTokens(row.output_tokens)}
+                    </div>
+                  </div>
+                  <div className="text-right font-mono text-ink max-lg:text-left">
+                    <div className="text-[10px] uppercase tracking-wider text-ink-subtle lg:hidden">
+                      Cost
+                    </div>
+                    {fmtMicroDollars(row.token_cost_micros)}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </section>
   );
+}
+
+function pricingHintForSource(source?: string): string {
+  switch (source) {
+    case "operator_policy_override":
+      return "policy override";
+    case "runtime_provider_api":
+      return "provider runtime";
+    case "bundled_estimate":
+    case "estimated":
+    case "partly_estimated":
+    case "mixed":
+      return "estimated";
+    case "pricing_source_unknown":
+      return "pricing source unknown";
+    case "unpriced":
+      return "not priced";
+    default:
+      return "pricing source unknown";
+  }
+}
+
+function pricingLabel(source?: string): string {
+  switch (source) {
+    case "operator_policy_override":
+      return "policy override";
+    case "runtime_provider_api":
+      return "provider runtime";
+    case "bundled_estimate":
+    case "estimated":
+    case "partly_estimated":
+    case "mixed":
+      return "estimate";
+    case "unpriced":
+      return "not priced";
+    default:
+      return "unknown";
+  }
+}
+
+function pricingSourceTone(source?: string): string {
+  switch (source) {
+    case "operator_policy_override":
+    case "runtime_provider_api":
+      return toneClasses("ok");
+    case "bundled_estimate":
+    case "estimated":
+    case "partly_estimated":
+    case "mixed":
+      return toneClasses("warn");
+    default:
+      return toneClasses("muted");
+  }
 }
 
 function SummaryMetric({

@@ -10,11 +10,12 @@
 #  - No shell of any kind (no /bin/sh, /bin/bash, busybox sh, …).
 #  - No git, no compilers, no language runtimes, no LSP servers.
 #  - No network utilities (curl, wget, ssh).
-#  - Only `raxis-planner-reviewer` (PID 1, statically linked) and
-#    `ripgrep` (statically linked); both invoked via `execvp` only.
+#  - Only `raxis-reviewer` (PID 1, statically linked) and
+#    `ripgrep` plus its ELF loader/shared-library closure; both
+#    invoked via `execvp` only.
 #
 # The Reviewer's NNSP and the harness's tool registry are baked into
-# `raxis-planner-reviewer` at build time; this image does not carry
+# `raxis-reviewer` at build time; this image does not carry
 # any operator-supplied configuration.
 #
 # Build is hermetic. CI runs `cargo run -p raxis-image-builder build
@@ -27,12 +28,25 @@ RUN ARCH="$(dpkg --print-architecture)" \
     && if [ "$ARCH" = "amd64" ]; then \
         curl -fsSL -o rg.tar.gz https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz; \
     elif [ "$ARCH" = "arm64" ]; then \
-        curl -fsSL -o rg.tar.gz https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep-14.1.0-aarch64-unknown-linux-musl.tar.gz; \
+        curl -fsSL -o rg.tar.gz https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep-14.1.0-aarch64-unknown-linux-gnu.tar.gz; \
     else \
         echo "Unsupported architecture: $ARCH" && exit 1; \
     fi \
     && tar -xzf rg.tar.gz \
-    && mv ripgrep-*/rg /rg
+    && mv ripgrep-*/rg /rg \
+    && mkdir -p /deps \
+    && ldd /rg \
+        | awk '/=> \// { print $3 } /^\// { print $1 }' \
+        | sort -u \
+        | xargs -r cp -L --parents -t /deps \
+    && if [ -e /lib/ld-linux-aarch64.so.1 ]; then \
+        cp -L --parents /lib/ld-linux-aarch64.so.1 /deps; \
+    fi \
+    && if [ -e /lib64/ld-linux-x86-64.so.2 ]; then \
+        cp -L --parents /lib64/ld-linux-x86-64.so.2 /deps; \
+    fi
 
 FROM scratch
+COPY --from=downloader /deps/ /
 COPY --from=downloader /rg /usr/bin/rg
+CMD ["/usr/bin/rg", "--version"]

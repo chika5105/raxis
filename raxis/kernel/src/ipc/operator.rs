@@ -2347,8 +2347,11 @@ async fn handle_approve_logical_deadlock(
     )
     .await;
 
-    let (initiative_id, transitioned_from_failed) = match join_result {
-        Ok(Ok(Some(outcome))) => (outcome.initiative_id, outcome.transitioned_from_failed),
+    let (initiative_id, transitioned_from_recovery_required) = match join_result {
+        Ok(Ok(Some(outcome))) => (
+            outcome.initiative_id,
+            outcome.transitioned_from_recovery_required,
+        ),
         Ok(Ok(None)) => {
             return OperatorResponse::Error {
                 code:   "FAIL_APPROVE_ESCALATION".to_owned(),
@@ -2389,18 +2392,18 @@ async fn handle_approve_logical_deadlock(
 
     // INV-AUDIT-OPERATOR-APPROVE-DEADLOCK-PAIRED-WRITE-01 — emit the
     // `InitiativeStateChanged` paired-write whenever the operator's
-    // approval drove a real `Failed → Executing` FSM transition.
-    // `transitioned_from_failed` is the row-count signal returned by
+    // approval drove a real `RecoveryRequired → Executing` FSM transition.
+    // `transitioned_from_recovery_required` is the row-count signal returned by
     // `approve_logical_deadlock_escalation_in_tx`; a `false` value
     // means the SQL UPDATE matched no row (rare race) and we MUST
     // skip the audit emit to keep the chain truthful per
     // `INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01`'s sibling rule
     // for initiatives.
-    if transitioned_from_failed {
+    if transitioned_from_recovery_required {
         if let Err(e) = ctx.audit.emit(
             raxis_audit_tools::AuditEventKind::InitiativeStateChanged {
                 initiative_id: initiative_id.clone(),
-                from_state: "Failed".to_owned(),
+                from_state: "RecoveryRequired".to_owned(),
                 to_state: "Executing".to_owned(),
             },
             None,
@@ -2533,7 +2536,7 @@ async fn handle_approve_escalation_standard_path(
 
 /// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — kernel-initiated
 /// `LogicalDeadlock` deny path. Flips
-/// `escalations.status = 'Denied'`, leaves the initiative `Failed`,
+/// `escalations.status = 'Denied'`, closes the initiative as `Failed`,
 /// leaves the orch-respawn counter at its post-ceiling value, and
 /// emits `OperatorDeniedRespawnEscalation` post-commit.
 async fn handle_deny_logical_deadlock(
@@ -2557,11 +2560,14 @@ async fn handle_deny_logical_deadlock(
     let store_for_blocking = Arc::clone(&ctx.store);
     let escalation_id_blocking = escalation_id.clone();
     let reason_for_blocking = reason.clone();
-    let join_result =
-        tokio::task::spawn_blocking(move || -> Result<Option<String>, rusqlite::Error> {
+    let join_result = tokio::task::spawn_blocking(
+        move || -> Result<
+            Option<crate::orch_respawn_ceiling::DenyLogicalDeadlockOutcome>,
+            rusqlite::Error,
+        > {
             let mut conn = store_for_blocking.lock_sync();
             let tx = conn.transaction()?;
-            let initiative_id =
+            let outcome =
                 crate::orch_respawn_ceiling::deny_logical_deadlock_escalation_in_tx(
                     &tx,
                     &escalation_id_blocking,
@@ -2569,12 +2575,13 @@ async fn handle_deny_logical_deadlock(
                     reason_for_blocking.as_deref(),
                 )?;
             tx.commit()?;
-            Ok(initiative_id)
-        })
-        .await;
+            Ok(outcome)
+        },
+    )
+    .await;
 
-    let initiative_id = match join_result {
-        Ok(Ok(Some(id))) => id,
+    let (initiative_id, transitioned_to_failed) = match join_result {
+        Ok(Ok(Some(outcome))) => (outcome.initiative_id, outcome.transitioned_to_failed),
         Ok(Ok(None)) => {
             return OperatorResponse::Error {
                 code:   "FAIL_DENY_ESCALATION".to_owned(),
@@ -2611,6 +2618,24 @@ async fn handle_deny_logical_deadlock(
             "{{\"level\":\"error\",\"event\":\"OperatorDeniedRespawnEscalation\",\
              \"audit_emit_failed\":\"{e}\",\"escalation_id\":\"{escalation_id}\"}}",
         );
+    }
+
+    if transitioned_to_failed {
+        if let Err(e) = ctx.audit.emit(
+            raxis_audit_tools::AuditEventKind::InitiativeStateChanged {
+                initiative_id: initiative_id.clone(),
+                from_state: "RecoveryRequired".to_owned(),
+                to_state: "Failed".to_owned(),
+            },
+            None,
+            None,
+            Some(&initiative_id),
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"InitiativeStateChanged\",\
+                 \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id}\"}}",
+            );
+        }
     }
 
     let _ = operator;

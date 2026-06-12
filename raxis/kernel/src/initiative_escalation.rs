@@ -20,7 +20,9 @@
 //! [`escalate_initiative_on_permanent_failure`], which:
 //!
 //!   1. Inserts a `LogicalDeadlock` escalation row + flips
-//!      `initiatives.state = 'Failed'` in ONE SQLite transaction
+//!      `initiatives.state = 'RecoveryRequired'` for recoverable
+//!      causes, or `Failed` for non-recoverable causes, in ONE
+//!      SQLite transaction
 //!      (paired-write per `audit-paired-writes.md §4`), with an
 //!      idempotency key derived from
 //!      `(initiative_id, cause_kind, cause_seq)` so a re-fire of
@@ -47,8 +49,8 @@
 //!     a structural condition the operator must clear") generalise
 //!     cleanly across every in-scope cause: the operator's
 //!     approve-vs-deny decision is the same shape (approve =
-//!     "retry; the cause has cleared", deny = "preserve Failed
-//!     terminal state; the cause is not recoverable from this
+//!     "retry; the cause has cleared", deny = "close the paused
+//!     initiative as Failed; the cause is not recoverable from this
 //!     surface").
 //!
 //!   * The cause discriminator is preserved on the chain-side
@@ -67,17 +69,15 @@
 //!   1. Flips the escalation `Pending → Approved`.
 //!   2. Resets `initiatives.orchestrator_no_progress_respawn_count`
 //!      to 0.
-//!   3. Transitions `initiatives.state = 'Failed' → 'Executing'`
-//!      (when the row is in `'Failed'`).
+//!   3. Transitions `initiatives.state = 'RecoveryRequired' → 'Executing'`
+//!      (when the row is in `'RecoveryRequired'`).
 //!
 //! For recoverable causes (capacity-pressure cleared, transient
 //! VM failure resolved, operator unblocked the egress stall),
 //! step (3) lets the next orchestrator decision-cycle pick up
 //! work. For non-recoverable causes (plan schema error, hard
-//! merge conflict the kernel cannot resolve), step (3) is a
-//! no-op-but-still-clears-the-block — the next orchestrator
-//! decision-cycle will hit the same condition and trip a fresh
-//! permanent-failure escalation. The
+//! merge conflict the kernel cannot resolve), the helper closes the
+//! initiative as `Failed`; approval will not resurrect it. The
 //! `recoverable_via_approve = false` signal is surfaced on the
 //! audit anchor so operators can choose Deny as the
 //! semantically-correct response and the dashboard can render a
@@ -423,7 +423,9 @@ pub enum EscalateOutcome {
 ///
 /// **Paired-write order.** Same shape as Bug 3:
 ///   1. INSERT `escalations` (LogicalDeadlock, Kernel, Pending) +
-///      UPDATE `initiatives.state = 'Failed'` in ONE SQLite
+///      UPDATE `initiatives.state = 'RecoveryRequired'` for
+///      recoverable causes, or `Failed` for non-recoverable causes,
+///      in ONE SQLite
 ///      transaction.
 ///   2. Post-commit, emit
 ///      `AuditEventKind::InitiativePermanentFailureEscalated`.
@@ -449,6 +451,7 @@ pub async fn escalate_initiative_on_permanent_failure(
     let cause_kind_for_tx = cause_kind.clone();
     let cause_seq_for_tx = cause_seq.clone();
     let cause_summary_for_tx = cause_summary.clone();
+    let recoverable_for_tx = recoverable_via_approve;
 
     let store_for_tx = Arc::clone(&ctx.store);
 
@@ -528,7 +531,9 @@ pub async fn escalate_initiative_on_permanent_failure(
                 policy_epoch_for_escalation,
             )?;
 
-            // ── 1c: flip the initiative to `Failed`. The cascade
+            // ── 1c: flip the initiative to `RecoveryRequired` when
+            //        the cause has a legitimate operator approval
+            //        recovery path; otherwise close as `Failed`. The cascade
             //        of in-flight tasks to `Failed` happens via
             //        the standard `transition_task_in_tx` path on
             //        the next orchestrator decision-cycle; the
@@ -539,16 +544,26 @@ pub async fn escalate_initiative_on_permanent_failure(
             //        executor tasks). The cascade is the caller's
             //        responsibility on the in-scope kinds where
             //        it is applicable.
+            let next_state = if recoverable_for_tx {
+                "RecoveryRequired"
+            } else {
+                "Failed"
+            };
+            let completed_at_expr = if recoverable_for_tx {
+                "NULL"
+            } else {
+                "strftime('%s','now')"
+            };
             tx.execute(
                 &format!(
                     "UPDATE {init}
-                        SET state        = 'Failed',
-                            completed_at = strftime('%s','now')
+                        SET state        = ?2,
+                            completed_at = {completed_at_expr}
                       WHERE initiative_id = ?1
                         AND state NOT IN ('Completed','Failed','Cancelled','Aborted')",
                     init = Table::Initiatives.as_str(),
                 ),
-                rusqlite::params![&init_for_tx],
+                rusqlite::params![&init_for_tx, next_state],
             )?;
 
             tx.commit()?;

@@ -2,7 +2,7 @@
 //
 // Vocabulary mirrors `raxis-types` enum strings:
 //   * Initiative:  Draft / ApprovedPlan / Executing / Blocked /
-//                  Completed / Failed / Aborted
+//                  RecoveryRequired / Completed / Failed / Aborted
 //   * Task:        Admitted / Running / GatesPending / Completed /
 //                  Failed / Aborted / Cancelled /
 //                  BlockedRecoveryPending
@@ -79,7 +79,7 @@ export const KERNEL_TASK_STATES = [
   "BlockedRecoveryPending",
 ] as const;
 
-/// Canonical kernel `InitiativeState` SQL strings — the seven
+/// Canonical kernel `InitiativeState` SQL strings — the eight
 /// variants of `raxis_types::fsm::InitiativeState`. Mirrors the
 /// `initiatives.state` SQL CHECK constraint
 /// (`kernel-store.md §2.5.1 Table 2`).
@@ -88,6 +88,7 @@ export const KERNEL_INITIATIVE_STATES = [
   "ApprovedPlan",
   "Executing",
   "Blocked",
+  "RecoveryRequired",
   "Completed",
   "Failed",
   "Aborted",
@@ -170,6 +171,10 @@ const VISUAL: Record<string, StateVisualTreatment> = {
   Blocked: {
     tone: "block", glyph: "⏸", label: "Blocked",
     description: "no admissible task; operator unblock or escalation required",
+  },
+  RecoveryRequired: {
+    tone: "warn", glyph: "↻", label: "RecoveryRequired",
+    description: "execution is paused; operator approval or closure is required",
   },
   Completed: {
     tone: "ok", glyph: "✓", label: "Completed",
@@ -447,6 +452,8 @@ export function isTerminalFailureState(
     "Aborted",
     "Cancelled",
     "Errored",
+    "Blocked",
+    "RecoveryRequired",
     "BlockedRecoveryPending",
     "VmFailedFinal",
   ]);

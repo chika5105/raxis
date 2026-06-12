@@ -161,11 +161,74 @@ pub async fn handle_propose_defaults(
 // EstimateCost — operator-ergonomics.md §11.3
 // ---------------------------------------------------------------------------
 
+const COST_ESTIMATE_BUNDLED_REGISTRY_VERSION: &str = "bundled-2026-06-11";
+
+#[derive(Debug, Clone)]
+struct EstimatePricingSource {
+    provider_id: String,
+    pricing: raxis_policy::ProviderPricing,
+    source: String,
+    registry_version: Option<String>,
+    estimate_class: String,
+}
+
+fn estimate_pricing_source_for_provider(
+    provider: &raxis_policy::ProviderEntry,
+) -> Option<EstimatePricingSource> {
+    if let Some(pricing) = provider.pricing.clone() {
+        return Some(EstimatePricingSource {
+            provider_id: provider.provider_id.clone(),
+            pricing,
+            source: "operator_policy_override".to_owned(),
+            registry_version: None,
+            estimate_class: "operator_policy_override".to_owned(),
+        });
+    }
+
+    bundled_pricing_for_provider_kind(&provider.kind).map(|pricing| EstimatePricingSource {
+        provider_id: provider.provider_id.clone(),
+        pricing,
+        source: "bundled_estimate".to_owned(),
+        registry_version: Some(COST_ESTIMATE_BUNDLED_REGISTRY_VERSION.to_owned()),
+        estimate_class: "bundled_fallback_estimate".to_owned(),
+    })
+}
+
+fn bundled_pricing_for_provider_kind(kind: &str) -> Option<raxis_policy::ProviderPricing> {
+    match kind {
+        "Anthropic" | "anthropic" => Some(raxis_policy::ProviderPricing {
+            input_tokens_per_dollar: 333_333,
+            output_tokens_per_dollar: 66_666,
+            cache_read_tokens_per_dollar: Some(3_333_333),
+            cache_creation_tokens_per_dollar: Some(266_666),
+        }),
+        "OpenAI" | "openai" => Some(raxis_policy::ProviderPricing {
+            input_tokens_per_dollar: 1_000_000,
+            output_tokens_per_dollar: 250_000,
+            cache_read_tokens_per_dollar: Some(10_000_000),
+            cache_creation_tokens_per_dollar: None,
+        }),
+        "Gemini" | "gemini" => Some(raxis_policy::ProviderPricing {
+            input_tokens_per_dollar: 1_000_000,
+            output_tokens_per_dollar: 250_000,
+            cache_read_tokens_per_dollar: Some(10_000_000),
+            cache_creation_tokens_per_dollar: None,
+        }),
+        "Bedrock" | "bedrock" => Some(raxis_policy::ProviderPricing {
+            input_tokens_per_dollar: 333_333,
+            output_tokens_per_dollar: 66_666,
+            cache_read_tokens_per_dollar: Some(3_333_333),
+            cache_creation_tokens_per_dollar: Some(266_666),
+        }),
+        _ => None,
+    }
+}
+
 /// Handle `OperatorRequest::EstimateCost`.
-/// Returns a dollar cost upper bound for the supplied plan, derived
-/// **from the operator-declared per-provider `[providers.<id>.pricing]`
-/// tables** (
-/// `ProviderPricing`). The estimate is intentionally conservative:
+/// Returns a dollar cost upper bound for the supplied plan. Pricing
+/// follows runtime budget admission precedence: operator overrides
+/// first, then bundled fallback estimates when no override exists.
+/// The estimate is intentionally conservative:
 /// 1. Parses the plan TOML; counts `[[tasks]]` entries.
 /// 2. For each task, estimates token consumption from the optional
 ///    `[tasks.token_policy.max_tokens_total]` declaration when
@@ -227,22 +290,20 @@ pub async fn handle_estimate_cost(
 
     // Resolve the worst-case provider for the upper-bound computation
     // by max-ing `cost_micro_dollars(1M, 1M)` across every LLM
-    // provider with declared pricing. Non-LLM providers and LLM
-    // providers without pricing are skipped (per `PolicyBundle::
-    // validate` contract, every LLM provider MUST declare pricing,
-    // so the latter set is empty in any validated bundle).
+    // provider with declared pricing, falling back to bundled
+    // estimates for known provider kinds that do not have an
+    // operator override. This mirrors the runtime budget resolver:
+    // policy overrides are authoritative, bundled values are
+    // explicitly an estimate.
     // Why "1M, 1M" as the comparator: it linearises the cost
     // function so the most-expensive provider for *any* token mix is
     // the one with the highest combined-1M cost. This is exact for
     // affine pricing (which `ProviderPricing` is by construction).
-    let worst_provider: Option<&raxis_policy::ProviderEntry> = policy
+    let worst_pricing: Option<EstimatePricingSource> = policy
         .providers()
         .iter()
-        .filter(|p| p.pricing.is_some())
-        .max_by_key(|p| {
-            let pr = p.pricing.as_ref().expect("filtered to Some");
-            pr.cost_micro_dollars(1_000_000, 1_000_000, 0, 0)
-        });
+        .filter_map(estimate_pricing_source_for_provider)
+        .max_by_key(|p| p.pricing.cost_micro_dollars(1_000_000, 1_000_000, 0, 0));
 
     let mut breakdown: Vec<serde_json::Value> = Vec::with_capacity(task_count);
     // u128 accumulator so summing `cost_micro_dollars` (`u64`) across
@@ -267,12 +328,8 @@ pub async fn handle_estimate_cost(
             let est_input = est.saturating_mul(INPUT_FRACTION_PERCENT) / 100;
             let est_output = est.saturating_mul(OUTPUT_FRACTION_PERCENT) / 100;
 
-            let task_micro: u64 = match worst_provider {
-                Some(p) => p
-                    .pricing
-                    .as_ref()
-                    .expect("checked above")
-                    .cost_micro_dollars(est_input, est_output, 0, 0),
+            let task_micro: u64 = match worst_pricing.as_ref() {
+                Some(p) => p.pricing.cost_micro_dollars(est_input, est_output, 0, 0),
                 None => 0u64,
             };
             total_micro_dollars = total_micro_dollars.saturating_add(u128::from(task_micro));
@@ -303,7 +360,9 @@ pub async fn handle_estimate_cost(
     total_cents = total_cents.saturating_add(admission_overhead_cents);
 
     let breakdown_value = json!({
-        "pricing_source":                 worst_provider.map(|p| p.provider_id.as_str()).unwrap_or("none"),
+        "pricing_source":                 worst_pricing.as_ref().map(|p| p.source.as_str()).unwrap_or("none"),
+        "pricing_provider":               worst_pricing.as_ref().map(|p| p.provider_id.as_str()).unwrap_or("none"),
+        "pricing_registry_version":       worst_pricing.as_ref().and_then(|p| p.registry_version.as_deref()),
         "input_fraction_percent":         INPUT_FRACTION_PERCENT,
         "output_fraction_percent":        OUTPUT_FRACTION_PERCENT,
         "default_tokens_per_task":        DEFAULT_TOKENS_PER_TASK,
@@ -314,7 +373,7 @@ pub async fn handle_estimate_cost(
         "tasks":                          breakdown,
         "policy_epoch":                   policy.epoch(),
         "supported_in_release":           "v2.5",
-        "estimate_class":                 "operator_grade_provider_pricing",
+        "estimate_class":                 worst_pricing.as_ref().map(|p| p.estimate_class.as_str()).unwrap_or("unpriced"),
     });
 
     let breakdown_json = match serde_json::to_string(&breakdown_value) {
@@ -717,19 +776,23 @@ pub async fn validate_subscribe_admission(
 // ---------------------------------------------------------------------------
 
 /// Handle `OperatorRequest::DescribeInitiativePause`.
-/// Reports whether `initiative_id` is currently paused (operator
-/// quarantine, escalation hold, or a non-Executing terminal-leaning
-/// state) and lists any outstanding escalations the operator must
-/// resolve before resume becomes legal.
-/// **V2.4 pause definition.** An initiative is "paused" if any of:
+/// Deprecated compatibility reader for older operator clients. Current
+/// recovery is modeled as `RecoveryRequired` plus escalation
+/// approve/deny; terminal `Failed` is forensic history and is not
+/// resumable in place.
+///
+/// Reports whether `initiative_id` is currently operator-paused
+/// (operator quarantine, `RecoveryRequired`, `Blocked`, or a live
+/// pending escalation) and lists outstanding non-terminal escalations.
+/// **V2.4+ pause definition.** An initiative is "paused" if any of:
 /// * It has a row in `initiative_quarantines` (operator pressed the
 ///   quarantine button — see `views::initiative_quarantines`).
-/// * Its `state` is one of `Blocked`, `Failed`, `Aborted` (cannot
-///   make forward progress without operator intervention).
+/// * Its `state` is one of `Blocked`, `RecoveryRequired` (cannot make
+///   forward progress without operator intervention).
 ///   `paused_at` reports the quarantine `quarantined_at` time when
-///   available; otherwise it falls back to the initiative's
-///   `completed_at` (terminal states) and `None` when no timestamp
-///   is recorded.
+///   available; otherwise it falls back to `None` when no timestamp is
+///   recorded. Terminal `Completed`, `Failed`, and `Aborted` rows are
+///   not "paused".
 pub async fn handle_describe_initiative_pause(
     initiative_id: String,
     ctx: &HandlerContext,
@@ -806,8 +869,14 @@ pub async fn handle_describe_initiative_pause(
         }
     };
 
-    let is_paused_by_quarantine = quarantine_row.is_some();
-    let is_paused_by_state = matches!(row.state.as_str(), "Blocked" | "Failed" | "Aborted");
+    let is_terminal = matches!(row.state.as_str(), "Completed" | "Failed" | "Aborted");
+    let is_paused_by_quarantine = !is_terminal && quarantine_row.is_some();
+    let is_paused_by_state = matches!(row.state.as_str(), "Blocked" | "RecoveryRequired");
+    let outstanding_escalations = if is_terminal {
+        Vec::new()
+    } else {
+        outstanding_escalations
+    };
     let is_paused_by_escalations = !outstanding_escalations.is_empty();
     let is_paused = is_paused_by_quarantine || is_paused_by_state || is_paused_by_escalations;
 

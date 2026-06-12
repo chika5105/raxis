@@ -20,8 +20,9 @@
 //!     `INV-NOTIFICATION-PRIORITY-PARITY-01`.
 //!   * The on-disk paired-write SQL contract (escalation INSERT
 //!     with a permanent-failure-keyed idempotency key + initiative
-//!     UPDATE to `Failed`) lands atomically and dedup's on
-//!     re-fire.
+//!     UPDATE to `RecoveryRequired` for recoverable causes, or
+//!     terminal `Failed` for non-recoverable causes) lands
+//!     atomically and dedup's on re-fire.
 //!
 //! ## What this pins (per-cause)
 //!
@@ -125,7 +126,9 @@ fn seed_initiative_with_anchor(
 /// Schema-level mirror of
 /// `initiative_escalation::insert_permanent_failure_escalation_in_tx`.
 /// Inserts one `escalations` row keyed on the helper's
-/// idempotency-key namespace + flips the initiative to `Failed`.
+/// idempotency-key namespace + flips the initiative to
+/// `RecoveryRequired` for recoverable causes, or `Failed` for
+/// non-recoverable causes.
 /// Returns the inserted `escalation_id` or `None` on the
 /// dedup-by-idempotency-key path.
 fn schema_paired_write_permanent_failure_escalation(
@@ -140,6 +143,18 @@ fn schema_paired_write_permanent_failure_escalation(
     let now = raxis_types::unix_now_secs();
     let timeout_at = now.saturating_add(3600);
     let escalation_id = uuid::Uuid::new_v4().to_string();
+    let recoverable_via_approve =
+        !matches!(cause_kind, "PlanRejected" | "EscalationRateLimitExceeded");
+    let next_state = if recoverable_via_approve {
+        "RecoveryRequired"
+    } else {
+        "Failed"
+    };
+    let completed_at: Option<i64> = if recoverable_via_approve {
+        None
+    } else {
+        Some(now)
+    };
 
     let tx = conn.transaction().expect("tx");
     let (task_id, session_id, lineage_id): (String, String, String) = tx
@@ -216,14 +231,14 @@ fn schema_paired_write_permanent_failure_escalation(
     tx.execute(
         &format!(
             "UPDATE {initiatives}
-                SET state        = 'Failed',
-                    completed_at = ?2
+                SET state        = ?2,
+                    completed_at = ?3
               WHERE initiative_id = ?1
                 AND state NOT IN ('Completed','Failed','Cancelled','Aborted')"
         ),
-        params![initiative_id, now],
+        params![initiative_id, next_state, completed_at],
     )
-    .expect("flip initiative to Failed");
+    .expect("flip initiative recovery/final state");
 
     tx.commit().expect("commit");
 
@@ -261,8 +276,8 @@ fn read_state(conn: &Connection, initiative_id: &str) -> String {
 /// `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
 /// (iter65-review). The first escalation for a given
 /// `(initiative_id, cause_kind, cause_seq)` triple lands as a
-/// fresh row + flips the initiative to `Failed`. A second emit of
-/// the SAME triple dedup's against the original row (the
+/// fresh row + flips recoverable causes to `RecoveryRequired`.
+/// A second emit of the SAME triple dedup's against the original row (the
 /// `escalations.UNIQUE(session_id, idempotency_key)` index
 /// short-circuits the INSERT) and the row count stays at 1.
 #[test]
@@ -288,8 +303,8 @@ fn idempotency_dedup_on_same_cause_seq() {
     );
     assert_eq!(
         read_state(&conn, "init-perm-fail-1"),
-        "Failed",
-        "first emit must flip the initiative to Failed",
+        "RecoveryRequired",
+        "first recoverable emit must pause the initiative as RecoveryRequired",
     );
 
     // Second emit of the exact same cause + cause_seq dedup's.
@@ -308,6 +323,30 @@ fn idempotency_dedup_on_same_cause_seq() {
         count_escalations_for_initiative(&conn, "init-perm-fail-1"),
         1,
         "dedup MUST NOT introduce a second row",
+    );
+}
+
+/// Non-recoverable causes are still terminal: approving the
+/// generated escalation cannot make a malformed plan admissible, so
+/// the initiative closes as `Failed` and the operator can fork from
+/// failed history if they need a forensic continuation.
+#[test]
+fn non_recoverable_cause_closes_failed() {
+    let (_tmp, mut conn) = fresh_disk_conn();
+    seed_initiative_with_anchor(&conn, "init-plan-rejected", "sess-1", "task-1", "lin-1");
+
+    let id = schema_paired_write_permanent_failure_escalation(
+        &mut conn,
+        "init-plan-rejected",
+        "PlanRejected",
+        "bundle=bad-schema",
+        "plan admission rejected: malformed [[tasks]] block",
+    );
+    assert!(id.is_some(), "first PlanRejected escalation must insert");
+    assert_eq!(
+        read_state(&conn, "init-plan-rejected"),
+        "Failed",
+        "non-recoverable PlanRejected must close the initiative as Failed",
     );
 }
 

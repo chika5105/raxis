@@ -140,8 +140,7 @@ pub struct PythonRuntime {
 pub struct NodePackage {
     /// npm package name (e.g. `npm`, `yarn`).
     pub name: String,
-    /// Version string from `npm list -g --json --depth=0` (or
-    /// `package.json` fallback).
+    /// Version string from the package's on-disk `package.json`.
     pub version: String,
 }
 
@@ -525,9 +524,15 @@ pub fn is_kernel_private_env(name: &str) -> bool {
 /// [`CapabilityManifest`]. Bounded sub-second on a warm VM; the
 /// only subprocess invocations are the small per-toolchain version
 /// probes (`bash --version`, `python3 --version`, `node --version`,
-/// `npm --version`, `rustc --version`, `cargo --version`,
-/// `go version`, `git --version`, `git rev-parse HEAD`,
-/// `npm list -g --json --depth=0`).
+/// `rustc --version`, `cargo --version`, `go version`,
+/// `git --version`, `git rev-parse HEAD`). Network-capable package
+/// managers such as npm/npx/pnpm/yarn are never executed during
+/// discovery; their presence is reported from the PATH walk and
+/// package versions are read from on-disk package.json files.
+/// Node global packages are discovered by reading on-disk
+/// `package.json` files from global `node_modules` roots; the probe
+/// must never invoke npm package-listing commands because npm may
+/// perform registry metadata checks even for read-only discovery.
 ///
 /// `env_reader` is the env-reader closure (matches the
 /// `BootEnv::from_env_fn` shape so unit tests can hermetically
@@ -681,6 +686,9 @@ fn probe_binaries(path_var: &str) -> Vec<BinaryEntry> {
     // Best-effort version probes for the well-known toolchain set.
     // Each probe spawns one subprocess; we cap the table at a
     // small list so the worst-case probe time stays sub-second.
+    // Do not include Node package managers here. Some npm-family
+    // binaries perform update checks even for `--version`, which
+    // creates guest network traffic before the model's first turn.
     for name in WELL_KNOWN_VERSION_PROBES {
         if let Some(entry) = seen.get_mut(*name) {
             entry.version = best_effort_version(name, &entry.path);
@@ -696,8 +704,8 @@ fn probe_binaries(path_var: &str) -> Vec<BinaryEntry> {
 /// most-likely BYO additions.
 const WELL_KNOWN_VERSION_PROBES: &[&str] = &[
     "bash", "cargo", "clang", "curl", "fd", "gcc", "git", "gh", "go", "gofmt", "grep", "jq",
-    "make", "node", "npm", "npx", "pip", "pip3", "pnpm", "python", "python3", "ripgrep", "rg",
-    "ruby", "rustc", "sed", "wget", "yarn",
+    "make", "node", "pip", "pip3", "python", "python3", "ripgrep", "rg", "ruby", "rustc", "sed",
+    "wget",
 ];
 
 /// Run `<bin> --version` (or `<bin> version` for `go`) with a
@@ -911,10 +919,10 @@ fn python_importable(interpreter: &str, package: &str) -> bool {
     }
 }
 
-/// Detect Node interpreter and global packages. Spawns
-/// `npm list -g --json --depth=0` with a bounded budget; if `npm`
-/// is absent or the call fails, returns `node` alone with an
-/// empty `global_packages` set.
+/// Detect Node interpreter and global packages. Package discovery is
+/// filesystem-only: never invoke `npm list`, because npm may attempt
+/// registry lookups/update checks and trigger mediated egress before
+/// the agent has done any work.
 fn probe_node(binaries: &[BinaryEntry]) -> Option<NodeRuntime> {
     let node = binaries.iter().find(|b| b.name == "node")?;
     let version = node
@@ -922,10 +930,11 @@ fn probe_node(binaries: &[BinaryEntry]) -> Option<NodeRuntime> {
         .clone()
         .unwrap_or_else(|| best_effort_version("node", &node.path).unwrap_or_default());
     let version = version.trim_start_matches('v').to_owned();
-    let global_packages = match binaries.iter().find(|b| b.name == "npm") {
-        Some(npm) => npm_list_global(&npm.path).unwrap_or_default(),
-        None => Vec::new(),
-    };
+    let npm_path = binaries
+        .iter()
+        .find(|b| b.name == "npm")
+        .map(|b| b.path.as_str());
+    let global_packages = read_node_global_packages(&node.path, npm_path);
     Some(NodeRuntime {
         interpreter: node.path.clone(),
         version,
@@ -933,36 +942,104 @@ fn probe_node(binaries: &[BinaryEntry]) -> Option<NodeRuntime> {
     })
 }
 
-/// Run `npm list -g --json --depth=0` and parse the
-/// `dependencies: { name: { version: ... } }` object.
-fn npm_list_global(npm_path: &str) -> Option<Vec<NodePackage>> {
-    use std::process::{Command, Stdio};
-    let child = Command::new(npm_path)
-        .args(["list", "-g", "--json", "--depth=0"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-    let out = wait_with_timeout(child, Duration::from_secs(5))?;
-    let body = String::from_utf8_lossy(&out.stdout);
-    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let deps = v.get("dependencies")?.as_object()?;
-    let mut packages: BTreeSet<(String, String)> = BTreeSet::new();
-    for (name, meta) in deps {
-        let version = meta
-            .get("version")
-            .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .to_owned();
-        packages.insert((name.clone(), version));
+fn read_node_global_packages(node_path: &str, npm_path: Option<&str>) -> Vec<NodePackage> {
+    read_node_packages_from_roots(node_global_package_roots(node_path, npm_path))
+}
+
+fn node_global_package_roots(node_path: &str, npm_path: Option<&str>) -> Vec<PathBuf> {
+    let mut roots = BTreeSet::new();
+    for bin_path in [Some(node_path), npm_path].into_iter().flatten() {
+        add_node_roots_for_binary_path(&mut roots, Path::new(bin_path));
     }
-    Some(
-        packages
-            .into_iter()
-            .map(|(name, version)| NodePackage { name, version })
-            .collect(),
-    )
+    roots.insert(PathBuf::from("/usr/lib/node_modules"));
+    roots.insert(PathBuf::from("/usr/local/lib/node_modules"));
+    roots.into_iter().collect()
+}
+
+fn add_node_roots_for_binary_path(roots: &mut BTreeSet<PathBuf>, bin_path: &Path) {
+    let Some(bin_dir) = bin_path.parent() else {
+        return;
+    };
+    if bin_dir.file_name().and_then(|s| s.to_str()) != Some("bin") {
+        return;
+    }
+    let Some(prefix) = bin_dir.parent() else {
+        return;
+    };
+    roots.insert(prefix.join("lib/node_modules"));
+}
+
+fn read_node_packages_from_roots<I>(roots: I) -> Vec<NodePackage>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let mut packages: BTreeMap<String, NodePackage> = BTreeMap::new();
+    for root in roots {
+        read_node_packages_from_root(&root, &mut packages);
+    }
+    packages.into_values().collect()
+}
+
+fn read_node_packages_from_root(root: &Path, packages: &mut BTreeMap<String, NodePackage>) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().into_owned();
+        if dir_name.starts_with('@') {
+            read_node_scoped_packages(&entry.path(), &dir_name, packages);
+        } else if let Some(package) = read_node_package(&entry.path(), dir_name) {
+            packages.insert(package.name.clone(), package);
+        }
+    }
+}
+
+fn read_node_scoped_packages(
+    scope_dir: &Path,
+    scope_name: &str,
+    packages: &mut BTreeMap<String, NodePackage>,
+) {
+    let entries = match std::fs::read_dir(scope_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let package_dir = entry.file_name().to_string_lossy().into_owned();
+        let fallback_name = format!("{scope_name}/{package_dir}");
+        if let Some(package) = read_node_package(&entry.path(), fallback_name) {
+            packages.insert(package.name.clone(), package);
+        }
+    }
+}
+
+fn read_node_package(package_dir: &Path, fallback_name: String) -> Option<NodePackage> {
+    let body = std::fs::read_to_string(package_dir.join("package.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let name = v
+        .get("name")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&fallback_name)
+        .to_owned();
+    let version = v
+        .get("version")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_owned();
+    Some(NodePackage { name, version })
 }
 
 fn probe_rust(binaries: &[BinaryEntry]) -> RustToolchain {
@@ -1407,6 +1484,62 @@ mod tests {
                 head_commit: None,
             },
         }
+    }
+
+    #[test]
+    fn node_package_managers_are_not_version_probed() {
+        for name in ["npm", "npx", "pnpm", "yarn"] {
+            assert!(
+                !WELL_KNOWN_VERSION_PROBES.contains(&name),
+                "{name} must not be invoked during capability discovery; \
+                 npm-family CLIs can perform update checks before the first model turn"
+            );
+        }
+    }
+
+    #[test]
+    fn node_global_packages_are_read_from_disk_without_npm_subprocess() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("lib/node_modules");
+        std::fs::create_dir_all(root.join("eslint")).unwrap();
+        std::fs::write(
+            root.join("eslint/package.json"),
+            r#"{"name":"eslint","version":"9.19.0"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("@typescript-eslint/parser")).unwrap();
+        std::fs::write(
+            root.join("@typescript-eslint/parser/package.json"),
+            r#"{"name":"@typescript-eslint/parser","version":"8.24.1"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("fallback-name")).unwrap();
+        std::fs::write(
+            root.join("fallback-name/package.json"),
+            r#"{"version":"1.2.3"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("broken")).unwrap();
+        std::fs::write(root.join("broken/package.json"), "{not json").unwrap();
+
+        let packages = read_node_packages_from_roots([root]);
+        assert_eq!(
+            packages,
+            vec![
+                NodePackage {
+                    name: "@typescript-eslint/parser".to_owned(),
+                    version: "8.24.1".to_owned(),
+                },
+                NodePackage {
+                    name: "eslint".to_owned(),
+                    version: "9.19.0".to_owned(),
+                },
+                NodePackage {
+                    name: "fallback-name".to_owned(),
+                    version: "1.2.3".to_owned(),
+                },
+            ]
+        );
     }
 
     // ── env redaction ────────────────────────────────────────────

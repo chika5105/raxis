@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyPriorityFilter,
   compareByPriorityThenTimeDesc,
+  compareByTimeDescThenPriority,
   priorityAriaLabel,
   priorityRank,
   type PriorityFilter,
@@ -80,6 +81,20 @@ describe("compareByPriorityThenTimeDesc", () => {
       "low-old",
       "none-newest",
     ]);
+  });
+});
+
+describe("compareByTimeDescThenPriority", () => {
+  it("sorts newest first globally, even when the newer row has lower priority", () => {
+    const old_critical = row("old-critical", "Critical", 100);
+    const new_low = row("new-low", "Low", 200);
+    expect(compareByTimeDescThenPriority(new_low, old_critical)).toBeLessThan(0);
+  });
+
+  it("uses priority as a tie-breaker for identical timestamps", () => {
+    const critical = row("critical", "Critical", 100);
+    const low = row("low", "Low", 100);
+    expect(compareByTimeDescThenPriority(critical, low)).toBeLessThan(0);
   });
 });
 

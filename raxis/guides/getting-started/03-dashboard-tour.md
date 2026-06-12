@@ -144,8 +144,10 @@ Use **Model routing** to define Executor and Reviewer provider:model
 aliases with ordered fallbacks. Orchestrator routing remains
 policy-owned because the Orchestrator is the most sensitive agent role.
 The active policy must still declare each provider credential, model
-allowlist, timeout, and pricing entry before the kernel admits the
-plan.
+allowlist, and timeout before the kernel admits the plan. Pricing
+entries are optional operator overrides; without them the dashboard
+labels provider-reported usage with runtime/provider pricing when
+available, or with a bundled estimate fallback.
 
 Use **Tool profiles** when an Executor needs access to local automation
 that RAXIS does not ship as a built-in tool: an existing script, a

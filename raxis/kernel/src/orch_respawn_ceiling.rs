@@ -41,7 +41,7 @@
 //!   1. Emits `AuditEventKind::OrchestratorRespawnCeilingExceeded`
 //!      with the offending `initiative_id`, the counter value, and
 //!      the ceiling.
-//!   2. Marks the initiative `Failed` with
+//!   2. Marks the initiative `RecoveryRequired` with
 //!      `reason = "orchestrator no-progress respawn ceiling exceeded"`.
 //!   3. Refuses further respawns for that initiative — the
 //!      `is_executing` preflight in
@@ -52,7 +52,7 @@
 //!
 //! * **Increment** in [`increment_no_progress_count_in_tx`]: called
 //!   from `respawn_orchestrator_for_initiative` BEFORE the substrate
-//!   spawn. The increment + ceiling check + initiative-Failed
+//!   spawn. The increment + ceiling check + initiative-RecoveryRequired
 //!   transition all run in one transaction so a race against an
 //!   operator abort cannot leave a half-finished bookkeeping state.
 //!
@@ -142,7 +142,7 @@ pub enum CeilingOutcome {
     Permitted { count_after_increment: u32 },
     /// The post-increment count strictly exceeds
     /// [`MAX_ORCH_NO_PROGRESS_RESPAWNS`]. The caller MUST mark the
-    /// initiative `Failed`, emit
+    /// initiative `RecoveryRequired`, emit
     /// `OrchestratorRespawnCeilingExceeded`, and refuse the spawn.
     /// `count_after_increment` is always `> max_attempts`.
     Exceeded {
@@ -281,17 +281,17 @@ pub fn lookup_initiative_id_for_task_in_tx(
 /// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — auto-create a
 /// kernel-initiated `LogicalDeadlock` escalation row inside the
 /// SAME SQLite transaction as the ceiling-exceeded
-/// initiative-`Failed` flip. The escalation lets the operator
+/// initiative-`RecoveryRequired` flip. The escalation lets the operator
 /// decide whether to (a) approve the reset + retry path
 /// (transitioning the initiative back to `Executing`) or (b)
-/// preserve the `Failed` terminal state by denying.
+/// close the paused initiative as terminal `Failed` by denying.
 ///
 /// **Paired-write order.** Per
 /// `audit-paired-writes.md §4`:
 ///
 ///   1. INSERT escalations row (status `'Pending'`, initiator
 ///      `'Kernel'`, class `'LogicalDeadlock'`)
-///   2. UPDATE initiatives state = 'Failed'
+///   2. UPDATE initiatives state = 'RecoveryRequired'
 ///   3. COMMIT
 ///   4. (post-commit) emit
 ///      `AuditEventKind::OrchestratorRespawnCeilingExceeded`
@@ -301,7 +301,7 @@ pub fn lookup_initiative_id_for_task_in_tx(
 /// performs Steps 2–4. The two writes share one transaction so a
 /// crash between them leaves the store internally consistent
 /// (either both pending or both rolled back; never an
-/// initiative-`Failed` without an operator-actionable escalation
+/// initiative-`RecoveryRequired` without an operator-actionable escalation
 /// row).
 ///
 /// **FK satisfaction strategy.** The `escalations` table requires
@@ -323,7 +323,7 @@ pub fn lookup_initiative_id_for_task_in_tx(
 /// one kernel-process lifetime. Subsequent re-tries of the same
 /// auto-create after `escalations.status` has been resolved
 /// (Approved/Denied) are blocked by the
-/// `ceiling-exceeded → state=Failed` short-circuit at the top of
+/// `ceiling-exceeded → state=RecoveryRequired` short-circuit at the top of
 /// `respawn_orchestrator_for_initiative` (the second auto-create
 /// never runs because the first respawn refused to spawn).
 ///
@@ -337,7 +337,7 @@ pub fn lookup_initiative_id_for_task_in_tx(
 /// `Ok(None)` on the no-eligible-FK fallback path. Propagates
 /// `rusqlite::Error` on SQL failure; the caller MUST fail-closed
 /// (treat the error as if the insert never happened, so the
-/// initiative still transitions to `Failed`).
+/// initiative still transitions to `RecoveryRequired`).
 #[allow(clippy::too_many_arguments)]
 pub fn insert_logical_deadlock_escalation_in_tx(
     tx: &Connection,
@@ -521,7 +521,7 @@ pub fn insert_logical_deadlock_escalation_in_tx(
          {last_intent_kind_trunc} rejected as \
          {last_rejection_reason_trunc}. Operator approval required \
          to reset the respawn counter and retry, or deny to \
-         preserve the Failed terminal state."
+         close the initiative as Failed."
     );
 
     // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01`
@@ -583,10 +583,11 @@ pub fn insert_logical_deadlock_escalation_in_tx(
 ///      would be a planner-side admission bug; we refuse to act
 ///      on it here even though the planner-side admission also
 ///      rejects.)
-///   2. UPDATE escalations SET status = 'Approved', resolved_at = now.
-///   3. UPDATE initiatives SET orchestrator_no_progress_respawn_count = 0.
-///   4. UPDATE initiatives SET state = 'Executing' (transition back
-///      from `Failed`).
+///   2. Verify the parent initiative is still `RecoveryRequired`.
+///   3. UPDATE escalations SET status = 'Approved', resolved_at = now.
+///   4. UPDATE initiatives SET orchestrator_no_progress_respawn_count = 0.
+///   5. UPDATE initiatives SET state = 'Executing' (transition back
+///      from `RecoveryRequired`).
 ///
 /// Returns `Ok(initiative_id)` on success so the caller can
 /// schedule the orchestrator respawn outside the SQL transaction.
@@ -617,11 +618,13 @@ pub fn approve_logical_deadlock_escalation_in_tx(
     let pending_state = EscalationStatus::Pending.as_sql_str();
     let class_str = EscalationClass::LogicalDeadlock.as_sql_str();
 
-    let row: Option<(String, String, String, String)> = tx
+    let row: Option<(String, String, String, String, String)> = tx
         .query_row(
             &format!(
-                "SELECT initiative_id, class, initiator, status
-               FROM {escalations} WHERE escalation_id = ?1"
+                "SELECT e.initiative_id, e.class, e.initiator, e.status, i.state
+                   FROM {escalations} e
+                   JOIN {initiatives} i ON i.initiative_id = e.initiative_id
+                  WHERE e.escalation_id = ?1"
             ),
             rusqlite::params![escalation_id],
             |r| {
@@ -630,16 +633,21 @@ pub fn approve_logical_deadlock_escalation_in_tx(
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
                 ))
             },
         )
         .optional()?;
 
-    let Some((initiative_id, class, initiator, status)) = row else {
+    let Some((initiative_id, class, initiator, status, initiative_state)) = row else {
         return Ok(None);
     };
 
-    if class != class_str || initiator != "Kernel" || status != pending_state {
+    if class != class_str
+        || initiator != "Kernel"
+        || status != pending_state
+        || initiative_state != "RecoveryRequired"
+    {
         return Ok(None);
     }
 
@@ -664,10 +672,7 @@ pub fn approve_logical_deadlock_escalation_in_tx(
         rusqlite::params![&initiative_id],
     )?;
 
-    // Capture whether the Failed → Executing UPDATE actually fired.
-    // The WHERE clause `state = 'Failed'` may be a no-op if the
-    // initiative is in a different state (rare race where another
-    // transition landed between the SELECT above and this UPDATE).
+    // Capture whether the RecoveryRequired → Executing UPDATE actually fired.
     // FOLLOWUP-C / INV-AUDIT-OPERATOR-APPROVE-DEADLOCK-PAIRED-WRITE-01
     // pins that the operator handler emits `InitiativeStateChanged`
     // ONLY when the row count is 1.
@@ -675,43 +680,43 @@ pub fn approve_logical_deadlock_escalation_in_tx(
         &format!(
             "UPDATE {initiatives}
                 SET state = 'Executing', completed_at = NULL
-              WHERE initiative_id = ?1 AND state = 'Failed'"
+              WHERE initiative_id = ?1 AND state = 'RecoveryRequired'"
         ),
         rusqlite::params![&initiative_id],
     )?;
-    let transitioned_from_failed = state_change_rows == 1;
+    let transitioned_from_recovery_required = state_change_rows == 1;
 
     Ok(Some(ApproveLogicalDeadlockOutcome {
         initiative_id,
-        transitioned_from_failed,
+        transitioned_from_recovery_required,
     }))
 }
 
 /// Outcome of [`approve_logical_deadlock_escalation_in_tx`].
 ///
-/// `transitioned_from_failed` reflects whether the
-/// `initiatives.state` UPDATE that flips `Failed → Executing`
-/// actually changed any rows. `false` means the initiative was
-/// already in some other state by the time the operator approved
-/// (e.g. a competing operator hand-aborted between the SELECT and
-/// the UPDATE in this transaction); the caller then MUST NOT emit
-/// `InitiativeStateChanged` because no transition occurred.
+/// `transitioned_from_recovery_required` reflects whether the
+/// `initiatives.state` UPDATE that flips `RecoveryRequired → Executing`
+/// actually changed any rows. The handler returns `Ok(None)` rather
+/// than mutating the escalation when the initiative is no longer in
+/// `RecoveryRequired`, so callers should normally only see `true`;
+/// `false` remains a defensive race signal and MUST NOT emit
+/// `InitiativeStateChanged`.
 #[derive(Debug, Clone)]
 pub struct ApproveLogicalDeadlockOutcome {
     /// The initiative whose escalation was approved.
     pub initiative_id: String,
-    /// `true` iff the `Failed → Executing` UPDATE matched the
+    /// `true` iff the `RecoveryRequired → Executing` UPDATE matched the
     /// initiative row (i.e. the FSM transition actually happened
     /// in this transaction).
-    pub transitioned_from_failed: bool,
+    pub transitioned_from_recovery_required: bool,
 }
 
 /// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — operator-deny path
 /// for the kernel-initiated `LogicalDeadlock` escalation. UPDATEs
-/// `escalations.status = 'Denied'`; the initiative stays `Failed`
-/// and the orch-respawn counter stays at its post-ceiling value
-/// (the operator's deny signals "do not retry; the failure mode
-/// requires manual intervention").
+/// `escalations.status = 'Denied'`; the initiative moves from
+/// `RecoveryRequired` to terminal `Failed` and the orch-respawn
+/// counter stays at its post-ceiling value (the operator's deny
+/// signals "do not retry; close this recoverable pause as failed").
 ///
 /// Returns `Ok(initiative_id)` on success for audit attribution,
 /// `Ok(None)` on FSM mismatch (already resolved or not found),
@@ -721,18 +726,22 @@ pub fn deny_logical_deadlock_escalation_in_tx(
     escalation_id: &str,
     now_unix: i64,
     deny_reason_note: Option<&str>,
-) -> Result<Option<String>, rusqlite::Error> {
+) -> Result<Option<DenyLogicalDeadlockOutcome>, rusqlite::Error> {
     let escalations = Table::Escalations.as_str();
 
     let denied_state = EscalationStatus::Denied.as_sql_str();
     let pending_state = EscalationStatus::Pending.as_sql_str();
     let class_str = EscalationClass::LogicalDeadlock.as_sql_str();
 
-    let row: Option<(String, String, String, String)> = tx
+    let initiatives = Table::Initiatives.as_str();
+
+    let row: Option<(String, String, String, String, String)> = tx
         .query_row(
             &format!(
-                "SELECT initiative_id, class, initiator, status
-               FROM {escalations} WHERE escalation_id = ?1"
+                "SELECT e.initiative_id, e.class, e.initiator, e.status, i.state
+                   FROM {escalations} e
+                   JOIN {initiatives} i ON i.initiative_id = e.initiative_id
+                  WHERE e.escalation_id = ?1"
             ),
             rusqlite::params![escalation_id],
             |r| {
@@ -741,16 +750,21 @@ pub fn deny_logical_deadlock_escalation_in_tx(
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
                 ))
             },
         )
         .optional()?;
 
-    let Some((initiative_id, class, initiator, status)) = row else {
+    let Some((initiative_id, class, initiator, status, initiative_state)) = row else {
         return Ok(None);
     };
 
-    if class != class_str || initiator != "Kernel" || status != pending_state {
+    if class != class_str
+        || initiator != "Kernel"
+        || status != pending_state
+        || initiative_state != "RecoveryRequired"
+    {
         return Ok(None);
     }
 
@@ -773,7 +787,32 @@ pub fn deny_logical_deadlock_escalation_in_tx(
         return Ok(None);
     }
 
-    Ok(Some(initiative_id))
+    let state_change_rows = tx.execute(
+        &format!(
+            "UPDATE {initiatives}
+                SET state = 'Failed',
+                    completed_at = ?2
+              WHERE initiative_id = ?1 AND state = 'RecoveryRequired'",
+            initiatives = initiatives,
+        ),
+        rusqlite::params![&initiative_id, now_unix],
+    )?;
+    let transitioned_to_failed = state_change_rows == 1;
+
+    Ok(Some(DenyLogicalDeadlockOutcome {
+        initiative_id,
+        transitioned_to_failed,
+    }))
+}
+
+/// Outcome of [`deny_logical_deadlock_escalation_in_tx`].
+#[derive(Debug, Clone)]
+pub struct DenyLogicalDeadlockOutcome {
+    /// The initiative whose recovery escalation was denied.
+    pub initiative_id: String,
+    /// `true` iff the `RecoveryRequired → Failed` UPDATE matched the
+    /// initiative row in this transaction.
+    pub transitioned_to_failed: bool,
 }
 
 /// Bound either `last_intent_kind` or `last_rejection_reason` to

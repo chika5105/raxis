@@ -23,6 +23,14 @@ const FULL_REASON: FailureInfo = {
     { label: "Audit row 12345", href: "/audit/12345" },
     { label: "Worktree home", href: "https://example.com/wts/abc123" },
   ],
+  actions: [
+    { label: "Open task", kind: "route", target: "/tasks/task-abc" },
+    {
+      label: "Resume task",
+      kind: "command",
+      target: "raxis task resume task-abc",
+    },
+  ],
   event_id: "evt_abc123def456",
   seq: 12345,
   observed_at: 1714500000,
@@ -59,6 +67,19 @@ describe("<FailureReasonPanel>", () => {
     expect(auditLink?.getAttribute("target")).toBeNull();
     expect(artifacts).toHaveTextContent("/var/log/raxis/kernel.stderr.log");
     expect(artifacts.querySelectorAll("a")).toHaveLength(2);
+    // Recovery actions are first-class and copyable so the
+    // operator can act without spelunking through logs.
+    const recovery = screen.getByTestId("failure-recovery-actions");
+    expect(recovery).toHaveTextContent("Open task");
+    expect(recovery).toHaveTextContent("Resume task");
+    expect(recovery).toHaveTextContent("raxis task resume task-abc");
+    expect(recovery).toHaveTextContent("Task can be resumed");
+    expect(screen.getAllByTestId("failure-recovery-status")[0]).toHaveTextContent(
+      "Recoverable",
+    );
+    expect(
+      recovery.querySelector("a[href='/tasks/task-abc']"),
+    ).not.toBeNull();
     // Footer surfaces the audit anchors so the operator can deep-link.
     expect(screen.getByText(/audit seq/)).toBeInTheDocument();
     expect(screen.getByText(/event/)).toBeInTheDocument();
@@ -103,9 +124,34 @@ describe("<FailureReasonPanel>", () => {
     );
     expect(screen.queryByTestId("failure-fields")).toBeNull();
     expect(screen.queryByTestId("failure-artifacts")).toBeNull();
+    expect(screen.queryByTestId("failure-recovery-actions")).toBeNull();
     // No audit anchors → no footer
     expect(screen.queryByText(/audit seq/)).toBeNull();
     expect(screen.queryByText(/observed /)).toBeNull();
+  });
+
+  it("labels unrecoverable failures even when there is no command", () => {
+    render(
+      <FailureReasonPanel
+        reason={{
+          kind: "ReviewRejectionCeilingExceeded",
+          message: "review retry budget exhausted",
+          recovery: {
+            status: "unrecoverable",
+            label: "Review retry budget exhausted",
+            detail:
+              "This task loop is terminal in place. Start a corrected initiative or amendment.",
+          },
+        }}
+      />,
+    );
+
+    const recovery = screen.getByTestId("failure-recovery-actions");
+    expect(recovery).toHaveTextContent("Unrecoverable in place");
+    expect(recovery).toHaveTextContent("Review retry budget exhausted");
+    expect(recovery).toHaveTextContent(
+      "No in-place recovery command is available",
+    );
   });
 
   it("collapses details when collapsible=true", () => {
@@ -116,6 +162,7 @@ describe("<FailureReasonPanel>", () => {
     fireEvent.click(toggle);
     expect(screen.queryByTestId("failure-fields")).toBeNull();
     expect(screen.queryByTestId("failure-artifacts")).toBeNull();
+    expect(screen.getByTestId("failure-recovery-actions")).toBeInTheDocument();
     // Headline + message stay rendered.
     expect(screen.getByTestId("failure-kind")).toBeInTheDocument();
     expect(screen.getByTestId("failure-message")).toBeInTheDocument();

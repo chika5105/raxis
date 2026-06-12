@@ -174,6 +174,11 @@ export interface ToolProfileDraft {
   tools: ToolDraft[];
 }
 
+interface RegisteredToolProfile {
+  source: "active" | "draft";
+  profile: ToolProfileDraft;
+}
+
 export interface ModelRouteEntryDraft {
   providerKind: ProviderKind;
   providerId: string;
@@ -560,7 +565,10 @@ export function PlanBuilderPage() {
     staleTime: 30_000,
     retry: false,
   });
-  const registeredCredentials = registeredCredentialsQuery.data?.credentials ?? [];
+  const registeredCredentials = useMemo(
+    () => registeredCredentialsQuery.data?.credentials ?? [],
+    [registeredCredentialsQuery.data?.credentials],
+  );
   useEffect(() => {
     const refreshDraft = () => setPolicyDraftToml(readPolicyDraft() ?? "");
     window.addEventListener("focus", refreshDraft);
@@ -575,6 +583,14 @@ export function PlanBuilderPage() {
       mergePolicyGateRefs([
         ...parsePolicyGateRefs(activePolicyToml.data ?? "", "active"),
         ...parsePolicyGateRefs(policyDraftToml, "draft"),
+      ]),
+    [activePolicyToml.data, policyDraftToml],
+  );
+  const registeredToolProfiles = useMemo(
+    () =>
+      mergeRegisteredToolProfiles([
+        ...parseRegisteredToolProfiles(activePolicyToml.data ?? "", "active"),
+        ...parseRegisteredToolProfiles(policyDraftToml, "draft"),
       ]),
     [activePolicyToml.data, policyDraftToml],
   );
@@ -1101,6 +1117,7 @@ export function PlanBuilderPage() {
         {drawer === "tools" && planEnabled && (
           <ToolProfilesDrawer
             profiles={toolProfiles}
+            registeredProfiles={registeredToolProfiles}
             modelRoutes={modelRoutes}
             onUpdate={updateToolProfiles}
             onClose={() => setDrawer(null)}
@@ -1464,7 +1481,8 @@ function ModelRoutingDrawer({
         <div className="mt-3 rounded border border-info/40 bg-info-muted px-3 py-2 text-xs leading-relaxed text-info">
           Custom, BYO, local, and sidecar providers are allowed here by naming their
           provider id. The active policy still must declare the provider credential,
-          model allowlist, timeout, and pricing fields before the kernel admits the plan.
+          model allowlist, and timeout before the kernel admits the plan. Pricing
+          fields are optional operator overrides for contract rates.
         </div>
       </div>
       <div className="grid min-w-0 grid-cols-[9rem_minmax(0,1fr)] gap-0 min-h-full max-md:grid-cols-1">
@@ -1701,17 +1719,23 @@ function ModelRoutingDrawer({
 
 function ToolProfilesDrawer({
   profiles,
+  registeredProfiles,
   modelRoutes,
   onUpdate,
   onClose,
 }: {
   profiles: ToolProfileDraft[];
+  registeredProfiles: RegisteredToolProfile[];
   modelRoutes: ModelRouteDraft[];
   onUpdate: (updater: (prev: ToolProfileDraft[]) => ToolProfileDraft[]) => void;
   onClose: () => void;
 }) {
   const [selectedId, setSelectedId] = useState(() => profiles[0]?.id ?? "");
   const selected = profiles.find((profile) => profile.id === selectedId) ?? profiles[0];
+  const importedProfileIds = new Set(profiles.map((profile) => profile.id.trim()).filter(Boolean));
+  const importableProfiles = registeredProfiles.filter(
+    (entry) => !importedProfileIds.has(entry.profile.id.trim()),
+  );
 
   const updateProfile = (profileId: string, patch: Partial<ToolProfileDraft>) => {
     onUpdate((prev) =>
@@ -1743,6 +1767,12 @@ function ToolProfilesDrawer({
 
   const addProfile = () => {
     const next = makeToolProfile(profiles);
+    onUpdate((prev) => [...prev, next]);
+    setSelectedId(next.id);
+  };
+
+  const importProfile = (entry: RegisteredToolProfile) => {
+    const next = cloneToolProfile(entry.profile);
     onUpdate((prev) => [...prev, next]);
     setSelectedId(next.id);
   };
@@ -1820,6 +1850,32 @@ function ToolProfilesDrawer({
           )}
         </div>
         <div className="p-4 space-y-3">
+          {registeredProfiles.length > 0 && (
+            <div className="rounded border border-edge bg-panel px-3 py-2">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">
+                Registered tool catalog
+              </div>
+              {importableProfiles.length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {importableProfiles.map((entry) => (
+                    <button
+                      key={`${entry.source}:${entry.profile.id}`}
+                      type="button"
+                      className="badge max-w-full border-info/50 bg-info-muted text-[10px] text-info hover:border-info"
+                      title={`${entry.profile.tools.length} tool${entry.profile.tools.length === 1 ? "" : "s"} from ${entry.source} policy`}
+                      onClick={() => importProfile(entry)}
+                    >
+                      Import {entry.profile.id} · {entry.source}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-1 text-[11px] text-ink-subtle">
+                  All registered tool profiles are already in this plan.
+                </p>
+              )}
+            </div>
+          )}
           {!selected ? (
             <div className="rounded border border-edge bg-panel px-3 py-4 text-xs text-ink-muted">
               Add a tool profile to define shared tools for executor tasks.
@@ -3040,6 +3096,13 @@ function makeTool(existing: ToolDraft[]): ToolDraft {
   };
 }
 
+function cloneToolProfile(profile: ToolProfileDraft): ToolProfileDraft {
+  return {
+    ...profile,
+    tools: profile.tools.map((tool) => ({ ...tool })),
+  };
+}
+
 function makeCredentialSetup(existing: CredentialSetupDraft[]): CredentialSetupDraft {
   const proxyType: CredentialProxyType = "postgres";
   const name = uniqueCredentialName("db_main", existing);
@@ -3228,7 +3291,7 @@ function validatePlan(input: {
         seenModels.add(providerModel);
       }
       if (entry.providerKind === "custom" || entry.providerKind === "ollama" || entry.providerKind === "http_sidecar") {
-        push("warning", `${field}`, `${providerKindLabel(entry.providerKind)} provider ${providerId || "(blank)"} requires policy setup.`, "Declare the provider credential, endpoint or sidecar config, permitted model, timeout, and pricing in policy before submitting.");
+        push("warning", `${field}`, `${providerKindLabel(entry.providerKind)} provider ${providerId || "(blank)"} requires policy setup.`, "Declare the provider credential, endpoint or sidecar config, permitted model, and timeout in policy before submitting. Add pricing only when you need an operator override.");
       }
     }
     if (route.chain.length === 1) {
@@ -4197,6 +4260,36 @@ function parsePolicyGateRefs(text: string, source: PolicyGateRef["source"]): Pol
     .filter((gate) => gate.name.trim().length > 0);
 }
 
+function parseRegisteredToolProfiles(
+  text: string,
+  source: RegisteredToolProfile["source"],
+): RegisteredToolProfile[] {
+  return parseProfileTools(text)
+    .filter((profile) => profile.id.trim().length > 0 && profile.tools.length > 0)
+    .map((profile) => ({
+      source,
+      profile: cloneToolProfile(profile),
+    }));
+}
+
+function mergeRegisteredToolProfiles(entries: RegisteredToolProfile[]): RegisteredToolProfile[] {
+  const byProfile = new Map<string, RegisteredToolProfile>();
+  for (const entry of entries) {
+    const id = entry.profile.id.trim();
+    if (!id) continue;
+    const existing = byProfile.get(id);
+    if (existing && entry.source !== "draft") continue;
+    byProfile.set(id, {
+      source: entry.source,
+      profile: cloneToolProfile({ ...entry.profile, id }),
+    });
+  }
+  return [...byProfile.values()].sort((a, b) => {
+    const sourceOrder = a.source.localeCompare(b.source);
+    return sourceOrder || a.profile.id.localeCompare(b.profile.id);
+  });
+}
+
 function mergePolicyGateRefs(gates: PolicyGateRef[]): PolicyGateRef[] {
   const byName = new Map<string, PolicyGateRef>();
   for (const gate of gates) {
@@ -4281,8 +4374,15 @@ function isPlanTaskName(value: string) {
   return (
     value.trim().length > 0 &&
     value.length <= TASK_NAME_MAX_CHARS &&
-    !/[\u0000-\u001f\u007f]/.test(value)
+    !hasAsciiControl(value)
   );
+}
+
+function hasAsciiControl(value: string) {
+  return Array.from(value).some((ch) => {
+    const code = ch.charCodeAt(0);
+    return code <= 0x1f || code === 0x7f;
+  });
 }
 
 function parseModelAliasScope(value: string | null, alias: string): ModelAliasScope {
@@ -4557,7 +4657,9 @@ function downloadText(filename: string, text: string) {
 export const __planBuilderTest = {
   findPlanTomlLine,
   inferPlanTomlTargetFromLine,
+  mergeRegisteredToolProfiles,
   parsePlanToml,
+  parseRegisteredToolProfiles,
   renderPlan,
   validatePlan,
 };

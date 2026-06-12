@@ -20,8 +20,7 @@ ALTER TABLE tasks
 -- Cumulative micro-dollar cost = sum over every accepted intent of
 -- `provider_pricing.cost_micro_dollars(input_tokens, output_tokens, ...)`.
 -- The kernel re-computes the increment per intent from the planner-
--- reported `tokens_used` delta and the policy's worst-of-N LLM
--- pricing (matches the `EstimateCost` upper-bound contract).
+-- reported `tokens_used` delta and the active token-pricing resolver.
 ALTER TABLE tasks
     ADD COLUMN cumulative_token_cost_micros INTEGER NOT NULL DEFAULT 0;
 

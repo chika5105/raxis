@@ -8,6 +8,7 @@ import {
   effectiveTaskState,
   hasExplicitStateEntry,
   isIntegrationMergeTask,
+  isTerminalFailureState,
   orderedTaskStatusCounts,
   shortStateLabel,
   stateDescription,
@@ -34,6 +35,7 @@ describe("stateTone", () => {
     expect(stateTone("Draft")).toBe("muted");
     expect(stateTone("ApprovedPlan")).toBe("warn");
     expect(stateTone("Executing")).toBe("info");
+    expect(stateTone("RecoveryRequired")).toBe("warn");
     expect(stateTone("Aborted")).toBe("block");
   });
 
@@ -42,6 +44,15 @@ describe("stateTone", () => {
     expect(stateTone("GatesPending")).toBe("warn");
     expect(stateTone("Cancelled")).toBe("block");
     expect(stateTone("BlockedRecoveryPending")).toBe("warn");
+  });
+
+  it("treats blocked and recovery states as failure-reason states", () => {
+    expect(isTerminalFailureState("Failed")).toBe(true);
+    expect(isTerminalFailureState("Blocked")).toBe(true);
+    expect(isTerminalFailureState("RecoveryRequired")).toBe(true);
+    expect(isTerminalFailureState("BlockedRecoveryPending")).toBe(true);
+    expect(isTerminalFailureState("Revoked")).toBe(false);
+    expect(isTerminalFailureState("Completed")).toBe(false);
   });
 
   it("normalizes case for unknown variants", () => {
@@ -322,6 +333,7 @@ describe("shortStateLabel", () => {
     // the leading PascalCase token is the most-meaningful glance.
     expect(shortStateLabel("BlockedRecoveryPending")).toBe("BLOCKED");
     expect(shortStateLabel("ApprovedPlan")).toBe("APPROVED");
+    expect(shortStateLabel("RecoveryRequired")).toBe("RECOVERY");
     expect(shortStateLabel("GatesPending")).toBe("GATES");
   });
 

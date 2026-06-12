@@ -162,6 +162,7 @@ fn reviewer_envelope_carries_artifact_identity_only() {
     let env = Capabilities::Reviewer(ReviewerCapabilities {
         session: sample_session("reviewer"),
         artifact_task_id: "task-under-review".to_owned(),
+        artifact_evaluation_sha: "abc123review".to_owned(),
     });
     let json = serde_json::to_value(&env).expect("reviewer serialise");
     assert_eq!(json["role"], "reviewer");
@@ -231,6 +232,7 @@ fn capabilities_round_trip_through_json_for_every_variant() {
         Capabilities::Reviewer(ReviewerCapabilities {
             session: sample_session("reviewer"),
             artifact_task_id: "task-art".to_owned(),
+            artifact_evaluation_sha: "abc123review".to_owned(),
         }),
     ];
     for env in envelopes {
@@ -333,6 +335,7 @@ fn rendered_capabilities_block_respects_role_scope() {
     let rev = render_ksb(&fixture(Capabilities::Reviewer(ReviewerCapabilities {
         session: sample_session("reviewer"),
         artifact_task_id: "task-art".to_owned(),
+        artifact_evaluation_sha: "abc123review".to_owned(),
     })))
     .expect("render reviewer");
     assert!(
@@ -445,6 +448,7 @@ fn inv_ksb_max_turns_visibility_01_all_three_roles_carry_planner_max_turns() {
         Capabilities::Reviewer(ReviewerCapabilities {
             session: role_session("reviewer", REV_MT),
             artifact_task_id: "task-mt".to_owned(),
+            artifact_evaluation_sha: "abc123review".to_owned(),
         }),
         "reviewer",
     ))
@@ -554,6 +558,7 @@ fn inv_planner_max_turns_progressive_on_retry_01_role_scoped() {
     let rev_caps = Capabilities::Reviewer(ReviewerCapabilities {
         session: sample_session("reviewer"),
         artifact_task_id: "task-pr".to_owned(),
+        artifact_evaluation_sha: "abc123review".to_owned(),
     });
     let rev_json = serde_json::to_value(&rev_caps).expect("reviewer serialise");
     assert_eq!(

@@ -44,7 +44,10 @@ raxis budget --json | jq '.lanes[] | select(.utilization > 0.9)'
 How costs are computed:
 
 - Each `IntentKind` has a base cost from `[budget.base_cost_per_intent_kind]`.
-- LLM intents add token-based cost using `[[providers.entries]].pricing`.
+- LLM intents add token-based cost from provider-reported usage. RAXIS
+  prices those tokens with operator policy overrides when configured,
+  runtime/provider pricing when available, and an explicitly labelled
+  bundled estimate as the final fallback.
 - The lane's `[budget].max_cost_per_epoch` caps total spend per
   epoch; the policy epoch advances on operator-signed
   `raxis epoch advance` (or scheduled).

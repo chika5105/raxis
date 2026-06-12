@@ -338,6 +338,45 @@ Aborted`). The supervisor-aware exception lives entirely in
 `recovery::reconcile_after_supervisor_restart` and is documented in
 [`v2/supervisor-restart-classification.md`](v2/supervisor-restart-classification.md).
 
+### INV-INIT-05 — Recoverable initiative stops use `RecoveryRequired`, not `Failed`
+
+**Statement.** A kernel-detected recoverable initiative-level stop
+MUST transition the initiative to `RecoveryRequired`, never directly
+to terminal `Failed`. Operator approval may transition
+`RecoveryRequired → Executing`; operator denial closes
+`RecoveryRequired → Failed`. Terminal `Failed` is closed history and
+MUST NOT be resumed in place.
+
+**Justification.** Recovery and terminality are different operator
+questions. `RecoveryRequired` preserves plan immutability while giving
+operators a clear signed escalation surface for "retry the same frozen
+DAG." Task-local retries inside the signed plan budget are execution
+mechanics; initiative-level retrial requires explicit operator
+approval. `Failed` remains forensic history; reviving it in place
+would blur audit replay and make repeated runs depend on mutable
+terminal rows.
+
+**Scenario.** An orchestrator trips the no-progress respawn ceiling.
+The kernel inserts a kernel-initiated `LogicalDeadlock` escalation and
+sets the initiative to `RecoveryRequired`. If the operator approves,
+the respawn counter resets and the initiative returns to `Executing`.
+If the operator denies, the initiative becomes terminal `Failed`.
+
+**Forensic escape.** If an admin must continue from a terminal failed
+run, they create a new signed initiative that references the failed
+one as parent history (`raxis initiative fork-from-failed <id>` prints
+the required lineage data). This is intentionally not called resume.
+
+**Amendment boundary.** Signed amendments may be submitted at any time,
+subject to policy, but they never rewrite historical evidence. If an
+operator amends a running task, RAXIS must abort/revoke the current
+session, mark that attempt superseded, and start a new attempt under
+the amended authority. If an operator amends a completed task, RAXIS
+must preserve the completed attempt's commits, witnesses, reviewer
+verdicts, and evaluation SHA as forensic evidence, create a new attempt
+under the amended authority, and reset every downstream task that
+depended on the superseded output.
+
 ---
 
 ## §3 — Escalation
@@ -1475,7 +1514,7 @@ homes still contain the full normative discussion.
 
 | Old ID | Consolidated into |
 |---|---|
-| INV-INIT-05..11 | INV-INIT-04 (corollary) |
+| INV-INIT-06..11 | INV-INIT-04 (corollary) |
 | INV-ESC-06 | INV-ESC-04 (operational; not an invariant) |
 | INV-STORE-03 | code-style lint, not a structural rule |
 | INV-SCHED-03 | INV-INIT-01 (plan-time validation) |

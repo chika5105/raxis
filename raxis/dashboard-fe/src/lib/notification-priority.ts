@@ -8,6 +8,8 @@
 // What lives here
 // ───────────────
 //   * `priorityRank` for "Critical-first" sort ordering.
+//   * `compareByTimeDescThenPriority` for the Notifications
+//     inbox's newest-first ordering.
 //   * `priorityToneClasses` for the row-icon Tailwind classes
 //     (red / amber / blue / gray, AA-contrast vs panel-high).
 //   * `priorityIconLabel` ARIA label for the row icon.
@@ -60,6 +62,18 @@ export function compareByPriorityThenTimeDesc(
   const rb = priorityRank(b.priority);
   if (ra !== rb) return ra - rb;
   return b.created_at - a.created_at;
+}
+
+/**
+ * Newest-first inbox ordering. Priority is only a tie-breaker so
+ * the operator can trust the Notifications page as a timeline.
+ */
+export function compareByTimeDescThenPriority(
+  a: NotificationView,
+  b: NotificationView,
+): number {
+  if (a.created_at !== b.created_at) return b.created_at - a.created_at;
+  return priorityRank(a.priority) - priorityRank(b.priority);
 }
 
 /**

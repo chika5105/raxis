@@ -1706,7 +1706,7 @@ pub const COMMAND_KIND_ESTIMATE_COST: &str = "estimate_cost";
 pub const COMMAND_KIND_DRY_RUN_ADMIT: &str = "dry_run_admit";
 /// operator-ergonomics `initiative watch` stub.
 pub const COMMAND_KIND_SUBSCRIBE_INITIATIVE: &str = "subscribe_initiative";
-/// operator-ergonomics `initiative resume` stub.
+/// Deprecated operator-ergonomics pause-description reader.
 pub const COMMAND_KIND_DESCRIBE_INITIATIVE_PAUSE: &str = "describe_initiative_pause";
 /// V2_extended_gaps §3.2 — `task outputs` listing.
 pub const COMMAND_KIND_LIST_TASK_OUTPUTS: &str = "list_task_outputs";

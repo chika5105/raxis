@@ -1850,9 +1850,9 @@ pub enum AuditEventKind {
     /// `orchestrator_no_progress_respawn_count` counter exceeds
     /// `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3) in
     /// `session_spawn_orchestrator::respawn_orchestrator_for_initiative`.
-    /// The initiative is then transitioned to `Failed` with
-    /// `reason = "orchestrator no-progress respawn ceiling exceeded"`
-    /// and the kernel refuses further respawns for this initiative.
+    /// The initiative is then transitioned to `RecoveryRequired`
+    /// and the kernel refuses further respawns for this initiative
+    /// until an operator approves recovery or denies the escalation.
     ///
     /// **What this captures.** The structural backstop against an
     /// unbounded orchestrator respawn loop where the agent boots,
@@ -1864,7 +1864,7 @@ pub enum AuditEventKind {
     /// run: 45 `SessionVmSpawned` in 18 min, zero progress).
     ///
     /// **When fired.** ONCE per ceiling exceedance, immediately
-    /// before the initiative-`Failed` transition fires. Subsequent
+    /// before the initiative-`RecoveryRequired` transition fires. Subsequent
     /// post-exit-hook triggers for the same initiative are
     /// silently skipped (the `is_executing` preflight in
     /// `respawn_orchestrator_for_initiative` short-circuits to
@@ -1873,11 +1873,11 @@ pub enum AuditEventKind {
     /// **Paired with what.** Per `audit-paired-writes.md §4`, this
     /// event is the chain-side half of the SQLite-side state
     /// mutation in `respawn_orchestrator_for_initiative` Step 1c
-    /// (the `UPDATE initiatives SET state='Failed', failure_reason=…`
+    /// (the `UPDATE initiatives SET state='RecoveryRequired', …`
     /// row mutation). Pairing is post-commit: SQLite commits first,
     /// then the audit event fires in the same async task. A crash
-    /// between leaves a consistent SQLite state (initiative-Failed,
-    /// no further respawns) with a missing audit anchor; the
+    /// between leaves a consistent SQLite state (initiative paused
+    /// for recovery, no further respawns) with a missing audit anchor; the
     /// recovery sweep is advisory per `INV-AUDIT-PAIRED-06`.
     ///
     /// Closes `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`.
@@ -1904,7 +1904,8 @@ pub enum AuditEventKind {
     /// The approval performed three side effects in one SQLite
     /// transaction: (a) UPDATE `escalations.status = 'Approved'`,
     /// (b) UPDATE `initiatives.orchestrator_no_progress_respawn_count
-    /// = 0`, (c) UPDATE `initiatives.state = 'Executing'`. After
+    /// = 0`, (c) UPDATE `initiatives.state = 'Executing'` from
+    /// `RecoveryRequired`. After
     /// commit the approve handler schedules a fresh orchestrator
     /// respawn for the offending initiative.
     ///
@@ -1916,7 +1917,7 @@ pub enum AuditEventKind {
     /// non-overlapping.
     OperatorApprovedRespawnEscalation {
         /// The initiative whose orch-respawn counter was reset and
-        /// whose state transitioned `Failed → Executing`.
+        /// whose state transitioned `RecoveryRequired → Executing`.
         initiative_id: String,
         /// The kernel-initiated escalation that was approved.
         escalation_id: String,
@@ -1928,13 +1929,14 @@ pub enum AuditEventKind {
 
     /// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — operator denied
     /// the kernel-initiated `LogicalDeadlock` escalation. The
-    /// initiative stays `Failed`; the orch-respawn counter is NOT
-    /// reset; the matching `escalations` row is flipped to
-    /// `'Denied'`. No further respawn is scheduled. Pairs the
+    /// initiative closes `RecoveryRequired → Failed`; the
+    /// orch-respawn counter is NOT reset; the matching
+    /// `escalations` row is flipped to `'Denied'`. No further
+    /// respawn is scheduled. Pairs the
     /// audit-side anchor of the deny path with `EscalationDenied`'s
     /// structural counterpart.
     OperatorDeniedRespawnEscalation {
-        /// The initiative that remains `Failed`.
+        /// The initiative that was closed as `Failed`.
         initiative_id: String,
         /// The kernel-initiated escalation that was denied.
         escalation_id: String,
@@ -4657,9 +4659,11 @@ pub enum AuditEventKind {
     /// (iter65-review). The kernel observed a permanent-stall
     /// audit event on an initiative whose state was non-terminal
     /// AND inserted a paired-write `LogicalDeadlock` escalation
-    /// row + transitioned the initiative to `Failed` so the
-    /// operator can either approve a recovery retry or deny and
-    /// preserve the terminal state. Distinct from
+    /// row + transitioned the initiative to `RecoveryRequired` for
+    /// recoverable causes, or terminal `Failed` for non-recoverable
+    /// causes. The operator can either approve recovery on
+    /// `RecoveryRequired` rows or deny and close the initiative as
+    /// `Failed`. Distinct from
     /// `OrchestratorRespawnCeilingExceeded` (which carries the
     /// orch-respawn-ceiling-specific payload): this variant is the
     /// generalised "permanent failure detected" anchor that
@@ -4675,14 +4679,16 @@ pub enum AuditEventKind {
     /// Notification priority is `Critical` per
     /// `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`:
     /// any event that triggers this anchor is by definition
-    /// initiative-terminal and operator-actionable; promoting it
-    /// to `Critical` ensures a Critical-only filter on the
+    /// initiative-pausing or initiative-terminal and
+    /// operator-actionable; promoting it to `Critical` ensures a
+    /// Critical-only filter on the
     /// dispatch gate or the dashboard projection still surfaces
     /// the permanent-stall signal regardless of how the
     /// underlying cause_kind is classified individually.
     InitiativePermanentFailureEscalated {
         /// The initiative whose state was just transitioned to
-        /// `Failed`. Cross-references `initiatives.initiative_id`.
+        /// `RecoveryRequired` or `Failed`. Cross-references
+        /// `initiatives.initiative_id`.
         initiative_id: String,
         /// The `AuditEventKind::as_str()` of the underlying audit
         /// event that the helper observed as a permanent stall
@@ -4711,13 +4717,11 @@ pub enum AuditEventKind {
         /// Whether the underlying `cause_kind` is documented as
         /// recoverable by an operator-approve action. `false` for
         /// causes whose underlying condition the operator cannot
-        /// clear via the kernel (e.g. plan schema errors); the
-        /// approve handler still resets the orch-respawn counter
-        /// and transitions Failed → Executing, but the documented
-        /// expectation is that the next orchestrator decision
-        /// cycle will hit the same condition and trip a fresh
-        /// permanent failure. Surfaced in the inbox so operators
-        /// can prefer Deny on non-recoverable causes.
+        /// clear via the kernel (e.g. plan schema errors); those
+        /// causes close as `Failed` and are not resumable in
+        /// place. Surfaced in the inbox so operators understand
+        /// whether approve can legally return the initiative to
+        /// `Executing`.
         recoverable_via_approve: bool,
     },
 }

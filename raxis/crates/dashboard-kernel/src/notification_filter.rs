@@ -159,7 +159,7 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
         // `notification_priority` classified it as `Critical`. The
         // typed surface is correct: the orchestrator respawn ceiling
         // is a structural backstop, an `Exceeded` event means the
-        // initiative is now terminal-Failed and the operator MUST
+        // initiative is now RecoveryRequired and the operator MUST
         // intervene. The kernel `notifications::dispatch` gate and
         // the dashboard `notifications` projection both consult the
         // string surface; without parity, Critical-only filters
@@ -455,11 +455,11 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // burning rounds against `max_review_rejections`.
         K::ExecutorRespawnFromReviewRejection { .. } => Some(Medium),
         // `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01` — initiative
-        // failure on the structural backstop. Critical because the
-        // initiative is now terminal-Failed and the operator must
-        // intervene (abort, escalate, or open a fresh plan); the
-        // kernel will refuse all subsequent orchestrator respawns
-        // for the offending initiative.
+        // paused on the structural backstop. Critical because the
+        // initiative is now RecoveryRequired and the operator must
+        // approve recovery or deny/close it; the kernel will refuse
+        // all subsequent orchestrator respawns for the offending
+        // initiative until that decision lands.
         K::OrchestratorRespawnCeilingExceeded { .. } => Some(Critical),
         K::ReviewRejectionCeilingExceeded { .. } => Some(Critical),
         // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — operator
@@ -467,7 +467,8 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // escalation. Routed at `Medium` priority: the operator has
         // already responded to the upstream `Critical` ceiling event
         // and is now closing the loop (approve resets the counter +
-        // resumes the initiative; deny preserves Failed). Both
+        // resumes the initiative; deny closes RecoveryRequired as
+        // Failed). Both
         // outcomes are operator-attention-noted, not paged; pairs
         // 1:1 with the upstream `OrchestratorRespawnCeilingExceeded`.
         K::OperatorApprovedRespawnEscalation { .. } => Some(Medium),
@@ -727,10 +728,11 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         K::PlannerMaxTurnsProgressivelyScaled { .. } => None,
         // `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
         // (iter65-review) — every emit of this anchor means an
-        // initiative just transitioned to terminal-`Failed` because
-        // a permanent-stall audit event landed; the operator MUST
-        // intervene (approve a recovery retry, deny + audit the
-        // permanent failure, or open a fresh plan). Critical priority
+        // initiative just transitioned to `RecoveryRequired` or
+        // terminal `Failed` because a permanent-stall audit event
+        // landed; the operator MUST intervene (approve a recovery
+        // retry when legal, deny + audit the permanent failure, or
+        // open a fresh plan). Critical priority
         // ensures a Critical-only filter on the kernel's
         // `notifications::dispatch` gate or the dashboard
         // `notifications` projection still surfaces the event

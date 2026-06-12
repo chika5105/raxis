@@ -164,7 +164,7 @@ export function OverviewPage() {
           value={String(h.active_initiatives)}
           tone="info"
           sub="In flight"
-          to="/initiatives?state=Active"
+          to="/initiatives?state=Executing"
         />
         <Tile
           title="Pending escalations"
@@ -464,9 +464,9 @@ export function OverviewPage() {
             {recentActivity.map((a) => (
               <li
                 key={a.event_id}
-                className="px-4 py-2.5 flex items-center gap-3 text-sm"
+                className="px-4 py-2.5 flex min-w-0 flex-wrap items-start gap-3 text-sm"
               >
-                <span className="text-[11px] text-ink-subtle font-mono w-12 text-right">
+                <span className="shrink-0 text-[11px] text-ink-subtle font-mono w-12 text-right">
                   #{a.seq}
                 </span>
                 <span className={auditBadgeClasses(a.event_kind)}>
@@ -475,7 +475,8 @@ export function OverviewPage() {
                 {a.initiative_id && (
                   <Link
                     to={`/initiatives/${a.initiative_id}`}
-                    className="text-xs text-accent hover:underline"
+                    title={a.initiative_id}
+                    className="min-w-0 max-w-full break-all text-xs text-accent [overflow-wrap:anywhere] hover:underline"
                   >
                     {a.initiative_id}
                   </Link>
@@ -483,12 +484,13 @@ export function OverviewPage() {
                 {a.task_id && (
                   <Link
                     to={`/tasks/${a.task_id}`}
-                    className="text-xs text-ink-muted hover:text-accent"
+                    title={a.task_id}
+                    className="min-w-0 max-w-full break-all text-xs text-ink-muted [overflow-wrap:anywhere] hover:text-accent"
                   >
                     · {a.task_id}
                   </Link>
                 )}
-                <span className="ml-auto text-xs text-ink-subtle">
+                <span className="ml-auto shrink-0 text-xs text-ink-subtle">
                   {fmtRelative(a.at)}
                 </span>
               </li>

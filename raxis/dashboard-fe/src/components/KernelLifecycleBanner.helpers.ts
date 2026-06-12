@@ -13,6 +13,10 @@ import type { KernelLifecycleResponse } from "@/types/api";
 
 export type BannerTone = "hidden" | "ok" | "warn" | "stop";
 
+function hasHostRestartRecovery(s: KernelLifecycleResponse): boolean {
+  return (s.host_restart_recovery?.tasks.length ?? 0) > 0;
+}
+
 /// Computes the banner tone from the snapshot. Pure function so
 /// tests can drive every branch without a React tree.
 export function bannerTone(s: KernelLifecycleResponse): BannerTone {
@@ -40,6 +44,7 @@ export function bannerTone(s: KernelLifecycleResponse): BannerTone {
       s.auto_resume.transition_failed > 0;
     return partial ? "warn" : "ok";
   }
+  if (hasHostRestartRecovery(s)) return "warn";
   // No supervisor in play (default-off opt-in) ⇒ never paint.
   // The kernel handler returns `Healthy { fresh: true,
   // supervisor_pid: 0 }` in this case; we want zero chrome.
@@ -80,6 +85,9 @@ export function headlineFor(s: KernelLifecycleResponse): string {
     return partial
       ? "Kernel restored — partial auto-resume"
       : "Kernel restored — work auto-resumed";
+  }
+  if (s.status === "Healthy" && hasHostRestartRecovery(s)) {
+    return "Recovery after host restart";
   }
   // Unknown status — surface verbatim so the operator at least
   // sees what the supervisor reported.

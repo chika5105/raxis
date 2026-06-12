@@ -250,51 +250,248 @@ fn intent_kind_to_str(kind: &IntentKind) -> &'static str {
 /// for sub-cent precision. 1 ¢ = 10 000 µ$.
 pub const MICROS_PER_CENT: u64 = 10_000;
 
-/// Incremental dollar cost of one
-/// planner-reported `TokensReport`. The kernel picks the
-/// **worst-of-N** LLM provider (the one whose
-/// [`raxis_policy::ProviderPricing::cost_micro_dollars`] is highest
-/// at the comparator point `(1M input, 1M output)`) when the
-/// planner's `TokensReport.provider_id` is empty / unknown, matching
-/// the `EstimateCost` upper-bound contract. When `provider_id` matches
-/// a declared LLM provider with `pricing`, that provider's pricing is
-/// used directly (more accurate accounting for multi-provider
-/// deployments).
-/// Returns `0` when the policy declares no LLM providers with
-/// pricing — degraded read-only deployments charge no LLM cost.
-pub fn cost_micros_for_tokens(report: &raxis_types::TokensReport, policy: &PolicyBundle) -> u64 {
-    let provider = if report.provider_id.is_empty() {
-        worst_llm_pricing(policy)
-    } else {
-        policy
-            .providers()
-            .iter()
-            .find(|p| p.provider_id == report.provider_id && p.pricing.is_some())
-            .or_else(|| worst_llm_pricing(policy))
-    };
-    match provider.and_then(|p| p.pricing.as_ref()) {
-        Some(pricing) => pricing.cost_micro_dollars(
-            report.input_tokens,
-            report.output_tokens,
-            report.cache_read_tokens,
-            report.cache_creation_tokens,
-        ),
-        None => 0,
+/// Version label for the bundled rate table used only when no
+/// operator override or runtime provider-pricing source is available.
+/// This label is surfaced to the dashboard because bundled rates are
+/// estimates, not provider-billed truth.
+pub const BUNDLED_PRICING_REGISTRY_VERSION: &str = "bundled-2026-06-11";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenPricingSource {
+    OperatorPolicyOverride {
+        provider_id: String,
+    },
+    RuntimeProviderApi {
+        provider_id: String,
+        registry_version: String,
+    },
+    BundledEstimate {
+        provider_id: String,
+        registry_version: &'static str,
+    },
+    Unpriced,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PricedTokenCost {
+    pub micros: u64,
+    pub source: TokenPricingSource,
+}
+
+/// Incremental dollar cost of one planner-reported `TokensReport`.
+///
+/// Resolution order:
+/// 1. Operator policy override (`[[providers]].pricing`) for the
+///    exact provider id, provider kind, or model-derived provider.
+/// 2. Runtime provider-pricing API hook. Official providers reliably
+///    report usage tokens, but do not expose a uniform rate endpoint;
+///    this seam is where provider-specific cost APIs can plug in.
+/// 3. Bundled fallback estimates, explicitly marked as estimates.
+/// 4. Unpriced (`0`) only when there are no tokens or no usable
+///    source.
+pub fn price_tokens_for_report(
+    report: &raxis_types::TokensReport,
+    policy: &PolicyBundle,
+) -> PricedTokenCost {
+    if report.input_tokens == 0
+        && report.output_tokens == 0
+        && report.cache_read_tokens == 0
+        && report.cache_creation_tokens == 0
+    {
+        return PricedTokenCost {
+            micros: 0,
+            source: TokenPricingSource::Unpriced,
+        };
+    }
+
+    if let Some(provider) = policy_pricing_for_report(report, policy) {
+        let pricing = provider
+            .pricing
+            .as_ref()
+            .expect("policy_pricing_for_report filters to pricing");
+        return PricedTokenCost {
+            micros: pricing.cost_micro_dollars(
+                report.input_tokens,
+                report.output_tokens,
+                report.cache_read_tokens,
+                report.cache_creation_tokens,
+            ),
+            source: TokenPricingSource::OperatorPolicyOverride {
+                provider_id: provider.provider_id.clone(),
+            },
+        };
+    }
+
+    if let Some(runtime) = runtime_provider_pricing_for_report(report) {
+        return runtime;
+    }
+
+    if let Some((provider_id, pricing)) = bundled_estimate_pricing_for_report(report) {
+        return PricedTokenCost {
+            micros: pricing.cost_micro_dollars(
+                report.input_tokens,
+                report.output_tokens,
+                report.cache_read_tokens,
+                report.cache_creation_tokens,
+            ),
+            source: TokenPricingSource::BundledEstimate {
+                provider_id,
+                registry_version: BUNDLED_PRICING_REGISTRY_VERSION,
+            },
+        };
+    }
+
+    PricedTokenCost {
+        micros: 0,
+        source: TokenPricingSource::Unpriced,
     }
 }
 
-/// Resolve the most-expensive LLM provider declared in the policy.
-/// Linear-scan; the provider list is bounded by policy and never
-/// exceeds tens of entries in practice.
-fn worst_llm_pricing(policy: &PolicyBundle) -> Option<&raxis_policy::ProviderEntry> {
+/// Backward-compatible cost-only helper for admission code.
+pub fn cost_micros_for_tokens(report: &raxis_types::TokensReport, policy: &PolicyBundle) -> u64 {
+    price_tokens_for_report(report, policy).micros
+}
+
+fn policy_pricing_for_report<'a>(
+    report: &raxis_types::TokensReport,
+    policy: &'a PolicyBundle,
+) -> Option<&'a raxis_policy::ProviderEntry> {
+    let provider_id = report.provider_id.trim();
+    if !provider_id.is_empty() {
+        if let Some(exact) = policy
+            .providers()
+            .iter()
+            .find(|p| p.provider_id == provider_id && p.pricing.is_some())
+        {
+            return Some(exact);
+        }
+    }
+
+    let provider_kind = provider_id_from_report(report);
+    if let Some(kind) = provider_kind.as_deref() {
+        return policy
+            .providers()
+            .iter()
+            .filter(|p| p.pricing.is_some() && provider_kind_id(&p.kind) == Some(kind))
+            .max_by_key(|p| {
+                p.pricing
+                    .as_ref()
+                    .expect("filtered to Some")
+                    .cost_micro_dollars(
+                        report.input_tokens,
+                        report.output_tokens,
+                        report.cache_read_tokens,
+                        report.cache_creation_tokens,
+                    )
+            });
+    }
+
+    // Legacy/diagnostic reports might omit provider and model. Use a
+    // conservative worst override if the operator supplied any.
     policy
         .providers()
         .iter()
         .filter(|p| p.pricing.is_some())
         .max_by_key(|p| {
-            let pr = p.pricing.as_ref().expect("filtered to Some");
-            pr.cost_micro_dollars(1_000_000, 1_000_000, 0, 0)
+            p.pricing
+                .as_ref()
+                .expect("filtered to Some")
+                .cost_micro_dollars(
+                    report.input_tokens,
+                    report.output_tokens,
+                    report.cache_read_tokens,
+                    report.cache_creation_tokens,
+                )
         })
+}
+
+fn runtime_provider_pricing_for_report(
+    _report: &raxis_types::TokensReport,
+) -> Option<PricedTokenCost> {
+    // Official model APIs return provider usage tokens reliably, but
+    // OpenAI/Anthropic/Gemini do not expose one uniform "current
+    // model rate" endpoint that the kernel can synchronously trust at
+    // admission time. Provider-specific billing/cost APIs can be
+    // wired here later; until then, policy overrides and bundled
+    // estimates carry explicit provenance.
+    None
+}
+
+fn bundled_estimate_pricing_for_report(
+    report: &raxis_types::TokensReport,
+) -> Option<(String, raxis_policy::ProviderPricing)> {
+    let provider = provider_id_from_report(report)?;
+    let pricing = match provider.as_str() {
+        // Conservative generic estimates. They are deliberately not
+        // exact list prices; the dashboard labels them as estimates
+        // and policy overrides should be used for enterprise
+        // contracts or volume discounts.
+        "anthropic" => raxis_policy::ProviderPricing {
+            input_tokens_per_dollar: 333_333, // ~$3 / 1M input
+            output_tokens_per_dollar: 66_666, // ~$15 / 1M output
+            cache_read_tokens_per_dollar: Some(3_333_333),
+            cache_creation_tokens_per_dollar: Some(266_666),
+        },
+        "openai" => raxis_policy::ProviderPricing {
+            input_tokens_per_dollar: 1_000_000, // ~$1 / 1M input
+            output_tokens_per_dollar: 250_000,  // ~$4 / 1M output
+            cache_read_tokens_per_dollar: Some(10_000_000),
+            cache_creation_tokens_per_dollar: None,
+        },
+        "gemini" => raxis_policy::ProviderPricing {
+            input_tokens_per_dollar: 1_000_000, // ~$1 / 1M input
+            output_tokens_per_dollar: 250_000,  // ~$4 / 1M output
+            cache_read_tokens_per_dollar: Some(10_000_000),
+            cache_creation_tokens_per_dollar: None,
+        },
+        "bedrock" => raxis_policy::ProviderPricing {
+            input_tokens_per_dollar: 333_333,
+            output_tokens_per_dollar: 66_666,
+            cache_read_tokens_per_dollar: Some(3_333_333),
+            cache_creation_tokens_per_dollar: Some(266_666),
+        },
+        "sidecar" => return None,
+        _ => return None,
+    };
+    Some((provider, pricing))
+}
+
+fn provider_id_from_report(report: &raxis_types::TokensReport) -> Option<String> {
+    let provider_id = report.provider_id.trim();
+    if let Some(kind) = provider_kind_id(provider_id) {
+        return Some(kind.to_owned());
+    }
+    provider_from_model_id(report.model_id.trim())
+}
+
+fn provider_kind_id(kind: &str) -> Option<&'static str> {
+    match kind {
+        "Anthropic" | "anthropic" => Some("anthropic"),
+        "OpenAI" | "openai" => Some("openai"),
+        "Gemini" | "gemini" => Some("gemini"),
+        "Bedrock" | "bedrock" => Some("bedrock"),
+        "http_sidecar" | "sidecar" => Some("sidecar"),
+        _ => None,
+    }
+}
+
+fn provider_from_model_id(model_id: &str) -> Option<String> {
+    if model_id.is_empty() {
+        return None;
+    }
+    if model_id.starts_with("claude-") {
+        return Some("anthropic".to_owned());
+    }
+    if model_id.starts_with("gemini-") {
+        return Some("gemini".to_owned());
+    }
+    if model_id.starts_with("gpt-") || model_id.starts_with("o1") || model_id.starts_with("o3") {
+        return Some("openai".to_owned());
+    }
+    if model_id.starts_with("anthropic.") {
+        return Some("bedrock".to_owned());
+    }
+    None
 }
 
 /// The per-task token-cost ceiling
@@ -781,6 +978,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            model_id: String::new(),
             provider_id: String::new(),
         };
         assert_eq!(cost_micros_for_tokens(&report, &policy), 25_000_000);
@@ -812,6 +1010,7 @@ mod tests {
             output_tokens: 500_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            model_id: String::new(),
             provider_id: String::new(),
         };
         match evaluate_token_budget(Some(&report), 0, &policy) {
@@ -834,6 +1033,7 @@ mod tests {
             output_tokens: 50_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            model_id: String::new(),
             provider_id: String::new(),
         };
         match evaluate_token_budget(Some(&report), 0, &policy) {
@@ -860,6 +1060,7 @@ mod tests {
             output_tokens: 50_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            model_id: String::new(),
             provider_id: String::new(),
         };
         match evaluate_token_budget(Some(&report), 0, &policy) {
@@ -882,6 +1083,7 @@ mod tests {
             output_tokens: 50_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            model_id: String::new(),
             provider_id: String::new(),
         };
         // Previous cost is higher than what the new (smaller) report
@@ -911,6 +1113,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            model_id: String::new(),
             provider_id: String::new(),
         };
         // Worst-of-N pricing: $10/M × 2M = $20 = 20_000_000 µ$.
@@ -931,9 +1134,56 @@ mod tests {
             output_tokens: 1_000_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            model_id: String::new(),
             provider_id: "cheap".to_owned(),
         };
         // Cheap pricing: $1/M × 2M = $2 = 2_000_000 µ$.
         assert_eq!(cost_micros_for_tokens(&report, &policy), 2_000_000);
+    }
+
+    #[test]
+    fn token_cost_uses_policy_override_by_provider_kind() {
+        let mut policy = PolicyBundle::for_tests_with_operators(Vec::<OperatorEntry>::new());
+        let mut openai = make_provider("openai-prod", 2_000_000, 500_000);
+        openai.kind = "OpenAI".to_owned();
+        policy.set_providers_for_tests(vec![openai]);
+        let report = raxis_types::TokensReport {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            model_id: "gpt-5.3-codex".to_owned(),
+            provider_id: "openai".to_owned(),
+        };
+        let priced = price_tokens_for_report(&report, &policy);
+        assert_eq!(priced.micros, 2_500_000);
+        assert_eq!(
+            priced.source,
+            TokenPricingSource::OperatorPolicyOverride {
+                provider_id: "openai-prod".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn token_cost_falls_back_to_bundled_estimate_with_provenance() {
+        let policy = PolicyBundle::for_tests_with_operators(Vec::<OperatorEntry>::new());
+        let report = raxis_types::TokensReport {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            model_id: "gemini-2.5-flash".to_owned(),
+            provider_id: "gemini".to_owned(),
+        };
+        let priced = price_tokens_for_report(&report, &policy);
+        assert_eq!(priced.micros, 5_000_000);
+        assert_eq!(
+            priced.source,
+            TokenPricingSource::BundledEstimate {
+                provider_id: "gemini".to_owned(),
+                registry_version: BUNDLED_PRICING_REGISTRY_VERSION,
+            }
+        );
     }
 }

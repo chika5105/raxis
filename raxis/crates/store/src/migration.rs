@@ -48,7 +48,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 30;
+pub const SCHEMA_VERSION: u32 = 32;
 
 /// Apply all pending migrations to `conn`.
 /// Safe to call on every startup — skips already-applied migrations. Returns
@@ -151,6 +151,12 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 30 {
         apply_migration_30(conn)?;
+    }
+    if current_version < 31 {
+        apply_migration_31(conn)?;
+    }
+    if current_version < 32 {
+        apply_migration_32(conn)?;
     }
 
     Ok(())
@@ -1788,10 +1794,11 @@ COMMIT;
 // Migration 12 — V2 §2.5 per-task LLM token-usage accounting.
 // admission gate requires the kernel to
 // know each task's cumulative LLM input/output token consumption
-// AND the corresponding micro-dollar cost (derived from the
-// operator-declared `[providers.<id>.pricing]` tables) to enforce
-// `policy.max_cost_per_task` as a real dollar ceiling rather than a
-// flat admission-units heuristic.
+// AND the corresponding micro-dollar cost (derived from operator
+// pricing overrides when present, runtime/provider pricing when
+// available, and explicitly labelled bundled estimates otherwise) to
+// enforce `policy.max_cost_per_task` as a real dollar ceiling rather
+// than a flat admission-units heuristic.
 // We add three columns to `tasks`:
 //   * cumulative_input_tokens         — INTEGER NOT NULL DEFAULT 0
 //   * cumulative_output_tokens        — INTEGER NOT NULL DEFAULT 0
@@ -1839,8 +1846,7 @@ ALTER TABLE {tasks}
 -- Cumulative micro-dollar cost = sum over every accepted intent of
 -- `provider_pricing.cost_micro_dollars(input_tokens, output_tokens, ...)`.
 -- The kernel re-computes the increment per intent from the planner-
--- reported `tokens_used` delta and the policy's worst-of-N LLM
--- pricing (matches the `EstimateCost` upper-bound contract).
+-- reported `tokens_used` delta and the active token-pricing resolver.
 ALTER TABLE {tasks}
     ADD COLUMN cumulative_token_cost_micros INTEGER NOT NULL DEFAULT 0;
 
@@ -2948,6 +2954,18 @@ fn apply_migration_30(conn: &Connection) -> Result<(), StoreError> {
         .map_err(|e| StoreError::Migration(format!("migration 30 failed: {e}")))
 }
 
+fn apply_migration_31(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_31_ddl();
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 31 failed: {e}")))
+}
+
+fn apply_migration_32(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_32_ddl();
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 32 failed: {e}")))
+}
+
 /// The complete migration-26 DDL.
 pub fn render_migration_26_ddl() -> String {
     let session_vm_env = Table::SessionVmEnv.as_str();
@@ -3170,6 +3188,144 @@ COMMIT;
     )
 }
 
+/// The complete migration-31 DDL.
+pub fn render_migration_31_ddl() -> String {
+    let initiatives = Table::Initiatives.as_str();
+    let plan_bundles = Table::PlanBundles.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+    let initiative_state_check =
+        check_in_clause(&InitiativeState::ALL, InitiativeState::as_sql_str);
+    let tmp = "initiatives_v31";
+
+    format!(
+        "
+PRAGMA foreign_keys=OFF;
+BEGIN EXCLUSIVE;
+
+-- recovery-required initiatives -- split recoverable operator-action
+-- pauses from terminal Failed. SQLite cannot ALTER a CHECK
+-- constraint, so rebuild the initiatives table with the expanded
+-- state set while preserving every v30 column.
+CREATE TABLE {tmp} (
+    initiative_id          TEXT    NOT NULL PRIMARY KEY,
+    state                  TEXT    NOT NULL
+        CHECK (state IN {initiative_state_check}),
+    terminal_criteria_json TEXT    NOT NULL,
+    plan_artifact_sha256   TEXT    NOT NULL,
+    created_at             INTEGER NOT NULL,
+    approved_at            INTEGER,
+    completed_at           INTEGER,
+    plan_bundle_sha256     BLOB
+        REFERENCES {plan_bundles}(bundle_sha256),
+    git_apply_pending      INTEGER NOT NULL DEFAULT 0,
+    orchestrator_no_progress_respawn_count INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT INTO {tmp} (
+    initiative_id,
+    state,
+    terminal_criteria_json,
+    plan_artifact_sha256,
+    created_at,
+    approved_at,
+    completed_at,
+    plan_bundle_sha256,
+    git_apply_pending,
+    orchestrator_no_progress_respawn_count
+)
+SELECT
+    initiative_id,
+    state,
+    terminal_criteria_json,
+    plan_artifact_sha256,
+    created_at,
+    approved_at,
+    completed_at,
+    plan_bundle_sha256,
+    git_apply_pending,
+    orchestrator_no_progress_respawn_count
+FROM {initiatives};
+
+DROP TABLE {initiatives};
+ALTER TABLE {tmp} RENAME TO {initiatives};
+
+CREATE INDEX IF NOT EXISTS idx_initiatives_pending_git
+    ON {initiatives} (initiative_id)
+    WHERE git_apply_pending = 1;
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (31, strftime('%s', 'now'));
+
+COMMIT;
+PRAGMA foreign_keys=ON;
+"
+    )
+}
+
+/// The complete migration-32 DDL.
+pub fn render_migration_32_ddl() -> String {
+    let queue = Table::IntegrationMergeQueue.as_str();
+    let initiatives = Table::Initiatives.as_str();
+    let tasks = Table::Tasks.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- repo/ref IntegrationMerge closeout queue -- serializes only the final
+-- managed-repository target-ref advancement for one (repository_id,
+-- target_ref). Executor/reviewer work remains parallel; this table records
+-- the deterministic closeout order and recoverable conflict diagnostics.
+CREATE TABLE IF NOT EXISTS {queue} (
+    queue_id                TEXT    NOT NULL PRIMARY KEY,
+    initiative_id           TEXT    NOT NULL
+        REFERENCES {initiatives}(initiative_id)
+        ON DELETE CASCADE,
+    task_id                 TEXT    NOT NULL
+        REFERENCES {tasks}(task_id)
+        ON DELETE CASCADE,
+    orchestrator_session_id TEXT,
+    repository_id           TEXT    NOT NULL,
+    target_ref              TEXT    NOT NULL,
+    requested_commit_sha    TEXT    NOT NULL,
+    base_sha                TEXT,
+    worktree_root           TEXT    NOT NULL,
+    state                   TEXT    NOT NULL
+        CHECK (state IN (
+            'Queued',
+            'Running',
+            'Completed',
+            'RecoveryRequired',
+            'Failed',
+            'Cancelled'
+        )),
+    enqueued_at             INTEGER NOT NULL,
+    started_at              INTEGER,
+    finished_at             INTEGER,
+    applied_commit_sha      TEXT,
+    previous_sha            TEXT,
+    failure_category        TEXT,
+    failure_reason          TEXT,
+    operator_hint           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_merge_queue_active
+    ON {queue} (repository_id, target_ref, state, enqueued_at);
+
+CREATE INDEX IF NOT EXISTS idx_integration_merge_queue_initiative
+    ON {queue} (initiative_id, enqueued_at);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (32, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3352,7 +3508,7 @@ mod tests {
         assert_eq!(
             check_in_clause(&InitiativeState::ALL, InitiativeState::as_sql_str),
             "('Draft', 'ApprovedPlan', 'Executing', 'Blocked', \
-              'Completed', 'Failed', 'Aborted')"
+              'RecoveryRequired', 'Completed', 'Failed', 'Aborted')"
                 .replace("              ", ""),
         );
         // tasks.state — kernel-store.md §2.5.1 Table 5.
@@ -3465,6 +3621,11 @@ mod tests {
             //                so an Open circuit mid-cooldown does not
             //                silently reset to Closed on reboot.
             Table::ProviderCircuitState,
+            // Migration 29 — v2: adopted managed repositories.
+            //                Explicit repo roots only; dashboard/git
+            //                discovery must not treat arbitrary parent
+            //                Git checkouts as RAXIS-managed repos.
+            Table::ManagedRepositories,
             // Migration 16 — v2: initiatives.git_apply_pending column +
             //                idx_initiatives_pending_git partial index
             //                (integration-merge.md §11.1). The column
@@ -3904,7 +4065,11 @@ mod tests {
     ///     redundancy with the implicit `UNIQUE (session_id,
     ///     capability_class)` autoindex. Comment-only — no schema
     ///     change in `sqlite_master`. Old hash 0xe3ec_727b_574e_cb66.
-    const MIGRATION_1_DDL_PINNED_HASH: u64 = 0xfeb2_8c71_a42f_649f;
+    ///   - 2026-06: `InitiativeState::RecoveryRequired` added. Existing
+    ///     databases receive the CHECK-constraint rebuild in migration 31;
+    ///     fresh databases render the expanded enum in migration 1.
+    ///     Old hash 0xfeb2_8c71_a42f_649f.
+    const MIGRATION_1_DDL_PINNED_HASH: u64 = 0x228d_0b82_fab0_c47c;
 
     /// Variant counts of every enum the DDL renders are pinned. A
     /// future PR that adds a new `TaskState` variant (etc.) MUST
@@ -3917,8 +4082,8 @@ mod tests {
     fn enum_variant_counts_are_pinned_to_v1() {
         assert_eq!(
             InitiativeState::ALL.len(),
-            7,
-            "InitiativeState v1 has 7 variants; bumping this requires migration_2"
+            8,
+            "InitiativeState has 8 variants; bumping this requires a new CHECK-constraint migration after migration_31"
         );
         assert_eq!(
             TaskState::ALL.len(),
@@ -6991,5 +7156,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(exists, 1);
+    }
+
+    /// Migration 32 adds the durable repo/ref IntegrationMerge closeout queue.
+    #[test]
+    fn migration_32_adds_integration_merge_queue_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let exists = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+                [Table::IntegrationMergeQueue.as_str()],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "integration_merge_queue table must exist");
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "PRAGMA table_info({})",
+                Table::IntegrationMergeQueue.as_str()
+            ))
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for expected in [
+            "queue_id",
+            "initiative_id",
+            "task_id",
+            "repository_id",
+            "target_ref",
+            "requested_commit_sha",
+            "state",
+            "failure_category",
+            "failure_reason",
+            "operator_hint",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "{expected} column missing from integration_merge_queue"
+            );
+        }
     }
 }

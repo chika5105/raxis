@@ -1,3 +1,13 @@
+-- ┌──────────────────────────────────────────────────────────────────────┐
+-- │ Auto-generated from raxis_store::migration::render_migration_N_ddl. │
+-- │ DO NOT EDIT BY HAND.                                                │
+-- │                                                                     │
+-- │ Source of truth: crates/store/src/migration.rs                      │
+-- │ Regenerate:      RAXIS_DUMP_MIGRATION_SQL=1 cargo test               │
+-- │                  -p raxis-store --test migration_sql_dumps           │
+-- │ Drift detector:  cargo test -p raxis-store --test migration_sql_dumps│
+-- └──────────────────────────────────────────────────────────────────────┘
+
 BEGIN EXCLUSIVE;
 
 -- adopted repository lifecycle -- persistent metadata for repositories

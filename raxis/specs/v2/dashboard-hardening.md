@@ -1749,14 +1749,14 @@ machinery.
 
 | Cause kind | Recoverable via approve | Approve semantics | Re-failure semantics |
 |---|---|---|---|
-| `OrchestratorRespawnCeilingExceeded` | Yes | Reset NNSP counter; flip `Failed → Executing`; next decision-cycle re-spawns the orchestrator. | If respawn re-trips the ceiling, a fresh escalation lands with a NEW idempotency key (the attempt counter advanced). Operator can Deny to settle the FSM. |
-| `MergeFastForwardFailed` | Yes | Flip `Failed → Executing`; orchestrator's next decision-cycle re-attempts the merge. | If FF still refused, fresh anchor lands with a different `cause_seq` (the integration ref's `target_ref` may have advanced) — operator should Deny + manually rebase. |
-| `PushFailed` | Yes | Flip `Failed → Executing`; next merge attempt re-attempts the push. | If push still failing, fresh anchor lands with the new push attempt's reason text in `cause_seq`. |
-| `SessionVmFailedFinal` | Yes (transient host pressure) | Flip `Failed → Executing`; next session-spawn cycle re-attempts. | If still permanent, fresh anchor with `total_attempts` advanced. |
-| `PlanRejected` | **No** | Flip `Failed → Executing` is a structural no-op (the rejected plan needs to be re-submitted; approve does not re-run admission). Operator should Deny + open a fresh plan. The chain anchor's `recoverable_via_approve = false` field surfaces this in the inbox. | N/A. |
-| `EscalationTimedOut` | Yes | Flip `Failed → Executing`; the original blocked work resumes. | If the underlying condition that drove the original escalation is still present, it re-trips immediately. |
+| `OrchestratorRespawnCeilingExceeded` | Yes | Reset NNSP counter; flip `RecoveryRequired → Executing`; next decision-cycle re-spawns the orchestrator. | If respawn re-trips the ceiling, a fresh escalation lands with a NEW idempotency key (the attempt counter advanced). Operator can Deny to settle the FSM as `Failed`. |
+| `MergeFastForwardFailed` | Yes | Flip `RecoveryRequired → Executing`; orchestrator's next decision-cycle re-attempts the merge. | If FF still refused, fresh anchor lands with a different `cause_seq` (the integration ref's `target_ref` may have advanced) — operator should Deny + manually rebase. |
+| `PushFailed` | Yes | Flip `RecoveryRequired → Executing`; next merge attempt re-attempts the push. | If push still failing, fresh anchor lands with the new push attempt's reason text in `cause_seq`. |
+| `SessionVmFailedFinal` | Yes (transient host pressure) | Flip `RecoveryRequired → Executing`; next session-spawn cycle re-attempts. | If still permanent, fresh anchor with `total_attempts` advanced. |
+| `PlanRejected` | **No** | Closes as terminal `Failed`; approval is not applicable because the rejected plan needs to be re-submitted. Operator should open a fresh plan or forensic fork. The chain anchor's `recoverable_via_approve = false` field surfaces this in the inbox. | N/A. |
+| `EscalationTimedOut` | Yes | Flip `RecoveryRequired → Executing`; the original blocked work resumes. | If the underlying condition that drove the original escalation is still present, it re-trips immediately. |
 | `EscalationRateLimitExceeded` | **No** | Approve is structural no-op (the storm pattern needs out-of-band investigation). Operator should Deny. | N/A. |
-| `SessionEgressStallDetected` | Yes | Flip `Failed → Executing`; orchestrator's next decision-cycle re-runs the egress-blocked session. | If egress still stalled, fresh anchor with the stalled session_id in `cause_seq`. |
+| `SessionEgressStallDetected` | Yes | Flip `RecoveryRequired → Executing`; orchestrator's next decision-cycle re-runs the egress-blocked session. | If egress still stalled, fresh anchor with the stalled session_id in `cause_seq`. |
 
 `ReviewRejectionCeilingExceeded` is deliberately **not** part of
 the approve-to-resume table. It means a Reviewer supplied a

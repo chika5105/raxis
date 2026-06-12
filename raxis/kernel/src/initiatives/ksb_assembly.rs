@@ -1179,9 +1179,12 @@ fn assemble_capabilities(
             let artifact_task_id =
                 read_reviewer_artifact_task_id(conn, inputs.initiative_id, reviewer_task_id)?
                     .unwrap_or_else(|| reviewer_task_id.to_owned());
+            let artifact_evaluation_sha =
+                read_evaluation_sha(conn, &artifact_task_id)?.unwrap_or_default();
             Ok(Capabilities::Reviewer(ReviewerCapabilities {
                 session,
                 artifact_task_id,
+                artifact_evaluation_sha,
             }))
         }
     }

@@ -26,7 +26,7 @@ import {
 } from "@/lib/notification-cache";
 import {
   applyPriorityFilter,
-  compareByPriorityThenTimeDesc,
+  compareByTimeDescThenPriority,
   PRIORITY_FILTER_VALUES,
   type PriorityFilter,
   priorityAriaLabel,
@@ -185,7 +185,7 @@ export function NotificationsPage() {
   const items = useMemo(() => list.data ?? [], [list.data]);
   const visibleItems = useMemo(() => {
     const filtered = applyPriorityFilter(items, priorityFilter, snoozeLowPriority);
-    return [...filtered].sort(compareByPriorityThenTimeDesc);
+    return [...filtered].sort(compareByTimeDescThenPriority);
   }, [items, priorityFilter, snoozeLowPriority]);
 
   if (list.isPending) return <PageSpinner />;
@@ -384,7 +384,7 @@ export function NotificationsPage() {
                   n.read ? "opacity-70" : ""
                 }`}
               >
-                <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex min-w-0 items-start gap-2 flex-wrap">
                   {/* Priority icon — Critical = red "!", High =
                       amber triangle, Medium = blue dot, Low =
                       gray dot, unclassified = hollow gray dot.
@@ -413,7 +413,8 @@ export function NotificationsPage() {
                     <Link
                       to={`/initiatives/${n.initiative_id}`}
                       onClick={(e) => e.stopPropagation()}
-                      className="text-sm text-accent hover:underline font-mono"
+                      title={n.initiative_id}
+                      className="min-w-0 max-w-full break-all font-mono text-sm text-accent [overflow-wrap:anywhere] hover:underline"
                     >
                       {n.initiative_id}
                     </Link>
@@ -422,12 +423,13 @@ export function NotificationsPage() {
                     <Link
                       to={`/tasks/${n.task_id}`}
                       onClick={(e) => e.stopPropagation()}
-                      className="text-xs text-ink-muted hover:text-accent font-mono"
+                      title={n.task_id}
+                      className="min-w-0 max-w-full break-all font-mono text-xs text-ink-muted [overflow-wrap:anywhere] hover:text-accent"
                     >
                       · {n.task_id}
                     </Link>
                   )}
-                  <span className="ml-auto flex items-center gap-3 text-xs text-ink-subtle">
+                  <span className="ml-auto flex shrink-0 items-center gap-3 text-xs text-ink-subtle">
                     <span>{fmtRelative(n.created_at)}</span>
                     {!n.read && (
                       <button
@@ -443,7 +445,7 @@ export function NotificationsPage() {
                     )}
                   </span>
                 </div>
-                <p className="mt-1.5 text-sm text-ink">
+                <p className="mt-1.5 min-w-0 break-words text-sm text-ink [overflow-wrap:anywhere]">
                   {notificationDisplaySummary(
                     n.summary,
                     n.event_kind,
@@ -468,7 +470,7 @@ export function NotificationsPage() {
                     />
                   </div>
                 )}
-                <Mono className="text-[10px] text-ink-subtle">
+                <Mono className="break-all text-[10px] text-ink-subtle [overflow-wrap:anywhere]">
                   source event {n.source_event_id}
                 </Mono>
               </li>

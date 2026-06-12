@@ -9,7 +9,7 @@
 //! `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` requires that every
 //! emission of `OrchestratorRespawnCeilingExceeded` is preceded —
 //! in the SAME SQLite transaction as the
-//! `initiatives.state = 'Failed'` flip — by an INSERT into
+//! `initiatives.state = 'RecoveryRequired'` flip — by an INSERT into
 //! `escalations` with `class = 'LogicalDeadlock'`,
 //! `initiator = 'Kernel'`, `status = 'Pending'`. The companion
 //! invariant covers two operator-decision paths:
@@ -18,8 +18,8 @@
 //!     `initiatives.orchestrator_no_progress_respawn_count = 0`
 //!     AND `initiatives.state = 'Executing'` — all three under
 //!     one tx.
-//!   * **Deny** ⇒ `escalations.status = 'Denied'` only;
-//!     initiative stays `Failed`; counter NOT reset.
+//!   * **Deny** ⇒ `escalations.status = 'Denied'` AND
+//!     `initiatives.state = 'Failed'`; counter NOT reset.
 //!
 //! ## Why this lives in `kernel/tests/` rather than
 //!    `orch_respawn_ceiling::tests`
@@ -126,7 +126,7 @@ fn seed_initiative_with_anchor_task(
 /// sequence the kernel's `respawn_orchestrator_for_initiative`
 /// runs at Step 1b: INSERT escalations(class='LogicalDeadlock',
 /// initiator='Kernel', status='Pending') → UPDATE
-/// initiatives state='Failed' → COMMIT. Returns the inserted
+/// initiatives state='RecoveryRequired' → COMMIT. Returns the inserted
 /// `escalation_id`.
 fn drive_to_ceiling_and_insert_escalation(conn: &mut Connection, initiative_id: &str) -> String {
     let initiatives = Table::Initiatives.as_str();
@@ -205,7 +205,7 @@ fn drive_to_ceiling_and_insert_escalation(conn: &mut Connection, initiative_id: 
          Last orchestrator intent: RetrySubTask rejected as \
          RetrySubTaskRejectedNotRetryable. Operator approval required \
          to reset the respawn counter and retry, or deny to \
-         preserve the Failed terminal state."
+         close the initiative as Failed."
         .to_string();
 
     tx.execute(
@@ -235,12 +235,12 @@ fn drive_to_ceiling_and_insert_escalation(conn: &mut Connection, initiative_id: 
 
     tx.execute(
         &format!(
-            "UPDATE {initiatives} SET state = 'Failed', completed_at = ?1
+            "UPDATE {initiatives} SET state = 'RecoveryRequired', completed_at = NULL
               WHERE initiative_id = ?2"
         ),
         params![now, initiative_id],
     )
-    .expect("flip Failed");
+    .expect("flip RecoveryRequired");
     tx.commit().expect("commit insert + flip");
 
     escalation_id
@@ -251,7 +251,7 @@ fn drive_to_ceiling_and_insert_escalation(conn: &mut Connection, initiative_id: 
 // ---------------------------------------------------------------------------
 
 /// Ceiling exceedance MUST insert a `LogicalDeadlock` row with the
-/// kernel-initiated marker AND flip the initiative to `Failed` in
+/// kernel-initiated marker AND flip the initiative to `RecoveryRequired` in
 /// the same transaction (`INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01`
 /// paired-write order).
 #[test]
@@ -310,7 +310,7 @@ fn ceiling_exceedance_inserts_pending_logical_deadlock_kernel_escalation() {
         "operator-facing justification carries failure context: {justification}",
     );
 
-    // Initiative is Failed.
+    // Initiative is waiting for signed recovery approval.
     let initiatives = Table::Initiatives.as_str();
     let init_state: String = conn
         .query_row(
@@ -319,7 +319,7 @@ fn ceiling_exceedance_inserts_pending_logical_deadlock_kernel_escalation() {
             |r| r.get(0),
         )
         .expect("initiative row present");
-    assert_eq!(init_state, "Failed");
+    assert_eq!(init_state, "RecoveryRequired");
 
     // Escalation IDs round-trip as UUIDs.
     assert_eq!(escalation_id.len(), 36, "escalation_id is a UUIDv4 string");
@@ -393,7 +393,7 @@ fn operator_approve_resets_counter_and_resumes_initiative() {
         &format!(
             "UPDATE {initiatives}
                 SET state = 'Executing', completed_at = NULL
-              WHERE initiative_id = ?1 AND state = 'Failed'"
+              WHERE initiative_id = ?1 AND state = 'RecoveryRequired'"
         ),
         params![initiative_id],
     )
@@ -441,11 +441,12 @@ fn operator_approve_resets_counter_and_resumes_initiative() {
     assert!(resolved_at.is_some(), "resolved_at stamped on approve");
 }
 
-/// Operator deny preserves `Failed` + does NOT reset the counter.
+/// Operator deny closes `RecoveryRequired` as terminal `Failed` and
+/// does NOT reset the counter.
 /// The escalations row flips to `Denied` and the operator's
 /// reason note (if present) lands in `resolution_notes`.
 #[test]
-fn operator_deny_preserves_failed_state_and_records_reason() {
+fn operator_deny_closes_recovery_required_and_records_reason() {
     let (_tmp, mut conn) = fresh_disk_conn();
     let initiative_id = "init-led-3";
     seed_initiative_with_anchor_task(
@@ -458,7 +459,7 @@ fn operator_deny_preserves_failed_state_and_records_reason() {
 
     let escalation_id = drive_to_ceiling_and_insert_escalation(&mut conn, initiative_id);
 
-    // Drive deny: status flip with reason; nothing else mutates.
+    // Drive deny: status flip with reason + RecoveryRequired -> Failed.
     let now = raxis_types::unix_now_secs();
     let escalations = Table::Escalations.as_str();
     let initiatives = Table::Initiatives.as_str();
@@ -475,6 +476,15 @@ fn operator_deny_preserves_failed_state_and_records_reason() {
         params![now, "upstream cause unfixable", escalation_id],
     )
     .expect("flip Denied");
+    conn.execute(
+        &format!(
+            "UPDATE {initiatives}
+                SET state = 'Failed', completed_at = ?1
+              WHERE initiative_id = ?2 AND state = 'RecoveryRequired'"
+        ),
+        params![now, initiative_id],
+    )
+    .expect("close initiative as Failed");
 
     // Counter unchanged.
     let post_count: i64 = conn
@@ -492,7 +502,7 @@ fn operator_deny_preserves_failed_state_and_records_reason() {
         "operator deny does NOT reset the counter; got {post_count}",
     );
 
-    // Initiative remains Failed.
+    // Initiative is now closed Failed.
     let post_state: String = conn
         .query_row(
             &format!("SELECT state FROM {initiatives} WHERE initiative_id = ?1"),

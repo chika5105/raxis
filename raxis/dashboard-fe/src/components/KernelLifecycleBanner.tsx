@@ -167,6 +167,11 @@ export function KernelLifecycleBannerView({
           )}
         </div>
       </div>
+      {(snapshot.host_restart_recovery?.tasks.length ?? 0) > 0 && (
+        <HostRestartRecoveryDetail
+          summary={snapshot.host_restart_recovery!}
+        />
+      )}
       {showRecovery && <RecoveryCommands tone={tone} />}
     </div>
   );
@@ -230,6 +235,101 @@ function AutoResumeDetail({
         </>
       )}
     </span>
+  );
+}
+
+function HostRestartRecoveryDetail({
+  summary,
+}: {
+  summary: NonNullable<KernelLifecycleResponse["host_restart_recovery"]>;
+}) {
+  const tasks = summary.tasks.slice(0, 6);
+  const remaining = summary.tasks.length - tasks.length;
+  return (
+    <div
+      data-testid="kernel-lifecycle-host-recovery"
+      className="mt-2 rounded border border-amber-700/20 bg-panel/70 p-2 text-amber-950 dark:border-amber-500/20 dark:bg-black/10 dark:text-amber-100"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-ink-subtle">
+            Operator resume required
+          </div>
+          <p className="mt-1 max-w-[90ch] text-xs text-ink-muted">
+            The kernel restarted after host shutdown and preserved interrupted
+            work in{" "}
+            <span className="font-mono">BlockedRecoveryPending</span>. Review
+            each task, then run the signed CLI resume command from a shell with
+            <span className="font-mono"> RAXIS_OPERATOR_KEY</span> set.
+          </p>
+        </div>
+        <span className="shrink-0 rounded border border-amber-700/25 px-2 py-1 font-mono text-[11px]">
+          {summary.tasks.length} task{summary.tasks.length === 1 ? "" : "s"}
+        </span>
+      </div>
+      <div className="mt-2 grid gap-2">
+        {tasks.map((task) => {
+          const title = task.task_name || task.task_id;
+          const initiative = task.initiative_display_name || task.initiative_id;
+          return (
+            <div
+              key={task.task_id}
+              className="grid gap-2 rounded border border-edge bg-panel px-2 py-2 md:grid-cols-[minmax(0,1fr)_auto]"
+            >
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded border border-edge px-1.5 py-0.5 text-[11px] font-semibold">
+                    {task.agent_type}
+                  </span>
+                  <span className="min-w-0 break-words font-medium">
+                    {title}
+                  </span>
+                </div>
+                <div className="mt-1 grid gap-1 text-[11px] text-ink-subtle">
+                  <div className="min-w-0 break-words">
+                    Initiative:{" "}
+                    <span className="font-medium text-ink-muted">
+                      {initiative}
+                    </span>
+                  </div>
+                  <div className="min-w-0 break-all font-mono">
+                    task_id={task.task_id}
+                  </div>
+                  {task.block_reason && (
+                    <div className="min-w-0 break-words">
+                      Reason:{" "}
+                      <span className="text-ink-muted">
+                        {task.block_reason}
+                      </span>
+                    </div>
+                  )}
+                  {task.updated_at > 0 && (
+                    <div>Blocked {fmtAbsolute(task.updated_at)}</div>
+                  )}
+                </div>
+              </div>
+              <div className="flex min-w-0 items-center gap-1 self-start rounded border border-edge bg-canvas px-2 py-1">
+                <code className="min-w-0 max-w-full break-all font-mono text-[11px] text-ink-muted md:max-w-[44ch]">
+                  {task.resume_command}
+                </code>
+                <CopyButton
+                  value={task.resume_command}
+                  label={`Copy resume command for ${title}`}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {remaining > 0 && (
+        <div className="mt-2 text-[11px] text-ink-subtle">
+          + {remaining} more interrupted task{remaining === 1 ? "" : "s"}.
+          Open the Tasks view or run{" "}
+          <span className="font-mono">raxis queue --blocked-only</span> for the
+          full list.
+        </div>
+      )}
+    </div>
   );
 }
 

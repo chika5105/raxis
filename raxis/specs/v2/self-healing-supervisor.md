@@ -348,6 +348,50 @@ is forensic loss only.
   both routing surfaces, and the policy
   `KNOWN_AUDIT_EVENT_KINDS` lockstep entry.
 
+### §3.6 Clean host-restart recovery surface
+
+Supervisor-triggered incident restarts and clean host restarts are
+intentionally different.
+
+* A supervisor-triggered incident restart is classified by the
+  supervisor sentinel as kernel pathology. The kernel may
+  auto-resume freshly swept `BlockedRecoveryPending` tasks per
+  §3.5.
+* A clean shutdown, laptop reboot, user logout, or service stop is
+  host/operator intent. On the next boot the kernel still performs
+  the normal recovery sweep, but it MUST NOT silently continue
+  interrupted tasks unless a future explicit policy opts into that
+  behaviour.
+
+The dashboard therefore exposes a first-class **Recovery after host
+restart** panel on `GET /api/health/kernel-lifecycle` whenever the
+durable store contains `BlockedRecoveryPending` tasks after boot
+and the recent auto-resume file is absent or inapplicable.
+
+The panel is an operator checklist:
+
+* task id and task name,
+* initiative id and initiative display name,
+* agent type,
+* kernel-recorded `block_reason`,
+* the timestamp the task entered recovery,
+* a copyable `raxis task resume '<task_id>'` command.
+
+It MUST NOT hide behind the generic diagnostics page, because the
+operator's first question after reboot is "what did RAXIS preserve
+and what do I need to resume?" It MUST NOT perform a browser-only
+one-click resume, because the browser session does not hold the
+operator's private signing key. A future local-signer bridge may
+turn the command into a button, but the action must still route
+through the same signed operator authority path as the CLI.
+
+This preserves the safety distinction:
+
+```text
+incident restart  -> auto-resume eligible, audited as kernel recovery
+clean host restart -> operator disposition required, CLI resume audited as operator action
+```
+
 ---
 
 ## §4 — Tier 2 (external supervisor binary, OPT-IN)

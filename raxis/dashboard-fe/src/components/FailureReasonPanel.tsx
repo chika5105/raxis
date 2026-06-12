@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import { useMemo, useState } from "react";
 
-import type { FailureInfo } from "@/types/api";
+import type { DiagnosticAction, FailureInfo, FailureRecovery } from "@/types/api";
 import { CopyButton } from "@/components/CopyButton";
 
 interface FailureReasonPanelProps {
@@ -155,6 +155,8 @@ export function FailureReasonPanel({
   const showDetails = !collapsible || open;
   const fields = reason.fields ?? [];
   const artifacts = reason.artifacts ?? [];
+  const actions = reason.actions ?? [];
+  const recovery = deriveRecovery(reason, actions);
   const hasDetails = fields.length > 0 || artifacts.length > 0;
   const eventAnchor = reason.event_id ?? null;
   const seqAnchor = reason.seq ?? null;
@@ -185,6 +187,9 @@ export function FailureReasonPanel({
             >
               {reason.kind || "UnknownFailure"}
             </p>
+            {recovery && (
+              <RecoveryStatusBadge recovery={recovery} className="mt-1" />
+            )}
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
@@ -209,6 +214,10 @@ export function FailureReasonPanel({
       >
         {reason.message?.trim() ? reason.message : "(no message)"}
       </p>
+
+      {(recovery || actions.length > 0) && (
+        <RecoveryActions recovery={recovery} actions={actions} />
+      )}
 
       {showDetails && hasDetails && (
         <div id="failure-details" className="space-y-2">
@@ -263,6 +272,120 @@ export function FailureReasonPanel({
         </footer>
       )}
     </section>
+  );
+}
+
+function RecoveryActions({
+  recovery,
+  actions,
+}: {
+  recovery: FailureRecovery | null;
+  actions: DiagnosticAction[];
+}) {
+  return (
+    <div
+      className={clsx(
+        "rounded border p-2",
+        recoverySurfaceClass(recovery?.status),
+      )}
+      data-testid="failure-recovery-actions"
+    >
+      <div className="mb-1 flex flex-wrap items-center gap-2">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">
+          Recovery status
+        </p>
+        {recovery && <RecoveryStatusBadge recovery={recovery} />}
+      </div>
+      {recovery && (
+        <div className="mb-2 space-y-0.5 text-[12.5px]">
+          <p className="font-medium text-ink">{recovery.label}</p>
+          <p className="text-ink-muted">{recovery.detail}</p>
+        </div>
+      )}
+      <div className="space-y-2">
+        {actions.length > 0 ? (
+          actions.map((action, index) => (
+            <RecoveryAction
+              key={`${action.kind}-${action.target}-${index}`}
+              action={action}
+            />
+          ))
+        ) : (
+          <p className="text-[12px] text-ink-muted">
+            No in-place recovery command is available for this failure.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RecoveryStatusBadge({
+  recovery,
+  className,
+}: {
+  recovery: FailureRecovery;
+  className?: string;
+}) {
+  return (
+    <span
+      className={clsx(
+        "inline-flex w-fit items-center rounded border px-2 py-0.5 text-[11px] font-semibold",
+        recoveryBadgeClass(recovery.status),
+        className,
+      )}
+      data-testid="failure-recovery-status"
+      data-recovery-status={recovery.status}
+      title={recovery.detail}
+    >
+      {recoveryLabel(recovery.status)}
+    </span>
+  );
+}
+
+function RecoveryAction({ action }: { action: DiagnosticAction }) {
+  if (action.kind === "command") {
+    return (
+      <div className="grid min-w-0 gap-1 sm:grid-cols-[8rem_minmax(0,1fr)_auto] sm:items-start">
+        <span className="text-[11px] font-medium text-ink-muted">
+          {action.label}
+        </span>
+        <code className="min-w-0 whitespace-pre-wrap break-all rounded border border-edge bg-panel px-2 py-1.5 font-mono text-[11px] leading-relaxed text-ink [overflow-wrap:anywhere]">
+          {action.target}
+        </code>
+        <CopyButton
+          value={action.target}
+          label={`Copy ${action.label.toLowerCase()} command`}
+        />
+      </div>
+    );
+  }
+
+  const isExternal =
+    action.kind === "external" || /^(https?:|mailto:)/i.test(action.target);
+  const isRoute = action.kind === "route" || action.target.startsWith("/");
+
+  if (isExternal || isRoute) {
+    return (
+      <a
+        href={action.target}
+        className="inline-flex max-w-full items-center gap-1 rounded border border-edge bg-panel px-2 py-1 text-[12px] font-medium text-accent hover:bg-panel-high hover:underline"
+        rel={isExternal ? "noopener noreferrer" : undefined}
+        target={isExternal ? "_blank" : undefined}
+      >
+        <span className="min-w-0 truncate">{action.label}</span>
+        <span aria-hidden="true">→</span>
+      </a>
+    );
+  }
+
+  return (
+    <div className="min-w-0 text-[12px] text-ink-muted">
+      <span className="font-medium text-ink">{action.label}: </span>
+      <code className="font-mono break-all [overflow-wrap:anywhere]">
+        {action.target}
+      </code>
+    </div>
   );
 }
 
@@ -330,13 +453,22 @@ function ArtifactLink({ label, href }: { label: string; href: string }) {
 function buildCopyBlob(reason: FailureInfo | null | undefined): string {
   if (!reason) return "";
   const lines: string[] = [];
+  const recovery = deriveRecovery(reason, reason.actions ?? []);
   lines.push(`kind: ${reason.kind}`);
   if (reason.message) lines.push(`message: ${reason.message}`);
+  if (recovery) {
+    lines.push(`recovery_status: ${recovery.status}`);
+    lines.push(`recovery_label: ${recovery.label}`);
+    lines.push(`recovery_detail: ${recovery.detail}`);
+  }
   for (const f of reason.fields ?? []) {
     lines.push(`${f.label}: ${f.value}`);
   }
   for (const a of reason.artifacts ?? []) {
     lines.push(`${a.label}: ${a.href}`);
+  }
+  for (const action of reason.actions ?? []) {
+    lines.push(`${action.label} (${action.kind}): ${action.target}`);
   }
   if (reason.event_id) lines.push(`event_id: ${reason.event_id}`);
   if (reason.seq !== undefined && reason.seq !== null)
@@ -344,6 +476,99 @@ function buildCopyBlob(reason: FailureInfo | null | undefined): string {
   if (reason.observed_at && reason.observed_at > 0)
     lines.push(`observed_at: ${formatTimestamp(reason.observed_at)}`);
   return lines.join("\n");
+}
+
+function deriveRecovery(
+  reason: FailureInfo,
+  actions: DiagnosticAction[],
+): FailureRecovery | null {
+  if (reason.recovery) return reason.recovery;
+
+  if (
+    actions.some(
+      (a) => a.kind === "command" && /resume task/i.test(a.label),
+    )
+  ) {
+    return {
+      status: "recoverable",
+      label: "Task can be resumed",
+      detail:
+        "Review the failure, then run the resume command. The kernel re-checks authority before admitting the retry.",
+    };
+  }
+
+  if (
+    actions.some(
+      (a) =>
+        /approve recovery/i.test(a.label) ||
+        /open recovery escalations/i.test(a.label),
+    )
+  ) {
+    return {
+      status: "operator_action_required",
+      label: "Operator action required",
+      detail:
+        "Open the recovery escalation, review the cause, then approve or deny the signed recovery disposition.",
+    };
+  }
+
+  if (actions.length > 0) {
+    return {
+      status: "diagnosis_only",
+      label: "Diagnosis available",
+      detail:
+        "Use the linked dashboard surfaces to inspect the cause. No direct resume command was attached.",
+    };
+  }
+
+  return null;
+}
+
+function recoveryLabel(status: string): string {
+  switch (status) {
+    case "recoverable":
+      return "Recoverable";
+    case "operator_action_required":
+      return "Operator action required";
+    case "unrecoverable":
+      return "Unrecoverable in place";
+    case "diagnosis_only":
+      return "Diagnosis only";
+    default:
+      return status
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, (ch) => ch.toUpperCase());
+  }
+}
+
+function recoveryBadgeClass(status: string): string {
+  switch (status) {
+    case "recoverable":
+      return "border-good/40 bg-good/10 text-good";
+    case "operator_action_required":
+      return "border-warn/40 bg-warn/10 text-warn";
+    case "unrecoverable":
+      return "border-bad/50 bg-bad/10 text-bad";
+    case "diagnosis_only":
+      return "border-accent/35 bg-accent/10 text-accent";
+    default:
+      return "border-edge bg-panel-raised text-ink-muted";
+  }
+}
+
+function recoverySurfaceClass(status: string | undefined): string {
+  switch (status) {
+    case "recoverable":
+      return "border-good/30 bg-good/5";
+    case "operator_action_required":
+      return "border-warn/30 bg-warn/5";
+    case "unrecoverable":
+      return "border-bad/35 bg-bad/5";
+    case "diagnosis_only":
+      return "border-accent/25 bg-accent/5";
+    default:
+      return "border-warn/30 bg-warn/5";
+  }
 }
 
 function formatTimestamp(unixSeconds: number): string {

@@ -98,6 +98,33 @@ describe("bannerTone (INV-DASHBOARD-KERNEL-LIFECYCLE-01)", () => {
       ),
     ).toBe("warn");
   });
+
+  it("paints amber when clean host restart recovery needs operator disposition", () => {
+    expect(
+      bannerTone(
+        snap({
+          status: "Healthy",
+          supervisor_pid: 12345,
+          host_restart_recovery: {
+            generated_at: 1_700_000_000,
+            tasks: [
+              {
+                task_id: "019eboot-recovery-task",
+                task_name: "interpret-metrics",
+                initiative_id: "019eboot-initiative",
+                initiative_display_name: "Rebooted initiative",
+                agent_type: "Executor",
+                state: "BlockedRecoveryPending",
+                block_reason: "kernel boot recovery after host restart",
+                updated_at: 1_700_000_000,
+                resume_command: "raxis task resume '019eboot-recovery-task'",
+              },
+            ],
+          },
+        }),
+      ),
+    ).toBe("warn");
+  });
 });
 
 describe("headlineFor (spec wording)", () => {
@@ -121,6 +148,33 @@ describe("headlineFor (spec wording)", () => {
     expect(headlineFor(snap({ status: "Restarting" }))).toBe(
       "Kernel restarting",
     );
+  });
+
+  it("uses host-restart recovery headline when healthy but tasks remain paused", () => {
+    expect(
+      headlineFor(
+        snap({
+          status: "Healthy",
+          supervisor_pid: 12345,
+          host_restart_recovery: {
+            generated_at: 1_700_000_000,
+            tasks: [
+              {
+                task_id: "019eboot-recovery-task",
+                task_name: "interpret-metrics",
+                initiative_id: "019eboot-initiative",
+                initiative_display_name: "Rebooted initiative",
+                agent_type: "Executor",
+                state: "BlockedRecoveryPending",
+                block_reason: "kernel boot recovery after host restart",
+                updated_at: 1_700_000_000,
+                resume_command: "raxis task resume '019eboot-recovery-task'",
+              },
+            ],
+          },
+        }),
+      ),
+    ).toBe("Recovery after host restart");
   });
 });
 
@@ -248,6 +302,42 @@ describe("<KernelLifecycleBannerView>", () => {
     expect(
       screen.queryByTestId("kernel-lifecycle-stale"),
     ).not.toBeInTheDocument();
+  });
+
+  it("renders host-restart recovery tasks with copyable resume command", () => {
+    render(
+      <KernelLifecycleBannerView
+        snapshot={snap({
+          status: "Healthy",
+          supervisor_pid: 12345,
+          host_restart_recovery: {
+            generated_at: 1_700_000_000,
+            tasks: [
+              {
+                task_id: "019eboot-recovery-task",
+                task_name: "interpret-metrics",
+                initiative_id: "019eboot-initiative",
+                initiative_display_name: "Rebooted initiative",
+                agent_type: "Executor",
+                state: "BlockedRecoveryPending",
+                block_reason: "kernel boot recovery after host restart",
+                updated_at: 1_700_000_000,
+                resume_command: "raxis task resume '019eboot-recovery-task'",
+              },
+            ],
+          },
+        })}
+      />,
+    );
+    const banner = screen.getByTestId("kernel-lifecycle-banner");
+    expect(banner).toHaveTextContent("Recovery after host restart");
+    const detail = screen.getByTestId("kernel-lifecycle-host-recovery");
+    expect(detail).toHaveTextContent("Operator resume required");
+    expect(detail).toHaveTextContent("interpret-metrics");
+    expect(detail).toHaveTextContent("Rebooted initiative");
+    expect(detail).toHaveTextContent(
+      "raxis task resume '019eboot-recovery-task'",
+    );
   });
 });
 

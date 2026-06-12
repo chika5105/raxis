@@ -101,6 +101,8 @@ function renderTask() {
       cache_read_tokens: 0,
       cache_creation_tokens: 0,
       token_cost_micros: 0,
+      token_cost_pricing_source: "unpriced",
+      token_cost_pricing_note: "No token cost has been recorded.",
       admission_reserved_units: 0,
       actual_cost_units: 0,
       declared_turn_budget: null,

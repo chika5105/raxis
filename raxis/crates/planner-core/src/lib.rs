@@ -159,8 +159,8 @@ pub use streaming::{
 };
 pub use tools::{
     build_executor_registry, build_orchestrator_registry, build_reviewer_registry, BashTool,
-    EditFileTool, GitCommitTool, GrepSearchTool, ReadFileTool, Tool, ToolContext, ToolError,
-    ToolOutput, ToolRegistry,
+    EditFileTool, GitCommitTool, GrepSearchTool, ListFilesTool, ReadFileTool, Tool, ToolContext,
+    ToolError, ToolOutput, ToolRegistry,
 };
 pub use tools_vm_capabilities::VmCapabilitiesTool;
 pub use transport::{

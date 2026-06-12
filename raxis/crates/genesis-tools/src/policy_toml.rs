@@ -418,11 +418,10 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
          # inference_timeout_ms  = 30000\n\
          # data_fetch_timeout_ms = 10000\n\
          # max_response_bytes    = 16777216\n\
-         # # pricing is REQUIRED for every\n\
-         # # model-bearing provider kind (Anthropic, OpenAI, Gemini,\n\
-         # # Bedrock, http_sidecar). Operators declare the inverse of\n\
-         # # the published per-million price (tokens per US dollar) so\n\
-         # # the kernel can compute cost via integer math.\n\
+         # # pricing is optional and overrides runtime/bundled estimates.\n\
+         # # Operators declare the inverse of the published or contracted\n\
+         # # per-million price (tokens per US dollar) so the kernel can\n\
+         # # compute cost via integer math.\n\
          # pricing.input_tokens_per_dollar  = 200000   # $5  / 1M input\n\
          # pricing.output_tokens_per_dollar = 50000    # $20 / 1M output\n\
          # # pricing.cache_read_tokens_per_dollar    = 2000000  # $0.50 / 1M cache hit\n\

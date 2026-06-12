@@ -71,4 +71,30 @@ describe("<OrchestratorGapWarningCard>", () => {
     );
     expect(screen.getByText(/stalled 45s/)).toBeInTheDocument();
   });
+
+  it("wraps long generated ids instead of letting them escape the card", () => {
+    const longTask =
+      "interpret_reddit_opportunities__20260609T162842Z_daily_reddit_engagement_plan_90207";
+    const longPred =
+      "discover_reddit_opportunities__20260609T162842Z_daily_reddit_engagement_plan_90207";
+    render(
+      <TestMemoryRouter>
+        <OrchestratorGapWarningCard
+          a={{
+            ...GAP,
+            activation_id: "a9fb8700-2c0e-46ff-a992-bfc5f6765b66",
+            task_id: longTask,
+            predecessors_completed_at: [[longPred, 1_700_000_000]],
+            wait_seconds: 63_000,
+          }}
+        />
+      </TestMemoryRouter>,
+    );
+
+    const card = screen.getByTestId("lifecycle-orchestrator-gap");
+    expect(card.className).toContain("overflow-hidden");
+    const taskLink = screen.getByRole("link", { name: longTask });
+    expect(taskLink.className).toContain("break-all");
+    expect(screen.getByText(longPred).className).toContain("break-all");
+  });
 });

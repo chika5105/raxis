@@ -347,6 +347,55 @@ pub struct OrchestratorGapsResponse {
     pub generated_at: i64,
 }
 
+/// `GET /api/health/kernel-lifecycle` companion projection for
+/// clean host-restart recovery. These are tasks the kernel swept
+/// into `BlockedRecoveryPending` during boot and deliberately did
+/// not auto-resume because there was no supervisor incident marker.
+///
+/// Product contract: this is an operator checklist, not a hidden
+/// mutation. The dashboard may show copyable signed CLI commands,
+/// but the browser must not learn the operator private key just to
+/// resume work after a laptop reboot.
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct HostRestartRecoverySummary {
+    /// Unix-seconds timestamp the projection was generated.
+    pub generated_at: i64,
+    /// Bounded list of interrupted tasks requiring operator
+    /// disposition.
+    pub tasks: Vec<HostRestartRecoveryTask>,
+}
+
+/// One resumable task row in [`HostRestartRecoverySummary`].
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HostRestartRecoveryTask {
+    /// Kernel-owned immutable task id.
+    pub task_id: String,
+    /// Operator-authored task name from `plan.toml`, when this is
+    /// a plan task rather than a synthetic kernel task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_name: Option<String>,
+    /// Owning initiative id.
+    pub initiative_id: String,
+    /// Operator-authored workspace/initiative display label, when
+    /// available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiative_display_name: Option<String>,
+    /// `Orchestrator` / `Executor` / `Reviewer`.
+    pub agent_type: String,
+    /// Current task FSM state; expected to be
+    /// `BlockedRecoveryPending`.
+    pub state: String,
+    /// Kernel-recorded block reason shown to the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_reason: Option<String>,
+    /// Unix-seconds timestamp of the transition into the blocked
+    /// recovery state.
+    pub updated_at: u64,
+    /// Copyable command that routes through the existing signed CLI
+    /// path. The browser does not hold the private operator key.
+    pub resume_command: String,
+}
+
 /// One row in `GET /api/gates/stats` — per-`gate_type` rollup of
 /// witness outcomes, with a fixup-loop counter so the dashboard
 /// can render the cumulative health of every operator-configured
@@ -678,6 +727,14 @@ pub struct RecentSessionEntry {
 ///     (`/audit#seq=42`), file-scheme paths
 ///     (`file:///var/raxis/sessions/.../kernel.stderr.log`), or
 ///     plain anchor text the FE renders as a non-link.
+///   * `actions` — suggested recovery / diagnosis steps. Actions
+///     are hints, not authority: the operator still performs the
+///     CLI/dashboard operation and the kernel re-checks roles,
+///     signatures, epochs, and policy.
+///   * `recovery` — the operator-facing disposition. This is
+///     separate from `actions` so unrecoverable failures can be
+///     labelled clearly even when there is intentionally no
+///     recovery command.
 ///   * `event_id` — when this failure is anchored to a specific
 ///     audit-chain row, the chain's `event_id` so the FE can deep-
 ///     link `/audit#evt=<id>`. None when the failure is synthesised
@@ -700,6 +757,15 @@ pub struct FailureInfo {
     /// failure has no artifact references.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<FailureArtifact>,
+    /// Suggested next actions (`route`, `command`, or `external`).
+    /// Empty when there is no known in-dashboard or CLI recovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<DiagnosticAction>,
+    /// Operator-facing recovery classification. `None` means an
+    /// older backend did not classify it; the FE may derive a
+    /// conservative fallback from actions/kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<FailureRecovery>,
     /// Audit-chain `event_id` (when the failure was projected from
     /// an audit row). `None` for substrate-side synthesised
     /// failures.
@@ -744,6 +810,24 @@ pub struct FailureArtifact {
     pub href: String,
 }
 
+/// Operator-facing recovery disposition attached to
+/// [`FailureInfo`]. `status` is stable enough for the FE to color
+/// (`recoverable`, `operator_action_required`, `diagnosis_only`,
+/// `unrecoverable`); `label` and `detail` are the text operators
+/// see in the panel.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FailureRecovery {
+    /// Stable disposition key (`recoverable`,
+    /// `operator_action_required`, `diagnosis_only`,
+    /// `unrecoverable`).
+    pub status: String,
+    /// Short human label rendered in the dashboard panel.
+    pub label: String,
+    /// One or two sentence explanation of what the operator should
+    /// understand about recovery for this failure.
+    pub detail: String,
+}
+
 impl FailureInfo {
     /// Minimal constructor: just a kind + message. Operators see
     /// the `kind` as a badge and the `message` as the body. Used
@@ -755,6 +839,8 @@ impl FailureInfo {
             message: message.into(),
             fields: Vec::new(),
             artifacts: Vec::new(),
+            actions: Vec::new(),
+            recovery: None,
             event_id: None,
             seq: None,
             observed_at: 0,
@@ -770,11 +856,43 @@ impl FailureInfo {
         self
     }
 
+    /// Builder: classify how the operator should think about
+    /// recovery for this failure. This is descriptive UI metadata;
+    /// the kernel still validates every action when invoked.
+    pub fn with_recovery(
+        mut self,
+        status: impl Into<String>,
+        label: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        self.recovery = Some(FailureRecovery {
+            status: status.into(),
+            label: label.into(),
+            detail: detail.into(),
+        });
+        self
+    }
+
     /// Builder: attach an operator-actionable artifact link.
     pub fn with_artifact(mut self, label: impl Into<String>, href: impl Into<String>) -> Self {
         self.artifacts.push(FailureArtifact {
             label: label.into(),
             href: href.into(),
+        });
+        self
+    }
+
+    /// Builder: attach an operator recovery / diagnostic action.
+    pub fn with_action(
+        mut self,
+        label: impl Into<String>,
+        kind: impl Into<String>,
+        target: impl Into<String>,
+    ) -> Self {
+        self.actions.push(DiagnosticAction {
+            label: label.into(),
+            kind: kind.into(),
+            target: target.into(),
         });
         self
     }
@@ -1096,6 +1214,18 @@ pub struct InitiativeRunSummary {
     pub cache_creation_tokens: u64,
     /// Kernel-computed token cost in micro-dollars.
     pub token_cost_micros: u64,
+    /// Cost-source class used for `token_cost_micros`.
+    /// Values: `operator_policy_override`, `runtime_provider_api`,
+    /// `bundled_estimate`, or `unpriced`.
+    pub token_cost_pricing_source: String,
+    /// Operator-facing explanation of how `token_cost_micros` was
+    /// computed.
+    pub token_cost_pricing_note: String,
+    /// Per-provider/model breakdown of the token cost. This lets
+    /// the UI explain aggregate sources such as "estimated" without
+    /// making the operator infer which provider caused it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_cost_breakdown: Vec<TokenCostBreakdownRow>,
     /// Sum of per-task admission reservation units, when present.
     pub admission_reserved_units: u64,
     /// Sum of kernel admission actual-cost units.
@@ -1104,6 +1234,34 @@ pub struct InitiativeRunSummary {
     pub declared_turn_budget: Option<u64>,
     /// Sum of `[[tasks]].cumulative_max_seconds`, when declared.
     pub declared_wallclock_budget_seconds: Option<u64>,
+}
+
+/// One row of the initiative token-cost provenance breakdown.
+///
+/// Rows are grouped by provider, model, and pricing source so an
+/// aggregate label such as "estimated" can be explained without
+/// forcing the operator to inspect logs or audit JSON.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct TokenCostBreakdownRow {
+    /// Provider id or provider family that produced these tokens.
+    pub provider_id: String,
+    /// Model id that produced these tokens, when known.
+    pub model_id: String,
+    /// Machine-readable source code for the pricing rate.
+    pub pricing_source: String,
+    /// Short operator-facing source label.
+    pub pricing_note: String,
+    /// Provider-reported input tokens in this bucket.
+    pub input_tokens: u64,
+    /// Provider-reported output tokens in this bucket.
+    pub output_tokens: u64,
+    /// Provider-reported cache-read tokens in this bucket.
+    pub cache_read_tokens: u64,
+    /// Provider-reported cache-creation/cache-write tokens in this
+    /// bucket.
+    pub cache_creation_tokens: u64,
+    /// Kernel-computed cost for this bucket in micro-dollars.
+    pub token_cost_micros: u64,
 }
 
 /// One DAG edge.
@@ -2668,6 +2826,15 @@ pub trait DashboardData: Send + Sync + 'static {
     /// the kernel's own bookkeeping — the dashboard never
     /// invents a status (`INV-DASHBOARD-VALIDATE-01`).
     fn subsystem_health(&self) -> Result<SubsystemHealthResponse, ApiError>;
+
+    /// Clean host-restart recovery projection for the lifecycle
+    /// banner. Production returns `BlockedRecoveryPending` tasks
+    /// that require an operator-signed `task resume`; default
+    /// fixtures return empty so older route tests do not need to
+    /// fabricate reboot state.
+    fn host_restart_recovery(&self) -> Result<HostRestartRecoverySummary, ApiError> {
+        Ok(HostRestartRecoverySummary::default())
+    }
 
     /// Operator diagnostics projection for `GET /api/diagnostics`.
     ///
@@ -4816,6 +4983,8 @@ mod tests {
         assert_eq!(f.message, "remote rejected push");
         assert!(f.fields.is_empty());
         assert!(f.artifacts.is_empty());
+        assert!(f.actions.is_empty());
+        assert!(f.recovery.is_none());
         assert!(f.event_id.is_none());
         assert!(f.seq.is_none());
         assert_eq!(f.observed_at, 0);
@@ -4834,6 +5003,12 @@ mod tests {
                 "kernel.stderr.log",
                 "file:///var/raxis/sessions/abc/kernel.stderr.log",
             )
+            .with_action("Open health", "route", "/health")
+            .with_recovery(
+                "operator_action_required",
+                "Operator action required",
+                "Restart the gateway after inspecting health.",
+            )
             .with_audit("ev-42", 42)
             .at(1_700_000_000);
         let v = serde_json::to_value(&f).expect("serialises");
@@ -4843,6 +5018,11 @@ mod tests {
         assert_eq!(v["fields"][0]["value"], "Permanent");
         assert_eq!(v["fields"][1]["label"], "Total attempts");
         assert_eq!(v["artifacts"][0]["label"], "kernel.stderr.log");
+        assert_eq!(v["actions"][0]["label"], "Open health");
+        assert_eq!(v["actions"][0]["kind"], "route");
+        assert_eq!(v["actions"][0]["target"], "/health");
+        assert_eq!(v["recovery"]["status"], "operator_action_required");
+        assert_eq!(v["recovery"]["label"], "Operator action required");
         assert_eq!(v["event_id"], "ev-42");
         assert_eq!(v["seq"], 42);
         assert_eq!(v["observed_at"], 1_700_000_000_u64);
@@ -4858,6 +5038,8 @@ mod tests {
         let s = serde_json::to_string(&f).expect("serialises");
         assert!(!s.contains("\"fields\""));
         assert!(!s.contains("\"artifacts\""));
+        assert!(!s.contains("\"actions\""));
+        assert!(!s.contains("\"recovery\""));
         assert!(!s.contains("\"event_id\""));
         assert!(!s.contains("\"seq\""));
         assert!(!s.contains("\"observed_at\""));

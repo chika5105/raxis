@@ -54,31 +54,29 @@ raxis policy show > /tmp/policy.toml
 Append:
 
 ```toml
-[[providers.entries]]
-id              = "anthropic-prod"
-base_url        = "https://api.anthropic.com"
-default_model   = "claude-3-5-sonnet-20241022"
-credential_id   = "anthropic-prod"
-priority        = 100                 # higher = preferred when multiple match a model
-[providers.entries.pricing]
-input_per_1k_tokens  = 0.003
-output_per_1k_tokens = 0.015
+[[providers]]
+provider_id           = "anthropic-prod"
+kind                  = "Anthropic"
+credentials_file      = "anthropic-prod.toml"
+inference_timeout_ms  = 120000
+data_fetch_timeout_ms = 30000
+max_response_bytes    = 16777216
 
-[[providers.entries.allowed_models]]
-model = "claude-3-5-sonnet-20241022"
-[[providers.entries.allowed_models]]
-model = "claude-haiku-4-5"
+# Optional operator pricing override. Leave unset unless contract
+# rates or volume discounts should override runtime/provider or
+# bundled estimate pricing.
+# pricing.input_tokens_per_dollar  = 200000
+# pricing.output_tokens_per_dollar = 50000
 ```
 
 | Field | Meaning |
 |---|---|
-| `id` | Stable id, used in `providers status` and budget reports. |
-| `base_url` | Provider's API endpoint. The gateway hits this URL. |
-| `default_model` | Used when a session doesn't request a specific model. |
-| `credential_id` | The `raxis credential add` id; the gateway consults the proxy for the live secret. |
-| `priority` | When multiple providers serve the same model, higher wins. |
-| `pricing` | USD per 1k tokens; budget accounting uses this. |
-| `allowed_models` | Hard whitelist; sessions can only request models in this list. |
+| `provider_id` | Stable id, used in provider status, routing, and budget reports. |
+| `kind` | Provider family (`Anthropic`, `OpenAI`, `Gemini`, `Bedrock`, `http_sidecar`, etc.). |
+| `credentials_file` | TOML file under `<data-dir>/providers/`; the gateway reads the secret from there. |
+| `inference_timeout_ms` | Per-model-call deadline. |
+| `pricing` | Optional tokens-per-dollar override for contract/list rates. |
+| model allowlists/routing | Defined by the active model-routing policy and plan-side aliases. |
 
 ### 3. Re-sign and apply
 

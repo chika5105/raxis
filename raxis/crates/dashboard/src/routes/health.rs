@@ -37,7 +37,7 @@ use axum::Json;
 use serde::Serialize;
 
 use crate::auth::DashboardRole;
-use crate::data::HealthSnapshot;
+use crate::data::{HealthSnapshot, HostRestartRecoverySummary};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
 
@@ -190,6 +190,11 @@ pub struct KernelLifecycleResponse {
     /// the banner.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_resume: Option<KernelAutoResumeSummary>,
+    /// Clean host-restart recovery checklist. Present when the
+    /// durable store contains interrupted tasks left at
+    /// `BlockedRecoveryPending` for operator disposition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_restart_recovery: Option<HostRestartRecoverySummary>,
 }
 
 /// Serde-stable summary of one supervisor-aware auto-resume
@@ -275,7 +280,12 @@ where
             required: "read".into(),
         });
     }
-    let response = read_kernel_lifecycle_response(state.config.data_dir.as_deref());
+    let mut response = read_kernel_lifecycle_response(state.config.data_dir.as_deref());
+    if let Ok(recovery) = state.data.host_restart_recovery() {
+        if !recovery.tasks.is_empty() {
+            response.host_restart_recovery = Some(recovery);
+        }
+    }
     // Same no-store cache contract as the rest of the health surface
     // — the supervisor sentinel banner polls every 5 s and MUST see
     // a fresh sentinel snapshot per tick.
@@ -308,6 +318,7 @@ pub fn read_kernel_lifecycle_response(data_dir: Option<&str>) -> KernelLifecycle
             updated_at_unix_secs: now,
             fresh: true,
             auto_resume: None,
+            host_restart_recovery: None,
         };
     };
     let sentinel_path = PathBuf::from(data_dir).join("kernel_lifecycle_status.json");
@@ -329,6 +340,7 @@ pub fn read_kernel_lifecycle_response(data_dir: Option<&str>) -> KernelLifecycle
                 updated_at_unix_secs: now,
                 fresh: true,
                 auto_resume: auto_resume.clone(),
+                host_restart_recovery: None,
             };
         }
         Err(_e) => {
@@ -349,6 +361,7 @@ pub fn read_kernel_lifecycle_response(data_dir: Option<&str>) -> KernelLifecycle
                 updated_at_unix_secs: now,
                 fresh: false,
                 auto_resume: auto_resume.clone(),
+                host_restart_recovery: None,
             };
         }
     };
@@ -369,6 +382,7 @@ pub fn read_kernel_lifecycle_response(data_dir: Option<&str>) -> KernelLifecycle
                 updated_at_unix_secs: now,
                 fresh: false,
                 auto_resume: auto_resume.clone(),
+                host_restart_recovery: None,
             };
         }
     };
@@ -411,6 +425,7 @@ pub fn read_kernel_lifecycle_response(data_dir: Option<&str>) -> KernelLifecycle
         updated_at_unix_secs: view.updated_at_unix_secs,
         fresh,
         auto_resume,
+        host_restart_recovery: None,
     }
 }
 

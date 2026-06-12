@@ -107,10 +107,11 @@ enum Role {
 impl Role {
     /// Does this role's rootfs come from a `Containerfile`-driven OCI
     /// bake (`bake-rootfs`), or is it binary-only (just the staged
-    /// planner PID-1 binary)? Reviewer is deliberately binary-only
-    /// per `INV-PLANNER-HARNESS-02` minimalism; Orchestrator,
-    /// `executor-starter`, and both verifier images need the
-    /// OS-tooling-rich Containerfile bake. Orchestrator requires
+    /// planner PID-1 binary)? Every current role is Containerfile
+    /// baked. Reviewer is still minimal — it carries only the
+    /// planner binary plus kernel-owned read-only search
+    /// (`/usr/bin/rg` and its loader), and excludes shells, git,
+    /// language runtimes, and mutation tools. Orchestrator requires
     /// bash/git/ripgrep for integration merge and conflict
     /// resolution, while the verifier ships the runtime alongside
     /// the binary.
@@ -123,7 +124,11 @@ impl Role {
     fn needs_rootfs_bake(self) -> bool {
         matches!(
             self,
-            Role::Orchestrator | Role::ExecutorStarter | Role::Verifier | Role::VerifierSymbolIndex,
+            Role::Orchestrator
+                | Role::Reviewer
+                | Role::ExecutorStarter
+                | Role::Verifier
+                | Role::VerifierSymbolIndex,
         )
     }
 
@@ -383,9 +388,11 @@ impl DevStageArgs {
 /// * `usr/bin/git` — `GitCommitTool` spawn and orchestrator semantic
 ///   merge/conflict-resolution flow.
 ///
-/// Reviewer remains intentionally binary-only today
-/// (`INV-PLANNER-HARNESS-02 — minimalism`); its `required_binaries`
-/// list is empty so the guard always passes for that role.
+/// Reviewer remains mutation-tool-free, but it is not operationally
+/// tool-empty: the read-only `grep_search` contract depends on
+/// `/usr/bin/rg` in canonical images. The stage guard therefore pins
+/// `usr/bin/rg` so a reviewer image cannot advertise search and then
+/// fail at runtime with ENOENT.
 fn required_os_binaries(role: Role) -> &'static [&'static str] {
     match role {
         Role::ExecutorStarter => &[
@@ -395,7 +402,7 @@ fn required_os_binaries(role: Role) -> &'static [&'static str] {
             "usr/bin/git",
         ],
         Role::Orchestrator => &["bin/bash", "usr/bin/git", "usr/bin/rg"],
-        Role::Reviewer => &[],
+        Role::Reviewer => &["usr/bin/rg"],
         // === iter62 verifier-runtime ===
         //
         // `verifier-starter` carries `bash` (for `RAXIS_VERIFIER_COMMAND
@@ -3855,13 +3862,31 @@ mod tests {
     // logic.
 
     #[test]
-    fn stub_guard_passes_when_role_has_no_required_binaries() {
-        // Reviewer ships binary-only today (INV-PLANNER-HARNESS-02
-        // minimalism), so the guard is a no-op. This pins that
-        // contract: a future change that adds entries to
-        // `required_os_binaries(Role::Reviewer)` MUST also amend the
-        // spec.
+    fn stub_guard_rejects_reviewer_without_ripgrep() {
+        // Reviewer is mutation-tool-free, but its read-only
+        // `grep_search` contract depends on /usr/bin/rg. Missing rg
+        // must fail during image staging instead of surfacing as a
+        // mid-review tool ENOENT.
         let tmp = tempfile::tempdir().unwrap();
+        let err = assert_no_stub_after_stage(Role::Reviewer, tmp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("usr/bin/rg"),
+            "reviewer remediation must name rg: {err}"
+        );
+        assert!(
+            err.contains("images bake --role reviewer-core"),
+            "reviewer remediation must point at bake: {err}"
+        );
+    }
+
+    #[test]
+    fn stub_guard_passes_for_reviewer_when_ripgrep_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("usr/bin/rg");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"#!/bin/sh\nexit 0\n").unwrap();
         assert!(assert_no_stub_after_stage(Role::Reviewer, tmp.path()).is_ok());
     }
 
@@ -4929,7 +4954,7 @@ mod tests {
             &ws,
             &install,
             &signing_key,
-            &[Role::Reviewer], // binary-only avoids the daemon probe
+            &[Role::Reviewer],
             None,
             None,
             None,
@@ -4984,57 +5009,6 @@ mod tests {
     }
 
     #[test]
-    fn inv_image_bake_preflight_fail_closed_01_binary_only_skips_builder_probe() {
-        // When the selected roles are all binary-only (`Role::Reviewer`),
-        // the preflight must NOT require a container builder — a fresh
-        // macOS dev box without docker/podman/buildah can still bake
-        // the canonical pure-static reviewer role.
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = tmp.path().to_owned();
-        for r in &[Role::Reviewer] {
-            let dir = ws.join(STAGING_PARENT).join(r.images_subdir());
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(
-                dir.join("manifest.toml"),
-                format!(
-                    "role = {role:?}\nkernel_version=\"0.1.0\"\n\
-                 source_date_epoch=0\nerofs_version=\"x\"\n\
-                 tar_version=\"x\"\nzstd_version=\"x\"\n",
-                    role = r.manifest_role(),
-                ),
-            )
-            .unwrap();
-            std::fs::write(dir.join("Containerfile"), "FROM scratch\n").unwrap();
-        }
-        let install = tmp.path().join("install");
-        std::fs::create_dir_all(install.join("kernel")).unwrap();
-        write_test_vmlinux(&install.join("kernel").join("vmlinux"), b"k");
-        let key_hex = tmp.path().join("k.hex");
-        std::fs::write(&key_hex, "11".repeat(32)).unwrap();
-        // Pin a non-musl target so this witness isolates the
-        // builder-resolution branch. The musl-linker preflight has
-        // its own production path; a macOS CI runner should not need
-        // musl-cross installed merely to prove binary-only roles
-        // avoid Docker/Podman/Buildah.
-        let outcome = preflight_bake_inputs(
-            &ws,
-            &install,
-            &key_hex,
-            &[Role::Reviewer],
-            None,
-            None,
-            None,
-            Some("x86_64-unknown-linux-gnu"),
-            false,
-        )
-        .expect("binary-only preflight must pass without a builder");
-        assert!(
-            outcome.container_builder.is_none(),
-            "no role needs a builder; preflight must NOT resolve one"
-        );
-    }
-
-    #[test]
     fn inv_image_bake_preflight_fail_closed_01_role_needs_rootfs_bake_taxonomy() {
         // Pin which roles need the OCI bake. A future change to
         // this table MUST update the harness's
@@ -5045,8 +5019,8 @@ mod tests {
             "Orchestrator needs bash/git/rg via Containerfile bake"
         );
         assert!(
-            !Role::Reviewer.needs_rootfs_bake(),
-            "Reviewer is binary-only by spec"
+            Role::Reviewer.needs_rootfs_bake(),
+            "Reviewer needs Containerfile-baked /usr/bin/rg plus its loader"
         );
         assert!(
             Role::ExecutorStarter.needs_rootfs_bake(),

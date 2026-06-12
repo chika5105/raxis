@@ -580,10 +580,15 @@ HMAC secret never surface.
 The probe is sub-second on a warm VM:
 
 * PATH walk + `--version` for the curated binary allowlist
-  (~20 binaries) — cap each subprocess at 250 ms.
+  (~20 binaries, excluding npm-family package managers) — cap
+  each subprocess at 250 ms.
 * Direct `dist-info` reads under each Python `site-packages`
   dir (NO `pip list` subprocess — pip startup is >100 ms).
-* `npm list -g --json --depth=0` — capped at 500 ms.
+* Direct `node_modules/<pkg>/package.json` reads under global
+  Node package roots (NO `npm list`, `npm --version`, `npx
+  --version`, `pnpm --version`, or `yarn --version`
+  subprocesses — npm-family CLIs can perform update checks and
+  create guest egress before the model's first turn).
 * `git rev-parse HEAD` — capped at 100 ms.
 * No recursive filesystem walks (`workspace_languages_detected`
   uses depth=1 globs only).

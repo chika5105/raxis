@@ -7,6 +7,7 @@ import { CopyButton } from "@/components/CopyButton";
 import { DagGraph } from "@/components/DagGraph";
 import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
+import { FailureReasonPanel } from "@/components/FailureReasonPanel";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
@@ -21,6 +22,7 @@ import {
 } from "@/lib/status-filter";
 import {
   effectiveTaskState,
+  isTerminalFailureState,
   orderedTaskStatusCounts,
   taskDisplayId,
 } from "@/lib/state-color";
@@ -290,6 +292,16 @@ export function InitiativeDagPage() {
                   </span>
                 )}
               </div>
+              {(isTerminalFailureState(focusedNode.state) ||
+                focusedNode.failure) && (
+                <div className="mt-3">
+                  <FailureReasonPanel
+                    reason={focusedNode.failure ?? null}
+                    heading="Task failure reason"
+                    collapsible
+                  />
+                </div>
+              )}
               <Link
                 to={`/tasks/${focusedNode.task_id}`}
                 className="btn w-full justify-center mt-4"

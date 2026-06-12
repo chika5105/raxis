@@ -22,17 +22,19 @@ import {
 
 const STATE_OPTIONS = [
   "All",
-  "Pending",
-  "Active",
-  "Paused",
+  "Draft",
+  "ApprovedPlan",
+  "Executing",
+  "Blocked",
+  "RecoveryRequired",
   "Completed",
-  "Closed",
   "Failed",
+  "Aborted",
 ];
 
 export function InitiativesPage() {
   const navigate = useNavigate();
-  // The Overview KPI tile links here with `?state=Active`,
+  // The Overview KPI tile links here with a canonical kernel state,
   // and operators expect to share / bookmark filtered URLs.
   // Mirror the filter into the URL so back/forward, copy-link,
   // and refresh all preserve the chosen state.
@@ -251,7 +253,7 @@ export function InitiativesPage() {
                     <td className="px-4 py-2.5">
                       <StateBadge
                         state={i.state}
-                        pulse={i.state === "Active"}
+                        pulse={i.state === "Executing"}
                       />
                     </td>
                     <td className="px-4 py-2.5 text-xs text-ink-muted">

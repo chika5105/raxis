@@ -14,6 +14,11 @@ describe("isFailureAuditKind", () => {
     expect(isFailureAuditKind("WorktreeProvisionFailed")).toBe(true);
     expect(isFailureAuditKind("OperatorApprovalDenied")).toBe(true);
     expect(isFailureAuditKind("NotificationDeliveryFailed")).toBe(true);
+    expect(isFailureAuditKind("OrchestratorRespawnCeilingExceeded")).toBe(true);
+    expect(isFailureAuditKind("InitiativePermanentFailureEscalated")).toBe(true);
+    expect(isFailureAuditKind("ReviewRejectionCeilingExceeded")).toBe(true);
+    expect(isFailureAuditKind("EscalationRateLimitExceeded")).toBe(true);
+    expect(isFailureAuditKind("TproxyAdmissionDenied")).toBe(true);
   });
 
   it("uses suffix fallback for unseen kinds", () => {
@@ -177,6 +182,157 @@ describe("failureFromAuditEvent", () => {
     expect((f?.fields ?? []).find((x) => x.label === "verdict")?.value).toBe(
       "RequestChanges",
     );
+  });
+
+  it("extracts structured fields for TproxyAdmissionDenied", () => {
+    const f = failureFromAuditEvent("TproxyAdmissionDenied", {
+      session_id: "sess_tproxy",
+      host_or_sni: "registry.npmjs.org",
+      original_dst_ip: "104.16.8.34",
+      original_dst_port: 443,
+      protocol: "https",
+      reason: "host_not_in_allowlist",
+    });
+    expect(f?.message).toBe("host_not_in_allowlist");
+    const fields = f?.fields ?? [];
+    expect(fields.find((x) => x.label === "host_or_sni")?.value).toBe(
+      "registry.npmjs.org",
+    );
+    expect(fields.find((x) => x.label === "original_dst_ip")?.value).toBe(
+      "104.16.8.34",
+    );
+    expect(fields.find((x) => x.label === "original_dst_port")?.value).toBe(
+      "443",
+    );
+    expect(fields.find((x) => x.label === "session_id")?.value).toBe(
+      "sess_tproxy",
+    );
+    expect(f?.recovery?.status).toBe("diagnosis_only");
+    expect(f?.recovery?.label).toBe("Policy denied egress");
+  });
+
+  it("extracts review rejection ceiling context", () => {
+    const f = failureFromAuditEvent("ReviewRejectionCeilingExceeded", {
+      initiative_id: "init_1",
+      executor_task_id: "executor_1",
+      triggered_by_reviewer_task_id: "reviewer_1",
+      review_reject_count: 3,
+      max_review_rejections: 2,
+      critique: "metrics were misstated",
+    });
+    expect(f?.message).toBe("metrics were misstated");
+    const fields = f?.fields ?? [];
+    expect(fields.find((x) => x.label === "executor_task_id")?.value).toBe(
+      "executor_1",
+    );
+    expect(
+      fields.find((x) => x.label === "triggered_by_reviewer_task_id")?.value,
+    ).toBe("reviewer_1");
+    const actions = f?.actions ?? [];
+    expect(actions).toContainEqual({
+      label: "Open executor task",
+      kind: "route",
+      target: "/tasks/executor_1",
+    });
+    expect(actions).toContainEqual({
+      label: "Open reviewer task",
+      kind: "route",
+      target: "/tasks/reviewer_1",
+    });
+    expect(f?.recovery?.status).toBe("unrecoverable");
+    expect(f?.recovery?.label).toBe("Review retry budget exhausted");
+  });
+
+  it("extracts escalation rate limit failures", () => {
+    const f = failureFromAuditEvent("EscalationRateLimitExceeded", {
+      lineage_id: "lineage_1",
+      attempted_count: 4,
+      window_start: 1714500000,
+    });
+    expect(f?.message).toContain("4 attempts");
+    expect((f?.fields ?? []).find((x) => x.label === "lineage_id")?.value).toBe(
+      "lineage_1",
+    );
+    expect(f?.actions?.some((a) => a.target === "/escalations")).toBe(true);
+    expect(f?.recovery?.status).toBe("operator_action_required");
+  });
+
+  it("extracts task recovery actions for TaskBlockedForRecovery", () => {
+    const f = failureFromAuditEvent("TaskBlockedForRecovery", {
+      task_id: "task_retry",
+      initiative_id: "init_1",
+      block_reason: "host reboot interrupted this task",
+    });
+    expect(f?.message).toBe("host reboot interrupted this task");
+    const actions = f?.actions ?? [];
+    expect(actions).toContainEqual({
+      label: "Resume task",
+      kind: "command",
+      target: "raxis task resume task_retry",
+    });
+    expect(actions).toContainEqual({
+      label: "Open task",
+      kind: "route",
+      target: "/tasks/task_retry",
+    });
+    expect(f?.recovery?.status).toBe("recoverable");
+    expect(f?.recovery?.label).toBe("Task can be resumed");
+  });
+
+  it("extracts recovery actions for permanent initiative escalations", () => {
+    const f = failureFromAuditEvent("InitiativePermanentFailureEscalated", {
+      initiative_id: "init_1",
+      cause_kind: "MergeFastForwardFailed",
+      cause_summary: "target ref advanced while this merge was waiting",
+      escalation_id: "esc_1",
+      recoverable_via_approve: true,
+    });
+    expect(f?.message).toBe("target ref advanced while this merge was waiting");
+    const labels = (f?.fields ?? []).map((x) => x.label);
+    expect(labels).toContain("cause_kind");
+    expect(labels).toContain("recoverable_via_approve");
+    const actions = f?.actions ?? [];
+    expect(actions.some((a) => a.label === "Approve recovery")).toBe(true);
+    expect(actions.some((a) => a.label === "Deny recovery")).toBe(true);
+    expect(actions.some((a) => a.target === "/escalations")).toBe(true);
+    expect(f?.recovery?.status).toBe("operator_action_required");
+  });
+
+  it("labels non-recoverable permanent initiative escalations", () => {
+    const f = failureFromAuditEvent("InitiativePermanentFailureEscalated", {
+      initiative_id: "init_1",
+      cause_kind: "ReviewRejectionCeilingExceeded",
+      cause_summary: "review retry budget exhausted",
+      escalation_id: "esc_1",
+      recoverable_via_approve: false,
+    });
+    expect(f?.recovery?.status).toBe("unrecoverable");
+    expect(f?.recovery?.label).toBe("Not recoverable in place");
+    expect(f?.actions?.some((a) => a.label === "Preserve failed state")).toBe(
+      true,
+    );
+    expect(f?.actions?.some((a) => a.label === "Approve recovery")).toBe(false);
+  });
+
+  it("surfaces merge fast-forward failure fields and recovery navigation", () => {
+    const f = failureFromAuditEvent("MergeFastForwardFailed", {
+      initiative_id: "init_1",
+      commit_sha: "abc123",
+      target_ref: "refs/heads/main",
+      category: "non_fast_forward",
+      reason: "target advanced while the candidate waited",
+    });
+    expect(f?.message).toBe("target advanced while the candidate waited");
+    const fields = f?.fields ?? [];
+    expect(fields.find((x) => x.label === "commit_sha")?.value).toBe("abc123");
+    expect(fields.find((x) => x.label === "target_ref")?.value).toBe(
+      "refs/heads/main",
+    );
+    expect(f?.actions?.some((a) => a.target === "/escalations")).toBe(true);
+    expect(
+      f?.actions?.some((a) => a.target === "/initiatives/init_1"),
+    ).toBe(true);
+    expect(f?.recovery?.status).toBe("operator_action_required");
   });
 
   it("falls through to operator-action outcome path for Operator* events", () => {

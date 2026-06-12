@@ -116,7 +116,9 @@ key_ref  = "anthropic-prod-2026-q1"          # SHA256 of key blob in artifact st
 provider = "openai"
 key_ref  = "openai-prod-2026-q1"
 
-# Per-provider per-model token pricing for budget lane debits. See token-limit.md.
+# Optional per-provider per-model token-pricing overrides for budget
+# lane debits. Runtime/provider pricing and bundled estimates are used
+# when no operator override exists. See token-limit.md.
 [[providers.pricing]]
 model           = "anthropic:claude-opus-4.7"
 input_per_mtok  = 15.00      # USD per 1M input tokens

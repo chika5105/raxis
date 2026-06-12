@@ -271,9 +271,10 @@ pub enum OperatorRequest {
         initiative_id: String,
     },
 
-    /// `operator-ergonomics.md §14.3`
-    /// (`raxis initiative resume`). Reports pause status and
-    /// outstanding escalations. V2 stub.
+    /// Deprecated V2 pause-description reader.
+    /// Current recoverable initiatives use `RecoveryRequired` plus
+    /// normal escalation approve/deny; terminal `Failed` uses the
+    /// CLI-local `initiative fork-from-failed` lineage helper.
     DescribeInitiativePause {
         initiative_id: String,
     },

@@ -2794,9 +2794,10 @@ pub fn realistic_lifecycle_deadline() -> Duration {
 /// `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`): when the per-
 /// initiative no-progress respawn counter exceeds its ceiling
 /// (`INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01`), the kernel
-/// commits `initiatives.state = 'Failed'` in the same paired
-/// write that emits the chain-side audit row. No further audit
-/// events fire on that initiative's lane, so polling for
+/// commits `initiatives.state = 'RecoveryRequired'` in the same
+/// paired write that emits the chain-side audit row. No further
+/// progress events fire on that initiative's lane until an
+/// operator approves recovery, so polling for
 /// `IntegrationMergeCompleted` is a guaranteed indefinite wait.
 /// The chain-side scan in the poll loop panics immediately with
 /// the upstream blind-ask hypothesis cited so the operator can
@@ -2932,11 +2933,12 @@ pub fn poll_for_dual_lifecycle_completion(
             }
             // Fast-fail on `OrchestratorRespawnCeilingExceeded` for
             // either watched initiative. The kernel emits this event
-            // AND commits `initiatives.state = 'Failed'` in one paired
-            // write
+            // AND commits `initiatives.state = 'RecoveryRequired'` in one
+            // paired write
             // (`session_spawn_orchestrator.rs::orchestrator_post_exit_respawn_trigger`)
-            // — the initiative is now terminal and no further audit
-            // events fire on its lane. Without this branch the harness
+            // — the initiative is now paused for recovery and no further
+            // progress events fire on its lane without operator action.
+            // Without this branch the harness
             // would poll the full `realistic_lifecycle_deadline` for an
             // `IntegrationMergeCompleted` that will never arrive (the
             // same indefinite-wait class the spawn-failure scanner
@@ -2969,8 +2971,8 @@ pub fn poll_for_dual_lifecycle_completion(
                              initiative {bad_initiative} (payload: {payload:#}); \
                              the per-initiative no-progress respawn ceiling \
                              has been reached and the kernel has marked the \
-                             initiative `Failed` — the lifecycle cannot \
-                             complete without operator-driven recovery, so \
+                             initiative `RecoveryRequired` — the lifecycle \
+                             cannot complete without operator-driven recovery, so \
                              the harness will not poll further (would be a \
                              guaranteed indefinite wait per \
                              INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01). \

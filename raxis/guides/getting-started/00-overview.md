@@ -42,7 +42,7 @@ model for the getting-started flow.
 | **Executor** | Agent that edits code inside an isolated VM and completes a task with a commit SHA. |
 | **Reviewer** | Agent that reviews an executor commit and emits an approve/reject verdict before merge. |
 | **Plan Builder** | Visual `plan.toml` editor. The DAG is the primary surface, task cards expand inline, and the TOML source stays synchronized beside the canvas. It also contains plan setup, model routing, tool profiles, credential setup, and verifier panes. The signed submit path is still authoritative. |
-| **Model routing** | Plan Builder pane for Executor/Reviewer provider:model fallback aliases. The active policy still owns provider credentials, model allowlists, pricing, and timeouts. |
+| **Model routing** | Plan Builder pane for Executor/Reviewer provider:model fallback aliases. The active policy still owns provider credentials, model allowlists, optional pricing overrides, and timeouts. |
 | **Tool profiles** | Plan Builder pane that drafts shared Executor custom tools for existing scripts, stdio MCP servers, local HTTP services, commercial tool bridges, Unity, Blender, and other local automation. Tasks can reference one or many profiles. |
 | **Credential setup** | Plan Builder pane that names the credentials a task may bind and records the expected proxy shape. Secret values stay in credential/provider files under the data dir, not in `plan.toml`. |
 | **Plan verifiers** | Plan Builder pane for per-plan integration checks and policy gate references. Use it when the merged result must satisfy a mechanical check before the kernel completes integration. |

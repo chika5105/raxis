@@ -198,6 +198,31 @@ git reports conflicts or cannot synthesize the merge commit, the adapter rejects
 surfaces the merge as a failed `IntegrationMerge` rather than silently rewriting
 history.
 
+**Repo/ref closeout queue.** Executor and Reviewer sessions for different initiatives may
+run in parallel, including against the same managed repository. The final target-ref
+advancement is narrower: the kernel serializes only the closeout step for a given
+`(repository_id, target_ref)` via the durable `integration_merge_queue` table and an
+in-process mutex keyed by the same pair. This keeps independent repositories and branches
+parallel while making two same-ref `IntegrationMerge` completions linearizable. Each queue
+row records the requested candidate SHA, base SHA, orchestrator worktree, state
+(`Queued`, `Running`, `Completed`, `RecoveryRequired`, `Failed`, `Cancelled`), and any
+operator-facing failure reason.
+
+**Post-verifier finalization.** If Check 5d parked the synthetic integration task in
+`GatesPending`, the final passing witness does not reopen the task as ordinary work. It
+runs the same closeout path as an immediate no-gate merge: enqueue, acquire the repo/ref
+closeout lock, run the domain commit, clear `git_apply_pending`, snapshot the managed
+repo, transition the synthetic task and initiative through legal FSM edges, and emit
+`IntegrationMergeCompleted`. This prevents the historical failure mode where pre-merge
+witnesses passed but the managed ref never advanced.
+
+**Recoverable concurrent conflicts.** When the reference git adapter cannot synthesize a
+conflict-free host-side merge commit, it preserves the temporary conflicted worktree and
+returns its path in the failure reason. The kernel marks the queue row
+`RecoveryRequired`, records a precise operator hint, leaves `target_ref` untouched, and
+escalates the initiative for operator-assisted merge recovery. A conflict is never
+reported as generic orchestrator no-progress when the domain adapter can identify it.
+
 ### Check 4 — `merged_task_ids` Validation
 Every `task_id` in `merged_task_ids`:
 - Must exist in `subtask_activations` for this initiative

@@ -103,15 +103,19 @@ priority             = 100`,
   {
     title: "Approved model provider",
     category: "Models",
-    purpose: "Allow one model provider identity, pricing envelope, timeout, and credential file name. The secret value stays in providers/*.toml, never in policy.toml.",
+    purpose: "Allow one model provider identity, timeout, and credential file name. Pricing is optional and only needed when operator contract rates should override runtime/provider or bundled estimates.",
     info: "This publishes which vendors may be used. It does not store API keys, and it does not configure the gateway subprocess.",
-    fields: ["[[providers]]", "credentials_file", "pricing.*", "timeouts"],
+    fields: ["[[providers]]", "credentials_file", "timeouts", "optional pricing.* override"],
     snippet: `[[providers]]
 provider_id           = "anthropic-prod"
 kind                  = "Anthropic"
 credentials_file      = "anthropic-prod.toml"
 inference_timeout_ms  = 120000
 data_fetch_timeout_ms = 30000
+
+# Optional operator pricing override for enterprise contracts or
+# volume discounts. Leave unset to use provider-reported usage with
+# runtime/provider pricing where available, then bundled estimates.
 pricing.input_tokens_per_dollar      = 200000
 pricing.output_tokens_per_dollar     = 50000
 pricing.cache_read_tokens_per_dollar = 2000000`,

@@ -462,7 +462,11 @@ pub struct IntentRequest {
 /// counters are zero unless the model client surfaces them
 /// explicitly via the streaming `usage` events; the
 /// `raxis_policy::ProviderPricing::cost_micro_dollars` arithmetic
-/// handles all four channels uniformly.
+/// handles all four channels uniformly. `model_id` and
+/// `provider_id` identify the actual provider/model that produced
+/// the usage, so fallback chains can be priced against the model that
+/// answered rather than the primary model that happened to be tried
+/// first.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokensReport {
     /// Cumulative input tokens (prompt + tool output) the planner
@@ -479,12 +483,19 @@ pub struct TokensReport {
     /// 0 when the provider does not surface this counter.
     #[serde(default)]
     pub cache_creation_tokens: u64,
-    /// **Provider id** the planner billed these tokens against —
-    /// matches an entry in `policy.providers[].provider_id`. The
-    /// kernel uses this to pick the right
-    /// `ProviderPricing` table at admission time. Empty string
-    /// when the planner did not route through the gateway (e.g.
-    /// reviewer that short-circuited on a deterministic check).
+    /// Model id that produced the usage (for example
+    /// `claude-haiku-4-5`, `gemini-2.5-flash`, or `gpt-5.3-codex`).
+    /// This is provider-reported when available; otherwise the
+    /// planner stamps the configured model id. Empty string means no
+    /// model call occurred.
+    #[serde(default)]
+    pub model_id: String,
+    /// Provider identity the planner billed these tokens against.
+    /// Prefer the exact `policy.providers[].provider_id` when the
+    /// planner knows it (custom sidecars); otherwise use the stable
+    /// provider kind string (`anthropic`, `openai`, `gemini`,
+    /// `bedrock`, `sidecar`). Empty string means no model call
+    /// occurred.
     #[serde(default)]
     pub provider_id: String,
 }

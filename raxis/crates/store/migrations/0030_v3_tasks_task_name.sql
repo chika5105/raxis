@@ -1,3 +1,13 @@
+-- ┌──────────────────────────────────────────────────────────────────────┐
+-- │ Auto-generated from raxis_store::migration::render_migration_N_ddl. │
+-- │ DO NOT EDIT BY HAND.                                                │
+-- │                                                                     │
+-- │ Source of truth: crates/store/src/migration.rs                      │
+-- │ Regenerate:      RAXIS_DUMP_MIGRATION_SQL=1 cargo test               │
+-- │                  -p raxis-store --test migration_sql_dumps           │
+-- │ Drift detector:  cargo test -p raxis-store --test migration_sql_dumps│
+-- └──────────────────────────────────────────────────────────────────────┘
+
 BEGIN EXCLUSIVE;
 
 -- kernel-owned task ids -- plan authors provide task_name; the kernel
@@ -17,6 +27,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_initiative_task_name
 CREATE INDEX IF NOT EXISTS idx_tasks_task_name
     ON tasks (task_name);
 
+-- Record this migration.
 INSERT OR IGNORE INTO schema_version (version, applied_at)
     VALUES (30, strftime('%s', 'now'));
 

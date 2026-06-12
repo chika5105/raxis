@@ -8,7 +8,7 @@
 //! backstop on the orchestrator post-exit respawn loop: every
 //! `respawn_orchestrator_for_initiative` call increments the
 //! per-initiative `initiatives.orchestrator_no_progress_respawn_count`
-//! by one and refuses the spawn (and marks the initiative `Failed`)
+//! by one and refuses the spawn (and marks the initiative `RecoveryRequired`)
 //! once the post-increment value strictly exceeds
 //! `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3). The counter resets
 //! to zero on every legal task FSM transition routed through
@@ -33,7 +33,7 @@
 //!      observed `attempts` + `max_attempts` fields the dashboard
 //!      reads.
 //!   4. After the kernel transitions the offending initiative to
-//!      `state = 'Failed'` (the same-transaction sister of the
+//!      `state = 'RecoveryRequired'` (the same-transaction sister of the
 //!      ceiling-exceeded branch in
 //!      `respawn_orchestrator_for_initiative`), the
 //!      `is_executing` predicate the post-exit hook checks at the
@@ -176,27 +176,27 @@ fn simulate_respawn_increment(conn: &mut Connection, initiative_id: &str) -> u32
     u32::try_from(new_count).unwrap_or(u32::MAX)
 }
 
-/// Mirror of the kernel's same-transaction Failed-transition that
+/// Mirror of the kernel's same-transaction RecoveryRequired transition that
 /// fires inside `respawn_orchestrator_for_initiative` Step 1b
 /// once the increment returns `Exceeded`. The `completed_at`
-/// stamp is a side-effect operators read from the dashboard's
-/// initiative-detail panel; the `state = 'Failed'` flip is the
+/// non-terminal pause leaves `completed_at` unset; the
+/// `state = 'RecoveryRequired'` flip is the
 /// load-bearing piece — the `is_executing` preflight at the top
 /// of every respawn now short-circuits.
-fn simulate_initiative_failed(conn: &mut Connection, initiative_id: &str) {
+fn simulate_initiative_recovery_required(conn: &mut Connection, initiative_id: &str) {
     let initiatives = Table::Initiatives.as_str();
-    let tx = conn.transaction().expect("begin failed-tx");
+    let tx = conn.transaction().expect("begin recovery-required-tx");
     tx.execute(
         &format!(
             "UPDATE {initiatives}
-                SET state        = 'Failed',
-                    completed_at = strftime('%s','now')
+                SET state        = 'RecoveryRequired',
+                    completed_at = NULL
               WHERE initiative_id = ?1"
         ),
         params![initiative_id],
     )
-    .expect("flip to Failed");
-    tx.commit().expect("commit failed-tx");
+    .expect("flip to RecoveryRequired");
+    tx.commit().expect("commit recovery-required-tx");
 }
 
 /// Mirror of `transition_task_in_tx`'s end-of-function reset hook
@@ -225,17 +225,17 @@ fn simulate_fsm_progress_reset(conn: &mut Connection, initiative_id: &str) {
 ///
 ///   * Increments 1..=3 land `Permitted`.
 ///   * Increment 4 trips the ceiling, the kernel marks the
-///     initiative `Failed`, and the audit-event constructor
+///     initiative `RecoveryRequired`, and the audit-event constructor
 ///     surfaces the operator-facing
 ///     `OrchestratorRespawnCeilingExceeded` payload.
-///   * After the Failed-flip, the predicate the kernel reads on
+///   * After the RecoveryRequired flip, the predicate the kernel reads on
 ///     every subsequent post-exit-hook trigger
 ///     (`state = 'Executing'`) returns `false`, so additional
 ///     respawns are silently skipped — the loop is structurally
 ///     bounded at four iterations regardless of the upstream
 ///     post-exit-hook firing rate.
 #[test]
-fn iter42_pathology_bounded_at_max_plus_one_then_initiative_failed() {
+fn iter42_pathology_bounded_at_max_plus_one_then_recovery_required() {
     let (_tmp, mut conn) = fresh_disk_conn();
     seed_executing_initiative(&conn, "init-iter42");
 
@@ -269,7 +269,7 @@ fn iter42_pathology_bounded_at_max_plus_one_then_initiative_failed() {
 
     // Increment MAX + 1 trips the ceiling. The kernel's branch in
     // `respawn_orchestrator_for_initiative` calls
-    // `simulate_initiative_failed` (the SQLite-side mutation) and
+    // `simulate_initiative_recovery_required` (the SQLite-side mutation) and
     // then emits the audit event post-commit; we mirror that two-
     // step here.
     let post_ceiling = simulate_respawn_increment(&mut conn, "init-iter42");
@@ -278,11 +278,11 @@ fn iter42_pathology_bounded_at_max_plus_one_then_initiative_failed() {
         MAX_ORCH_NO_PROGRESS_RESPAWNS + 1,
         "post-ceiling increment MUST report counter strictly above MAX",
     );
-    simulate_initiative_failed(&mut conn, "init-iter42");
+    simulate_initiative_recovery_required(&mut conn, "init-iter42");
     assert_eq!(
         read_state(&conn, "init-iter42"),
-        "Failed",
-        "ceiling-exceeded branch MUST transition initiative to Failed",
+        "RecoveryRequired",
+        "ceiling-exceeded branch MUST transition initiative to RecoveryRequired",
     );
 
     // The audit-event constructor surfaces the operator-facing
@@ -314,18 +314,18 @@ fn iter42_pathology_bounded_at_max_plus_one_then_initiative_failed() {
     assert_ne!(
         read_state(&conn, "init-iter42"),
         "Executing",
-        "after Failed-flip the is_executing preflight MUST return false",
+        "after RecoveryRequired flip the is_executing preflight MUST return false",
     );
 
     // Critically, no further increments should fire. We DON'T call
     // `simulate_respawn_increment` again to mirror the kernel's
     // short-circuit — the witness is "the kernel never reaches the
-    // increment helper after Failed". Re-reading the counter
+    // increment helper after RecoveryRequired". Re-reading the counter
     // confirms it is unchanged.
     assert_eq!(
         read_count(&conn, "init-iter42"),
         MAX_ORCH_NO_PROGRESS_RESPAWNS + 1,
-        "post-Failed counter MUST be the post-ceiling value, never re-incremented",
+        "post-RecoveryRequired counter MUST be the post-ceiling value, never re-incremented",
     );
 }
 

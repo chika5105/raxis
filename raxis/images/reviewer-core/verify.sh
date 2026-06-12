@@ -19,14 +19,29 @@ fi
 
 # Required files (absence is FAIL_REVIEWER_IMAGE_INVALID).
 for required in \
-    "/sbin/init" \
-    "/usr/local/bin/raxis-planner-reviewer" \
+    "/usr/local/bin/raxis-reviewer" \
     "/usr/bin/rg"; do
     if [ ! -e "$ROOTFS$required" ]; then
         echo "verify: missing required file $required" >&2
         exit 1
     fi
 done
+
+# Dynamic Linux binaries fail with ENOENT ("not found") when their
+# interpreter path is absent, even if the binary itself exists. The
+# arm64 ripgrep release is dynamically linked, so make the loader
+# requirement explicit and fail during bake instead of at reviewer VM
+# boot.
+if grep -a -q "/lib/ld-linux-aarch64.so.1" "$ROOTFS/usr/bin/rg" \
+    && [ ! -e "$ROOTFS/lib/ld-linux-aarch64.so.1" ]; then
+    echo "verify: /usr/bin/rg requires /lib/ld-linux-aarch64.so.1" >&2
+    exit 1
+fi
+if grep -a -q "/lib64/ld-linux-x86-64.so.2" "$ROOTFS/usr/bin/rg" \
+    && [ ! -e "$ROOTFS/lib64/ld-linux-x86-64.so.2" ]; then
+    echo "verify: /usr/bin/rg requires /lib64/ld-linux-x86-64.so.2" >&2
+    exit 1
+fi
 
 # Forbidden files (presence is FAIL_REVIEWER_IMAGE_INVALID).
 for forbidden in \
@@ -56,13 +71,5 @@ for forbidden in \
         exit 1
     fi
 done
-
-# `/sbin/init` must be a regular file (the spec calls for a static
-# executable; symlinks are explicitly disallowed because the manifest
-# walker rejects them).
-if [ -L "$ROOTFS/sbin/init" ]; then
-    echo "verify: /sbin/init must be a regular file, not a symlink" >&2
-    exit 1
-fi
 
 echo "verify: reviewer-core rootfs at $ROOTFS passes structural checks"

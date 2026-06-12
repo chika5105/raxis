@@ -71,7 +71,7 @@ export function InboxPage() {
                     : ""
                 }`}
               >
-                <div className="flex items-center gap-3 flex-wrap">
+                <div className="flex min-w-0 items-start gap-3 flex-wrap">
                   <span className="badge bg-warn-muted/30 border-warn text-warn">
                     {a.event_kind}
                   </span>
@@ -79,7 +79,8 @@ export function InboxPage() {
                     <Link
                       to={`/initiatives/${a.initiative_id}`}
                       onClick={(e) => e.stopPropagation()}
-                      className="text-sm text-accent hover:underline font-mono"
+                      title={a.initiative_id}
+                      className="min-w-0 max-w-full break-all font-mono text-sm text-accent [overflow-wrap:anywhere] hover:underline"
                     >
                       {a.initiative_id}
                     </Link>
@@ -88,12 +89,13 @@ export function InboxPage() {
                     <Link
                       to={`/tasks/${a.task_id}`}
                       onClick={(e) => e.stopPropagation()}
-                      className="text-xs text-ink-muted hover:text-accent font-mono"
+                      title={a.task_id}
+                      className="min-w-0 max-w-full break-all font-mono text-xs text-ink-muted [overflow-wrap:anywhere] hover:text-accent"
                     >
                       · {a.task_id}
                     </Link>
                   )}
-                  <span className="ml-auto text-xs text-ink-subtle">
+                  <span className="ml-auto whitespace-nowrap text-xs text-ink-subtle">
                     <Mono>#{a.seq}</Mono> · {fmtRelative(a.at)}
                   </span>
                 </div>

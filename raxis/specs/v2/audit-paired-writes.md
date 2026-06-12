@@ -454,34 +454,36 @@ Reviewer-rejection retry (`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`):
   // `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01` — structural backstop on
   // unbounded orchestrator respawn loops. The
   // `initiatives.orchestrator_no_progress_respawn_count` increment +
-  // `initiatives.state = 'Failed'` UPDATE land in one SQLite
+  // `initiatives.state = 'RecoveryRequired'` UPDATE land in one SQLite
   // transaction inside `session_spawn_orchestrator::
   // respawn_orchestrator_for_initiative` Step 1b; the audit event
   // fires immediately post-commit in the same async task. A crash
   // between the two leaves SQLite consistent
-  // (`initiatives.state = 'Failed'`, no further respawns) with a
+  // (`initiatives.state = 'RecoveryRequired'`, no further respawns
+  // until operator approval/denial) with a
   // missing audit anchor; the recovery sweep is advisory per
   // `INV-AUDIT-PAIRED-06`.
-  OrchestratorRespawnCeilingExceeded                  // paired with INSERT escalations(class='LogicalDeadlock') + initiatives state=Failed UPDATE
+  OrchestratorRespawnCeilingExceeded                  // paired with INSERT escalations(class='LogicalDeadlock') + initiatives state=RecoveryRequired UPDATE
   // INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01 — under the same SQL
-  // transaction as the initiative-`Failed` flip, the kernel
+  // transaction as the initiative-`RecoveryRequired` flip, the kernel
   // INSERTs an `escalations` row (class='LogicalDeadlock',
   // initiator='Kernel', status='Pending') so the operator has a
   // tracked approve/deny surface for the structural-loop fault.
   // The audit event then fires post-commit (paired-write order:
   //   1. INSERT escalations
-  //   2. UPDATE initiatives state='Failed'
+  //   2. UPDATE initiatives state='RecoveryRequired'
   //   3. COMMIT
   //   4. emit OrchestratorRespawnCeilingExceeded
   // ). On approve, OperatorApprovedRespawnEscalation pairs with
   // (escalations.status='Approved', initiatives counter reset,
   // initiatives.state='Executing'); on deny,
   // OperatorDeniedRespawnEscalation pairs with
-  // (escalations.status='Denied'). Both follow-up events are
+  // (escalations.status='Denied', initiatives.state='Failed').
+  // Both follow-up events are
   // emitted post-commit by the operator-approval handler in
   // `kernel/src/ipc/operator.rs`.
   OperatorApprovedRespawnEscalation                   // paired with escalations(status=Approved) + initiatives counter reset + state='Executing'
-  OperatorDeniedRespawnEscalation                     // paired with escalations(status=Denied)
+  OperatorDeniedRespawnEscalation                     // paired with escalations(status=Denied) + initiatives state='Failed'
 
 Operator quarantine (v2 key-revocation):
   OperatorQuarantineDirectiveAdded,

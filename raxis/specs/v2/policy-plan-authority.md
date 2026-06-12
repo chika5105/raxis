@@ -1284,8 +1284,8 @@ is the failure-code index.
 | `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` | Policy load | `[default_executor_image] alias` doesn't resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Executor"`. | [`operator-ergonomics.md §18.1`](operator-ergonomics.md) |
 | `FAIL_DEFAULT_EXECUTOR_IMAGE_DIGEST_MISMATCH` | Runtime / `raxis doctor` | The kernel-bundled `raxis-executor-starter` image's digest does not match the manifest. Hard error if any in-flight session is using it; non-fatal warning otherwise. | [`planner-harness.md §10.6`](planner-harness.md) |
 | `FAIL_PLAN_INIT_TEMPLATE_NOT_FOUND { name }` | `plan init` (CLI-local; never IPC) | Template name not in CLI-bundled set. | [`operator-ergonomics.md §6.4`](operator-ergonomics.md) |
-| `FAIL_COST_ESTIMATE_PROVIDER_RATE_MISSING { provider }` | `plan cost-estimate` IPC | Policy doesn't declare rates for a configured provider. | [`operator-ergonomics.md §11.4`](operator-ergonomics.md) |
-| `FAIL_INITIATIVE_NOT_PAUSED { state }` | `initiative resume` | Initiative is not in a paused state; nothing to resume. | [`operator-ergonomics.md §14.5`](operator-ergonomics.md) |
+| `WARN_COST_ESTIMATE_BUNDLED_RATE_FALLBACK { provider, registry_version }` | `plan cost-estimate` IPC | Estimate used bundled fallback rates because neither an operator override nor runtime provider pricing was available. | [`operator-ergonomics.md §11.4`](operator-ergonomics.md) |
+| `FAIL_INITIATIVE_NOT_FAILED { state }` | `initiative fork-from-failed` | Initiative is not terminal Failed; use signed escalation approval for `RecoveryRequired` initiatives. | [`operator-ergonomics.md §14.5`](operator-ergonomics.md) |
 
 `FAIL_PLAN_REQUIRES_PREPARE` is the only one of these that can fire on
 `submit plan` admission. Its `missing_fields` array names the §4.2
@@ -2494,10 +2494,10 @@ behavior diverges from the plan's stated intent.
       - Implement `OperatorRequest::EstimateCost` IPC handler per [`operator-ergonomics.md §11.3`](operator-ergonomics.md)
       - Implement `OperatorRequest::DryRunAdmit` IPC handler per [`operator-ergonomics.md §12.3`](operator-ergonomics.md); runs full admission chain but does NOT seal the bundle
       - Implement `OperatorRequest::SubscribeInitiative` and `KernelPush::InitiativeEvent` per [`operator-ergonomics.md §13`](operator-ergonomics.md)
-      - Implement `OperatorRequest::DescribeInitiativePause` per [`operator-ergonomics.md §14`](operator-ergonomics.md)
+      - Use the existing escalation approve/deny IPC for `RecoveryRequired` per [`operator-ergonomics.md §14`](operator-ergonomics.md); `initiative fork-from-failed` is CLI-local/read-only
       - Add admission step 0e (defaultable-fields pre-check) per §5; emit `FAIL_PLAN_REQUIRES_PREPARE { missing_fields }` when defaultable fields are omitted AND policy declares defaults for them
       - Implement `DefaultsProposed` and `DryRunAdmitted` audit events per [`operator-ergonomics.md §19.2`](operator-ergonomics.md); rate-limited per operator fingerprint
-      - All `FAIL_PLAN_REQUIRES_PREPARE`, `FAIL_PREPARE_DEFAULT_UPGRADE_REQUIRED`, `FAIL_POLICY_DEFAULT_*`, `FAIL_COST_ESTIMATE_*`, `FAIL_INITIATIVE_NOT_PAUSED` codes registered in `raxis-types::PlannerErrorCode`
+      - All `FAIL_PLAN_REQUIRES_PREPARE`, `FAIL_PREPARE_DEFAULT_UPGRADE_REQUIRED`, `FAIL_POLICY_DEFAULT_*`, `FAIL_COST_ESTIMATE_*`, `FAIL_INITIATIVE_NOT_FAILED` codes registered in `raxis-types::PlannerErrorCode`
 - [ ] V2 provider-model-selection additions (per [`provider-model-selection.md`](provider-model-selection.md)):
       - Implement `[provider_aliases_defaults.<role>]` policy section parsing and validation per [`provider-model-selection.md §7`](provider-model-selection.md)
       - Validation chain at policy load: `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_REFERENCES_NONPERMITTED_MODEL`, `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_MISSING_CREDENTIAL`, `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_EMPTY_CHAIN`, `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_UNKNOWN_FALLBACK_BEHAVIOR`, `WARN_PROVIDER_ALIAS_DEFAULT_UNKNOWN_ROLE`, `WARN_PROVIDER_ALIAS_PRIMARY_NO_FAILOVER`
@@ -2605,7 +2605,7 @@ behavior diverges from the plan's stated intent.
       - V2 operator-ergonomics: same scenario; operator declares `[plan.protected_paths] paths = [...]` with some entries → `plan prepare` produces the union of operator and policy defaults
       - V2 operator-ergonomics: operator wants to remove `.git/` from protected paths; declares `[plan.protected_paths]` excluding it AND passes `--ignore-policy-protected-paths` → `plan prepare` honors the operator's narrower set
       - V2 operator-ergonomics: `OperatorRequest::ProposeDefaults` does NOT insert any row into `kernel.db` (read-only invariant)
-      - V2 operator-ergonomics: `initiative resume` on an `Executing` initiative → `FAIL_INITIATIVE_NOT_PAUSED { state: "Executing" }`
+      - V2 operator-ergonomics: `initiative fork-from-failed` on an `Executing` initiative → `FAIL_INITIATIVE_NOT_FAILED { state: "Executing" }`
       - V2 operator-ergonomics: `setup wizard` end-to-end against a fresh install completes in under 5 minutes including smoke-test
       - V2 operator-ergonomics: tampered `raxis-executor-starter` image detected at `raxis doctor canonical-images` → `FAIL_DEFAULT_EXECUTOR_IMAGE_DIGEST_MISMATCH`
       - V2 environment-binding: policy with zero `[environments.<label>]` declared → step 3.5 no-op; every admitted task records as Neutral by trivial cardinality

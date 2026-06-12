@@ -91,11 +91,10 @@ jwt_ttl_secs = 86400
 # inference_timeout_ms  = 30000
 # data_fetch_timeout_ms = 10000
 # max_response_bytes    = 16777216
-# # pricing is REQUIRED for every
-# # model-bearing provider kind (Anthropic, OpenAI, Gemini,
-# # Bedrock, http_sidecar). Operators declare the inverse of
-# # the published per-million price (tokens per US dollar) so
-# # the kernel can compute cost via integer math.
+# # pricing is optional and overrides runtime/bundled estimates.
+# # Operators declare the inverse of the published or contracted
+# # per-million price (tokens per US dollar) so the kernel can
+# # compute cost via integer math.
 # pricing.input_tokens_per_dollar  = 200000   # $5  / 1M input
 # pricing.output_tokens_per_dollar = 50000    # $20 / 1M output
 # # pricing.cache_read_tokens_per_dollar    = 2000000  # $0.50 / 1M cache hit

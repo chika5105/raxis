@@ -2,13 +2,13 @@
 
 > **Topic:** Policy reference | **Time to read:** ~4 min | **Complexity:** ⭐⭐ Intermediate
 
-`[[providers]]` declares the LLM providers the gateway will route
-to. Each entry binds a stable `id` (referenced by plans), a `kind`
-(provider family), the credential file backing it, the default
-model, and the pricing block the kernel uses to convert tokens into
-admission cost. The block is the gateway's authoritative
-configuration; the file under `<data-dir>/providers/<id>.toml`
-holds only the secret bytes.
+`[[providers]]` declares the LLM providers model routing may use.
+Each entry binds a stable `provider_id`, a provider `kind`, the
+credential file backing it, and request limits. Optional
+`pricing.*` fields are operator overrides for enterprise contracts
+or volume discounts. Without them, RAXIS uses provider-reported
+usage and labels the pricing source in the dashboard, with bundled
+rates only as an estimate fallback.
 
 ---
 
@@ -19,18 +19,19 @@ Each `[[providers]]` block declares one provider.
 | Field | Type | Required | Default | Effect |
 |---|---|---|---|---|
 | `provider_id` | `String` | yes | — | Stable provider identifier. Must be unique. |
-| `kind` | `String` | yes | — | Provider family. Canonical V2 values: `Anthropic`, `OpenAI`, `Bedrock`, `Vertex`, `Ollama`. Unknown kinds fail policy load. |
+| `kind` | `String` | yes | — | Provider family. Canonical V2 values include `Anthropic`, `OpenAI`, `Gemini`, `Bedrock`, and `http_sidecar`. |
 | `credentials_file` | `String` | yes | — | Filename **relative to `<data-dir>/providers/`**. The file must exist, be `0600`, and be a TOML map of provider-specific keys (`api_key = "…"`, etc.). |
 | `inference_timeout_ms` | `u32` | no | `30000` | Per-inference request deadline. |
 | `data_fetch_timeout_ms` | `u32` | no | `10000` | Per-data-fetch request deadline. |
 | `max_response_bytes` | `u64` | no | `16777216` | Maximum gateway response body size. |
-| `pricing.input_tokens_per_dollar` | `u64` | yes | — | How many input tokens equal one dollar. Used by the budget heuristic to project token spend into admission units. |
-| `pricing.output_tokens_per_dollar` | `u64` | yes | — | Same for output tokens. |
-| `pricing.cache_read_tokens_per_dollar` | `u64` | no | input rate | Optional prompt-cache read rate. |
-| `pricing.cache_creation_tokens_per_dollar` | `u64` | no | input rate | Optional prompt-cache creation rate. |
+| `pricing.input_tokens_per_dollar` | `u64` | no | runtime/provider or bundled estimate | Optional override: how many input tokens equal one dollar. |
+| `pricing.output_tokens_per_dollar` | `u64` | no | runtime/provider or bundled estimate | Optional override for output tokens. |
+| `pricing.cache_read_tokens_per_dollar` | `u64` | no | input override/rate fallback | Optional prompt-cache read override. |
+| `pricing.cache_creation_tokens_per_dollar` | `u64` | no | input override/rate fallback | Optional prompt-cache creation override. |
 
-`pricing.*` is **mandatory** for any LLM-bearing provider entry —
-`PolicyBundle::validate` rejects entries without it.
+`pricing.*` is optional for LLM-bearing provider entries. If you set
+one override, keep it truthful: the dashboard will label costs as
+operator-policy priced.
 
 ---
 
@@ -45,6 +46,7 @@ inference_timeout_ms  = 30000
 data_fetch_timeout_ms = 10000
 max_response_bytes    = 16777216
 
+# Optional operator pricing override.
 pricing.input_tokens_per_dollar  = 200000     # $5 per 1M tokens
 pricing.output_tokens_per_dollar = 50000      # $20 per 1M tokens
 ```
@@ -65,35 +67,32 @@ chmod 600 "$RAXIS_DATA_DIR/providers/anthropic-prod.toml"
 provider_id      = "openai-primary"
 kind             = "OpenAI"
 credentials_file = "openai-primary.toml"
-pricing.input_tokens_per_dollar  = 100000
-pricing.output_tokens_per_dollar = 33333
 
 [[providers]]
 provider_id      = "anthropic-fallback"
 kind             = "Anthropic"
 credentials_file = "anthropic-fallback.toml"
-pricing.input_tokens_per_dollar  = 200000
-pricing.output_tokens_per_dollar = 50000
 ```
 
-Plans target a provider via `[[providers]] id` in the system prompt
-or via the gateway's failover policy. When the primary's circuit
-breaker opens (e.g., 5xx storm), the gateway falls back to the
-secondary.
+Plans choose provider/model order through `[model_routing]` and
+plan-side provider aliases. When the primary provider/model is
+unavailable, the kernel attempts the signed fallback chain and still
+records which provider/model actually answered.
 
 ## Example — local Ollama (no auth)
 
 ```toml
 [[providers]]
 provider_id      = "local-ollama"
-kind             = "Ollama"
+kind             = "http_sidecar"
 credentials_file = "ollama.toml"     # contains base_url = "http://127.0.0.1:11434"
 pricing.input_tokens_per_dollar  = 1000000   # effectively free
 pricing.output_tokens_per_dollar = 1000000
 ```
 
-Even local providers need pricing values — the budget heuristic
-uses them, so set them to large values to model "negligible cost".
+Local/custom providers can omit pricing, but then RAXIS cannot know
+their real contract cost. Set high `pricing.*` override values only
+when you want the budget display to model "negligible cost."
 
 ---
 
@@ -127,7 +126,7 @@ raxis providers status
 | Symptom | Fix |
 |---|---|
 | `BOOT_ERR_CREDENTIAL_MODE` | The `<id>.toml` file under `providers/` is not `0600`. `chmod 600 …`. |
-| `Validation: pricing.input_tokens_per_dollar required` | Add the pricing block. Even a placeholder is better than an unset value. |
+| Cost looks estimated | Add a `pricing.*_tokens_per_dollar` override only when you know your contract/list rates. RAXIS otherwise labels bundled fallback pricing as an estimate. |
 | `Validation: provider id already declared` | Two entries share an `id`. Pick a unique one. |
 | `CircuitOpen` on every request to one provider | The breaker is open after consecutive failures. Run `raxis providers reset <id>` to force-close it. |
 

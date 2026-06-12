@@ -41,6 +41,7 @@
 // file once at boot to extract the optional block; absence ⇒
 // dashboard disabled (zero runtime cost per spec §4.3).
 
+use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -55,12 +56,13 @@ use raxis_dashboard::data::{
     AuditEntryView, AuditListFilters, BuilderValidationIssue, BuilderValidationResponse,
     BuilderValidationSeverity, ChainStatusView, CredentialMetadata, CredentialReveal,
     CustomToolCallView, DagEdge, DashboardData, DiagnosticFinding, DiagnosticsResponse,
-    EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry, InitiativePlanView,
-    InitiativeRunSummary, InitiativeTaskListEntry, InitiativeView, NotificationView,
-    OperatorAuthResolution, OrchestratorGapsResponse, PolicyAdvancement, PolicyHistoryEntry,
-    PolicyOperatorView, PolicySnapshotView, RecentSessionEntry, ReviewerPanelEntry,
-    ReviewerVerdictView, SessionView, SessionVmEnvView, StructuredOutputView, SubsystemDetailRow,
-    SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail, WorktreeDiff,
+    EscalationView, FailureInfo, HealthCheck, HealthSnapshot, HostRestartRecoverySummary,
+    HostRestartRecoveryTask, InitiativeListEntry, InitiativePlanView, InitiativeRunSummary,
+    InitiativeTaskListEntry, InitiativeView, NotificationView, OperatorAuthResolution,
+    OrchestratorGapsResponse, PolicyAdvancement, PolicyHistoryEntry, PolicyOperatorView,
+    PolicySnapshotView, RecentSessionEntry, ReviewerPanelEntry, ReviewerVerdictView, SessionView,
+    SessionVmEnvView, StructuredOutputView, SubsystemDetailRow, SubsystemHealthCard,
+    SubsystemHealthResponse, TaskView, TokenCostBreakdownRow, WorktreeDetail, WorktreeDiff,
     WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry,
     SUBSYSTEM_CATALOG,
 };
@@ -857,6 +859,39 @@ impl DashboardData for KernelDashboardData {
         })
     }
 
+    fn host_restart_recovery(&self) -> Result<HostRestartRecoverySummary, ApiError> {
+        let conn = self.open_ro()?;
+        let rows =
+            raxis_store::views::tasks::blocked_set(&conn, 50).map_err(|e| ApiError::Internal {
+                log_only: format!("tasks::blocked_set: {e}"),
+            })?;
+        let mut tasks = Vec::with_capacity(rows.len());
+        for row in rows {
+            let initiative_display_name =
+                initiative_name_for_id_opt(&conn, Some(row.initiative_id.as_str())).unwrap_or(None);
+            let agent_type = if row.task_id == row.initiative_id {
+                "Orchestrator".to_owned()
+            } else {
+                row.actor.clone()
+            };
+            tasks.push(HostRestartRecoveryTask {
+                resume_command: format!("raxis task resume '{}'", row.task_id),
+                task_id: row.task_id,
+                task_name: row.task_name,
+                initiative_id: row.initiative_id,
+                initiative_display_name,
+                agent_type,
+                state: row.state,
+                block_reason: row.block_reason,
+                updated_at: row.transitioned_at,
+            });
+        }
+        Ok(HostRestartRecoverySummary {
+            generated_at: unix_now_s() as i64,
+            tasks,
+        })
+    }
+
     fn diagnostics(
         &self,
         initiative_id: Option<&str>,
@@ -1062,17 +1097,17 @@ impl DashboardData for KernelDashboardData {
             &conn,
             &row,
             &task_rows,
+            &bundle,
             self.task_llm_capture.as_ref(),
             updated_at,
         )?;
-        // INV-DASHBOARD-FAILURE-VISIBILITY-01: when the initiative
-        // is in a terminal-failure state, surface the most recent
-        // failure-bearing audit row as `failure`. V2.5 ships the
-        // wire shape; the kernel-side projection is best-effort —
-        // V3 will widen this to a richer audit-chain walker. Until
-        // then, `None` here causes the FE to render "No reason
-        // supplied — kernel bug" so the gap is visible.
-        let failure = None;
+        // INV-DASHBOARD-FAILURE-VISIBILITY-01: the operator should
+        // not have to open raw logs/audit rows to learn why an
+        // initiative failed. Prefer the causal task `block_reason`
+        // because the kernel writes it at the state transition that
+        // actually stopped progress; V3 can still enrich this with
+        // a deeper audit-row anchor.
+        let failure = initiative_failure_from_task_rows(&row.state, &task_rows);
         Ok(InitiativeView {
             summary: InitiativeListEntry {
                 initiative_id: row.initiative_id.clone(),
@@ -5703,6 +5738,8 @@ fn initiative_review_base_sha(
 #[derive(Debug, Clone, Default)]
 struct InitiativeTaskAccounting {
     task_id: String,
+    provider: Option<String>,
+    model: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
     cache_creation_tokens: u64,
@@ -5732,6 +5769,7 @@ fn initiative_run_summary(
     conn: &raxis_store::ro::RoConn,
     initiative: &raxis_store::views::initiatives::InitiativeRow,
     task_rows: &[raxis_store::views::tasks::TaskRow],
+    policy: &PolicyBundle,
     capture: Option<&Arc<TaskLlmCapture>>,
     latest_task_transition_at: u64,
 ) -> Result<InitiativeRunSummary, ApiError> {
@@ -5746,7 +5784,8 @@ fn initiative_run_summary(
     summary.session_count = session_count;
     summary.active_session_count = active_session_count;
 
-    for row in task_accounting_for_initiative(conn, &initiative.initiative_id)? {
+    let accounting_rows = task_accounting_for_initiative(conn, &initiative.initiative_id)?;
+    for row in &accounting_rows {
         let captured = captured_usage_for_task(capture, &row.task_id);
         summary.llm_turn_count = saturating_u32_add(summary.llm_turn_count, captured.turn_count);
 
@@ -5789,6 +5828,12 @@ fn initiative_run_summary(
     summary.declared_turn_budget = declared.turn_budget;
     summary.declared_wallclock_budget_seconds = declared.wallclock_budget_seconds;
 
+    let (pricing_source, pricing_note) =
+        token_cost_pricing_note(policy, &accounting_rows, summary.token_cost_micros);
+    summary.token_cost_pricing_source = pricing_source;
+    summary.token_cost_pricing_note = pricing_note;
+    summary.token_cost_breakdown = token_cost_breakdown_rows(policy, &accounting_rows);
+
     // A freshly approved initiative with no task transitions yet still
     // has a meaningful elapsed clock from creation to completion if the
     // initiatives table carries a terminal timestamp.
@@ -5805,6 +5850,231 @@ fn initiative_run_summary(
     let _rendered_task_count = task_rows.len();
 
     Ok(summary)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DashboardTokenPricingSource {
+    OperatorPolicyOverride,
+    BundledEstimate,
+    Unknown,
+}
+
+const DASHBOARD_BUNDLED_PRICING_REGISTRY_VERSION: &str = "bundled-2026-06-11";
+
+fn token_cost_pricing_note(
+    policy: &PolicyBundle,
+    rows: &[InitiativeTaskAccounting],
+    token_cost_micros: u64,
+) -> (String, String) {
+    if token_cost_micros == 0 {
+        return (
+            "unpriced".to_owned(),
+            "No token cost has been recorded for this initiative yet.".to_owned(),
+        );
+    }
+
+    let mut saw_policy_override = false;
+    let mut saw_bundled_estimate = false;
+    let mut saw_unknown = false;
+    for row in rows.iter().filter(|row| row_has_token_accounting(row)) {
+        match dashboard_pricing_source_for_task(policy, row) {
+            DashboardTokenPricingSource::OperatorPolicyOverride => saw_policy_override = true,
+            DashboardTokenPricingSource::BundledEstimate => saw_bundled_estimate = true,
+            DashboardTokenPricingSource::Unknown => saw_unknown = true,
+        }
+    }
+
+    if saw_policy_override && !saw_bundled_estimate && !saw_unknown {
+        return (
+            "operator_policy_override".to_owned(),
+            "Provider-reported usage priced with operator policy override rates.".to_owned(),
+        );
+    }
+    if saw_bundled_estimate && !saw_policy_override && !saw_unknown {
+        return (
+            "bundled_estimate".to_owned(),
+            format!(
+                "Provider-reported usage priced with bundled fallback estimate rates ({DASHBOARD_BUNDLED_PRICING_REGISTRY_VERSION}). Use policy pricing overrides for contract or volume-discount rates."
+            ),
+        );
+    }
+    if saw_policy_override || saw_bundled_estimate {
+        return (
+            "estimated".to_owned(),
+            format!(
+                "Some provider usage was priced with bundled fallback estimates ({DASHBOARD_BUNDLED_PRICING_REGISTRY_VERSION}). See the provider/model breakdown for policy overrides versus estimates."
+            ),
+        );
+    }
+
+    (
+        "pricing_source_unknown".to_owned(),
+        "Provider reported usage, but this kernel version could not reconstruct the pricing source for the recorded cost.".to_owned(),
+    )
+}
+
+fn token_cost_breakdown_rows(
+    policy: &PolicyBundle,
+    rows: &[InitiativeTaskAccounting],
+) -> Vec<TokenCostBreakdownRow> {
+    let mut grouped: BTreeMap<(String, String, String, String), TokenCostBreakdownRow> =
+        BTreeMap::new();
+
+    for row in rows.iter().filter(|row| row_has_token_accounting(row)) {
+        let provider_id = dashboard_provider_label(policy, row);
+        let model_id = row
+            .model
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("unknown")
+            .to_owned();
+        let source = dashboard_pricing_source_for_task(policy, row);
+        let pricing_source = dashboard_pricing_source_code(source).to_owned();
+        let pricing_note = dashboard_pricing_source_note(source).to_owned();
+        let key = (
+            provider_id.clone(),
+            model_id.clone(),
+            pricing_source.clone(),
+            pricing_note.clone(),
+        );
+        let entry = grouped.entry(key).or_insert_with(|| TokenCostBreakdownRow {
+            provider_id,
+            model_id,
+            pricing_source,
+            pricing_note,
+            ..TokenCostBreakdownRow::default()
+        });
+        entry.input_tokens = entry.input_tokens.saturating_add(row.input_tokens);
+        entry.output_tokens = entry.output_tokens.saturating_add(row.output_tokens);
+        entry.cache_read_tokens = entry
+            .cache_read_tokens
+            .saturating_add(row.cache_read_tokens);
+        entry.cache_creation_tokens = entry
+            .cache_creation_tokens
+            .saturating_add(row.cache_creation_tokens);
+        entry.token_cost_micros = entry
+            .token_cost_micros
+            .saturating_add(row.token_cost_micros);
+    }
+
+    grouped.into_values().collect()
+}
+
+fn row_has_token_accounting(row: &InitiativeTaskAccounting) -> bool {
+    row.token_cost_micros > 0
+        || row.input_tokens > 0
+        || row.output_tokens > 0
+        || row.cache_read_tokens > 0
+        || row.cache_creation_tokens > 0
+}
+
+fn dashboard_provider_label(policy: &PolicyBundle, row: &InitiativeTaskAccounting) -> String {
+    let provider = row.provider.as_deref().unwrap_or("").trim();
+    if !provider.is_empty() {
+        return provider.to_owned();
+    }
+    dashboard_provider_kind(provider, row.model.as_deref())
+        .or_else(|| {
+            row.model
+                .as_deref()
+                .and_then(|model| dashboard_provider_kind("", Some(model)))
+        })
+        .map(str::to_owned)
+        .or_else(|| {
+            policy
+                .providers()
+                .iter()
+                .find(|p| p.pricing.is_some())
+                .map(|p| p.provider_id.clone())
+        })
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn dashboard_pricing_source_code(source: DashboardTokenPricingSource) -> &'static str {
+    match source {
+        DashboardTokenPricingSource::OperatorPolicyOverride => "operator_policy_override",
+        DashboardTokenPricingSource::BundledEstimate => "bundled_estimate",
+        DashboardTokenPricingSource::Unknown => "pricing_source_unknown",
+    }
+}
+
+fn dashboard_pricing_source_note(source: DashboardTokenPricingSource) -> &'static str {
+    match source {
+        DashboardTokenPricingSource::OperatorPolicyOverride => "policy override",
+        DashboardTokenPricingSource::BundledEstimate => "bundled estimate",
+        DashboardTokenPricingSource::Unknown => "source unknown",
+    }
+}
+
+fn dashboard_pricing_source_for_task(
+    policy: &PolicyBundle,
+    row: &InitiativeTaskAccounting,
+) -> DashboardTokenPricingSource {
+    let provider = row.provider.as_deref().unwrap_or("").trim();
+    if !provider.is_empty() {
+        if policy
+            .providers()
+            .iter()
+            .any(|p| p.provider_id == provider && p.pricing.is_some())
+        {
+            return DashboardTokenPricingSource::OperatorPolicyOverride;
+        }
+    }
+
+    let provider_kind = dashboard_provider_kind(provider, row.model.as_deref()).or_else(|| {
+        policy
+            .providers()
+            .iter()
+            .find(|p| p.provider_id == provider)
+            .and_then(|p| dashboard_kind_id(&p.kind))
+    });
+
+    if let Some(kind) = provider_kind {
+        if policy
+            .providers()
+            .iter()
+            .any(|p| p.pricing.is_some() && dashboard_kind_id(&p.kind) == Some(kind))
+        {
+            return DashboardTokenPricingSource::OperatorPolicyOverride;
+        }
+        if matches!(kind, "anthropic" | "openai" | "gemini" | "bedrock") {
+            return DashboardTokenPricingSource::BundledEstimate;
+        }
+    }
+
+    // Legacy reports before provider/model persistence used the
+    // conservative worst policy override when any override existed.
+    if policy.providers().iter().any(|p| p.pricing.is_some()) {
+        return DashboardTokenPricingSource::OperatorPolicyOverride;
+    }
+
+    DashboardTokenPricingSource::Unknown
+}
+
+fn dashboard_provider_kind(provider: &str, model: Option<&str>) -> Option<&'static str> {
+    dashboard_kind_id(provider).or_else(|| {
+        let model = model.unwrap_or("").trim();
+        if model.starts_with("claude-") || model.starts_with("anthropic.") {
+            Some("anthropic")
+        } else if model.starts_with("gpt-") || model.starts_with("o1") || model.starts_with("o3") {
+            Some("openai")
+        } else if model.starts_with("gemini-") {
+            Some("gemini")
+        } else {
+            None
+        }
+    })
+}
+
+fn dashboard_kind_id(kind: &str) -> Option<&'static str> {
+    match kind {
+        "Anthropic" | "anthropic" => Some("anthropic"),
+        "OpenAI" | "openai" => Some("openai"),
+        "Gemini" | "gemini" => Some("gemini"),
+        "Bedrock" | "bedrock" => Some("bedrock"),
+        "http_sidecar" | "HttpSidecar" | "sidecar" => Some("sidecar"),
+        _ => None,
+    }
 }
 
 fn initiative_is_terminal(state: &str) -> bool {
@@ -5842,7 +6112,9 @@ fn task_accounting_for_initiative(
     initiative_id: &str,
 ) -> Result<Vec<InitiativeTaskAccounting>, ApiError> {
     let sql = format!(
-        "SELECT task_id, \
+        "SELECT t.task_id, \
+                s.provider, \
+                s.model, \
                 cumulative_input_tokens, \
                 cumulative_output_tokens, \
                 cumulative_cache_creation_tokens, \
@@ -5850,9 +6122,10 @@ fn task_accounting_for_initiative(
                 cumulative_token_cost_micros, \
                 COALESCE(admission_reserved_units, 0), \
                 actual_cost \
-         FROM {TBL_TASKS} \
-         WHERE initiative_id = ?1 \
-         ORDER BY admitted_at ASC, task_id ASC",
+         FROM {TBL_TASKS} t \
+         LEFT JOIN {TBL_SESSIONS} s ON s.session_id = t.session_id \
+         WHERE t.initiative_id = ?1 \
+         ORDER BY t.admitted_at ASC, t.task_id ASC",
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| ApiError::Internal {
         log_only: format!("initiative task-accounting prepare: {e}"),
@@ -5861,13 +6134,15 @@ fn task_accounting_for_initiative(
         .query_map(rusqlite::params![initiative_id], |r| {
             Ok(InitiativeTaskAccounting {
                 task_id: r.get(0)?,
-                input_tokens: nonnegative_i64_to_u64(r.get::<_, i64>(1)?),
-                output_tokens: nonnegative_i64_to_u64(r.get::<_, i64>(2)?),
-                cache_creation_tokens: nonnegative_i64_to_u64(r.get::<_, i64>(3)?),
-                cache_read_tokens: nonnegative_i64_to_u64(r.get::<_, i64>(4)?),
-                token_cost_micros: nonnegative_i64_to_u64(r.get::<_, i64>(5)?),
-                admission_reserved_units: nonnegative_i64_to_u64(r.get::<_, i64>(6)?),
-                actual_cost_units: nonnegative_i64_to_u64(r.get::<_, i64>(7)?),
+                provider: r.get(1)?,
+                model: r.get(2)?,
+                input_tokens: nonnegative_i64_to_u64(r.get::<_, i64>(3)?),
+                output_tokens: nonnegative_i64_to_u64(r.get::<_, i64>(4)?),
+                cache_creation_tokens: nonnegative_i64_to_u64(r.get::<_, i64>(5)?),
+                cache_read_tokens: nonnegative_i64_to_u64(r.get::<_, i64>(6)?),
+                token_cost_micros: nonnegative_i64_to_u64(r.get::<_, i64>(7)?),
+                admission_reserved_units: nonnegative_i64_to_u64(r.get::<_, i64>(8)?),
+                actual_cost_units: nonnegative_i64_to_u64(r.get::<_, i64>(9)?),
             })
         })
         .map_err(|e| ApiError::Internal {
@@ -6631,6 +6906,214 @@ fn parse_worktree_snapshot_row(
     })
 }
 
+fn task_failure_from_block_reason(
+    t: &raxis_store::views::tasks::TaskRow,
+    title: &str,
+) -> Option<FailureInfo> {
+    let reason = t.block_reason.as_deref()?.trim();
+    if reason.is_empty() || !task_state_should_show_failure(&t.state) {
+        return None;
+    }
+
+    let mut info = FailureInfo::new(classify_task_failure_kind(t, reason), reason.to_owned())
+        .with_field("Task", title.to_owned())
+        .with_field("State", t.state.clone())
+        .with_field("Runtime task id", t.task_id.clone())
+        .with_field("Initiative", t.initiative_id.clone())
+        .with_artifact("Task page", format!("/tasks/{}", t.task_id))
+        .at(t.transitioned_at);
+
+    if let Some(session_id) = t.session_id.as_deref() {
+        info = info
+            .with_field("Session", session_id.to_owned())
+            .with_artifact("Session", format!("/sessions/{session_id}"));
+    }
+    info = attach_task_recovery_actions(info, t, reason);
+
+    Some(info)
+}
+
+fn initiative_failure_from_task_rows(
+    state: &str,
+    rows: &[raxis_store::views::tasks::TaskRow],
+) -> Option<FailureInfo> {
+    if !matches!(
+        state,
+        "Failed" | "Aborted" | "Blocked" | "RecoveryRequired" | "BlockedRecoveryPending"
+    ) {
+        return None;
+    }
+
+    let task = rows
+        .iter()
+        .filter(|t| {
+            t.block_reason
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|reason| !reason.is_empty())
+        })
+        .max_by_key(|t| t.transitioned_at)?;
+    let reason = task.block_reason.as_deref()?.trim();
+    let title = task_display_title(
+        &task.task_id,
+        task.task_name.as_deref(),
+        &task.initiative_id,
+    );
+    let kind = match state {
+        "RecoveryRequired" | "BlockedRecoveryPending" => "InitiativeRecoveryRequired",
+        "Aborted" => "InitiativeAborted",
+        _ => "InitiativeFailed",
+    };
+
+    let mut info = FailureInfo::new(kind, reason.to_owned())
+        .with_field("Initiative state", state.to_owned())
+        .with_field("Causal task", title)
+        .with_field("Causal task state", task.state.clone())
+        .with_field("Runtime task id", task.task_id.clone())
+        .with_artifact("Causal task", format!("/tasks/{}", task.task_id))
+        .at(task.transitioned_at);
+    if let Some(session_id) = task.session_id.as_deref() {
+        info = info.with_artifact("Session", format!("/sessions/{session_id}"));
+    }
+    info = attach_initiative_recovery_actions(info, state, task);
+    Some(info)
+}
+
+fn task_state_should_show_failure(state: &str) -> bool {
+    matches!(
+        state,
+        "Failed" | "Aborted" | "Cancelled" | "BlockedRecoveryPending" | "RecoveryRequired"
+    )
+}
+
+fn classify_task_failure_kind(
+    t: &raxis_store::views::tasks::TaskRow,
+    reason: &str,
+) -> &'static str {
+    if t.task_id == t.initiative_id
+        && (reason.contains("IntegrationMerge") || reason.contains("integration merge"))
+    {
+        "IntegrationMergeFailed"
+    } else if reason.contains("review rejection budget exhausted") {
+        "ReviewRejectionBudgetExhausted"
+    } else if reason.contains("ActivateSubTask substrate spawn failed")
+        || reason.contains("substrate spawn failed")
+    {
+        "SubtaskSpawnFailed"
+    } else if reason.contains("RetrySubTaskRejectedNotRetryable") {
+        "RetrySubTaskRejected"
+    } else if t.state == "BlockedRecoveryPending" {
+        "TaskBlockedForRecovery"
+    } else {
+        "TaskFailed"
+    }
+}
+
+fn attach_task_recovery_actions(
+    mut info: FailureInfo,
+    t: &raxis_store::views::tasks::TaskRow,
+    reason: &str,
+) -> FailureInfo {
+    if matches!(
+        t.state.as_str(),
+        "BlockedRecoveryPending" | "RecoveryRequired"
+    ) {
+        info = info
+            .with_recovery(
+                "recoverable",
+                "Task can be resumed",
+                "Review the block reason, then run the resume command. The kernel will reset stale runtime state and re-check authority.",
+            )
+            .with_action(
+                "Resume task",
+                "command",
+                format!("raxis task resume {}", shell_quote(&t.task_id)),
+            );
+    } else if reason.contains("operator approval")
+        || reason.contains("RecoveryRequired")
+        || reason.contains("LogicalDeadlock")
+        || reason.contains("IntegrationMerge")
+    {
+        info = info.with_recovery(
+            "operator_action_required",
+            "Operator action required",
+            "Review the recovery escalation or merge state before approving, denying, or rerunning.",
+        );
+    } else if matches!(t.state.as_str(), "Failed" | "Aborted" | "Cancelled") {
+        info = info.with_recovery(
+            "unrecoverable",
+            "Not recoverable in place",
+            "This terminal task state is preserved. Use a new run, fork, or signed amendment path instead of resuming in place.",
+        );
+    } else {
+        info = info.with_recovery(
+            "diagnosis_only",
+            "Diagnosis available",
+            "The dashboard has structured context for this failure. No direct in-place recovery command is attached.",
+        );
+    }
+
+    if t.task_id == t.initiative_id
+        || matches!(
+            t.state.as_str(),
+            "BlockedRecoveryPending" | "RecoveryRequired"
+        )
+        || reason.contains("operator approval")
+        || reason.contains("RecoveryRequired")
+        || reason.contains("LogicalDeadlock")
+        || reason.contains("IntegrationMerge")
+    {
+        info = info.with_action("Open recovery escalations", "route", "/escalations");
+    }
+
+    info.with_action("Open task", "route", format!("/tasks/{}", t.task_id))
+}
+
+fn attach_initiative_recovery_actions(
+    mut info: FailureInfo,
+    state: &str,
+    task: &raxis_store::views::tasks::TaskRow,
+) -> FailureInfo {
+    if matches!(state, "RecoveryRequired" | "BlockedRecoveryPending") {
+        info = info
+            .with_recovery(
+                "operator_action_required",
+                "Recovery approval required",
+                "Open the recovery escalation, review the causal task, then approve or deny the recovery disposition.",
+            )
+            .with_action("Open recovery escalations", "route", "/escalations")
+            .with_action(
+                "Open causal task",
+                "route",
+                format!("/tasks/{}", task.task_id),
+            );
+    } else if matches!(state, "Failed" | "Aborted") {
+        info = info.with_recovery(
+            "unrecoverable",
+            "Not recoverable in place",
+            "This initiative is terminal. Preserve the record and use a new run, fork, or signed amendment path.",
+        );
+    } else {
+        info = info.with_recovery(
+            "diagnosis_only",
+            "Diagnosis available",
+            "The dashboard has structured context for this initiative state. No direct recovery command is attached.",
+        );
+    }
+    info
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || "._:/@%+=,-".contains(ch))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+}
+
 fn task_row_to_view(
     conn: &raxis_store::ro::RoConn,
     t: &raxis_store::views::tasks::TaskRow,
@@ -6699,6 +7182,7 @@ fn task_row_to_view(
     // human title. Normal sub-task rows use `task_name`; the
     // runtime `task_id` is UUID plumbing.
     let title = task_display_title(&t.task_id, t.task_name.as_deref(), &t.initiative_id);
+    let failure = task_failure_from_block_reason(t, &title);
     Ok(TaskView {
         task_id: t.task_id.clone(),
         task_name: t.task_name.clone(),
@@ -6714,13 +7198,13 @@ fn task_row_to_view(
         path_allowlist,
         created_at: t.admitted_at,
         updated_at: t.transitioned_at,
-        // INV-DASHBOARD-FAILURE-VISIBILITY-01: V2.5 ships the
-        // wire shape; the kernel-side projection that walks the
-        // audit chain for the matching `TaskBlockedForRecovery` /
-        // `WitnessRejected` / `VerifierProcessFailed` row lands
-        // in V3. Until then `None` here causes the FE to render
-        // "No reason supplied — kernel bug" so the gap is visible.
-        failure: None,
+        // INV-DASHBOARD-FAILURE-VISIBILITY-01: task failure
+        // reasons are written into `tasks.block_reason` by the
+        // kernel transition path. Project them into the shared
+        // `FailureReasonPanel` shape so the dashboard can explain
+        // failures inline without making the operator inspect
+        // kernel.stderr.log or raw audit JSON first.
+        failure,
         blocked_downstream: Vec::new(),
         // Lifecycle annotations are populated lazily by the
         // detail / list paths that own the audit chain handle.
@@ -6860,9 +7344,17 @@ fn enrich_session_view_with_lifecycle(
     audit_chain: &[lifecycle::AuditRow],
     mut view: SessionView,
 ) -> SessionView {
-    let annotations = lifecycle::classify_for_session(audit_chain, &view.session_id);
+    let mut rows: Vec<&lifecycle::AuditRow> = audit_chain
+        .iter()
+        .filter(|r| r.session_id.as_deref() == Some(view.session_id.as_str()))
+        .collect();
+    rows.sort_by_key(|r| r.seq);
+    let annotations = lifecycle::classify_for_session_rows(&rows);
     view.latest_annotation = annotations.last().cloned();
     view.annotations = annotations;
+    if view.failure.is_none() {
+        view.failure = session_failure_from_lifecycle_rows(&rows);
+    }
     view
 }
 
@@ -6875,7 +7367,113 @@ fn enrich_session_view_with_lifecycle_indexed(
         lifecycle::classify_for_session_rows(audit_index.session_rows(&view.session_id));
     view.latest_annotation = annotations.last().cloned();
     view.annotations = annotations;
+    if view.failure.is_none() {
+        view.failure =
+            session_failure_from_lifecycle_rows(audit_index.session_rows(&view.session_id));
+    }
     view
+}
+
+fn session_failure_from_lifecycle_rows(rows: &[&lifecycle::AuditRow]) -> Option<FailureInfo> {
+    rows.iter()
+        .rev()
+        .find_map(|row| session_failure_from_lifecycle_row(row))
+}
+
+fn session_failure_from_lifecycle_row(row: &lifecycle::AuditRow) -> Option<FailureInfo> {
+    let mut info = match row.event_kind.as_str() {
+        "SessionVmFailedFinal" => {
+            let message = payload_str(row, "final_reason")
+                .or_else(|| payload_str(row, "reason"))
+                .unwrap_or("VM spawn failed permanently");
+            FailureInfo::new("SessionVmFailedFinal", message.to_owned())
+                .with_field("Session", payload_string(row, "session_id"))
+                .with_field("Failure class", payload_string(row, "failure_class"))
+                .with_field(
+                    "Total attempts",
+                    payload_u64(row, "total_attempts").to_string(),
+                )
+                .with_field("Initiative", payload_string(row, "initiative_id"))
+                .with_recovery(
+                    "diagnosis_only",
+                    "Session failure captured",
+                    "This VM/session has ended. Inspect the owning task or initiative for the recoverable action, if one exists.",
+                )
+        }
+        "SessionVmExited" => {
+            let signal_class = payload_str(row, "signal_class").unwrap_or("");
+            let exit_code = payload_i32(row, "exit_code").unwrap_or(0);
+            if signal_class == "GracefulExit" && exit_code == 0 {
+                return None;
+            }
+            let message = payload_str(row, "backend_error")
+                .or_else(|| payload_str(row, "reason"))
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("Session VM exited with {signal_class} ({exit_code})"));
+            let mut failure = FailureInfo::new("SessionVmExited", message)
+                .with_field("Session", payload_string(row, "session_id"))
+                .with_field("Signal class", signal_class.to_owned())
+                .with_field("Exit code", exit_code.to_string())
+                .with_recovery(
+                    "diagnosis_only",
+                    "Session exit captured",
+                    "This session is no longer running. Inspect the owning task for retry or recovery disposition.",
+                );
+            if let Some(terminal_tool) = payload_str(row, "terminal_tool") {
+                failure = failure.with_field("Terminal tool", terminal_tool.to_owned());
+            }
+            if let Some(console_log_path) = payload_str(row, "console_log_path") {
+                failure = failure.with_artifact("Console log", console_log_path.to_owned());
+            }
+            failure
+        }
+        "WorktreeProvisionFailed" => {
+            let message = payload_str(row, "reason")
+                .or_else(|| payload_str(row, "detail"))
+                .unwrap_or("Worktree provisioning failed");
+            let mut failure = FailureInfo::new("WorktreeProvisionFailed", message.to_owned())
+                .with_field("Session", payload_string(row, "session_id"))
+                .with_field("Task", payload_string(row, "task_id"))
+                .with_recovery(
+                    "diagnosis_only",
+                    "Worktree provisioning failed",
+                    "Inspect disk space, repository state, and path validity. Retry through the owning task when it is marked recoverable.",
+                );
+            if let Some(worktree_path) = payload_str(row, "worktree_path") {
+                failure = failure.with_field("Worktree path", worktree_path.to_owned());
+            }
+            if let Some(exit_code) = payload_i32(row, "exit_code") {
+                failure = failure.with_field("Exit code", exit_code.to_string());
+            }
+            failure
+        }
+        _ => return None,
+    };
+
+    if let Some(task_id) = row
+        .task_id
+        .as_deref()
+        .or_else(|| payload_str(row, "task_id"))
+        .filter(|id| !id.is_empty())
+    {
+        info = info.with_action("Open task", "route", format!("/tasks/{task_id}"));
+    }
+    if let Some(initiative_id) = row
+        .initiative_id
+        .as_deref()
+        .or_else(|| payload_str(row, "initiative_id"))
+        .filter(|id| !id.is_empty())
+    {
+        info = info.with_action(
+            "Open initiative",
+            "route",
+            format!("/initiatives/{initiative_id}"),
+        );
+    }
+    if !row.event_id.is_empty() {
+        info = info.with_audit(row.event_id.clone(), row.seq);
+    }
+    Some(info.at(row.at.max(0) as u64))
 }
 
 // ---------------------------------------------------------------------------
@@ -9250,6 +9848,85 @@ predecessors = ["produce-report"]
         );
     }
 
+    fn session_audit_row(
+        seq: u64,
+        event_kind: &str,
+        payload: serde_json::Value,
+    ) -> lifecycle::AuditRow {
+        lifecycle::AuditRow {
+            seq,
+            event_id: format!("event-{seq}"),
+            event_kind: event_kind.to_owned(),
+            initiative_id: payload
+                .get("initiative_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            task_id: payload
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            session_id: payload
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            at: 1_779_211_000 + i64::try_from(seq).unwrap(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn session_failure_projects_non_graceful_vm_exit() {
+        let rows = vec![session_audit_row(
+            42,
+            "SessionVmExited",
+            serde_json::json!({
+                "session_id": "session-failed",
+                "signal_class": "BackendError",
+                "exit_code": -2,
+                "backend_error": "broken pipe",
+                "terminal_tool": null,
+                "console_log_path": "/tmp/raxis/session-failed/console.log"
+            }),
+        )];
+        let refs: Vec<&lifecycle::AuditRow> = rows.iter().collect();
+        let failure = session_failure_from_lifecycle_rows(&refs)
+            .expect("non-graceful VM exit should project as session failure");
+        assert_eq!(failure.kind, "SessionVmExited");
+        assert_eq!(failure.message, "broken pipe");
+        assert_eq!(failure.seq, Some(42));
+        assert!(failure
+            .fields
+            .iter()
+            .any(|field| field.label == "Signal class" && field.value == "BackendError"));
+        assert!(failure.artifacts.iter().any(|artifact| {
+            artifact.label == "Console log"
+                && artifact.href == "/tmp/raxis/session-failed/console.log"
+        }));
+        assert_eq!(
+            failure.recovery.as_ref().map(|r| r.status.as_str()),
+            Some("diagnosis_only")
+        );
+    }
+
+    #[test]
+    fn session_failure_ignores_graceful_vm_exit() {
+        let rows = vec![session_audit_row(
+            43,
+            "SessionVmExited",
+            serde_json::json!({
+                "session_id": "session-clean",
+                "signal_class": "GracefulExit",
+                "exit_code": 0,
+                "terminal_tool": "complete_task"
+            }),
+        )];
+        let refs: Vec<&lifecycle::AuditRow> = rows.iter().collect();
+        assert!(
+            session_failure_from_lifecycle_rows(&refs).is_none(),
+            "clean planner self-exit must remain lifecycle-only, not a failure card"
+        );
+    }
+
     #[test]
     fn task_projection_surfaces_custom_tool_invocations_from_audit_chain() {
         let row = lifecycle::AuditRow {
@@ -9427,6 +10104,128 @@ task_name = "t-state"
     }
 
     #[test]
+    fn task_projection_surfaces_block_reason_as_failure_info() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("kernel.db");
+        {
+            let store = raxis_store::Store::open(&store_path).unwrap();
+            let g = store.lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {init} \
+                     (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                     VALUES ('init-state', 'RecoveryRequired', '{{}}', 'sha-state', 1)",
+                    init = raxis_store::Table::Initiatives.as_str()
+                ),
+                [],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {plans} \
+                     (initiative_id, plan_bytes, plan_sig, stored_at) \
+                     VALUES ('init-state', ?1, x'00', 1)",
+                    plans = raxis_store::Table::SignedPlanArtifacts.as_str()
+                ),
+                [br#"[plan.initiative]
+description = "failure fixture"
+
+[workspace]
+name = "Failure projection"
+lane_id = "default"
+"# as &[u8]],
+            )
+            .unwrap();
+        }
+
+        let conn = raxis_store::ro::open(tmp.path()).unwrap();
+        let mut row = synth_task_row(raxis_types::TaskState::Failed);
+        row.task_id = "init-state".into();
+        row.task_name = None;
+        row.initiative_id = "init-state".into();
+        row.state = "Failed".into();
+        row.block_reason =
+            Some("IntegrationMerge target advance failed (conflict): target advanced".into());
+        row.session_id = Some("sess-failed".into());
+        row.transitioned_at = 777;
+
+        let view = task_row_to_view(&conn, &row).unwrap();
+        let failure = view
+            .failure
+            .expect("failed task block_reason must project into FailureInfo");
+        assert_eq!(failure.kind, "IntegrationMergeFailed");
+        assert!(
+            failure
+                .message
+                .contains("IntegrationMerge target advance failed"),
+            "failure message should preserve the kernel block_reason"
+        );
+        assert_eq!(failure.observed_at, 777);
+        assert!(failure
+            .fields
+            .iter()
+            .any(|field| { field.label == "Task" && field.value == "Integration merge" }));
+        assert!(failure
+            .fields
+            .iter()
+            .any(|field| { field.label == "Session" && field.value == "sess-failed" }));
+        assert!(failure.artifacts.iter().any(|artifact| {
+            artifact.label == "Task page" && artifact.href == "/tasks/init-state"
+        }));
+        assert!(failure.actions.iter().any(|action| {
+            action.label == "Open recovery escalations" && action.target == "/escalations"
+        }));
+        assert!(failure
+            .actions
+            .iter()
+            .any(|action| { action.label == "Open task" && action.target == "/tasks/init-state" }));
+        assert_eq!(
+            failure.recovery.as_ref().map(|r| r.status.as_str()),
+            Some("operator_action_required")
+        );
+    }
+
+    #[test]
+    fn initiative_failure_uses_latest_causal_task_block_reason() {
+        let mut first = synth_task_row(raxis_types::TaskState::Failed);
+        first.task_id = "task-old".into();
+        first.task_name = Some("Old task".into());
+        first.block_reason = Some("old failure".into());
+        first.transitioned_at = 10;
+
+        let mut latest = synth_task_row(raxis_types::TaskState::Failed);
+        latest.task_id = "task-latest".into();
+        latest.task_name = Some("Latest task".into());
+        latest.block_reason = Some("review rejection budget exhausted after retry".into());
+        latest.transitioned_at = 20;
+
+        let failure = initiative_failure_from_task_rows("RecoveryRequired", &[first, latest])
+            .expect("initiative should project latest causal task failure");
+        assert_eq!(failure.kind, "InitiativeRecoveryRequired");
+        assert_eq!(
+            failure.message,
+            "review rejection budget exhausted after retry"
+        );
+        assert!(failure
+            .fields
+            .iter()
+            .any(|field| { field.label == "Causal task" && field.value == "Latest task" }));
+        assert!(failure.artifacts.iter().any(|artifact| {
+            artifact.label == "Causal task" && artifact.href == "/tasks/task-latest"
+        }));
+        assert!(failure.actions.iter().any(|action| {
+            action.label == "Open recovery escalations" && action.target == "/escalations"
+        }));
+        assert!(failure.actions.iter().any(|action| {
+            action.label == "Open causal task" && action.target == "/tasks/task-latest"
+        }));
+        assert_eq!(
+            failure.recovery.as_ref().map(|r| r.status.as_str()),
+            Some("operator_action_required")
+        );
+    }
+
+    #[test]
     fn initiative_run_summary_aggregates_ledger_capture_sessions_and_budgets() {
         let tmp = tempfile::tempdir().unwrap();
         let store = raxis_store::Store::open(&tmp.path().join("kernel.db")).unwrap();
@@ -9484,10 +10283,10 @@ prompt = "do capture work"
                         "INSERT INTO {sessions} \
                          (session_id, role_id, session_token, lineage_id, \
                           fetch_quota, created_at, expires_at, revoked, \
-                          session_agent_type, can_delegate, initiative_id) \
+                          session_agent_type, can_delegate, initiative_id, provider, model) \
                          VALUES (?1, 'Executor', ?2, 'lin', \
                                  0, 120, 9999999999, ?3, \
-                                 'Executor', 0, 'init-summary')",
+                                 'Executor', 0, 'init-summary', 'anthropic', 'claude-haiku-4-5')",
                         sessions = raxis_store::Table::Sessions.as_str()
                     ),
                     rusqlite::params![session_id, format!("tok-{session_id}"), revoked,],
@@ -9538,8 +10337,9 @@ prompt = "do capture work"
             .unwrap();
         let tasks =
             raxis_store::views::tasks::list_by_initiative(&conn, "init-summary", 10).unwrap();
-        let summary =
-            initiative_run_summary(&conn, &init, &tasks, Some(&cap), 260).expect("summary");
+        let policy = PolicyBundle::for_tests_with_operators(Vec::new());
+        let summary = initiative_run_summary(&conn, &init, &tasks, &policy, Some(&cap), 260)
+            .expect("summary");
 
         assert!(summary.terminal);
         assert_eq!(summary.elapsed_seconds, 160);
@@ -9551,6 +10351,7 @@ prompt = "do capture work"
         assert_eq!(summary.cache_creation_tokens, 11);
         assert_eq!(summary.cache_read_tokens, 22);
         assert_eq!(summary.token_cost_micros, 123456);
+        assert_eq!(summary.token_cost_pricing_source, "bundled_estimate");
         assert_eq!(summary.admission_reserved_units, 3);
         assert_eq!(summary.actual_cost_units, 7);
         assert_eq!(summary.declared_turn_budget, Some(12));

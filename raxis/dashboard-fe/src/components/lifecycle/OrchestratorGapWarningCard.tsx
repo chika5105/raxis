@@ -38,21 +38,21 @@ export function OrchestratorGapWarningCard({ a, onDismiss }: Props) {
   return (
     <div
       data-testid="lifecycle-orchestrator-gap"
-      className="card border-warn/60 bg-warn/10 p-3"
+      className="card min-w-0 max-w-full overflow-hidden border-warn/60 bg-warn/10 p-3"
     >
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="badge bg-warn-muted/40 border-warn text-warn">
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="badge shrink-0 bg-warn-muted/40 border-warn text-warn">
             Orchestrator gap
           </span>
-          <span className="text-[11px] text-warn">
+          <span className="whitespace-nowrap text-[11px] text-warn">
             stalled {waitLabel}
           </span>
         </div>
         {onDismiss && (
           <button
             type="button"
-            className="text-[11px] text-ink-muted hover:text-accent"
+            className="shrink-0 text-[11px] text-ink-muted hover:text-accent"
             onClick={onDismiss}
             aria-label={`Dismiss orchestrator gap for ${a.task_id} on ${a.activation_id}`}
           >
@@ -61,23 +61,31 @@ export function OrchestratorGapWarningCard({ a, onDismiss }: Props) {
         )}
       </div>
 
-      <div className="mt-2 text-xs text-ink-muted">
+      <div className="mt-2 min-w-0 text-xs leading-relaxed text-ink-muted [overflow-wrap:anywhere]">
         Task{" "}
         <Link
           to={`/tasks/${encodeURIComponent(a.task_id)}`}
-          className="text-accent hover:underline"
+          className="break-all text-accent [overflow-wrap:anywhere] hover:underline"
         >
-          <Mono>{a.task_id}</Mono>
+          <Mono className="whitespace-normal break-all [overflow-wrap:anywhere]">
+            {a.task_id}
+          </Mono>
         </Link>{" "}
         has been waiting on{" "}
-        <Mono>{a.activation_id}</Mono> with all predecessors complete.
+        <Mono className="whitespace-normal break-all [overflow-wrap:anywhere]">
+          {a.activation_id}
+        </Mono>{" "}
+        with all predecessors complete.
       </div>
 
       {a.predecessors_completed_at.length > 0 && (
-        <ul className="mt-2 space-y-1 text-[11px] text-ink-subtle">
+        <ul className="mt-2 min-w-0 space-y-1 text-[11px] text-ink-subtle">
           {a.predecessors_completed_at.map(([pred]) => (
-            <li key={pred}>
-              <Mono>{pred}</Mono> completed
+            <li key={pred} className="min-w-0 [overflow-wrap:anywhere]">
+              <Mono className="whitespace-normal break-all [overflow-wrap:anywhere]">
+                {pred}
+              </Mono>{" "}
+              completed
             </li>
           ))}
         </ul>

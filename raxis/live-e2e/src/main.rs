@@ -54,6 +54,12 @@
 //!     SNI receives `Deny`, both with byte-exact bincode wire frames
 //!     identical to what the in-guest `raxis-tproxy` writes.
 //!
+//!   * `recovery-required-lifecycle` — apply real store migrations
+//!     and drive the persisted operator recovery contract:
+//!     `RecoveryRequired -> Executing` on approval,
+//!     `RecoveryRequired -> Failed` on denial, and terminal `Failed`
+//!     never resurrects in place.
+//!
 //!   * `smtp-proxy` — start the real `SmtpProxy` from
 //!     `crates/credential-proxy-smtp/`, point its `upstream_host_port`
 //!     at an in-process SMTP listener, drive a raw SMTP submission
@@ -186,6 +192,7 @@ mod slice_postgres_proxy;
 mod slice_postgres_proxy_max_result_rows;
 mod slice_postgres_proxy_restrictions;
 mod slice_postgres_proxy_table_allowlists;
+mod slice_recovery_required_lifecycle;
 mod slice_redis_proxy;
 mod slice_session_spawn;
 mod slice_smtp_proxy;
@@ -256,6 +263,12 @@ enum Slice {
     /// order, plus byte-shape verdicts on the admission wire
     /// (Admit + Deny).
     SessionSpawn,
+    /// Real migrated store lifecycle witness for recoverable
+    /// initiative pauses. Asserts approve resumes
+    /// RecoveryRequired -> Executing, deny closes
+    /// RecoveryRequired -> Failed, and terminal Failed is not
+    /// resumable in place.
+    RecoveryRequiredLifecycle,
     /// Real `SmtpProxy` + an in-process upstream SMTP relay. Asserts
     /// that the proxy strips the agent's AUTH PLAIN payload and
     /// injects the real `CredentialBackend`-resolved credentials
@@ -435,6 +448,7 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
         Slice::HttpProxyBearer => slice_http_proxy_bearer::run(env).await,
         Slice::HttpProxyRestrictions => slice_http_proxy_restrictions::run(env).await,
         Slice::SessionSpawn => slice_session_spawn::run().await,
+        Slice::RecoveryRequiredLifecycle => slice_recovery_required_lifecycle::run().await,
         Slice::SmtpProxy => slice_smtp_proxy::run().await,
         Slice::RedisProxy => slice_redis_proxy::run().await,
         Slice::AwsProxy => slice_aws_proxy::run().await,
@@ -479,6 +493,9 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
             slice_session_spawn::run()
                 .await
                 .context("slice session-spawn")?;
+            slice_recovery_required_lifecycle::run()
+                .await
+                .context("slice recovery-required-lifecycle")?;
             slice_smtp_proxy::run().await.context("slice smtp-proxy")?;
             slice_redis_proxy::run()
                 .await

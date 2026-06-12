@@ -334,6 +334,14 @@ pub enum Table {
     ///           last_push_at, last_status_at, last_error, adopted_at,
     ///           updated_at)`.
     ManagedRepositories,
+
+    // ── v3: Repo/ref IntegrationMerge closeout queue ───────────────────────
+    /// **Repo/ref-level IntegrationMerge closeout queue.** One row per
+    /// IntegrationMerge candidate that reaches managed-repository target-ref
+    /// advancement. The kernel serializes only rows with the same
+    /// `(repository_id, target_ref)`, preserving parallel execution while
+    /// keeping final closeout deterministic and diagnosable.
+    IntegrationMergeQueue,
 }
 
 impl Table {
@@ -382,6 +390,7 @@ impl Table {
             Self::SessionVmEnv => "session_vm_env",
             Self::WorktreeSnapshots => "worktree_snapshots",
             Self::ManagedRepositories => "managed_repositories",
+            Self::IntegrationMergeQueue => "integration_merge_queue",
         }
     }
 }
@@ -432,6 +441,7 @@ mod tests {
             Table::SessionVmEnv,
             Table::WorktreeSnapshots,
             Table::ManagedRepositories,
+            Table::IntegrationMergeQueue,
         ];
         for t in all {
             assert!(!t.as_str().is_empty(), "Table::{t:?} returned empty string");
@@ -453,6 +463,16 @@ mod tests {
     #[test]
     fn managed_repositories_table_name_is_pinned() {
         assert_eq!(Table::ManagedRepositories.as_str(), "managed_repositories");
+    }
+
+    /// Integration merge queue table name is wire-stable: recovery,
+    /// dashboard, and closeout serialization all join through this table.
+    #[test]
+    fn integration_merge_queue_table_name_is_pinned() {
+        assert_eq!(
+            Table::IntegrationMergeQueue.as_str(),
+            "integration_merge_queue",
+        );
     }
 
     /// V2 §3.2 structured outputs table name is wire-stable (the
