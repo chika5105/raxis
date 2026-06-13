@@ -4279,7 +4279,7 @@ fn validate_single_lane_propagation(
     if let Some(offender) = tasks.iter().find(|t| !t.lane_id.is_empty()) {
         return Err(LifecycleError::PlanSingleLaneInvalid {
             rule: "single_lane_propagation",
-            offending_task: offender.task_id.clone(),
+            offending_task: offender.name.clone(),
             suggestion: "Remove `lane_id` from `[[tasks]]` blocks. V2 declares \
                              the lane once at `[workspace] lane_id` and \
                              propagates it to every sub-task — per-task \
@@ -4404,7 +4404,7 @@ fn validate_sparse_orchestrator_exclusion(tasks: &[PlanTask]) -> Result<(), Life
         if task.session_agent_type == SessionAgentType::Orchestrator {
             return Err(LifecycleError::PlanCloneStrategyInvalid {
                 rule: "orchestrator_task_not_permitted",
-                offending_task: task.task_id.clone(),
+                offending_task: task.name.clone(),
                 suggestion: "Remove the `session_agent_type = \"Orchestrator\"` line from \
                      this `[[tasks]]` block. V2 auto-creates exactly one \
                      Orchestrator session per initiative from the kernel-bundled \
@@ -4423,7 +4423,7 @@ fn validate_sparse_orchestrator_exclusion(tasks: &[PlanTask]) -> Result<(), Life
             // without re-evaluating this constraint.
             return Err(LifecycleError::PlanCloneStrategyInvalid {
                 rule: "sparse_orchestrator_exclusion",
-                offending_task: task.task_id.clone(),
+                offending_task: task.name.clone(),
                 suggestion: "The Orchestrator runs `git merge` in its workspace; \
                      git's 3-way tree traversal cannot complete safely \
                      against a sparse-checkout-trimmed working tree. \
@@ -4972,7 +4972,7 @@ fn validate_task_environment_consistency(
                      task into separate DAG-connected tasks (one per \
                      environment) and let the kernel mediate the artifact \
                      handoff per §11.5.",
-                    task = pt.task_id,
+                    task = pt.name.as_str(),
                     envs = labels.join(", "),
                     sources = sources_rendered,
                 ),
@@ -4990,7 +4990,7 @@ fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
             if matches!(decl.proxy, ProxyDecl::Unknown) {
                 return Err(LifecycleError::PlanTaskCredentialsInvalid {
                     rule: "unknown_proxy_type",
-                    offending_task: pt.task_id.clone(),
+                    offending_task: pt.name.clone(),
                     offending_credential: decl.name.as_str().to_owned(),
                     suggestion: format!(
                         "task `{}` declares credential `{}` with a \
@@ -5001,7 +5001,7 @@ fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
                          `mongodb`. Drop the credential block or \
                          upgrade the kernel build to one that ships \
                          the matching proxy.",
-                        pt.task_id,
+                        pt.name.as_str(),
                         decl.name.as_str(),
                     ),
                 });
@@ -5054,7 +5054,7 @@ fn validate_task_vm_images(
                 if !pt.vm_image.is_empty() {
                     return Err(LifecycleError::PlanTaskVmImageInvalid {
                         rule: "reviewer_image_not_allowed",
-                        offending_task: pt.task_id.clone(),
+                        offending_task: pt.name.clone(),
                         offending_image: pt.vm_image.clone(),
                         suggestion: format!(
                             "task `{}` is `session_agent_type = \"Reviewer\"` and \
@@ -5063,7 +5063,8 @@ fn validate_task_vm_images(
                              cannot be operator-overridden \
                              (INV-PLANNER-HARNESS-02). Drop the `vm_image` \
                              field from this task.",
-                            pt.task_id, pt.vm_image,
+                            pt.name.as_str(),
+                            pt.vm_image,
                         ),
                     });
                 }
@@ -5088,7 +5089,7 @@ fn validate_task_vm_images(
                     None => {
                         return Err(LifecycleError::PlanTaskVmImageInvalid {
                             rule: "image_not_registered",
-                            offending_task: pt.task_id.clone(),
+                            offending_task: pt.name.clone(),
                             offending_image: pt.vm_image.clone(),
                             suggestion: format!(
                                 "task `{}` declares `vm_image = {:?}`, \
@@ -5098,7 +5099,8 @@ fn validate_task_vm_images(
                                  (with `oci_digest`, `role_restriction`, \
                                  `linux_kernel_version_min`) or change the \
                                  task's `vm_image` to a registered alias.",
-                                pt.task_id, pt.vm_image,
+                                pt.name.as_str(),
+                                pt.vm_image,
                             ),
                         });
                     }
@@ -5106,7 +5108,7 @@ fn validate_task_vm_images(
                 if !entry.permits_role("Executor") {
                     return Err(LifecycleError::PlanTaskVmImageInvalid {
                         rule: "role_restriction_mismatch",
-                        offending_task: pt.task_id.clone(),
+                        offending_task: pt.name.clone(),
                         offending_image: pt.vm_image.clone(),
                         suggestion: format!(
                             "task `{}` declares `vm_image = {:?}`, but \
@@ -5115,7 +5117,9 @@ fn validate_task_vm_images(
                              reference an Executor-permitted alias, or \
                              extend the image's `role_restriction` in \
                              `policy.toml` (operators only).",
-                            pt.task_id, pt.vm_image, entry.role_restriction,
+                            pt.name.as_str(),
+                            pt.vm_image,
+                            entry.role_restriction,
                         ),
                     });
                 }
@@ -7571,10 +7575,12 @@ predecessors = ["build-svc"]
         // short-lived read-only connection on the same store; the
         // helper accepts any rusqlite::Connection (transaction or
         // not) so we can call it without opening a write tx here.
+        let build_svc_id = task_id_by_name(&store, &init_id, "build-svc");
+        let deploy_id = task_id_by_name(&store, &init_id, "deploy");
         let conn = store.lock_sync();
 
         let build_svc =
-            read_task_credential_proxies_in_tx(&conn, "build-svc").expect("read build-svc creds");
+            read_task_credential_proxies_in_tx(&conn, &build_svc_id).expect("read build-svc creds");
         assert_eq!(build_svc.len(), 1, "build-svc has exactly 1 credential");
         assert_eq!(build_svc[0].name.as_str(), "pg-staging");
         assert_eq!(build_svc[0].mount_as, "DATABASE_URL");
@@ -7591,7 +7597,7 @@ predecessors = ["build-svc"]
         }
 
         let deploy =
-            read_task_credential_proxies_in_tx(&conn, "deploy").expect("read deploy creds");
+            read_task_credential_proxies_in_tx(&conn, &deploy_id).expect("read deploy creds");
         assert_eq!(deploy.len(), 2, "deploy has exactly 2 credentials");
         // Order-stable: created_at_unix_secs ASC + credential_name ASC.
         // Both rows are inserted at the same wall-clock second by the
@@ -9044,11 +9050,9 @@ max_concurrent_admissions   = 7
 
             [[tasks]]
             task_name  = "t1"
-            name     = "first"
 
             [[tasks]]
             task_name      = "t2"
-            name         = "second"
             predecessors = ["t1"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -10904,7 +10908,13 @@ name = "fixture"
             .filter(|e| e.kind.as_str() == "PathScopeOverrideApplied")
             .map(|e| e.task_id.clone().unwrap_or_default())
             .collect();
-        assert_eq!(overriding_task_ids, vec!["t-override-1", "t-override-2"]);
+        assert_eq!(
+            overriding_task_ids,
+            vec![
+                task_id_by_name(&store, &init_id, "t-override-1"),
+                task_id_by_name(&store, &init_id, "t-override-2"),
+            ]
+        );
 
         for ev in evs
             .iter()

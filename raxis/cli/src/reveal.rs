@@ -236,7 +236,8 @@ mod tests {
         // kernel.db
         let db = data_dir.join("kernel.db");
         let initiative_id = "init-1".to_owned();
-        let task_id = "t-1".to_owned();
+        let task_id = "task-uuid-1".to_owned();
+        let task_name = "t-1".to_owned();
         {
             let store = Store::open(&db).unwrap();
             let guard = store.lock_sync();
@@ -252,11 +253,11 @@ mod tests {
                 .execute(
                     &format!(
                         "INSERT INTO {TASKS} \
-                     (task_id, initiative_id, lane_id, state, actor, \
+                     (task_id, task_name, initiative_id, lane_id, state, actor, \
                       policy_epoch, admitted_at, transitioned_at) \
-                     VALUES (?1, ?2, 'default', 'Running', 'op', 1, 1, 1)"
+                     VALUES (?1, ?2, ?3, 'default', 'Running', 'op', 1, 1, 1)"
                     ),
-                    rusqlite::params![&task_id, &initiative_id],
+                    rusqlite::params![&task_id, &task_name, &initiative_id],
                 )
                 .unwrap();
             guard
@@ -304,7 +305,7 @@ mod tests {
     fn reveal_returns_path_fields_and_appends_one_audit_event() {
         let plan = r#"
             [[tasks]]
-            task_id        = "t-1"
+            task_name      = "t-1"
             path_allowlist = ["src/**", "README.md"]
         "#;
         let (tmp, _init, task) = fresh_data_dir_with_plan(plan);
@@ -329,13 +330,13 @@ mod tests {
             .unwrap();
         let last = recs.last().unwrap();
         assert_eq!(last.event_kind, "PathReadAccessed");
-        assert_eq!(last.task_id.as_deref(), Some("t-1"));
+        assert_eq!(last.task_id.as_deref(), Some(task.as_str()));
         let payload = last.parsed_value.as_ref().unwrap().get("payload").unwrap();
         assert_eq!(payload["kind"], serde_json::json!("PathReadAccessed"));
         assert_eq!(payload["table"], serde_json::json!("task_plan_fields"));
         assert_eq!(payload["column"], serde_json::json!("all"));
         assert_eq!(payload["command"], serde_json::json!("inspect"));
-        assert_eq!(payload["task_id"], serde_json::json!("t-1"));
+        assert_eq!(payload["task_id"], serde_json::json!(task));
         let actor = payload["actor"].as_str().unwrap();
         assert!(
             actor.starts_with("cli:"),
@@ -348,7 +349,7 @@ mod tests {
         // Step 1 of `reveal_path_fields` MUST fail BEFORE step 2;
         // a missing task is operator error, not a real read, so it
         // must not pollute the audit chain.
-        let plan = "[[tasks]]\ntask_id = \"t-1\"\n";
+        let plan = "[[tasks]]\ntask_name = \"t-1\"\n";
         let (tmp, _init, _task) = fresh_data_dir_with_plan(plan);
         let flags = flags_for(tmp.path());
 
@@ -373,7 +374,7 @@ mod tests {
         // to the seed record.
         let plan = r#"
             [[tasks]]
-            task_id        = "t-1"
+            task_name      = "t-1"
             path_allowlist = ["src/**"]
         "#;
         let (tmp, _init, task) = fresh_data_dir_with_plan(plan);

@@ -99,6 +99,7 @@ fn fresh_disk_conn() -> (tempfile::TempDir, std::path::PathBuf, Connection) {
     conn.pragma_update(None, "journal_mode", "WAL").ok();
     conn.pragma_update(None, "foreign_keys", "OFF").ok();
     apply_pending(&conn).expect("apply migrations");
+    conn.pragma_update(None, "foreign_keys", "OFF").ok();
     (tmp, path, conn)
 }
 

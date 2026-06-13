@@ -648,13 +648,13 @@ mod tests {
                 "permitted op {op:?} missing from output"
             );
         }
-        // Confirm exactly 15: the default operator IPC ops.
+        // Confirm exactly 17: the default operator IPC ops.
         // OperatorCertInstall/admin is an explicit opt-in via
         // OPERATOR_CERT_INSTALL_PERMITTED_OP.
         assert_eq!(
             PERMITTED_OPS.len(),
-            15,
-            "default genesis permitted_ops set is fixed at 15 operator IPC ops"
+            17,
+            "default genesis permitted_ops set is fixed at 17 operator IPC ops"
         );
     }
 
