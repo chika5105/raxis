@@ -451,6 +451,7 @@ pub fn ahead_behind(root: &Path, base: &str) -> Option<(u32, u32)> {
 /// IntegrationMerge snapshot detail pages honest after `HEAD`
 /// advances: the UI should describe the captured merge result, not
 /// whatever the main repository happens to point at now.
+#[cfg(test)]
 pub fn ahead_behind_between(root: &Path, base: &str, head: &str) -> Option<(u32, u32)> {
     ahead_behind_range(root, base, head)
 }

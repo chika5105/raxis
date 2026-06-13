@@ -31,6 +31,13 @@
 //! `Err(...)` so the CLI surfaces the operator-visible diagnostic
 //! rather than silently rendering "all-deny" defaults that an auditor
 //! would mistake for "the kernel approved a lockdown plan".
+//!
+//! Historical note: v0.2.x sealed plans used operator-authored
+//! `task_id` fields directly. New plans use kernel-owned runtime
+//! `task_id` plus operator-authored `task_name`. This view is read-only
+//! and forensic, so it accepts the old `task_id` field when reading
+//! already-admitted historical plans. Admission remains strict in the
+//! kernel/parser path; this is not a compatibility mode for new plans.
 
 use rusqlite::OptionalExtension;
 use thiserror::Error;
@@ -343,8 +350,11 @@ fn lookup_plan_bytes(
 }
 
 /// Parse the `[[tasks]]` array out of the plan TOML and pluck the
-/// entry whose `task_name` matches. Defaults match the spec lockdown
-/// (deny-everything) for any field the operator omitted.
+/// entry whose `task_name` matches. For historical sealed plans,
+/// fallback to the old operator-authored `task_id` field so dashboard
+/// and readonly CLI views can still inspect completed runs admitted
+/// before runtime task ids became kernel-owned. Defaults match the spec
+/// lockdown (deny-everything) for any field the operator omitted.
 ///
 /// Kept in lockstep with the kernel's `parse_plan_tasks` in
 /// `raxis/kernel/src/initiatives/lifecycle.rs` — the two parsers MUST
@@ -371,7 +381,7 @@ fn parse_plan_path_fields(
 
     let entry = tasks_array
         .iter()
-        .find(|t| t.get("task_name").and_then(|v| v.as_str()) == Some(task_name))
+        .find(|t| task_entry_matches_identity(t, task_id, task_name))
         .ok_or_else(|| PlanFieldsError::TaskNotInPlan {
             initiative_id: initiative_id.to_owned(),
             task_id: task_id.to_owned(),
@@ -420,6 +430,22 @@ fn parse_plan_path_fields(
         min_memory_mb: optional_u32_field(entry, "min_memory_mb"),
         max_memory_mb: optional_u32_field(entry, "max_memory_mb"),
     })
+}
+
+fn task_entry_matches_identity(entry: &toml::Value, task_id: &str, task_name: &str) -> bool {
+    if entry.get("task_name").and_then(|v| v.as_str()) == Some(task_name) {
+        return true;
+    }
+
+    // Read-only historical fallback: pre-kernel-owned-task-id plans
+    // used `task_id` as the operator-facing task identity. Migration
+    // 0030 populated `tasks.task_name = tasks.task_id` for those rows,
+    // so matching either value recovers the sealed plan fields without
+    // accepting legacy syntax in the admission parser.
+    entry
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .is_some_and(|legacy| legacy == task_name || legacy == task_id)
 }
 
 /// Pull `[workspace].name` plus `[plan.initiative].description` out
@@ -682,6 +708,30 @@ mod tests {
         assert_eq!(f.path_export_globs, vec!["src/ipc/**", "src/auth/**"]);
         assert!(f.path_scope_override);
         assert_eq!(f.session_agent_type, "Reviewer");
+    }
+
+    #[test]
+    fn reveal_matches_historical_task_id_field_for_readonly_views() {
+        // v0.2.x sealed plans used `task_id` as the operator-facing
+        // task identity. Migration 0030 preserves those rows by setting
+        // `tasks.task_name = tasks.task_id`; the readonly reveal view
+        // must still recover the original plan fields so historical
+        // initiative/task dashboard pages do not 500. This does NOT
+        // relax the new admission parser, which rejects legacy task ids.
+        let plan = r#"
+            [[tasks]]
+            task_id = "t-1"
+            path_allowlist = ["gtm/analysis/web_discovery/"]
+            session_agent_type = "Reviewer"
+            clone_strategy = "blobless"
+        "#;
+        let (tmp, _init, task) = fresh_store_with_plan(plan);
+        let conn = open_ro(tmp.path()).unwrap();
+
+        let f = reveal_for_task(&conn, &task).expect("historical task_id fallback");
+        assert_eq!(f.path_allowlist, vec!["gtm/analysis/web_discovery/"]);
+        assert_eq!(f.session_agent_type, "Reviewer");
+        assert_eq!(f.clone_strategy.as_deref(), Some("blobless"));
     }
 
     #[test]
