@@ -2707,7 +2707,8 @@ impl DashboardData for KernelDashboardData {
                 kind: "worktree-path".into(),
             });
         }
-        let target = resolve_within_root(&root, sub_path.unwrap_or(""))?;
+        let prefix = sub_path.unwrap_or("").trim_matches('/');
+        let target = resolve_within_root(&root, prefix)?;
         let meta = std::fs::metadata(&target).map_err(|_| ApiError::NotFound {
             kind: "tree-entry".into(),
         })?;
@@ -2716,12 +2717,19 @@ impl DashboardData for KernelDashboardData {
                 detail: "path is not a directory".into(),
             });
         }
+        if let Ok((entries, truncated)) = git::tree_entries(&root, Some(prefix), MAX_TREE_ENTRIES) {
+            return Ok(WorktreeTree {
+                name: resolved.summary.name,
+                path: prefix.to_owned(),
+                entries,
+                truncated,
+            });
+        }
         let read_dir = std::fs::read_dir(&target).map_err(|e| ApiError::Internal {
             log_only: format!("read_dir: {e}"),
         })?;
         let mut entries: Vec<WorktreeTreeEntry> = Vec::new();
         let mut truncated = false;
-        let prefix = sub_path.unwrap_or("").trim_matches('/');
         for ent in read_dir {
             // Cap directory listings so a worktree with a
             // pathologically-large directory (e.g. a
@@ -2771,15 +2779,7 @@ impl DashboardData for KernelDashboardData {
             });
         }
         // Directories first, then alpha within each bucket.
-        entries.sort_by(|a, b| {
-            let dir_a = a.kind == "dir";
-            let dir_b = b.kind == "dir";
-            dir_b.cmp(&dir_a).then_with(|| {
-                a.name
-                    .to_ascii_lowercase()
-                    .cmp(&b.name.to_ascii_lowercase())
-            })
-        });
+        git::sort_tree_entries(&mut entries);
         Ok(WorktreeTree {
             name: resolved.summary.name,
             path: prefix.to_owned(),
@@ -4875,6 +4875,8 @@ struct ManagedRepoRoot {
     path: String,
     source_url: Option<String>,
     tracking_ref: Option<String>,
+    head_sha: Option<String>,
+    dirty: bool,
     lifecycle_state: Option<String>,
     publish_state: Option<String>,
     ahead_count: Option<i64>,
@@ -4882,6 +4884,21 @@ struct ManagedRepoRoot {
     last_fetch_at: Option<i64>,
     last_push_at: Option<i64>,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SessionWorktreeRow {
+    session_id: String,
+    raw_agent_type: String,
+    role_id: String,
+    worktree_root: String,
+    base_sha: Option<String>,
+    created_at: u64,
+    expires_at: u64,
+    revoked: bool,
+    revoked_at: Option<u64>,
+    task_id: Option<String>,
+    initiative_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -5068,98 +5085,13 @@ impl KernelDashboardData {
                           s.session_id ASC \
                  LIMIT 500"
             )) {
-                let rows = stmt.query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                        r.get::<_, i64>(5)?.max(0) as u64,
-                        r.get::<_, i64>(6)?.max(0) as u64,
-                        r.get::<_, i64>(7)? != 0,
-                        r.get::<_, Option<i64>>(8)?.map(|v| v.max(0) as u64),
-                        r.get::<_, Option<String>>(9)?,
-                        r.get::<_, Option<String>>(10)?,
-                    ))
-                });
+                let rows = stmt.query_map([], session_worktree_row_from);
                 if let Ok(rows) = rows {
                     for row in rows.flatten() {
-                        let (
-                            session_id,
-                            raw_agent_type,
-                            role_id,
-                            wt,
-                            base_sha,
-                            created_at,
-                            expires_at,
-                            revoked,
-                            revoked_at,
-                            task_id,
-                            initiative_id,
-                        ) = row;
-                        if wt.trim().is_empty() {
+                        if row.worktree_root.trim().is_empty() {
                             continue;
                         }
-                        let short = if session_id.len() >= 12 {
-                            session_id[..12].to_owned()
-                        } else {
-                            session_id.clone()
-                        };
-                        let owning = SessionOwningTask {
-                            initiative_id: initiative_id.clone(),
-                            task_id: task_id.clone(),
-                            task_name: None,
-                            input_tokens: 0,
-                            output_tokens: 0,
-                        };
-                        let agent_type = if raw_agent_type.trim().is_empty() {
-                            semantic_agent_type_for_session(
-                                &conn,
-                                &session_id,
-                                &role_id,
-                                Some(&owning),
-                            )
-                        } else {
-                            raw_agent_type
-                        };
-                        let initiative_display_name =
-                            initiative_name_for_id_opt(&conn, initiative_id.as_deref())?;
-                        if !git::is_exact_repo_root(std::path::Path::new(&wt)) {
-                            continue;
-                        }
-                        out.push(ResolvedWorktree {
-                            summary: WorktreeListEntry {
-                                name: format!("session-{short}"),
-                                label: format!("{agent_type}:{short}"),
-                                kind: "Session".into(),
-                                surface: Some("Worktree".into()),
-                                repository_id: None,
-                                path: wt,
-                                session_id: Some(session_id),
-                                task_id,
-                                initiative_id,
-                                initiative_display_name,
-                                agent_type: Some(agent_type),
-                                session_state: Some(session_state_from_columns(
-                                    revoked, revoked_at, created_at, expires_at,
-                                )),
-                                observed_head_sha: None,
-                                observed_branch: None,
-                                observed_dirty_paths: None,
-                                repository_lifecycle_state: None,
-                                repository_publish_state: None,
-                                repository_source_url: None,
-                                repository_tracking_ref: None,
-                                repository_ahead_count: None,
-                                repository_behind_count: None,
-                                repository_last_fetch_at: None,
-                                repository_last_push_at: None,
-                                repository_last_error: None,
-                                base_sha,
-                                comparison_head_sha: None,
-                            },
-                        });
+                        out.push(session_worktree_entry(&conn, row)?);
                     }
                 }
             }
@@ -5173,13 +5105,16 @@ impl KernelDashboardData {
     /// `policy.allowed_worktree_roots()` (defense-in-depth).
     fn resolve_worktree(&self, name: &str) -> Result<ResolvedWorktree, ApiError> {
         let bundle = self.policy.load_full();
-        let resolved = self
-            .collect_worktrees()?
-            .into_iter()
-            .find(|w| w.summary.name == name)
-            .ok_or(ApiError::NotFound {
-                kind: "worktree".into(),
-            })?;
+        let resolved = match self.resolve_worktree_fast(name)? {
+            Some(resolved) => resolved,
+            None => self
+                .collect_worktrees()?
+                .into_iter()
+                .find(|w| w.summary.name == name)
+                .ok_or(ApiError::NotFound {
+                    kind: "worktree".into(),
+                })?,
+        };
         if !bundle.worktree_root_allowed(&resolved.summary.path) {
             let is_managed_repo = resolved.summary.kind == "Main"
                 && self.is_managed_repo_root_path(&resolved.summary.path);
@@ -5192,20 +5127,225 @@ impl KernelDashboardData {
         Ok(resolved)
     }
 
+    fn resolve_worktree_fast(&self, name: &str) -> Result<Option<ResolvedWorktree>, ApiError> {
+        if let Some(resolved) = self.resolve_managed_repo_worktree(name) {
+            return Ok(Some(resolved));
+        }
+        if let Some(resolved) = self.resolve_policy_main_worktree(name) {
+            return Ok(Some(resolved));
+        }
+        if let Some(resolved) = self.resolve_integration_worktree(name)? {
+            return Ok(Some(resolved));
+        }
+        if let Some(resolved) = self.resolve_session_worktree(name)? {
+            return Ok(Some(resolved));
+        }
+        Ok(None)
+    }
+
+    fn resolve_managed_repo_worktree(&self, name: &str) -> Option<ResolvedWorktree> {
+        if !name.starts_with("main-repository") {
+            return None;
+        }
+        let managed_repos = self.collect_managed_repo_roots();
+        let repo = managed_repos
+            .iter()
+            .find(|repo| managed_repo_slug(&repo.name) == name)?;
+        Some(main_worktree_entry(
+            managed_repo_slug(&repo.name),
+            repo.name.clone(),
+            repo.path.clone(),
+            Some("Repository".into()),
+            Some(repo.name.clone()),
+            None,
+            None,
+            None,
+            Some(repo),
+            None,
+        ))
+    }
+
+    fn resolve_policy_main_worktree(&self, name: &str) -> Option<ResolvedWorktree> {
+        let idx_raw = name.strip_prefix("main-")?;
+        if idx_raw.starts_with("integration-") || idx_raw.starts_with("repository") {
+            return None;
+        }
+        let idx = idx_raw.parse::<usize>().ok()?;
+        let bundle = self.policy.load_full();
+        let raw = bundle.allowed_worktree_roots().get(idx)?;
+        let path = raw.trim_end_matches('/').to_owned();
+        if !git::is_exact_repo_root(std::path::Path::new(&path)) {
+            return None;
+        }
+        let label = std::path::Path::new(&path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        Some(main_worktree_entry(
+            format!("main-{idx}"),
+            if label.is_empty() {
+                format!("main-{idx}")
+            } else {
+                label
+            },
+            path,
+            Some("Repository".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
+    }
+
+    fn resolve_integration_worktree(
+        &self,
+        name: &str,
+    ) -> Result<Option<ResolvedWorktree>, ApiError> {
+        let Some(initiative_id) = name.strip_prefix("main-integration-") else {
+            return Ok(None);
+        };
+        if initiative_id.trim().is_empty() {
+            return Ok(None);
+        }
+        let conn = self.open_ro()?;
+        let snapshot = {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT task_id, base_sha, head_sha \
+                       FROM {TBL_WORKTREE_SNAPSHOTS} \
+                      WHERE trigger = 'IntegrationMerge' \
+                        AND initiative_id = ?1 \
+                      ORDER BY taken_at DESC, snapshot_id DESC \
+                      LIMIT 1"
+                ))
+                .map_err(|e| ApiError::Internal {
+                    log_only: format!("integration snapshot direct query prepare: {e}"),
+                })?;
+            match stmt.query_row([initiative_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            }) {
+                Ok(snapshot) => Some(snapshot),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => {
+                    return Err(ApiError::Internal {
+                        log_only: format!("integration snapshot direct query: {e}"),
+                    });
+                }
+            }
+        };
+        let Some((task_id, base_sha, head_sha)) = snapshot else {
+            return Ok(None);
+        };
+        let managed_repos = self.collect_managed_repo_roots();
+        let review_base_sha = initiative_review_base_sha(&conn, initiative_id)?.unwrap_or(base_sha);
+        let Some(review_repo) = self.find_repo_path_containing_range(
+            &conn,
+            &managed_repos,
+            initiative_id,
+            &review_base_sha,
+            &head_sha,
+        )?
+        else {
+            return Ok(None);
+        };
+        let initiative_display_name = initiative_name_for_id_opt(&conn, Some(initiative_id))?;
+        let short = short_stable_id(initiative_id, 12);
+        let label = match initiative_display_name.as_deref() {
+            Some(display) if !display.trim().is_empty() => format!("Main:{display}"),
+            _ => format!("Main:{short}"),
+        };
+        let review_repo_meta = review_repo
+            .repository_id
+            .as_ref()
+            .and_then(|repo_id| managed_repos.iter().find(|repo| &repo.name == repo_id));
+        Ok(Some(main_worktree_entry(
+            name.to_owned(),
+            label,
+            review_repo.path,
+            Some("Integration".into()),
+            review_repo.repository_id,
+            Some(task_id),
+            Some(initiative_id.to_owned()),
+            initiative_display_name,
+            review_repo_meta,
+            Some((review_base_sha, head_sha)),
+        )))
+    }
+
+    fn resolve_session_worktree(&self, name: &str) -> Result<Option<ResolvedWorktree>, ApiError> {
+        let Some(prefix) = name.strip_prefix("session-") else {
+            return Ok(None);
+        };
+        if prefix.is_empty()
+            || !prefix
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        {
+            return Ok(None);
+        }
+        let conn = self.open_ro()?;
+        let row = {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT s.session_id, COALESCE(s.session_agent_type, ''), s.role_id, \
+                            s.worktree_root, s.base_sha, \
+                            s.created_at, s.expires_at, s.revoked, s.revoked_at, \
+                            (SELECT t.task_id FROM {TBL_TASKS} t \
+                              WHERE t.session_id = s.session_id \
+                              ORDER BY t.admitted_at DESC LIMIT 1) AS task_id, \
+                            COALESCE(\
+                              s.initiative_id, \
+                              (SELECT t.initiative_id FROM {TBL_TASKS} t \
+                               WHERE t.session_id = s.session_id \
+                               ORDER BY t.admitted_at DESC LIMIT 1)\
+                            ) AS initiative_id \
+                       FROM {TBL_SESSIONS} s \
+                      WHERE s.worktree_root IS NOT NULL \
+                        AND substr(s.session_id, 1, ?2) = ?1 \
+                      ORDER BY COALESCE(s.revoked_at, s.created_at) DESC, \
+                               s.created_at DESC, \
+                               s.session_id ASC \
+                      LIMIT 1"
+                ))
+                .map_err(|e| ApiError::Internal {
+                    log_only: format!("session worktree direct query prepare: {e}"),
+                })?;
+            let prefix_len = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
+            match stmt.query_row(
+                rusqlite::params![prefix, prefix_len],
+                session_worktree_row_from,
+            ) {
+                Ok(row) => Some(row),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => {
+                    return Err(ApiError::Internal {
+                        log_only: format!("session worktree direct query: {e}"),
+                    });
+                }
+            }
+        };
+        row.map(|row| session_worktree_entry(&conn, row))
+            .transpose()
+    }
+
     fn collect_managed_repo_roots(&self) -> Vec<ManagedRepoRoot> {
         if let Ok(conn) = self.open_ro() {
             if let Ok(rows) = raxis_store::managed_repositories::list(&conn) {
                 let mut repos = Vec::new();
                 for row in rows {
-                    let path = std::path::PathBuf::from(&row.managed_path);
-                    if !git::is_exact_repo_root(&path) {
-                        continue;
-                    }
                     repos.push(ManagedRepoRoot {
                         name: row.repository_id,
                         path: row.managed_path,
                         source_url: row.source_url,
                         tracking_ref: row.tracking_ref,
+                        head_sha: row.head_sha,
+                        dirty: row.dirty,
                         lifecycle_state: Some(row.lifecycle_state),
                         publish_state: Some(row.publish_state),
                         ahead_count: row.ahead_count,
@@ -5246,6 +5386,8 @@ impl KernelDashboardData {
                 path: path.display().to_string(),
                 source_url: None,
                 tracking_ref: None,
+                head_sha: None,
+                dirty: false,
                 lifecycle_state: None,
                 publish_state: None,
                 ahead_count: None,
@@ -5264,8 +5406,8 @@ impl KernelDashboardData {
         conn: &raxis_store::ro::RoConn,
         managed_repos: &[ManagedRepoRoot],
         initiative_id: &str,
-        base_sha: &str,
-        head_sha: &str,
+        _base_sha: &str,
+        _head_sha: &str,
     ) -> Result<Option<ResolvedReviewRepo>, ApiError> {
         let mut candidates: Vec<ResolvedReviewRepo> = managed_repos
             .iter()
@@ -5316,16 +5458,10 @@ impl KernelDashboardData {
             if normalized.is_empty() || !seen.insert(normalized.clone()) {
                 continue;
             }
-            let path = std::path::Path::new(&normalized);
-            if !git::is_exact_repo_root(path) {
-                continue;
-            }
-            if git::has_commit(path, base_sha) && git::has_commit(path, head_sha) {
-                return Ok(Some(ResolvedReviewRepo {
-                    path: normalized,
-                    repository_id: candidate.repository_id,
-                }));
-            }
+            return Ok(Some(ResolvedReviewRepo {
+                path: normalized,
+                repository_id: candidate.repository_id,
+            }));
         }
         Ok(None)
     }
@@ -5360,9 +5496,6 @@ fn main_worktree_entry(
     repo_meta: Option<&ManagedRepoRoot>,
     review_range: Option<(String, String)>,
 ) -> ResolvedWorktree {
-    let observed = std::path::Path::new(&path)
-        .exists()
-        .then(|| git::probe_worktree_summary(std::path::Path::new(&path), None));
     let (base_sha, comparison_head_sha) = review_range
         .map(|(base, head)| (Some(base), Some(head)))
         .unwrap_or((None, None));
@@ -5382,11 +5515,9 @@ fn main_worktree_entry(
             session_state: None,
             observed_head_sha: comparison_head_sha
                 .clone()
-                .or_else(|| observed.as_ref().and_then(|s| s.head_sha.clone())),
-            observed_branch: observed.as_ref().and_then(|s| s.branch.clone()),
-            observed_dirty_paths: observed
-                .as_ref()
-                .map(|s| u32::try_from(s.status_lines.len()).unwrap_or(u32::MAX)),
+                .or_else(|| repo_meta.and_then(|r| r.head_sha.clone())),
+            observed_branch: None,
+            observed_dirty_paths: repo_meta.and_then(|r| r.dirty.then_some(1u32)),
             repository_lifecycle_state: repo_meta.and_then(|r| r.lifecycle_state.clone()),
             repository_publish_state: repo_meta.and_then(|r| r.publish_state.clone()),
             repository_source_url: repo_meta.and_then(|r| r.source_url.clone()),
@@ -5400,6 +5531,77 @@ fn main_worktree_entry(
             comparison_head_sha,
         },
     }
+}
+
+fn session_worktree_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionWorktreeRow> {
+    Ok(SessionWorktreeRow {
+        session_id: row.get::<_, String>(0)?,
+        raw_agent_type: row.get::<_, String>(1)?,
+        role_id: row.get::<_, String>(2)?,
+        worktree_root: row.get::<_, String>(3)?,
+        base_sha: row.get::<_, Option<String>>(4)?,
+        created_at: row.get::<_, i64>(5)?.max(0) as u64,
+        expires_at: row.get::<_, i64>(6)?.max(0) as u64,
+        revoked: row.get::<_, i64>(7)? != 0,
+        revoked_at: row.get::<_, Option<i64>>(8)?.map(|v| v.max(0) as u64),
+        task_id: row.get::<_, Option<String>>(9)?,
+        initiative_id: row.get::<_, Option<String>>(10)?,
+    })
+}
+
+fn session_worktree_entry(
+    conn: &raxis_store::ro::RoConn,
+    row: SessionWorktreeRow,
+) -> Result<ResolvedWorktree, ApiError> {
+    let short = short_stable_id(&row.session_id, 12);
+    let owning = SessionOwningTask {
+        initiative_id: row.initiative_id.clone(),
+        task_id: row.task_id.clone(),
+        task_name: None,
+        input_tokens: 0,
+        output_tokens: 0,
+    };
+    let agent_type = if row.raw_agent_type.trim().is_empty() {
+        semantic_agent_type_for_session(conn, &row.session_id, &row.role_id, Some(&owning))
+    } else {
+        row.raw_agent_type
+    };
+    let initiative_display_name = initiative_name_for_id_opt(conn, row.initiative_id.as_deref())?;
+    Ok(ResolvedWorktree {
+        summary: WorktreeListEntry {
+            name: format!("session-{short}"),
+            label: format!("{agent_type}:{short}"),
+            kind: "Session".into(),
+            surface: Some("Worktree".into()),
+            repository_id: None,
+            path: row.worktree_root,
+            session_id: Some(row.session_id),
+            task_id: row.task_id,
+            initiative_id: row.initiative_id,
+            initiative_display_name,
+            agent_type: Some(agent_type),
+            session_state: Some(session_state_from_columns(
+                row.revoked,
+                row.revoked_at,
+                row.created_at,
+                row.expires_at,
+            )),
+            observed_head_sha: None,
+            observed_branch: None,
+            observed_dirty_paths: None,
+            repository_lifecycle_state: None,
+            repository_publish_state: None,
+            repository_source_url: None,
+            repository_tracking_ref: None,
+            repository_ahead_count: None,
+            repository_behind_count: None,
+            repository_last_fetch_at: None,
+            repository_last_push_at: None,
+            repository_last_error: None,
+            base_sha: row.base_sha,
+            comparison_head_sha: None,
+        },
+    })
 }
 
 fn short_stable_id(id: &str, max_chars: usize) -> String {
@@ -5448,7 +5650,7 @@ fn slug_component(raw: &str) -> String {
 /// pathologically-large directory (e.g. `node_modules` with
 /// 50K entries) cannot pin a request thread for unbounded time.
 /// When tripped the response carries `truncated = true`.
-const MAX_TREE_ENTRIES: usize = 5_000;
+const MAX_TREE_ENTRIES: usize = 1_000;
 
 /// Maximum file size the inline `worktree_file` endpoint will
 /// serve. Anything larger gets a `BadRequest` and the operator

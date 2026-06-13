@@ -39,7 +39,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use raxis_dashboard::data::{WorktreeDiffFile, WorktreeLogEntry};
+use raxis_dashboard::data::{WorktreeDiffFile, WorktreeLogEntry, WorktreeTreeEntry};
 
 /// Maximum unified-diff payload kept per file before truncation.
 /// Beyond this, the body is replaced with a one-line marker so
@@ -159,6 +159,15 @@ fn run_git_with_timeout(
     root: &Path,
     timeout: Duration,
 ) -> Result<(String, String, i32), GitError> {
+    let (stdout, stderr, code) = run_git_bytes_with_timeout(args, root, timeout)?;
+    Ok((String::from_utf8_lossy(&stdout).into_owned(), stderr, code))
+}
+
+fn run_git_bytes_with_timeout(
+    args: &[&str],
+    root: &Path,
+    timeout: Duration,
+) -> Result<(Vec<u8>, String, i32), GitError> {
     if !root.exists() {
         return Err(GitError::MissingPath {
             path: root.display().to_string(),
@@ -208,12 +217,10 @@ fn run_git_with_timeout(
         GitError::Spawn(format!("wait: {e}"))
     })?;
     let code = status.code().unwrap_or(-1);
-    let stdout = std::fs::read(&stdout_path)
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .map_err(|e| {
-            cleanup_capture_files(&stdout_path, &stderr_path);
-            GitError::Spawn(format!("read stdout capture: {e}"))
-        })?;
+    let stdout = std::fs::read(&stdout_path).map_err(|e| {
+        cleanup_capture_files(&stdout_path, &stderr_path);
+        GitError::Spawn(format!("read stdout capture: {e}"))
+    })?;
     let stderr = std::fs::read(&stderr_path)
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .map_err(|e| {
@@ -311,11 +318,6 @@ pub fn is_exact_repo_root(root: &Path) -> bool {
         return false;
     };
     top_canon == root_canon
-}
-
-/// True when `sha` resolves to a commit object in `root`.
-pub fn has_commit(root: &Path, sha: &str) -> bool {
-    ensure_commit(root, sha).is_ok()
 }
 
 fn ensure_commit(root: &Path, sha: &str) -> Result<(), GitError> {
@@ -579,10 +581,16 @@ fn log_entries_inner(
     Ok(out)
 }
 
-/// `git diff <from>..<to> --numstat --no-renames` plus a
-/// per-file `git diff <from>..<to> -- <path>` to populate the
-/// hunk text. Per-file hunks are truncated at
-/// [`MAX_PER_FILE_DIFF_BYTES`].
+/// `git diff <from>..<to> --numstat --no-renames` plus one
+/// bounded patch pass to populate per-file hunk text. Per-file
+/// hunks are truncated at [`MAX_PER_FILE_DIFF_BYTES`].
+///
+/// Performance note: the old implementation ran one `git diff`
+/// subprocess per changed file. That made a 200-file integration
+/// review spawn 200+ Git processes before the dashboard could
+/// paint the diff. This path now asks Git for the full patch once
+/// and splits it in-process by the stable file order returned by
+/// the numstat/name-status probes.
 pub fn diff_files(root: &Path, from: &str, to: &str) -> Result<Vec<WorktreeDiffFile>, GitError> {
     ensure_commit(root, from)?;
     ensure_commit(root, to)?;
@@ -624,6 +632,21 @@ pub fn diff_files(root: &Path, from: &str, to: &str) -> Result<Vec<WorktreeDiffF
         }
     }
 
+    let mut ordered_paths = Vec::new();
+    for line in numstat.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let _added = parts.next();
+        let _removed = parts.next();
+        let path = parts.next().unwrap_or("").trim().to_owned();
+        if !path.is_empty() {
+            ordered_paths.push(path);
+        }
+    }
+    let hunks_by_path = match run_git(&["diff", &range, "--patch", "--no-renames"], root) {
+        Ok((patch, _, 0)) => split_patch_by_path_order(&patch, &ordered_paths),
+        _ => std::collections::HashMap::new(),
+    };
+
     let mut out = Vec::new();
     for line in numstat.lines() {
         let mut parts = line.splitn(3, '\t');
@@ -641,13 +664,10 @@ pub fn diff_files(root: &Path, from: &str, to: &str) -> Result<Vec<WorktreeDiffF
             .cloned()
             .unwrap_or_else(|| "M".to_owned());
 
-        // Per-file hunk fetch (best-effort; on failure we still
-        // surface the row with an empty hunk so the file appears
-        // in the file list).
-        let hunk = match run_git(&["diff", &range, "--", &path], root) {
-            Ok((s, _, 0)) => truncate_hunk(s),
-            _ => String::new(),
-        };
+        // Hunk fetch is best-effort; on parse/fetch mismatch we
+        // still surface the row with an empty hunk so the file
+        // appears in the file list.
+        let hunk = hunks_by_path.get(&path).cloned().unwrap_or_default();
         out.push(WorktreeDiffFile {
             path,
             status: status_code,
@@ -658,6 +678,123 @@ pub fn diff_files(root: &Path, from: &str, to: &str) -> Result<Vec<WorktreeDiffF
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
+}
+
+/// Fast committed-tree listing for dashboard repo browsing.
+///
+/// This avoids `read_dir + metadata` over huge directories when the
+/// operator is browsing committed artifacts. Callers should fall back
+/// to filesystem traversal if this returns an error, because recovery
+/// states can contain uncommitted conflict files that are not present
+/// in `HEAD`.
+pub fn tree_entries(
+    root: &Path,
+    sub_path: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<WorktreeTreeEntry>, bool), GitError> {
+    let clean_path = sub_path.unwrap_or("").trim_matches('/');
+    let treeish = if clean_path.is_empty() {
+        "HEAD".to_owned()
+    } else {
+        format!("HEAD:{clean_path}")
+    };
+    let (stdout, stderr, code) = run_git(&["ls-tree", "-z", "-l", &treeish], root)?;
+    if code != 0 {
+        if stderr_is_not_a_git_repo(&stderr) {
+            return Err(GitError::NotARepo {
+                path: root.display().to_string(),
+            });
+        }
+        return Err(GitError::NonZero {
+            code,
+            stderr: stderr.chars().take(256).collect(),
+        });
+    }
+
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    for raw in stdout.split('\0').filter(|entry| !entry.is_empty()) {
+        if entries.len() >= limit {
+            truncated = true;
+            break;
+        }
+        let Some((meta, name)) = raw.split_once('\t') else {
+            continue;
+        };
+        let mut meta_parts = meta.split_ascii_whitespace();
+        let mode = meta_parts.next().unwrap_or("");
+        let git_type = meta_parts.next().unwrap_or("");
+        let _object = meta_parts.next();
+        let size_raw = meta_parts.next().unwrap_or("-");
+        let kind = match (git_type, mode) {
+            ("tree", _) => "dir",
+            ("blob", "120000") => "symlink",
+            ("blob", _) => "file",
+            _ => "other",
+        }
+        .to_owned();
+        let size = (kind == "file")
+            .then(|| size_raw.parse::<u64>().ok())
+            .flatten();
+        let rel_path = if clean_path.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{clean_path}/{name}")
+        };
+        entries.push(WorktreeTreeEntry {
+            name: name.to_owned(),
+            path: rel_path,
+            kind,
+            size,
+        });
+    }
+    sort_tree_entries(&mut entries);
+    Ok((entries, truncated))
+}
+
+pub fn sort_tree_entries(entries: &mut [WorktreeTreeEntry]) {
+    entries.sort_by(|a, b| {
+        let dir_a = a.kind == "dir";
+        let dir_b = b.kind == "dir";
+        dir_b.cmp(&dir_a).then_with(|| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        })
+    });
+}
+
+fn split_patch_by_path_order(
+    patch: &str,
+    ordered_paths: &[String],
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let mut current = String::new();
+    let mut index = 0usize;
+
+    let flush = |out: &mut std::collections::HashMap<String, String>,
+                 body: &mut String,
+                 index: &mut usize| {
+        if body.is_empty() {
+            return;
+        }
+        if let Some(path) = ordered_paths.get(*index) {
+            out.insert(path.clone(), truncate_hunk(std::mem::take(body)));
+        } else {
+            body.clear();
+        }
+        *index += 1;
+    };
+
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            flush(&mut out, &mut current, &mut index);
+        }
+        current.push_str(line);
+        current.push('\n');
+    }
+    flush(&mut out, &mut current, &mut index);
+    out
 }
 
 fn truncate_hunk(mut s: String) -> String {
@@ -693,6 +830,74 @@ mod tests {
         let small = "abc".to_owned();
         let cut = truncate_hunk(small);
         assert_eq!(cut, "abc");
+    }
+
+    #[test]
+    fn split_patch_by_path_order_maps_hunks_without_per_file_git_calls() {
+        let patch = "\
+diff --git a/a.txt b/a.txt
+index 1111111..2222222 100644
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+diff --git a/dir/b.txt b/dir/b.txt
+index 3333333..4444444 100644
+--- a/dir/b.txt
++++ b/dir/b.txt
+@@ -0,0 +1 @@
++b
+";
+        let paths = vec!["a.txt".to_owned(), "dir/b.txt".to_owned()];
+        let hunks = split_patch_by_path_order(patch, &paths);
+        assert!(hunks
+            .get("a.txt")
+            .expect("a hunk")
+            .contains("diff --git a/a.txt b/a.txt"));
+        assert!(hunks
+            .get("dir/b.txt")
+            .expect("b hunk")
+            .contains("diff --git a/dir/b.txt b/dir/b.txt"));
+    }
+
+    #[test]
+    fn tree_entries_uses_git_tree_without_filesystem_metadata_walk() {
+        let Some(dir) = make_seed_repo() else {
+            eprintln!("skipping: no working git binary on PATH");
+            return;
+        };
+        std::fs::create_dir_all(dir.path().join("src")).expect("mkdir src");
+        std::fs::write(dir.path().join("src/main.rs"), b"fn main() {}\n").expect("write main");
+        std::fs::write(dir.path().join("README.md"), b"hello\n").expect("write readme");
+        for args in [
+            &["add", "src/main.rs", "README.md"][..],
+            &["commit", "-q", "-m", "add files"][..],
+        ] {
+            let ok = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .status()
+                .expect("git")
+                .success();
+            if !ok {
+                eprintln!("skipping: git {:?} failed", args);
+                return;
+            }
+        }
+
+        let (root, truncated) = tree_entries(dir.path(), None, 100).expect("root tree");
+        assert!(!truncated);
+        assert_eq!(root[0].name, "src", "directories sort first");
+        assert_eq!(root[0].kind, "dir");
+        assert!(root.iter().any(|entry| entry.name == "README.md"));
+
+        let (src, truncated) = tree_entries(dir.path(), Some("src"), 100).expect("src tree");
+        assert!(!truncated);
+        assert_eq!(src.len(), 1);
+        assert_eq!(src[0].path, "src/main.rs");
+        assert_eq!(src[0].kind, "file");
+        assert_eq!(src[0].size, Some(13));
     }
 
     #[test]

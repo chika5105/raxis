@@ -104,7 +104,8 @@ function DirectoryNode({
     queryFn: ({ signal }) =>
       dashboardApi.git.tree(worktreeName, path || undefined, signal),
     enabled: open,
-    staleTime: 5_000,
+    staleTime: 60_000,
+    gcTime: 10 * 60_000,
   });
 
   const listingProps = {
