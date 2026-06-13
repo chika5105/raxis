@@ -4976,8 +4976,8 @@ mod tests {
     #[test]
     fn inv_image_bake_preflight_fail_closed_01_missing_inputs_manifest_bails() {
         // Set up signing key + vmlinux + an empty workspace (no
-        // per-role manifest.toml). The preflight must surface
-        // the missing per-role fixture with the invariant token.
+        // per-role Containerfile). The preflight must surface
+        // the first missing per-role fixture with the invariant token.
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().to_owned();
         let install = tmp.path().join("install");
@@ -5003,7 +5003,7 @@ mod tests {
             "remediation must cite the invariant: {err}"
         );
         assert!(
-            err.contains("manifest.toml"),
+            err.contains("reviewer-core/Containerfile"),
             "remediation must name the missing fixture: {err}"
         );
     }
