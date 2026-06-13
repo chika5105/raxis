@@ -13,6 +13,9 @@
 //!      Terminal `Failed` initiatives are deliberately not resumable
 //!      in place and stale pending recovery escalations do not get
 //!      approved.
+//!   4. Deny on a stale pending recovery escalation attached to an
+//!      already terminal `Failed` initiative is allowed: it marks the
+//!      escalation `Denied` and preserves the failed initiative state.
 //!
 //! The anti-loop guarantee is exercised separately: a re-fire
 //! of the helper after approve writes a NEW escalation row
@@ -228,6 +231,104 @@ fn schema_approve_logical_deadlock(
     (approved, counter, state, state_change_rows == 1)
 }
 
+/// Schema-level mirror of `deny_logical_deadlock_escalation_in_tx`.
+/// Returns `(denied_status, state_after, transitioned_to_failed)`.
+fn schema_deny_logical_deadlock(
+    conn: &mut Connection,
+    escalation_id: &str,
+    reason: Option<&str>,
+) -> (String, String, bool) {
+    let escalations = Table::Escalations.as_str();
+    let initiatives = Table::Initiatives.as_str();
+    let now = raxis_types::unix_now_secs();
+    let tx = conn.transaction().expect("tx");
+
+    let row: Option<(String, String)> = tx
+        .query_row(
+            &format!(
+                "SELECT e.initiative_id, i.state
+                   FROM {escalations} e
+                   JOIN {initiatives} i ON i.initiative_id = e.initiative_id
+                  WHERE e.escalation_id = ?1
+                    AND e.class = 'LogicalDeadlock'
+                    AND e.initiator = 'Kernel'
+                    AND e.status = 'Pending'"
+            ),
+            params![escalation_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+
+    let Some((initiative_id, initiative_state)) = row else {
+        tx.commit().expect("commit no-op");
+        let status: String = conn
+            .query_row(
+                &format!("SELECT status FROM {escalations} WHERE escalation_id = ?1"),
+                params![escalation_id],
+                |r| r.get(0),
+            )
+            .expect("read status");
+        return (status, String::new(), false);
+    };
+
+    if initiative_state != "RecoveryRequired" && initiative_state != "Failed" {
+        tx.commit().expect("commit no-op");
+        let status: String = conn
+            .query_row(
+                &format!("SELECT status FROM {escalations} WHERE escalation_id = ?1"),
+                params![escalation_id],
+                |r| r.get(0),
+            )
+            .expect("read status");
+        return (status, initiative_state, false);
+    }
+
+    tx.execute(
+        &format!(
+            "UPDATE {escalations}
+                SET status = 'Denied', resolved_at = ?2,
+                    resolution_notes = COALESCE(?3, resolution_notes)
+              WHERE escalation_id = ?1 AND status = 'Pending'"
+        ),
+        params![escalation_id, now, reason],
+    )
+    .expect("flip status");
+
+    let state_change_rows = if initiative_state == "RecoveryRequired" {
+        tx.execute(
+            &format!(
+                "UPDATE {initiatives}
+                    SET state = 'Failed',
+                        completed_at = ?2
+                  WHERE initiative_id = ?1 AND state = 'RecoveryRequired'"
+            ),
+            params![&initiative_id, now],
+        )
+        .expect("transition recovery to failed")
+    } else {
+        0
+    };
+
+    tx.commit().expect("commit");
+
+    let denied: String = conn
+        .query_row(
+            &format!("SELECT status FROM {escalations} WHERE escalation_id = ?1"),
+            params![escalation_id],
+            |r| r.get(0),
+        )
+        .expect("read status");
+    let state: String = conn
+        .query_row(
+            &format!("SELECT state FROM {initiatives} WHERE initiative_id = ?1"),
+            params![&initiative_id],
+            |r| r.get(0),
+        )
+        .expect("read state");
+
+    (denied, state, state_change_rows == 1)
+}
+
 #[test]
 fn approve_refuses_terminal_failed_initiative_without_mutating_escalation() {
     let (_tmp, mut conn) = fresh_disk_conn();
@@ -266,6 +367,46 @@ fn approve_refuses_terminal_failed_initiative_without_mutating_escalation() {
     assert!(
         !transitioned,
         "terminal Failed must not report a RecoveryRequired -> Executing transition",
+    );
+}
+
+#[test]
+fn deny_allows_stale_pending_recovery_escalation_on_failed_initiative() {
+    let (_tmp, mut conn) = fresh_disk_conn();
+    let escalation_id = seed_recovery_required_initiative_with_escalation(
+        &mut conn,
+        "init-terminal-failed-deny",
+        "sess-terminal-deny",
+        "task-terminal-deny",
+        "lin-terminal-deny",
+        "kernel-initiative-permanent-failure:init-terminal-failed-deny:PushFailed:remote=origin;ref=refs/heads/main",
+        7,
+    );
+
+    let initiatives = Table::Initiatives.as_str();
+    conn.execute(
+        &format!(
+            "UPDATE {initiatives}
+                SET state = 'Failed', completed_at = ?2
+              WHERE initiative_id = ?1"
+        ),
+        params!["init-terminal-failed-deny", raxis_types::unix_now_secs()],
+    )
+    .expect("close initiative as terminal Failed");
+
+    let (status, state, transitioned) =
+        schema_deny_logical_deadlock(&mut conn, &escalation_id, Some("preserve failed state"));
+    assert_eq!(
+        status, "Denied",
+        "operator denial MUST close stale pending recovery escalations even when the initiative is already Failed",
+    );
+    assert_eq!(
+        state, "Failed",
+        "denying a stale escalation must preserve the terminal Failed initiative state",
+    );
+    assert!(
+        !transitioned,
+        "already-Failed initiative must not report a RecoveryRequired -> Failed transition",
     );
 }
 

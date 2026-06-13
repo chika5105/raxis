@@ -193,9 +193,10 @@ Stop the daemon with:
 brew services stop raxis
 ```
 
-`brew upgrade raxis` automatically restarts an active Homebrew service
+`brew upgrade raxis` automatically restarts a Homebrew-managed service
 after the upgraded bundle passes post-install checks, so the daemon does
-not keep running the old Cellar binary. Stopped services stay stopped.
+not keep running the old Cellar binary. Fresh installs and services that
+have never been enabled stay stopped.
 Skip one automatic restart during a maintenance window with:
 
 ```bash

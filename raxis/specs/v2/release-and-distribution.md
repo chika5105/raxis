@@ -819,11 +819,12 @@ upgrade because they are kernel-version-locked (per
 images named with the new kernel version. Custom operator policy
 under `$HOMEBREW_PREFIX/etc/raxis/` is **never** touched by upgrades.
 
-After post-install verification succeeds, the formula MUST refresh an
-active Homebrew-managed RAXIS service so launchd/systemd stops running
-the previous Cellar path. The formula MUST NOT start a service that was
-stopped before the upgrade. Operators may disable the refresh for a
-single upgrade with:
+After post-install verification succeeds, the formula MUST refresh a
+Homebrew-managed RAXIS service so launchd/systemd stops running the
+previous Cellar path. "Managed" means Homebrew reports the service as
+registered/loaded, or the service is currently `started`/`error`.
+Fresh installs and services that have never been enabled MUST remain
+stopped. Operators may disable the refresh for a single upgrade with:
 
 ```bash
 RAXIS_BREW_AUTO_RESTART=0 brew upgrade raxis

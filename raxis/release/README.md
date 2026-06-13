@@ -67,8 +67,10 @@ an existing generated service file.
 During `brew upgrade raxis`, the formula restarts an active RAXIS
 Homebrew service after post-install verification succeeds. This keeps
 launchd/systemd from continuing to run an older Cellar binary such as
-`/opt/homebrew/Cellar/raxis/<old>/bin/raxis-kernel`. Stopped services
-are not started. Operators can skip one automatic refresh with:
+`/opt/homebrew/Cellar/raxis/<old>/bin/raxis-kernel`. The hook refreshes
+a Homebrew-managed service, including a loaded/registered service whose
+supervisor is currently halted. Fresh installs and never-enabled
+services are not started. Operators can skip one automatic refresh with:
 
 ```bash
 RAXIS_BREW_AUTO_RESTART=0 brew upgrade raxis

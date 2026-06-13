@@ -643,11 +643,11 @@ pub fn approve_logical_deadlock_escalation_in_tx(
         return Ok(None);
     };
 
-    if class != class_str
-        || initiator != "Kernel"
-        || status != pending_state
-        || initiative_state != "RecoveryRequired"
-    {
+    if class != class_str || initiator != "Kernel" || status != pending_state {
+        return Ok(None);
+    }
+
+    if initiative_state != "RecoveryRequired" && initiative_state != "Failed" {
         return Ok(None);
     }
 
@@ -718,6 +718,12 @@ pub struct ApproveLogicalDeadlockOutcome {
 /// counter stays at its post-ceiling value (the operator's deny
 /// signals "do not retry; close this recoverable pause as failed").
 ///
+/// If the initiative is already terminal `Failed` but the paired
+/// kernel-initiated recovery escalation is still `Pending` (for
+/// example after an older binary or manual failure path closed the
+/// initiative first), denial is still valid: the escalation is marked
+/// `Denied` and the failed initiative state is preserved.
+///
 /// Returns `Ok(initiative_id)` on success for audit attribution,
 /// `Ok(None)` on FSM mismatch (already resolved or not found),
 /// `Err` on SQL failure.
@@ -787,16 +793,20 @@ pub fn deny_logical_deadlock_escalation_in_tx(
         return Ok(None);
     }
 
-    let state_change_rows = tx.execute(
-        &format!(
-            "UPDATE {initiatives}
-                SET state = 'Failed',
-                    completed_at = ?2
-              WHERE initiative_id = ?1 AND state = 'RecoveryRequired'",
-            initiatives = initiatives,
-        ),
-        rusqlite::params![&initiative_id, now_unix],
-    )?;
+    let state_change_rows = if initiative_state == "RecoveryRequired" {
+        tx.execute(
+            &format!(
+                "UPDATE {initiatives}
+                    SET state = 'Failed',
+                        completed_at = ?2
+                  WHERE initiative_id = ?1 AND state = 'RecoveryRequired'",
+                initiatives = initiatives,
+            ),
+            rusqlite::params![&initiative_id, now_unix],
+        )?
+    } else {
+        0
+    };
     let transitioned_to_failed = state_change_rows == 1;
 
     Ok(Some(DenyLogicalDeadlockOutcome {

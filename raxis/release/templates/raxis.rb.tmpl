@@ -2,6 +2,8 @@
 # by .github/workflows/release.yml. Do NOT hand-edit the rendered
 # formula in the tap repository; the next release overwrites it.
 
+require "json"
+
 class Raxis < Formula
   desc     "Runtime Attestation eXchange for Intelligent Systems"
   homepage "https://raxis.io"
@@ -86,7 +88,7 @@ class Raxis < Formula
       (etc/"raxis/disable-brew-auto-restart").exist?
   end
 
-  def raxis_homebrew_service_active?
+  def raxis_homebrew_service_active_from_list?
     brew = HOMEBREW_PREFIX/"bin/brew"
     services = IO.popen([brew.to_s, "services", "list"], err: File::NULL, &:read)
     services.lines.any? do |line|
@@ -97,16 +99,30 @@ class Raxis < Formula
     false
   end
 
+  def raxis_homebrew_service_managed?
+    brew = HOMEBREW_PREFIX/"bin/brew"
+    services = IO.popen([brew.to_s, "services", "info", "raxis", "--json"], err: File::NULL, &:read)
+    JSON.parse(services).any? do |entry|
+      entry["name"] == "raxis" && (
+        entry["registered"] ||
+        entry["loaded"] ||
+        %w[started error].include?(entry["status"].to_s)
+      )
+    end
+  rescue
+    raxis_homebrew_service_active_from_list?
+  end
+
   def raxis_restart_homebrew_service_after_upgrade
-    return unless raxis_homebrew_service_active?
+    return unless raxis_homebrew_service_managed?
 
     if raxis_homebrew_auto_restart_disabled?
-      opoo "RAXIS Homebrew service is active but automatic restart is disabled."
+      opoo "RAXIS Homebrew service is managed but automatic restart is disabled."
       opoo "Run `brew services restart raxis` when you want the service to use this upgrade."
       return
     end
 
-    ohai "Restarting active RAXIS Homebrew service so it uses this upgrade"
+    ohai "Restarting managed RAXIS Homebrew service so it uses this upgrade"
     system (HOMEBREW_PREFIX/"bin/brew").to_s, "services", "restart", "raxis"
   end
 
@@ -168,9 +184,10 @@ class Raxis < Formula
       Start the kernel with:
         brew services start raxis
 
-      When `brew upgrade raxis` replaces this formula, an active RAXIS
-      Homebrew service is restarted automatically so launchd/systemd stops
-      using the old Cellar path. Stopped services are left stopped.
+      When `brew upgrade raxis` replaces this formula, a Homebrew-managed
+      RAXIS service is restarted automatically so launchd/systemd stops
+      using the old Cellar path. Fresh installs and never-enabled services
+      are left stopped.
       Disable one automatic upgrade restart with:
         RAXIS_BREW_AUTO_RESTART=0 brew upgrade raxis
       Disable it persistently with:
