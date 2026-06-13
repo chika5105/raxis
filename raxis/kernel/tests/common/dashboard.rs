@@ -1011,6 +1011,28 @@ fn send_signal_best_effort(pid: u32, sigkill: bool) {
 /// [`ENV_SKIP_DASHBOARD_PORT_PREFLIGHT`]`=1`.
 pub fn mutate_dashboard_block_in_policy(data_dir: &Path) {
     let port = configured_dashboard_port();
+    mutate_dashboard_block_in_policy_on_port(data_dir, port);
+}
+
+/// Pick an currently-free loopback port for tests that may spawn
+/// multiple real kernels concurrently inside the same test binary.
+///
+/// The listener is dropped before the kernel binds, so this is still
+/// best-effort, but it avoids every harness-owned kernel racing on the
+/// same fixed dashboard port. Callers that need a human-stable dashboard
+/// URL should keep using [`configured_dashboard_port`].
+pub fn allocate_ephemeral_dashboard_port() -> u16 {
+    std::net::TcpListener::bind((DASHBOARD_BIND_ADDRESS, 0))
+        .expect("bind ephemeral dashboard port")
+        .local_addr()
+        .expect("read ephemeral dashboard port")
+        .port()
+}
+
+/// Rewrite the genesis-emitted dashboard block to use an explicit
+/// loopback port. See [`mutate_dashboard_block_in_policy`] for the
+/// fixed-port live-e2e variant.
+pub fn mutate_dashboard_block_in_policy_on_port(data_dir: &Path, port: u16) {
     // Pre-flight: clear the dashboard port BEFORE we touch the
     // policy file so a stale listener does not silently shadow
     // the new kernel's bind on macOS SO_REUSEPORT semantics.

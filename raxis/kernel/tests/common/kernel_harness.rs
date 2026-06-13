@@ -212,7 +212,8 @@ impl KernelInstance {
         let kernel_bin = build_and_locate_kernel();
         let tempdir = bootstrap_data_dir(&kernel_bin);
         let data_dir = tempdir.path().to_owned();
-        super::dashboard::mutate_dashboard_block_in_policy(&data_dir);
+        let dashboard_port = super::dashboard::allocate_ephemeral_dashboard_port();
+        super::dashboard::mutate_dashboard_block_in_policy_on_port(&data_dir, dashboard_port);
 
         let mut child = Command::new(&kernel_bin)
             .env("RAXIS_DATA_DIR", &data_dir)
