@@ -2575,52 +2575,31 @@ impl DashboardData for KernelDashboardData {
                 kind: "worktree-path".into(),
             });
         }
-        // `INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01`
-        // (`specs/v2/dashboard-hardening.md §1.9`): run the four
-        // read-only probes (`rev-parse HEAD`, `symbolic-ref --short
-        // HEAD`, `status --porcelain=v1`, `rev-list --left-right`)
-        // in parallel under `std::thread::scope`. They are mutually
-        // independent — serially they sum to 60–300 ms on a clean
-        // machine; in parallel the wall-clock cost is bounded by the
-        // slowest single probe. The route layer wraps this call in
-        // `tokio::task::spawn_blocking` so even the parallel
-        // blocking wait does not pin a tokio worker.
-        let probe_base = if resolved.summary.comparison_head_sha.is_some() {
-            None
-        } else {
-            resolved.summary.base_sha.as_deref()
-        };
-        let summary = git::probe_worktree_summary(&path, probe_base);
-        let git::WorktreeProbeSummary {
-            head_sha,
-            branch,
-            status_lines,
-            ahead_behind,
-        } = summary;
-        let review_head_sha = resolved
+        // Keep the detail route cheap. The Browse tab cannot render until this
+        // endpoint returns, so detail must not run `git status` or `rev-list`
+        // across a huge repository just to show a header. Bounded review rows
+        // already carry their exact head; managed repositories carry a
+        // persisted status snapshot; completed session tasks carry
+        // `evaluation_sha`. The expensive, exact work remains in the Log and
+        // Diff endpoints, where the operator explicitly asked for it.
+        let head_sha = resolved
             .summary
             .comparison_head_sha
             .clone()
-            .or_else(|| head_sha.clone());
-        let (ahead, behind) = match (resolved.summary.base_sha.as_ref(), review_head_sha.as_ref()) {
-            (Some(base), Some(head)) => {
-                let counts = match resolved.summary.comparison_head_sha.as_ref() {
-                    Some(_) => git::ahead_behind_between(&path, base, head),
-                    None => ahead_behind,
-                };
-                match counts {
-                    Some((behind, ahead)) => (Some(ahead), Some(behind)),
-                    None => (None, None),
-                }
-            }
-            _ => (None, None),
+            .or_else(|| resolved.summary.observed_head_sha.clone());
+        let status_lines = match resolved.summary.observed_dirty_paths {
+            Some(n) if n > 0 => vec![format!(
+                "{n} dirty path{} recorded in the repository status snapshot",
+                if n == 1 { "" } else { "s" }
+            )],
+            _ => Vec::new(),
         };
         Ok(WorktreeDetail {
             summary: resolved.summary,
-            head_sha: review_head_sha,
-            branch,
-            ahead,
-            behind,
+            head_sha,
+            branch: None,
+            ahead: None,
+            behind: None,
             status_lines,
         })
     }
@@ -4898,6 +4877,7 @@ struct SessionWorktreeRow {
     revoked: bool,
     revoked_at: Option<u64>,
     task_id: Option<String>,
+    evaluation_sha: Option<String>,
     initiative_id: Option<String>,
 }
 
@@ -5072,6 +5052,9 @@ impl KernelDashboardData {
                         (SELECT t.task_id FROM {TBL_TASKS} t \
                           WHERE t.session_id = s.session_id \
                           ORDER BY t.admitted_at DESC LIMIT 1) AS task_id, \
+                        (SELECT t.evaluation_sha FROM {TBL_TASKS} t \
+                          WHERE t.session_id = s.session_id \
+                          ORDER BY t.admitted_at DESC LIMIT 1) AS evaluation_sha, \
                         COALESCE(\
                           s.initiative_id, \
                           (SELECT t.initiative_id FROM {TBL_TASKS} t \
@@ -5299,6 +5282,9 @@ impl KernelDashboardData {
                             (SELECT t.task_id FROM {TBL_TASKS} t \
                               WHERE t.session_id = s.session_id \
                               ORDER BY t.admitted_at DESC LIMIT 1) AS task_id, \
+                            (SELECT t.evaluation_sha FROM {TBL_TASKS} t \
+                              WHERE t.session_id = s.session_id \
+                              ORDER BY t.admitted_at DESC LIMIT 1) AS evaluation_sha, \
                             COALESCE(\
                               s.initiative_id, \
                               (SELECT t.initiative_id FROM {TBL_TASKS} t \
@@ -5545,7 +5531,8 @@ fn session_worktree_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessio
         revoked: row.get::<_, i64>(7)? != 0,
         revoked_at: row.get::<_, Option<i64>>(8)?.map(|v| v.max(0) as u64),
         task_id: row.get::<_, Option<String>>(9)?,
-        initiative_id: row.get::<_, Option<String>>(10)?,
+        evaluation_sha: row.get::<_, Option<String>>(10)?,
+        initiative_id: row.get::<_, Option<String>>(11)?,
     })
 }
 
@@ -5586,7 +5573,7 @@ fn session_worktree_entry(
                 row.created_at,
                 row.expires_at,
             )),
-            observed_head_sha: None,
+            observed_head_sha: row.evaluation_sha.clone(),
             observed_branch: None,
             observed_dirty_paths: None,
             repository_lifecycle_state: None,
@@ -5599,7 +5586,7 @@ fn session_worktree_entry(
             repository_last_push_at: None,
             repository_last_error: None,
             base_sha: row.base_sha,
-            comparison_head_sha: None,
+            comparison_head_sha: row.evaluation_sha,
         },
     })
 }

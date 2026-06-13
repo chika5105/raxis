@@ -23,16 +23,16 @@ type Tab = "files" | "browse" | "log" | "diff" | "range";
 ///     summary, and (when applicable) deep links to the owning
 ///     session and task.
 ///   * Tabs:
+///       - **Browse**: default, lazy-loaded full file-tree browser backed
+///         by `GET /api/git/worktrees/:name/tree?path=…` and
+///         `GET /api/git/worktrees/:name/file?path=…`. Lets the
+///         operator inspect any file in the worktree, not just
+///         the ones the executor touched.
 ///       - **Files**: a tree-shaped list of files the executor
 ///         has changed relative to the worktree's base SHA,
 ///         derived from the same diff payload the Diff tab
 ///         renders. Clicking a file scrolls the corresponding
 ///         hunk into view.
-///       - **Browse**: full lazy-loaded file-tree browser backed
-///         by `GET /api/git/worktrees/:name/tree?path=…` and
-///         `GET /api/git/worktrees/:name/file?path=…`. Lets the
-///         operator inspect any file in the worktree, not just
-///         the ones the executor touched.
 ///       - **Agent commits / Log**: for session worktrees,
 ///         `base..HEAD` agent commits; for main roots, recent
 ///         repository commits.
@@ -41,7 +41,7 @@ type Tab = "files" | "browse" | "log" | "diff" | "range";
 ///       - **Range diff**: arbitrary sha1..sha2 comparison.
 export function WorktreeDetailPage() {
   const { name = "" } = useParams<{ name: string }>();
-  const [tab, setTab] = useState<Tab>("files");
+  const [tab, setTab] = useState<Tab>("browse");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [expandedCommit, setExpandedCommit] = useState<string | null>(null);
@@ -53,7 +53,7 @@ export function WorktreeDetailPage() {
   const detail = useQuery({
     queryKey: ["worktree", name],
     queryFn: ({ signal }) => dashboardApi.git.get(name, signal),
-    refetchInterval: 10_000,
+    staleTime: 30_000,
     enabled: name.length > 0,
   });
 
@@ -65,13 +65,15 @@ export function WorktreeDetailPage() {
   });
 
   // The diff against the base SHA powers BOTH the Files and the
-  // Diff tabs. Loading it eagerly on both means the operator
-  // can switch tabs without an extra spinner.
+  // Diff tabs. It is intentionally loaded only when those tabs are
+  // selected: on large repos, asking for the full diff while the
+  // operator is merely browsing files can trip the dashboard handler
+  // timeout and make normal file inspection feel broken.
   const defaultDiff = useQuery({
     queryKey: ["worktree-diff-default", name],
     queryFn: ({ signal }) => dashboardApi.git.diffDefault(name, signal),
     enabled: (tab === "files" || tab === "diff") && name.length > 0,
-    refetchInterval: tab === "files" || tab === "diff" ? 15_000 : false,
+    staleTime: 60_000,
     retry: false,
   });
 
@@ -234,11 +236,11 @@ export function WorktreeDetailPage() {
 
       {/* Tabs */}
       <div role="tablist" className="flex border-b border-edge text-sm">
-        <TabButton active={tab === "files"} onClick={() => setTab("files")}>
-          Files
-        </TabButton>
         <TabButton active={tab === "browse"} onClick={() => setTab("browse")}>
           Browse
+        </TabButton>
+        <TabButton active={tab === "files"} onClick={() => setTab("files")}>
+          Files
         </TabButton>
         <TabButton active={tab === "log"} onClick={() => setTab("log")}>
           {w.base_sha ? "Agent commits" : "Log"}

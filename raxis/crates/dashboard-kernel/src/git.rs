@@ -1154,23 +1154,17 @@ index 3333333..4444444 100644
         );
     }
 
-    /// Witness for `INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01`
-    /// (`specs/v2/dashboard-hardening.md §1.9`) — the four
-    /// parallel probes together MUST cost roughly the same as
-    /// the slowest one, NOT their sum. We allow 1.8× the
-    /// single-probe budget to absorb CI variance; pre-fix the
-    /// serial implementation cost 4× plus polling sleeps.
+    /// Legacy probe-helper smoke test. The dashboard detail route no
+    /// longer calls this on the file-browse hot path because `git status`
+    /// can be pathological on large worktrees. Keep a bounded smoke test so
+    /// explicit callers still get sane data without preserving a fragile
+    /// micro-benchmark in CI.
     #[test]
-    fn parallel_probes_finish_under_serial_budget() {
+    fn parallel_probe_helper_returns_sane_summary() {
         let Some(dir) = make_seed_repo() else {
             eprintln!("skipping: no working git binary on PATH");
             return;
         };
-
-        // Bound the single-probe baseline first.
-        let single_start = std::time::Instant::now();
-        let _ = head_sha(dir.path());
-        let single = single_start.elapsed();
 
         let parallel_start = std::time::Instant::now();
         let summary = probe_worktree_summary(dir.path(), None);
@@ -1180,13 +1174,9 @@ index 3333333..4444444 100644
             summary.head_sha.is_some(),
             "parallel probe must resolve head_sha"
         );
-        // We allow `1.8 * single + 50ms` (the +50ms absorbs the
-        // tiny serial overhead of `std::thread::scope` spawning
-        // four workers).
-        let budget = single.saturating_mul(2) + Duration::from_millis(50);
         assert!(
-            parallel <= budget,
-            "parallel probe budget exceeded — got {parallel:?} vs single-probe {single:?} (budget {budget:?})"
+            parallel < Duration::from_secs(2),
+            "legacy parallel probe helper took too long for a seed repo: {parallel:?}"
         );
     }
 

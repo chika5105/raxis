@@ -9,6 +9,12 @@ import { WorktreeDetailPage } from "@/pages/WorktreeDetail";
 import type { WorktreeDetail, WorktreeDiff, WorktreeLogEntry } from "@/types/api";
 
 function renderWithProviders() {
+  vi.spyOn(dashboardApi.git, "tree").mockResolvedValue({
+    name: "session-a",
+    path: "",
+    entries: [],
+    truncated: false,
+  });
   const qc = new QueryClient({
     defaultOptions: {
       queries: {
@@ -91,10 +97,24 @@ describe("<WorktreeDetailPage>", () => {
 
     renderWithProviders();
 
+    fireEvent.click(await screen.findByRole("tab", { name: "Files" }));
     await screen.findByText("src/very_long_line.rs");
     const grid = screen.getByTestId("worktree-diff-grid");
     expect(grid).toHaveClass("min-w-0");
     expect(grid.className).toContain("xl:grid-cols-[320px_minmax(0,1fr)]");
+  });
+
+  it("opens on Browse without eagerly requesting the full diff", async () => {
+    vi.spyOn(dashboardApi.git, "get").mockResolvedValue(worktree());
+    const diffDefault = vi
+      .spyOn(dashboardApi.git, "diffDefault")
+      .mockResolvedValue(emptyDiff());
+    vi.spyOn(dashboardApi.git, "log").mockResolvedValue([]);
+
+    renderWithProviders();
+
+    expect(await screen.findByText("Select a file to view its contents.")).toBeInTheDocument();
+    expect(diffDefault).not.toHaveBeenCalled();
   });
 
   it("opens an agent commit and renders its parent-to-commit diff", async () => {
