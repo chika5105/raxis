@@ -507,6 +507,49 @@ raxis repo publish [repo_id] [--remote origin] [--ref refs/heads/main]
 raxis repo repair
 ```
 
+Workspace fan-in conflict commands:
+
+```bash
+raxis workspace-merge list [--all]
+raxis workspace-merge status <attempt_id>
+raxis workspace-merge submit <attempt_id>
+raxis workspace-merge reset <attempt_id>
+```
+
+When an Executor needs artifacts from more than one predecessor,
+operators declare an explicit `task_kind = "workspace_merge"` task
+instead of placing multiple predecessors directly on an Executor. The
+kernel provisions a merge worktree from the initiative's managed
+repository base, attempts to merge each predecessor `evaluation_sha`,
+and stamps the resulting merge SHA as the workspace-merge task's
+`evaluation_sha`.
+
+If Git reports conflicts, RAXIS preserves the conflicted worktree and
+creates a `MergeConflict` escalation. The operator can then use normal
+Git commands in that preserved worktree (`git status`, edit files,
+`git add`) and finish through authenticated operator IPC with
+`raxis workspace-merge submit <attempt_id>`. `submit` is the authority
+gate: it refuses unresolved paths, records the resulting SHA, consumes
+the escalation, completes the merge task, and lets downstream tasks
+activate. `reset` discards manual resolution edits and replays the
+merge from the recorded base/predecessor SHAs.
+
+Conflict policy is explicit:
+
+- `on_conflict = "operator_manual"` preserves the conflict and asks a
+  human operator to resolve it with Git.
+- `on_conflict = "orchestrator_then_operator"` is the product default
+  policy: RAXIS may give an orchestrator a bounded semantic-resolution
+  attempt, then escalates to the human operator if it cannot complete
+  reliably. The first production slice uses the same preserved-worktree
+  operator path for conflicts until the orchestrator-specific
+  workspace-merge terminal intent is wired; this keeps the invariant
+  fail-closed and avoids pretending a model resolved a conflict it never
+  saw.
+- `on_conflict = "fail_closed"` is strict noninteractive mode. Git
+  conflicts immediately fail the workspace-merge task instead of
+  preserving an operator resolution path.
+
 Lifecycle semantics:
 
 - `clean`: managed mirror is clean and aligned with its tracking ref.

@@ -80,6 +80,8 @@ pub const PERMITTED_OPS: &[&str] = &[
     "RevokeSession",
     "GrantDelegation",
     "RetryTask",
+    "WorkspaceMergeSubmit",
+    "WorkspaceMergeReset",
     "ResumeTask",
     "AbortTask",
     "AbortInitiative",

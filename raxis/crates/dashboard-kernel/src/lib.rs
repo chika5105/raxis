@@ -62,9 +62,10 @@ use raxis_dashboard::data::{
     OrchestratorGapsResponse, PolicyAdvancement, PolicyHistoryEntry, PolicyOperatorView,
     PolicySnapshotView, RecentSessionEntry, ReviewerPanelEntry, ReviewerVerdictView, SessionView,
     SessionVmEnvView, StructuredOutputView, SubsystemDetailRow, SubsystemHealthCard,
-    SubsystemHealthResponse, TaskView, TokenCostBreakdownRow, VmCommandDiagnosticView,
-    VmDiagnosticsView, VmSessionDiagnosticView, WorktreeDetail, WorktreeDiff, WorktreeFile,
-    WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry, SUBSYSTEM_CATALOG,
+    SubsystemHealthResponse, TaskPlanConfigView, TaskPlanCredentialView, TaskPlanVerifierView,
+    TaskView, TokenCostBreakdownRow, VmCommandDiagnosticView, VmDiagnosticsView,
+    VmSessionDiagnosticView, WorktreeDetail, WorktreeDiff, WorktreeFile, WorktreeListEntry,
+    WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry, SUBSYSTEM_CATALOG,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -226,6 +227,44 @@ where
     }
 }
 
+/// Kernel-side callback the dashboard uses to validate Plan Builder
+/// drafts against the live admission path. `raxis-dashboard-kernel`
+/// cannot depend on `raxis-kernel` because the kernel already depends
+/// on this crate, so the production binary wires this trait with a
+/// closure that calls `initiatives::lifecycle::validate_plan_toml_against_policy`.
+pub trait PlanValidator: Send + Sync + 'static {
+    /// Validate a raw `plan.toml` draft against the currently active
+    /// policy bundle and durable store state.
+    fn validate(&self, toml: &str, policy: &PolicyBundle) -> BuilderValidationResponse;
+}
+
+/// Closure-backed [`PlanValidator`] for tests and kernel glue.
+pub struct ClosurePlanValidator<F>
+where
+    F: Fn(&str, &PolicyBundle) -> BuilderValidationResponse + Send + Sync + 'static,
+{
+    inner: F,
+}
+
+impl<F> ClosurePlanValidator<F>
+where
+    F: Fn(&str, &PolicyBundle) -> BuilderValidationResponse + Send + Sync + 'static,
+{
+    /// Wrap a closure into a [`PlanValidator`].
+    pub fn new(f: F) -> Self {
+        Self { inner: f }
+    }
+}
+
+impl<F> PlanValidator for ClosurePlanValidator<F>
+where
+    F: Fn(&str, &PolicyBundle) -> BuilderValidationResponse + Send + Sync + 'static,
+{
+    fn validate(&self, toml: &str, policy: &PolicyBundle) -> BuilderValidationResponse {
+        (self.inner)(toml, policy)
+    }
+}
+
 /// Kernel-wired implementation of the dashboard data trait.
 ///
 /// Construction is cheap (just `Arc` clones); every read method
@@ -266,6 +305,11 @@ pub struct KernelDashboardData {
     /// (which don't boot the kernel) can opt out without
     /// silently exposing a no-op write surface.
     policy_advancer: Option<Arc<dyn PolicyAdvancer>>,
+    /// Optional live plan validation callback. Production kernel boots
+    /// wire this so Plan Builder validation and `approve_plan` share the
+    /// same lifecycle admission checks. Test/read-only fixtures leave it
+    /// unset and use the local draft validator below.
+    plan_validator: Option<Arc<dyn PlanValidator>>,
     /// Immutable policy/plan/key artifact store. Policy history
     /// rows live in SQLite; this store lets the dashboard open
     /// the exact historical `policy.toml` bytes referenced by a
@@ -367,6 +411,7 @@ impl KernelDashboardData {
             store,
             stream_capture,
             policy_advancer: None,
+            plan_validator: None,
             artifact_store: None,
             chain_status_cache: parking_lot::Mutex::new(None),
             audit_sink: None,
@@ -398,6 +443,7 @@ impl KernelDashboardData {
             store,
             stream_capture,
             policy_advancer: None,
+            plan_validator: None,
             artifact_store: None,
             chain_status_cache: parking_lot::Mutex::new(None),
             audit_sink: None,
@@ -460,6 +506,13 @@ impl KernelDashboardData {
     /// chain the call onto a `KernelDashboardData::new(...)`.
     pub fn with_advancer(mut self, advancer: Arc<dyn PolicyAdvancer>) -> Self {
         self.policy_advancer = Some(advancer);
+        self
+    }
+
+    /// Wire the live kernel Plan Builder validator. Production uses this
+    /// to avoid drift between dashboard preflight and actual admission.
+    pub fn with_plan_validator(mut self, validator: Arc<dyn PlanValidator>) -> Self {
+        self.plan_validator = Some(validator);
         self
     }
 
@@ -2478,10 +2531,12 @@ impl DashboardData for KernelDashboardData {
         _operator_fingerprint: &str,
         toml: &str,
     ) -> Result<BuilderValidationResponse, ApiError> {
-        Ok(validate_plan_draft_with_policy(
-            toml,
-            &self.policy.load_full(),
-        ))
+        let policy = self.policy.load_full();
+        if let Some(validator) = &self.plan_validator {
+            Ok(validator.validate(toml, &policy))
+        } else {
+            Ok(validate_plan_draft_with_policy(toml, &policy))
+        }
     }
 
     fn validate_policy_builder_toml(
@@ -7295,6 +7350,61 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+fn task_plan_config_from_fields(
+    f: &raxis_store::views::plan_fields::PlanPathFields,
+) -> TaskPlanConfigView {
+    TaskPlanConfigView {
+        task_kind: f.task_kind.clone(),
+        description: f.description.clone(),
+        prompt: f.prompt.clone(),
+        session_agent_type: f.session_agent_type.clone(),
+        clone_strategy: f.clone_strategy.clone(),
+        workspace_merge_on_conflict: f.workspace_merge_on_conflict.clone(),
+        predecessors: f.predecessors.clone(),
+        path_allowlist: f.path_allowlist.clone(),
+        path_export_to_successors: f.path_export_to_successors,
+        path_export_globs: f.path_export_globs.clone(),
+        path_scope_override: f.path_scope_override,
+        allowed_egress: f.allowed_egress.clone(),
+        profiles: f.profiles.clone(),
+        credentials: f
+            .credentials
+            .iter()
+            .map(|c| TaskPlanCredentialView {
+                name: c.name.clone(),
+                proxy_type: c.proxy_type.clone(),
+                mount_as: c.mount_as.clone(),
+                upstream_host_port: c.upstream_host_port.clone(),
+                upstream_url: c.upstream_url.clone(),
+            })
+            .collect(),
+        verifiers: f
+            .task_verifiers
+            .iter()
+            .map(|v| TaskPlanVerifierView {
+                name: v.name.clone(),
+                image: v.image.clone(),
+                command: v.command.clone(),
+                timeout: v.timeout.clone(),
+                on_failure: v.on_failure.clone(),
+                artifact: v.artifact.clone(),
+                artifact_max_bytes: v.artifact_max_bytes,
+                allowed_egress: v.allowed_egress.clone(),
+            })
+            .collect(),
+        vm_image: f.vm_image.clone(),
+        max_crash_retries: f.max_crash_retries,
+        max_review_rejections: f.max_review_rejections,
+        max_turns: f.max_turns,
+        max_turns_step: f.max_turns_step,
+        elastic: f.elastic,
+        min_vcpus: f.min_vcpus,
+        max_vcpus: f.max_vcpus,
+        min_memory_mb: f.min_memory_mb,
+        max_memory_mb: f.max_memory_mb,
+    }
+}
+
 fn task_row_to_view(
     conn: &raxis_store::ro::RoConn,
     t: &raxis_store::views::tasks::TaskRow,
@@ -7323,6 +7433,7 @@ fn task_row_to_view(
         .as_ref()
         .map(|f| f.path_allowlist.clone())
         .unwrap_or_default();
+    let plan_config = plan_fields.as_ref().map(task_plan_config_from_fields);
     let max_review_rejections = plan_fields
         .as_ref()
         .map(|f| f.max_review_rejections)
@@ -7377,6 +7488,7 @@ fn task_row_to_view(
         structured_outputs: outputs,
         custom_tool_calls: Vec::new(),
         path_allowlist,
+        plan_config,
         created_at: t.admitted_at,
         updated_at: t.transitioned_at,
         // INV-DASHBOARD-FAILURE-VISIBILITY-01: task failure
@@ -8145,6 +8257,7 @@ fn read_predecessors_by_successor(
 #[derive(Debug, Clone)]
 struct PlanDraftTask {
     id: String,
+    task_kind: String,
     agent_type: String,
     predecessors: Vec<String>,
     path_allowlist: Vec<String>,
@@ -8348,21 +8461,57 @@ fn validate_plan_draft_with_policy(
                 ));
             }
         }
+        let task_kind = match task.get("task_kind") {
+            None => "agent".to_owned(),
+            Some(toml::Value::String(s)) if s.trim() == "agent" => "agent".to_owned(),
+            Some(toml::Value::String(s)) if s.trim() == "workspace_merge" => {
+                "workspace_merge".to_owned()
+            }
+            Some(toml::Value::String(_)) => {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_TASK_KIND",
+                    format!("task {id:?} has an invalid task_kind."),
+                    "Use agent or workspace_merge.",
+                ));
+                "agent".to_owned()
+            }
+            Some(_) => {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_TASK_KIND",
+                    format!("task {id:?} task_kind must be a string."),
+                    "Use task_kind = \"workspace_merge\" for explicit fan-in, or omit it for an agent task.",
+                ));
+                "agent".to_owned()
+            }
+        };
         let agent_type = string_field(task, "session_agent_type").unwrap_or_default();
-        match agent_type {
-            "Executor" | "Reviewer" => {}
-            "Orchestrator" => issues.push(builder_issue(
+        if task_kind == "agent" {
+            match agent_type {
+                "Executor" | "Reviewer" => {}
+                "Orchestrator" => issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_ORCHESTRATOR_DECLARED",
+                    "Do not declare Orchestrator tasks.",
+                    "The kernel creates the Orchestrator automatically; remove this task or change it to Executor/Reviewer.",
+                )),
+                _ => issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_AGENT_TYPE",
+                    format!("task {id:?} must use session_agent_type Executor or Reviewer."),
+                    "Choose Executor for file changes or Reviewer for review-only work.",
+                )),
+            }
+        } else if !matches!(agent_type, "" | "Executor") {
+            issues.push(builder_issue(
                 BuilderValidationSeverity::Error,
-                "PLAN_ORCHESTRATOR_DECLARED",
-                "Do not declare Orchestrator tasks.",
-                "The kernel creates the Orchestrator automatically; remove this task or change it to Executor/Reviewer.",
-            )),
-            _ => issues.push(builder_issue(
-                BuilderValidationSeverity::Error,
-                "PLAN_AGENT_TYPE",
-                format!("task {id:?} must use session_agent_type Executor or Reviewer."),
-                "Choose Executor for file changes or Reviewer for review-only work.",
-            )),
+                "PLAN_WORKSPACE_MERGE_AGENT_TYPE",
+                format!(
+                    "workspace_merge task {id:?} must not use session_agent_type {agent_type:?}."
+                ),
+                "Omit session_agent_type; RAXIS materializes workspace merges in the kernel.",
+            ));
         }
         if string_field(task, "description").is_none_or(str::is_empty) {
             issues.push(builder_issue(
@@ -8380,32 +8529,64 @@ fn validate_plan_draft_with_policy(
                 "Move the main instruction into prompt; keep description as the short summary.",
             ));
         }
-        if string_field(task, "prompt").is_none_or(str::is_empty) {
-            issues.push(builder_issue(
-                BuilderValidationSeverity::Error,
-                "PLAN_TASK_PROMPT",
-                format!("task {id:?} has no prompt."),
-                "Add prompt for the executor/reviewer instruction; description should stay brief.",
-            ));
-        }
-        match string_field(task, "clone_strategy") {
-            Some(clone_strategy) if matches!(clone_strategy, "blobless" | "full" | "sparse") => {}
-            Some(_) => issues.push(builder_issue(
-                BuilderValidationSeverity::Error,
-                "PLAN_CLONE_STRATEGY",
-                format!("task {id:?} has an invalid clone_strategy."),
-                "Use blobless, sparse, or full.",
-            )),
-            None => issues.push(builder_issue(
-                BuilderValidationSeverity::Error,
-                "PLAN_CLONE_STRATEGY",
-                format!("task {id:?} is missing clone_strategy."),
-                "Set clone_strategy explicitly: blobless, sparse, or full.",
-            )),
+        if task_kind == "workspace_merge" {
+            if task.contains_key("prompt") {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_WORKSPACE_MERGE_PROMPT",
+                    format!("workspace_merge task {id:?} declares prompt."),
+                    "Remove prompt; no model receives task instructions for a kernel-owned workspace merge.",
+                ));
+            }
+            if task.contains_key("clone_strategy") {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_WORKSPACE_MERGE_CLONE_STRATEGY",
+                    format!("workspace_merge task {id:?} declares clone_strategy."),
+                    "Remove clone_strategy; no agent VM is spawned for a kernel-owned workspace merge.",
+                ));
+            }
+            if task.contains_key("profiles")
+                || task.contains_key("credentials")
+                || task.contains_key("verifiers")
+                || task.contains_key("vm_image")
+            {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_WORKSPACE_MERGE_AGENT_FIELDS",
+                    format!("workspace_merge task {id:?} declares agent-only fields."),
+                    "Attach profiles, credentials, verifiers, and VM images to artifact-producing Executor tasks instead.",
+                ));
+            }
+        } else {
+            if string_field(task, "prompt").is_none_or(str::is_empty) {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_TASK_PROMPT",
+                    format!("task {id:?} has no prompt."),
+                    "Add prompt for the executor/reviewer instruction; description should stay brief.",
+                ));
+            }
+            match string_field(task, "clone_strategy") {
+                Some(clone_strategy)
+                    if matches!(clone_strategy, "blobless" | "full" | "sparse") => {}
+                Some(_) => issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_CLONE_STRATEGY",
+                    format!("task {id:?} has an invalid clone_strategy."),
+                    "Use blobless, sparse, or full.",
+                )),
+                None => issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_CLONE_STRATEGY",
+                    format!("task {id:?} is missing clone_strategy."),
+                    "Set clone_strategy explicitly: blobless, sparse, or full.",
+                )),
+            }
         }
         let paths = string_array_field(task, "path_allowlist", &id, &mut issues);
         let allowed_egress = string_array_field(task, "allowed_egress", &id, &mut issues);
-        if agent_type == "Executor" && paths.is_empty() {
+        if task_kind == "agent" && agent_type == "Executor" && paths.is_empty() {
             issues.push(builder_issue(
                 BuilderValidationSeverity::Error,
                 "PLAN_EXECUTOR_PATHS",
@@ -8413,7 +8594,7 @@ fn validate_plan_draft_with_policy(
                 "Keep it narrow: exact files or directory prefixes such as src/api/.",
             ));
         }
-        if agent_type == "Reviewer" {
+        if task_kind == "agent" && agent_type == "Reviewer" {
             if task.contains_key("vm_image") {
                 issues.push(builder_issue(
                     BuilderValidationSeverity::Error,
@@ -8430,6 +8611,35 @@ fn validate_plan_draft_with_policy(
                     "Remove reviewer egress; reviewers have no network device.",
                 ));
             }
+        }
+        if task_kind == "workspace_merge" {
+            match task.get("on_conflict") {
+                None => {}
+                Some(toml::Value::String(s))
+                    if matches!(
+                        s.trim(),
+                        "orchestrator_then_operator" | "operator_manual" | "fail_closed"
+                    ) => {}
+                Some(toml::Value::String(_)) => issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_WORKSPACE_MERGE_ON_CONFLICT",
+                    format!("workspace_merge task {id:?} has an invalid on_conflict."),
+                    "Use orchestrator_then_operator, operator_manual, or fail_closed.",
+                )),
+                Some(_) => issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_WORKSPACE_MERGE_ON_CONFLICT",
+                    format!("workspace_merge task {id:?} on_conflict must be a string."),
+                    "Use on_conflict = \"orchestrator_then_operator\" or another supported policy.",
+                )),
+            }
+        } else if task.contains_key("on_conflict") {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_AGENT_ON_CONFLICT",
+                format!("agent task {id:?} declares on_conflict."),
+                "Use on_conflict only on task_kind = \"workspace_merge\" tasks.",
+            ));
         }
         for field in [
             "max_turns",
@@ -8453,6 +8663,14 @@ fn validate_plan_draft_with_policy(
             }
         }
         let predecessors = string_array_field(task, "predecessors", &id, &mut issues);
+        if task_kind == "workspace_merge" && predecessors.len() < 2 {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_WORKSPACE_MERGE_PREDECESSORS",
+                format!("workspace_merge task {id:?} needs at least two predecessors."),
+                "Use workspace_merge only at an explicit fan-in point with two or more artifact-producing tasks.",
+            ));
+        }
         let path_export_to_successors = task
             .get("path_export_to_successors")
             .and_then(|value| value.as_bool())
@@ -8460,6 +8678,7 @@ fn validate_plan_draft_with_policy(
         let path_export_globs = string_array_field(task, "path_export_globs", &id, &mut issues);
         task_drafts.push(PlanDraftTask {
             id,
+            task_kind,
             agent_type: agent_type.to_owned(),
             predecessors,
             path_allowlist: paths,
@@ -9064,6 +9283,35 @@ fn validate_task_dag(tasks: &[PlanDraftTask], issues: &mut Vec<BuilderValidation
         .iter()
         .filter_map(|task| (!task.id.is_empty()).then_some((task.id.as_str(), task)))
         .collect();
+    for task in tasks {
+        for pred in &task.predecessors {
+            let Some(predecessor) = by_id.get(pred.as_str()) else {
+                continue;
+            };
+            if predecessor.agent_type == "Reviewer" {
+                issues.push(builder_issue(
+                    BuilderValidationSeverity::Error,
+                    "PLAN_REVIEWER_AS_PREDECESSOR",
+                    format!(
+                        "task {:?} depends directly on Reviewer task {pred:?}.",
+                        task.id
+                    ),
+                    "Depend on the Executor that reviewer inspects; RAXIS enforces the reviewer gate before downstream work starts.",
+                ));
+            }
+        }
+        if task.task_kind != "workspace_merge"
+            && task.agent_type == "Executor"
+            && task.predecessors.len() > 1
+        {
+            issues.push(builder_issue(
+                BuilderValidationSeverity::Error,
+                "PLAN_EXECUTOR_MULTI_PREDECESSOR",
+                format!("Executor task {:?} lists multiple predecessors directly.", task.id),
+                "Add a task_kind = \"workspace_merge\" fan-in task, then make this Executor depend on that single merged workspace.",
+            ));
+        }
+    }
     let mut visiting = std::collections::HashSet::new();
     let mut visited = std::collections::HashSet::new();
     for task in tasks {
@@ -9670,6 +9918,7 @@ pub async fn start_dashboard_with_advancer(
     artifact_store: Option<Arc<raxis_artifact_store::ArtifactStore>>,
     stream_capture: Arc<SessionStreamCapture>,
     advancer: Arc<dyn PolicyAdvancer>,
+    plan_validator: Option<Arc<dyn PlanValidator>>,
     audit_sink: Arc<dyn raxis_audit_tools::AuditSink>,
     observability: Option<Arc<raxis_observability::ObservabilityHub>>,
     task_llm_capture: Option<Arc<TaskLlmCapture>>,
@@ -9685,6 +9934,9 @@ pub async fn start_dashboard_with_advancer(
     )
     .with_advancer(advancer)
     .with_audit_sink(audit_sink);
+    if let Some(validator) = plan_validator {
+        data = data.with_plan_validator(validator);
+    }
     if let Some(store) = artifact_store {
         data = data.with_artifact_store(store);
     }
@@ -9795,6 +10047,103 @@ prompt = "Invoke x_discover, commit the generated evidence, and submit CompleteT
             "large-but-admissible tool timeout should surface as a warning: {:#?}",
             response
         );
+    }
+
+    #[test]
+    fn plan_builder_kernel_check_accepts_workspace_merge_without_agent_vm_fields() {
+        let policy = PolicyBundle::for_tests_with_operators(Vec::new());
+        let response = validate_plan_draft_with_policy(
+            r#"[plan.initiative]
+description = "Merge fan-out artifacts."
+
+[workspace]
+name = "fixture"
+lane_id = "default"
+repository = "main"
+target_ref = "refs/heads/main"
+
+[[tasks]]
+task_name = "lint-python"
+description = "Run Python lint capture."
+prompt = "Run the Python lint capture and commit the evidence."
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+path_allowlist = ["reports/lint/python/"]
+predecessors = []
+
+[[tasks]]
+task_name = "lint-rust"
+description = "Run Rust lint capture."
+prompt = "Run the Rust lint capture and commit the evidence."
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+path_allowlist = ["reports/lint/rust/"]
+predecessors = []
+
+[[tasks]]
+task_name = "merge-lint-captures"
+task_kind = "workspace_merge"
+description = "Materialize lint captures into one workspace."
+predecessors = ["lint-python", "lint-rust"]
+on_conflict = "orchestrator_then_operator"
+"#,
+            &policy,
+        );
+
+        assert!(
+            response.ok,
+            "workspace_merge should not require prompt/session/clone VM fields: {response:#?}"
+        );
+        for forbidden in ["PLAN_AGENT_TYPE", "PLAN_TASK_PROMPT", "PLAN_CLONE_STRATEGY"] {
+            assert!(
+                response.issues.iter().all(|issue| issue.code != forbidden),
+                "unexpected {forbidden} on workspace_merge task: {response:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_builder_validation_uses_live_kernel_callback_when_wired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("raxis");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let store = Arc::new(Store::open(&data_dir.join("kernel.db")).unwrap());
+        let policy = Arc::new(ArcSwap::from_pointee(
+            PolicyBundle::for_tests_with_operators(Vec::new()),
+        ));
+        let validator: Arc<dyn PlanValidator> = Arc::new(ClosurePlanValidator::new(
+            |_toml: &str, policy: &PolicyBundle| BuilderValidationResponse {
+                artifact_kind: "plan".to_owned(),
+                authority: "kernel".to_owned(),
+                policy_epoch: policy.epoch(),
+                resolved_target_ref: Some("refs/heads/live-callback".to_owned()),
+                ok: false,
+                issues: vec![BuilderValidationIssue {
+                    code: "LIVE_KERNEL_VALIDATOR".to_owned(),
+                    severity: BuilderValidationSeverity::Error,
+                    message: "callback used".to_owned(),
+                    remediation: "dashboard did not fall back to local draft checks".to_owned(),
+                }],
+                next_steps: Vec::new(),
+            },
+        ));
+        let data = KernelDashboardData::new(
+            store,
+            policy,
+            data_dir.clone(),
+            data_dir.join("policy/policy.toml"),
+            1,
+        )
+        .unwrap()
+        .with_plan_validator(validator);
+
+        let response = DashboardData::validate_plan_builder_toml(&data, "operator", "not = toml =")
+            .expect("dashboard validation should return callback response");
+        assert_eq!(
+            response.resolved_target_ref.as_deref(),
+            Some("refs/heads/live-callback")
+        );
+        assert_eq!(response.issues[0].code, "LIVE_KERNEL_VALIDATOR");
     }
 
     #[test]

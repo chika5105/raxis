@@ -55,6 +55,82 @@ impl TaskKey {
 }
 
 // ---------------------------------------------------------------------------
+// TaskKind / WorkspaceMergeOnConflict — kernel-owned DAG task metadata
+// ---------------------------------------------------------------------------
+
+/// The execution substrate for a plan-declared task.
+///
+/// `Agent` is the normal Executor / Reviewer path: activation spawns a VM and
+/// the planner submits terminal intents. `WorkspaceMerge` is a kernel-owned
+/// fan-in materialization point: activation merges completed predecessor
+/// evaluation commits into a single audited workspace commit and stamps that
+/// commit as this task's `evaluation_sha`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskKind {
+    Agent,
+    WorkspaceMerge,
+}
+
+impl TaskKind {
+    pub const DEFAULT: Self = Self::Agent;
+
+    pub fn as_plan_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::WorkspaceMerge => "workspace_merge",
+        }
+    }
+
+    pub fn from_plan_str(s: &str) -> Option<Self> {
+        match s {
+            "agent" => Some(Self::Agent),
+            "workspace_merge" => Some(Self::WorkspaceMerge),
+            _ => None,
+        }
+    }
+}
+
+/// What RAXIS should do when a workspace-merge task materializes a conflicted
+/// fan-in worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceMergeOnConflict {
+    /// Product path: give the orchestrator a bounded chance to resolve the
+    /// normal Git conflict; if it cannot, escalate to the operator.
+    ///
+    /// The first production slice parks conflicts on the operator path until
+    /// the dedicated orchestrator workspace-merge terminal intent exists. The
+    /// plan string is still accepted so signed plans can express the intended
+    /// policy without weakening safety; unresolved conflicts never fail open.
+    OrchestratorThenOperator,
+    /// Skip orchestrator resolution and immediately surface an operator
+    /// escalation with the conflict worktree path and CLI commands.
+    OperatorManual,
+    /// Strict noninteractive mode: conflict marks the merge task failed.
+    FailClosed,
+}
+
+impl WorkspaceMergeOnConflict {
+    pub const DEFAULT: Self = Self::OrchestratorThenOperator;
+
+    pub fn as_plan_str(self) -> &'static str {
+        match self {
+            Self::OrchestratorThenOperator => "orchestrator_then_operator",
+            Self::OperatorManual => "operator_manual",
+            Self::FailClosed => "fail_closed",
+        }
+    }
+
+    pub fn from_plan_str(s: &str) -> Option<Self> {
+        match s {
+            "orchestrator_then_operator" => Some(Self::OrchestratorThenOperator),
+            "operator_manual" => Some(Self::OperatorManual),
+            "fail_closed" => Some(Self::FailClosed),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TaskPlanFields — the four §2.5.8 plan fields for one task
 // ---------------------------------------------------------------------------
 
@@ -81,6 +157,9 @@ impl TaskKey {
 ///     dropped immediately after lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPlanFields {
+    pub task_kind: TaskKind,
+    pub workspace_merge_on_conflict: WorkspaceMergeOnConflict,
+
     pub path_allowlist: Vec<String>,
     pub path_export_to_successors: bool,
     pub path_export_globs: Vec<String>,
@@ -329,6 +408,8 @@ pub const DEFAULT_PLANNER_MAX_TURNS: u32 = 100;
 impl Default for TaskPlanFields {
     fn default() -> Self {
         Self {
+            task_kind: TaskKind::DEFAULT,
+            workspace_merge_on_conflict: WorkspaceMergeOnConflict::DEFAULT,
             path_allowlist: Vec::new(),
             path_export_to_successors: false,
             path_export_globs: Vec::new(),
@@ -1019,6 +1100,8 @@ mod tests {
             path_export_to_successors: true,
             path_export_globs: vec!["src/**".to_owned()],
             path_scope_override: false,
+            task_kind: TaskKind::Agent,
+            workspace_merge_on_conflict: WorkspaceMergeOnConflict::DEFAULT,
             clone_strategy: CloneStrategy::Sparse,
             session_agent_type: SessionAgentType::Executor,
             vm_image: String::new(),

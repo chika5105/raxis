@@ -100,7 +100,8 @@ use extended_e2e_support::{
     plan_realistic::{
         realistic_plan_toml, TASK_ALLOWLIST_POSITIVE, TASK_CREDENTIAL_SUBSTITUTION_CANARY,
         TASK_DEP_FETCH_EVIDENCE, TASK_LINT_DEFECT, TASK_LINT_RUNNER_PYTHON, TASK_MATERIALIZE,
-        TASK_REVIEW_LINT_A, TASK_REVIEW_LINT_B, TASK_SERVICE_ROUND_TRIP, TASK_TOOLING_MCP_UNITY,
+        TASK_MERGE_LINT_CAPTURES, TASK_MERGE_SERVICE_EVIDENCE, TASK_REVIEW_LINT_A,
+        TASK_REVIEW_LINT_B, TASK_SERVICE_ROUND_TRIP, TASK_TOOLING_MCP_UNITY,
         TASK_TRANSPARENT_PROXY_REALSCRIPTS, TASK_XFILE_REFACTOR,
     },
     reviewer_substantive_disagreement::ReviewerSubstantiveDisagreementWitness,
@@ -439,10 +440,12 @@ fn realistic_session_lifecycle() {
             TASK_LINT_RUNNER_PYTHON,
             TASK_REVIEW_LINT_A,
             TASK_REVIEW_LINT_B,
+            TASK_MERGE_LINT_CAPTURES,
             TASK_ALLOWLIST_POSITIVE,
             TASK_SERVICE_ROUND_TRIP,
             TASK_TRANSPARENT_PROXY_REALSCRIPTS,
             TASK_CREDENTIAL_SUBSTITUTION_CANARY,
+            TASK_MERGE_SERVICE_EVIDENCE,
             TASK_DEP_FETCH_EVIDENCE,
             TASK_TOOLING_MCP_UNITY,
         ],
@@ -467,6 +470,17 @@ fn realistic_session_lifecycle() {
         primary_task_ids.len(),
         TASK_SIBLING_MATERIALIZE,
         sibling_task_id(TASK_SIBLING_MATERIALIZE),
+    );
+
+    assert_workspace_merge_attempt_completed(
+        kernel.data_dir(),
+        primary_task_id(TASK_MERGE_LINT_CAPTURES),
+        TASK_MERGE_LINT_CAPTURES,
+    );
+    assert_workspace_merge_attempt_completed(
+        kernel.data_dir(),
+        primary_task_id(TASK_MERGE_SERVICE_EVIDENCE),
+        TASK_MERGE_SERVICE_EVIDENCE,
     );
 
     // ── Apply every realism witness ──────────────────────────
@@ -795,6 +809,68 @@ fn realistic_session_lifecycle() {
     // SIGKILL safety nets MUST be skipped — wired in
     // `tier3_artifacts.rs`, `kernel_harness.rs`, and
     // `otel_pusher.rs` respectively.
+}
+
+fn assert_workspace_merge_attempt_completed(data_dir: &Path, task_id: &str, task_name: &str) {
+    let db_path = data_dir.join("kernel.db");
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .unwrap_or_else(|e| {
+        panic!(
+            "[realism-e2e] open kernel.db at {} for workspace merge witness failed: {e}",
+            db_path.display()
+        )
+    });
+    let mut stmt = conn
+        .prepare(
+            "SELECT attempt_id, state, output_sha, failure_reason
+               FROM workspace_merge_attempts
+              WHERE task_id = ?1
+              ORDER BY created_at DESC",
+        )
+        .unwrap_or_else(|e| {
+            panic!("[realism-e2e] prepare workspace_merge_attempts query failed: {e}")
+        });
+    let rows = stmt
+        .query_map(rusqlite::params![task_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .unwrap_or_else(|e| {
+            panic!("[realism-e2e] query workspace_merge_attempts for {task_name} failed: {e}")
+        });
+    let attempts: Vec<_> = rows.collect::<Result<Vec<_>, _>>().unwrap_or_else(|e| {
+        panic!("[realism-e2e] collect workspace_merge_attempts for {task_name} failed: {e}")
+    });
+    assert_eq!(
+        attempts.len(),
+        1,
+        "[realism-e2e] expected exactly one workspace merge attempt for \
+         {task_name} ({task_id}), got {attempts:?}",
+    );
+    let (attempt_id, state, output_sha, failure_reason) = &attempts[0];
+    assert_eq!(
+        state, "Completed",
+        "[realism-e2e] workspace merge {task_name} attempt {attempt_id} did \
+         not complete; state={state}, failure_reason={failure_reason:?}",
+    );
+    let output_sha = output_sha.as_ref().unwrap_or_else(|| {
+        panic!("[realism-e2e] workspace merge {task_name} attempt {attempt_id} missing output_sha")
+    });
+    assert!(
+        output_sha.len() >= 7,
+        "[realism-e2e] workspace merge {task_name} attempt {attempt_id} \
+         output_sha looks malformed: {output_sha:?}",
+    );
+    eprintln!(
+        "[realism-e2e] workspace merge {task_name} attempt {attempt_id} completed at {output_sha}",
+    );
 }
 
 // ---------------------------------------------------------------------------

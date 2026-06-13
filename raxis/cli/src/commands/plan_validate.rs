@@ -349,6 +349,74 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
             return r;
         }
 
+        let task_kind = match entry.get("task_kind") {
+            None => "agent".to_owned(),
+            Some(toml::Value::String(s)) if s.trim() == "agent" => "agent".to_owned(),
+            Some(toml::Value::String(s)) if s.trim() == "workspace_merge" => {
+                "workspace_merge".to_owned()
+            }
+            Some(toml::Value::String(s)) => {
+                r.fail(
+                    "task_kind",
+                    format!(
+                        "task `{task_name}` has invalid `task_kind = \"{}\"`; \
+                         valid values: agent, workspace_merge",
+                        s.trim()
+                    ),
+                );
+                return r;
+            }
+            Some(other) => {
+                r.fail(
+                    "task_kind",
+                    format!(
+                        "task `{task_name}` task_kind must be a TOML string, got {:?}",
+                        other.type_str()
+                    ),
+                );
+                return r;
+            }
+        };
+        match entry.get("on_conflict") {
+            None => {}
+            Some(toml::Value::String(s)) if task_kind == "workspace_merge" => {
+                if !matches!(
+                    s.trim(),
+                    "orchestrator_then_operator" | "operator_manual" | "fail_closed"
+                ) {
+                    r.fail(
+                        "on_conflict",
+                        format!(
+                            "task `{task_name}` has invalid `on_conflict = \"{}\"`; \
+                             valid values: orchestrator_then_operator, operator_manual, fail_closed",
+                            s.trim()
+                        ),
+                    );
+                    return r;
+                }
+            }
+            Some(toml::Value::String(_)) => {
+                r.fail(
+                    "on_conflict",
+                    format!(
+                        "task `{task_name}` declares on_conflict but is not \
+                         `task_kind = \"workspace_merge\"`"
+                    ),
+                );
+                return r;
+            }
+            Some(other) => {
+                r.fail(
+                    "on_conflict",
+                    format!(
+                        "task `{task_name}` on_conflict must be a TOML string, got {:?}",
+                        other.type_str()
+                    ),
+                );
+                return r;
+            }
+        }
+
         // Every `[[tasks]]` block must declare a non-empty
         // `description`. `prompt` is the preferred primary model
         // instruction in 0.2.0, but old plans that omit it still use
@@ -398,46 +466,181 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
                 return r;
             }
         }
-        match entry.get("prompt") {
-            Some(toml::Value::String(s)) => {
-                let trimmed = s.trim_end();
-                if trimmed.is_empty() {
+        let agent_type = if task_kind == "workspace_merge" {
+            if entry.get("prompt").is_some() {
+                r.fail(
+                    "[[tasks]] prompt",
+                    format!(
+                        "task `{task_name}` is `task_kind = \"workspace_merge\"` \
+                         and must not declare `prompt`; no model receives instructions for this row"
+                    ),
+                );
+                return r;
+            }
+            if entry.get("clone_strategy").is_some() {
+                r.fail(
+                    "clone_strategy",
+                    format!(
+                        "task `{task_name}` is `task_kind = \"workspace_merge\"` \
+                         and must not declare clone_strategy; no agent VM is spawned"
+                    ),
+                );
+                return r;
+            }
+            if entry.get("profiles").is_some()
+                || entry.get("credentials").is_some()
+                || entry.get("verifiers").is_some()
+                || entry.get("vm_image").is_some()
+            {
+                r.fail(
+                    "workspace_merge agent fields",
+                    format!(
+                        "task `{task_name}` is `task_kind = \"workspace_merge\"` \
+                         and cannot declare profiles, credentials, verifiers, or vm_image"
+                    ),
+                );
+                return r;
+            }
+            match entry.get("session_agent_type") {
+                None => "Executor".to_owned(),
+                Some(toml::Value::String(s)) if s.trim() == "Executor" => "Executor".to_owned(),
+                Some(toml::Value::String(s)) => {
                     r.fail(
-                        "[[tasks]] prompt",
+                        "session_agent_type",
                         format!(
-                            "task `{task_name}` has empty `prompt`; provide the primary \
-                             executor/reviewer instruction"
+                            "task `{task_name}` is `task_kind = \"workspace_merge\"` \
+                             and must not use `session_agent_type = \"{}\"`; omit the field",
+                            s.trim()
                         ),
                     );
                     return r;
                 }
-                if trimmed.len() > MAX_DESCRIPTION_BYTES {
+                Some(other) => {
                     r.fail(
-                        "[[tasks]] prompt",
+                        "session_agent_type",
                         format!(
-                            "task `{task_name}` prompt is {} bytes, exceeds 64 KiB \
-                             cap; trim to fit execve(2) ARG_MAX",
-                            trimmed.len(),
+                            "task `{task_name}` session_agent_type must be a TOML string, got {:?}",
+                            other.type_str()
                         ),
                     );
                     return r;
                 }
             }
-            Some(_) => {
-                r.fail(
-                    "[[tasks]] prompt",
-                    format!("task `{task_name}` `prompt` must be a TOML string"),
-                );
-                return r;
+        } else {
+            match entry.get("prompt") {
+                Some(toml::Value::String(s)) => {
+                    let trimmed = s.trim_end();
+                    if trimmed.is_empty() {
+                        r.fail(
+                            "[[tasks]] prompt",
+                            format!(
+                                "task `{task_name}` has empty `prompt`; provide the primary \
+                                 executor/reviewer instruction"
+                            ),
+                        );
+                        return r;
+                    }
+                    if trimmed.len() > MAX_DESCRIPTION_BYTES {
+                        r.fail(
+                            "[[tasks]] prompt",
+                            format!(
+                                "task `{task_name}` prompt is {} bytes, exceeds 64 KiB \
+                                 cap; trim to fit execve(2) ARG_MAX",
+                                trimmed.len(),
+                            ),
+                        );
+                        return r;
+                    }
+                }
+                Some(_) => {
+                    r.fail(
+                        "[[tasks]] prompt",
+                        format!("task `{task_name}` `prompt` must be a TOML string"),
+                    );
+                    return r;
+                }
+                None => {
+                    r.fail(
+                        "[[tasks]] prompt",
+                        format!("task `{task_name}` is missing required `prompt`"),
+                    );
+                    return r;
+                }
             }
-            None => {
-                r.fail(
-                    "[[tasks]] prompt",
-                    format!("task `{task_name}` is missing required `prompt`"),
-                );
-                return r;
+
+            let agent_type = match entry.get("session_agent_type") {
+                Some(toml::Value::String(agent)) => {
+                    if !matches!(agent.as_str(), "Executor" | "Reviewer") {
+                        if agent == "Orchestrator" {
+                            r.fail(
+                                "Orchestrator declaration",
+                                format!(
+                                "task `{task_name}` declares `session_agent_type = \"Orchestrator\"`; \
+                                 V2 auto-creates exactly one Orchestrator session per initiative \
+                                 from the kernel-bundled `raxis-orchestrator-core` image — \
+                                 operators only declare Executor (and optionally Reviewer) tasks"
+                            ),
+                            );
+                            return r;
+                        }
+                        r.fail(
+                            "session_agent_type",
+                            format!(
+                                "task `{task_name}` has invalid `session_agent_type = \"{agent}\"`; \
+                             valid values: Executor, Reviewer"
+                            ),
+                        );
+                        return r;
+                    }
+                    agent.to_owned()
+                }
+                Some(_) => {
+                    r.fail(
+                        "session_agent_type",
+                        format!("task `{task_name}` session_agent_type must be a TOML string"),
+                    );
+                    return r;
+                }
+                None => {
+                    r.fail(
+                        "session_agent_type",
+                        format!("task `{task_name}` is missing required session_agent_type"),
+                    );
+                    return r;
+                }
+            };
+
+            match entry.get("clone_strategy") {
+                Some(toml::Value::String(s)) => {
+                    if !matches!(s.as_str(), "full" | "blobless" | "sparse") {
+                        r.fail(
+                            "clone_strategy",
+                            format!(
+                                "task `{task_name}` has invalid `clone_strategy = \"{s}\"`; \
+                             valid values: full, blobless, sparse"
+                            ),
+                        );
+                        return r;
+                    }
+                }
+                Some(_) => {
+                    r.fail(
+                        "clone_strategy",
+                        format!("task `{task_name}` clone_strategy must be a TOML string"),
+                    );
+                    return r;
+                }
+                None => {
+                    r.fail(
+                        "clone_strategy",
+                        format!("task `{task_name}` is missing required clone_strategy"),
+                    );
+                    return r;
+                }
             }
-        }
+
+            agent_type
+        };
 
         if let Some(per_task_lane) = entry.get("lane_id").and_then(|v| v.as_str()) {
             if !per_task_lane.is_empty() {
@@ -453,78 +656,17 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
             }
         }
 
-        let agent_type = match entry.get("session_agent_type") {
-            Some(toml::Value::String(agent)) => {
-                if !matches!(agent.as_str(), "Executor" | "Reviewer") {
-                    if agent == "Orchestrator" {
-                        r.fail(
-                            "Orchestrator declaration",
-                            format!(
-                            "task `{task_name}` declares `session_agent_type = \"Orchestrator\"`; \
-                             V2 auto-creates exactly one Orchestrator session per initiative \
-                             from the kernel-bundled `raxis-orchestrator-core` image — \
-                             operators only declare Executor (and optionally Reviewer) tasks"
-                        ),
-                        );
-                        return r;
-                    }
-                    r.fail(
-                        "session_agent_type",
-                        format!(
-                            "task `{task_name}` has invalid `session_agent_type = \"{agent}\"`; \
-                         valid values: Executor, Reviewer"
-                        ),
-                    );
-                    return r;
-                }
-                agent.to_owned()
-            }
-            Some(_) => {
-                r.fail(
-                    "session_agent_type",
-                    format!("task `{task_name}` session_agent_type must be a TOML string"),
-                );
-                return r;
-            }
-            None => {
-                r.fail(
-                    "session_agent_type",
-                    format!("task `{task_name}` is missing required session_agent_type"),
-                );
-                return r;
-            }
-        };
-
-        match entry.get("clone_strategy") {
-            Some(toml::Value::String(s)) => {
-                if !matches!(s.as_str(), "full" | "blobless" | "sparse") {
-                    r.fail(
-                        "clone_strategy",
-                        format!(
-                            "task `{task_name}` has invalid `clone_strategy = \"{s}\"`; \
-                         valid values: full, blobless, sparse"
-                        ),
-                    );
-                    return r;
-                }
-            }
-            Some(_) => {
-                r.fail(
-                    "clone_strategy",
-                    format!("task `{task_name}` clone_strategy must be a TOML string"),
-                );
-                return r;
-            }
-            None => {
-                r.fail(
-                    "clone_strategy",
-                    format!("task `{task_name}` is missing required clone_strategy"),
-                );
-                return r;
-            }
-        }
-
         let predecessors = toml_string_array(entry, "predecessors");
+        if task_kind == "workspace_merge" && predecessors.len() < 2 {
+            r.fail(
+                "workspace_merge predecessors",
+                format!(
+                    "task `{task_name}` is `task_kind = \"workspace_merge\"` \
+                     but has fewer than two predecessors"
+                ),
+            );
+            return r;
+        }
         let path_allowlist = toml_string_array(entry, "path_allowlist");
         let path_export_globs = toml_string_array(entry, "path_export_globs");
         let path_export_to_successors = entry
@@ -534,6 +676,7 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
 
         tasks.push(ParsedTask {
             task_name,
+            task_kind,
             agent_type,
             predecessors,
             path_allowlist,
@@ -603,6 +746,7 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
 #[derive(Debug)]
 struct ParsedTask {
     task_name: String,
+    task_kind: String,
     agent_type: String,
     predecessors: Vec<String>,
     path_allowlist: Vec<String>,
@@ -653,6 +797,38 @@ fn validate_dag(tasks: &[ParsedTask]) -> Result<(), String> {
                     t.task_name,
                 ));
             }
+        }
+    }
+
+    let by_name: HashMap<&str, &ParsedTask> = tasks
+        .iter()
+        .map(|task| (task.task_name.as_str(), task))
+        .collect();
+    for t in tasks {
+        for p in &t.predecessors {
+            let Some(predecessor) = by_name.get(p.as_str()) else {
+                continue;
+            };
+            if predecessor.agent_type == "Reviewer" {
+                return Err(format!(
+                    "task `{}` lists Reviewer task `{p}` in `predecessors`; \
+                     reviewers are gates and do not produce an evaluation_sha. \
+                     Depend on the Executor that `{p}` reviews; RAXIS will enforce \
+                     the reviewer gate before downstream work starts",
+                    t.task_name,
+                ));
+            }
+        }
+        if t.task_kind != "workspace_merge"
+            && t.agent_type == "Executor"
+            && t.predecessors.len() > 1
+        {
+            return Err(format!(
+                "task `{}` lists multiple predecessors directly. Add a \
+                 `task_kind = \"workspace_merge\"` fan-in task, then make `{}` \
+                 depend on that single merged workspace",
+                t.task_name, t.task_name,
+            ));
         }
     }
 
@@ -952,6 +1128,46 @@ predecessors       = ["build"]
             .lines
             .iter()
             .any(|l| l.contains("[OK] 2 task(s) declared")));
+    }
+
+    #[test]
+    fn workspace_merge_without_agent_vm_fields_passes_validation() {
+        let r = validate_plan_text(
+            r#"
+[plan.initiative]
+description = "Merge fan-out artifacts."
+
+[workspace]
+name = "fixture"
+lane_id = "default"
+
+[[tasks]]
+task_name = "lint-python"
+description = "Run Python lint capture."
+prompt = "Run the Python lint capture and commit the evidence."
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+
+[[tasks]]
+task_name = "lint-rust"
+description = "Run Rust lint capture."
+prompt = "Run the Rust lint capture and commit the evidence."
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+
+[[tasks]]
+task_name = "merge-lint-captures"
+task_kind = "workspace_merge"
+description = "Materialize lint captures into one workspace."
+predecessors = ["lint-python", "lint-rust"]
+on_conflict = "orchestrator_then_operator"
+"#,
+        );
+        assert!(
+            r.first_error.is_none(),
+            "workspace_merge should not require prompt/session/clone VM fields: {:#?}",
+            r.lines
+        );
     }
 
     #[test]

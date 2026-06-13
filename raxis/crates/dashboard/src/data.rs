@@ -1504,6 +1504,11 @@ pub struct TaskView {
     pub custom_tool_calls: Vec<CustomToolCallView>,
     /// Path-scope allowlist (effective).
     pub path_allowlist: Vec<String>,
+    /// Operator-authored task configuration from the sealed
+    /// `plan.toml`. This is absent for synthetic kernel-owned rows
+    /// such as the initiative coordinator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_config: Option<TaskPlanConfigView>,
     /// Unix-seconds creation timestamp.
     pub created_at: u64,
     /// Unix-seconds latest-update timestamp.
@@ -1588,6 +1593,117 @@ pub struct TaskView {
     /// in <100ms.
     #[serde(default)]
     pub is_active: bool,
+}
+
+/// Dashboard-safe subset of one `[[tasks]]` block from the sealed
+/// plan. Carries authority/configuration metadata only; secret bytes
+/// remain outside this surface.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct TaskPlanConfigView {
+    /// `agent` or `workspace_merge`.
+    pub task_kind: String,
+    /// Operator-authored summary.
+    pub description: String,
+    /// Operator-authored model instruction. `None` for
+    /// kernel-owned workspace merge tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Executor / Reviewer for agent tasks.
+    pub session_agent_type: String,
+    /// Clone strategy for agent tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_strategy: Option<String>,
+    /// Workspace merge conflict policy.
+    pub workspace_merge_on_conflict: String,
+    /// Declared predecessor task names.
+    pub predecessors: Vec<String>,
+    /// Path scope.
+    pub path_allowlist: Vec<String>,
+    /// Whether touched paths export to successors.
+    pub path_export_to_successors: bool,
+    /// Optional export filters.
+    pub path_export_globs: Vec<String>,
+    /// Explicit path-scope override flag.
+    pub path_scope_override: bool,
+    /// Task-level egress allowlist.
+    pub allowed_egress: Vec<String>,
+    /// Referenced tool profiles.
+    pub profiles: Vec<String>,
+    /// Referenced credential bindings.
+    pub credentials: Vec<TaskPlanCredentialView>,
+    /// Task-level verifier declarations.
+    pub verifiers: Vec<TaskPlanVerifierView>,
+    /// VM image alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vm_image: Option<String>,
+    /// Retry ceiling for crashes.
+    pub max_crash_retries: u32,
+    /// Retry ceiling for reviewer rejections.
+    pub max_review_rejections: u32,
+    /// Optional planner turn budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    /// Optional progressive retry turn step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns_step: Option<u32>,
+    /// Optional elastic VM toggle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elastic: Option<bool>,
+    /// Optional minimum vCPU floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_vcpus: Option<u32>,
+    /// Optional maximum vCPU ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_vcpus: Option<u32>,
+    /// Optional memory floor in MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_memory_mb: Option<u32>,
+    /// Optional memory ceiling in MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_mb: Option<u32>,
+}
+
+/// Dashboard-safe credential binding reference from
+/// `[[tasks.credentials]]`.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct TaskPlanCredentialView {
+    /// Registered credential name.
+    pub name: String,
+    /// Credential proxy type.
+    pub proxy_type: String,
+    /// Environment variable or mount name visible inside the VM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_as: Option<String>,
+    /// Optional upstream host/port for protocol proxies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_host_port: Option<String>,
+    /// Optional upstream URL for HTTP-style proxies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_url: Option<String>,
+}
+
+/// Dashboard-safe task verifier declaration from
+/// `[[tasks.verifiers]]`.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct TaskPlanVerifierView {
+    /// Verifier name.
+    pub name: String,
+    /// VM image alias.
+    pub image: String,
+    /// Verifier command.
+    pub command: String,
+    /// Timeout string.
+    pub timeout: String,
+    /// Failure routing.
+    pub on_failure: String,
+    /// Artifact path, when declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<String>,
+    /// Artifact size ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_max_bytes: Option<u64>,
+    /// Verifier egress allowlist.
+    pub allowed_egress: Vec<String>,
 }
 
 /// One captured raw LLM turn surfaced via
@@ -5047,6 +5163,7 @@ mod tests {
                     structured_outputs: vec![],
                     custom_tool_calls: vec![],
                     path_allowlist: vec!["src/".into()],
+                    plan_config: None,
                     created_at: 100,
                     updated_at: 150,
                     failure: None,
@@ -5076,6 +5193,7 @@ mod tests {
                     structured_outputs: vec![],
                     custom_tool_calls: vec![],
                     path_allowlist: vec!["src/".into()],
+                    plan_config: None,
                     created_at: 150,
                     updated_at: 200,
                     failure: None,
@@ -5195,6 +5313,7 @@ mod tests {
             structured_outputs: vec![],
             custom_tool_calls: vec![],
             path_allowlist: vec![],
+            plan_config: None,
             created_at: 0,
             updated_at: 0,
             failure: None,
@@ -5239,6 +5358,7 @@ mod tests {
             structured_outputs: vec![],
             custom_tool_calls: vec![],
             path_allowlist: vec![],
+            plan_config: None,
             created_at: 0,
             updated_at: 0,
             failure: Some(

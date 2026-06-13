@@ -20,7 +20,7 @@ import {
   isTerminalFailureState,
   taskDisplayId,
 } from "@/lib/state-color";
-import type { CustomToolCallView } from "@/types/api";
+import type { CustomToolCallView, TaskPlanConfigView } from "@/types/api";
 
 export function TaskDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
@@ -121,6 +121,8 @@ export function TaskDetailPage() {
         critique={t.last_critique ?? null}
         entries={t.reviewer_panel_results ?? []}
       />
+
+      <TaskPlanConfiguration config={t.plan_config ?? null} />
 
       {/* Lifecycle timeline — retries, revokes, gaps in
           kernel-emit order. `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`. */}
@@ -249,26 +251,253 @@ export function TaskDetailPage() {
           `specs/v3/worktree-snapshots.md`. */}
       <TaskWorktreeSnapshots taskId={t.task_id} />
 
-      <section className="card p-4">
-        <h2 className="text-sm font-semibold text-ink mb-3">Path scope (allowlist)</h2>
-        {t.path_allowlist.length === 0 ? (
-          <p className="text-xs text-ink-subtle">No paths in the allowlist.</p>
-        ) : (
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-            {t.path_allowlist.map((p) => (
-              <code
-                key={p}
-                className="font-mono text-[11px] px-2 py-1.5 rounded border border-edge bg-panel-high text-ink-muted truncate"
-                title={p}
-              >
-                {p}
-              </code>
-            ))}
-          </div>
-        )}
-      </section>
+      {!t.plan_config && (
+        <section className="card p-4">
+          <h2 className="text-sm font-semibold text-ink mb-3">Path scope (allowlist)</h2>
+          {t.path_allowlist.length === 0 ? (
+            <p className="text-xs text-ink-subtle">No paths in the allowlist.</p>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+              {t.path_allowlist.map((p) => (
+                <code
+                  key={p}
+                  className="font-mono text-[11px] px-2 py-1.5 rounded border border-edge bg-panel-high text-ink-muted truncate"
+                  title={p}
+                >
+                  {p}
+                </code>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
+}
+
+function TaskPlanConfiguration({ config }: { config: TaskPlanConfigView | null }) {
+  if (!config) return null;
+  const isWorkspaceMerge = config.task_kind === "workspace_merge";
+  const resourceBits = [
+    config.min_vcpus || config.max_vcpus
+      ? `vCPU ${config.min_vcpus ?? "policy"}-${config.max_vcpus ?? "policy"}`
+      : null,
+    config.min_memory_mb || config.max_memory_mb
+      ? `mem ${config.min_memory_mb ?? "policy"}-${config.max_memory_mb ?? "policy"} MiB`
+      : null,
+    config.elastic !== null && config.elastic !== undefined
+      ? `elastic ${config.elastic ? "on" : "off"}`
+      : null,
+  ].filter(Boolean) as string[];
+
+  return (
+    <section className="card p-4">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-xs uppercase tracking-wide text-ink-subtle">
+            Signed plan configuration
+          </div>
+          <h2 className="mt-1 text-sm font-semibold text-ink">
+            What this task was configured to do
+          </h2>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <span className="badge bg-panel-high border-edge text-ink-muted">
+            {isWorkspaceMerge ? "Workspace merge" : "Agent task"}
+          </span>
+          {!isWorkspaceMerge && (
+            <span className="badge bg-panel-high border-edge text-ink-muted">
+              {config.session_agent_type}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <p className="mt-3 text-sm text-ink leading-relaxed whitespace-pre-wrap break-words">
+        {config.description || "No task summary recorded."}
+      </p>
+
+      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+        <PlanConfigField label="Kind" value={labelize(config.task_kind)} />
+        {!isWorkspaceMerge && (
+          <PlanConfigField label="Clone strategy" value={config.clone_strategy ?? "policy"} />
+        )}
+        {isWorkspaceMerge ? (
+          <PlanConfigField
+            label="Conflict handling"
+            value={labelize(config.workspace_merge_on_conflict)}
+          />
+        ) : (
+          <PlanConfigField label="VM image" value={config.vm_image ?? "canonical"} />
+        )}
+        <PlanConfigField
+          label="Turn budget"
+          value={config.max_turns ? `${config.max_turns}` : "policy default"}
+        />
+        <PlanConfigField
+          label="Retry ceilings"
+          value={`crash ${config.max_crash_retries} · review ${config.max_review_rejections}`}
+        />
+        {resourceBits.length > 0 && (
+          <PlanConfigField label="Resources" value={resourceBits.join(" · ")} />
+        )}
+      </div>
+
+      {config.prompt && (
+        <details className="mt-4 rounded border border-edge bg-panel-high/60 p-3">
+          <summary className="cursor-pointer text-sm font-medium text-ink">
+            Prompt
+          </summary>
+          <pre className="mt-3 max-h-72 overflow-auto overscroll-contain scroll-thin whitespace-pre-wrap break-words text-[12px] leading-relaxed font-sans text-ink-muted">
+            {config.prompt}
+          </pre>
+        </details>
+      )}
+
+      <div className="mt-4 grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <PlanConfigChipGroup label="Predecessors" values={config.predecessors} />
+        <PlanConfigChipGroup label="Tool profiles" values={config.profiles} />
+        <PlanConfigChipGroup label="Allowed egress" values={config.allowed_egress} />
+        <PlanConfigChipGroup label="Path allowlist" values={config.path_allowlist} />
+        {(config.path_export_to_successors ||
+          config.path_export_globs.length > 0 ||
+          config.path_scope_override) && (
+          <div className="rounded border border-edge bg-panel-high/40 p-3">
+            <div className="text-[11px] uppercase tracking-wide text-ink-subtle">
+              Path exports
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <span className="badge bg-panel border-edge text-ink-muted">
+                export {config.path_export_to_successors ? "on" : "off"}
+              </span>
+              {config.path_scope_override && (
+                <span className="badge bg-warn-muted/30 border-warn text-warn">
+                  override
+                </span>
+              )}
+            </div>
+            <ChipList values={config.path_export_globs} empty="No export filters." />
+          </div>
+        )}
+      </div>
+
+      {(config.credentials.length > 0 || config.verifiers.length > 0) && (
+        <div className="mt-4 grid grid-cols-1 xl:grid-cols-2 gap-4">
+          {config.credentials.length > 0 && (
+            <div className="rounded border border-edge bg-panel-high/40 p-3">
+              <div className="text-[11px] uppercase tracking-wide text-ink-subtle">
+                Credential bindings
+              </div>
+              <ul className="mt-2 space-y-2">
+                {config.credentials.map((credential) => (
+                  <li
+                    key={`${credential.name}-${credential.proxy_type}-${credential.mount_as ?? ""}`}
+                    className="min-w-0 rounded border border-edge bg-panel px-3 py-2 text-xs"
+                  >
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Mono>{credential.name}</Mono>
+                      <span className="badge bg-panel-high border-edge text-ink-muted">
+                        {credential.proxy_type || "credential"}
+                      </span>
+                      {credential.mount_as && (
+                        <span className="badge bg-info-muted/20 border-info text-info">
+                          {credential.mount_as}
+                        </span>
+                      )}
+                    </div>
+                    {(credential.upstream_host_port || credential.upstream_url) && (
+                      <div className="mt-1 text-ink-subtle break-all">
+                        {credential.upstream_host_port ?? credential.upstream_url}
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {config.verifiers.length > 0 && (
+            <div className="rounded border border-edge bg-panel-high/40 p-3">
+              <div className="text-[11px] uppercase tracking-wide text-ink-subtle">
+                Task verifiers
+              </div>
+              <ul className="mt-2 space-y-2">
+                {config.verifiers.map((verifier) => (
+                  <li
+                    key={verifier.name}
+                    className="min-w-0 rounded border border-edge bg-panel px-3 py-2 text-xs"
+                  >
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Mono>{verifier.name}</Mono>
+                      <span className="badge bg-panel-high border-edge text-ink-muted">
+                        {verifier.on_failure}
+                      </span>
+                      <span className="text-ink-subtle">{verifier.timeout}</span>
+                    </div>
+                    <div className="mt-1 grid grid-cols-1 md:grid-cols-2 gap-2 text-ink-subtle">
+                      <div className="min-w-0">
+                        image <Mono>{verifier.image || "policy"}</Mono>
+                      </div>
+                      <div className="min-w-0 break-all">
+                        command <Mono>{verifier.command || "not set"}</Mono>
+                      </div>
+                    </div>
+                    {verifier.artifact && (
+                      <div className="mt-1 text-ink-subtle break-all">
+                        artifact <Mono>{verifier.artifact}</Mono>
+                      </div>
+                    )}
+                    <ChipList values={verifier.allowed_egress} empty="No verifier egress." />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PlanConfigField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded border border-edge bg-panel-high/40 p-3">
+      <div className="text-[11px] uppercase tracking-wide text-ink-subtle">{label}</div>
+      <div className="mt-1 text-sm text-ink break-words">{value}</div>
+    </div>
+  );
+}
+
+function PlanConfigChipGroup({ label, values }: { label: string; values: string[] }) {
+  return (
+    <div className="rounded border border-edge bg-panel-high/40 p-3">
+      <div className="text-[11px] uppercase tracking-wide text-ink-subtle">{label}</div>
+      <ChipList values={values} empty={`No ${label.toLowerCase()}.`} />
+    </div>
+  );
+}
+
+function ChipList({ values, empty }: { values: string[]; empty: string }) {
+  if (values.length === 0) {
+    return <p className="mt-2 text-xs text-ink-subtle">{empty}</p>;
+  }
+  return (
+    <div className="mt-2 flex flex-wrap gap-2">
+      {values.map((value) => (
+        <code
+          key={value}
+          className="max-w-full rounded border border-edge bg-panel px-2 py-1 text-[11px] font-mono text-ink-muted break-all"
+          title={value}
+        >
+          {value}
+        </code>
+      ))}
+    </div>
+  );
+}
+
+function labelize(value: string) {
+  return value.replace(/_/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
 function CustomToolCallsPanel({

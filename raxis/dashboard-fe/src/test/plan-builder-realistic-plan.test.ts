@@ -147,6 +147,42 @@ prompt = "Approve only if the recommendations are grounded and safe."
     );
   });
 
+  it("preserves workspace merge fan-in tasks from the primary live-e2e plan", () => {
+    const parsed = __planBuilderTest.parsePlanToml(primaryPlan);
+    const lintMerge = parsed.tasks.find((task) => task.id === "merge-lint-captures");
+    const serviceMerge = parsed.tasks.find((task) => task.id === "merge-service-evidence");
+
+    expect(lintMerge).toMatchObject({
+      taskKind: "workspace_merge",
+      predecessors: "lint-runner-python, lint-runner-rust, lint-runner-js",
+      onConflict: "orchestrator_then_operator",
+      prompt: "",
+      agentType: "",
+    });
+    expect(serviceMerge).toMatchObject({
+      taskKind: "workspace_merge",
+      predecessors: "transparent-proxy-realscripts, credential-substitution-canary",
+      onConflict: "orchestrator_then_operator",
+      prompt: "",
+      agentType: "",
+    });
+
+    const issues = __planBuilderTest.validatePlan({
+      ...parsed,
+      credentialSetups: [],
+    });
+    expect(
+      issues.find((issue) => issue.field === "merge-lint-captures.prompt"),
+    ).toBeUndefined();
+    expect(
+      issues.find((issue) => issue.field === "merge-service-evidence.prompt"),
+    ).toBeUndefined();
+
+    const rendered = __planBuilderTest.renderPlan(parsed);
+    expect(rendered).toContain('task_kind          = "workspace_merge"');
+    expect(rendered).not.toContain('session_agent_type = ""');
+  });
+
   it("does not warn when a credential binding matches a registered credential", () => {
     const parsed = __planBuilderTest.parsePlanToml(primaryPlan);
     const tasks = parsed.tasks.map((task, index) =>

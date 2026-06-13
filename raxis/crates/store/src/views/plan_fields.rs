@@ -49,32 +49,89 @@ use crate::Table;
 /// dependency-direction rule in `views/mod.rs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanPathFields {
+    pub task_kind: String,
+    pub workspace_merge_on_conflict: String,
     pub path_allowlist: Vec<String>,
     pub path_export_to_successors: bool,
     pub path_export_globs: Vec<String>,
     pub path_scope_override: bool,
+    pub description: String,
+    pub prompt: Option<String>,
+    pub predecessors: Vec<String>,
     /// Plan-declared semantic agent type for this task. Defaults to
     /// `"Executor"` when omitted, matching the kernel admission
     /// parser.
     pub session_agent_type: String,
+    pub clone_strategy: Option<String>,
+    pub vm_image: Option<String>,
+    pub profiles: Vec<String>,
+    pub credentials: Vec<PlanCredentialRef>,
+    pub allowed_egress: Vec<String>,
+    pub task_verifiers: Vec<PlanTaskVerifierRef>,
     /// Plan-declared review rejection ceiling for this task.
     /// Defaults mirror the kernel admission parser.
     pub max_review_rejections: u32,
     /// Plan-declared crash retry ceiling for this task. Defaults
     /// mirror the kernel admission parser.
     pub max_crash_retries: u32,
+    pub max_turns: Option<u32>,
+    pub max_turns_step: Option<u32>,
+    pub elastic: Option<bool>,
+    pub min_vcpus: Option<u32>,
+    pub max_vcpus: Option<u32>,
+    pub min_memory_mb: Option<u32>,
+    pub max_memory_mb: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanCredentialRef {
+    pub name: String,
+    pub proxy_type: String,
+    pub mount_as: Option<String>,
+    pub upstream_host_port: Option<String>,
+    pub upstream_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlanTaskVerifierRef {
+    pub name: String,
+    pub image: String,
+    pub command: String,
+    pub timeout: String,
+    pub on_failure: String,
+    pub artifact: Option<String>,
+    pub artifact_max_bytes: Option<u64>,
+    pub allowed_egress: Vec<String>,
 }
 
 impl Default for PlanPathFields {
     fn default() -> Self {
         Self {
+            task_kind: "agent".to_owned(),
+            workspace_merge_on_conflict: "orchestrator_then_operator".to_owned(),
             path_allowlist: Vec::new(),
             path_export_to_successors: false,
             path_export_globs: Vec::new(),
             path_scope_override: false,
+            description: String::new(),
+            prompt: None,
+            predecessors: Vec::new(),
             session_agent_type: "Executor".to_owned(),
+            clone_strategy: None,
+            vm_image: None,
+            profiles: Vec::new(),
+            credentials: Vec::new(),
+            allowed_egress: Vec::new(),
+            task_verifiers: Vec::new(),
             max_review_rejections: DEFAULT_MAX_REVIEW_REJECTIONS,
             max_crash_retries: DEFAULT_MAX_CRASH_RETRIES,
+            max_turns: None,
+            max_turns_step: None,
+            elastic: None,
+            min_vcpus: None,
+            max_vcpus: None,
+            min_memory_mb: None,
+            max_memory_mb: None,
         }
     }
 }
@@ -322,6 +379,9 @@ fn parse_plan_path_fields(
         })?;
 
     Ok(PlanPathFields {
+        task_kind: string_field(entry, "task_kind").unwrap_or_else(|| "agent".to_owned()),
+        workspace_merge_on_conflict: string_field(entry, "on_conflict")
+            .unwrap_or_else(|| "orchestrator_then_operator".to_owned()),
         path_allowlist: string_array(entry, "path_allowlist"),
         path_export_to_successors: entry
             .get("path_export_to_successors")
@@ -332,17 +392,33 @@ fn parse_plan_path_fields(
             .get("path_scope_override")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        description: string_field(entry, "description").unwrap_or_default(),
+        prompt: string_field(entry, "prompt"),
+        predecessors: string_array(entry, "predecessors"),
         session_agent_type: entry
             .get("session_agent_type")
             .and_then(|v| v.as_str())
             .unwrap_or("Executor")
             .to_owned(),
+        clone_strategy: string_field(entry, "clone_strategy"),
+        vm_image: string_field(entry, "vm_image").filter(|s| !s.is_empty()),
+        profiles: string_array(entry, "profiles"),
+        credentials: credential_refs(entry),
+        allowed_egress: string_array(entry, "allowed_egress"),
+        task_verifiers: task_verifier_refs(entry),
         max_review_rejections: u32_field(
             entry,
             "max_review_rejections",
             DEFAULT_MAX_REVIEW_REJECTIONS,
         ),
         max_crash_retries: u32_field(entry, "max_crash_retries", DEFAULT_MAX_CRASH_RETRIES),
+        max_turns: optional_u32_field(entry, "max_turns"),
+        max_turns_step: optional_u32_field(entry, "max_turns_step"),
+        elastic: entry.get("elastic").and_then(|v| v.as_bool()),
+        min_vcpus: optional_u32_field(entry, "min_vcpus"),
+        max_vcpus: optional_u32_field(entry, "max_vcpus"),
+        min_memory_mb: optional_u32_field(entry, "min_memory_mb"),
+        max_memory_mb: optional_u32_field(entry, "max_memory_mb"),
     })
 }
 
@@ -434,12 +510,76 @@ fn string_array(entry: &toml::Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn string_field(entry: &toml::Value, field: &str) -> Option<String> {
+    entry
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(str::trim_end)
+        .map(str::to_owned)
+}
+
 fn u32_field(entry: &toml::Value, field: &str, default: u32) -> u32 {
     entry
         .get(field)
         .and_then(|v| v.as_integer())
         .and_then(|v| u32::try_from(v).ok())
         .unwrap_or(default)
+}
+
+fn optional_u32_field(entry: &toml::Value, field: &str) -> Option<u32> {
+    entry
+        .get(field)
+        .and_then(|v| v.as_integer())
+        .and_then(|v| u32::try_from(v).ok())
+}
+
+fn credential_refs(entry: &toml::Value) -> Vec<PlanCredentialRef> {
+    entry
+        .get("credentials")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|credential| {
+                    let name = string_field(credential, "name")?;
+                    Some(PlanCredentialRef {
+                        name,
+                        proxy_type: string_field(credential, "proxy_type").unwrap_or_default(),
+                        mount_as: string_field(credential, "mount_as"),
+                        upstream_host_port: string_field(credential, "upstream_host_port"),
+                        upstream_url: string_field(credential, "upstream_url"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn task_verifier_refs(entry: &toml::Value) -> Vec<PlanTaskVerifierRef> {
+    entry
+        .get("verifiers")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|verifier| {
+                    let name = string_field(verifier, "name")?;
+                    Some(PlanTaskVerifierRef {
+                        name,
+                        image: string_field(verifier, "image").unwrap_or_default(),
+                        command: string_field(verifier, "command").unwrap_or_default(),
+                        timeout: string_field(verifier, "timeout").unwrap_or_default(),
+                        on_failure: string_field(verifier, "on_failure")
+                            .unwrap_or_else(|| "block_review".to_owned()),
+                        artifact: string_field(verifier, "artifact"),
+                        artifact_max_bytes: verifier
+                            .get("artifact_max_bytes")
+                            .and_then(|v| v.as_integer())
+                            .and_then(|v| u64::try_from(v).ok()),
+                        allowed_egress: string_array(verifier, "allowed_egress"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ────────────────────────────────────────────────────────────────────

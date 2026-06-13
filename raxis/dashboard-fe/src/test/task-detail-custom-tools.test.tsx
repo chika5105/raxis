@@ -51,6 +51,51 @@ function task(overrides: Partial<TaskView> = {}): TaskView {
       },
     ],
     path_allowlist: ["out/tools/"],
+    plan_config: {
+      task_kind: "agent",
+      description: "Run Unity smoke tests through the approved tool profile.",
+      prompt: "Use the Unity MCP profile and commit the generated test evidence.",
+      session_agent_type: "Executor",
+      clone_strategy: "blobless",
+      workspace_merge_on_conflict: "orchestrator_then_operator",
+      predecessors: ["merge-service-evidence"],
+      path_allowlist: ["out/tools/"],
+      path_export_to_successors: true,
+      path_export_globs: ["out/tools/*.json"],
+      path_scope_override: false,
+      allowed_egress: ["unity.local"],
+      profiles: ["unity_mcp_tools"],
+      credentials: [
+        {
+          name: "unity-token",
+          proxy_type: "http",
+          mount_as: "UNITY_API_URL",
+          upstream_url: "https://unity.local/api",
+        },
+      ],
+      verifiers: [
+        {
+          name: "unity_evidence",
+          image: "raxis-verifier-starter",
+          command: "verify-unity-evidence",
+          timeout: "30s",
+          on_failure: "block_review",
+          artifact: "/raxis/unity-evidence.json",
+          artifact_max_bytes: null,
+          allowed_egress: [],
+        },
+      ],
+      vm_image: "raxis-executor-starter",
+      max_crash_retries: 3,
+      max_review_rejections: 2,
+      max_turns: 40,
+      max_turns_step: null,
+      elastic: null,
+      min_vcpus: null,
+      max_vcpus: null,
+      min_memory_mb: null,
+      max_memory_mb: null,
+    },
     created_at: 1_779_211_000,
     updated_at: 1_779_211_400,
     failure: null,
@@ -130,10 +175,26 @@ describe("<TaskDetailPage> custom tool calls", () => {
 
     expect(await screen.findByText("Custom tool calls")).toBeInTheDocument();
     expect(screen.getByText("unity_run_playmode_tests")).toBeInTheDocument();
-    expect(screen.getByText("unity_mcp_tools")).toBeInTheDocument();
+    expect(screen.getAllByText("unity_mcp_tools").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("host_mcp")).toBeInTheDocument();
     expect(screen.getByText("Audit #199")).toBeInTheDocument();
     expect(screen.getByText("83 ms")).toBeInTheDocument();
     expect(screen.getByText("287 / 287 B")).toBeInTheDocument();
+  });
+
+  it("renders the signed task plan configuration above runtime evidence", async () => {
+    renderTask();
+
+    expect(await screen.findByText("Signed plan configuration")).toBeInTheDocument();
+    expect(screen.getByText("What this task was configured to do")).toBeInTheDocument();
+    expect(screen.getByText("Run Unity smoke tests through the approved tool profile.")).toBeInTheDocument();
+    expect(screen.getByText("Use the Unity MCP profile and commit the generated test evidence.")).toBeInTheDocument();
+    expect(screen.getByText("blobless")).toBeInTheDocument();
+    expect(screen.getByText("raxis-executor-starter")).toBeInTheDocument();
+    expect(screen.getByText("unity.local")).toBeInTheDocument();
+    expect(screen.getAllByText("unity_mcp_tools").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("unity-token")).toBeInTheDocument();
+    expect(screen.getByText("UNITY_API_URL")).toBeInTheDocument();
+    expect(screen.getByText("unity_evidence")).toBeInTheDocument();
   });
 });

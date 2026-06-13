@@ -77,6 +77,7 @@ mod session_activity;
 mod session_spawn_orchestrator;
 mod vcs;
 mod witness_index;
+mod workspace_merge;
 mod worktree_gc;
 // V2 §Step 24 / §Step 24b — host-side worktree provisioning seam.
 // Composes `raxis-worktree-provision` + `raxis-domain-git` into the
@@ -2180,6 +2181,7 @@ async fn main() {
                 )
                 .with_gateway(Arc::clone(&gateway_client)),
             );
+            let plan_validator = crate::dashboard_glue::kernel_plan_validator(Arc::clone(&store));
             // Reuse the SAME `SessionStreamCapture` instance
             // that the audit-sink `StreamingAuditSink` bridge
             // was wrapped around earlier (so audit→SSE mirror
@@ -2209,6 +2211,7 @@ async fn main() {
                         Some(Arc::clone(&artifact_store)),
                         stream_capture,
                         advancer,
+                        Some(plan_validator),
                         Arc::clone(&audit),
                         // V3 §3.14 seam: thread the boot-time
                         // ObservabilityHub through to

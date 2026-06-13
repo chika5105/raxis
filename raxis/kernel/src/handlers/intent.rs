@@ -56,6 +56,7 @@ const SUBTASK_ACTIVATIONS: &str = Table::SubtaskActivations.as_str();
 const SESSIONS: &str = Table::Sessions.as_str();
 const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
 const INTEGRATION_MERGE_QUEUE: &str = Table::IntegrationMergeQueue.as_str();
+const WORKSPACE_MERGE_ATTEMPTS: &str = Table::WorkspaceMergeAttempts.as_str();
 
 use crate::authority;
 use crate::gates::{self, GateEvalResult};
@@ -5635,7 +5636,7 @@ async fn resolve_vm_image_override(
 /// (`inv_kernel_dag_authority_01_activate_subtask_rejects_unsatisfied_predecessor`)
 /// can pin the predicate against `task_dag_edges` + `tasks` without
 /// standing up a full `HandlerContext` + substrate spawn service.
-fn missing_predecessors_for_activation(
+pub(crate) fn missing_predecessors_for_activation(
     tx: &rusqlite::Transaction<'_>,
     task_id: &str,
     plan_registry: &crate::initiatives::plan_registry::PlanRegistry,
@@ -5982,6 +5983,20 @@ async fn handle_activate_sub_task(
     // path as possible.
     if crate::capacity::refuse_if_disk_full(ctx.disk_watchdog.as_deref()).is_err() {
         return Err((PlannerErrorCode::FailDiskFull, TaskState::Admitted));
+    }
+
+    // ── Step 1.45: kernel-owned workspace merge task. ─────────────
+    //
+    // `task_kind = "workspace_merge"` is not a planner VM. It is a
+    // kernel materialisation point that fans multiple completed
+    // predecessor evaluation SHAs into one deterministic workspace
+    // commit. Route it before the VM concurrency gate so fan-in does
+    // not consume a microVM slot or mint a fake session.
+    if let Some(result) =
+        crate::workspace_merge::handle_activate_if_workspace_merge(&req, &session_id, seq, ctx)
+            .await
+    {
+        return result;
     }
 
     // ── Step 1.5: pre-admission cap check. ───────────────

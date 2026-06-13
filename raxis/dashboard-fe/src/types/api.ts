@@ -242,6 +242,7 @@ export interface TaskView {
   structured_outputs: StructuredOutputView[];
   custom_tool_calls?: CustomToolCallView[];
   path_allowlist: string[];
+  plan_config?: TaskPlanConfigView | null;
   created_at: number;
   updated_at: number;
   /// Failure reason, set when the task is in a terminal-failure
@@ -287,6 +288,53 @@ export interface TaskView {
   /// Render the task as Running whenever this is true, even
   /// if `state === "Admitted"`.
   is_active?: boolean;
+}
+
+export interface TaskPlanConfigView {
+  task_kind: string;
+  description: string;
+  prompt?: string | null;
+  session_agent_type: string;
+  clone_strategy?: string | null;
+  workspace_merge_on_conflict: string;
+  predecessors: string[];
+  path_allowlist: string[];
+  path_export_to_successors: boolean;
+  path_export_globs: string[];
+  path_scope_override: boolean;
+  allowed_egress: string[];
+  profiles: string[];
+  credentials: TaskPlanCredentialView[];
+  verifiers: TaskPlanVerifierView[];
+  vm_image?: string | null;
+  max_crash_retries: number;
+  max_review_rejections: number;
+  max_turns?: number | null;
+  max_turns_step?: number | null;
+  elastic?: boolean | null;
+  min_vcpus?: number | null;
+  max_vcpus?: number | null;
+  min_memory_mb?: number | null;
+  max_memory_mb?: number | null;
+}
+
+export interface TaskPlanCredentialView {
+  name: string;
+  proxy_type: string;
+  mount_as?: string | null;
+  upstream_host_port?: string | null;
+  upstream_url?: string | null;
+}
+
+export interface TaskPlanVerifierView {
+  name: string;
+  image: string;
+  command: string;
+  timeout: string;
+  on_failure: string;
+  artifact?: string | null;
+  artifact_max_bytes?: number | null;
+  allowed_egress: string[];
 }
 
 /// One reviewer's result against an executor task, surfaced

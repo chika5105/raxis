@@ -28,7 +28,10 @@ use raxis_types::{
 use rusqlite::OptionalExtension;
 
 use crate::authority::keys::AuthorityError;
-use crate::initiatives::plan_registry::{PlanRegistry, TaskKey, TaskPlanFields};
+use crate::initiatives::plan_registry::{
+    PlanRegistry, TaskKey, TaskKind, TaskPlanFields, WorkspaceMergeOnConflict,
+};
+use crate::initiatives::OrchestratorPlanFields;
 use crate::scheduler::{self, SchedulerError};
 
 // Table name consts — one definition, used everywhere below.
@@ -628,6 +631,157 @@ pub fn approve_plan_for_test(
     )
 }
 
+struct ValidatedPlanAdmission {
+    plan_tasks: Vec<PlanTask>,
+    orchestrator_fields: OrchestratorPlanFields,
+    workspace_lane: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_plan_toml_for_approval(
+    conn: &rusqlite::Connection,
+    plan_toml_str: &str,
+    policy_default_target_ref: &str,
+    policy_target_ref_locked: bool,
+    policy_environments: &std::collections::HashMap<String, raxis_policy::EnvironmentConfig>,
+    policy_permitted_credentials: &[raxis_policy::PermittedCredentialConfig],
+    policy_vm_images: &[raxis_policy::VmImageConfig],
+    policy_default_executor_image: Option<&raxis_policy::DefaultExecutorImageConfig>,
+    policy_elastic: &raxis_policy::ElasticConfig,
+    policy_lanes: &[raxis_policy::LaneEntry],
+) -> Result<ValidatedPlanAdmission, LifecycleError> {
+    let mut plan_tasks = parse_plan_tasks(plan_toml_str)?;
+    let mut orchestrator_fields = parse_plan_orchestrator(plan_toml_str)?;
+    // V2 §Step 28 — read `[workspace] lane_id` (or surface the
+    // missing/empty/override error below).
+    let workspace_lane_raw = parse_plan_workspace_lane(plan_toml_str)?;
+    // Operator-facing display identity. `initiative_id` remains the
+    // kernel-owned uniqueness boundary; `[workspace].name` is the
+    // stable dashboard label.
+    let _workspace_name = parse_plan_workspace_name(plan_toml_str)?;
+    // Read required `[workspace] target_ref`. The plan carries the
+    // branch it intends to advance; policy may still lock it to the
+    // operator default, but runtime admission no longer invents one.
+    let plan_target_ref_raw = parse_plan_workspace_target_ref(plan_toml_str)?;
+    // Raxis 0.2 — read required `[workspace] repository`.
+    // This selects the managed source repository under
+    // `<data_dir>/repositories/<id>` for every spawn / merge path.
+    let plan_repository_id = parse_plan_workspace_repository(plan_toml_str)?;
+    validate_managed_repository_ready(conn, &plan_repository_id)?;
+    // V2 (`verifier-processes.md §15`) — parse plan-source pre-merge
+    // verifiers. Empty `Vec` for plans that don't declare any.
+    // Structural per-field rules run inside the validator below.
+    let mut plan_pre_merge_verifiers = parse_plan_integration_merge_verifiers(plan_toml_str)?;
+
+    // V2 Step 17 — shift-left plan validation. Each helper runs BEFORE
+    // `BEGIN TRANSACTION`, so a malformed plan never mutates kernel
+    // state. This function is also the dashboard Plan Builder's live
+    // validator, so the UI and `approve_plan` share one admission truth.
+    validate_plan_dag(&plan_tasks)?;
+    validate_plan_task_ids_globally_unused(conn, &plan_tasks)?;
+    validate_path_allowlist_v2_format(&plan_tasks)?;
+    validate_cross_cutting_artifacts(&orchestrator_fields)?;
+    // V2 (`verifier-processes.md §15`) — shift-left validation of
+    // plan-source pre-merge verifier declarations. Cross-source rules
+    // (collision against operator-side `[[integration_merge_verifiers]]`,
+    // image resolution against `[[vm_images]]`, hard-cap timeout
+    // enforcement) run at IntegrationMerge admission (Check 5d).
+    validate_plan_integration_merge_verifiers(&plan_pre_merge_verifiers, &plan_tasks)?;
+    resolve_plan_task_name_references(&mut plan_tasks, &mut plan_pre_merge_verifiers)?;
+    orchestrator_fields.integration_merge_verifiers = plan_pre_merge_verifiers.clone();
+    // V2 `credential-proxy.md §3` shift-left: any
+    // `[[tasks.credentials]]` block declaring an unknown `proxy_type`
+    // (or a structurally malformed entry — already surfaced as
+    // `PlanInvalid` inside `parse_plan_tasks`) is rejected here.
+    validate_task_credentials(&plan_tasks)?;
+    // V2 `elastic-vm-scaling.md §2.1, §2.2` — plan-narrows-policy
+    // (INV-ELASTIC-01).
+    validate_elastic_against_policy(&plan_tasks, &orchestrator_fields, policy_elastic)?;
+    // (V2.5 BLOCKER) — INV-VM-CAP-03 +
+    // INV-PLANNER-HARNESS-03.
+    validate_task_vm_images(
+        &mut plan_tasks,
+        policy_vm_images,
+        policy_default_executor_image,
+    )?;
+    // (`custom-tools.md`) — kernel-side validation of
+    // operator-declared custom tools at plan-approve time.
+    crate::initiatives::custom_tools_validator::validate_plan_custom_tools(
+        plan_toml_str,
+        crate::initiatives::custom_tools_validator::DEFAULT_MAX_CUSTOM_TOOL_TIMEOUT_SECONDS,
+    )
+    .map_err(|e| LifecycleError::PlanInvalid {
+        reason: e.to_string(),
+    })?;
+    // (`environment-access-control.md §11`) —
+    // INV-ENV-01 Task Environment Consistency.
+    validate_task_environment_consistency(
+        &plan_tasks,
+        policy_environments,
+        policy_permitted_credentials,
+    )?;
+    // V2 §Step 27 — clone-strategy + Sparse-Orchestrator exclusion +
+    // Orchestrator-in-`[[tasks]]` rejection.
+    validate_sparse_orchestrator_exclusion(&plan_tasks)?;
+    // V2 §Step 28 — single-lane propagation.
+    let workspace_lane = validate_single_lane_propagation(&workspace_lane_raw, &plan_tasks)?;
+    // V2 §Step 28 + INV-SCHED-03 — lane-in-policy registration.
+    validate_workspace_lane_in_policy(&workspace_lane, policy_lanes)?;
+
+    // (INV-PLAN-POLICY-PRECEDENCE-01).
+    // Resolve the per-initiative target_ref from the plan-side
+    // override + policy-side default + locked flag.
+    let resolved_target_ref = resolve_target_ref(
+        plan_target_ref_raw.as_deref(),
+        policy_default_target_ref,
+        policy_target_ref_locked,
+    )?;
+    orchestrator_fields.target_ref = resolved_target_ref;
+    orchestrator_fields.repository_id = plan_repository_id;
+
+    Ok(ValidatedPlanAdmission {
+        plan_tasks,
+        orchestrator_fields,
+        workspace_lane,
+    })
+}
+
+/// Validate raw `plan.toml` bytes through the same pre-transaction
+/// admission checks used by [`approve_plan`].
+///
+/// This deliberately does not verify a detached signature or require a Draft
+/// initiative row. It answers the Plan Builder / CLI preflight question:
+/// "would this plan shape be accepted by the kernel under the current policy
+/// and managed-repository store state?"
+#[allow(clippy::too_many_arguments)]
+pub fn validate_plan_toml_against_policy(
+    plan_toml_str: &str,
+    policy_default_target_ref: &str,
+    policy_target_ref_locked: bool,
+    policy_environments: &std::collections::HashMap<String, raxis_policy::EnvironmentConfig>,
+    policy_permitted_credentials: &[raxis_policy::PermittedCredentialConfig],
+    policy_vm_images: &[raxis_policy::VmImageConfig],
+    policy_default_executor_image: Option<&raxis_policy::DefaultExecutorImageConfig>,
+    policy_elastic: &raxis_policy::ElasticConfig,
+    policy_lanes: &[raxis_policy::LaneEntry],
+    store: &Store,
+) -> Result<(), LifecycleError> {
+    let conn = store.lock_sync();
+    validate_plan_toml_for_approval(
+        &conn,
+        plan_toml_str,
+        policy_default_target_ref,
+        policy_target_ref_locked,
+        policy_environments,
+        policy_permitted_credentials,
+        policy_vm_images,
+        policy_default_executor_image,
+        policy_elastic,
+        policy_lanes,
+    )
+    .map(|_| ())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn approve_plan(
     initiative_id: &str,
@@ -871,158 +1025,22 @@ pub fn approve_plan(
     }
 
     let plan_toml_str = String::from_utf8_lossy(&plan_bytes);
-    let mut plan_tasks = parse_plan_tasks(&plan_toml_str)?;
-    let mut orchestrator_fields = parse_plan_orchestrator(&plan_toml_str)?;
-    // V2 §Step 28 — read `[workspace] lane_id` (or surface the
-    // missing/empty/override error below).
-    let workspace_lane_raw = parse_plan_workspace_lane(&plan_toml_str)?;
-    // Operator-facing display identity. `initiative_id` remains the
-    // kernel-owned uniqueness boundary; `[workspace].name` is the
-    // stable dashboard label.
-    let _workspace_name = parse_plan_workspace_name(&plan_toml_str)?;
-    // Read required `[workspace] target_ref`. The plan carries the
-    // branch it intends to advance; policy may still lock it to the
-    // operator default, but runtime admission no longer invents one.
-    let plan_target_ref_raw = parse_plan_workspace_target_ref(&plan_toml_str)?;
-    // Raxis 0.2 — read required `[workspace] repository`.
-    // This selects the managed source repository under
-    // `<data_dir>/repositories/<id>` for every spawn / merge path.
-    let plan_repository_id = parse_plan_workspace_repository(&plan_toml_str)?;
-    validate_managed_repository_ready(&conn, &plan_repository_id)?;
-    // V2 (`verifier-processes.md §15`) — parse plan-source pre-merge
-    // verifiers. Empty `Vec` for plans that don't declare any.
-    // Structural per-field rules run inside the validator below.
-    let mut plan_pre_merge_verifiers = parse_plan_integration_merge_verifiers(&plan_toml_str)?;
-
-    // V2 Step 17 — shift-left plan validation. Each helper runs BEFORE
-    // `BEGIN TRANSACTION`, so a malformed plan never mutates kernel
-    // state. We run the DAG check first because a structurally broken
-    // plan can confuse later validators (e.g. a path-allowlist entry
-    // on a duplicate task_name), and the path-format check second because
-    // it is purely syntactic and cannot depend on graph well-formedness.
-    // V2 §Step 11 cross_cutting_artifacts validator runs alongside —
-    // it has no dependency on graph well-formedness either, but lives
-    // here so a malformed orchestrator stanza is rejected with the same
-    // pre-tx posture as the path_allowlist validator.
-    // The other Step 17 checks (referential integrity over `[[subtasks]]`,
-    // meta-authority of the unique Orchestrator, path-subset containment,
-    // sparse-Orchestrator exclusion, single-lane propagation) require V2
-    // schema fields (`session_agent_type`, `clone_strategy`,
-    // `[plan.orchestrator]`) that are not yet parsed by `parse_plan_tasks`.
-    // Those checks land alongside the V2 plan-bundle schema work
-    // (see `plan-bundle-sealing.md §8.2`); the DAG and path-format
-    // validators run today and are forward-compatible (they operate on
-    // `predecessors` / `path_allowlist`, both already in the V1 schema).
-    validate_plan_dag(&plan_tasks)?;
-    validate_plan_task_ids_globally_unused(&conn, &plan_tasks)?;
-    validate_path_allowlist_v2_format(&plan_tasks)?;
-    validate_cross_cutting_artifacts(&orchestrator_fields)?;
-    // V2 (`verifier-processes.md §15`) — shift-left validation of
-    // plan-source pre-merge verifier declarations. Cross-source rules
-    // (collision against operator-side `[[integration_merge_verifiers]]`,
-    // image resolution against `[[vm_images]]`, hard-cap timeout
-    // enforcement) run at IntegrationMerge admission (Check 5d).
-    validate_plan_integration_merge_verifiers(&plan_pre_merge_verifiers, &plan_tasks)?;
-    resolve_plan_task_name_references(&mut plan_tasks, &mut plan_pre_merge_verifiers)?;
-    orchestrator_fields.integration_merge_verifiers = plan_pre_merge_verifiers.clone();
-    // V2 `credential-proxy.md §3` shift-left: any
-    // `[[tasks.credentials]]` block declaring an unknown
-    // `proxy_type` (or a structurally malformed entry — already
-    // surfaced as `PlanInvalid` inside `parse_plan_tasks`) is
-    // rejected here, before BEGIN TRANSACTION, so a plan that
-    // names a proxy this kernel build does not implement cannot
-    // allocate a task row.
-    validate_task_credentials(&plan_tasks)?;
-    // V2 `elastic-vm-scaling.md §2.1, §2.2` — plan-narrows-policy
-    // (INV-ELASTIC-01). Runs before BEGIN TRANSACTION so an
-    // over-claiming plan never allocates a row. Reviewer-task
-    // checks here are a defence-in-depth re-check of what the
-    // parser already enforces.
-    validate_elastic_against_policy(&plan_tasks, &orchestrator_fields, policy_elastic)?;
-    // (V2.5 BLOCKER) — INV-VM-CAP-03 +
-    // INV-PLANNER-HARNESS-03. Reject Reviewer tasks that try to
-    // override the kernel-canonical Reviewer image and Executor
-    // tasks whose `vm_image` does not resolve to an operator-
-    // published `[[vm_images]]` entry whose `role_restriction`
-    // permits "Executor". Inert when the registry is empty.
-    validate_task_vm_images(
-        &mut plan_tasks,
-        policy_vm_images,
-        policy_default_executor_image,
-    )?;
-    // (`custom-tools.md`) — kernel-side validation of
-    // operator-declared custom tools at plan-approve time. Rejects
-    // structurally malformed `[[profiles.<name>.custom_tool]]`
-    // blocks (and forbids `[[plan.tasks.<id>.custom_tool]]`) before
-    // BEGIN TRANSACTION so a typo can never round-trip into a
-    // session. Surfaced as `LifecycleError::PlanInvalid`; the typed
-    // failure-code projection is preserved through the error
-    // string (`FAIL_CUSTOM_TOOL_*`).
-    crate::initiatives::custom_tools_validator::validate_plan_custom_tools(
+    let ValidatedPlanAdmission {
+        plan_tasks,
+        orchestrator_fields,
+        workspace_lane,
+    } = validate_plan_toml_for_approval(
+        &conn,
         &plan_toml_str,
-        crate::initiatives::custom_tools_validator::DEFAULT_MAX_CUSTOM_TOOL_TIMEOUT_SECONDS,
-    )
-    .map_err(|e| LifecycleError::PlanInvalid {
-        reason: e.to_string(),
-    })?;
-    // (`environment-access-control.md §11`) —
-    // INV-ENV-01 Task Environment Consistency. Runs the per-task
-    // binding algorithm (§11.3) and rejects any task whose
-    // environment-bound credentials resolve to more than one
-    // declared environment. Inert when no `[environments.<label>]`
-    // is declared (§1.5.2 activation gate). The MVP enforces the
-    // credential-side limb of the algorithm; the URL-gate limb
-    // (§11.3 step B) and the same-cluster handler (§11.4) are
-    // V3 along with the `[[environment_gates]]` parser.
-    validate_task_environment_consistency(
-        &plan_tasks,
-        policy_environments,
-        policy_permitted_credentials,
-    )?;
-    // V2 §Step 27 — clone-strategy + Sparse-Orchestrator exclusion +
-    // Orchestrator-in-`[[tasks]]` rejection. Runs after the parser-
-    // level "unknown value" rejection (which fires inside
-    // `parse_plan_tasks`) so by here every task has a valid typed
-    // `clone_strategy` and `session_agent_type`.
-    validate_sparse_orchestrator_exclusion(&plan_tasks)?;
-    // V2 §Step 28 — single-lane propagation: rejects missing /
-    // empty `[workspace] lane_id` AND per-task `lane_id` overrides
-    // before the transaction opens. `workspace_lane` is the
-    // authoritative non-empty lane id every `scheduler::PlanTask`
-    // below will be stamped with.
-    let workspace_lane = validate_single_lane_propagation(&workspace_lane_raw, &plan_tasks)?;
-    // V2 §Step 28 + INV-SCHED-03 — lane-in-policy registration:
-    // rejects a plan whose workspace lane has no `[[lanes]]` entry
-    // in the operator's signed policy. Sister check to
-    // `validate_single_lane_propagation` — that one proves the plan
-    // shape is single-lane; this one proves the declared lane has a
-    // policy-side budget ceiling to enforce against. Without this,
-    // sub-task admission (early-dispatch, no budget check) silently
-    // succeeds while the synthetic IntegrationMerge coordinator
-    // (Phase-C, full budget check) collapses to `FailBudgetExceeded`
-    // and the orchestrator exits without a terminal event,
-    // surfacing as a silent harness deadline hang. Inert when
-    // `policy_lanes` is empty (test-fixture path).
-    validate_workspace_lane_in_policy(&workspace_lane, policy_lanes)?;
-
-    // (INV-PLAN-POLICY-PRECEDENCE-01).
-    // Resolve the per-initiative target_ref from the plan-side
-    // override + policy-side default + locked flag. Surface
-    // `LifecycleError::PlanTargetRefInvalid { rule="locked"|"invalid" }`
-    // pre-tx so a malformed/locked plan cannot allocate any
-    // initiative state. The resolved value is plumbed into the
-    // orchestrator plan-fields registry (`OrchestratorPlanFields::
-    // target_ref`) so the integration-merge handler can read it
-    // verbatim into `commit_merge_to_target_ref(...)` (`v2_extended_
-    // gaps.md §1.2`).
-    let resolved_target_ref = resolve_target_ref(
-        plan_target_ref_raw.as_deref(),
         policy_default_target_ref,
         policy_target_ref_locked,
+        policy_environments,
+        policy_permitted_credentials,
+        policy_vm_images,
+        policy_default_executor_image,
+        policy_elastic,
+        policy_lanes,
     )?;
-    orchestrator_fields.target_ref = resolved_target_ref.clone();
-    orchestrator_fields.repository_id = plan_repository_id;
-
     let task_count = plan_tasks.len();
     let now = unix_now_secs();
 
@@ -1092,6 +1110,8 @@ pub fn approve_plan(
 
     for pt in plan_tasks {
         let path_fields = TaskPlanFields {
+            task_kind: pt.task_kind,
+            workspace_merge_on_conflict: pt.workspace_merge_on_conflict,
             path_allowlist: pt.path_allowlist.clone(),
             path_export_to_successors: pt.path_export_to_successors,
             path_export_globs: pt.path_export_globs.clone(),
@@ -1751,6 +1771,8 @@ pub fn repopulate_plan_registry(
                     // signed plan bytes. Empty when the plan
                     // omitted the field.
                     vm_image: pt.vm_image,
+                    task_kind: pt.task_kind,
+                    workspace_merge_on_conflict: pt.workspace_merge_on_conflict,
                     // Re-hydrate the
                     // operator-authored seed prompt from the immutable
                     // signed plan bytes. Always non-empty: admission
@@ -2330,6 +2352,13 @@ struct PlanTask {
     lane_id: String,
     predecessors: Vec<String>,
 
+    /// Kernel-owned task substrate. `Agent` tasks spawn Executor /
+    /// Reviewer VMs. `WorkspaceMerge` tasks materialize a fan-in
+    /// workspace commit directly in the kernel and expose that single
+    /// `evaluation_sha` to downstream executors.
+    task_kind: TaskKind,
+    workspace_merge_on_conflict: WorkspaceMergeOnConflict,
+
     // ── V2 §Step 27 typed fields ───────────────────────────────────────
     /// **V2 §Step 27 — typed clone strategy.** `full | blobless | sparse`.
     /// Default `Blobless` (uniformly safe; cheaper than `Full` for repos
@@ -2555,6 +2584,73 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        let task_kind = match entry.get("task_kind") {
+            None => TaskKind::DEFAULT,
+            Some(toml::Value::String(s)) if !s.trim().is_empty() => {
+                TaskKind::from_plan_str(s.trim()).ok_or_else(|| LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) unknown task_kind `{}`. \
+                         Use `agent` or `workspace_merge`.",
+                        s.trim()
+                    ),
+                })?
+            }
+            Some(toml::Value::String(_)) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) task_kind cannot be empty. \
+                         Use `agent` or `workspace_merge`."
+                    ),
+                });
+            }
+            Some(v) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) task_kind must be a TOML string, got {:?}",
+                        v.type_str()
+                    ),
+                });
+            }
+        };
+        let workspace_merge_on_conflict = match entry.get("on_conflict") {
+            None => WorkspaceMergeOnConflict::DEFAULT,
+            Some(toml::Value::String(s)) if !s.trim().is_empty() => {
+                WorkspaceMergeOnConflict::from_plan_str(s.trim()).ok_or_else(|| {
+                    LifecycleError::PlanInvalid {
+                        reason: format!(
+                            "[[tasks]] (task `{task_id}`) unknown on_conflict `{}`. \
+                             Use `orchestrator_then_operator`, `operator_manual`, or `fail_closed`.",
+                            s.trim()
+                        ),
+                    }
+                })?
+            }
+            Some(toml::Value::String(_)) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) on_conflict cannot be empty. \
+                         Use `orchestrator_then_operator`, `operator_manual`, or `fail_closed`."
+                    ),
+                });
+            }
+            Some(v) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) on_conflict must be a TOML string, got {:?}",
+                        v.type_str()
+                    ),
+                });
+            }
+        };
+        if task_kind == TaskKind::Agent && entry.get("on_conflict").is_some() {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task_id}`) declares on_conflict but is not \
+                     `task_kind = \"workspace_merge\"`."
+                ),
+            });
+        }
+
         // V2 §Step 27 — typed clone strategy. This is now explicit in
         // every plan. The old parser default (`blobless`) made runtime
         // and Plan Builder disagree about the same TOML bytes.
@@ -2579,23 +2675,32 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
                 });
             }
             None => {
-                return Err(LifecycleError::PlanCloneStrategyInvalid {
-                    rule: "missing_clone_strategy",
-                    offending_task: task_id.clone(),
-                    suggestion: "clone_strategy is required. Use one of: full, blobless, sparse."
-                        .to_owned(),
-                });
+                if task_kind == TaskKind::WorkspaceMerge {
+                    CloneStrategy::Blobless.as_sql_str().to_owned()
+                } else {
+                    return Err(LifecycleError::PlanCloneStrategyInvalid {
+                        rule: "missing_clone_strategy",
+                        offending_task: task_id.clone(),
+                        suggestion:
+                            "clone_strategy is required. Use one of: full, blobless, sparse."
+                                .to_owned(),
+                    });
+                }
             }
         };
         let session_agent_type_raw = match entry.get("session_agent_type") {
             Some(toml::Value::String(s)) if !s.trim().is_empty() => s.trim().to_owned(),
             Some(toml::Value::String(_)) | None => {
-                return Err(LifecycleError::PlanCloneStrategyInvalid {
-                    rule: "missing_agent_type",
-                    offending_task: task_id.clone(),
-                    suggestion: "session_agent_type is required. Use Executor or Reviewer; the kernel creates Orchestrator sessions automatically."
-                        .to_owned(),
-                });
+                if task_kind == TaskKind::WorkspaceMerge {
+                    SessionAgentType::Executor.as_sql_str().to_owned()
+                } else {
+                    return Err(LifecycleError::PlanCloneStrategyInvalid {
+                        rule: "missing_agent_type",
+                        offending_task: task_id.clone(),
+                        suggestion: "session_agent_type is required. Use Executor or Reviewer; the kernel creates Orchestrator sessions automatically."
+                            .to_owned(),
+                    });
+                }
             }
             Some(v) => {
                 return Err(LifecycleError::PlanCloneStrategyInvalid {
@@ -2644,6 +2749,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
                 ),
             });
         }
+        let profiles_declared = entry.get("profiles").is_some();
         match entry.get("profiles") {
             None => {}
             Some(toml::Value::Array(values)) => {
@@ -2708,6 +2814,53 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             .unwrap_or("")
             .trim()
             .to_owned();
+
+        if task_kind == TaskKind::WorkspaceMerge {
+            if predecessors.len() < 2 {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) is `task_kind = \"workspace_merge\"` \
+                         but has fewer than two predecessors. A workspace merge is the explicit \
+                         fan-in point for two or more completed artifact commits."
+                    ),
+                });
+            }
+            if session_agent_type != SessionAgentType::Executor {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) is `task_kind = \"workspace_merge\"` \
+                         and must not declare `session_agent_type = \"{}\"`. Omit \
+                         session_agent_type; RAXIS executes workspace merges in the kernel.",
+                        session_agent_type.as_sql_str()
+                    ),
+                });
+            }
+            if entry.get("clone_strategy").is_some() {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) is `task_kind = \"workspace_merge\"` \
+                         and must not declare clone_strategy. No agent VM is spawned."
+                    ),
+                });
+            }
+            if profiles_declared || !credentials.is_empty() || !task_verifiers.is_empty() {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) is `task_kind = \"workspace_merge\"` \
+                         and cannot declare profiles, credentials, or task verifiers. \
+                         Attach those to the artifact-producing Executor tasks instead."
+                    ),
+                });
+            }
+            if !vm_image.is_empty() {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) is `task_kind = \"workspace_merge\"` \
+                         and cannot declare vm_image. No guest image boots for kernel-owned fan-in."
+                    ),
+                });
+            }
+        }
 
         if entry.get("context").is_some() {
             return Err(LifecycleError::PlanInvalid {
@@ -2779,6 +2932,15 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             });
         }
         let prompt_raw = match entry.get("prompt") {
+            Some(_) if task_kind == TaskKind::WorkspaceMerge => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) is `task_kind = \"workspace_merge\"` \
+                         and must not declare prompt. The kernel materializes the fan-in commit; \
+                         no model receives task instructions for this row."
+                    ),
+                });
+            }
             Some(toml::Value::String(s)) => s.trim_end().to_owned(),
             Some(_) => {
                 return Err(LifecycleError::PlanInvalid {
@@ -2789,16 +2951,20 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
                 });
             }
             None => {
-                return Err(LifecycleError::PlanInvalid {
-                    reason: format!(
-                        "[[tasks]] (task `{task_id}`) is missing required `prompt` field — \
-                         `description` is only the short summary; `prompt` carries the \
-                         executor/reviewer instructions"
-                    ),
-                });
+                if task_kind == TaskKind::WorkspaceMerge {
+                    String::new()
+                } else {
+                    return Err(LifecycleError::PlanInvalid {
+                        reason: format!(
+                            "[[tasks]] (task `{task_id}`) is missing required `prompt` field — \
+                             `description` is only the short summary; `prompt` carries the \
+                             executor/reviewer instructions"
+                        ),
+                    });
+                }
             }
         };
-        if prompt_raw.is_empty() {
+        if task_kind == TaskKind::Agent && prompt_raw.is_empty() {
             return Err(LifecycleError::PlanInvalid {
                 reason: format!(
                     "[[tasks]] (task `{task_id}`) `prompt` is empty — provide \
@@ -2816,9 +2982,17 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
                 ),
             });
         }
-        let agent_description =
-            format!("Task summary:\n{description_raw}\n\nPrimary instructions:\n{prompt_raw}");
-        let custom_tools_json =
+        let agent_description = if task_kind == TaskKind::WorkspaceMerge {
+            format!(
+                "Workspace merge summary:\n{description_raw}\n\nConflict handling:\n{}",
+                workspace_merge_on_conflict.as_plan_str()
+            )
+        } else {
+            format!("Task summary:\n{description_raw}\n\nPrimary instructions:\n{prompt_raw}")
+        };
+        let custom_tools_json = if task_kind == TaskKind::WorkspaceMerge {
+            None
+        } else {
             crate::initiatives::custom_tools_validator::custom_tool_bundle_json_for_task(
                 plan_toml,
                 &task_id,
@@ -2826,7 +3000,8 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             )
             .map_err(|e| LifecycleError::PlanInvalid {
                 reason: e.to_string(),
-            })?;
+            })?
+        };
 
         // V2 `v2-deep-spec.md §Step 12` — operator-declared retry
         // ceilings. Both fields are OPTIONAL: omission leaves the
@@ -2960,6 +3135,8 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             name,
             lane_id,
             predecessors,
+            task_kind,
+            workspace_merge_on_conflict,
             path_allowlist,
             path_export_to_successors,
             path_export_globs,
@@ -4361,13 +4538,18 @@ fn validate_cross_cutting_artifacts(
 ///   4. **`reviewer_as_predecessor`** — `task.predecessors` lists a
 ///      Reviewer task. Reviewers are gates, not artifact producers; a
 ///      downstream task must depend on the reviewed Executor instead.
-///   5. **`cyclic_dependency`** — directed cycle in the proposed
+///   5. **`executor_multi_predecessor_without_workspace_merge`** —
+///      ordinary Executor tasks may not list multiple artifact
+///      predecessors directly. They need an explicit
+///      `task_kind = "workspace_merge"` fan-in task so the kernel owns
+///      the merge base, conflict state, and audit trail.
+///   6. **`cyclic_dependency`** — directed cycle in the proposed
 ///      `predecessors` graph. Implemented as iterative DFS over the
 ///      in-memory plan (Kahn's algorithm would also work; DFS gives
 ///      us "an arbitrary task on the cycle" for the diagnostic).
 ///      The in-tx `scheduler::dag::detect_cycle_in` is retained as a
 ///      defense-in-depth backstop — see `LifecycleError::PlanDagInvalid`.
-///      All five rules emit `LifecycleError::PlanDagInvalid { rule,
+///      All rules emit `LifecycleError::PlanDagInvalid { rule,
 /// offending_task, suggestion }`. The `suggestion` field is mandatory
 ///      per the spec; it is a concrete fix the operator can apply, not a
 ///      generic restatement of the rule name.
@@ -4477,7 +4659,28 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
         }
     }
 
-    // ── Rule 5: cyclic_dependency ────────────────────────────────────
+    // ── Rule 5: executor_multi_predecessor_without_workspace_merge ───
+    for pt in tasks {
+        if pt.task_kind == TaskKind::WorkspaceMerge {
+            continue;
+        }
+        if pt.session_agent_type == SessionAgentType::Executor && pt.predecessors.len() > 1 {
+            return Err(LifecycleError::PlanDagInvalid {
+                rule: "executor_multi_predecessor_without_workspace_merge",
+                offending_task: pt.name.clone(),
+                suggestion: format!(
+                    "Task {:?} lists multiple predecessors directly. \
+                     Add a `task_kind = \"workspace_merge\"` task that depends on {:?}, \
+                     then make {:?} depend on that single workspace-merge task. \
+                     This lets the kernel materialize one concrete merged worktree \
+                     and park Git conflicts for operator/orchestrator resolution.",
+                    pt.name, pt.predecessors, pt.name,
+                ),
+            });
+        }
+    }
+
+    // ── Rule 6: cyclic_dependency ────────────────────────────────────
     // Iterative DFS with the standard three-color visit pattern:
     //   * `White` — never visited
     //   * `Gray`  — on the current DFS stack (cycle witness)
@@ -5548,6 +5751,81 @@ mod tests {
     }
 
     #[test]
+    fn parse_plan_tasks_accepts_workspace_merge_task_without_vm_fields() {
+        let toml = r#"
+[[tasks]]
+task_name   = "merge_frontend_backend"
+task_kind   = "workspace_merge"
+description = "Materialize the frontend/backend fan-in workspace."
+predecessors = ["frontend", "backend"]
+on_conflict = "operator_manual"
+"#;
+        let tasks = parse_plan_tasks(toml).expect("workspace merge task must parse");
+        assert_eq!(tasks.len(), 1);
+        let task = &tasks[0];
+        assert_eq!(task.name, "merge_frontend_backend");
+        assert_eq!(task.task_kind, TaskKind::WorkspaceMerge);
+        assert_eq!(
+            task.workspace_merge_on_conflict,
+            WorkspaceMergeOnConflict::OperatorManual
+        );
+        assert_eq!(task.session_agent_type, SessionAgentType::Executor);
+        assert_eq!(task.clone_strategy, CloneStrategy::Blobless);
+        assert!(task.custom_tools_json.is_none());
+        assert!(task.description.contains("Workspace merge summary"));
+        assert!(task.description.contains("operator_manual"));
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_workspace_merge_prompt_or_agent_fields() {
+        let toml = r#"
+[[tasks]]
+task_name   = "merge_frontend_backend"
+task_kind   = "workspace_merge"
+description = "Materialize the frontend/backend fan-in workspace."
+predecessors = ["frontend", "backend"]
+prompt = "please merge"
+"#;
+        let err = parse_plan_tasks(toml).expect_err("workspace merge prompt must fail");
+        assert!(
+            err.to_string().contains("must not declare prompt"),
+            "unexpected error: {err}"
+        );
+
+        let toml = r#"
+[[tasks]]
+task_name   = "merge_frontend_backend"
+task_kind   = "workspace_merge"
+description = "Materialize the frontend/backend fan-in workspace."
+predecessors = ["frontend", "backend"]
+clone_strategy = "blobless"
+"#;
+        let err = parse_plan_tasks(toml).expect_err("workspace merge clone_strategy must fail");
+        assert!(
+            err.to_string().contains("must not declare clone_strategy"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_on_conflict_for_agent_task() {
+        let toml = r#"
+[[tasks]]
+task_name = "ordinary_executor"
+description = "Normal executor must not carry merge conflict policy."
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+prompt = "Do the work."
+on_conflict = "operator_manual"
+"#;
+        let err = parse_plan_tasks(toml).expect_err("agent on_conflict must fail");
+        assert!(
+            err.to_string().contains("declares on_conflict"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn parse_plan_tasks_empty_array_ok() {
         let toml =
             "[meta]\nversion = 1\n[[tasks]]\ntask_name = \"t1\"\ndescription = \"do thing\"\n";
@@ -5911,6 +6189,8 @@ prompt = "   "
             name: task_id.to_owned(),
             lane_id: "default".to_owned(),
             predecessors: vec![],
+            task_kind: TaskKind::Agent,
+            workspace_merge_on_conflict: WorkspaceMergeOnConflict::DEFAULT,
             path_allowlist: allow.iter().map(|s| (*s).to_owned()).collect(),
             path_export_to_successors: false,
             path_export_globs: vec![],
@@ -6102,6 +6382,8 @@ prompt = "   "
             name: id.to_owned(),
             lane_id: "default".to_owned(),
             predecessors: deps.iter().map(|s| (*s).to_owned()).collect(),
+            task_kind: TaskKind::Agent,
+            workspace_merge_on_conflict: WorkspaceMergeOnConflict::DEFAULT,
             path_allowlist: vec![],
             path_export_to_successors: false,
             path_export_globs: vec![],
@@ -6128,6 +6410,13 @@ prompt = "   "
     fn dag_task_with_role(id: &str, deps: &[&str], role: SessionAgentType) -> PlanTask {
         let mut task = dag_task(id, deps);
         task.session_agent_type = role;
+        task
+    }
+
+    fn dag_workspace_merge_task(id: &str, deps: &[&str]) -> PlanTask {
+        let mut task = dag_task(id, deps);
+        task.task_kind = TaskKind::WorkspaceMerge;
+        task.workspace_merge_on_conflict = WorkspaceMergeOnConflict::DEFAULT;
         task
     }
 
@@ -6174,12 +6463,14 @@ prompt = "   "
 
     #[test]
     fn validate_plan_dag_accepts_diamond_dag() {
-        // a → b, a → c, b → d, c → d  — classic diamond, no cycle.
+        // a → b, a → c, b/c → merge, merge → d — classic diamond
+        // with an explicit kernel-owned fan-in node.
         let plan = vec![
             dag_task("a", &[]),
             dag_task("b", &["a"]),
             dag_task("c", &["a"]),
-            dag_task("d", &["b", "c"]),
+            dag_workspace_merge_task("merge-bc", &["b", "c"]),
+            dag_task("d", &["merge-bc"]),
         ];
         validate_plan_dag(&plan).unwrap();
     }
@@ -6242,6 +6533,21 @@ prompt = "   "
             "reviewer_as_predecessor",
             "draft-release",
             "depend on the Executor",
+        );
+    }
+
+    #[test]
+    fn validate_plan_dag_rejects_executor_multi_predecessor_without_workspace_merge() {
+        let plan = vec![
+            dag_task("frontend", &[]),
+            dag_task("backend", &[]),
+            dag_task("integration-test", &["frontend", "backend"]),
+        ];
+        assert_dag_invalid(
+            plan,
+            "executor_multi_predecessor_without_workspace_merge",
+            "integration-test",
+            "workspace_merge",
         );
     }
 
@@ -6342,6 +6648,8 @@ prompt = "   "
             name: task_id.into(),
             lane_id: lane_id.into(),
             predecessors: vec![],
+            task_kind: TaskKind::Agent,
+            workspace_merge_on_conflict: WorkspaceMergeOnConflict::DEFAULT,
             path_allowlist: vec![],
             path_export_to_successors: false,
             path_export_globs: vec![],
@@ -6718,6 +7026,8 @@ session_agent_type = "Coordinator"
             name: task_id.into(),
             lane_id: String::new(),
             predecessors: vec![],
+            task_kind: TaskKind::Agent,
+            workspace_merge_on_conflict: WorkspaceMergeOnConflict::DEFAULT,
             path_allowlist: vec![],
             path_export_to_successors: false,
             path_export_globs: vec![],
@@ -7501,6 +7811,8 @@ description = "do thing"
             name: task_id.to_owned(),
             lane_id: String::new(),
             predecessors: Vec::new(),
+            task_kind: TaskKind::Agent,
+            workspace_merge_on_conflict: WorkspaceMergeOnConflict::DEFAULT,
             path_allowlist: Vec::new(),
             path_export_to_successors: false,
             path_export_globs: Vec::new(),
@@ -11377,6 +11689,8 @@ mod env_consistency_tests {
             name: "t1".to_owned(),
             lane_id: "main".to_owned(),
             predecessors: Vec::new(),
+            task_kind: TaskKind::Agent,
+            workspace_merge_on_conflict: WorkspaceMergeOnConflict::DEFAULT,
             path_allowlist: Vec::new(),
             path_export_to_successors: false,
             path_export_globs: Vec::new(),
@@ -11535,6 +11849,8 @@ mod vm_image_admission_tests {
             name: task_id.to_owned(),
             lane_id: "default".to_owned(),
             predecessors: Vec::new(),
+            task_kind: TaskKind::Agent,
+            workspace_merge_on_conflict: WorkspaceMergeOnConflict::DEFAULT,
             path_allowlist: Vec::new(),
             path_export_to_successors: false,
             path_export_globs: Vec::new(),

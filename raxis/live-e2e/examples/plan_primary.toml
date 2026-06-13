@@ -778,12 +778,25 @@ VM image ships only `raxis-planner` + `ripgrep` per
 """
 
 
+# -- Workspace merge: per-language lint captures ------------
+[[tasks]]
+task_name   = "merge-lint-captures"
+task_kind   = "workspace_merge"
+description = "Materialize the reviewed Python, Rust, and JavaScript lint capture fan-in."
+predecessors = [
+  "lint-runner-python",
+  "lint-runner-rust",
+  "lint-runner-js",
+]
+on_conflict = "orchestrator_then_operator"
+
 
 # ── Positive path-allowlist Executor (P3-4) ─────────────
 [[tasks]]
 task_name            = "allowlist-positive-codegen"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
+predecessors       = ["merge-lint-captures"]
 # Trivial single-file generation task; write build_meta.txt under the
 # allowlisted path, commit. ~5 turns natural; iter55 budget audit
 # bumps the ceiling 15 → 25 for retry headroom (the `-f` flag on
@@ -1075,6 +1088,17 @@ Complete the task with the row count and the evidence path.
   proxy_type = "postgres"
   mount_as   = "DATABASE_URL"
 
+# -- Workspace merge: service evidence fan-in ---------------
+[[tasks]]
+task_name   = "merge-service-evidence"
+task_kind   = "workspace_merge"
+description = "Materialize the stock-script and credential-substitution service evidence fan-in."
+predecessors = [
+  "transparent-proxy-realscripts",
+  "credential-substitution-canary",
+]
+on_conflict = "orchestrator_then_operator"
+
 # -- Dep-fetch-evidence Executor ----
 [[tasks]]
 task_name            = "dep-fetch-evidence"
@@ -1159,6 +1183,7 @@ task_name            = "tooling-mcp-unity"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 profiles          = ["unity_mcp_tools"]
+predecessors       = ["merge-service-evidence"]
 # Three custom-tool calls + one JSON evidence file + commit. The
 # profile timeout is 5s per tool; 40 turns gives enough budget for
 # a correction loop without turning BYO tooling into open-ended

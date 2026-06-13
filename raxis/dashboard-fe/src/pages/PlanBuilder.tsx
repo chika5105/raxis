@@ -26,6 +26,8 @@ import type {
 } from "@/types/api";
 
 type AgentType = "" | "Executor" | "Reviewer";
+type TaskKind = "agent" | "workspace_merge";
+type WorkspaceMergeOnConflict = "orchestrator_then_operator" | "operator_manual" | "fail_closed";
 type CloneStrategy = "" | "blobless" | "full" | "sparse";
 export type ToolLocality =
   | "guest_subprocess"
@@ -93,8 +95,10 @@ interface PlanBasics {
 
 export interface TaskDraft {
   id: string;
+  taskKind: TaskKind;
   description: string;
   agentType: AgentType;
+  onConflict: WorkspaceMergeOnConflict;
   predecessors: string;
   paths: string;
   pathExports: string;
@@ -214,8 +218,10 @@ const initialPlan: PlanBasics = {
 const starterTasks: TaskDraft[] = [
   {
     id: "greeter",
+    taskKind: "agent",
     description: "Create HELLO.md and commit it",
     agentType: "Executor",
+    onConflict: "orchestrator_then_operator",
     predecessors: "",
     paths: "HELLO.md",
     pathExports: "",
@@ -621,10 +627,19 @@ export function PlanBuilderPage() {
   );
   const status = useMemo<PlanStatus>(() => {
     if (!planEnabled) return "empty";
+    if (kernelValidation) {
+      if (kernelValidation.issues.some((i) => i.severity === "error")) {
+        return "needs-fixes";
+      }
+      if (kernelValidation.issues.some((i) => i.severity === "warning")) {
+        return "warnings";
+      }
+      return kernelValidation.ok ? "ready" : "warnings";
+    }
     if (localIssues.some((i) => i.severity === "error")) return "needs-fixes";
     if (localIssues.some((i) => i.severity === "warning")) return "warnings";
     return "ready";
-  }, [localIssues, planEnabled]);
+  }, [kernelValidation, localIssues, planEnabled]);
 
   const revealGeneratedToml = useCallback(
     (target: PlanTomlRevealTarget, textOverride?: string) => {
@@ -2717,7 +2732,7 @@ function ValidationPanel({
         <div>
           <div className="text-sm font-semibold text-ink">Validation</div>
           <div className="text-[11px] text-ink-subtle">
-            Draft checks plus kernel validation output.
+            Editor hints plus authoritative kernel validation.
           </div>
         </div>
         <button type="button" className="btn text-xs py-1" onClick={onClose}>
@@ -2727,7 +2742,7 @@ function ValidationPanel({
       <div className="max-h-[58vh] overflow-y-auto overscroll-y-auto scroll-thin p-3 space-y-3">
         <section>
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-xs font-semibold text-ink">Draft checks</h2>
+            <h2 className="text-xs font-semibold text-ink">Editor hints</h2>
             <span className="text-[10px] text-ink-subtle">
               {issues.length === 0 ? "0 issues" : `${issues.length} issue${issues.length === 1 ? "" : "s"}`}
             </span>
@@ -2737,24 +2752,30 @@ function ValidationPanel({
               Ready for kernel validation.
             </div>
           ) : (
-            <ul className="mt-2 space-y-1.5">
-              {issues.map((issue) => (
-                <li
-                  key={`${issue.field}-${issue.message}`}
-                  className={`rounded border px-2.5 py-2 text-xs ${
-                    issue.severity === "error"
-                      ? "border-bad/40 bg-bad/10 text-bad"
-                      : "border-warn/40 bg-warn-muted text-warn"
-                  }`}
-                >
-                  <div className="font-semibold">{issue.message}</div>
-                  <div className="mt-1 text-ink-muted">{issue.next}</div>
-                  <code className="mt-1 inline-block font-mono text-[10px] text-ink-subtle">
-                    {issue.field}
-                  </code>
-                </li>
-              ))}
-            </ul>
+            <>
+              <p className="mt-2 text-[11px] leading-relaxed text-ink-subtle">
+                These are immediate UI hints for editing. The kernel result below
+                is the admission source of truth.
+              </p>
+              <ul className="mt-2 space-y-1.5">
+                {issues.map((issue) => (
+                  <li
+                    key={`${issue.field}-${issue.message}`}
+                    className={`rounded border px-2.5 py-2 text-xs ${
+                      issue.severity === "error"
+                        ? "border-bad/40 bg-bad/10 text-bad"
+                        : "border-warn/40 bg-warn-muted text-warn"
+                    }`}
+                  >
+                    <div className="font-semibold">{issue.message}</div>
+                    <div className="mt-1 text-ink-muted">{issue.next}</div>
+                    <code className="mt-1 inline-block font-mono text-[10px] text-ink-subtle">
+                      {issue.field}
+                    </code>
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
         </section>
         <Divider label="Kernel" />
@@ -2919,8 +2940,10 @@ function makeTask(agentType: AgentType, existing: TaskDraft[]): TaskDraft {
   const id = uniqueTaskId(agentType === "Reviewer" ? "review" : "task", existing);
   return normalizeTask({
     id,
+    taskKind: "agent",
     description: agentType === "Reviewer" ? "Review predecessor output" : "Implement task",
     agentType,
+    onConflict: "orchestrator_then_operator",
     predecessors: "",
     paths: agentType === "Reviewer" ? existing.at(-1)?.paths ?? "" : "./",
     pathExports: "",
@@ -3020,8 +3043,15 @@ function normalizePlanVerifier(verifier: PlanVerifierDraft): PlanVerifierDraft {
 }
 
 function normalizeTask(task: TaskDraft): TaskDraft {
+  const taskKind: TaskKind = task.taskKind === "workspace_merge" ? "workspace_merge" : "agent";
+  const onConflict: WorkspaceMergeOnConflict =
+    task.onConflict === "operator_manual" || task.onConflict === "fail_closed"
+      ? task.onConflict
+      : "orchestrator_then_operator";
   const normalized = {
     ...task,
+    taskKind,
+    onConflict,
     credentials: task.credentials ?? [],
     verifierImage: task.verifierImage ?? "raxis-verifier-starter",
     verifierTimeout: task.verifierTimeout ?? "30s",
@@ -3029,6 +3059,22 @@ function normalizeTask(task: TaskDraft): TaskDraft {
     verifierArtifact: task.verifierArtifact ?? "",
     verifierArtifactMaxBytes: task.verifierArtifactMaxBytes ?? "",
   };
+  if (normalized.taskKind === "workspace_merge") {
+    return {
+      ...normalized,
+      agentType: "",
+      cloneStrategy: "",
+      paths: "",
+      pathExports: "",
+      allowedEgress: "",
+      vmImage: "",
+      profiles: "",
+      credentials: [],
+      verifierName: "",
+      verifierCommand: "",
+      prompt: "",
+    };
+  }
   if (normalized.agentType !== "Reviewer") return normalized;
   return {
     ...normalized,
@@ -3438,6 +3484,37 @@ function validatePlan(input: {
     if (!task.description.trim()) {
       push("error", `${id}.description`, `Task ${id || "(blank)"} needs a description.`, "Describe what this task is meant to do.");
     }
+    const predecessors = splitList(task.predecessors);
+    if (task.taskKind === "workspace_merge") {
+      if (predecessors.length < 2) {
+        push("error", `${id}.predecessors`, `Workspace merge ${id || "(blank)"} needs at least two predecessors.`, "Use workspace_merge only at an explicit fan-in point with two or more completed artifact tasks.");
+      }
+      if (
+        task.onConflict !== "orchestrator_then_operator" &&
+        task.onConflict !== "operator_manual" &&
+        task.onConflict !== "fail_closed"
+      ) {
+        push("error", `${id}.on_conflict`, `Workspace merge ${id || "(blank)"} has an unsupported conflict policy.`, "Use orchestrator_then_operator, operator_manual, or fail_closed.");
+      }
+      for (const pred of predecessors) {
+        const predecessorTask = input.tasks.find((candidate) => candidate.id.trim() === pred);
+        if (!predecessorTask) {
+          push("error", `${id}.predecessors`, `Task ${id || "(blank)"} references unknown predecessor ${pred}.`, "Drag an edge from an existing task or remove the stale predecessor.");
+        }
+        if (pred === id) {
+          push("error", `${id}.predecessors`, `Task ${id} cannot depend on itself.`, "Remove the self-edge.");
+        }
+        if (predecessorTask?.agentType === "Reviewer") {
+          push(
+            "error",
+            `${id}.predecessors`,
+            `Workspace merge ${id || "(blank)"} cannot depend directly on reviewer ${pred}.`,
+            "Make the merge depend on the executor output; RAXIS enforces the reviewer gate before fan-in.",
+          );
+        }
+      }
+      continue;
+    }
     if (!task.prompt.trim()) {
       push("error", `${id}.prompt`, `Task ${id || "(blank)"} has no prompt.`, "Add prompt for precise work instructions; description is only the short dashboard summary.");
     }
@@ -3447,7 +3524,7 @@ function validatePlan(input: {
     if (!task.cloneStrategy) {
       push("error", `${id}.clone_strategy`, `Task ${id || "(blank)"} needs a clone strategy.`, "Choose blobless, sparse, or full explicitly.");
     }
-    for (const pred of splitList(task.predecessors)) {
+    for (const pred of predecessors) {
       const predecessorTask = input.tasks.find((candidate) => candidate.id.trim() === pred);
       if (!predecessorTask) {
         push("error", `${id}.predecessors`, `Task ${id || "(blank)"} references unknown predecessor ${pred}.`, "Drag an edge from an existing task or remove the stale predecessor.");
@@ -3710,6 +3787,13 @@ function renderPlan(input: {
     lines.push("[[tasks]]");
     lines.push(`task_name          = ${tomlString(task.id.trim())}`);
     lines.push(`description        = ${tomlString(task.description.trim())}`);
+    if (task.taskKind === "workspace_merge") {
+      lines.push('task_kind          = "workspace_merge"');
+      lines.push(`predecessors       = [${predecessors.map(tomlString).join(", ")}]`);
+      lines.push(`on_conflict        = ${tomlString(task.onConflict || "orchestrator_then_operator")}`);
+      lines.push("");
+      continue;
+    }
     lines.push(`session_agent_type = ${tomlString(task.agentType)}`);
     lines.push(`clone_strategy     = ${tomlString(task.cloneStrategy)}`);
     const taskProfiles = splitList(task.profiles);
@@ -4077,9 +4161,15 @@ function parsePlanToml(text: string): {
     .filter(Boolean);
 
   const tasks = taskBlocks.map((block, index) => {
+    const taskKind: TaskKind =
+      readString(block, "task_kind") === "workspace_merge" ? "workspace_merge" : "agent";
     const rawAgentType = readString(block, "session_agent_type");
     const agentType: AgentType =
-      rawAgentType === "Executor" || rawAgentType === "Reviewer" ? rawAgentType : "";
+      taskKind === "workspace_merge"
+        ? ""
+        : rawAgentType === "Executor" || rawAgentType === "Reviewer"
+          ? rawAgentType
+          : "";
     const profiles = readArray(block, "profiles").join(", ");
     const taskName = nonEmpty(readString(block, "name"));
     const shortDescription = nonEmpty(readTomlText(block, "description"));
@@ -4112,8 +4202,14 @@ function parsePlanToml(text: string): {
     const verifier = readNestedBlock(block, "tasks.verifiers");
     return normalizeTask({
       id: readString(block, "task_name") ?? `Task ${index + 1}`,
+      taskKind,
       description,
       agentType,
+      onConflict:
+        readString(block, "on_conflict") === "operator_manual" ||
+        readString(block, "on_conflict") === "fail_closed"
+          ? (readString(block, "on_conflict") as WorkspaceMergeOnConflict)
+          : "orchestrator_then_operator",
       predecessors: readArray(block, "predecessors").join(", "),
       paths: readArray(block, "path_allowlist").join(", "),
       pathExports: readArray(block, "path_export_globs").join(", "),

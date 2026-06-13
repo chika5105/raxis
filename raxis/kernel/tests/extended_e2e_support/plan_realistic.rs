@@ -216,6 +216,21 @@ pub const TASK_REVIEW_LINT_RUST: &str = "review-lint-defect-rust";
 /// per-language child.
 pub const TASK_REVIEW_LINT_JS: &str = "review-lint-defect-js";
 
+/// Kernel-owned fan-in task for the three per-language lint
+/// capture executors. This is the realistic live-e2e coverage for
+/// `task_kind = "workspace_merge"` after a reviewer-gated fan-out:
+/// the merge must not materialize until the runners' reviewer gates
+/// have settled, and the downstream allowlist executor consumes the
+/// merged workspace state rather than choosing one predecessor.
+pub const TASK_MERGE_LINT_CAPTURES: &str = "merge-lint-captures";
+
+/// Kernel-owned fan-in task for the two service evidence branches
+/// that diverge after `service-round-trip`. This gives the live
+/// e2e a second workspace-merge transition, covering the common
+/// "shared ancestor, two downstream evidence branches, then fan-in"
+/// shape operators use in real plans.
+pub const TASK_MERGE_SERVICE_EVIDENCE: &str = "merge-service-evidence";
+
 /// Lane id for the realistic scenario. Distinct from
 /// `super::plan::LANE_ID` so the realistic-scenario test and the
 /// existing extended-scenario test can co-exist in a single kernel
@@ -339,6 +354,8 @@ pub fn realistic_plan_toml() -> String {
     s.push_str("\n\n");
     s.push_str(REALISTIC_PLAN_LINT_REVIEWERS);
     s.push_str("\n\n");
+    s.push_str(REALISTIC_PLAN_MERGE_LINT_CAPTURES);
+    s.push_str("\n\n");
     s.push_str(REALISTIC_PLAN_ALLOWLIST_POSITIVE_HEAD);
     s.push_str(allowlist);
     s.push_str("\n\"\"\"\n");
@@ -358,6 +375,8 @@ pub fn realistic_plan_toml() -> String {
     s.push_str(cred_sub);
     s.push_str("\n\"\"\"\n");
     s.push_str(REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_CREDS);
+    s.push_str("\n\n");
+    s.push_str(REALISTIC_PLAN_MERGE_SERVICE_EVIDENCE);
     s.push_str("\n\n");
     s.push_str(REALISTIC_PLAN_DEP_FETCH_EVIDENCE_HEAD);
     s.push_str(dep_fetch);
@@ -1112,6 +1131,7 @@ const REALISTIC_PLAN_ALLOWLIST_POSITIVE_HEAD: &str = r#"# ── Positive path-a
 task_name            = "allowlist-positive-codegen"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
+predecessors       = ["merge-lint-captures"]
 # Trivial single-file generation task; write build_meta.txt under the
 # allowlisted path, commit. ~5 turns natural; iter55 budget audit
 # bumps the ceiling 15 → 25 for retry headroom (the `-f` flag on
@@ -1122,6 +1142,19 @@ max_turns          = 25
 path_allowlist     = ["target/codegen/"]
 description        = "Generate a build metadata file under target/codegen."
 prompt = """
+"#;
+
+const REALISTIC_PLAN_MERGE_LINT_CAPTURES: &str = r#"# -- Workspace merge: per-language lint captures ------------
+[[tasks]]
+task_name   = "merge-lint-captures"
+task_kind   = "workspace_merge"
+description = "Materialize the reviewed Python, Rust, and JavaScript lint capture fan-in."
+predecessors = [
+  "lint-runner-python",
+  "lint-runner-rust",
+  "lint-runner-js",
+]
+on_conflict = "orchestrator_then_operator"
 "#;
 
 const REALISTIC_PLAN_ALLOWLIST_POSITIVE_VERIFIER: &str = r#"
@@ -1282,6 +1315,18 @@ const REALISTIC_PLAN_CREDENTIAL_SUBSTITUTION_CREDS: &str = r#"
   proxy_type = "postgres"
   mount_as   = "DATABASE_URL""#;
 
+const REALISTIC_PLAN_MERGE_SERVICE_EVIDENCE: &str = r#"# -- Workspace merge: service evidence fan-in ---------------
+[[tasks]]
+task_name   = "merge-service-evidence"
+task_kind   = "workspace_merge"
+description = "Materialize the stock-script and credential-substitution service evidence fan-in."
+predecessors = [
+  "transparent-proxy-realscripts",
+  "credential-substitution-canary",
+]
+on_conflict = "orchestrator_then_operator"
+"#;
+
 // -- Dep-fetch-evidence Executor (mediated egress, iter65) ------
 //
 // First end-to-end exercise of Path A3 from inside a real executor
@@ -1355,6 +1400,7 @@ task_name            = "tooling-mcp-unity"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 profiles          = ["unity_mcp_tools"]
+predecessors       = ["merge-service-evidence"]
 # Three custom-tool calls + one JSON evidence file + commit. The
 # profile timeout is 5s per tool; 40 turns gives enough budget for
 # a correction loop without turning BYO tooling into open-ended
@@ -1397,10 +1443,12 @@ mod tests {
             TASK_REVIEW_LINT_B,
             TASK_REVIEW_LINT_RUST,
             TASK_REVIEW_LINT_JS,
+            TASK_MERGE_LINT_CAPTURES,
             TASK_ALLOWLIST_POSITIVE,
             TASK_SERVICE_ROUND_TRIP,
             TASK_TRANSPARENT_PROXY_REALSCRIPTS,
             TASK_CREDENTIAL_SUBSTITUTION_CANARY,
+            TASK_MERGE_SERVICE_EVIDENCE,
             TASK_DEP_FETCH_EVIDENCE,
             TASK_TOOLING_MCP_UNITY,
         ] {
@@ -1868,6 +1916,94 @@ mod tests {
                 prompt.len(),
             );
         }
+    }
+
+    #[test]
+    fn realistic_plan_exercises_repeated_workspace_merge_fan_in() {
+        let toml_text = realistic_plan_toml();
+        let v: toml::Value = toml::from_str(&toml_text)
+            .expect("realistic plan must be valid TOML with workspace merges wired");
+        let tasks = v
+            .get("tasks")
+            .and_then(|t| t.as_array())
+            .expect("[[tasks]] array present");
+        let task = |task_name: &str| {
+            tasks
+                .iter()
+                .find(|t| t.get("task_name").and_then(|i| i.as_str()) == Some(task_name))
+                .unwrap_or_else(|| panic!("task `{task_name}` present"))
+        };
+        let preds = |task_name: &str| -> Vec<&str> {
+            task(task_name)
+                .get("predecessors")
+                .and_then(|p| p.as_array())
+                .unwrap_or_else(|| panic!("task `{task_name}` predecessors present"))
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect()
+        };
+
+        let lint_merge = task(TASK_MERGE_LINT_CAPTURES);
+        assert_eq!(
+            lint_merge.get("task_kind").and_then(|v| v.as_str()),
+            Some("workspace_merge"),
+            "lint fan-in must be kernel-owned, not a planner VM",
+        );
+        assert_eq!(
+            lint_merge.get("on_conflict").and_then(|v| v.as_str()),
+            Some("orchestrator_then_operator"),
+            "realistic e2e should exercise the production conflict policy spelling",
+        );
+        assert!(
+            lint_merge.get("prompt").is_none()
+                && lint_merge.get("session_agent_type").is_none()
+                && lint_merge.get("clone_strategy").is_none(),
+            "workspace_merge tasks must not carry agent VM fields",
+        );
+        assert_eq!(
+            preds(TASK_MERGE_LINT_CAPTURES),
+            vec![
+                TASK_LINT_RUNNER_PYTHON,
+                TASK_LINT_RUNNER_RUST,
+                TASK_LINT_RUNNER_JS,
+            ],
+            "first fan-in should merge all three per-language lint captures",
+        );
+        assert_eq!(
+            preds(TASK_ALLOWLIST_POSITIVE),
+            vec![TASK_MERGE_LINT_CAPTURES],
+            "a real downstream executor must consume the lint fan-in workspace",
+        );
+
+        let service_merge = task(TASK_MERGE_SERVICE_EVIDENCE);
+        assert_eq!(
+            service_merge.get("task_kind").and_then(|v| v.as_str()),
+            Some("workspace_merge"),
+            "service evidence fan-in must also be kernel-owned",
+        );
+        assert_eq!(
+            service_merge.get("on_conflict").and_then(|v| v.as_str()),
+            Some("orchestrator_then_operator"),
+        );
+        assert!(
+            service_merge.get("prompt").is_none()
+                && service_merge.get("session_agent_type").is_none()
+                && service_merge.get("clone_strategy").is_none(),
+            "workspace_merge service fan-in must not carry agent VM fields",
+        );
+        assert_eq!(
+            preds(TASK_MERGE_SERVICE_EVIDENCE),
+            vec![
+                TASK_TRANSPARENT_PROXY_REALSCRIPTS,
+                TASK_CREDENTIAL_SUBSTITUTION_CANARY,
+            ],
+            "second fan-in should merge the two service evidence branches",
+        );
+        assert_eq!(
+            preds(TASK_TOOLING_MCP_UNITY),
+            vec![TASK_MERGE_SERVICE_EVIDENCE],
+            "a later executor should prove workspace_merge outputs activate successors",
+        );
     }
 
     #[test]

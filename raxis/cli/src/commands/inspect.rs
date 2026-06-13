@@ -554,6 +554,7 @@ mod tests {
             session_agent_type: "Executor".to_owned(),
             max_review_rejections: 2,
             max_crash_retries: 1,
+            ..Default::default()
         }
     }
 

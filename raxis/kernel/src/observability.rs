@@ -1685,6 +1685,10 @@ pub const COMMAND_KIND_ABORT_TASK: &str = "abort_task";
 pub const COMMAND_KIND_RESUME_TASK: &str = "resume_task";
 /// Operator retries a failed task (`RetryTask` lifecycle FSM step).
 pub const COMMAND_KIND_RETRY_TASK: &str = "retry_task";
+/// Operator accepts a manually-resolved workspace-merge conflict.
+pub const COMMAND_KIND_WORKSPACE_MERGE_SUBMIT: &str = "workspace_merge_submit";
+/// Operator resets and replays a conflicted workspace merge attempt.
+pub const COMMAND_KIND_WORKSPACE_MERGE_RESET: &str = "workspace_merge_reset";
 /// Operator aborts an in-flight initiative.
 pub const COMMAND_KIND_ABORT_INITIATIVE: &str = "abort_initiative";
 /// Operator approves a planner-submitted escalation.
@@ -1733,6 +1737,8 @@ pub const COMMAND_KIND_CLOSED_SET: &[&str] = &[
     COMMAND_KIND_ABORT_TASK,
     COMMAND_KIND_RESUME_TASK,
     COMMAND_KIND_RETRY_TASK,
+    COMMAND_KIND_WORKSPACE_MERGE_SUBMIT,
+    COMMAND_KIND_WORKSPACE_MERGE_RESET,
     COMMAND_KIND_ABORT_INITIATIVE,
     COMMAND_KIND_APPROVE_ESCALATION,
     COMMAND_KIND_DENY_ESCALATION,
@@ -1781,6 +1787,8 @@ pub fn operator_command_kind(req: &raxis_types::operator_wire::OperatorRequest) 
         R::AbortTask { .. } => COMMAND_KIND_ABORT_TASK,
         R::ResumeTask { .. } => COMMAND_KIND_RESUME_TASK,
         R::RetryTask { .. } => COMMAND_KIND_RETRY_TASK,
+        R::WorkspaceMergeSubmit { .. } => COMMAND_KIND_WORKSPACE_MERGE_SUBMIT,
+        R::WorkspaceMergeReset { .. } => COMMAND_KIND_WORKSPACE_MERGE_RESET,
         R::ApproveEscalation { .. } => COMMAND_KIND_APPROVE_ESCALATION,
         R::DenyEscalation { .. } => COMMAND_KIND_DENY_ESCALATION,
         R::RotateEpoch { .. } => COMMAND_KIND_ROTATE_EPOCH,
@@ -1922,6 +1930,12 @@ mod operator_ipc_tests {
             },
             OperatorRequest::RetryTask {
                 task_id: "t1".into(),
+            },
+            OperatorRequest::WorkspaceMergeSubmit {
+                attempt_id: "attempt-1".into(),
+            },
+            OperatorRequest::WorkspaceMergeReset {
+                attempt_id: "attempt-1".into(),
             },
             OperatorRequest::ApproveEscalation {
                 escalation_id: "esc-1".into(),

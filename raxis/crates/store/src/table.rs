@@ -342,6 +342,14 @@ pub enum Table {
     /// `(repository_id, target_ref)`, preserving parallel execution while
     /// keeping final closeout deterministic and diagnosable.
     IntegrationMergeQueue,
+
+    // ── v3: Kernel-owned workspace fan-in materialization ────────────────
+    /// **Workspace merge attempts.** One row per kernel-owned
+    /// `task_kind = "workspace_merge"` activation. The row records the
+    /// fan-in predecessor SHAs, the materialization worktree path, clean
+    /// output SHA, or conflict state so operator/manual resolution survives
+    /// kernel restarts.
+    WorkspaceMergeAttempts,
 }
 
 impl Table {
@@ -391,6 +399,7 @@ impl Table {
             Self::WorktreeSnapshots => "worktree_snapshots",
             Self::ManagedRepositories => "managed_repositories",
             Self::IntegrationMergeQueue => "integration_merge_queue",
+            Self::WorkspaceMergeAttempts => "workspace_merge_attempts",
         }
     }
 }
@@ -442,6 +451,7 @@ mod tests {
             Table::WorktreeSnapshots,
             Table::ManagedRepositories,
             Table::IntegrationMergeQueue,
+            Table::WorkspaceMergeAttempts,
         ];
         for t in all {
             assert!(!t.as_str().is_empty(), "Table::{t:?} returned empty string");
@@ -562,6 +572,16 @@ mod tests {
     #[test]
     fn session_vm_env_table_name_is_pinned() {
         assert_eq!(Table::SessionVmEnv.as_str(), "session_vm_env");
+    }
+
+    /// Workspace merge attempt table name is wire-stable: CLI,
+    /// dashboard, recovery, and audit tooling join through this row.
+    #[test]
+    fn workspace_merge_attempts_table_name_is_pinned() {
+        assert_eq!(
+            Table::WorkspaceMergeAttempts.as_str(),
+            "workspace_merge_attempts"
+        );
     }
 
     #[test]

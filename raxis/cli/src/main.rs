@@ -59,6 +59,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "tools",
     "providers",
     "repo",
+    "workspace-merge",
     "status",
     "log",
     "verify-chain",
@@ -138,6 +139,8 @@ const PROVIDERS_SUBCOMMANDS: &[&str] = &["status", "reset"];
 const REPO_SUBCOMMANDS: &[&str] = &[
     "adopt", "status", "list", "fetch", "sync", "publish", "repair",
 ];
+/// Kernel-owned fan-in workspace merge recovery.
+const WORKSPACE_MERGE_SUBCOMMANDS: &[&str] = &["list", "status", "submit", "reset"];
 /// V2 §4.2 — operator-dashboard auth helper (challenge-response signing).
 const AUTH_SUBCOMMANDS: &[&str] = &["sign"];
 /// V2.5 self-healing-supervisor.md §10 / dashboard-hardening.md
@@ -457,6 +460,20 @@ fn run() -> Result<(), CliError> {
                     "repo sub-command",
                     sub2,
                     REPO_SUBCOMMANDS,
+                ))),
+            }
+        }
+        "workspace-merge" => {
+            let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
+            match sub2 {
+                "list" => commands::workspace_merge::run_list(&flags, &rest[1..]),
+                "status" => commands::workspace_merge::run_status(&flags, &rest[1..]),
+                "submit" => commands::workspace_merge::run_submit(&flags, &rest[1..]),
+                "reset" => commands::workspace_merge::run_reset(&flags, &rest[1..]),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "workspace-merge sub-command",
+                    sub2,
+                    WORKSPACE_MERGE_SUBCOMMANDS,
                 ))),
             }
         }
@@ -851,6 +868,25 @@ SUBCOMMANDS:
         Re-scan <data-dir>/repositories for exact Git roots and record
         missing adopted-repository metadata. Rejects parent-walk roots.
 
+    workspace-merge list [--all] [--json]
+        List open kernel-owned fan-in merge attempts. These appear when
+        a `task_kind = "workspace_merge"` task cannot cleanly merge
+        multiple predecessor artifacts.
+
+    workspace-merge status <attempt_id> [--json]
+        Show the preserved conflict worktree, predecessor SHAs, conflict
+        paths, and exact Git commands for manual resolution.
+
+    workspace-merge submit <attempt_id>
+        After resolving conflicts in the preserved worktree with normal
+        Git commands, submit the result through authenticated operator
+        IPC so RAXIS can stamp the output SHA, consume the escalation,
+        and complete the merge task.
+
+    workspace-merge reset <attempt_id>
+        Discard manual conflict-resolution edits and replay the merge
+        from the recorded base/predecessor SHAs.
+
     auth sign [--json] <challenge-hex>
         Sign a 32-byte hex challenge issued by the operator dashboard's
         GET /api/auth/challenge endpoint. Output the operator's public
@@ -1241,6 +1277,7 @@ mod catalog_consistency_tests {
             ("auth", AUTH_SUBCOMMANDS),
             ("providers", PROVIDERS_SUBCOMMANDS),
             ("repo", REPO_SUBCOMMANDS),
+            ("workspace-merge", WORKSPACE_MERGE_SUBCOMMANDS),
             ("task", TASK_SUBCOMMANDS),
             ("dashboard", DASHBOARD_SUBCOMMANDS),
         ] {
@@ -1279,6 +1316,7 @@ mod catalog_consistency_tests {
             ("\"tools\" => {", TOOLS_SUBCOMMANDS),
             ("\"providers\" => {", PROVIDERS_SUBCOMMANDS),
             ("\"repo\" => {", REPO_SUBCOMMANDS),
+            ("\"workspace-merge\" => {", WORKSPACE_MERGE_SUBCOMMANDS),
             ("\"auth\" => {", AUTH_SUBCOMMANDS),
             ("\"dashboard\" => {", DASHBOARD_SUBCOMMANDS),
         ];

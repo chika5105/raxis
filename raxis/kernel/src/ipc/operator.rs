@@ -384,6 +384,10 @@ fn request_context_fields(req: &OperatorRequest) -> Vec<(&'static str, String)> 
         OperatorRequest::RetryTask { task_id } => {
             vec![("task_id", task_id.clone())]
         }
+        OperatorRequest::WorkspaceMergeSubmit { attempt_id }
+        | OperatorRequest::WorkspaceMergeReset { attempt_id } => {
+            vec![("attempt_id", attempt_id.clone())]
+        }
         OperatorRequest::ResumeTask {
             task_id,
             resumed_by,
@@ -847,6 +851,22 @@ async fn handle_request(
             reason,
         } => handle_reject_plan(initiative_id, rejected_by, reason, ctx).await,
         OperatorRequest::RetryTask { task_id } => handle_retry_task(task_id, ctx).await,
+        OperatorRequest::WorkspaceMergeSubmit { attempt_id } => {
+            crate::workspace_merge::handle_operator_workspace_merge_submit(
+                attempt_id,
+                &operator.fingerprint,
+                ctx,
+            )
+            .await
+        }
+        OperatorRequest::WorkspaceMergeReset { attempt_id } => {
+            crate::workspace_merge::handle_operator_workspace_merge_reset(
+                attempt_id,
+                &operator.fingerprint,
+                ctx,
+            )
+            .await
+        }
         OperatorRequest::ResumeTask {
             task_id,
             resumed_by,
@@ -3005,6 +3025,8 @@ fn op_name(req: &OperatorRequest) -> &'static str {
         OperatorRequest::ApprovePlan { .. } => "ApprovePlan",
         OperatorRequest::RejectPlan { .. } => "RejectPlan",
         OperatorRequest::RetryTask { .. } => "RetryTask",
+        OperatorRequest::WorkspaceMergeSubmit { .. } => "WorkspaceMergeSubmit",
+        OperatorRequest::WorkspaceMergeReset { .. } => "WorkspaceMergeReset",
         OperatorRequest::ResumeTask { .. } => "ResumeTask",
         OperatorRequest::AbortTask { .. } => "AbortTask",
         OperatorRequest::AbortInitiative { .. } => "AbortInitiative",
@@ -4585,6 +4607,18 @@ mod dispatch_logging_tests {
                     task_id: "t1".to_owned(),
                 },
                 "task_id",
+            ),
+            (
+                OperatorRequest::WorkspaceMergeSubmit {
+                    attempt_id: "attempt-1".to_owned(),
+                },
+                "attempt_id",
+            ),
+            (
+                OperatorRequest::WorkspaceMergeReset {
+                    attempt_id: "attempt-1".to_owned(),
+                },
+                "attempt_id",
             ),
             (
                 OperatorRequest::ResumeTask {

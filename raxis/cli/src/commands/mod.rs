@@ -57,3 +57,4 @@ pub mod top;
 pub mod verifiers;
 pub mod verify_chain;
 pub mod witnesses;
+pub mod workspace_merge;

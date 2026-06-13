@@ -48,7 +48,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 32;
+pub const SCHEMA_VERSION: u32 = 33;
 
 /// Apply all pending migrations to `conn`.
 /// Safe to call on every startup — skips already-applied migrations. Returns
@@ -157,6 +157,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 32 {
         apply_migration_32(conn)?;
+    }
+    if current_version < 33 {
+        apply_migration_33(conn)?;
     }
 
     Ok(())
@@ -2966,6 +2969,12 @@ fn apply_migration_32(conn: &Connection) -> Result<(), StoreError> {
         .map_err(|e| StoreError::Migration(format!("migration 32 failed: {e}")))
 }
 
+fn apply_migration_33(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_33_ddl();
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 33 failed: {e}")))
+}
+
 /// The complete migration-26 DDL.
 pub fn render_migration_26_ddl() -> String {
     let session_vm_env = Table::SessionVmEnv.as_str();
@@ -3326,6 +3335,73 @@ COMMIT;
     )
 }
 
+/// The complete migration-33 DDL.
+pub fn render_migration_33_ddl() -> String {
+    let attempts = Table::WorkspaceMergeAttempts.as_str();
+    let initiatives = Table::Initiatives.as_str();
+    let tasks = Table::Tasks.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- workspace fan-in materialization -- one durable row per
+-- task_kind=\"workspace_merge\" activation. A clean merge stamps
+-- output_sha onto tasks.evaluation_sha; a conflict preserves the
+-- conflicted worktree for orchestrator or operator resolution.
+CREATE TABLE IF NOT EXISTS {attempts} (
+    attempt_id          TEXT    NOT NULL PRIMARY KEY,
+    initiative_id       TEXT    NOT NULL
+        REFERENCES {initiatives}(initiative_id)
+        ON DELETE CASCADE,
+    task_id             TEXT    NOT NULL
+        REFERENCES {tasks}(task_id)
+        ON DELETE CASCADE,
+    state               TEXT    NOT NULL
+        CHECK (state IN (
+            'Running',
+            'Completed',
+            'ConflictPendingOrchestrator',
+            'ConflictPendingOperator',
+            'Failed',
+            'Cancelled'
+        )),
+    on_conflict         TEXT    NOT NULL
+        CHECK (on_conflict IN (
+            'orchestrator_then_operator',
+            'operator_manual',
+            'fail_closed'
+        )),
+    worktree_root       TEXT    NOT NULL,
+    base_sha            TEXT    NOT NULL,
+    predecessor_shas_json TEXT  NOT NULL,
+    output_sha          TEXT,
+    conflict_paths_json TEXT,
+    failure_reason      TEXT,
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL,
+    resolved_at         INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_merge_attempts_task
+    ON {attempts} (task_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_merge_attempts_open
+    ON {attempts} (initiative_id, state, updated_at DESC)
+    WHERE state IN ('Running',
+                    'ConflictPendingOrchestrator',
+                    'ConflictPendingOperator');
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (33, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3626,6 +3702,10 @@ mod tests {
             //                discovery must not treat arbitrary parent
             //                Git checkouts as RAXIS-managed repos.
             Table::ManagedRepositories,
+            // Migration 32 — v3: repo/ref IntegrationMerge closeout queue.
+            Table::IntegrationMergeQueue,
+            // Migration 33 — v3: workspace fan-in materialization attempts.
+            Table::WorkspaceMergeAttempts,
             // Migration 16 — v2: initiatives.git_apply_pending column +
             //                idx_initiatives_pending_git partial index
             //                (integration-merge.md §11.1). The column

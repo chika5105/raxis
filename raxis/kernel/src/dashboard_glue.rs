@@ -26,7 +26,12 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
-use raxis_dashboard_kernel::{AdvanceError, AdvanceResult, PolicyAdvancer};
+use raxis_dashboard::data::{
+    BuilderValidationIssue, BuilderValidationResponse, BuilderValidationSeverity,
+};
+use raxis_dashboard_kernel::{
+    AdvanceError, AdvanceResult, ClosurePlanValidator, PlanValidator, PolicyAdvancer,
+};
 use raxis_policy::PolicyBundle;
 use raxis_store::Store;
 
@@ -186,6 +191,110 @@ impl PolicyAdvancer for KernelPolicyAdvancer {
             advanced_at: outcome.advanced_at_unix_secs.max(0) as u64,
         })
     }
+}
+
+/// Build the production Plan Builder validator. This is intentionally
+/// wired from the kernel binary so the dashboard can validate plan TOML
+/// with the same lifecycle admission checks used by `approve_plan`
+/// without creating a `raxis-dashboard-kernel -> raxis-kernel` crate
+/// cycle.
+pub fn kernel_plan_validator(store: Arc<Store>) -> Arc<dyn PlanValidator> {
+    Arc::new(ClosurePlanValidator::new(
+        move |toml: &str, policy: &PolicyBundle| {
+            let resolved_target_ref = plan_builder_resolved_target_ref(toml, policy);
+            let environments = policy.environments().clone();
+            let permitted_credentials = policy.permitted_credentials().to_vec();
+            let vm_images = policy.vm_images().to_vec();
+            let default_executor_image = policy.default_executor_image().cloned();
+            let elastic = policy.elastic().clone();
+            let lanes = policy.lanes().to_vec();
+
+            match crate::initiatives::lifecycle::validate_plan_toml_against_policy(
+                toml,
+                policy.git_default_target_ref(),
+                policy.git_target_ref_locked(),
+                &environments,
+                &permitted_credentials,
+                &vm_images,
+                default_executor_image.as_ref(),
+                &elastic,
+                &lanes,
+                &store,
+            ) {
+                Ok(()) => BuilderValidationResponse {
+                    artifact_kind: "plan".to_owned(),
+                    authority: "kernel".to_owned(),
+                    policy_epoch: policy.epoch(),
+                    resolved_target_ref,
+                    ok: true,
+                    issues: Vec::new(),
+                    next_steps: plan_builder_next_steps(),
+                },
+                Err(err) => BuilderValidationResponse {
+                    artifact_kind: "plan".to_owned(),
+                    authority: "kernel".to_owned(),
+                    policy_epoch: policy.epoch(),
+                    resolved_target_ref,
+                    ok: false,
+                    issues: vec![BuilderValidationIssue {
+                        code: plan_validation_error_code(&err),
+                        severity: BuilderValidationSeverity::Error,
+                        message: "Kernel admission would reject this plan.".to_owned(),
+                        remediation: err.to_string(),
+                    }],
+                    next_steps: plan_builder_next_steps(),
+                },
+            }
+        },
+    ))
+}
+
+fn plan_builder_next_steps() -> Vec<String> {
+    vec![
+        "raxis plan validate plan.toml".to_owned(),
+        "raxis submit plan plan.toml --no-dry-run".to_owned(),
+        "raxis plan approve <initiative_id>".to_owned(),
+    ]
+}
+
+fn plan_builder_resolved_target_ref(toml_text: &str, policy: &PolicyBundle) -> Option<String> {
+    if policy.git_target_ref_locked() {
+        return Some(policy.git_default_target_ref().to_owned());
+    }
+    let parsed = toml_text.parse::<toml::Value>().ok()?;
+    parsed
+        .get("workspace")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("target_ref"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn plan_validation_error_code(err: &crate::initiatives::lifecycle::LifecycleError) -> String {
+    use crate::initiatives::lifecycle::LifecycleError;
+
+    match err {
+        LifecycleError::PlanInvalid { .. } => "PLAN_INVALID",
+        LifecycleError::PlanTaskIdAlreadyExists { .. } => "FAIL_PLAN_TASK_ID_ALREADY_EXISTS",
+        LifecycleError::PathAllowlistInvalidSyntax { .. } => "FAIL_PATH_ALLOWLIST_INVALID_SYNTAX",
+        LifecycleError::CrossCuttingArtifactInvalidSyntax { .. } => {
+            "FAIL_CROSS_CUTTING_ARTIFACT_INVALID_SYNTAX"
+        }
+        LifecycleError::PlanCloneStrategyInvalid { .. } => "PLAN_CLONE_STRATEGY",
+        LifecycleError::PlanSingleLaneInvalid { .. } => "PLAN_SINGLE_LANE",
+        LifecycleError::PlanLaneNotInPolicy { .. } => "PLAN_LANE_NOT_IN_POLICY",
+        LifecycleError::PlanDagInvalid { .. } => "PLAN_DAG_INVALID",
+        LifecycleError::PlanIntegrationMergeVerifierInvalid { .. } => {
+            "PLAN_INTEGRATION_MERGE_VERIFIER"
+        }
+        LifecycleError::PlanTaskCredentialsInvalid { .. } => "PLAN_TASK_CREDENTIAL",
+        LifecycleError::PlanTaskVmImageInvalid { .. } => "PLAN_VM_IMAGE",
+        LifecycleError::PlanTargetRefInvalid { .. } => "PLAN_TARGET_REF",
+        _ => "PLAN_KERNEL_ADMISSION",
+    }
+    .to_owned()
 }
 
 /// Convention: `<policy_path>.sig`. Mirrors the CLI default

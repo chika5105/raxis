@@ -156,6 +156,23 @@ pub enum OperatorRequest {
         task_id: String,
     },
 
+    // ── workspace merge conflict recovery ─────────────────────────────
+    /// Accept a manually-resolved `task_kind = "workspace_merge"` conflict.
+    /// The operator resolves the preserved Git worktree with normal Git
+    /// tooling, then submits the attempt through authenticated operator IPC so
+    /// RAXIS can stamp the output SHA, close the escalation, and audit the
+    /// resolution.
+    WorkspaceMergeSubmit {
+        attempt_id: String,
+    },
+    /// Reset a pending workspace-merge conflict attempt back to its recorded
+    /// base SHA and replay the predecessor merges. This discards manual edits
+    /// in the preserved conflict worktree and is the Git-like "start conflict
+    /// resolution over" operation.
+    WorkspaceMergeReset {
+        attempt_id: String,
+    },
+
     // ── escalation review ─────────────────────────────────────────────
     // Operator approves or denies a planner-submitted escalation.
     // Spec: kernel-store.md §2.5.5 "Escalation approval on the
@@ -733,6 +750,32 @@ mod tests {
             json!({
                 "op": "RetryTask",
                 "payload": { "task_id": "t1" }
+            }),
+        );
+    }
+
+    #[test]
+    fn workspace_merge_submit_wire_shape() {
+        round_trip(
+            &OperatorRequest::WorkspaceMergeSubmit {
+                attempt_id: "attempt-1".into(),
+            },
+            json!({
+                "op": "WorkspaceMergeSubmit",
+                "payload": { "attempt_id": "attempt-1" }
+            }),
+        );
+    }
+
+    #[test]
+    fn workspace_merge_reset_wire_shape() {
+        round_trip(
+            &OperatorRequest::WorkspaceMergeReset {
+                attempt_id: "attempt-1".into(),
+            },
+            json!({
+                "op": "WorkspaceMergeReset",
+                "payload": { "attempt_id": "attempt-1" }
             }),
         );
     }

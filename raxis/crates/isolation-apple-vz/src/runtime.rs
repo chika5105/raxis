@@ -227,6 +227,11 @@ pub struct AvfExit {
     pub reason: Option<String>,
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn avf_stop_should_not_be_issued_for_state(state: VmStateSnapshot) -> bool {
+    matches!(state, VmStateSnapshot::Stopped | VmStateSnapshot::Stopping)
+}
+
 // ---------------------------------------------------------------------------
 // Cross-platform stub — every method returns `Unsupported` on non-macOS.
 // ---------------------------------------------------------------------------
@@ -1023,8 +1028,7 @@ mod macos {
             let vm = match self.vm.take() {
                 Some(vm) => vm,
                 None => {
-                    self.config_obj = None;
-                    self.started = false;
+                    self.finish_stop_cleanup();
                     return Ok(AvfExit {
                         final_state: VmStateSnapshot::Stopped,
                         graceful: true,
@@ -1032,6 +1036,23 @@ mod macos {
                     });
                 }
             };
+
+            if let Some(initial_state) = self.try_vm_state_snapshot(&vm, Duration::from_millis(500))
+            {
+                if avf_stop_should_not_be_issued_for_state(initial_state) {
+                    let exit = if initial_state == VmStateSnapshot::Stopped {
+                        AvfExit {
+                            final_state: VmStateSnapshot::Stopped,
+                            graceful: true,
+                            reason: None,
+                        }
+                    } else {
+                        self.wait_for_already_stopping_vm(&vm, grace)
+                    };
+                    self.finish_stop_cleanup();
+                    return Ok(exit);
+                }
+            }
 
             let (tx, rx) = mpsc::sync_channel::<Result<(), RuntimeError>>(1);
             let vm_for_dispatch = vm.clone_handle();
@@ -1052,16 +1073,6 @@ mod macos {
                     vm_for_dispatch.raw().stopWithCompletionHandler(&block);
                 }
             });
-
-            self.started = false;
-            self.config_obj = None;
-            // Drop the configuration object so the AVF retains on
-            // the serial-port attachment (and therefore on the
-            // pipe's NSFileHandle write side) get released; that
-            // lets the console-pump thread observe EOF on its read
-            // side and exit. Without this drop the pump would
-            // hang until process exit.
-            // (The actual drop happens above by `self.config_obj = None`.)
 
             let result = match rx.recv_timeout(grace) {
                 Ok(Ok(())) => Ok(AvfExit {
@@ -1084,14 +1095,7 @@ mod macos {
                 }),
             };
 
-            // Best-effort bounded join of the console-pump thread.
-            // The thread exits naturally on pipe EOF (which arrives
-            // once AVF releases the write-side NSFileHandle on VM
-            // teardown). If EOF never arrives, detach instead of
-            // wedging the kernel on a forensic capture helper.
-            if let Some(pump) = self.console_pump.take() {
-                join_console_pump_best_effort(pump, CONSOLE_PUMP_JOIN_GRACE);
-            }
+            self.finish_stop_cleanup();
 
             result
         }
@@ -1463,6 +1467,19 @@ mod macos {
                     };
                 }
             };
+            self.vm_state_snapshot(vm, Duration::from_millis(500))
+        }
+
+        fn vm_state_snapshot(&self, vm: &VmHandle, timeout: Duration) -> VmStateSnapshot {
+            self.try_vm_state_snapshot(vm, timeout)
+                .unwrap_or(VmStateSnapshot::Stopped)
+        }
+
+        fn try_vm_state_snapshot(
+            &self,
+            vm: &VmHandle,
+            timeout: Duration,
+        ) -> Option<VmStateSnapshot> {
             let (tx, rx) = mpsc::sync_channel::<VZVirtualMachineState>(1);
             let vm_for_dispatch = vm.clone_handle();
             self.queue.exec_async(move || {
@@ -1470,10 +1487,60 @@ mod macos {
                 let s = unsafe { vm_for_dispatch.raw().state() };
                 let _ = tx.send(s);
             });
-            let raw = rx
-                .recv_timeout(Duration::from_millis(500))
-                .unwrap_or(VZVirtualMachineState::Stopped);
-            map_vz_state(raw)
+            rx.recv_timeout(timeout).ok().map(map_vz_state)
+        }
+
+        fn wait_for_already_stopping_vm(&self, vm: &VmHandle, grace: Duration) -> AvfExit {
+            let started_at = std::time::Instant::now();
+            loop {
+                if let Some(state) = self.try_vm_state_snapshot(vm, Duration::from_millis(100)) {
+                    if state == VmStateSnapshot::Stopped {
+                        return AvfExit {
+                            final_state: VmStateSnapshot::Stopped,
+                            graceful: true,
+                            reason: None,
+                        };
+                    }
+                    if started_at.elapsed() >= grace {
+                        return AvfExit {
+                            final_state: state,
+                            graceful: false,
+                            reason: Some(format!(
+                                "VM was already stopping and did not stop within {grace:?}"
+                            )),
+                        };
+                    }
+                }
+                if started_at.elapsed() >= grace {
+                    return AvfExit {
+                        final_state: VmStateSnapshot::Stopping,
+                        graceful: false,
+                        reason: Some(format!(
+                            "VM was already stopping and did not stop within {grace:?}"
+                        )),
+                    };
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+
+        fn finish_stop_cleanup(&mut self) {
+            self.started = false;
+            self.config_obj = None;
+            // Drop the configuration object so the AVF retains on
+            // the serial-port attachment (and therefore on the
+            // pipe's NSFileHandle write side) get released; that
+            // lets the console-pump thread observe EOF on its read
+            // side and exit. Without this drop the pump would
+            // hang until process exit.
+            //
+            // Best-effort bounded join of the console-pump thread.
+            // The thread exits naturally on pipe EOF. If EOF never
+            // arrives, detach instead of wedging the kernel on a
+            // forensic capture helper.
+            if let Some(pump) = self.console_pump.take() {
+                join_console_pump_best_effort(pump, CONSOLE_PUMP_JOIN_GRACE);
+            }
         }
 
         /// Translated config (test introspection).
@@ -1498,14 +1565,19 @@ mod macos {
             // dispatch a stop on the queue and forget the result —
             // Drop must not panic.
             if let Some(vm) = self.vm.take() {
-                let vm_for_dispatch = vm.clone_handle();
-                self.queue.exec_async(move || {
-                    // SAFETY: queue-confined; ignore completion.
-                    unsafe {
-                        let block = RcBlock::new(|_err: *mut NSError| {});
-                        vm_for_dispatch.raw().stopWithCompletionHandler(&block);
-                    }
-                });
+                let skip_stop = self
+                    .try_vm_state_snapshot(&vm, Duration::from_millis(100))
+                    .is_some_and(avf_stop_should_not_be_issued_for_state);
+                if !skip_stop {
+                    let vm_for_dispatch = vm.clone_handle();
+                    self.queue.exec_async(move || {
+                        // SAFETY: queue-confined; ignore completion.
+                        unsafe {
+                            let block = RcBlock::new(|_err: *mut NSError| {});
+                            vm_for_dispatch.raw().stopWithCompletionHandler(&block);
+                        }
+                    });
+                }
             }
             self.config_obj = None;
         }
@@ -1733,5 +1805,24 @@ mod tests {
         assert_eq!(exit.final_state, VmStateSnapshot::Stopped);
         assert!(exit.graceful);
         assert!(exit.reason.is_none());
+    }
+
+    #[test]
+    fn stopped_and_stopping_states_do_not_reissue_avf_stop() {
+        assert!(avf_stop_should_not_be_issued_for_state(
+            VmStateSnapshot::Stopped
+        ));
+        assert!(avf_stop_should_not_be_issued_for_state(
+            VmStateSnapshot::Stopping
+        ));
+        assert!(!avf_stop_should_not_be_issued_for_state(
+            VmStateSnapshot::Running
+        ));
+        assert!(!avf_stop_should_not_be_issued_for_state(
+            VmStateSnapshot::Starting
+        ));
+        assert!(!avf_stop_should_not_be_issued_for_state(
+            VmStateSnapshot::Errored
+        ));
     }
 }
