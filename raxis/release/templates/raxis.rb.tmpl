@@ -113,6 +113,34 @@ class Raxis < Formula
     raxis_homebrew_service_active_from_list?
   end
 
+  def raxis_launchctl_restart_loaded_service
+    return false unless OS.mac?
+
+    domain = "gui/#{Process.uid}"
+    label = "homebrew.mxcl.raxis"
+    target = "#{domain}/#{label}"
+    return false unless system "/bin/launchctl", "print", target,
+                               out: File::NULL, err: File::NULL
+
+    ohai "Restarting loaded RAXIS launchd service so it uses this upgrade"
+    system "/bin/launchctl", "kickstart", "-k", target
+  end
+
+  def raxis_systemd_restart_loaded_service
+    return false unless OS.linux?
+
+    %w[
+      homebrew.raxis.service
+      homebrew.mxcl.raxis.service
+    ].any? do |unit|
+      next false unless system "systemctl", "--user", "is-active", "--quiet", unit,
+                               out: File::NULL, err: File::NULL
+
+      ohai "Restarting loaded RAXIS systemd service so it uses this upgrade"
+      system "systemctl", "--user", "restart", unit
+    end
+  end
+
   def raxis_restart_homebrew_service_after_upgrade
     return unless raxis_homebrew_service_managed?
 
@@ -122,8 +150,11 @@ class Raxis < Formula
       return
     end
 
-    ohai "Restarting managed RAXIS Homebrew service so it uses this upgrade"
-    system (HOMEBREW_PREFIX/"bin/brew").to_s, "services", "restart", "raxis"
+    return if raxis_launchctl_restart_loaded_service
+    return if raxis_systemd_restart_loaded_service
+
+    opoo "RAXIS Homebrew service is managed, but no loaded launchd/systemd unit was found."
+    opoo "Run `brew services restart raxis` when you want the service to use this upgrade."
   end
 
   service do
