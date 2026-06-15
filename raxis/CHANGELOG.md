@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.1 - 2026-06-15
+
+RAXIS 0.3.1 is a patch release for dashboard correctness and Git
+review performance.
+
+- Fixed initiative detail rendering for historical sealed plans that
+  still contain the pre-0.3 task identifier field.
+- Made repository and worktree detail pages load quickly on larger repos
+  by avoiding eager Git status, branch, and diff probes on the initial
+  header request.
+- Kept exact Git review data available through the explicit log, diff,
+  tree, and file endpoints.
+- Updated the dashboard kernel regression test to pin the lazy worktree
+  detail contract used by the optimized UI.
+
 ## 0.3.0 - 2026-06-13
 
 RAXIS 0.3.0 is a breaking release focused on making governed agent

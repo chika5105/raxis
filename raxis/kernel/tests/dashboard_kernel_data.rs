@@ -536,10 +536,12 @@ async fn worktree_endpoints_surface_real_git_state() {
         .cloned()
         .expect("seeded allowed root must be the reviewable main worktree");
 
-    // 2) Detail returns the head SHA + branch + clean status.
+    // 2) Detail stays cheap for large repositories. Exact Git facts are loaded
+    //    by the explicit Log/Diff endpoints below, not by the initial detail
+    //    header route.
     let detail = data.get_worktree(&main.name).expect("get_worktree");
-    assert_eq!(detail.head_sha.as_deref(), Some(head_sha.as_str()));
-    assert_eq!(detail.branch.as_deref(), Some("main"));
+    assert_eq!(detail.head_sha, None);
+    assert_eq!(detail.branch, None);
     assert!(
         detail.status_lines.is_empty(),
         "fresh commit must report clean status; got {:?}",

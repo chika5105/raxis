@@ -10,7 +10,7 @@
 # bound to the kernel signing key (system-requirements.md §11.2).
 
 role              = "Reviewer"
-kernel_version    = "0.3.0"
+kernel_version    = "0.3.1"
 
 # Reproducibility pin. Bumped once per kernel release; carried in the
 # `build_env` of the produced manifest.
