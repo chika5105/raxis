@@ -6746,23 +6746,26 @@ async fn handle_activate_sub_task(
                 let task_id_for_eval = task_id_owned.clone();
                 let row_join = tokio::task::spawn_blocking(move || {
                     let conn = store_for_eval.lock_sync();
-                    // The Reviewer's `predecessors` list points
-                    // at the Executor task; the Executor's
-                    // `tasks.evaluation_sha` was stamped at its
-                    // CompleteTask. We grab any predecessor with
-                    // a non-NULL evaluation_sha — the plan
-                    // validator guarantees Reviewers have
-                    // exactly one predecessor.
+                    // The Reviewer's `predecessors` list points at
+                    // the artifact-producing task; normal Executor
+                    // predecessors carry their diff base on the
+                    // worker session row, while kernel-owned
+                    // workspace_merge predecessors have no session
+                    // and persist the diff base directly on
+                    // `tasks.base_sha`. We accept either source but
+                    // still require both the evaluation SHA and a
+                    // concrete diff base before provisioning the
+                    // read-only reviewer worktree.
                     let dag = raxis_store::Table::TaskDagEdges.as_str();
                     conn.query_row(
                         &format!(
-                            "SELECT t.evaluation_sha, s.base_sha
+                            "SELECT t.evaluation_sha, COALESCE(s.base_sha, t.base_sha)
                                FROM {tasks} AS t
                                JOIN {dag} AS d ON d.predecessor_task_id = t.task_id
                                LEFT JOIN {sessions} AS s ON s.session_id = t.session_id
                               WHERE d.successor_task_id = ?1
                                 AND t.evaluation_sha IS NOT NULL
-                                AND s.base_sha IS NOT NULL
+                                AND COALESCE(s.base_sha, t.base_sha) IS NOT NULL
                               LIMIT 1",
                             tasks = TASKS,
                             dag = dag,
@@ -6793,9 +6796,8 @@ async fn handle_activate_sub_task(
                         eprintln!(
                             "{{\"level\":\"error\",\"event\":\"ActivateSubTaskReviewerNoEvalSha\",\
                              \"task_id\":\"{}\",\"diagnostic\":\"reviewer activation but no \
-                             predecessor task carries evaluation_sha plus session base_sha — \
-                             Executor's commit_task_completion and worktree provisioning must \
-                             run first\"}}",
+                             predecessor task carries evaluation_sha plus a session/task base_sha — \
+                             Executor CompleteTask or workspace_merge completion must run first\"}}",
                             task_id_owned,
                         );
                         cleanup_unactivated_session_after_activation_failure(

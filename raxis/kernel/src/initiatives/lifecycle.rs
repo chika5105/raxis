@@ -2264,6 +2264,10 @@ pub fn abort_task(
 
 /// Retry a Failed task — transition back to Admitted.
 /// Uses `task_transitions::transition_task` to enforce FSM rules (INV-INIT-04).
+/// Also checks the parent initiative state before mutating the task row:
+/// terminal initiative history is immutable, so `Failed`, `Completed`, and
+/// `Aborted` initiatives must be continued by a new signed initiative rather
+/// than by re-admitting an old task in place.
 /// `audit` is optional for backward compatibility with legacy
 /// callers that did not have an `AuditSink` in scope; when supplied,
 /// the post-commit `AuditEventKind::TaskStateChanged` paired-write
@@ -2282,11 +2286,16 @@ pub fn retry_task(
     };
 
     let conn = store.lock_sync();
-    let state: String = conn
+    let (state, initiative_state): (String, String) = conn
         .query_row(
-            &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
+            &format!(
+                "SELECT t.state, i.state
+                   FROM {TASKS} t
+                   JOIN {INITIATIVES} i ON i.initiative_id = t.initiative_id
+                  WHERE t.task_id = ?1"
+            ),
             rusqlite::params![task_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => LifecycleError::TaskNotFound {
@@ -2299,6 +2308,24 @@ pub fn retry_task(
         return Err(LifecycleError::TaskNotFailed {
             current_state: state,
         });
+    }
+
+    match initiative_state.as_str() {
+        s if s == InitiativeState::Executing.as_sql_str()
+            || s == InitiativeState::Blocked.as_sql_str() => {}
+        s if s == InitiativeState::Completed.as_sql_str()
+            || s == InitiativeState::Failed.as_sql_str()
+            || s == InitiativeState::Aborted.as_sql_str() =>
+        {
+            return Err(LifecycleError::InitiativeTerminal {
+                current_state: initiative_state,
+            });
+        }
+        _ => {
+            return Err(LifecycleError::TaskNotRetryable {
+                current_state: format!("parent initiative is {initiative_state}"),
+            });
+        }
     }
     drop(conn); // release lock before calling transition_task which re-acquires
 
@@ -8645,6 +8672,103 @@ max_concurrent_admissions   = 7
             current_state: "Running".into(),
         };
         assert!(e.to_string().contains("Running"));
+    }
+
+    #[test]
+    fn retry_task_allows_failed_task_in_executing_initiative() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"[[tasks]]
+        task_name = "t1"
+        path_allowlist = ["src/"]
+        "#;
+        let (init_id, pk) = seed_draft_initiative(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let live_registry = PlanRegistry::new();
+        approve_plan_for_test(&init_id, "op", None, &pk, 1, &store, &audit, &live_registry)
+            .unwrap();
+        let task_id = task_id_by_name(&store, &init_id, "t1");
+
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!("UPDATE {TASKS} SET state=?1 WHERE task_id=?2"),
+                rusqlite::params![TaskState::Failed.as_sql_str(), &task_id],
+            )
+            .unwrap();
+        }
+
+        retry_task(&task_id, &store, None).unwrap();
+
+        let state: String = store
+            .lock_sync()
+            .query_row(
+                &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
+                rusqlite::params![&task_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, TaskState::Admitted.as_sql_str());
+    }
+
+    #[test]
+    fn retry_task_rejects_terminal_parent_initiative() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"[[tasks]]
+        task_name = "t1"
+        path_allowlist = ["src/"]
+        "#;
+        let (init_id, pk) = seed_draft_initiative(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let live_registry = PlanRegistry::new();
+        approve_plan_for_test(&init_id, "op", None, &pk, 1, &store, &audit, &live_registry)
+            .unwrap();
+        let task_id = task_id_by_name(&store, &init_id, "t1");
+
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!("UPDATE {TASKS} SET state=?1 WHERE task_id=?2"),
+                rusqlite::params![TaskState::Failed.as_sql_str(), &task_id],
+            )
+            .unwrap();
+            conn.execute(
+                &format!(
+                    "UPDATE {INITIATIVES}
+                        SET state=?1, completed_at=?2
+                      WHERE initiative_id=?3"
+                ),
+                rusqlite::params![
+                    InitiativeState::Failed.as_sql_str(),
+                    unix_now_secs(),
+                    &init_id
+                ],
+            )
+            .unwrap();
+        }
+
+        let err = retry_task(&task_id, &store, None).unwrap_err();
+        match err {
+            LifecycleError::InitiativeTerminal { current_state } => {
+                assert_eq!(current_state, InitiativeState::Failed.as_sql_str());
+            }
+            other => panic!("expected InitiativeTerminal, got {other:?}"),
+        }
+
+        let state: String = store
+            .lock_sync()
+            .query_row(
+                &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
+                rusqlite::params![&task_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            TaskState::Failed.as_sql_str(),
+            "retry rejection must not mutate the old task row"
+        );
     }
 
     // ───────────────────────────────────────────────────────────────────

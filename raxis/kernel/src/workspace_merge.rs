@@ -625,7 +625,6 @@ fn complete_workspace_merge_attempt_for_operator(
                 SET evaluation_sha = ?1,
                     base_sha = ?2,
                     session_id = NULL,
-                    failure_reason = NULL,
                     block_reason = NULL
               WHERE task_id = ?3"
         ),
