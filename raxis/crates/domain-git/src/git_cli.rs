@@ -1,5 +1,5 @@
-//! `git_cli` — minimal git CLI subprocess wrappers for the V2 SE
-//! `DomainAdapter::verify_state_advance` impl.
+//! `git_cli` — minimal git CLI subprocess wrappers for V2 SE
+//! state checks.
 //!
 //! This module is intentionally a near-verbatim subset of what
 //! `kernel/src/vcs/diff.rs` does — limited to the three operations
@@ -9,11 +9,10 @@
 //! 2. `topology_check(base, head, worktree)` — `git rev-list --min-parents=2 --count`
 //! 3. `compute(base, head, worktree)` — `git diff --name-status --no-renames -z`
 //!
-//! The kernel's `vcs::diff` will be deleted in a follow-up cleanup
-//! commit once every kernel callsite has migrated to
-//! `ctx.domain.verify_state_advance(...)`. Until then this module
-//! and the kernel's still co-exist; algorithmic parity is asserted
-//! by the conformance tests at the bottom of this file.
+//! The kernel's `vcs::diff` still exists for legacy callsites; this
+//! module keeps the concrete git adapter independent of the kernel
+//! crate. Algorithmic parity is asserted by the conformance tests at
+//! the bottom of this file.
 //!
 //! Why a vendored copy and not a direct call into the kernel: the
 //! `raxis-domain-git` crate must not depend on `raxis-kernel` (the

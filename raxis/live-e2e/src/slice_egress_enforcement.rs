@@ -64,13 +64,21 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
     )
     .map_err(|e| anyhow!("parse_gateway_env: {e:?}"))?;
     let backend: Arc<dyn Backend> = Arc::new(raxis_gateway::HttpBackend::new());
-    let gateway_task =
+    let mut gateway_task =
         tokio::spawn(async move { run_gateway_with_backend(env_parsed, backend).await });
 
-    let (mut stream, _addr) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
-        .await
-        .map_err(|_| anyhow!("gateway never connected within 5s"))?
-        .map_err(|e| anyhow!("accept: {e}"))?;
+    let (mut stream, _addr) = tokio::select! {
+        accepted = tokio::time::timeout(Duration::from_secs(15), listener.accept()) => {
+            accepted
+                .map_err(|_| anyhow!("gateway never connected within 15s"))?
+                .map_err(|e| anyhow!("accept: {e}"))?
+        }
+        joined = &mut gateway_task => {
+            let result = joined.map_err(|e| anyhow!("gateway task join failed: {e}"))?;
+            result.map_err(|e| anyhow!("gateway exited before connecting: {e}"))?;
+            return Err(anyhow!("gateway exited before connecting"));
+        }
+    };
 
     // Drain handshake.
     let ready = tokio::time::timeout(

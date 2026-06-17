@@ -29,9 +29,7 @@ use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_dashboard::data::{
     BuilderValidationIssue, BuilderValidationResponse, BuilderValidationSeverity,
 };
-use raxis_dashboard_kernel::{
-    AdvanceError, AdvanceResult, ClosurePlanValidator, PlanValidator, PolicyAdvancer,
-};
+use raxis_dashboard_kernel::{AdvanceError, AdvanceResult, PlanValidator, PolicyAdvancer};
 use raxis_policy::PolicyBundle;
 use raxis_store::Store;
 
@@ -198,55 +196,53 @@ impl PolicyAdvancer for KernelPolicyAdvancer {
 /// with the same lifecycle admission checks used by `approve_plan`
 /// without creating a `raxis-dashboard-kernel -> raxis-kernel` crate
 /// cycle.
-pub fn kernel_plan_validator(store: Arc<Store>) -> Arc<dyn PlanValidator> {
-    Arc::new(ClosurePlanValidator::new(
-        move |toml: &str, policy: &PolicyBundle| {
-            let resolved_target_ref = plan_builder_resolved_target_ref(toml, policy);
-            let environments = policy.environments().clone();
-            let permitted_credentials = policy.permitted_credentials().to_vec();
-            let vm_images = policy.vm_images().to_vec();
-            let default_executor_image = policy.default_executor_image().cloned();
-            let elastic = policy.elastic().clone();
-            let lanes = policy.lanes().to_vec();
+pub fn kernel_plan_validator(store: Arc<Store>) -> Arc<PlanValidator> {
+    Arc::new(move |toml: &str, policy: &PolicyBundle| {
+        let resolved_target_ref = plan_builder_resolved_target_ref(toml, policy);
+        let environments = policy.environments().clone();
+        let permitted_credentials = policy.permitted_credentials().to_vec();
+        let vm_images = policy.vm_images().to_vec();
+        let default_executor_image = policy.default_executor_image().cloned();
+        let elastic = policy.elastic().clone();
+        let lanes = policy.lanes().to_vec();
 
-            match crate::initiatives::lifecycle::validate_plan_toml_against_policy(
-                toml,
-                policy.git_default_target_ref(),
-                policy.git_target_ref_locked(),
-                &environments,
-                &permitted_credentials,
-                &vm_images,
-                default_executor_image.as_ref(),
-                &elastic,
-                &lanes,
-                &store,
-            ) {
-                Ok(()) => BuilderValidationResponse {
-                    artifact_kind: "plan".to_owned(),
-                    authority: "kernel".to_owned(),
-                    policy_epoch: policy.epoch(),
-                    resolved_target_ref,
-                    ok: true,
-                    issues: Vec::new(),
-                    next_steps: plan_builder_next_steps(),
-                },
-                Err(err) => BuilderValidationResponse {
-                    artifact_kind: "plan".to_owned(),
-                    authority: "kernel".to_owned(),
-                    policy_epoch: policy.epoch(),
-                    resolved_target_ref,
-                    ok: false,
-                    issues: vec![BuilderValidationIssue {
-                        code: plan_validation_error_code(&err),
-                        severity: BuilderValidationSeverity::Error,
-                        message: "Kernel admission would reject this plan.".to_owned(),
-                        remediation: err.to_string(),
-                    }],
-                    next_steps: plan_builder_next_steps(),
-                },
-            }
-        },
-    ))
+        match crate::initiatives::lifecycle::validate_plan_toml_against_policy(
+            toml,
+            policy.git_default_target_ref(),
+            policy.git_target_ref_locked(),
+            &environments,
+            &permitted_credentials,
+            &vm_images,
+            default_executor_image.as_ref(),
+            &elastic,
+            &lanes,
+            &store,
+        ) {
+            Ok(()) => BuilderValidationResponse {
+                artifact_kind: "plan".to_owned(),
+                authority: "kernel".to_owned(),
+                policy_epoch: policy.epoch(),
+                resolved_target_ref,
+                ok: true,
+                issues: Vec::new(),
+                next_steps: plan_builder_next_steps(),
+            },
+            Err(err) => BuilderValidationResponse {
+                artifact_kind: "plan".to_owned(),
+                authority: "kernel".to_owned(),
+                policy_epoch: policy.epoch(),
+                resolved_target_ref,
+                ok: false,
+                issues: vec![BuilderValidationIssue {
+                    code: plan_validation_error_code(&err),
+                    severity: BuilderValidationSeverity::Error,
+                    message: "Kernel admission would reject this plan.".to_owned(),
+                    remediation: err.to_string(),
+                }],
+                next_steps: plan_builder_next_steps(),
+            },
+        }
+    })
 }
 
 fn plan_builder_next_steps() -> Vec<String> {

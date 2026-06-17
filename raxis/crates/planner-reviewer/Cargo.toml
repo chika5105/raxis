@@ -13,5 +13,5 @@ path = "src/main.rs"
 
 [dependencies]
 # Same `vsock-transport` rationale as `planner-orchestrator/Cargo.toml`.
-raxis-planner-core = { path = "../planner-core", features = ["reviewer", "vsock-transport"] }
+raxis-planner-core = { path = "../planner-core", features = ["vsock-transport"] }
 tokio              = { workspace = true }

@@ -15,14 +15,12 @@ license.workspace = true
 #
 # Lives in its own crate so kernel integration tests + future
 # operator tooling can drive the same provisioning logic without a
-# kernel boot. Pulls in only `gix`, `raxis-types`, `sha2`, and
-# `thiserror`.
+# kernel boot.
 
 [dependencies]
 gix              = { workspace = true }
 glob             = { workspace = true }
 raxis-types      = { workspace = true }
-sha2             = { workspace = true }
 thiserror        = { workspace = true }
 # iter61 — `INV-OBSERVABILITY-DATAPLANE-LATENCY-04`. The provisioner
 # times its four stages (clone / fetch / checkout / verify) and emits

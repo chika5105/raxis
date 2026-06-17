@@ -29,6 +29,7 @@ members = [
     "crates/credential-proxy-gcp",
     "crates/credential-proxy-azure",
     "crates/credential-proxy-cloud-shared",
+    "crates/credential-proxy-sql-shared",
     "crates/credential-proxy-mysql",
     "crates/credential-proxy-mongodb",
     "crates/credential-proxy-mssql",
@@ -100,7 +101,7 @@ members = [
 ]
 
 [workspace.package]
-version     = "0.3.1"
+version     = "0.3.2"
 edition     = "2021"
 license     = "SSPL-1.0"
 authors     = ["RAXIS authors"]
@@ -174,11 +175,8 @@ toml        = "0.8"
 glob        = "0.3"
 anyhow      = "1"
 thiserror   = "1"
-# `async-trait` is required for `DomainAdapter` (the trait has async
-# methods; `async fn` in traits became stable in 1.75 but bringing
-# back the dyn-trait support requires `async-trait` until the
-# stabilisation of "dyn AsyncFn" lands). Pinned to the long-stable
-# 0.1 line.
+# Async trait-object helpers used by planner-core provider, tool, and
+# transport traits.
 async-trait = "0.1"
 # Wallclock timestamps in audit-shaped types (DomainCommitReceipt,
 # audit retention deadlines). `chrono` is pinned to the 0.4 line which
@@ -266,6 +264,7 @@ raxis-credentials       = { path = "crates/raxis-credentials" }
 raxis-credentials-file  = { path = "crates/raxis-credentials-file" }
 raxis-plan-credentials  = { path = "crates/plan-credentials" }
 raxis-credential-proxy-cloud-shared = { path = "crates/credential-proxy-cloud-shared" }
+raxis-credential-proxy-sql-shared = { path = "crates/credential-proxy-sql-shared" }
 raxis-tproxy-protocol   = { path = "crates/tproxy-protocol" }
 raxis-vsock-loopback    = { path = "crates/vsock-loopback" }
 raxis-egress-admission  = { path = "crates/egress-admission" }

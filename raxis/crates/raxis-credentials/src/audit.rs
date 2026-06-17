@@ -18,9 +18,8 @@
 //!      thread it through. The decorator owns the sink once.
 //!   2. **The decorator is independent of the inner backend's
 //!      synchronisation.** The inner impl's `resolve` / `rotate`
-//!      mechanics (file locking, Vault HTTP calls, HSM PKCS#11)
-//!      can stay focused on storage; the decorator only reads the
-//!      result and emits one event.
+//!      mechanics can stay focused on storage; the decorator only
+//!      reads the result and emits one event.
 //!
 //! # Audit-emission failure mode
 //!
@@ -36,7 +35,7 @@ use raxis_audit_tools::AuditSink;
 
 use crate::{
     emit_credential_accessed, emit_credential_rotated, ConsumerIdentity, CredentialBackend,
-    CredentialError, CredentialName, CredentialValue, Lease, OperatorId,
+    CredentialError, CredentialName, CredentialValue, OperatorId,
 };
 
 /// A decorator over `Arc<dyn CredentialBackend>` that emits the
@@ -105,10 +104,6 @@ impl CredentialBackend for AuditingBackend {
 
     fn exists(&self, name: &CredentialName) -> bool {
         self.inner.exists(name)
-    }
-
-    fn lease(&self, name: &CredentialName) -> Lease {
-        self.inner.lease(name)
     }
 
     fn backend_kind(&self) -> &'static str {

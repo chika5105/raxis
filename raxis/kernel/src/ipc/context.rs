@@ -16,8 +16,7 @@ use raxis_artifact_store::ArtifactStore;
 use raxis_audit_tools::AuditSink;
 use raxis_credential_proxy_manager::CredentialProxyManager;
 use raxis_credentials::CredentialBackend;
-use raxis_domain::DomainAdapter;
-use raxis_domain_git::{SeIntentKind, SeTerminalArtefact};
+use raxis_domain_git::GitAdapter;
 use raxis_image_cache::{ImageResolver, PrePopulatedResolver};
 use raxis_isolation::Backend as IsolationBackend;
 use raxis_observability::ObservabilityHub;
@@ -237,28 +236,14 @@ pub struct HandlerContext {
     /// trait.
     pub executor_spawn: Arc<ExecutorSpawnContext>,
 
-    /// V2 domain adapter selected at boot.
-    /// `extensibility-traits.md §2` — the single seam between the
-    /// domain-agnostic kernel core and the domain-specific state
-    /// primitives that vary per problem domain. The kernel boot
-    /// path constructs `Arc::new(GitAdapter::new(...))` (the
-    /// SE-domain reference impl) and stores it here. Future trading
-    /// / healthcare / robotics adapters plug into the same field
-    /// behind a `cfg`-gated boot-time selector.
-    /// **Why a concrete `IntentKind = SeIntentKind` binding**: the
-    /// kernel's IPC handlers compile against a single domain at a
-    /// time — there is no run-time dispatch over multiple
-    /// `IntentKind` enums. The trait's associated types are
-    /// monomorphised at the kernel binary boundary; per-domain
-    /// kernels are produced by swapping the `cfg` flag at build.
-    /// V2 ships only the SE binding.
+    /// V2 git-domain adapter selected at boot.
+    /// The kernel ships one domain today: software engineering over git.
     /// **Why non-Option**: the kernel cannot admit any intent
     /// without a domain adapter to compute the touched-set against
     /// (`R-9` admission gate). A degraded boot without a domain
     /// adapter would refuse every spawn, which is identical to
     /// failing closed at boot — so we fail closed at boot instead.
-    pub domain:
-        Arc<dyn DomainAdapter<IntentKind = SeIntentKind, TerminalArtefact = SeTerminalArtefact>>,
+    pub domain: Arc<GitAdapter>,
 
     /// V2 OCI image resolver — turns a policy- / plan-pinned
     /// `oci_digest` into the on-disk path the isolation backend
@@ -462,9 +447,7 @@ impl HandlerContext {
         isolation: Arc<dyn IsolationBackend>,
         orchestrator_spawn: Arc<dyn OrchestratorSpawn>,
         executor_spawn: Arc<ExecutorSpawnContext>,
-        domain: Arc<
-            dyn DomainAdapter<IntentKind = SeIntentKind, TerminalArtefact = SeTerminalArtefact>,
-        >,
+        domain: Arc<GitAdapter>,
     ) -> Self {
         let witness_dir = data_dir.join("witness");
 
@@ -792,16 +775,14 @@ pub fn build_default_test_credentials(
     Arc::new(AuditingBackend::new(inner, audit))
 }
 
-/// Build a default `GitAdapter`-backed [`DomainAdapter`] for in-process
-/// kernel unit tests. The adapter operates against three
+/// Build a default `GitAdapter` for in-process kernel unit tests.
+/// The adapter operates against three
 /// kernel-test-temporary directories under `data_dir`. Every adapter
 /// method is a no-op or a deterministic pure computation; tests that
 /// exercise the actual `commit_merge_to_main` ceremony override
 /// these paths to point at a fixture-built repo.
 #[cfg(any(debug_assertions, test))]
-pub fn build_default_test_domain(
-    data_dir: &std::path::Path,
-) -> Arc<dyn DomainAdapter<IntentKind = SeIntentKind, TerminalArtefact = SeTerminalArtefact>> {
+pub fn build_default_test_domain(data_dir: &std::path::Path) -> Arc<GitAdapter> {
     Arc::new(raxis_domain_git::GitAdapter::new(
         data_dir.join("repositories").join("main"),
         data_dir.join("worktrees"),

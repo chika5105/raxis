@@ -25,8 +25,7 @@
 //!    a. Structured stderr (`KernelPanicCaught` JSON line) — the
 //!    durable signal that the log aggregator + supervisor see.
 //!    b. Best-effort audit row via the captured audit sink.
-//!    c. Best-effort Critical operator notification.
-//!    d. Chains to the previously installed panic hook (which
+//!    c. Chains to the previously installed panic hook (which
 //!    ultimately reaches the Rust default hook so the standard
 //!    panic banner prints + the unwind continues).
 //!
@@ -42,8 +41,8 @@
 //! recovery layers MUST NOT weaken any of the kernel's safety
 //! invariants. The hook's contributions:
 //!
-//! * The eprintln IS the durable signal. Audit + notification are
-//!   best-effort decorations; their failure does NOT alter the
+//! * The eprintln IS the durable signal. Audit is a best-effort
+//!   decoration; its failure does NOT alter the
 //!   panic outcome (Rust unwind continues regardless).
 //!
 //! * The hook NEVER catches a panic — it only enriches it. A
@@ -90,15 +89,7 @@ const PANIC_BACKTRACE_TRUNCATE_BYTES: usize = 16 * 1024;
 ///   3. The Rust default hook (printed by the chain via the
 ///      previous hook delegating).
 ///
-/// Notification sink is optional — if `notification_sink` is
-/// `None`, the Critical-priority dashboard alert is skipped (the
-/// audit row + eprintln are still emitted). Callers SHOULD pass
-/// `Some(...)` once the dashboard sink is wired up; passing `None`
-/// is the early-boot path before the dashboard is online.
-pub fn install_kernel_panic_hook(
-    audit_sink: Arc<dyn AuditSink>,
-    notification_sink: Option<Arc<dyn NotificationSinkApi>>,
-) {
+pub fn install_kernel_panic_hook(audit_sink: Arc<dyn AuditSink>) {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // Recursive-panic guard. If anything below panics, we'd
@@ -108,7 +99,7 @@ pub fn install_kernel_panic_hook(
         // previous hook always runs even if our enrichment
         // exploded.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            emit_panic_event(info, audit_sink.as_ref(), notification_sink.as_deref());
+            emit_panic_event(info, audit_sink.as_ref());
         }));
         // Always chain to the previous hook so the existing
         // TaskLlmCapture flush + the Rust default panic banner
@@ -118,28 +109,11 @@ pub fn install_kernel_panic_hook(
     }));
 }
 
-/// Trait used by [`install_kernel_panic_hook`] to emit Critical
-/// operator notifications without taking a hard dependency on the
-/// dashboard-kernel crate's concrete sink type. Implementors:
-/// `raxis_dashboard_kernel::NotificationSink` (production) and the
-/// fake in `kernel/tests/panic_hook.rs` (regression tests).
-pub trait NotificationSinkApi: Send + Sync {
-    /// Emit a Critical-priority operator notification with the
-    /// given title + body + location identifier. Best-effort —
-    /// implementors swallow errors; the panic-hook caller does
-    /// not check the return.
-    fn emit_critical(&self, title: &str, body: &str, location: &str);
-}
-
 /// Inner emit path — the catch_unwind-guarded body of the hook
 /// closure. Pure-sync; no `await`s; no allocations larger than
 /// [`PANIC_PAYLOAD_TRUNCATE_BYTES`] +
 /// [`PANIC_BACKTRACE_TRUNCATE_BYTES`].
-fn emit_panic_event(
-    info: &std::panic::PanicHookInfo<'_>,
-    audit_sink: &dyn AuditSink,
-    notification_sink: Option<&dyn NotificationSinkApi>,
-) {
+fn emit_panic_event(info: &std::panic::PanicHookInfo<'_>, audit_sink: &dyn AuditSink) {
     let location_str = info
         .location()
         .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
@@ -173,15 +147,6 @@ fn emit_panic_event(
         backtrace: backtrace_truncated,
     };
     let _ = audit_sink.emit(event, None, None, None);
-
-    // Step 3: best-effort Critical operator notification.
-    if let Some(sink) = notification_sink {
-        sink.emit_critical(
-            "Kernel panic caught",
-            &format!("{}: {}", category.as_str(), payload_truncated),
-            &location_str,
-        );
-    }
 }
 
 /// Inspect the panic payload for a [`FatalKernelPanic`] sentinel

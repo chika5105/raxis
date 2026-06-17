@@ -71,7 +71,6 @@ use std::ffi::OsString;
 use std::fmt;
 
 pub mod bedrock_client;
-pub mod circuit;
 pub mod cmdline_env;
 pub mod custom_tools;
 pub mod dispatch;
@@ -93,10 +92,6 @@ pub mod transport;
 pub mod vm_capabilities;
 
 pub use bedrock_client::{BedrockClient, ANTHROPIC_VERSION_BEDROCK};
-pub use circuit::{
-    circuit_state_wire_str, CircuitBreakerModelClient, CircuitConfig, CircuitRow, CircuitSnapshot,
-    CircuitState, CircuitStore, InMemoryCircuitStore,
-};
 pub use cmdline_env::{
     apply_envb64_payload, hydrate_from_path, hydrate_from_proc_cmdline, HydrationOutcome,
     CMDLINE_ENV_TOKEN,

@@ -1,0 +1,9 @@
+[package]
+name        = "raxis-credential-proxy-sql-shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared SQL restriction decision types for database credential proxies."
+
+[lib]
+path = "src/lib.rs"

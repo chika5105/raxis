@@ -1,81 +1,21 @@
-//! crates/raxis-domain — the `DomainAdapter` trait crate.
+//! crates/raxis-domain — shared domain data types.
 //!
 //! Normative reference: `specs/v2/extensibility-traits.md §2`.
 //!
-//! The single seam between RAXIS's domain-agnostic Kernel core and the
-//! implementation-specific state primitives that vary per problem
-//! domain (software engineering / git, trading / FIX, healthcare /
-//! FHIR, robotics / motion-plans, …). The kernel binary is compiled
-//! against this trait; concrete impls live in their own crates and
-//! are wired at process boot via `Arc<dyn DomainAdapter<...>>`.
-//!
-//! # Wiring overview
-//!
-//! ```text
-//!   ┌────────── kernel/src/main.rs ──────────┐
-//!   │ let cred_backend = build_credentials() │
-//!   │ let isolation    = build_isolation()   │
-//!   │ let domain: Arc<dyn DomainAdapter> =   │
-//!   │     Arc::new(GitAdapter::new(...));    │
-//!   │ HandlerContext::new(..., domain, ...)  │
-//!   └──────────────────────────────────────────┘
-//!   The kernel never imports `raxis-domain-git` directly; the
-//!   concrete adapter is the single boot-time choice.
-//! ```
+//! Shared context, result, and error shapes used by the git domain
+//! implementation and the kernel.
 //!
 //! # Cross-references
 //!
-//! * `extensibility-traits.md §2.7` — conformance contract every
-//!   `DomainAdapter` impl must satisfy.
-//! * `extensibility-traits.md §2.8` — phased migration plan
-//!   (Phase A: trait crate; Phase B: `GitAdapter` impl; Phase C+:
-//!   kernel-side call-site migration).
 //! * `paradigm.md §2`, `R-9`, `R-11` — paradigm-layer requirements
-//!   the trait surface preserves.
+//!   these data shapes preserve.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 use std::path::PathBuf;
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-
-// ---------------------------------------------------------------------------
-// CredentialProxyHandle — the per-session reader-only credential view
-// the kernel hands the `commit` method.
-// ---------------------------------------------------------------------------
-
-/// Per-session, scoped read-only handle into the credential proxy.
-/// Concrete impls live in the credential-proxy crate hierarchy
-/// (`raxis-credentials*`). `DomainAdapter::commit` is the only
-/// touchpoint that the trait exposes for credential mediation —
-/// every other stage is by construction credential-free.
-///
-/// **Why a separate trait, not a direct re-export of
-/// `CredentialBackend`.** A `CredentialBackend` is the *backend* (file,
-/// Vault, AWS Secrets Manager, …); a `CredentialProxyHandle` is a
-/// *per-session lease* over that backend that has already been
-/// scoped, rate-limited, and audit-tagged by the kernel. The
-/// distinction matters for `INV-VM-CAP-04`: an adapter that touched
-/// `CredentialBackend` directly would bypass the lease's audit
-/// emission. Concrete impls live in the kernel; the trait shape is
-/// here so adapters can take it as a parameter without depending on
-/// kernel internals.
-pub trait CredentialProxyHandle: Send + Sync {
-    /// Resolve a leased credential by its policy-declared name. The
-    /// returned bytes are kept in `secrecy::SecretBox` storage by the
-    /// kernel-side wrapper; the `Vec<u8>` returned here is a
-    /// short-lived copy the adapter is responsible for zeroing once
-    /// it has injected the credential into the outbound wire frame
-    /// (e.g., FIX login message, HTTP `Authorization` header).
-    fn resolve_leased(&self, credential_name: &str) -> Result<Vec<u8>, DomainError>;
-
-    /// Stable short-string identifying the underlying backend
-    /// implementation. Used in audit emissions and `raxis doctor`
-    /// output; carries no authority.
-    fn backend_kind(&self) -> &'static str;
-}
 
 // ---------------------------------------------------------------------------
 // Read-only context views the kernel constructs and hands to the
@@ -301,7 +241,7 @@ pub enum ResourceOp {
 // DomainError
 // ---------------------------------------------------------------------------
 
-/// Errors any `DomainAdapter` method may return.
+/// Errors surfaced by domain-specific state helpers.
 #[derive(Debug, thiserror::Error)]
 pub enum DomainError {
     /// The named resource was not found in the canonical state.
@@ -342,209 +282,6 @@ pub enum DomainError {
 }
 
 // ---------------------------------------------------------------------------
-// DomainAdapter — the trait
-// ---------------------------------------------------------------------------
-
-/// The boundary between the domain-agnostic kernel and
-/// domain-specific state management. Every method is invoked *only*
-/// from inside the kernel after the relevant `R-*` admission gate
-/// has fired; the impl is not responsible for re-checking authority.
-///
-/// Concurrency: every method may be called from multiple tokio worker
-/// threads in parallel. Adapters are responsible for their own
-/// internal synchronisation (the SE adapter holds a per-main-repo
-/// `gix::Repository` mutex during `commit`).
-///
-/// The trait is `async` because some adapters (Trading: FIX session;
-/// Healthcare: FHIR HTTP) are inherently I/O-bound. SE-domain methods
-/// that the spec describes synchronously (`gix::diff`, host-path
-/// staging) are still async-shaped because the kernel runs them on
-/// the tokio blocking pool.
-#[async_trait]
-pub trait DomainAdapter: Send + Sync + 'static {
-    /// Closed enumeration of the authority operations this domain
-    /// admits. SE: `IntentKind` from `raxis-types`. Trading:
-    /// `ProposeOrder | CancelOrder | …`. The kernel deserialises
-    /// these out of the `IntentRequest` envelope.
-    type IntentKind: Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + std::fmt::Debug;
-
-    /// Artefact a successful terminal-task `CompleteTask`-equivalent
-    /// witness binds to. SE: `(CommitSha, head_tree_sha256)`.
-    /// Trading: `(OrderId, FillReceipt)`.
-    type TerminalArtefact: Clone + Send + Sync + std::fmt::Debug;
-
-    // ── §2.2.A state-lifecycle primitives ───────────────────────────
-
-    /// Prepare the mutable state surface the agent will operate on
-    /// inside its isolated VM. Called exactly once per session,
-    /// after the planner VM has been spawned but before any
-    /// `KernelPush` is allowed to deliver an intent.
-    ///
-    /// MUST be deterministic given `(session.session_id,
-    /// session.parent_state_ref)`: re-invocation MUST yield
-    /// byte-identical contents at the returned host-path (modulo
-    /// timestamps the impl SHOULD canonicalise).
-    async fn provision_workspace(
-        &self,
-        session: SessionContext<'_>,
-    ) -> Result<WorkspaceHandle, DomainError>;
-
-    /// Create a content-addressed snapshot of whatever the agent has
-    /// produced inside its workspace. Called when the planner submits
-    /// a `CompleteTask`-equivalent intent, BEFORE admission gates run
-    /// (the touched-set is derived from the snapshot per `R-9`).
-    ///
-    /// MUST be **idempotent**: calling twice on a workspace that has
-    /// not changed MUST return the same `Snapshot` (same
-    /// `content_hash`).
-    async fn snapshot(
-        &self,
-        session: SessionContext<'_>,
-        workspace: &WorkspaceHandle,
-    ) -> Result<Snapshot, DomainError>;
-
-    /// Hand a snapshot from one isolated agent VM to another (the
-    /// multi-agent coordination primitive of `R-11`). The kernel
-    /// always mediates: the source VM cannot write directly into the
-    /// destination's workspace, and the destination cannot pull
-    /// directly from the source. This call materialises a
-    /// transferable `Bundle` in a kernel-controlled staging directory;
-    /// the kernel then mounts that directory read-only into the
-    /// destination VM.
-    ///
-    /// MUST be idempotent on `(snapshot.content_hash, dst.session_id)`.
-    async fn transfer(
-        &self,
-        snapshot: &Snapshot,
-        src: SessionContext<'_>,
-        dst: SessionContext<'_>,
-    ) -> Result<Bundle, DomainError>;
-
-    /// Commit approved work to the canonical external system of
-    /// record. This is the only method that contacts the outside
-    /// world; it MUST go through the credential proxy
-    /// (`INV-VM-CAP-04`) when external credentials are required.
-    ///
-    /// MUST be idempotent on `snapshot.content_hash`: re-invocation
-    /// after a successful commit MUST return
-    /// `Err(DomainError::AlreadyApplied { receipt })` carrying the
-    /// original receipt — the kernel relies on this for crash recovery.
-    async fn commit(
-        &self,
-        snapshot: &Snapshot,
-        cred_proxy: &dyn CredentialProxyHandle,
-        ctx: CommitContext<'_>,
-    ) -> Result<DomainCommitReceipt, DomainError>;
-
-    // ── §2.2.B kernel admission-pipeline hooks ──────────────────────
-
-    /// Compute the deterministic touched-set of domain resources the
-    /// `intent` would mutate, derived only from authoritative state
-    /// (the workspace + snapshot), never from planner-supplied
-    /// manifests. The kernel runs this BEFORE the path-allowlist
-    /// gate (`R-9`).
-    async fn touched_resources(
-        &self,
-        intent: &Self::IntentKind,
-        ctx: AdmissionContext<'_>,
-    ) -> Result<TouchedResources, DomainError>;
-
-    /// Granular admission hook #1 — is `parent_state_ref` a valid
-    /// ancestor of `target_state_ref`? The kernel's IntegrationMerge
-    /// gate calls this first so it can report
-    /// `FailInvalidDiff` when ancestry fails.
-    ///
-    /// SE: `git merge-base --is-ancestor parent target`. Trading:
-    /// portfolio reachability check. Healthcare: bundle-version
-    /// chain check.
-    async fn is_ancestor(
-        &self,
-        parent_state_ref: &str,
-        target_state_ref: &str,
-        workspace_root: &std::path::Path,
-    ) -> Result<bool, DomainError>;
-
-    /// Granular admission hook #2 — verify there are no
-    /// "implementation-domain merge events" between
-    /// `parent_state_ref` and `target_state_ref`. Reported as
-    /// `FailInvalidCommitTopology` when it fails.
-    ///
-    /// SE: `git rev-list --min-parents=2 --count parent..target`
-    /// (must be 0). Trading: no foreign-order mutations between the
-    /// two snapshots. Healthcare: no out-of-band patient-record
-    /// edits.
-    ///
-    /// Domains that have no notion of "merge commits in range" return
-    /// `Ok(())` unconditionally.
-    async fn topology_check(
-        &self,
-        parent_state_ref: &str,
-        target_state_ref: &str,
-        workspace_root: &std::path::Path,
-    ) -> Result<(), DomainError>;
-
-    /// Granular admission hook #3 — compute the touched-set between
-    /// the two refs. Reported as `FailInvalidDiff` when it fails.
-    ///
-    /// MUST be deterministic and lexicographically sorted by URI.
-    async fn compute_touched_paths(
-        &self,
-        parent_state_ref: &str,
-        target_state_ref: &str,
-        workspace_root: &std::path::Path,
-    ) -> Result<TouchedResources, DomainError>;
-
-    /// Convenience method that runs the three granular hooks in
-    /// sequence and collapses their per-step errors into a single
-    /// `PreconditionFailed`. Default implementation delegates to
-    /// `is_ancestor` → `topology_check` → `compute_touched_paths`.
-    /// Adapters with cheaper combined-paths (e.g., a single SQL
-    /// query that fuses the three) override this method.
-    async fn verify_state_advance(
-        &self,
-        parent_state_ref: &str,
-        target_state_ref: &str,
-        workspace_root: &std::path::Path,
-    ) -> Result<TouchedResources, DomainError> {
-        match self
-            .is_ancestor(parent_state_ref, target_state_ref, workspace_root)
-            .await?
-        {
-            true => {}
-            false => {
-                return Err(DomainError::PreconditionFailed(format!(
-                    "{parent_state_ref} is not an ancestor of {target_state_ref}"
-                )))
-            }
-        }
-        self.topology_check(parent_state_ref, target_state_ref, workspace_root)
-            .await?;
-        self.compute_touched_paths(parent_state_ref, target_state_ref, workspace_root)
-            .await
-    }
-
-    /// Stable, sorted, deduplicated list of escalation class names
-    /// the kernel's escalation FSM should accept for this domain.
-    /// SE: `["protected_path_merge", "review_loop_exceeded", …]`.
-    fn escalation_classes(&self) -> &'static [&'static str];
-
-    // ── §2.2.C cleanup primitives ───────────────────────────────────
-
-    /// Called when a session ends (terminal `CompleteTask`, abandoned
-    /// after agent-disagreement, or operator-killed). Releases
-    /// VM-mounted resources but does NOT delete the underlying state
-    /// — the audit-retention window of `agent-disagreement.md §7`
-    /// may require it for forensic replay.
-    async fn teardown_workspace(&self, workspace: &WorkspaceHandle) -> Result<(), DomainError>;
-
-    /// Called when the audit retention window closes. Permanently
-    /// purges the underlying state. SE: `rm -rf` the ephemeral clone.
-    /// The kernel still retains the audit-chain entry; only the
-    /// bulk state goes.
-    async fn purge_workspace(&self, workspace: &WorkspaceHandle) -> Result<(), DomainError>;
-}
-
-// ---------------------------------------------------------------------------
 // Conformance helpers (used by adapter test suites)
 // ---------------------------------------------------------------------------
 
@@ -562,7 +299,7 @@ pub mod conformance {
         assert_eq!(
             h1.content_hash,
             h2.content_hash,
-            "DomainAdapter::provision_workspace conformance #1: \
+            "domain provision_workspace conformance #1: \
              two provisions of the same (session_id, parent_state_ref) \
              must produce byte-identical content_hash; got {:?} vs {:?}",
             h1.content_hash.as_hex(),
@@ -576,7 +313,7 @@ pub mod conformance {
         assert_eq!(
             s1.content_hash,
             s2.content_hash,
-            "DomainAdapter::snapshot conformance #2: two snapshots of \
+            "domain snapshot conformance #2: two snapshots of \
              an unchanged workspace must produce byte-identical \
              content_hash; got {:?} vs {:?}",
             s1.content_hash.as_hex(),
@@ -599,7 +336,7 @@ pub mod conformance {
                 );
             }
             other => panic!(
-                "{adapter_kind}: DomainAdapter::commit conformance #5 \
+                "{adapter_kind}: domain commit conformance #5 \
                  violated — retry on the same snapshot must return \
                  Err(AlreadyApplied {{ receipt }}); got {:?}",
                 other,

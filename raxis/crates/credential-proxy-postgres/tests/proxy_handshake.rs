@@ -38,7 +38,7 @@ use raxis_credential_proxy_postgres::{
     PostgresProxy, ProxyConfig,
 };
 use raxis_credentials::{
-    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
     OperatorId,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -93,10 +93,6 @@ impl CredentialBackend for FakeBackend {
 
     fn exists(&self, name: &CredentialName) -> bool {
         name.as_str() == "demo"
-    }
-
-    fn lease(&self, _name: &CredentialName) -> Lease {
-        Lease::Forever
     }
 
     fn backend_kind(&self) -> &'static str {

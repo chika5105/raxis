@@ -7,18 +7,14 @@
 //! The trait every credential store implements. The reference deployment
 //! reads plaintext files under `<data_dir>/credentials/<name>.env` and
 //! `<data_dir>/providers/<name>.toml` (chmod 0600, kernel-OS-user); that
-//! impl lives in `raxis-credentials-file`. Future deployments can plug
-//! HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, or a PKCS#11
-//! HSM behind the same trait without changing a single call site in the
-//! kernel, the gateway, or the credential proxies.
+//! impl lives in `raxis-credentials-file`.
 //!
 //! # What this crate is NOT
 //!
 //! - Not the credential proxy. The proxy types (Postgres, k8s, AWS,
 //!   Azure, GCP, Redis, MongoDB, MySQL, MSSQL, SMTP) live in
 //!   `raxis-credential-proxy` (or per-protocol sub-crates). They consume
-//!   `Arc<dyn CredentialBackend>` to resolve the *value* and never see
-//!   the underlying file/Vault/HSM detail.
+//!   `Arc<dyn CredentialBackend>` to resolve the *value*.
 //! - Not the gateway's provider-credentials reader. That logic moves
 //!   into `raxis-credentials-file` so both the gateway and the proxies
 //!   share one resolver — `extensibility-traits.md §4.4` "Files to
@@ -67,12 +63,8 @@ pub use audit::AuditingBackend;
 
 /// The policy-declared name of a credential. Always a short ASCII
 /// identifier (e.g. `"postgres-staging"`,
-/// `"providers.anthropic-prod"`). The trait stores it as a plain
-/// `String` rather than a more constrained type so that future variants
-/// (`vault://kv/data/secret-name`, `aws-sm://arn:...`) can ride on the
-/// same wire shape — concrete backends are free to require a more
-/// restrictive form via `resolve` and reject everything else with
-/// `CredentialError::NotFound`.
+/// `"providers.anthropic-prod"`). Admission validates the name before
+/// it reaches a backend.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CredentialName(String);
 
@@ -173,9 +165,8 @@ impl CredentialValue {
     }
 
     /// Borrow the value as a UTF-8 string IF it parses as such.
-    /// Returns `None` when the credential is binary (e.g. an HSM
-    /// key blob). Logging is forbidden — the redaction is on the
-    /// wrapper itself.
+    /// Returns `None` when the credential is binary. Logging is
+    /// forbidden — the redaction is on the wrapper itself.
     pub fn as_utf8(&self) -> Option<String> {
         use secrecy::ExposeSecret;
         std::str::from_utf8(self.inner.expose_secret().as_slice())
@@ -238,23 +229,6 @@ impl<'a> ConsumerIdentity<'a> {
     }
 }
 
-/// Lifetime hint for a resolved credential. The kernel uses this
-/// to schedule re-resolution before re-injection into a
-/// long-running VM (e.g. Vault leases that expire mid-session).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lease {
-    /// File-backed and HSM-backed credentials have no expiry.
-    Forever,
-    /// Vault-style lease — re-resolve before this TTL elapses.
-    /// Caller stores the issuance time and refreshes when
-    /// `now - issued > ttl - safety_margin`.
-    TtlSeconds(u32),
-}
-
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
 /// Failure modes from a `CredentialBackend` operation. Stable wire
 /// strings (via `error_code`) so the operator CLI can pattern-match
 /// on them across backend implementations.
@@ -264,10 +238,9 @@ pub enum CredentialError {
     #[error("credential not found: {0}")]
     NotFound(CredentialName),
 
-    /// The caller's identity does not authorise this access. Most
-    /// concrete backends never return this — the kernel's admission
-    /// pipeline gates access — but Vault / AWS-SM may return it
-    /// when the kernel's own auth token is expired or scoped wrong.
+    /// The caller's identity does not authorise this access. The file
+    /// backend never returns this because kernel admission gates
+    /// access first.
     #[error("permission denied resolving credential {name}: {reason}")]
     PermissionDenied {
         /// Credential whose access was denied.
@@ -287,22 +260,16 @@ pub enum CredentialError {
         reason: String,
     },
 
-    /// The backend store itself is unreachable (Vault sealed,
-    /// network partition, HSM offline, file-system error). Callers
-    /// MUST treat this as transient on the boot path (retry once
-    /// after a short delay) and fatal on the per-request path
-    /// (return `CredentialResolutionFailed` to the agent).
+    /// The backend store itself is unreachable, usually due to a
+    /// file-system error. Callers MUST treat this as transient on the
+    /// boot path (retry once after a short delay) and fatal on the
+    /// per-request path (return `CredentialResolutionFailed` to the
+    /// agent).
     #[error("credential backend unavailable: {reason}")]
     BackendUnavailable {
-        /// Human-readable detail (e.g. "Vault sealed", "i/o error").
+        /// Human-readable detail.
         reason: String,
     },
-
-    /// `rotate` is not supported by this backend (HSM, where the
-    /// rotation must happen out-of-band on the device's own
-    /// management plane).
-    #[error("credential rotation requires out-of-band ceremony on this backend")]
-    RotationRequiresOutOfBand,
 
     /// Audit emission failed — surface as fatal to the kernel boot
     /// path. Per `R-7`, an unrecoverable audit-write failure halts
@@ -323,7 +290,6 @@ impl CredentialError {
             Self::PermissionDenied { .. } => "FAIL_CRED_PERMISSION_DENIED",
             Self::Malformed { .. } => "FAIL_CRED_MALFORMED",
             Self::BackendUnavailable { .. } => "FAIL_CRED_BACKEND_UNAVAILABLE",
-            Self::RotationRequiresOutOfBand => "FAIL_CRED_ROTATION_OOB",
             Self::AuditEmissionFailed { .. } => "FAIL_CRED_AUDIT_EMIT",
         }
     }
@@ -345,8 +311,6 @@ impl CredentialError {
 /// Implementations:
 /// - [`raxis-credentials-file::FileCredentialBackend`] — plaintext
 ///   files under `<data_dir>/` (V2 default).
-/// - Future: `VaultCredentialBackend`, `AwsSecretsManagerBackend`,
-///   `AzureKeyVaultBackend`, `Pkcs11HsmBackend`.
 ///
 /// # Audit discipline
 ///
@@ -363,8 +327,7 @@ impl CredentialError {
 /// `Arc<dyn CredentialBackend>` in `HandlerContext` and call into
 /// the backend from any tokio task without serialisation. Concrete
 /// impls are responsible for their own internal synchronisation
-/// (file backend uses fcntl locks during rotate; Vault backend uses
-/// the underlying client's connection pool).
+/// (file backend uses fcntl locks during rotate).
 pub trait CredentialBackend: Send + Sync + 'static {
     /// Resolve a credential by its policy-declared name. The caller
     /// must already have authorisation to read it (the kernel's
@@ -378,8 +341,6 @@ pub trait CredentialBackend: Send + Sync + 'static {
     /// Rotate a credential. Called only by `raxis credential rotate`,
     /// which itself is a privileged operator op gated by `INV-CERT-01`.
     /// File backend: writes the new value, fsyncs, atomic-renames.
-    /// Vault backend: KV v2 versioned write.
-    /// HSM backend: returns `CredentialError::RotationRequiresOutOfBand`.
     fn rotate(
         &self,
         name: &CredentialName,
@@ -394,36 +355,20 @@ pub trait CredentialBackend: Send + Sync + 'static {
     /// rather than at first resolution.
     fn exists(&self, name: &CredentialName) -> bool;
 
-    /// Lifetime hint: when does the value's lease expire? File
-    /// backend returns [`Lease::Forever`]. Vault backend returns the
-    /// lease TTL.
-    fn lease(&self, name: &CredentialName) -> Lease;
-
     /// Stable short-string identifying this backend implementation.
     /// Recorded in `CredentialAccessed.backend_kind` for forensic
-    /// audit. Pin one value per impl crate (`"file"`, `"vault"`,
-    /// `"aws_secrets_manager"`, etc.).
+    /// audit.
     fn backend_kind(&self) -> &'static str;
 }
 
-/// Kind discriminator persisted in `policy.toml [credential_backend]`
-/// and read by `kernel/src/main.rs` at boot to pick the concrete
-/// `Arc<dyn CredentialBackend>`. The `File` variant is the V2
-/// default. Future variants slot in alphabetically.
+/// Kind discriminator persisted in `policy.toml [credential_backend]`.
+/// The file backend is the only backend currently shipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialBackendKind {
     /// Plaintext files under `<data_dir>/credentials/<name>.env` and
     /// `<data_dir>/providers/<name>.toml`. The V2 default.
     File,
-    /// HashiCorp Vault KV v2 store. Future.
-    Vault,
-    /// AWS Secrets Manager. Future.
-    AwsSecretsManager,
-    /// Azure Key Vault. Future.
-    AzureKeyVault,
-    /// PKCS#11 hardware security module. Future.
-    Pkcs11Hsm,
 }
 
 impl Default for CredentialBackendKind {
@@ -439,10 +384,6 @@ impl CredentialBackendKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::File => "file",
-            Self::Vault => "vault",
-            Self::AwsSecretsManager => "aws_secrets_manager",
-            Self::AzureKeyVault => "azure_key_vault",
-            Self::Pkcs11Hsm => "pkcs11",
         }
     }
 }
@@ -570,16 +511,6 @@ mod tests {
     #[test]
     fn credential_backend_kind_str_pin() {
         assert_eq!(CredentialBackendKind::File.as_str(), "file");
-        assert_eq!(CredentialBackendKind::Vault.as_str(), "vault");
-        assert_eq!(
-            CredentialBackendKind::AwsSecretsManager.as_str(),
-            "aws_secrets_manager"
-        );
-        assert_eq!(
-            CredentialBackendKind::AzureKeyVault.as_str(),
-            "azure_key_vault"
-        );
-        assert_eq!(CredentialBackendKind::Pkcs11Hsm.as_str(), "pkcs11");
     }
 
     #[test]
@@ -615,10 +546,6 @@ mod tests {
         assert_eq!(
             CredentialError::BackendUnavailable { reason: "y".into() }.error_code(),
             "FAIL_CRED_BACKEND_UNAVAILABLE",
-        );
-        assert_eq!(
-            CredentialError::RotationRequiresOutOfBand.error_code(),
-            "FAIL_CRED_ROTATION_OOB",
         );
         assert_eq!(
             CredentialError::AuditEmissionFailed { reason: "y".into() }.error_code(),

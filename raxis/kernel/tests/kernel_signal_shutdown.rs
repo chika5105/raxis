@@ -95,6 +95,30 @@ fn write_operator_cert(dir: &Path) -> PathBuf {
     path
 }
 
+fn move_dashboard_to_ephemeral_port(data_dir: &Path) {
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("reserve ephemeral dashboard port")
+        .local_addr()
+        .expect("read ephemeral dashboard port")
+        .port();
+    let policy_path = data_dir.join("policy/policy.toml");
+    let body = std::fs::read_to_string(&policy_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", policy_path.display()));
+    let updated = body.replacen(
+        "bind_port    = 9820\n",
+        &format!("bind_port    = {port}\n"),
+        1,
+    );
+    assert_ne!(
+        body,
+        updated,
+        "genesis dashboard bind_port shape changed in {}",
+        policy_path.display()
+    );
+    std::fs::write(&policy_path, updated)
+        .unwrap_or_else(|e| panic!("write {}: {e}", policy_path.display()));
+}
+
 /// Bootstrap a fresh data dir by running the kernel binary in
 /// `RAXIS_BOOTSTRAP=1` mode. Returns the data dir on success.
 fn bootstrap_data_dir(kernel_bin: &Path) -> tempfile::TempDir {
@@ -134,6 +158,7 @@ fn bootstrap_data_dir(kernel_bin: &Path) -> tempfile::TempDir {
         data_dir.join("keys/authority_keypair.pem").exists(),
         "authority key missing after bootstrap"
     );
+    move_dashboard_to_ephemeral_port(data_dir);
 
     tmp
 }

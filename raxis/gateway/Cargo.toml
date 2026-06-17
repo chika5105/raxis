@@ -25,7 +25,6 @@ path = "src/main.rs"
 # IPC framing + the GatewayMessage / FetchKind enums that the kernel and
 # the gateway both speak. peripherals.md §3.2.
 raxis-ipc    = { workspace = true }
-raxis-types  = { workspace = true }
 # For loading <data_dir>/policy/policy.toml directly (gateway re-validates
 # the domain allowlist; it does NOT trust kernel-supplied lists).
 # peripherals.md §3.2 "Domain allowlist re-validation".
@@ -45,7 +44,6 @@ raxis-credentials-file  = { workspace = true }
 
 tokio        = { workspace = true }
 serde        = { workspace = true }
-serde_json   = { workspace = true }
 toml         = { workspace = true }
 hex          = { workspace = true }
 # SHA-256 fingerprinting for the gateway-handshake log line —

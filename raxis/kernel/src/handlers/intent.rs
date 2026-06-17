@@ -1604,11 +1604,10 @@ fn run_phase_a(
         }
     }
 
-    // V2 migration: ancestry / topology / diff dispatch through the
-    // `DomainAdapter` (`extensibility-traits.md §2.2.B`). The kernel
-    // keeps the per-step planner-error-code mapping; the adapter is
-    // the implementation seam. We are inside a `spawn_blocking`
-    // context, so async adapter methods are bridged to sync via
+    // Ancestry / topology / diff dispatch through the concrete git
+    // adapter. The kernel keeps the per-step planner-error-code
+    // mapping. We are inside a `spawn_blocking` context, so async
+    // adapter methods are bridged to sync via
     // `tokio::runtime::Handle::current().block_on`. The runtime is
     // guaranteed to exist because `run_phase_a` is only ever invoked
     // from a tokio multi-threaded worker.
@@ -2977,10 +2976,10 @@ fn handle_complete_task(
     // §2.5.8 line 1987 explicitly says we DO NOT re-run topology_check
     // on stored ranges — they were already checked at step 2A on
     // admission (the IntegrationMerge carve-out applied per range).
-    // V2 migration: dispatch through the `DomainAdapter`. The
-    // calling function (`handle_complete_task`) is sync; we bridge
-    // async via `Handle::current().block_on` exactly like the
-    // intent-admission path does.
+    // Dispatch through the concrete git adapter. The calling
+    // function (`handle_complete_task`) is sync; we bridge async via
+    // `Handle::current().block_on` exactly like the intent-admission
+    // path does.
     let rt_handle = tokio::runtime::Handle::current();
     let mut full_touched_paths: std::collections::BTreeSet<PathBuf> =
         std::collections::BTreeSet::new();

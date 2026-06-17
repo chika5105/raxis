@@ -112,11 +112,8 @@ pub(crate) struct RawPolicy {
 
     /// `[credential_backend]` — V2 selector for the active
     /// `CredentialBackend` impl. **Optional**: a kernel that omits
-    /// the section boots with `kind = "file"` (the V2 reference
-    /// `FileCredentialBackend`). Future Vault / AWS-SM / Azure-KV /
-    /// PKCS#11 backends are selected by setting `kind` to one of
-    /// `"vault"`, `"aws_secrets_manager"`, `"azure_key_vault"`,
-    /// `"pkcs11"`; `extensibility-traits.md §4.4`.
+    /// the section boots with `kind = "file"`, the only backend
+    /// currently shipped.
     #[serde(default)]
     pub(crate) credential_backend: Option<CredentialBackendSection>,
 
@@ -1430,11 +1427,7 @@ pub(crate) struct GitSection {
 }
 
 /// `[credential_backend]` — selector for the active credential
-/// store. The `kind` discriminator picks one of the registered
-/// backends; non-file backends will eventually carry their own
-/// per-backend configuration sub-table here, but V2 ships only
-/// the `kind = "file"` selector and ignores anything else with a
-/// validation error.
+/// store. The `kind` discriminator currently accepts only `file`.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CredentialBackendSection {
     pub(crate) kind: CredentialBackendKind,

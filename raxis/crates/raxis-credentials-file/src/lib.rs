@@ -59,8 +59,8 @@
 //! `raxis-isolation-firecracker`: one trait crate
 //! (`raxis-credentials`) and one impl crate per substrate. Tests of
 //! the gateway, the credential proxies, and the kernel can all depend
-//! on the impl crate without dragging Vault / AWS-SM HTTP clients
-//! into builds that don't need them.
+//! on the impl crate without extra backends in builds that don't
+//! need them.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -69,7 +69,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use raxis_credentials::{
-    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
     OperatorId,
 };
 
@@ -223,13 +223,6 @@ impl CredentialBackend for FileCredentialBackend {
             return false;
         }
         validate_path_security(&path, name, self.expected_uid).is_ok()
-    }
-
-    fn lease(&self, _name: &CredentialName) -> Lease {
-        // Plaintext files have no expiry. The operator rotates by
-        // calling `rotate`; the file lifetime equals deployment
-        // lifetime.
-        Lease::Forever
     }
 
     fn backend_kind(&self) -> &'static str {

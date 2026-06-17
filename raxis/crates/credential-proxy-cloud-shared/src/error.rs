@@ -8,9 +8,8 @@
 //!      the proxy uses to drive its audit emission and cache
 //!      eviction logic. The variants map 1:1 to the closed-enum
 //!      denial reasons in `specs/v3/cloud-proxy-forwarding.md §5.2`.
-//!   2. [`UpstreamErrorEnvelope`] — the trait per-provider crates
-//!      implement to render the upstream-canonical error body
-//!      back to the in-VM client unchanged (`INV-CLOUD-FWD-05`).
+//!   2. Provider crates render their own upstream-canonical error
+//!      bodies back to the in-VM client unchanged (`INV-CLOUD-FWD-05`).
 //!
 //! The split lets the shared crate stay provider-agnostic: it
 //! classifies the wire-level outcome (transport vs. 4xx vs. 5xx
@@ -124,31 +123,6 @@ pub fn classify_reqwest_error(err: reqwest::Error) -> UpstreamError {
         // state that future versions might widen).
         UpstreamError::Network(format!("{err}"))
     }
-}
-
-/// Trait per-provider crates implement to render the
-/// upstream-canonical error body back to the in-VM client.
-///
-/// The proxy reads the upstream response body, parses it with
-/// the provider-specific parser (XML for AWS, JSON for GCP /
-/// Azure), constructs an `UpstreamErrorEnvelope` value, and
-/// then writes the envelope to the in-VM socket using the
-/// trait's `render_to_in_vm_client` hook.
-///
-/// Per `INV-CLOUD-FWD-05`, the envelope MUST preserve the
-/// upstream's `error` / `Code` field verbatim.
-pub trait UpstreamErrorEnvelope: Send + Sync {
-    /// HTTP status code to relay to the in-VM client. Same as
-    /// the upstream's.
-    fn status_code(&self) -> u16;
-
-    /// Wire-encoded body bytes to relay verbatim. For AWS this
-    /// is XML; for GCP / Azure this is JSON.
-    fn body_bytes(&self) -> Vec<u8>;
-
-    /// Content-Type header value (`application/xml` for AWS,
-    /// `application/json` for GCP / Azure).
-    fn content_type(&self) -> &'static str;
 }
 
 // ---------------------------------------------------------------------------

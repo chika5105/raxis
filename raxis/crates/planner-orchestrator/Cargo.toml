@@ -20,5 +20,5 @@ path = "src/main.rs"
 # `tokio-vsock` dep is itself feature-gated to Linux at the upstream
 # crate level — non-Linux builds simply omit the dependency, and the
 # planner-core `connect()` falls back to `TransportError::VsockUnavailable`.
-raxis-planner-core = { path = "../planner-core", features = ["orchestrator", "vsock-transport"] }
+raxis-planner-core = { path = "../planner-core", features = ["vsock-transport"] }
 tokio              = { workspace = true }

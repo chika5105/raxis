@@ -704,7 +704,7 @@ async fn main() {
     // wiring — see `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01`
     // for the contract.
     safety::install_safety_audit_sink(Arc::clone(&inner_audit));
-    panic_hook::install_kernel_panic_hook(Arc::clone(&inner_audit), None);
+    panic_hook::install_kernel_panic_hook(Arc::clone(&inner_audit));
 
     // Per-session lifecycle capture (`SessionCapture`) — sibling
     // of `TaskLlmCapture` for the post-mortem surface. The
@@ -1744,43 +1744,20 @@ async fn main() {
     // the `AuditSink` once, freeing concrete impls from repeating the
     // emit step in their own `resolve` / `rotate` bodies.
     let credentials: Arc<dyn raxis_credentials::CredentialBackend> = {
-        use raxis_credentials::{AuditingBackend, CredentialBackendKind};
-        let bundle = policy.load();
-        let kind = bundle.credential_backend_kind();
-        let inner: Arc<dyn raxis_credentials::CredentialBackend> = match kind {
-            CredentialBackendKind::File => Arc::new(
-                raxis_credentials_file::FileCredentialBackend::open(data_dir.clone()),
-            ),
-            other => {
-                eprintln!(
-                    "BOOT_ERR_CREDENTIAL_BACKEND_NOT_IMPLEMENTED: \
-                     policy.toml selects credential_backend.kind = {} but only \
-                     `file` is implemented in V2; future Vault / AWS-SM / \
-                     Azure-KV / PKCS#11 backends are out of scope for V2 GA.",
-                    other.as_str(),
-                );
-                std::process::exit(64);
-            }
-        };
+        use raxis_credentials::AuditingBackend;
+        let inner: Arc<dyn raxis_credentials::CredentialBackend> = Arc::new(
+            raxis_credentials_file::FileCredentialBackend::open(data_dir.clone()),
+        );
         Arc::new(AuditingBackend::new(inner, Arc::clone(&audit)))
     };
 
-    // Step 8.0c — V2 DomainAdapter selection.
+    // Step 8.0c — V2 git-domain adapter selection.
     //
-    // Spec: `extensibility-traits.md §2.6` (boot-order step). The
-    // kernel binary monomorphises against the SE-domain binding in
-    // V2; future trading / healthcare / robotics kernels swap the
-    // adapter behind a `cfg`-gated boot-time selector. The three
-    // host-side roots — main repo, per-session worktrees,
+    // The three host-side roots — main repo, per-session worktrees,
     // transfer staging — anchor under `<data_dir>/`; the
     // `worktree-provision` and `worktree-staging` crates own the
     // actual content laid down inside them.
-    let domain: Arc<
-        dyn raxis_domain::DomainAdapter<
-            IntentKind = raxis_domain_git::SeIntentKind,
-            TerminalArtefact = raxis_domain_git::SeTerminalArtefact,
-        >,
-    > = {
+    let domain: Arc<raxis_domain_git::GitAdapter> = {
         let main_root = data_dir.join("repositories").join("main");
         let sessions_root = data_dir.join("worktrees");
         let transfer_root = data_dir.join("transfer");

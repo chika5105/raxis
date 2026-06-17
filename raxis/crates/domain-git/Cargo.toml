@@ -5,16 +5,14 @@ edition     = { workspace = true }
 license     = { workspace = true }
 authors     = { workspace = true }
 repository  = { workspace = true }
-description = "RAXIS V2 — `DomainAdapter` reference implementation for the SE (git) domain. Main-branch fast-forward + ancestry verification host-side via `gix`."
+description = "RAXIS V2 — git-domain state helpers. Main-branch fast-forward + ancestry verification host-side via `gix`."
 
 [dependencies]
 raxis-domain = { workspace = true }
 gix          = { workspace = true }
 thiserror    = { workspace = true }
-async-trait  = { workspace = true }
 chrono       = { workspace = true }
 sha2         = { workspace = true }
-serde        = { workspace = true }
 tokio        = { workspace = true }
 
 [dev-dependencies]

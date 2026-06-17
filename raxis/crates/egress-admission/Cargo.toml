@@ -18,7 +18,6 @@ path = "src/lib.rs"
 
 [dependencies]
 raxis-tproxy-protocol = { workspace = true }
-raxis-policy          = { workspace = true }
 raxis-audit-tools     = { workspace = true }
 # iter61 — `INV-OBSERVABILITY-DATAPLANE-LATENCY-06`. The
 # admission loop times every `service.admit()` call (the

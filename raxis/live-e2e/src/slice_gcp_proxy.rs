@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use raxis_credentials::{
-    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
     OperatorId,
 };
 use serde_json::Value as JsonValue;
@@ -68,9 +68,6 @@ impl CredentialBackend for LiveBackend {
     }
     fn exists(&self, name: &CredentialName) -> bool {
         name.as_str() == "live-e2e"
-    }
-    fn lease(&self, _: &CredentialName) -> Lease {
-        Lease::Forever
     }
     fn backend_kind(&self) -> &'static str {
         "live-e2e"

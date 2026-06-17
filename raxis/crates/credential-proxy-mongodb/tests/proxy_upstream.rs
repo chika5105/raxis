@@ -9,7 +9,7 @@ use raxis_credential_proxy_mongodb::{
     AuditChannel, AuditEvent, MongodbProxy, OwnedConsumer, ProxyConfig, Restrictions,
 };
 use raxis_credentials::{
-    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
     OperatorId,
 };
 
@@ -39,9 +39,6 @@ impl CredentialBackend for StaticBackend {
     }
     fn exists(&self, _: &CredentialName) -> bool {
         true
-    }
-    fn lease(&self, _: &CredentialName) -> Lease {
-        Lease::Forever
     }
     fn backend_kind(&self) -> &'static str {
         "test_static"

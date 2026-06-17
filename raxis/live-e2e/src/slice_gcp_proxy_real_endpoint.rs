@@ -99,7 +99,7 @@ use raxis_credential_proxy_gcp::{
     OwnedConsumer, ProxyConfig, Restrictions,
 };
 use raxis_credentials::{
-    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
     OperatorId,
 };
 use raxis_test_support::audit_sink::FakeAuditSink;
@@ -141,9 +141,6 @@ impl CredentialBackend for SyntheticSaBackend {
     }
     fn exists(&self, _name: &CredentialName) -> bool {
         true
-    }
-    fn lease(&self, _: &CredentialName) -> Lease {
-        Lease::Forever
     }
     fn backend_kind(&self) -> &'static str {
         "live-e2e-v3-gcp-witness"

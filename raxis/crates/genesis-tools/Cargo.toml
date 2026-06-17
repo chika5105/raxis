@@ -30,9 +30,6 @@ serde_json = { workspace = true }
 # `getrandom` for the genesis-nonce CSPRNG. Goes through the workspace
 # `try_random_array` helper in `raxis-crypto`.
 raxis-crypto = { workspace = true }
-# `uuid` for the `event_id` field of the genesis audit record. Same UUID
-# version (`v4`) used by every other `event_id` mint site in the kernel.
-uuid       = { workspace = true }
 # `raxis-types` for the `OperatorCert` wire type that
 # `GenesisPolicyInputs::operator_cert` references — the cert is part of
 # the emitter's input contract because cert is mandatory at the policy

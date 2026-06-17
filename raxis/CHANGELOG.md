@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.2 - 2026-06-17
+
+RAXIS 0.3.2 is a patch release for kernel retry correctness, a leaner
+runtime surface, and live release validation.
+
+- Fixed initiative retry and workspace merge review edges so recovered
+  plans continue through the expected lifecycle.
+- Removed dormant planner, credential, domain, dashboard, and panic-hook
+  abstraction layers that had no production implementations.
+- Deduplicated SQL proxy restriction verdict types across PostgreSQL,
+  MySQL, and MSSQL proxies.
+- Simplified the credential backend surface to the file-backed runtime
+  path that is actually shipped today.
+- Hardened live E2E diagnostics and release fixtures, including
+  explicit gateway startup failures and required model routing.
+- Rebaked canonical role and verifier image manifests for the 0.3.2
+  kernel version.
+
 ## 0.3.1 - 2026-06-15
 
 RAXIS 0.3.1 is a patch release for dashboard correctness and Git

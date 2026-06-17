@@ -4,14 +4,12 @@
 //! exercise the rules with a deliberately minimal in-memory backend
 //! built **inside** this test file so the conformance test itself is
 //! the canonical source of truth for what conformance means. Any
-//! concrete backend (`FileCredentialBackend`,
-//! `VaultCredentialBackend`, `Pkcs11HsmBackend`) re-runs the same
-//! battery of assertions against its own constructor — see
-//! `raxis-credentials-file/tests/integration.rs` for the file-backed
-//! variant. The minimal backend defined here is **not** exported and
-//! **MUST NOT** be used outside this test — it satisfies the trait
-//! shape but stores its bytes in plain `Mutex<HashMap<...>>` with no
-//! mode/uid checks.
+//! concrete backend re-runs the same battery of assertions against its
+//! own constructor — see `raxis-credentials-file/tests/integration.rs`
+//! for the file-backed variant. The minimal backend defined here is
+//! **not** exported and **MUST NOT** be used outside this test — it
+//! satisfies the trait shape but stores its bytes in plain
+//! `Mutex<HashMap<...>>` with no mode/uid checks.
 //!
 //! What this test pins:
 //!
@@ -32,7 +30,7 @@ use std::time::Duration;
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_credentials::{
     AuditingBackend, ConsumerIdentity, CredentialBackend, CredentialError, CredentialName,
-    CredentialValue, Lease, OperatorId,
+    CredentialValue, OperatorId,
 };
 use raxis_test_support::FakeAuditSink;
 
@@ -95,10 +93,6 @@ impl CredentialBackend for MemBackend {
 
     fn exists(&self, name: &CredentialName) -> bool {
         self.inner.lock().unwrap().contains_key(name.as_str())
-    }
-
-    fn lease(&self, _name: &CredentialName) -> Lease {
-        Lease::Forever
     }
 
     fn backend_kind(&self) -> &'static str {

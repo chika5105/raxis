@@ -43,7 +43,6 @@ repository.workspace  = true
 
 [dependencies]
 raxis-isolation       = { workspace = true }
-raxis-types           = { workspace = true }
 raxis-vsock-loopback  = { workspace = true }
 serde                 = { workspace = true }
 serde_json            = { workspace = true }

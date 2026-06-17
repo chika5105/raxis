@@ -36,7 +36,6 @@ toml        = { workspace = true }
 
 # Errors + diagnostics.
 thiserror   = { workspace = true }
-anyhow      = { workspace = true }
 
 # OTLP HTTP/protobuf transport. `reqwest` is already pinned to
 # `rustls-tls` at the workspace root, which gives us a single audited
@@ -61,8 +60,6 @@ hex         = { workspace = true }
 # Wallclock timestamps in cursor entries.
 chrono      = { workspace = true }
 
-# Random jitter for retry backoff.
-rand_core   = { workspace = true }
 getrandom   = { workspace = true }
 
 [dev-dependencies]

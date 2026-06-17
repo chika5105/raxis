@@ -16,9 +16,8 @@
 //!     upstream-exchange decision without leaking credential
 //!     bytes ([`audit`]).
 //!   * Translate provider-specific upstream errors into the
-//!     `UpstreamError` enum the proxy uses to drive the
-//!     "preserve the canonical error envelope" rule
-//!     ([`error`]).
+//!     `UpstreamError` enum the proxy uses to drive denial/audit
+//!     handling ([`error`]).
 //!
 //! The crate has NO platform-specific dependencies and NO
 //! credential-resolution logic — it consumes already-resolved
@@ -57,7 +56,7 @@ pub use audit::{
     CloudForwardingDenialReason, CloudProvider,
 };
 pub use cache::{CacheKey, CachedToken, TokenCache};
-pub use error::{UpstreamError, UpstreamErrorEnvelope};
+pub use error::UpstreamError;
 pub use http::CloudHttpClient;
 pub use time::unix_now_seconds;
 

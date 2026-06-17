@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 raxis-credentials = { workspace = true }
+raxis-credential-proxy-sql-shared = { workspace = true }
 
 tokio     = { workspace = true }
 bytes     = "1"

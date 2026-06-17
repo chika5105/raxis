@@ -836,10 +836,10 @@ async fn gate_recheck(
     // This mirrors exactly what handlers/intent.rs computed at intent time.
     let touched_paths: Vec<PathBuf> =
         if let (Some(base), Some(head)) = (&task_row.base_sha, &task_row.evaluation_sha) {
-            // V2 migration: dispatch through the `DomainAdapter`
-            // (`extensibility-traits.md §2.2.B`). Newtype validation is
-            // preserved so we surface a parsing error before the trait
-            // call, mirroring the regular intent admission path.
+            // Dispatch through the concrete git adapter. Newtype
+            // validation is preserved so we surface a parsing error
+            // before the adapter call, mirroring the regular intent
+            // admission path.
             let _base_sha = vcs::diff::CommitSha::new(base)
                 .map_err(|e| HandlerError::GateRecheck(format!("invalid base_sha: {e}")))?;
             let _head_sha = vcs::diff::CommitSha::new(head)

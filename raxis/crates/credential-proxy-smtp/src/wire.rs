@@ -632,9 +632,8 @@ impl Outbound {
     ) -> Result<(), String> {
         // Resolve the credential bytes per submission. The backend's
         // resolve API is synchronous and takes `ConsumerIdentity` by
-        // value; we run it on the current task (no thread-blocking
-        // I/O for File / Vault backends — the impls bound their
-        // sync work to memory + small sockets).
+        // value; we run it on the current task because the file
+        // backend bounds sync work to small local reads.
         let cred = backend
             .resolve(&config.credential_name, config.consumer.as_ref())
             .map_err(|e| format!("credential_resolve_failed: {e}"))?;
@@ -1114,7 +1113,7 @@ mod tests {
     async fn ehlo_quit_round_trip_reads_220_and_221() {
         use raxis_credentials::{
             ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
-            Lease, OperatorId,
+            OperatorId,
         };
         struct NoopBackend;
         impl CredentialBackend for NoopBackend {
@@ -1135,9 +1134,6 @@ mod tests {
             }
             fn exists(&self, _name: &CredentialName) -> bool {
                 true
-            }
-            fn lease(&self, _name: &CredentialName) -> Lease {
-                Lease::Forever
             }
             fn backend_kind(&self) -> &'static str {
                 "test_noop"
@@ -1206,7 +1202,7 @@ mod tests {
     async fn sender_not_allowed_rejects_with_550_and_audits_envelope() {
         use raxis_credentials::{
             ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
-            Lease, OperatorId,
+            OperatorId,
         };
         use std::sync::Mutex as StdMutex;
 
@@ -1229,9 +1225,6 @@ mod tests {
             }
             fn exists(&self, _name: &CredentialName) -> bool {
                 true
-            }
-            fn lease(&self, _name: &CredentialName) -> Lease {
-                Lease::Forever
             }
             fn backend_kind(&self) -> &'static str {
                 "test_noop"

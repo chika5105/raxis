@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 # The trait + value type the proxy borrows credentials from.
 raxis-credentials = { workspace = true }
+raxis-credential-proxy-sql-shared = { workspace = true }
 # This crate emits its own `AuditEvent` enum (local to the proxy
 # surface) rather than depending on the kernel's full audit-tools
 # DAG. The kernel translates these events into `AuditEventKind`

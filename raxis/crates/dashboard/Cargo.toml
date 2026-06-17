@@ -10,7 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 # Workspace-internal: read-only access to live kernel state.
-raxis-types         = { workspace = true }
 raxis-store         = { workspace = true }
 raxis-policy        = { workspace = true }
 raxis-crypto        = { workspace = true }
@@ -35,7 +34,6 @@ tower        = { version = "0.5", features = ["limit"] }
 
 # Async + concurrency primitives.
 tokio        = { workspace = true, features = ["sync", "rt-multi-thread", "macros", "time", "fs"] }
-arc-swap     = { workspace = true }
 parking_lot  = "0.12"
 futures-util = "0.3"
 

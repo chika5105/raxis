@@ -50,7 +50,7 @@ use raxis_credential_proxy_postgres::{
     restriction::Restrictions, AuditChannel, AuditEvent, OwnedConsumer, PostgresProxy, ProxyConfig,
 };
 use raxis_credentials::{
-    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
     OperatorId,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -94,9 +94,6 @@ impl CredentialBackend for LiveBackend {
     }
     fn exists(&self, name: &CredentialName) -> bool {
         name.as_str() == "live-e2e"
-    }
-    fn lease(&self, _name: &CredentialName) -> Lease {
-        Lease::Forever
     }
     fn backend_kind(&self) -> &'static str {
         "live-e2e"

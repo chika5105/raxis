@@ -25,6 +25,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use raxis_credential_proxy_sql_shared::matches_any;
+pub use raxis_credential_proxy_sql_shared::{
+    AmbiguityReason, QualifiedName, RelationList, RestrictionDecision, RestrictionReason,
+};
+
 /// Restriction set declared in `[tasks.credentials.restrictions]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Restrictions {
@@ -156,109 +161,6 @@ impl Restrictions {
                 reason,
                 tables_referenced,
             }
-        }
-    }
-}
-
-/// Closed enum of restriction-rejection reasons. Strings in the
-/// audit chain match `as_str()` verbatim per `proxy-table-
-/// allowlists.md §8.2`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RestrictionReason {
-    /// Verb-class filter (V2.1 `allow_only_select`) blocked.
-    AllowOnlySelect,
-    /// Walker resolved tables; one or more was not in `allowed_tables`.
-    TableNotInAllowedList,
-    /// Walker resolved tables; one or more was in `forbidden_tables`.
-    TableInForbiddenList,
-    /// Walker couldn't resolve because the input was a multi-
-    /// statement batch (`;`-separated).
-    AmbiguousSqlMultiStatement,
-    /// Walker couldn't resolve dynamic SQL (`EXEC`/`EXECUTE`/`sp_executesql`).
-    AmbiguousSqlDynamic,
-    /// Walker couldn't resolve malformed SQL.
-    AmbiguousSqlMalformed,
-}
-
-impl RestrictionReason {
-    /// Stable grep key for the audit chain.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::AllowOnlySelect => "allow_only_select",
-            Self::TableNotInAllowedList => "table_not_in_allowed_list",
-            Self::TableInForbiddenList => "table_in_forbidden_list",
-            Self::AmbiguousSqlMultiStatement => "ambiguous_sql_multi_statement",
-            Self::AmbiguousSqlDynamic => "ambiguous_sql_dynamic",
-            Self::AmbiguousSqlMalformed => "ambiguous_sql_malformed",
-        }
-    }
-}
-
-/// Outcome of `Restrictions::check`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RestrictionDecision {
-    /// Forward upstream; record the walker's resolved table list
-    /// in audit.
-    Admit {
-        /// Walker-resolved relation list.
-        tables_referenced: Vec<String>,
-    },
-    /// Reject with a wire-format error; record reason in audit.
-    Block {
-        /// Closed-enum reason; serialised verbatim into audit.
-        reason: RestrictionReason,
-        /// Walker output, included for audit.
-        tables_referenced: Vec<String>,
-    },
-    /// `enforce = false`: forward upstream BUT record the would-
-    /// have-blocked reason in audit.
-    AuditOnly {
-        /// Reason the walker would have blocked under `enforce = true`.
-        reason: RestrictionReason,
-        /// Walker output (may be empty if ambiguous).
-        tables_referenced: Vec<String>,
-    },
-}
-
-/// Walker output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RelationList {
-    /// Confidently resolved set of qualified relations.
-    Resolved(Vec<QualifiedName>),
-    /// Walker could not prove the set with high confidence.
-    Ambiguous {
-        /// Specific ambiguity class.
-        reason: AmbiguityReason,
-    },
-}
-
-/// Why the walker bailed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AmbiguityReason {
-    /// `;`-separated batch with > 1 non-trailing statement.
-    MultiStatementBatch,
-    /// Dynamic SQL (`EXEC`, `EXECUTE`, `sp_executesql`).
-    DynamicSql,
-    /// Unbalanced parens, unterminated string, or empty input.
-    Malformed,
-}
-
-/// Schema-qualified relation reference produced by the walker.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QualifiedName {
-    /// Optional schema qualifier. `None` when the SQL referenced
-    /// the relation by bare name.
-    pub schema: Option<String>,
-    /// Table component, case preserved per `§3 D3`.
-    pub table: String,
-}
-
-impl std::fmt::Display for QualifiedName {
-    /// Canonical `<schema>.<table>` or bare `<table>` form.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.schema {
-            Some(s) => write!(f, "{}.{}", s.to_ascii_lowercase(), self.table),
-            None => f.write_str(&self.table),
         }
     }
 }
@@ -907,33 +809,6 @@ fn is_clause_boundary(kw: &str) -> bool {
             | "PIVOT"
             | "UNPIVOT"
     )
-}
-
-fn parse_entry(entry: &str) -> QualifiedName {
-    if let Some(idx) = entry.rfind('.') {
-        let schema = entry[..idx].to_ascii_lowercase();
-        let table = entry[idx + 1..].to_owned();
-        QualifiedName {
-            schema: Some(schema),
-            table,
-        }
-    } else {
-        QualifiedName {
-            schema: None,
-            table: entry.to_owned(),
-        }
-    }
-}
-
-fn matches_any(t: &QualifiedName, list: &[String]) -> bool {
-    list.iter().any(|entry| {
-        let e = parse_entry(entry);
-        match (&e.schema, &t.schema) {
-            (Some(es), Some(ts)) => es.eq_ignore_ascii_case(ts) && e.table == t.table,
-            (Some(_), None) => false,
-            (None, _) => e.table == t.table,
-        }
-    })
 }
 
 // ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_credentials::{
     AuditingBackend, ConsumerIdentity, CredentialBackend, CredentialError, CredentialName,
-    CredentialValue, Lease, OperatorId,
+    CredentialValue, OperatorId,
 };
 use raxis_credentials_file::FileCredentialBackend;
 use raxis_test_support::FakeAuditSink;
@@ -311,25 +311,6 @@ fn file_backend_exists_returns_false_for_wrong_mode() {
     let (backend, _audit) = build_audited(dd.path());
     assert!(!backend.exists(&CredentialName::from("exposed")));
 }
-
-// ---------------------------------------------------------------------------
-// File-specific: lease is always Forever
-// ---------------------------------------------------------------------------
-
-#[test]
-fn file_backend_lease_is_forever_for_any_name() {
-    let dd = build_data_dir();
-    let backend = FileCredentialBackend::open_without_uid_check(dd.path());
-    assert_eq!(
-        backend.lease(&CredentialName::from("anything")),
-        Lease::Forever,
-    );
-    assert_eq!(backend.backend_kind(), "file");
-}
-
-// ---------------------------------------------------------------------------
-// Audit-event payload shape
-// ---------------------------------------------------------------------------
 
 #[test]
 fn audit_event_payload_records_consumer_kind_and_id_and_backend_kind() {

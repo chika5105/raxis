@@ -4,12 +4,9 @@
 //! * `integration-merge.md §4 Check 8` (Phase 2: idempotent domain
 //!   commit, dispatched by the merge handler after Phase 1's
 //!   `git_apply_pending = 1` SQLite intent).
-//! * `extensibility-traits.md §2.2.A DomainAdapter::commit` —
-//!   `IntegrationMerge` is the SE-domain instantiation of the
-//!   paradigm primitive "authorised commit of agent-produced state
-//!   to canonical external state". The trait stays in the kernel
-//!   binary; this crate is the V2 reference adapter for the git
-//!   domain.
+//! * `extensibility-traits.md §2.2.A` — `IntegrationMerge` is the
+//!   SE-domain instantiation of the paradigm primitive "authorised
+//!   commit of agent-produced state to canonical external state".
 //! * `v2-deep-spec.md §Step 8` (Orchestrator owns
 //!   `IntegrationMerge`; Kernel verifies ancestry and path
 //!   containment, then advances the target ref).
@@ -105,7 +102,7 @@ use std::path::{Path, PathBuf};
 
 mod adapter;
 pub mod git_cli;
-pub use adapter::{GitAdapter, SeIntentKind, SeTerminalArtefact};
+pub use adapter::GitAdapter;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -323,8 +320,7 @@ pub fn commit_merge_to_target_ref(
 /// `IntegrationMerge` handler (`raxis-kernel::handlers::intent`)
 /// resolves `target_ref` from the orchestrator plan-fields registry
 /// and calls [`commit_merge_to_target_ref`] directly; this wrapper
-/// only feeds the adapter shim (`crate::adapter::GitDomainAdapter`)
-/// and the in-crate test helpers, both of which target
+/// only feeds the in-crate test helpers, which target
 /// `refs/heads/main` explicitly.
 pub fn commit_merge_to_main(
     main_repo_root: &Path,

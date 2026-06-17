@@ -37,7 +37,7 @@ use raxis_credential_proxy_mysql::{
     AuditChannel, AuditEvent, MysqlProxy, OwnedConsumer, ProxyConfig, Restrictions,
 };
 use raxis_credentials::{
-    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
     OperatorId,
 };
 
@@ -73,10 +73,6 @@ impl CredentialBackend for StaticBackend {
 
     fn exists(&self, _name: &CredentialName) -> bool {
         true
-    }
-
-    fn lease(&self, _name: &CredentialName) -> Lease {
-        Lease::Forever
     }
 
     fn backend_kind(&self) -> &'static str {

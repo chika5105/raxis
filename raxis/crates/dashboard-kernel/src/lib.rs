@@ -228,42 +228,9 @@ where
 }
 
 /// Kernel-side callback the dashboard uses to validate Plan Builder
-/// drafts against the live admission path. `raxis-dashboard-kernel`
-/// cannot depend on `raxis-kernel` because the kernel already depends
-/// on this crate, so the production binary wires this trait with a
-/// closure that calls `initiatives::lifecycle::validate_plan_toml_against_policy`.
-pub trait PlanValidator: Send + Sync + 'static {
-    /// Validate a raw `plan.toml` draft against the currently active
-    /// policy bundle and durable store state.
-    fn validate(&self, toml: &str, policy: &PolicyBundle) -> BuilderValidationResponse;
-}
-
-/// Closure-backed [`PlanValidator`] for tests and kernel glue.
-pub struct ClosurePlanValidator<F>
-where
-    F: Fn(&str, &PolicyBundle) -> BuilderValidationResponse + Send + Sync + 'static,
-{
-    inner: F,
-}
-
-impl<F> ClosurePlanValidator<F>
-where
-    F: Fn(&str, &PolicyBundle) -> BuilderValidationResponse + Send + Sync + 'static,
-{
-    /// Wrap a closure into a [`PlanValidator`].
-    pub fn new(f: F) -> Self {
-        Self { inner: f }
-    }
-}
-
-impl<F> PlanValidator for ClosurePlanValidator<F>
-where
-    F: Fn(&str, &PolicyBundle) -> BuilderValidationResponse + Send + Sync + 'static,
-{
-    fn validate(&self, toml: &str, policy: &PolicyBundle) -> BuilderValidationResponse {
-        (self.inner)(toml, policy)
-    }
-}
+/// drafts against the live admission path.
+pub type PlanValidator =
+    dyn Fn(&str, &PolicyBundle) -> BuilderValidationResponse + Send + Sync + 'static;
 
 /// Kernel-wired implementation of the dashboard data trait.
 ///
@@ -309,7 +276,7 @@ pub struct KernelDashboardData {
     /// wire this so Plan Builder validation and `approve_plan` share the
     /// same lifecycle admission checks. Test/read-only fixtures leave it
     /// unset and use the local draft validator below.
-    plan_validator: Option<Arc<dyn PlanValidator>>,
+    plan_validator: Option<Arc<PlanValidator>>,
     /// Immutable policy/plan/key artifact store. Policy history
     /// rows live in SQLite; this store lets the dashboard open
     /// the exact historical `policy.toml` bytes referenced by a
@@ -511,7 +478,7 @@ impl KernelDashboardData {
 
     /// Wire the live kernel Plan Builder validator. Production uses this
     /// to avoid drift between dashboard preflight and actual admission.
-    pub fn with_plan_validator(mut self, validator: Arc<dyn PlanValidator>) -> Self {
+    pub fn with_plan_validator(mut self, validator: Arc<PlanValidator>) -> Self {
         self.plan_validator = Some(validator);
         self
     }
@@ -2533,7 +2500,7 @@ impl DashboardData for KernelDashboardData {
     ) -> Result<BuilderValidationResponse, ApiError> {
         let policy = self.policy.load_full();
         if let Some(validator) = &self.plan_validator {
-            Ok(validator.validate(toml, &policy))
+            Ok(validator(toml, &policy))
         } else {
             Ok(validate_plan_draft_with_policy(toml, &policy))
         }
@@ -10107,7 +10074,7 @@ pub async fn start_dashboard_with_advancer(
     artifact_store: Option<Arc<raxis_artifact_store::ArtifactStore>>,
     stream_capture: Arc<SessionStreamCapture>,
     advancer: Arc<dyn PolicyAdvancer>,
-    plan_validator: Option<Arc<dyn PlanValidator>>,
+    plan_validator: Option<Arc<PlanValidator>>,
     audit_sink: Arc<dyn raxis_audit_tools::AuditSink>,
     observability: Option<Arc<raxis_observability::ObservabilityHub>>,
     task_llm_capture: Option<Arc<TaskLlmCapture>>,
@@ -10300,22 +10267,23 @@ on_conflict = "orchestrator_then_operator"
         let policy = Arc::new(ArcSwap::from_pointee(
             PolicyBundle::for_tests_with_operators(Vec::new()),
         ));
-        let validator: Arc<dyn PlanValidator> = Arc::new(ClosurePlanValidator::new(
-            |_toml: &str, policy: &PolicyBundle| BuilderValidationResponse {
-                artifact_kind: "plan".to_owned(),
-                authority: "kernel".to_owned(),
-                policy_epoch: policy.epoch(),
-                resolved_target_ref: Some("refs/heads/live-callback".to_owned()),
-                ok: false,
-                issues: vec![BuilderValidationIssue {
-                    code: "LIVE_KERNEL_VALIDATOR".to_owned(),
-                    severity: BuilderValidationSeverity::Error,
-                    message: "callback used".to_owned(),
-                    remediation: "dashboard did not fall back to local draft checks".to_owned(),
-                }],
-                next_steps: Vec::new(),
-            },
-        ));
+        let validator: Arc<PlanValidator> =
+            Arc::new(
+                |_toml: &str, policy: &PolicyBundle| BuilderValidationResponse {
+                    artifact_kind: "plan".to_owned(),
+                    authority: "kernel".to_owned(),
+                    policy_epoch: policy.epoch(),
+                    resolved_target_ref: Some("refs/heads/live-callback".to_owned()),
+                    ok: false,
+                    issues: vec![BuilderValidationIssue {
+                        code: "LIVE_KERNEL_VALIDATOR".to_owned(),
+                        severity: BuilderValidationSeverity::Error,
+                        message: "callback used".to_owned(),
+                        remediation: "dashboard did not fall back to local draft checks".to_owned(),
+                    }],
+                    next_steps: Vec::new(),
+                },
+            );
         let data = KernelDashboardData::new(
             store,
             policy,
