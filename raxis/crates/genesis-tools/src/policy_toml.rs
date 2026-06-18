@@ -250,6 +250,20 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
          \n",
     );
 
+    // [gate_fixup] — default bounded repair lane for verifier/reviewer gate
+    // failures. Without this profile, any non-pass witness is terminal even
+    // when the failed artifact is fixable by a narrow executor retry.
+    out.push_str(
+        "[gate_fixup]\n\
+         enabled            = true\n\
+         max_attempts       = 2\n\
+         executor_image     = \"raxis-executor-starter\"\n\
+         max_turns          = 16\n\
+         max_cost_per_run   = 8000\n\
+         wall_clock_seconds = 900\n\
+         \n",
+    );
+
     // [sessions] — TTLs + allowed worktree roots. The roots list is the
     // single most error-prone genesis field; we annotate it with a TOML
     // comment directing the operator to update it before first use.
@@ -529,6 +543,14 @@ mod tests {
             "exactly one default lane at genesis"
         );
         assert_eq!(bundle.lanes()[0].lane_id, "default");
+        let fixup = bundle
+            .gate_fixup()
+            .expect("genesis policy must install a default gate-fixup profile");
+        assert_eq!(fixup.max_attempts, 2);
+        assert_eq!(fixup.executor_image, "raxis-executor-starter");
+        assert_eq!(fixup.max_turns, 16);
+        assert_eq!(fixup.max_cost_per_run, 8_000);
+        assert_eq!(fixup.wall_clock_seconds, 900);
         assert_eq!(sha.len(), 64, "policy_sha256 is hex-SHA-256 = 64 chars");
         // Cert mandatory: every operator entry MUST carry a cert that
         // round-trips losslessly through TOML.
