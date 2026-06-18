@@ -240,24 +240,64 @@ pub fn effective_allow(
     store: &Store,
 ) -> Result<AllowSet, PathScopeError> {
     let key = TaskKey::new(initiative_id, task_id);
-    let fields = registry
-        .get(&key)
-        .ok_or_else(|| PathScopeError::NoPlanEntry {
-            initiative_id: initiative_id.to_owned(),
-            task_id: task_id.to_owned(),
-        })?;
+    let (scope_task_id, fields) = match registry.get(&key) {
+        Some(fields) => (task_id.to_owned(), fields),
+        None => {
+            let Some(parent_task_id) = gate_fixup_parent_task_id(initiative_id, task_id, store)?
+            else {
+                return Err(PathScopeError::NoPlanEntry {
+                    initiative_id: initiative_id.to_owned(),
+                    task_id: task_id.to_owned(),
+                });
+            };
+            let parent_key = TaskKey::new(initiative_id, &parent_task_id);
+            let parent_fields =
+                registry
+                    .get(&parent_key)
+                    .ok_or_else(|| PathScopeError::NoPlanEntry {
+                        initiative_id: initiative_id.to_owned(),
+                        task_id: parent_task_id.clone(),
+                    })?;
+            (parent_task_id, parent_fields)
+        }
+    };
 
     if fields.path_scope_override {
         return Ok(AllowSet::universal());
     }
 
     let path_entries = parse_v2_entries(&fields.path_allowlist)?;
-    let exact_paths = collect_predecessor_exports(initiative_id, task_id, registry, store)?;
+    let exact_paths = collect_predecessor_exports(initiative_id, &scope_task_id, registry, store)?;
 
     Ok(AllowSet {
         universal: false,
         path_entries,
         exact_paths,
+    })
+}
+
+fn gate_fixup_parent_task_id(
+    initiative_id: &str,
+    task_id: &str,
+    store: &Store,
+) -> Result<Option<String>, PathScopeError> {
+    let conn = store.lock_sync();
+    conn.query_row(
+        &format!(
+            "SELECT parent_gate_failure_task_id \
+               FROM {tasks} \
+              WHERE initiative_id = ?1 \
+                AND task_id = ?2 \
+                AND COALESCE(is_gate_fixup, 0) = 1",
+            tasks = Table::Tasks.as_str(),
+        ),
+        rusqlite::params![initiative_id, task_id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .map(|parent| parent.filter(|s| !s.is_empty()))
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        _ => Err(PathScopeError::Store(e)),
     })
 }
 
@@ -704,6 +744,26 @@ mod tests {
         .unwrap();
     }
 
+    fn seed_gate_fixup_task(store: &Store, init_id: &str, task_id: &str, parent_task_id: &str) {
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at, actual_cost,
+                         is_gate_fixup, parent_gate_failure_task_id,
+                         parent_gate_failure_type)
+                     VALUES (?1, ?2, 'default', 'Admitted', 'kernel', 1, 0, 0, 0,
+                             1, ?3, 'Verifier')"
+                ),
+                rusqlite::params![task_id, init_id, parent_task_id],
+            )
+            .unwrap();
+        }
+        seed_edge(store, init_id, parent_task_id, task_id);
+    }
+
     fn seed_edge(store: &Store, init_id: &str, pred: &str, succ: &str) {
         let conn = store.lock_sync();
         conn.execute(
@@ -791,6 +851,73 @@ mod tests {
         assert!(allow.matches("src/lib.rs"));
         assert!(allow.matches("README.md"));
         assert!(!allow.matches("Cargo.toml"));
+    }
+
+    #[test]
+    fn gate_fixup_task_inherits_parent_path_allowlist() {
+        let store = Store::open_in_memory().unwrap();
+        seed_initiative(&store, "init-A");
+        seed_task(
+            &store,
+            "init-A",
+            "parent",
+            raxis_types::TaskState::GatesPending,
+        );
+        seed_gate_fixup_task(&store, "init-A", "fixup", "parent");
+
+        let registry = registry_with(&[(
+            "init-A",
+            "parent",
+            TaskPlanFields {
+                path_allowlist: vec!["gtm/analysis/".into(), "README.md".into()],
+                ..Default::default()
+            },
+        )]);
+
+        let allow = effective_allow("init-A", "fixup", &registry, &store).unwrap();
+        assert!(allow.matches("gtm/analysis/review.md"));
+        assert!(allow.matches("README.md"));
+        assert!(!allow.matches("gtm/authority/claims.toml"));
+    }
+
+    #[test]
+    fn gate_fixup_task_inherits_parent_predecessor_exports() {
+        let store = Store::open_in_memory().unwrap();
+        seed_initiative(&store, "init-A");
+        seed_task(&store, "init-A", "pred", raxis_types::TaskState::Completed);
+        seed_task(
+            &store,
+            "init-A",
+            "parent",
+            raxis_types::TaskState::GatesPending,
+        );
+        seed_edge(&store, "init-A", "pred", "parent");
+        seed_exported(&store, "pred", &["gtm/reports/generated/context.md"]);
+        seed_gate_fixup_task(&store, "init-A", "fixup", "parent");
+
+        let registry = registry_with(&[
+            (
+                "init-A",
+                "pred",
+                TaskPlanFields {
+                    path_export_to_successors: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "init-A",
+                "parent",
+                TaskPlanFields {
+                    path_allowlist: vec!["gtm/analysis/".into()],
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        let allow = effective_allow("init-A", "fixup", &registry, &store).unwrap();
+        assert!(allow.matches("gtm/analysis/review.md"));
+        assert!(allow.matches("gtm/reports/generated/context.md"));
+        assert!(!allow.matches("gtm/reports/generated/other.md"));
     }
 
     #[test]

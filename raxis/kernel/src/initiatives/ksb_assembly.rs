@@ -173,6 +173,21 @@ pub fn assemble_ksb_snapshot(
         .task_id
         .map(|tid| TaskKey::new(inputs.initiative_id.to_owned(), tid.to_owned()))
         .and_then(|key| registry.get(&key));
+    let gate_fixup_scope_fields = if task_fields.is_none() {
+        inputs
+            .task_id
+            .and_then(|tid| {
+                read_gate_fixup_parent_task_id_for_scope(conn, tid)
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|parent_tid| {
+                registry.get(&TaskKey::new(inputs.initiative_id.to_owned(), parent_tid))
+            })
+    } else {
+        None
+    };
+    let path_scope_fields = task_fields.as_ref().or(gate_fixup_scope_fields.as_ref());
     let orch_fields = registry.orchestrator(inputs.initiative_id);
 
     let target_ref = orch_fields
@@ -180,8 +195,7 @@ pub fn assemble_ksb_snapshot(
         .map(|o| o.target_ref.clone())
         .unwrap_or_default();
 
-    let path_allowlist = task_fields
-        .as_ref()
+    let path_allowlist = path_scope_fields
         .map(|t| t.path_allowlist.clone())
         .unwrap_or_default();
 
@@ -199,6 +213,7 @@ pub fn assemble_ksb_snapshot(
             // `[[tasks]].description`.
             task_fields
                 .as_ref()
+                .or(gate_fixup_scope_fields.as_ref())
                 .map(|t| truncate_to_bytes(&t.description, TASK_DESCRIPTION_MAX_BYTES))
                 .unwrap_or_default()
         }
@@ -362,6 +377,28 @@ pub fn assemble_ksb_snapshot(
 /// `Ok(None)` with a kernel-bug stderr line so the spawn path
 /// stays boot-safe rather than refusing to bring up the
 /// session.
+fn read_gate_fixup_parent_task_id_for_scope(
+    conn: &rusqlite::Connection,
+    task_id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    let tasks = raxis_store::Table::Tasks.as_str();
+    conn.query_row(
+        &format!(
+            "SELECT parent_gate_failure_task_id \
+               FROM {tasks} \
+              WHERE task_id = ?1 \
+                AND COALESCE(is_gate_fixup, 0) = 1"
+        ),
+        rusqlite::params![task_id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .map(|parent| parent.filter(|s| !s.is_empty()))
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        _ => Err(e),
+    })
+}
+
 fn read_gate_fixup_context(
     conn: &rusqlite::Connection,
     task_id: &str,
@@ -3558,6 +3595,70 @@ mod tests {
         assert_eq!(
             ctx.attempt_index, 1,
             "attempt index must reflect the parent's gate_fixup_attempts counter"
+        );
+    }
+
+    #[test]
+    fn gate_fixup_snapshot_inherits_parent_path_allowlist() {
+        let (store, _td) = fresh_store();
+        let registry = PlanRegistry::new();
+        registry.insert(
+            TaskKey::new("init-gf-scope", "parent-1"),
+            TaskPlanFields {
+                path_allowlist: vec!["gtm/analysis/".to_owned(), "README.md".to_owned()],
+                description: "Repair the gated GTM analysis artifact.".to_owned(),
+                ..Default::default()
+            },
+        );
+
+        let conn = store.lock_sync();
+        conn.execute_batch(&format!(
+            "INSERT INTO {INITIATIVES} \
+                (initiative_id, state, terminal_criteria_json, \
+                 plan_artifact_sha256, created_at) \
+             VALUES ('init-gf-scope', 'Executing', '{{}}', 'deadbeef', 1); \
+             INSERT INTO {TASKS} \
+                (task_id, initiative_id, lane_id, state, actor, \
+                 policy_epoch, admitted_at, transitioned_at, actual_cost) \
+             VALUES ('parent-1', 'init-gf-scope', 'default', \
+                     'GatesPending', 'kernel', 1, 1, 1, 0); \
+             INSERT INTO {TASKS} \
+                (task_id, initiative_id, lane_id, state, actor, \
+                 policy_epoch, admitted_at, transitioned_at, actual_cost, \
+                 is_gate_fixup, parent_gate_failure_task_id, \
+                 parent_gate_failure_type) \
+             VALUES ('fixup-1', 'init-gf-scope', 'default', \
+                     'Admitted', 'kernel', 1, 1, 1, 0, \
+                     1, 'parent-1', 'Verifier');"
+        ))
+        .unwrap();
+
+        let snap = assemble_ksb_snapshot(
+            &conn,
+            &registry,
+            &KsbInputs {
+                initiative_id: "init-gf-scope",
+                task_id: Some("fixup-1"),
+                role: KsbRole::Executor,
+                token_budget_remaining: 0,
+                wallclock_budget_remaining_s: 0,
+                credential_ports: Vec::new(),
+                session_id: "sess-fixup",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
+            },
+        )
+        .expect("assemble fixup snapshot");
+
+        assert_eq!(
+            snap.path_allowlist,
+            vec!["gtm/analysis/".to_owned(), "README.md".to_owned()],
+            "synthetic fixup task must inherit the failed parent's signed path scope"
+        );
+        assert!(
+            snap.task_description
+                .starts_with("Repair the gated GTM analysis artifact"),
+            "fixup snapshot should inherit parent task description for operator context"
         );
     }
 
