@@ -93,6 +93,7 @@ mod worktree_provisioning;
 // BOUNDED-DIFF}-01`.
 mod worktree_snapshot;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use errors::{exit_with_code, KernelError};
@@ -240,8 +241,31 @@ fn spawn_deadlock_watcher(data_dir: std::path::PathBuf) {
 /// Kernel data directory. Explicit `RAXIS_DATA_DIR` wins. Homebrew
 /// binaries default to the Homebrew var dir; source builds default
 /// to `~/.raxis`.
-fn data_dir() -> std::path::PathBuf {
+fn data_dir() -> PathBuf {
     raxis_runtime::data_dir_from_env_or_install_default()
+}
+
+/// Runtime bundle root. If the operator supplied `RAXIS_INSTALL_DIR`, resolve
+/// symlinks once at boot so a long-running kernel never follows a moving
+/// Homebrew `opt` symlink after `brew upgrade`.
+fn install_dir(data_dir: &Path) -> (PathBuf, bool) {
+    let raw_from_env = std::env::var_os("RAXIS_INSTALL_DIR");
+    let configured = raw_from_env.is_some();
+    let raw = raw_from_env
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.to_path_buf());
+    let resolved = std::fs::canonicalize(&raw).unwrap_or_else(|_| raw.clone());
+
+    if resolved != raw {
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"install_dir_resolved\",\
+             \"raw\":\"{}\",\"resolved\":\"{}\"}}",
+            raw.display(),
+            resolved.display(),
+        );
+    }
+
+    (resolved, configured)
 }
 
 #[tokio::main]
@@ -1275,14 +1299,11 @@ async fn main() {
     //     the audit event eagerly, the launch path enforces the
     //     gate).
     //
-    // `RAXIS_INSTALL_DIR` is the operator-supplied bundle root
-    // (default: `/usr/local/lib/raxis` for system installs;
-    // `~/.local/share/raxis` for user installs). Falls back to
-    // `data_dir` so dev workstations without a configured install
-    // dir still see consistent preflight output.
-    let install_dir = std::env::var("RAXIS_INSTALL_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| data_dir.clone());
+    // `RAXIS_INSTALL_DIR` is the operator-supplied bundle root.
+    // Resolve it once so long-running packaged kernels keep using the
+    // versioned bundle they booted with rather than a symlink that Homebrew
+    // may retarget underneath them during upgrade.
+    let (install_dir, install_dir_configured) = install_dir(&data_dir);
     let kernel_version = env!("CARGO_PKG_VERSION");
     let canonical_image_outcomes = canonical_images_preflight::verify_canonical_images_at_boot(
         &install_dir,
@@ -1369,6 +1390,66 @@ async fn main() {
                     reason,
                 );
             }
+        }
+    }
+    if install_dir_configured {
+        let blockers: Vec<String> =
+            canonical_image_outcomes
+                .iter()
+                .filter_map(|(kind, outcome)| match outcome {
+                    canonical_images_preflight::PreflightOutcome::Ok { .. } => None,
+                    canonical_images_preflight::PreflightOutcome::Missing { path } => Some(
+                        format!("{} missing at {}", kind.audit_kind(), path.display()),
+                    ),
+                    canonical_images_preflight::PreflightOutcome::ManifestMissing {
+                        image_path,
+                        manifest_path,
+                    } => Some(format!(
+                        "{} manifest missing for image {} at {}",
+                        kind.audit_kind(),
+                        image_path.display(),
+                        manifest_path.display()
+                    )),
+                    canonical_images_preflight::PreflightOutcome::TrustAnchorUnpopulated {
+                        path,
+                    } => Some(format!(
+                        "{} trust anchor unpopulated for {}",
+                        kind.audit_kind(),
+                        path.display()
+                    )),
+                    canonical_images_preflight::PreflightOutcome::Tampered {
+                        path,
+                        expected,
+                        actual,
+                    } => Some(format!(
+                        "{} tampered at {} expected {} actual {}",
+                        kind.audit_kind(),
+                        path.display(),
+                        expected,
+                        actual
+                    )),
+                    canonical_images_preflight::PreflightOutcome::ManifestRejected {
+                        image_path,
+                        manifest_path,
+                        reason,
+                    } => Some(format!(
+                        "{} manifest rejected for image {} at {}: {}",
+                        kind.audit_kind(),
+                        image_path.display(),
+                        manifest_path.display(),
+                        reason
+                    )),
+                })
+                .collect();
+
+        if !blockers.is_empty() {
+            exit_with_code(KernelError::BootstrapFailed {
+                reason: format!(
+                    "canonical image preflight failed for configured RAXIS_INSTALL_DIR {}: {}",
+                    install_dir.display(),
+                    blockers.join("; ")
+                ),
+            });
         }
     }
 

@@ -42,11 +42,11 @@ exactly. Other provider impls translate to and from this canonical shape.
    compiler enforces every translation explicitly.
 
 3. **Single trait surface.** Composition (
-   `Fallback[Circuit[Retrying[OpenAiClient]], Circuit[Retrying[GeminiClient]]]`
+   `Fallback[Retrying[OpenAiClient], Retrying[GeminiClient]]`
    ) requires a single `Arc<dyn ModelClient>` shape. Per-provider impls
    register against the same trait so the dispatch loop and the
-   resilience shells (retry, circuit, fallback) work identically across
-   providers.
+   resilience shells (retry and fallback-with-cooldown) work identically
+   across providers.
 
 ## §2 — `OpenAiClient` — OpenAI-compatible APIs
 
@@ -307,35 +307,39 @@ The role-binary `main()` constructs the dispatch chain like:
 
 ```rust
 use raxis_planner_core::{
-    AnthropicClient, OpenAiClient, GeminiClient,
+    AnthropicClient, OpenAiClient,
     RetryConfig, RetryingModelClient,
-    CircuitConfig, CircuitBreakerModelClient,
     FallbackModelClient,
     ModelClient,
 };
 use std::sync::Arc;
 
-let primary: Arc<dyn ModelClient> = Arc::new(CircuitBreakerModelClient::new(
-    Arc::new(RetryingModelClient::new(
-        Arc::new(AnthropicClient::new("https://api.anthropic.com")) as _,
-        RetryConfig::anthropic_default(),
-    )) as _,
-    "anthropic",
-    CircuitConfig::production_default(),
+let primary_raw: Arc<dyn ModelClient> =
+    Arc::new(AnthropicClient::new("https://api.anthropic.com"));
+let primary: Arc<dyn ModelClient> = Arc::new(RetryingModelClient::new(
+    primary_raw,
+    RetryConfig::fallback_chain_provider_default(),
 ));
-let secondary: Arc<dyn ModelClient> = Arc::new(CircuitBreakerModelClient::new(
-    Arc::new(RetryingModelClient::new(
-        Arc::new(OpenAiClient::new("https://api.openai.com")) as _,
-        RetryConfig::anthropic_default(),
-    )) as _,
-    "openai",
-    CircuitConfig::production_default(),
+
+let secondary_raw: Arc<dyn ModelClient> =
+    Arc::new(OpenAiClient::new("https://api.openai.com"));
+let secondary: Arc<dyn ModelClient> = Arc::new(RetryingModelClient::new(
+    secondary_raw,
+    RetryConfig::fallback_chain_provider_default(),
 ));
+
 let chain: Arc<dyn ModelClient> = Arc::new(FallbackModelClient::new(vec![
     primary,
     secondary,
 ]));
 ```
+
+`FallbackModelClient::new` applies the production fallback cooldown:
+after a provider returns a fallbackable error, later turns skip that
+provider for the cooldown window instead of paying that provider's
+latency before every secondary attempt. Single-provider deployments keep
+`RetryConfig::anthropic_default()` so one transient provider failure can
+still retry in place.
 
 The dispatch loop holds `chain: Arc<dyn ModelClient>` and is
 provider-agnostic.

@@ -20,7 +20,7 @@ use raxis_observability::{redact, MetricName, ObservabilityHub};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
@@ -73,6 +73,21 @@ pub enum AuditWriterError {
     /// the kernel cannot resume from a corrupted segment.
     #[error("audit chain has malformed JSON at line {line_number}: {reason}")]
     MalformedRecord { line_number: u64, reason: String },
+
+    /// Another kernel / CLI process already owns the OS-level writer lock
+    /// for this segment. Without this lock, two processes can both scan a
+    /// valid tail and append divergent records with the same `prev_sha256`,
+    /// creating an audit fork. Fail closed instead.
+    #[error("audit segment is already locked by another writer at {path}")]
+    SegmentLockHeld { path: PathBuf },
+
+    /// The writer could not create or lock the segment lock file.
+    #[error("I/O error locking audit segment at {path}: {source}")]
+    SegmentLockIo {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +104,10 @@ pub enum AuditWriterError {
 /// in v1 (single-segment, no rotation). v1 uses `prev_sha256 = "000...000"`
 /// for the first record of each segment start.
 pub struct AuditWriter {
+    /// OS-level process lock for the active segment. The in-process mutex
+    /// serialises tasks within one kernel; this prevents a second kernel or
+    /// CLI writer from appending to the same segment concurrently.
+    _segment_lock: AuditSegmentLock,
     /// Buffered writer for the segment file.
     writer: BufWriter<File>,
     /// Monotonically increasing sequence counter.
@@ -140,8 +159,10 @@ impl AuditWriter {
         starting_seq: u64,
         starting_prev_sha256: Option<String>,
     ) -> Result<Self, AuditWriterError> {
+        let segment_lock = AuditSegmentLock::acquire(path)?;
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
+            _segment_lock: segment_lock,
             writer: BufWriter::new(file),
             seq: starting_seq,
             prev_sha256: starting_prev_sha256
@@ -280,6 +301,76 @@ impl AuditWriter {
     pub fn prev_sha256(&self) -> &str {
         &self.prev_sha256
     }
+}
+
+// ---------------------------------------------------------------------------
+// Process-level segment lock
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+struct AuditSegmentLock {
+    file: File,
+}
+
+#[cfg(unix)]
+impl AuditSegmentLock {
+    fn acquire(segment_path: &Path) -> Result<Self, AuditWriterError> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let path = segment_lock_path(segment_path);
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|source| AuditWriterError::SegmentLockIo {
+                path: path.clone(),
+                source,
+            })?;
+
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Ok(Self { file });
+        }
+
+        let source = std::io::Error::last_os_error();
+        let already_locked = source
+            .raw_os_error()
+            .map(|code| code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+            .unwrap_or(false);
+        if already_locked {
+            Err(AuditWriterError::SegmentLockHeld { path })
+        } else {
+            Err(AuditWriterError::SegmentLockIo { path, source })
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for AuditSegmentLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+
+        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[cfg(not(unix))]
+struct AuditSegmentLock;
+
+#[cfg(not(unix))]
+impl AuditSegmentLock {
+    fn acquire(_segment_path: &Path) -> Result<Self, AuditWriterError> {
+        Ok(Self)
+    }
+}
+
+fn segment_lock_path(segment_path: &Path) -> PathBuf {
+    let mut raw = segment_path.as_os_str().to_os_string();
+    raw.push(".lock");
+    PathBuf::from(raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +662,23 @@ mod tests {
         for (i, r) in records.iter().enumerate() {
             assert_eq!(r["seq"].as_u64().unwrap(), i as u64);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn second_writer_on_same_segment_fails_while_first_is_alive() {
+        let tmp = NamedTempFile::new().unwrap();
+        let _first = AuditWriter::open(tmp.path(), 0, None).unwrap();
+
+        let err = match AuditWriter::open(tmp.path(), 0, None) {
+            Ok(_) => panic!("second writer must not acquire the segment lock"),
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, AuditWriterError::SegmentLockHeld { .. }),
+            "expected SegmentLockHeld, got {err:?}"
+        );
     }
 
     // -----------------------------------------------------------------------

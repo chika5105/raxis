@@ -8,12 +8,13 @@
 //! (`extensibility-traits.md §9A.6`).
 //! ## Why the planner side ships this client (not the kernel)
 //! V2's actual integration point is the planner's `ModelClient`
-//! trait (defined in `crate::model`). The dispatch loop, retry
-//! shell (`crate::retry`), and circuit breaker (`crate::circuit`)
-//! all compose against `Arc<dyn ModelClient>`. Adding a sidecar
-//! provider is therefore one new `ModelClient` impl alongside
-//! `AnthropicClient`, `OpenAiClient`, `GeminiClient`, and
-//! `BedrockClient` — exactly the slot anticipates.
+//! trait (defined in `crate::model`). The dispatch loop, retry shell
+//! ([`crate::retry::RetryingModelClient`]), and fallback shell
+//! ([`crate::retry::FallbackModelClient`]) all compose against
+//! `Arc<dyn ModelClient>`. Adding a sidecar provider is therefore one
+//! new `ModelClient` impl alongside `AnthropicClient`, `OpenAiClient`,
+//! `GeminiClient`, and `BedrockClient` — exactly the slot the spec
+//! anticipates.
 //! The original `extensibility-traits.md §9A` references a
 //! kernel-side `InferenceRouter` trait. V2 does not yet ship that
 //! trait — see for the migration design. The
@@ -70,15 +71,21 @@
 //!   intercepts a single request replay it indefinitely. Including
 //!   `request_id` and `timestamp` in the signing input binds each
 //!   signature to a specific request at a specific moment.
-//! ## Retry / circuit-breaker composition
+//! ## Retry / fallback composition
 //! `SidecarModelClient` plugs into the existing dispatch chain
 //! identically to every other `ModelClient`:
 //! ```text
 //! FallbackModelClient[
-//!   CircuitBreakerModelClient(RetryingModelClient(AnthropicClient)),
-//!   CircuitBreakerModelClient(RetryingModelClient(SidecarModelClient)),
+//!   RetryingModelClient(AnthropicClient),
+//!   RetryingModelClient(SidecarModelClient),
 //! ]
 //! ```
+//! In a multi-provider chain, each retry shell uses
+//! `RetryConfig::fallback_chain_provider_default()` (one attempt per
+//! provider). `FallbackModelClient` then applies a short per-provider
+//! cooldown after fallbackable failures, so an unhealthy primary is
+//! skipped on later turns instead of being retried before every
+//! secondary attempt.
 //! HTTP 5xx / connection failures map to `ModelError::Upstream` /
 //! `ModelError::Transport` (retryable per the standard
 //! classifier). 4xx responses map to `ModelError::Upstream` and

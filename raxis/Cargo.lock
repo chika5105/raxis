@@ -3124,6 +3124,7 @@ name = "raxis-audit-tools"
 version = "0.3.2"
 dependencies = [
  "hex",
+ "libc",
  "raxis-genesis-tools",
  "raxis-observability",
  "raxis-types",
