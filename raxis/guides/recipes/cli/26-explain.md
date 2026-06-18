@@ -76,7 +76,7 @@ For an escalation:
   reason: "Cannot decide: ambiguous spec line 42"
 
 Final state: Paused (waiting on operator approve/deny)
-Resolve with:  raxis escalation approve e8a5... --guidance "..."
+Resolve with:  raxis escalation approve e8a5... --scope <capability_class> --max-uses 1 --valid-for 3600
               raxis escalation deny    e8a5... --reason "..."
 ```
 

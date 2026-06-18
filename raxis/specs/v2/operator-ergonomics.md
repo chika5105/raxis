@@ -1350,7 +1350,7 @@ metadata for a new signed initiative.
 
 ```bash
 raxis initiative list --state recovery
-raxis escalation approve <escalation_id> --reason <text>
+raxis escalation approve <escalation_id> --scope LogicalDeadlock --max-uses 1 --valid-for 3600
 raxis escalation deny <escalation_id> --reason <text>
 raxis initiative fork-from-failed <initiative_id>
 ```
@@ -1369,6 +1369,12 @@ raxis initiative fork-from-failed <initiative_id>
 6. If the initiative is already Failed, `fork-from-failed` refuses to mutate it
    and prints parent bundle / artifact metadata for a new signed run.
 ```
+
+For the kernel-created `LogicalDeadlock` recovery class, the approval
+command still uses the standard approval-scope CLI shape because the
+wire request is shared. The kernel pre-classifies the row as
+`class='LogicalDeadlock'` and `initiator='Kernel'`, so no downstream
+approval token is minted; the approval itself is the recovery action.
 
 ### 14.4 Why there is no `initiative resume`
 

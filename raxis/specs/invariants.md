@@ -1434,6 +1434,35 @@ attempt_index: 2 }`.
 
 ---
 
+### INV-GATE-FIXUP-PATH-SCOPE-INHERITS-PARENT-01 — Synthetic fixup tasks inherit the failed parent's signed path authority
+
+**Statement.** A task with `is_gate_fixup = 1` MUST NOT acquire an
+independent or wider path scope. Because synthetic fixup tasks do
+not have signed `[[tasks]]` plan rows, path-scope enforcement MUST
+resolve the fixup child's effective allow set from the failed
+parent task's signed plan fields: `path_allowlist`, `path_denylist`,
+`path_exports`, and `path_scope_override`. Predecessor-export
+resolution MUST also evaluate from the parent task id. KSB assembly
+MUST surface the inherited parent path allowlist and parent task
+description to the fixup executor.
+
+**Justification.** Gate fixups must be able to repair the exact
+artifact that failed, but the planner must not be able to use a
+kernel-created synthetic task as a new authority surface. Looking up
+the failed parent's signed plan fields preserves the operator's
+original scope ceiling. Failing closed when the parent is missing
+avoids accidental universal scope.
+
+**Scenario.** Task `build_queue` is signed with
+`path_allowlist = ["gtm/queues/**"]` and fails a verifier gate. The
+kernel admits `build_queue--gatefixup-1` with `is_gate_fixup = 1`.
+When the fixup executor submits a commit, `path_scope::effective_allow`
+uses `build_queue`'s signed allowlist and predecessor exports. A
+repair under `gtm/queues/` is admissible; a write under
+`automation/` is rejected as out of scope.
+
+---
+
 ### INV-GATE-FIXUP-COMPLETION-PROPAGATES-01 — `CompleteTask` on a fixup task always closes the fixup loop
 
 **Statement.** When `handle_complete_task` flips a task with

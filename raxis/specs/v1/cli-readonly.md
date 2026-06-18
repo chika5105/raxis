@@ -633,7 +633,7 @@ The `[Q]` column surfaces the joined quarantine flag on **every** row (regardles
 PENDING (1):
   escalation_id        task          requested_capability  justification
   01J7…esc-a           01J7…task-04  WriteSecrets          "Need to rotate the auth bug fix"
-  → use `raxis escalation approve 01J7…esc-a`
+  → use `raxis escalation approve 01J7…esc-a --scope WriteSecrets --max-uses 1 --valid-for 600`
 
 APPROVED (2): use --state Approved to view
 DENIED (0):   use --state Denied to view

@@ -5,15 +5,15 @@
 Human-in-the-loop decision points. When an Orchestrator decides a
 task can't make progress without operator input (R-12, INV-06), it
 emits an escalation and pauses the dependent tasks. Operators
-review and either `approve` (with optional guidance) or `deny`
-(terminating the initiative).
+review and either `approve` with a bounded approval scope, or `deny`
+(terminating or failing the affected recovery path).
 
 ---
 
 ## Syntax
 
 ```text
-raxis escalation approve <escalation_id> [--guidance <text>]
+raxis escalation approve <escalation_id> --scope <capability_class> --max-uses <n> --valid-for <secs>
 raxis escalation deny    <escalation_id> [--reason <text>]
 ```
 
@@ -48,29 +48,60 @@ raxis escalation show e8a5...
 
 ---
 
-## approve — let the work continue
+## approve — mint a bounded approval
 
 ```bash
 raxis escalation approve e8a5... \
-  --guidance "spec line 42 means 'reject expired tokens'; proceed with strict mode"
+  --scope NetworkEgress \
+  --max-uses 1 \
+  --valid-for 3600
 # Output:
-# escalation_id:  e8a5...
-# state:          Approved
-# resumed_tasks:  [code_reviewer]
+# Escalation e8a5... approved.
+# approval_token_id:  7b4c...
+# approval_token_raw: <redacted; sha256_fp=...> (re-run with --reveal-token to print the raw token to stdout)
+# expires_at:         1770638892
 ```
 
 What happens:
 
-- The kernel marks the escalation `Approved` in the audit chain
-  (`EscalationResolved { decision: Approved, guidance }`).
-- The Orchestrator's session receives a `KernelPush::EscalationResolved`
-  containing the guidance. The Orchestrator decides how to proceed
-  (typically: re-issue the task with augmented system prompt).
-- Lineage rate-limit counters are reset (the operator's
-  decision counts as fresh signal).
+- The CLI signs `approval|<escalation_id>|<capability_class>|<max_uses>|<valid_for_seconds>`
+  with the operator key.
+- The kernel verifies the signature, marks the escalation `Approved`,
+  and inserts an `approval_tokens` row.
+- The returned token is a bearer secret. By default the CLI redacts it;
+  pass `--reveal-token` only when you need to hand the raw token to a
+  planner out-of-band.
+- The token can be consumed only for the approved capability class, only
+  until `--valid-for` expires, and only up to `--max-uses`.
 
-The guidance string is delivered verbatim to the Orchestrator via
-the kernel push channel. Keep it precise and actionable.
+Approval is an authority act, not a prompt-edit mechanism. If the agent
+needs new instructions, encode those in the next signed plan or in the
+human-controlled operating notes it is allowed to read.
+
+---
+
+## approve — recover a kernel logical deadlock
+
+Some escalations are created by the kernel itself when an initiative
+enters `RecoveryRequired`, for example an orchestrator no-progress /
+logical-deadlock stop. These rows have class `LogicalDeadlock` and
+initiator `Kernel`.
+
+Use the same CLI shape:
+
+```bash
+raxis escalation approve 7edb... \
+  --scope LogicalDeadlock \
+  --max-uses 1 \
+  --valid-for 3600
+```
+
+For this special class, the kernel does not mint a downstream approval
+token. The operator approval is the action: it resets the recovery
+counter, transitions the initiative from `RecoveryRequired` back to
+`Executing`, and schedules the orchestrator to be respawned. The scope
+flags remain required by the CLI because approval requests share one
+typed wire shape.
 
 ---
 
@@ -82,13 +113,14 @@ raxis escalation deny e8a5... \
 # Output:
 # escalation_id:    e8a5...
 # state:            Denied
-# initiative_state: Aborted
+# initiative_state: Failed
 ```
 
-A denied escalation is **terminal for the initiative** — the kernel
-aborts all sessions for it (just like `initiative abort`), records
-`InitiativeAborted` linked to the escalation, and the lane budget
-recovers.
+A denied escalation is terminal for that recovery path. For
+kernel-initiated `LogicalDeadlock` recovery, denial transitions
+`RecoveryRequired -> Failed`. For ordinary planner capability
+escalations, the denied capability remains unavailable and dependent
+work fails closed.
 
 ---
 
@@ -118,8 +150,10 @@ or the rate-limit window expires.
 |---|---|
 | `approve: escalation not found` | Wrong UUID or already resolved. |
 | `approve: escalation already resolved` | Idempotent — swallow if scripting. |
-| `approve: --guidance too long` | Trim to ≤ 4 KB (server-side cap). |
-| `deny: initiative already terminal` | The initiative is already `Aborted` / `Completed`. The escalation auto-closed; nothing to do. |
+| `escalation approve requires --scope <capability_class>` | Add the capability class, for example `--scope LogicalDeadlock` for kernel recovery. |
+| `escalation approve requires --max-uses <n>` | Add a positive use count such as `--max-uses 1`. |
+| `escalation approve requires --valid-for <secs>` | Add a positive TTL such as `--valid-for 3600`. |
+| `deny: initiative already terminal` | The initiative is already `Failed` / `Aborted` / `Completed`. The escalation auto-closed; nothing to do. |
 | `OPERATOR_NOT_AUTHORIZED` | Cert lacks `ApproveEscalation` / `DenyEscalation` in `permitted_ops`. |
 
 ---
@@ -138,15 +172,14 @@ or the rate-limit window expires.
 
 ## Variations
 
-- **Approve with broad guidance.** "Re-run with the strict-mode
-  flag" → Orchestrator augments the system prompt and re-issues
-  the Reviewer.
+- **Approve one bounded capability.** Give the planner exactly one
+  short-lived token for the class it requested.
+- **Approve recovery.** A kernel-created `LogicalDeadlock` escalation
+  resumes a `RecoveryRequired` initiative without minting a planner
+  token.
 - **Deny on policy grounds.** A reviewer escalates because they
   found a bug in policy interpretation; deny so the initiative
   doesn't sneak through, and start a separate plan to fix the
   policy.
-- **Operator playbook.** Map common escalation reason patterns to
-  pre-canned guidance strings; review docs `R-12` for the
-  invariant.
 - **Auto-deny stale escalations.** Cron that denies any escalation
   pending > N hours, with `--reason "auto-deny: stale"`.

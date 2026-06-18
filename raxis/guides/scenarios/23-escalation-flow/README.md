@@ -32,9 +32,9 @@ Same as scenario 04.
 
 - The escalation terminal state reached after the Orchestrator
   gives up on a stuck Executor / Reviewer pair.
-- `raxis escalation list` and `raxis escalation approve` /
+- `raxis escalations` and `raxis escalation approve` /
   `raxis escalation deny` CLI flow (the older `accept` spelling
-  was renamed; see `cli/src/cmd/escalation.rs`).
+  was renamed; see `cli/src/commands/escalation.rs`).
 
 ---
 
@@ -67,5 +67,5 @@ INIT_ID="$(raxis submit plan ./plan.toml --no-dry-run | awk '/^Initiative / {pri
 raxis plan approve "$INIT_ID"
 
 # Wait for escalation:
-raxis escalation list --json
+raxis escalations --json
 ```

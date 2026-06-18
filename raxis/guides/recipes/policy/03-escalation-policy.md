@@ -117,7 +117,7 @@ operator acknowledgement and clears the expired-count.
 
 | Command | Purpose |
 |---|---|
-| `raxis escalation list [--status pending\|approved\|denied\|all]` | Inspect outstanding escalations. |
+| `raxis escalations [--status pending\|approved\|denied\|all]` | Inspect outstanding escalations. |
 | `raxis escalation approve <id> --scope <cap> --max-uses <N> --valid-for <secs>` | Grant a bounded capability in response to an escalation. |
 | `raxis escalation deny <id> [--reason <text>]` | Refuse the escalation; the agent receives `FAIL_ESCALATION_DENIED`. |
 | `raxis log --kind LineageQuarantined` | Find lineages currently quarantined. |
