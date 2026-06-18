@@ -879,6 +879,7 @@ async fn spawn_orchestrator_for_initiative(
         policy.model_routing(),
         raxis_types::SessionAgentType::Orchestrator,
         None,
+        None,
     );
     if let Some(data_dir) = &spawn_ctx.data_dir {
         let sock = data_dir.join("sockets").join("planner.sock");
@@ -4929,16 +4930,31 @@ fn stamp_planner_model_env_or_insert(
     env: &mut BTreeMap<String, String>,
     model_routing: Option<&raxis_policy::ModelRoutingSection>,
     session_agent_type: raxis_types::SessionAgentType,
+    task_fields: Option<&crate::initiatives::TaskPlanFields>,
     task_id: Option<&str>,
 ) {
     let Some(model_routing) = model_routing else {
         return;
     };
-    let mut chain = model_chain_for_role(model_routing, session_agent_type);
+    let task_override = task_fields
+        .map(|fields| {
+            fields
+                .model_chain
+                .iter()
+                .map(|model| model.trim())
+                .filter(|model| !model.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|chain| !chain.is_empty());
+    let has_task_override = task_override.is_some();
+    let mut chain =
+        task_override.unwrap_or_else(|| model_chain_for_role(model_routing, session_agent_type));
     if chain.is_empty() {
         return;
     }
-    if matches!(session_agent_type, raxis_types::SessionAgentType::Executor)
+    if !has_task_override
+        && matches!(session_agent_type, raxis_types::SessionAgentType::Executor)
         && model_routing.executor_rotate_primary
     {
         if let Some(task_id) = task_id {
@@ -5250,10 +5266,15 @@ pub async fn spawn_executor_for_task(
         ExecutorAgentKind::Executor => raxis_types::SessionAgentType::Executor,
         ExecutorAgentKind::Reviewer => raxis_types::SessionAgentType::Reviewer,
     };
+    let task_fields_for_spawn = {
+        let key = crate::initiatives::TaskKey::new(initiative_id, task_id);
+        plan_registry.get(&key)
+    };
     stamp_planner_model_env_or_insert(
         &mut env,
         policy.model_routing(),
         session_agent_type,
+        task_fields_for_spawn.as_ref(),
         Some(task_id),
     );
     if let Some(data_dir) = &spawn_ctx.data_dir {
@@ -5286,10 +5307,6 @@ pub async fn spawn_executor_for_task(
     // `attempt = 1` (no progressive scaling — the conservative
     // default for first-spawn behaviour). Read errors are logged
     // but never abort the spawn flow.
-    let task_fields_for_max_turns = {
-        let key = crate::initiatives::TaskKey::new(initiative_id, task_id);
-        plan_registry.get(&key)
-    };
     let crash_retry_count_for_attempt = {
         let store_for_read = Arc::clone(store);
         let task_id_owned = task_id.to_owned();
@@ -5327,7 +5344,7 @@ pub async fn spawn_executor_for_task(
     };
     let attempt_for_resolver = crash_retry_count_for_attempt.saturating_add(1);
     let planner_max_turns_resolved = resolve_planner_max_turns_for(
-        task_fields_for_max_turns.as_ref(),
+        task_fields_for_spawn.as_ref(),
         policy.model_routing(),
         attempt_for_resolver,
     );
@@ -5417,7 +5434,7 @@ pub async fn spawn_executor_for_task(
     // Falls back to the legacy inline channels when no `data_dir`
     // is available (in-process subprocess-isolation tests).
     let task_prompt_for_sidecar = env.remove(PLANNER_TASK_PROMPT_ENV);
-    let custom_tools_for_sidecar = task_fields_for_max_turns
+    let custom_tools_for_sidecar = task_fields_for_spawn
         .as_ref()
         .and_then(|fields| fields.custom_tools_json.clone());
     let meta_sidecar = provision_meta_sidecar(
@@ -6313,6 +6330,7 @@ mod tests {
             &mut env,
             Some(&model_routing),
             raxis_types::SessionAgentType::Executor,
+            None,
             Some("task-a"),
         );
         assert_eq!(
@@ -6329,6 +6347,7 @@ mod tests {
             &mut env,
             Some(&model_routing),
             raxis_types::SessionAgentType::Reviewer,
+            None,
             Some("review-a"),
         );
         assert_eq!(
@@ -6353,6 +6372,7 @@ mod tests {
             &mut env_a,
             Some(&model_routing),
             raxis_types::SessionAgentType::Executor,
+            None,
             Some("materialize-records"),
         );
         let mut env_b = BTreeMap::new();
@@ -6360,6 +6380,7 @@ mod tests {
             &mut env_b,
             Some(&model_routing),
             raxis_types::SessionAgentType::Executor,
+            None,
             Some("xfile-refactor"),
         );
 
@@ -6373,6 +6394,40 @@ mod tests {
             chain_a, chain_b,
             "different task ids should rotate the same fallback set so \
              live e2e exercises multiple provider primaries",
+        );
+    }
+
+    #[test]
+    fn planner_model_env_uses_task_chain_override_without_rotation() {
+        let mut model_routing = model_routing_with_default(None);
+        model_routing.executor_chain = vec![
+            "claude-haiku-4-5".to_owned(),
+            "gemini-2.5-flash".to_owned(),
+            "gpt-5.3-codex".to_owned(),
+        ];
+        model_routing.executor_rotate_primary = true;
+        let task_fields = crate::initiatives::TaskPlanFields {
+            model_chain: vec!["gpt-5.3-codex".to_owned(), "claude-haiku-4-5".to_owned()],
+            ..crate::initiatives::TaskPlanFields::default()
+        };
+
+        let mut env = BTreeMap::new();
+        stamp_planner_model_env_or_insert(
+            &mut env,
+            Some(&model_routing),
+            raxis_types::SessionAgentType::Executor,
+            Some(&task_fields),
+            Some("materialize-records"),
+        );
+
+        assert_eq!(
+            env.get(PLANNER_MODEL_ID_ENV).map(String::as_str),
+            Some("gpt-5.3-codex")
+        );
+        assert_eq!(
+            env.get(PLANNER_MODEL_CHAIN_ENV).map(String::as_str),
+            Some("gpt-5.3-codex,claude-haiku-4-5"),
+            "explicit task override preserves operator-chosen primary order"
         );
     }
 

@@ -205,6 +205,7 @@ pub fn kernel_plan_validator(store: Arc<Store>) -> Arc<PlanValidator> {
         let default_executor_image = policy.default_executor_image().cloned();
         let elastic = policy.elastic().clone();
         let lanes = policy.lanes().to_vec();
+        let model_routing = policy.model_routing().cloned();
 
         match crate::initiatives::lifecycle::validate_plan_toml_against_policy(
             toml,
@@ -216,6 +217,7 @@ pub fn kernel_plan_validator(store: Arc<Store>) -> Arc<PlanValidator> {
             default_executor_image.as_ref(),
             &elastic,
             &lanes,
+            model_routing.as_ref(),
             &store,
         ) {
             Ok(()) => BuilderValidationResponse {

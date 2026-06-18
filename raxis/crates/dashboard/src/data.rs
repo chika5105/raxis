@@ -1646,6 +1646,9 @@ pub struct TaskPlanConfigView {
     /// Optional progressive retry turn step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns_step: Option<u32>,
+    /// Optional task-level model chain override. Empty means policy default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_chain: Vec<String>,
     /// Optional elastic VM toggle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elastic: Option<bool>,

@@ -7553,6 +7553,7 @@ fn task_plan_config_from_fields(
         max_review_rejections: f.max_review_rejections,
         max_turns: f.max_turns,
         max_turns_step: f.max_turns_step,
+        model_chain: f.model_chain.clone(),
         elastic: f.elastic,
         min_vcpus: f.min_vcpus,
         max_vcpus: f.max_vcpus,

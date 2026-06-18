@@ -330,6 +330,11 @@ pub struct TaskPlanFields {
     ///    the step.
     pub max_turns_step: Option<u32>,
 
+    /// Optional task-level model routing override from the signed
+    /// plan. Empty means use the policy role default chain. When set,
+    /// the first entry is primary and later entries are fallbacks.
+    pub model_chain: Vec<String>,
+
     // ── V2 elastic-vm-scaling.md §2.2 — per-task elastic knobs ─────
     /// Operator-declared toggle for upward VM-resource scaling on
     /// this task. `None` ⇒ inherit from
@@ -424,6 +429,7 @@ impl Default for TaskPlanFields {
             max_review_rejections: None,
             max_turns: None,
             max_turns_step: None,
+            model_chain: Vec::new(),
             elastic: None,
             min_vcpus: None,
             max_vcpus: None,
@@ -1111,6 +1117,7 @@ mod tests {
             max_review_rejections: None,
             max_turns: None,
             max_turns_step: None,
+            model_chain: Vec::new(),
             elastic: None,
             min_vcpus: None,
             max_vcpus: None,

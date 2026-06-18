@@ -311,6 +311,7 @@ export interface TaskPlanConfigView {
   max_review_rejections: number;
   max_turns?: number | null;
   max_turns_step?: number | null;
+  model_chain?: string[];
   elastic?: boolean | null;
   min_vcpus?: number | null;
   max_vcpus?: number | null;

@@ -335,6 +335,14 @@ function TaskPlanConfiguration({ config }: { config: TaskPlanConfigView | null }
           value={config.max_turns ? `${config.max_turns}` : "policy default"}
         />
         <PlanConfigField
+          label="Model routing"
+          value={
+            config.model_chain && config.model_chain.length > 0
+              ? config.model_chain.join(" -> ")
+              : "policy default"
+          }
+        />
+        <PlanConfigField
           label="Retry ceilings"
           value={`crash ${config.max_crash_retries} · review ${config.max_review_rejections}`}
         />

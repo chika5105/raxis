@@ -624,6 +624,7 @@ pub fn approve_plan_for_test(
         None,
         &default_elastic,
         &empty_lanes,
+        None,
         store,
         audit,
         plan_registry,
@@ -649,6 +650,7 @@ fn validate_plan_toml_for_approval(
     policy_default_executor_image: Option<&raxis_policy::DefaultExecutorImageConfig>,
     policy_elastic: &raxis_policy::ElasticConfig,
     policy_lanes: &[raxis_policy::LaneEntry],
+    policy_model_routing: Option<&raxis_policy::ModelRoutingSection>,
 ) -> Result<ValidatedPlanAdmission, LifecycleError> {
     let mut plan_tasks = parse_plan_tasks(plan_toml_str)?;
     let mut orchestrator_fields = parse_plan_orchestrator(plan_toml_str)?;
@@ -689,6 +691,7 @@ fn validate_plan_toml_for_approval(
     validate_plan_integration_merge_verifiers(&plan_pre_merge_verifiers, &plan_tasks)?;
     resolve_plan_task_name_references(&mut plan_tasks, &mut plan_pre_merge_verifiers)?;
     orchestrator_fields.integration_merge_verifiers = plan_pre_merge_verifiers.clone();
+    validate_task_model_overrides(&plan_tasks, policy_model_routing)?;
     // V2 `credential-proxy.md §3` shift-left: any
     // `[[tasks.credentials]]` block declaring an unknown `proxy_type`
     // (or a structurally malformed entry — already surfaced as
@@ -764,6 +767,7 @@ pub fn validate_plan_toml_against_policy(
     policy_default_executor_image: Option<&raxis_policy::DefaultExecutorImageConfig>,
     policy_elastic: &raxis_policy::ElasticConfig,
     policy_lanes: &[raxis_policy::LaneEntry],
+    policy_model_routing: Option<&raxis_policy::ModelRoutingSection>,
     store: &Store,
 ) -> Result<(), LifecycleError> {
     let conn = store.lock_sync();
@@ -778,6 +782,7 @@ pub fn validate_plan_toml_against_policy(
         policy_default_executor_image,
         policy_elastic,
         policy_lanes,
+        policy_model_routing,
     )
     .map(|_| ())
 }
@@ -840,6 +845,10 @@ pub fn approve_plan(
     // `lanes()` slice, which is non-empty (genesis emits the
     // `default` lane).
     policy_lanes: &[raxis_policy::LaneEntry],
+    // Operator-side `[model_routing]` snapshot. Per-task model
+    // overrides may reorder/select from the role chain, but cannot
+    // introduce a model id the policy did not publish for that role.
+    policy_model_routing: Option<&raxis_policy::ModelRoutingSection>,
     store: &Store,
     audit: &dyn AuditSink,
     plan_registry: &PlanRegistry,
@@ -1040,6 +1049,7 @@ pub fn approve_plan(
         policy_default_executor_image,
         policy_elastic,
         policy_lanes,
+        policy_model_routing,
     )?;
     let task_count = plan_tasks.len();
     let now = unix_now_secs();
@@ -1156,6 +1166,7 @@ pub fn approve_plan(
             // (`[model_routing].planner_max_turns_step_default`) and then
             // the derived `max(base/2, 10)` default at spawn time.
             max_turns_step: pt.max_turns_step,
+            model_chain: pt.model_chain.clone(),
             // V2 `elastic-vm-scaling.md §2.2` — propagate the
             // operator-declared elastic knobs into the in-memory
             // PlanRegistry so the spawn helper can consult them
@@ -1805,6 +1816,9 @@ pub fn repopulate_plan_registry(
                     // `max_turns` above so the policy / derived
                     // defaults remain in play after restart.
                     max_turns_step: pt.max_turns_step,
+                    // Re-hydrate optional per-task model routing.
+                    // Empty means inherit the policy role default.
+                    model_chain: pt.model_chain,
                     // V2 `elastic-vm-scaling.md §2.2` — re-hydrate
                     // the operator-declared elastic knobs from the
                     // immutable signed plan bytes. Same `None`
@@ -2447,6 +2461,13 @@ struct PlanTask {
     /// cold-start retry tax this knob exists to absorb.
     max_turns_step: Option<u32>,
 
+    /// Optional per-task model chain override. Empty means the task
+    /// inherits the role default from policy `[model_routing]`.
+    /// Non-empty means first entry is primary and subsequent entries
+    /// are fallback models. Approval validates this stays inside the
+    /// policy-published role chain.
+    model_chain: Vec<String>,
+
     // ── V2 `credential-proxy.md §3` typed credential decls ─────────────
     /// Parsed `[[tasks.credentials]]` entries for this task. Empty
     /// when the operator omitted the block. The
@@ -2841,6 +2862,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             .unwrap_or("")
             .trim()
             .to_owned();
+        let model_chain = parse_task_model_chain(entry, &task_id, task_kind)?;
 
         if task_kind == TaskKind::WorkspaceMerge {
             if predecessors.len() < 2 {
@@ -2884,6 +2906,15 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
                     reason: format!(
                         "[[tasks]] (task `{task_id}`) is `task_kind = \"workspace_merge\"` \
                          and cannot declare vm_image. No guest image boots for kernel-owned fan-in."
+                    ),
+                });
+            }
+            if !model_chain.is_empty() {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) is `task_kind = \"workspace_merge\"` \
+                         and cannot declare model or model_chain. No model receives instructions \
+                         for kernel-owned fan-in."
                     ),
                 });
             }
@@ -3179,6 +3210,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             max_review_rejections,
             max_turns,
             max_turns_step,
+            model_chain,
             elastic,
             min_vcpus,
             max_vcpus,
@@ -3402,6 +3434,83 @@ fn validate_elastic_against_policy(
         }
     }
 
+    Ok(())
+}
+
+fn policy_role_model_chain(
+    routing: &raxis_policy::ModelRoutingSection,
+    role: SessionAgentType,
+) -> Vec<String> {
+    let (chain, single) = match role {
+        SessionAgentType::Orchestrator => (
+            &routing.orchestrator_chain,
+            routing.orchestrator_model.as_deref(),
+        ),
+        SessionAgentType::Executor => (&routing.executor_chain, routing.executor_model.as_deref()),
+        SessionAgentType::Reviewer => (&routing.reviewer_chain, routing.reviewer_model.as_deref()),
+    };
+    let filtered: Vec<String> = chain
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if !filtered.is_empty() {
+        return filtered;
+    }
+    single
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(|model| vec![model.to_owned()])
+        .unwrap_or_default()
+}
+
+fn validate_task_model_overrides(
+    tasks: &[PlanTask],
+    policy_model_routing: Option<&raxis_policy::ModelRoutingSection>,
+) -> Result<(), LifecycleError> {
+    for task in tasks {
+        if task.model_chain.is_empty() {
+            continue;
+        }
+        let Some(routing) = policy_model_routing else {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{}`) declares model routing but the active policy \
+                     has no [model_routing] section. Add role defaults to policy first, \
+                     then override per task inside that envelope.",
+                    task.name
+                ),
+            });
+        };
+        let policy_models = policy_role_model_chain(routing, task.session_agent_type);
+        if policy_models.is_empty() {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{}`) declares model routing for role `{}` but policy \
+                     publishes no model chain for that role.",
+                    task.name,
+                    task.session_agent_type.as_sql_str()
+                ),
+            });
+        }
+        let allowed: std::collections::HashSet<&str> =
+            policy_models.iter().map(String::as_str).collect();
+        for model in &task.model_chain {
+            if !allowed.contains(model.as_str()) {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{}`) declares model `{model}`, but policy \
+                         [model_routing] for role `{}` only allows [{}]. Add the model \
+                         to the policy role chain before using it in a task override.",
+                        task.name,
+                        task.session_agent_type.as_sql_str(),
+                        policy_models.join(", ")
+                    ),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -5696,6 +5805,81 @@ fn string_array(entry: &toml::Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn parse_task_model_chain(
+    entry: &toml::Value,
+    task_id: &str,
+    task_kind: TaskKind,
+) -> Result<Vec<String>, LifecycleError> {
+    let model = entry.get("model");
+    let model_chain = entry.get("model_chain");
+    if model.is_some() && model_chain.is_some() {
+        return Err(LifecycleError::PlanInvalid {
+            reason: format!(
+                "[[tasks]] (task `{task_id}`) declares both `model` and `model_chain`; \
+                 use `model` for a single primary or `model_chain` for primary + fallbacks."
+            ),
+        });
+    }
+    if task_kind == TaskKind::WorkspaceMerge && (model.is_some() || model_chain.is_some()) {
+        return Err(LifecycleError::PlanInvalid {
+            reason: format!(
+                "[[tasks]] (task `{task_id}`) is `task_kind = \"workspace_merge\"` \
+                 and cannot declare model routing. No model receives instructions \
+                 for kernel-owned fan-in."
+            ),
+        });
+    }
+    if let Some(value) = model {
+        return match value {
+            toml::Value::String(s) if !s.trim().is_empty() => Ok(vec![s.trim().to_owned()]),
+            toml::Value::String(_) => Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task_id}`) `model` cannot be empty. \
+                     Omit it to inherit policy routing."
+                ),
+            }),
+            other => Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task_id}`) `model` must be a TOML string, got {:?}",
+                    other.type_str()
+                ),
+            }),
+        };
+    }
+    let Some(value) = model_chain else {
+        return Ok(Vec::new());
+    };
+    let toml::Value::Array(values) = value else {
+        return Err(LifecycleError::PlanInvalid {
+            reason: format!(
+                "[[tasks]] (task `{task_id}`) `model_chain` must be an array of non-empty strings"
+            ),
+        });
+    };
+    if values.is_empty() {
+        return Err(LifecycleError::PlanInvalid {
+            reason: format!(
+                "[[tasks]] (task `{task_id}`) `model_chain` cannot be empty. \
+                 Omit it to inherit policy routing."
+            ),
+        });
+    }
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        match value {
+            toml::Value::String(s) if !s.trim().is_empty() => out.push(s.trim().to_owned()),
+            _ => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) `model_chain` must be an array of non-empty strings"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// V2 §Step 12 — parse an optional `u32` task field.
 /// Three outcomes:
 ///   * Field absent ⇒ `Ok(None)`.
@@ -5834,6 +6018,112 @@ clone_strategy = "blobless"
         let err = parse_plan_tasks(toml).expect_err("workspace merge clone_strategy must fail");
         assert!(
             err.to_string().contains("must not declare clone_strategy"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_plan_tasks_reads_task_model_chain_override() {
+        let toml = r#"
+[[tasks]]
+task_name = "deep_review"
+description = "Deep review"
+session_agent_type = "Reviewer"
+clone_strategy = "blobless"
+model_chain = ["gpt-5.3-codex", "claude-haiku-4-5"]
+prompt = "Review carefully."
+"#;
+        let tasks = parse_plan_tasks(toml).expect("task model chain must parse");
+        assert_eq!(
+            tasks[0].model_chain,
+            vec!["gpt-5.3-codex".to_owned(), "claude-haiku-4-5".to_owned()]
+        );
+    }
+
+    #[test]
+    fn parse_plan_tasks_reads_single_task_model_override() {
+        let toml = r#"
+[[tasks]]
+task_name = "fast_executor"
+description = "Fast path"
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+model = "gemini-2.5-flash"
+prompt = "Do the bounded task."
+"#;
+        let tasks = parse_plan_tasks(toml).expect("single model override must parse");
+        assert_eq!(tasks[0].model_chain, vec!["gemini-2.5-flash".to_owned()]);
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_ambiguous_task_model_override() {
+        let toml = r#"
+[[tasks]]
+task_name = "bad_model"
+description = "Bad model config"
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+model = "gemini-2.5-flash"
+model_chain = ["gpt-5.3-codex"]
+prompt = "Do the bounded task."
+"#;
+        let err = parse_plan_tasks(toml).expect_err("model + model_chain must fail");
+        assert!(
+            err.to_string()
+                .contains("declares both `model` and `model_chain`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_workspace_merge_model_override() {
+        let toml = r#"
+[[tasks]]
+task_name   = "merge_frontend_backend"
+task_kind   = "workspace_merge"
+description = "Materialize the frontend/backend fan-in workspace."
+predecessors = ["frontend", "backend"]
+model = "gpt-5.3-codex"
+"#;
+        let err = parse_plan_tasks(toml).expect_err("workspace merge model must fail");
+        assert!(
+            err.to_string().contains("cannot declare model routing"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_task_model_overrides_must_stay_inside_policy_role_chain() {
+        let mut tasks = parse_plan_tasks(
+            r#"
+[[tasks]]
+task_name = "deep_review"
+description = "Deep review"
+session_agent_type = "Reviewer"
+clone_strategy = "blobless"
+model_chain = ["gpt-5.3-codex", "claude-haiku-4-5"]
+prompt = "Review carefully."
+"#,
+        )
+        .expect("task must parse");
+        let routing = raxis_policy::ModelRoutingSection {
+            planner_max_turns_default: None,
+            planner_max_turns_step_default: None,
+            orchestrator_model: Some("claude-haiku-4-5".to_owned()),
+            executor_model: Some("gemini-2.5-flash".to_owned()),
+            reviewer_model: None,
+            orchestrator_chain: Vec::new(),
+            executor_chain: Vec::new(),
+            reviewer_chain: vec!["gpt-5.3-codex".to_owned(), "claude-haiku-4-5".to_owned()],
+            executor_rotate_primary: false,
+        };
+        validate_task_model_overrides(&tasks, Some(&routing)).expect("allowed role chain");
+
+        tasks[0].model_chain = vec!["gemini-2.5-flash".to_owned()];
+        let err = validate_task_model_overrides(&tasks, Some(&routing))
+            .expect_err("reviewer cannot select executor-only model");
+        assert!(
+            err.to_string().contains("only allows"),
             "unexpected error: {err}"
         );
     }
@@ -6237,6 +6527,7 @@ prompt = "   "
             max_review_rejections: None,
             max_turns: None,
             max_turns_step: None,
+            model_chain: Vec::new(),
             elastic: None,
             min_vcpus: None,
             max_vcpus: None,
@@ -6430,6 +6721,7 @@ prompt = "   "
             max_review_rejections: None,
             max_turns: None,
             max_turns_step: None,
+            model_chain: Vec::new(),
             elastic: None,
             min_vcpus: None,
             max_vcpus: None,
@@ -6696,6 +6988,7 @@ prompt = "   "
             max_review_rejections: None,
             max_turns: None,
             max_turns_step: None,
+            model_chain: Vec::new(),
             elastic: None,
             min_vcpus: None,
             max_vcpus: None,
@@ -7074,6 +7367,7 @@ session_agent_type = "Coordinator"
             max_review_rejections: None,
             max_turns: None,
             max_turns_step: None,
+            model_chain: Vec::new(),
             elastic: None,
             min_vcpus: None,
             max_vcpus: None,
@@ -7861,6 +8155,7 @@ description = "do thing"
             max_review_rejections: None,
             max_turns: None,
             max_turns_step: None,
+            model_chain: Vec::new(),
             elastic: None,
             min_vcpus: None,
             max_vcpus: None,
@@ -9417,6 +9712,7 @@ max_concurrent_admissions   = 7
             None,
             &default_elastic,
             &empty_lanes,
+            None,
             &store,
             &audit,
             &registry,
@@ -9945,6 +10241,7 @@ name = "fixture"
             None,
             &default_elastic,
             policy_lanes,
+            None,
             store,
             audit,
             registry,
@@ -11840,6 +12137,7 @@ mod env_consistency_tests {
             max_review_rejections: None,
             max_turns: None,
             max_turns_step: None,
+            model_chain: Vec::new(),
             elastic: None,
             min_vcpus: None,
             max_vcpus: None,
@@ -12000,6 +12298,7 @@ mod vm_image_admission_tests {
             max_review_rejections: None,
             max_turns: None,
             max_turns_step: None,
+            model_chain: Vec::new(),
             elastic: None,
             min_vcpus: None,
             max_vcpus: None,

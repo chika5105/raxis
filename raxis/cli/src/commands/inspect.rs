@@ -201,6 +201,10 @@ fn render_plan_fields<W: Write>(out: &mut W, revealed: Option<&PlanPathFields>) 
                 out,
                 "  session_agent_type:        <pass --reveal-paths to show>"
             );
+            let _ = writeln!(
+                out,
+                "  model_chain:               <pass --reveal-paths to show>"
+            );
         }
         Some(fields) => {
             render_path_list(out, "path_allowlist", &fields.path_allowlist);
@@ -220,6 +224,7 @@ fn render_plan_fields<W: Write>(out: &mut W, revealed: Option<&PlanPathFields>) 
                 "  session_agent_type:        {}",
                 fields.session_agent_type,
             );
+            render_path_list(out, "model_chain", &fields.model_chain);
         }
     }
 }
@@ -364,6 +369,7 @@ fn serialize_plan_fields(revealed: Option<&PlanPathFields>) -> serde_json::Value
                 "path_export_globs",
                 "path_scope_override",
                 "session_agent_type",
+                "model_chain",
             ],
             "hint": "pass --reveal-paths to expand (writes PathReadAccessed audit event)",
         }),
@@ -374,6 +380,7 @@ fn serialize_plan_fields(revealed: Option<&PlanPathFields>) -> serde_json::Value
             "path_export_globs":         f.path_export_globs,
             "path_scope_override":       f.path_scope_override,
             "session_agent_type":        f.session_agent_type,
+            "model_chain":               f.model_chain,
         }),
     }
 }

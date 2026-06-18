@@ -106,6 +106,7 @@ export interface TaskDraft {
   cloneStrategy: CloneStrategy;
   maxTurns: string;
   maxTurnsStep: string;
+  modelChain?: string;
   cumulativeMaxSeconds: string;
   vmImage: string;
   profiles: string;
@@ -229,6 +230,7 @@ const starterTasks: TaskDraft[] = [
     cloneStrategy: "blobless",
     maxTurns: "60",
     maxTurnsStep: "",
+    modelChain: "",
     cumulativeMaxSeconds: "600",
     vmImage: "",
     profiles: "repo_tools",
@@ -2951,6 +2953,7 @@ function makeTask(agentType: AgentType, existing: TaskDraft[]): TaskDraft {
     cloneStrategy: "blobless",
     maxTurns: agentType === "Reviewer" ? "30" : "60",
     maxTurnsStep: "",
+    modelChain: "",
     cumulativeMaxSeconds: agentType === "Reviewer" ? "600" : "",
     vmImage: "",
     profiles: "",
@@ -3058,6 +3061,7 @@ function normalizeTask(task: TaskDraft): TaskDraft {
     verifierOnFailure: task.verifierOnFailure ?? "block_review",
     verifierArtifact: task.verifierArtifact ?? "",
     verifierArtifactMaxBytes: task.verifierArtifactMaxBytes ?? "",
+    modelChain: task.modelChain ?? "",
   };
   if (normalized.taskKind === "workspace_merge") {
     return {
@@ -3067,6 +3071,7 @@ function normalizeTask(task: TaskDraft): TaskDraft {
       paths: "",
       pathExports: "",
       allowedEgress: "",
+      modelChain: "",
       vmImage: "",
       profiles: "",
       credentials: [],
@@ -3802,6 +3807,12 @@ function renderPlan(input: {
     }
     if (task.maxTurns.trim()) lines.push(`max_turns          = ${task.maxTurns.trim()}`);
     if (task.maxTurnsStep.trim()) lines.push(`max_turns_step     = ${task.maxTurnsStep.trim()}`);
+    const taskModelChain = splitList(task.modelChain ?? "");
+    if (taskModelChain.length === 1) {
+      lines.push(`model              = ${tomlString(taskModelChain[0])}`);
+    } else if (taskModelChain.length > 1) {
+      lines.push(`model_chain        = [${taskModelChain.map(tomlString).join(", ")}]`);
+    }
     if (task.cumulativeMaxSeconds.trim()) {
       lines.push(`cumulative_max_seconds = ${task.cumulativeMaxSeconds.trim()}`);
     }
@@ -4217,6 +4228,10 @@ function parsePlanToml(text: string): {
       cloneStrategy: parseCloneStrategy(readString(block, "clone_strategy")),
       maxTurns: readNumber(block, "max_turns") ?? "",
       maxTurnsStep: readNumber(block, "max_turns_step") ?? "",
+      modelChain:
+        readArray(block, "model_chain").join(", ") ||
+        readString(block, "model") ||
+        "",
       cumulativeMaxSeconds: readNumber(block, "cumulative_max_seconds") ?? "",
       vmImage: readString(block, "vm_image") ?? "",
       profiles,

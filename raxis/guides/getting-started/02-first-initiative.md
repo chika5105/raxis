@@ -184,6 +184,11 @@ instead of the single-model fields; the kernel attempts configured
 fallbacks on provider/model availability failures while still
 rejecting malformed requests fail-closed.
 
+Individual `[[tasks]]` may declare `model = "..."` or
+`model_chain = ["...", "..."]` to choose a different primary or
+fallback order for that task, but only from the models already
+published in the policy chain for that role.
+
 Pricing overrides are optional. Add them when your enterprise contract
 or volume discount differs from public/list pricing; otherwise RAXIS
 uses provider-reported usage and labels the pricing source in the

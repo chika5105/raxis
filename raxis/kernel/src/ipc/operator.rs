@@ -1564,6 +1564,8 @@ async fn handle_approve_plan(
     // emission and surfaces as a harness deadline hang. Cloned so
     // the spawn_blocking hop owns 'static data.
     let policy_lanes_snapshot: Vec<raxis_policy::LaneEntry> = policy_snapshot.lanes().to_vec();
+    let policy_model_routing_snapshot: Option<raxis_policy::ModelRoutingSection> =
+        policy_snapshot.model_routing().cloned();
     // Snapshot the operator's display name from the same bundle we
     // resolved the pubkey from, so the audit event records the name
     // that was authoritative at approval time. See
@@ -1590,6 +1592,7 @@ async fn handle_approve_plan(
             policy_default_executor_image_snapshot.as_ref(),
             &policy_elastic_snapshot,
             &policy_lanes_snapshot,
+            policy_model_routing_snapshot.as_ref(),
             &store_for_blocking,
             &*audit_for_blocking,
             &plan_registry_for_blocking,

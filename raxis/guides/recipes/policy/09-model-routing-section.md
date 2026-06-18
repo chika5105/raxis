@@ -69,6 +69,42 @@ For model routing, this means a plan can choose only models/providers
 published by policy. It cannot introduce an unapproved provider, model,
 credential, VM image, lane, or egress host.
 
+### Per-Task Overrides
+
+`[model_routing]` defines the default and allowed model set for each
+role. A task can override its own primary model or fallback order, but
+only by choosing from the policy chain for that task's role.
+
+Use `model` for a single-model override:
+
+```toml
+[[tasks]]
+task_name = "fast-doc-edit"
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+model = "gemini-2.5-flash"
+```
+
+Use `model_chain` when the task needs a different primary plus
+fallbacks:
+
+```toml
+[[tasks]]
+task_name = "deep-security-review"
+session_agent_type = "Reviewer"
+clone_strategy = "blobless"
+model_chain = ["gpt-5.3-codex", "claude-haiku-4-5"]
+```
+
+If `executor_rotate_primary = true`, rotation applies only to tasks
+that inherit the policy executor chain. A task-level `model` or
+`model_chain` preserves the operator-chosen order exactly.
+
+To make one reviewer use a higher-thinking model without changing
+every reviewer, publish that model in `reviewer_chain`, keep the
+normal default first, and put the stronger model first only on the
+task that needs it.
+
 ---
 
 ## Common Failure Modes

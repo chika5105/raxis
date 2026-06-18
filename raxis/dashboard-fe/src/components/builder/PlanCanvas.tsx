@@ -851,6 +851,15 @@ function InlineTaskEditor({
           </CardField>
         </div>
 
+        <CardField label="Model chain override">
+          <input
+            value={task.modelChain ?? ""}
+            onChange={(e) => onUpdate({ modelChain: e.target.value })}
+            className="input w-full font-mono text-xs"
+            placeholder="gpt-5.3-codex, claude-haiku-4-5"
+          />
+        </CardField>
+
         {isExecutor && (
           <>
             <div className="grid grid-cols-2 gap-2">

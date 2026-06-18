@@ -83,6 +83,7 @@ pub struct PlanPathFields {
     pub max_crash_retries: u32,
     pub max_turns: Option<u32>,
     pub max_turns_step: Option<u32>,
+    pub model_chain: Vec<String>,
     pub elastic: Option<bool>,
     pub min_vcpus: Option<u32>,
     pub max_vcpus: Option<u32>,
@@ -134,6 +135,7 @@ impl Default for PlanPathFields {
             max_crash_retries: DEFAULT_MAX_CRASH_RETRIES,
             max_turns: None,
             max_turns_step: None,
+            model_chain: Vec::new(),
             elastic: None,
             min_vcpus: None,
             max_vcpus: None,
@@ -424,6 +426,7 @@ fn parse_plan_path_fields(
         max_crash_retries: u32_field(entry, "max_crash_retries", DEFAULT_MAX_CRASH_RETRIES),
         max_turns: optional_u32_field(entry, "max_turns"),
         max_turns_step: optional_u32_field(entry, "max_turns_step"),
+        model_chain: model_chain_field(entry),
         elastic: entry.get("elastic").and_then(|v| v.as_bool()),
         min_vcpus: optional_u32_field(entry, "min_vcpus"),
         max_vcpus: optional_u32_field(entry, "max_vcpus"),
@@ -542,6 +545,20 @@ fn string_field(entry: &toml::Value, field: &str) -> Option<String> {
         .and_then(|v| v.as_str())
         .map(str::trim_end)
         .map(str::to_owned)
+}
+
+fn model_chain_field(entry: &toml::Value) -> Vec<String> {
+    let chain = string_array(entry, "model_chain");
+    if !chain.is_empty() {
+        return chain;
+    }
+    entry
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(|model| vec![model.to_owned()])
+        .unwrap_or_default()
 }
 
 fn u32_field(entry: &toml::Value, field: &str, default: u32) -> u32 {
