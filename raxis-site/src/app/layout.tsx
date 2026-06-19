@@ -68,6 +68,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       className={`${sans.variable} ${display.variable} ${wordmark.variable} ${mono.variable}`}
     >
       <head>
+        <script async src="https://www.googletagmanager.com/gtag/js?id=AW-18252782781" />
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'AW-18252782781');
+`,
+          }}
+        />
         <ThemeScript />
       </head>
       <body suppressHydrationWarning className="min-h-dvh flex flex-col">
