@@ -101,8 +101,11 @@ dispatch matrix authorises no other actor). The kernel handler
 this in a single SQLite transaction:
 
 1. Look up the most recent `subtask_activations` row for
-   `task_id`. The row **must be in `Failed`**. Anything else
-   (`PendingActivation`, `Active`, `Completed`) rejects with
+   `task_id`. The row must be one of the kernel's closed retry
+   classes: `Failed`, or `Completed` with `review_reject_count > 0`.
+   `Failed` covers executor crashes / `ReportFailure` and reviewer
+   runtime failures before `SubmitReview`. Clean `Completed`,
+   `Active`, and `PendingActivation` rows reject with
    `FAIL_INVALID_REQUEST` — there is nothing to retry against.
 2. Resolve the effective ceilings. The plan registry stores the
    `Option<u32>` exactly as parsed; `effective_max_crash_retries`

@@ -577,11 +577,11 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
                         // orchestrator session's exit. There is no
                         // preceding orchestrator session whose last
                         // intent could have been a capacity-pressure
-                        // rejection; pass `false` unconditionally.
+                        // rejection; count normally.
                         crate::session_spawn_orchestrator::respawn_orchestrator_for_initiative(
                             &init_id,
                             ctx_for_respawn,
-                            false,
+                            crate::session_spawn_orchestrator::OrchestratorRespawnNoProgressBypass::None,
                         )
                         .await;
                     });

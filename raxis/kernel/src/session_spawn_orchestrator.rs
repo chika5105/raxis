@@ -1557,6 +1557,85 @@ fn scrape_terminal_tool_from_console_log(path: &Path) -> Option<String> {
     None
 }
 
+fn scrape_retry_neutral_planner_boot_failure_from_console_log(path: &Path) -> Option<String> {
+    use std::io::Read;
+    const MAX_TAIL_BYTES: u64 = 64 * 1024;
+    const STEP_MARKER: &str = "\"step\":\"planner-boot-error\"";
+
+    let mut f = std::fs::File::open(path).ok()?;
+    let total = f.metadata().ok()?.len();
+    let start = total.saturating_sub(MAX_TAIL_BYTES);
+    if start > 0 {
+        use std::io::Seek;
+        f.seek(std::io::SeekFrom::Start(start)).ok()?;
+    }
+    let mut buf = Vec::with_capacity(MAX_TAIL_BYTES as usize);
+    f.take(MAX_TAIL_BYTES).read_to_end(&mut buf).ok()?;
+    let tail = String::from_utf8_lossy(&buf);
+
+    for line in tail.lines().rev() {
+        if !line.contains(STEP_MARKER) {
+            continue;
+        }
+        if !is_retry_neutral_planner_boot_failure_line(line) {
+            continue;
+        }
+        let detail = extract_planner_boot_message(line)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| line.trim().to_owned());
+        return Some(truncate_retry_neutral_boot_failure(&detail));
+    }
+    None
+}
+
+fn is_retry_neutral_planner_boot_failure_line(line: &str) -> bool {
+    // Provider/gateway transport failures mean the model runtime never
+    // reached an authority decision. They are infrastructure exits, not
+    // semantic task/orchestrator no-progress. Deliberately do not match
+    // kernel terminal-tool rejections or Idle/no-terminal behavior.
+    line.contains("model error:")
+        && (line.contains("transport error:")
+            || line.contains("NetworkError")
+            || line.contains("GatewayUnavailable")
+            || line.contains("TimeoutExceeded")
+            || line.contains("timeout after"))
+}
+
+fn extract_planner_boot_message(line: &str) -> Option<String> {
+    const MARKER: &str = "\"message\":\"";
+    let start = line.find(MARKER)? + MARKER.len();
+    let mut escaped = false;
+    let mut out = String::new();
+    for ch in line[start..].chars() {
+        if escaped {
+            out.push(match ch {
+                '"' => '"',
+                '\\' => '\\',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            });
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => return Some(out),
+            other => out.push(other),
+        }
+    }
+    None
+}
+
+fn truncate_retry_neutral_boot_failure(detail: &str) -> String {
+    const MAX_LEN: usize = 512;
+    if detail.len() <= MAX_LEN {
+        return detail.to_owned();
+    }
+    format!("{}…(truncated)", &detail[..MAX_LEN])
+}
+
 pub fn spawn_planner_dispatcher(
     handle: &mut SpawnHandle,
     ctx: Arc<crate::ipc::context::HandlerContext>,
@@ -1625,6 +1704,19 @@ pub fn spawn_planner_dispatcher(
             .as_ref()
             .ok()
             .and_then(|o| o.last_exit_notice.clone());
+        let response_write_disconnect_for_post_exit: Option<&'static str> = dispatch_result
+            .as_ref()
+            .ok()
+            .and_then(|o| o.response_write_disconnect_message_kind);
+        let console_log_path_for_post_exit = ctx
+            .data_dir
+            .join("guests")
+            .join(session_id.as_str())
+            .join("console.log");
+        let retry_neutral_planner_boot_failure_for_post_exit =
+            scrape_retry_neutral_planner_boot_failure_from_console_log(
+                &console_log_path_for_post_exit,
+            );
         // `INV-PLANNER-IPC-IDLE-WATCHDOG-01` — surface the
         // kernel-side idle-watchdog signal so the Mode-B
         // synthesiser names the watchdog firing instead of
@@ -1838,13 +1930,9 @@ pub fn spawn_planner_dispatcher(
             // its clean disconnect. Best-effort; an unreadable
             // log surfaces as `None` (the kernel doesn't fail
             // the audit emit on a missing console-log file).
-            let console_log_path = ctx
-                .data_dir
-                .join("guests")
-                .join(session_id.as_str())
-                .join("console.log");
-            let console_log_path_str = Some(console_log_path.display().to_string());
-            let terminal_tool = scrape_terminal_tool_from_console_log(&console_log_path);
+            let console_log_path_str = Some(console_log_path_for_post_exit.display().to_string());
+            let terminal_tool =
+                scrape_terminal_tool_from_console_log(&console_log_path_for_post_exit);
 
             // `INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01`
             // — fold the planner-side
@@ -1978,15 +2066,24 @@ pub fn spawn_planner_dispatcher(
         // exits the planner and may immediately enter a Mode-A
         // respawn, and we do NOT want the operator-driven revoke
         // to be treated as a capacity-pressure event.
-        let predecessor_was_capacity_pressure = if revoke_committed {
+        let predecessor_respawn_bypass = if revoke_committed {
             let last_activity = ctx.session_activity.get(&session_id);
-            crate::session_activity::classify_planner_exit(
+            if response_write_disconnect_for_post_exit.is_some() {
+                OrchestratorRespawnNoProgressBypass::PlannerTransportDisconnect
+            } else if retry_neutral_planner_boot_failure_for_post_exit.is_some() {
+                OrchestratorRespawnNoProgressBypass::PlannerModelTransportFailure
+            } else if crate::session_activity::classify_planner_exit(
                 exit_notice_for_post_exit.as_ref(),
                 last_activity.as_ref(),
             )
             .is_capacity_pressure()
+            {
+                OrchestratorRespawnNoProgressBypass::CapacityPressure
+            } else {
+                OrchestratorRespawnNoProgressBypass::None
+            }
         } else {
-            false
+            OrchestratorRespawnNoProgressBypass::None
         };
 
         // ── V2 §Step 6 — post-exit recovery dispatch. ─────────────
@@ -2136,6 +2233,9 @@ pub fn spawn_planner_dispatcher(
         let session_for_post_exit = session_id.clone();
         let dispatch_err_for_synth = dispatch_err_for_post_exit.clone();
         let exit_notice_for_synth = exit_notice_for_post_exit.clone();
+        let response_write_disconnect_for_synth = response_write_disconnect_for_post_exit;
+        let retry_neutral_planner_boot_failure_for_synth =
+            retry_neutral_planner_boot_failure_for_post_exit.clone();
         let idle_watchdog_for_synth = idle_watchdog_for_post_exit;
         // INV-FAILURE-REASON-CONCRETE-01 (P2 ladder slot): clone
         // the activity tracker handle so the spawn_blocking body
@@ -2440,6 +2540,244 @@ pub fn spawn_planner_dispatcher(
                 return None;
             }
 
+            let retry_neutral_reactivation_reason = response_write_disconnect_for_synth
+                .map(str::to_owned)
+                .or_else(|| {
+                    retry_neutral_planner_boot_failure_for_synth
+                        .as_ref()
+                        .map(|detail| format!("planner_boot_model_transport_failure: {detail}"))
+                });
+
+            if let Some(message_kind) = retry_neutral_reactivation_reason {
+                use crate::initiatives::task_transitions::{
+                    transition_task_in_tx, TransitionActor,
+                };
+
+                let active_meta: Option<(String, i64, i64, i64, i64)> = conn
+                    .query_row(
+                        &format!(
+                            "SELECT activation_id, crash_retry_count, review_reject_count,
+                                    validation_reject_count, max_validation_rejections
+                               FROM {sa}
+                              WHERE session_id = ?1
+                                AND activation_state = 'Active'
+                              LIMIT 1",
+                            sa = Table::SubtaskActivations.as_str(),
+                        ),
+                        rusqlite::params![&session_for_post_exit],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                    )
+                    .ok();
+                let (
+                    prior_activation_id,
+                    crash_retry_count,
+                    review_reject_count,
+                    validation_reject_count,
+                    max_validation_rejections,
+                ) = active_meta?;
+
+                let tx = match conn.transaction() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\
+                             \"event\":\"worker_transport_reactivation_tx_open_failed\",\
+                             \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                             \"error\":\"{err}\"}}",
+                            sid = &session_for_post_exit,
+                            tid = &task_id,
+                            err = e,
+                        );
+                        return None;
+                    }
+                };
+                let now = unix_now_secs();
+                let transition_record = if matches!(task_state, raxis_types::TaskState::Running) {
+                    match transition_task_in_tx(
+                        &tx,
+                        &task_id,
+                        raxis_types::TaskState::Admitted,
+                        None,
+                        TransitionActor::Kernel,
+                    ) {
+                        Ok(record) => Some(record),
+                        Err(e) => {
+                            eprintln!(
+                                "{{\"level\":\"warn\",\
+                                 \"event\":\"worker_transport_reactivation_state_reset_failed\",\
+                                 \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                                 \"error\":\"{err}\"}}",
+                                sid = &session_for_post_exit,
+                                tid = &task_id,
+                                err = e,
+                            );
+                            return None;
+                        }
+                    }
+                } else {
+                    if let Err(e) = tx.execute(
+                        &format!(
+                            "UPDATE {tasks}
+                                SET state = 'Admitted',
+                                    transitioned_at = ?1,
+                                    block_reason = NULL,
+                                    actor = 'kernel',
+                                    session_id = NULL,
+                                    evaluation_sha = NULL,
+                                    base_sha = NULL
+                              WHERE task_id = ?2",
+                            tasks = Table::Tasks.as_str(),
+                        ),
+                        rusqlite::params![now, &task_id],
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\
+                             \"event\":\"worker_transport_reactivation_task_update_failed\",\
+                             \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                             \"error\":\"{err}\"}}",
+                            sid = &session_for_post_exit,
+                            tid = &task_id,
+                            err = e,
+                        );
+                        return None;
+                    }
+                    None
+                };
+
+                if let Err(e) = tx.execute(
+                    &format!(
+                        "UPDATE {tasks}
+                            SET session_id = NULL,
+                                evaluation_sha = NULL,
+                                base_sha = NULL
+                          WHERE task_id = ?1",
+                        tasks = Table::Tasks.as_str(),
+                    ),
+                    rusqlite::params![&task_id],
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"worker_transport_reactivation_clear_session_failed\",\
+                         \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                         \"error\":\"{err}\"}}",
+                        sid = &session_for_post_exit,
+                        tid = &task_id,
+                        err = e,
+                    );
+                    return None;
+                }
+
+                if let Err(e) = tx.execute(
+                    &format!(
+                        "UPDATE {sa}
+                            SET activation_state = 'Failed',
+                                terminated_at = ?1
+                          WHERE activation_id = ?2
+                            AND activation_state = 'Active'",
+                        sa = Table::SubtaskActivations.as_str(),
+                    ),
+                    rusqlite::params![now, &prior_activation_id],
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"worker_transport_reactivation_close_activation_failed\",\
+                         \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                         \"activation_id\":\"{aid}\",\"error\":\"{err}\"}}",
+                        sid = &session_for_post_exit,
+                        tid = &task_id,
+                        aid = &prior_activation_id,
+                        err = e,
+                    );
+                    return None;
+                }
+
+                let new_activation_id = uuid::Uuid::new_v4().to_string();
+                if let Err(e) = tx.execute(
+                    &format!(
+                        "INSERT INTO {sa} (
+                            activation_id, task_id, initiative_id,
+                            activation_state, session_id, evaluation_sha,
+                            crash_retry_count, review_reject_count,
+                            validation_reject_count, max_validation_rejections,
+                            created_at, activated_at, terminated_at
+                         ) VALUES (?1, ?2, ?3, 'PendingActivation',
+                                   NULL, NULL, ?4, ?5, ?6, ?7, ?8, NULL, NULL)",
+                        sa = Table::SubtaskActivations.as_str(),
+                    ),
+                    rusqlite::params![
+                        &new_activation_id,
+                        &task_id,
+                        &initiative_id,
+                        crash_retry_count,
+                        review_reject_count,
+                        validation_reject_count,
+                        max_validation_rejections,
+                        now,
+                    ],
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"worker_transport_reactivation_insert_failed\",\
+                         \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                         \"error\":\"{err}\"}}",
+                        sid = &session_for_post_exit,
+                        tid = &task_id,
+                        err = e,
+                    );
+                    return None;
+                }
+
+                if let Err(e) =
+                    crate::scheduler::budget::release_budget_in_tx(&tx, &lane_id, &task_id)
+                {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"worker_transport_reactivation_release_budget_failed\",\
+                         \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                         \"lane_id\":\"{lane}\",\"error\":\"{err}\"}}",
+                        sid = &session_for_post_exit,
+                        tid = &task_id,
+                        lane = &lane_id,
+                        err = e,
+                    );
+                    return None;
+                }
+
+                if let Err(e) = tx.commit() {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"worker_transport_reactivation_commit_failed\",\
+                         \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                         \"error\":\"{err}\"}}",
+                        sid = &session_for_post_exit,
+                        tid = &task_id,
+                        err = e,
+                    );
+                    return None;
+                }
+
+                eprintln!(
+                    "{{\"level\":\"info\",\
+                     \"event\":\"WorkerReactivatedAfterPlannerTransportDisconnect\",\
+                     \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                     \"role\":\"{role}\",\"message_kind\":\"{message_kind}\",\
+                     \"prior_activation_id\":\"{prior_activation_id}\",\
+                     \"new_activation_id\":\"{new_activation_id}\"}}",
+                    sid = &session_for_post_exit,
+                    tid = &task_id,
+                    role = if is_executor { "executor" } else { "reviewer" },
+                );
+                let _ = session_activity_for_post_exit.take(&session_for_post_exit);
+
+                return Some(PostExitAction::WorkerTransportReactivation {
+                    initiative_id,
+                    task_id,
+                    role: if is_executor { "executor" } else { "reviewer" },
+                    message_kind,
+                    transition_record,
+                });
+            }
+
             // Perform the synthetic Failed transition in a single
             // SQLite transaction so the bump + FSM walk + activation-
             // row close commit atomically. Matches the
@@ -2629,7 +2967,42 @@ pub fn spawn_planner_dispatcher(
                 respawn_orchestrator_for_initiative(
                     &initiative_id,
                     Arc::clone(&ctx),
-                    predecessor_was_capacity_pressure,
+                    predecessor_respawn_bypass,
+                )
+                .await;
+            }
+            Ok(Some(PostExitAction::WorkerTransportReactivation {
+                initiative_id,
+                task_id,
+                role,
+                message_kind,
+                transition_record,
+            })) => {
+                if let Some(record) = transition_record.as_ref() {
+                    crate::initiatives::task_transitions::emit_task_state_changed_audit(
+                        ctx.audit.as_ref(),
+                        record,
+                        Some(session_id.as_str()),
+                    );
+                }
+                eprintln!(
+                    "{{\"level\":\"info\",\
+                     \"event\":\"worker_transport_reactivation_respawn_trigger\",\
+                     \"session_id\":\"{session_id}\",\
+                     \"initiative_id\":\"{initiative_id}\",\
+                     \"task_id\":\"{task_id}\",\"role\":\"{role}\",\
+                     \"message_kind\":\"{message_kind}\"}}",
+                );
+                let counter_bypass =
+                    if message_kind.starts_with("planner_boot_model_transport_failure") {
+                        OrchestratorRespawnNoProgressBypass::PlannerModelTransportFailure
+                    } else {
+                        OrchestratorRespawnNoProgressBypass::PlannerTransportDisconnect
+                    };
+                respawn_orchestrator_for_initiative(
+                    &initiative_id,
+                    Arc::clone(&ctx),
+                    counter_bypass,
                 )
                 .await;
             }
@@ -2661,7 +3034,12 @@ pub fn spawn_planner_dispatcher(
                 // reviewer) intent isn't subject to the orchestrator's
                 // VM-concurrency cap; only the orchestrator-spawn path
                 // is. Always pass `false`.
-                respawn_orchestrator_for_initiative(&initiative_id, Arc::clone(&ctx), false).await;
+                respawn_orchestrator_for_initiative(
+                    &initiative_id,
+                    Arc::clone(&ctx),
+                    OrchestratorRespawnNoProgressBypass::None,
+                )
+                .await;
             }
             Ok(None) => { /* nothing to do */ }
             Err(e) => {
@@ -2689,6 +3067,13 @@ enum PostExitAction {
         initiative_id: String,
         task_id: String,
         role: &'static str,
+    },
+    WorkerTransportReactivation {
+        initiative_id: String,
+        task_id: String,
+        role: &'static str,
+        message_kind: String,
+        transition_record: Option<crate::initiatives::task_transitions::TaskTransitionRecord>,
     },
 }
 
@@ -2760,14 +3145,23 @@ async fn terminate_orchestrator(
 /// Returns `Ok(Some(session_id))` on a successful spawn, `Ok(None)`
 /// when the precondition checks elected to skip, and never panics.
 ///
-/// ## `predecessor_was_capacity_pressure` — iter65
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrchestratorRespawnNoProgressBypass {
+    None,
+    CapacityPressure,
+    PlannerTransportDisconnect,
+    PlannerModelTransportFailure,
+}
+
+/// ## `counter_bypass` — iter65 + transport resilience
 ///
-/// Set to `true` when the just-revoked session reaches this respawn
-/// path with a `Dirty` exit cleanliness whose
+/// Set to [`OrchestratorRespawnNoProgressBypass::CapacityPressure`]
+/// when the just-revoked session reaches this respawn path with a
+/// `Dirty` exit cleanliness whose
 /// `last_rejection_code` is one of the closed-lexicon
 /// capacity-pressure codes (see
 /// `crate::session_activity::is_capacity_pressure_code`). When
-/// true, the no-progress respawn counter ceiling check is
+/// set, the no-progress respawn counter ceiling check is
 /// short-circuited per
 /// `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`:
 /// capacity back-pressure from a peer initiative's slot contention
@@ -2777,14 +3171,20 @@ async fn terminate_orchestrator(
 /// → 3 and tripped the ceiling, escalating an initiative whose
 /// orchestrator's only sin was running on a saturated host).
 ///
-/// All non-Mode-A callers (handlers/intent.rs::handle_intent
-/// EarlyResponse dispatch, ipc/operator.rs operator-driven respawn,
-/// etc.) pass `false` because they have no preceding session whose
-/// last intent could have been a capacity-pressure rejection.
+/// [`OrchestratorRespawnNoProgressBypass::PlannerTransportDisconnect`]
+/// applies the same skip when the preceding planner stream closed
+/// while the kernel was writing a response. That is a host/planner
+/// transport reactivation, not semantic orchestrator no-progress.
+///
+/// [`OrchestratorRespawnNoProgressBypass::PlannerModelTransportFailure`]
+/// applies the same skip when the VM console records a boot-time
+/// provider/gateway timeout or network failure before the planner
+/// can submit an intent. That is host/provider availability, not
+/// semantic orchestrator no-progress.
 pub async fn respawn_orchestrator_for_initiative(
     initiative_id: &str,
     ctx: Arc<crate::ipc::context::HandlerContext>,
-    predecessor_was_capacity_pressure: bool,
+    counter_bypass: OrchestratorRespawnNoProgressBypass,
 ) -> Option<String> {
     use raxis_store::Table;
     use raxis_types::SessionAgentType;
@@ -2930,12 +3330,37 @@ pub async fn respawn_orchestrator_for_initiative(
     // emit so a forensic reader can correlate the audit-side
     // `kernel://planner_self_exit_dirty` revoke URN with the
     // kernel's deliberate decision NOT to walk the NNSP counter.
-    if predecessor_was_capacity_pressure {
+    if matches!(
+        counter_bypass,
+        OrchestratorRespawnNoProgressBypass::CapacityPressure
+    ) {
         eprintln!(
             "{{\"level\":\"info\",\
              \"event\":\"orchestrator_respawn_capacity_pressure_no_count_increment\",\
              \"initiative_id\":\"{initiative_id}\",\
              \"invariant\":\"INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01\"}}",
+        );
+    }
+    if matches!(
+        counter_bypass,
+        OrchestratorRespawnNoProgressBypass::PlannerTransportDisconnect
+    ) {
+        eprintln!(
+            "{{\"level\":\"info\",\
+             \"event\":\"orchestrator_respawn_transport_disconnect_no_count_increment\",\
+             \"initiative_id\":\"{initiative_id}\",\
+             \"invariant\":\"INV-ORCH-NNSP-TRANSPORT-DISCONNECT-NOT-NO-PROGRESS-01\"}}",
+        );
+    }
+    if matches!(
+        counter_bypass,
+        OrchestratorRespawnNoProgressBypass::PlannerModelTransportFailure
+    ) {
+        eprintln!(
+            "{{\"level\":\"info\",\
+             \"event\":\"orchestrator_respawn_model_transport_failure_no_count_increment\",\
+             \"initiative_id\":\"{initiative_id}\",\
+             \"invariant\":\"INV-ORCH-NNSP-MODEL-TRANSPORT-NOT-NO-PROGRESS-01\"}}",
         );
     }
     if active_worker_count > 0 {
@@ -2948,14 +3373,15 @@ pub async fn respawn_orchestrator_for_initiative(
         );
     }
 
-    // When `predecessor_was_capacity_pressure` is true, we skip the
+    // When `counter_bypass` is not `None`, we skip the
     // SQLite-side increment + ceiling evaluation transaction
     // entirely and synthesise a `Permitted { count_after_increment: 0 }`
     // outcome locally — the counter on disk does NOT mutate, so a
     // subsequent honest no-progress respawn (e.g. an actual rejected
     // RetrySubTask after the slot frees) walks the counter from its
     // pre-existing value rather than from a polluted starting point.
-    let skip_ceiling_check = predecessor_was_capacity_pressure || active_worker_count > 0;
+    let skip_ceiling_check = !matches!(counter_bypass, OrchestratorRespawnNoProgressBypass::None)
+        || active_worker_count > 0;
     let plan_shape = ctx.plan_registry.tasks_in_initiative(initiative_id);
     let task_count = plan_shape.len();
     let reviewer_count = plan_shape
@@ -7210,7 +7636,11 @@ mod concrete_reason_tests {
 
 #[cfg(test)]
 mod self_exit_paired_write_tests {
-    use super::scrape_terminal_tool_from_console_log;
+    use super::{
+        is_retry_neutral_planner_boot_failure_line,
+        scrape_retry_neutral_planner_boot_failure_from_console_log,
+        scrape_terminal_tool_from_console_log,
+    };
     use std::io::Write;
 
     /// Happy path — most-recent `step:planner-completed` line
@@ -7312,6 +7742,64 @@ mod self_exit_paired_write_tests {
             scrape_terminal_tool_from_console_log(&path).as_deref(),
             Some("end_turn"),
             "scraper MUST find a tail-positioned breadcrumb even when the head is large",
+        );
+    }
+
+    #[test]
+    fn planner_boot_transport_scraper_extracts_network_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("console.log");
+        let mut f = std::fs::File::create(&path).expect("create");
+        writeln!(
+            f,
+            "{{\"level\":\"error\",\"step\":\"planner-boot-error\",\"role\":\"orchestrator\",\
+             \"message\":\"driver failure: dispatch loop failed: model error: transport error: NetworkError\"}}"
+        )
+        .unwrap();
+        drop(f);
+
+        let detail = scrape_retry_neutral_planner_boot_failure_from_console_log(&path)
+            .expect("transport failure should classify as retry-neutral");
+        assert!(
+            detail.contains("NetworkError"),
+            "must preserve provider detail; got {detail:?}",
+        );
+    }
+
+    #[test]
+    fn planner_boot_transport_scraper_extracts_model_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("console.log");
+        let mut f = std::fs::File::create(&path).expect("create");
+        writeln!(
+            f,
+            "{{\"level\":\"error\",\"step\":\"planner-boot-error\",\"role\":\"reviewer\",\
+             \"message\":\"driver failure: dispatch loop failed: model error: timeout after 60s\"}}"
+        )
+        .unwrap();
+        drop(f);
+
+        let detail = scrape_retry_neutral_planner_boot_failure_from_console_log(&path)
+            .expect("provider timeout should classify as retry-neutral");
+        assert!(
+            detail.contains("timeout after 60s"),
+            "must preserve timeout detail; got {detail:?}",
+        );
+    }
+
+    #[test]
+    fn planner_boot_transport_scraper_ignores_kernel_rejection_and_idle() {
+        assert!(
+            !is_retry_neutral_planner_boot_failure_line(
+                "{\"step\":\"planner-boot-error\",\"message\":\"driver failure: terminal tool \\\"activate_subtask\\\" was rejected by the kernel: FAIL_POLICY_VIOLATION\"}"
+            ),
+            "kernel terminal-tool rejections are semantic orchestration failures",
+        );
+        assert!(
+            !is_retry_neutral_planner_boot_failure_line(
+                "{\"step\":\"planner-boot-error\",\"message\":\"dispatch loop terminated with Idle (no terminal tool fired)\"}"
+            ),
+            "idle/no-terminal model behavior should still count as no-progress",
         );
     }
 }

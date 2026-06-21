@@ -1131,7 +1131,7 @@ fn assemble_capabilities(
             let orch_count =
                 read_orchestrator_no_progress_respawn_count(conn, inputs.initiative_id)?;
             let initiative = build_initiative_view(inputs.initiative_id, orch_count);
-            let tasks = read_executor_task_capability_views(conn, registry, inputs.initiative_id)?;
+            let tasks = read_retry_task_capability_views(conn, registry, inputs.initiative_id)?;
             // V3 iter70+ — surface the kernel-authoritative ready
             // set and per-initiative concurrency posture directly
             // to the orchestrator LLM. The previous design forced
@@ -1339,10 +1339,15 @@ fn read_orchestrator_no_progress_respawn_count(
 }
 
 /// For the orchestrator: build one [`TaskCapabilityView`] per
-/// **executor** task in the initiative (reviewer tasks are
-/// reactivate-only — the orchestrator does not `retry_subtask` on
-/// a reviewer, so surfacing reviewer rows would be noise).
-fn read_executor_task_capability_views(
+/// retry-addressable worker task in the initiative.
+///
+/// Executor rows need this for ordinary crash retries and
+/// Completed+review-rejection retries. Reviewer rows need it for the
+/// infrastructure-failure case where the reviewer VM exits before
+/// submitting `SubmitReview`: the task row and latest activation are
+/// both `Failed`, and the orchestrator's correct recovery move is the
+/// same two-intent `RetrySubTask` -> `ActivateSubTask` loop.
+fn read_retry_task_capability_views(
     conn: &Connection,
     registry: &PlanRegistry,
     initiative_id: &str,
@@ -1365,8 +1370,10 @@ fn read_executor_task_capability_views(
             Some(f) => f,
             None => continue,
         };
-        // Only project executor rows — reviewers are not retry-eligible.
-        if fields.session_agent_type != SessionAgentType::Executor {
+        if !matches!(
+            fields.session_agent_type,
+            SessionAgentType::Executor | SessionAgentType::Reviewer
+        ) {
             continue;
         }
         out.push(build_task_capability_view(
@@ -3166,6 +3173,161 @@ mod tests {
         assert!(
             rendered.contains("concurrency: cap=5 active=0 headroom=5"),
             "rendered KSB MUST surface `concurrency:` line; got:\n{rendered}",
+        );
+    }
+
+    /// Reviewer infrastructure failures are retry-addressable workers,
+    /// not invisible "awaiting reviewer verdict" states. A live GTM run
+    /// hit `ReviewerExitedWithoutVerdict`; the reviewer task and its
+    /// activation were both `Failed`, but the orchestrator KSB omitted
+    /// reviewer rows from `capabilities.tasks`, so the model could not
+    /// see the admissible retry and churned until the no-progress
+    /// ceiling escalated.
+    #[test]
+    fn failed_reviewer_is_projected_as_retry_capability() {
+        let (store, _dir) = fresh_store();
+        let registry = PlanRegistry::new();
+        let init = "init-failed-reviewer-retry";
+        let executor = "executor-produced-artifact";
+        let reviewer = "reviewer-exited-without-verdict";
+
+        registry.insert_orchestrator(
+            init.to_owned(),
+            OrchestratorPlanFields {
+                cross_cutting_artifacts: vec![],
+                description: "failed reviewer retry witness".to_owned(),
+                target_ref: "refs/heads/main".to_owned(),
+                repository_id: OrchestratorPlanFields::DEFAULT_REPOSITORY_ID.to_owned(),
+                elastic: None,
+                max_concurrent_admissions: 3,
+                integration_merge_verifiers: Vec::new(),
+            },
+        );
+        registry.insert(
+            TaskKey::new(init.to_owned(), executor.to_owned()),
+            TaskPlanFields {
+                description: "produce artifact".to_owned(),
+                session_agent_type: SessionAgentType::Executor,
+                ..Default::default()
+            },
+        );
+        registry.insert(
+            TaskKey::new(init.to_owned(), reviewer.to_owned()),
+            TaskPlanFields {
+                description: "review artifact".to_owned(),
+                session_agent_type: SessionAgentType::Reviewer,
+                max_crash_retries: Some(3),
+                ..Default::default()
+            },
+        );
+
+        let conn = store.lock_sync();
+        conn.execute(
+            &format!(
+                "INSERT INTO {INITIATIVES} (
+                 initiative_id, state, terminal_criteria_json,
+                 plan_artifact_sha256, created_at
+             ) VALUES (?1, 'Executing', '{{}}', 'sha', 0)"
+            ),
+            rusqlite::params![init],
+        )
+        .expect("insert initiative");
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS} (task_id, initiative_id, lane_id, state, actor, \
+                                policy_epoch, admitted_at, transitioned_at, \
+                                evaluation_sha) \
+             VALUES (?1, ?2, 'default', 'Completed', 'kernel', 0, 10, 10, ?3)"
+            ),
+            rusqlite::params![executor, init, "b".repeat(40)],
+        )
+        .expect("insert executor");
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS} (task_id, initiative_id, lane_id, state, actor, \
+                                policy_epoch, admitted_at, transitioned_at, block_reason) \
+             VALUES (?1, ?2, 'default', 'Failed', 'kernel', 0, 20, 20, ?3)"
+            ),
+            rusqlite::params![
+                reviewer,
+                init,
+                "ReviewerExitedWithoutVerdict: reviewer VM disconnected before submitting SubmitReview",
+            ],
+        )
+        .expect("insert reviewer");
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASK_DAG_EDGES} (initiative_id, predecessor_task_id, \
+                                          successor_task_id, predecessor_satisfied) \
+             VALUES (?1, ?2, ?3, 0)"
+            ),
+            rusqlite::params![init, executor, reviewer],
+        )
+        .expect("insert edge");
+        conn.execute(
+            &format!(
+                "INSERT INTO {SUBTASK_ACTIVATIONS} \
+                (activation_id, task_id, initiative_id, activation_state, session_id, \
+                 crash_retry_count, review_reject_count, validation_reject_count, \
+                 created_at, activated_at, terminated_at) \
+             VALUES (?1, ?2, ?3, 'Completed', NULL, 0, 0, 0, 11, 10, 10)"
+            ),
+            rusqlite::params!["act-executor", executor, init],
+        )
+        .expect("insert executor activation");
+        conn.execute(
+            &format!(
+                "INSERT INTO {SUBTASK_ACTIVATIONS} \
+                (activation_id, task_id, initiative_id, activation_state, session_id, \
+                 crash_retry_count, review_reject_count, validation_reject_count, \
+                 created_at, activated_at, terminated_at) \
+             VALUES (?1, ?2, ?3, 'Failed', NULL, 1, 0, 0, 21, 20, 20)"
+            ),
+            rusqlite::params!["act-reviewer", reviewer, init],
+        )
+        .expect("insert reviewer activation");
+        drop(conn);
+
+        let conn = store.lock_sync();
+        let snap = assemble_ksb_snapshot(
+            &conn,
+            &registry,
+            &KsbInputs {
+                initiative_id: init,
+                task_id: None,
+                role: KsbRole::Orchestrator,
+                token_budget_remaining: 0,
+                wallclock_budget_remaining_s: 0,
+                credential_ports: Vec::new(),
+                session_id: "",
+                planner_max_turns: crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
+                max_turns_scaling: default_max_turns_scaling(),
+            },
+        )
+        .expect("snapshot");
+        drop(conn);
+
+        let raxis_ksb::Capabilities::Orchestrator(o) =
+            snap.capabilities.as_ref().expect("capabilities present")
+        else {
+            panic!("expected orchestrator capabilities");
+        };
+        let reviewer_cap = o
+            .tasks
+            .iter()
+            .find(|t| t.task_id == reviewer)
+            .expect("failed reviewer MUST be in retry capabilities");
+        assert!(
+            reviewer_cap.retry_admissible,
+            "failed reviewer should be retry-admissible while under crash retry ceiling: {reviewer_cap:?}",
+        );
+        assert_eq!(reviewer_cap.crash_retry_count, 1);
+
+        let rendered = raxis_ksb::render_ksb(&snap).expect("render");
+        assert!(
+            rendered.contains(&format!("task={reviewer}"))
+                && rendered.contains("retry_admissible=true"),
+            "rendered KSB MUST expose failed reviewer retry capability; got:\n{rendered}",
         );
     }
 

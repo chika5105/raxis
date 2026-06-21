@@ -2452,11 +2452,11 @@ async fn handle_approve_logical_deadlock(
         // no preceding capacity-pressure-rejected session here
         // (this is a fresh restart of the orchestrator after the
         // operator approved the LogicalDeadlock escalation); pass
-        // `false`.
+        // Count normally.
         let _ = crate::session_spawn_orchestrator::respawn_orchestrator_for_initiative(
             &init_for_respawn,
             ctx_for_respawn,
-            false,
+            crate::session_spawn_orchestrator::OrchestratorRespawnNoProgressBypass::None,
         )
         .await;
     });

@@ -535,8 +535,8 @@ pub struct InitiativeCapabilityView {
 }
 
 /// Per-task admit-predicate view. The orchestrator carries one row
-/// per executor task in the DAG; the executor carries exactly one
-/// row (its own task). The `retry_admissible` boolean is computed
+/// per retry-addressable worker task in the DAG; the executor carries
+/// exactly one row (its own task). The `retry_admissible` boolean is computed
 /// from the SAME `admit_retry_subtask_check` predicate the
 /// `RetrySubTask` IPC handler runs (parity contract).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

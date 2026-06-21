@@ -7351,6 +7351,8 @@ fn classify_task_failure_kind(
         "IntegrationMergeFailed"
     } else if task_reason_needs_parent_initiative_recovery(reason) {
         "ParentInitiativeRecoveryRequired"
+    } else if is_reviewer_runtime_failure_reason(reason) {
+        "ReviewerRuntimeFailure"
     } else if reason.contains("review rejection budget exhausted") {
         "ReviewRejectionBudgetExhausted"
     } else if reason.contains("ActivateSubTask substrate spawn failed")
@@ -7391,6 +7393,12 @@ fn attach_task_recovery_actions(
             "operator_action_required",
             "Parent initiative recovery available",
             "This task is not directly retryable, but the parent initiative has a recovery escalation. Open Escalations to review the cause and approve or deny the signed resume disposition.",
+        );
+    } else if is_reviewer_runtime_failure_reason(reason) {
+        info = info.with_recovery(
+            "diagnosis_only",
+            "Reviewer worker retry expected",
+            "The reviewer failed before submitting a verdict. The orchestrator retries failed reviewer workers through RetrySubTask when the retry ceiling allows it; if the initiative entered RecoveryRequired, use the parent recovery escalation.",
         );
     } else if reason.contains("operator approval")
         || reason.contains("RecoveryRequired")
@@ -7493,6 +7501,13 @@ fn task_reason_needs_parent_initiative_recovery(reason: &str) -> bool {
                 || lower.contains("logicaldeadlock")
                 || lower.contains("logical deadlock")
                 || lower.contains("respawn")))
+}
+
+fn is_reviewer_runtime_failure_reason(reason: &str) -> bool {
+    reason.contains("ReviewerExitedWithoutVerdict")
+        || reason.contains("ReviewerTurnBudgetExhausted")
+        || reason.contains("ReviewerNoTerminalIntent")
+        || reason.contains("ReviewInfrastructureFailed")
 }
 
 fn shell_quote(value: &str) -> String {
@@ -10963,6 +10978,36 @@ lane_id = "default"
         assert!(failure.actions.iter().any(|action| {
             action.label == "Open recovery escalations" && action.target == "/escalations"
         }));
+        assert!(!failure
+            .recovery
+            .as_ref()
+            .is_some_and(|r| r.status == "unrecoverable"));
+    }
+
+    #[test]
+    fn reviewer_runtime_failure_is_not_labeled_unrecoverable() {
+        let mut row = synth_task_row(raxis_types::TaskState::Failed);
+        row.task_id = "reviewer-failed-before-verdict".into();
+        row.task_name = Some("strategy_reviewer".into());
+        row.block_reason = Some(
+            "ReviewerExitedWithoutVerdict: reviewer VM disconnected before submitting \
+             `SubmitReview`. The planner IPC stream then surfaced a transport detail: \
+             I/O error reading/writing frame: Broken pipe (os error 32)."
+                .into(),
+        );
+
+        let failure = task_failure_from_block_reason(&row, "strategy_reviewer")
+            .expect("reviewer runtime failure must project");
+
+        assert_eq!(failure.kind, "ReviewerRuntimeFailure");
+        assert_eq!(
+            failure.recovery.as_ref().map(|r| r.status.as_str()),
+            Some("diagnosis_only")
+        );
+        assert_eq!(
+            failure.recovery.as_ref().map(|r| r.label.as_str()),
+            Some("Reviewer worker retry expected")
+        );
         assert!(!failure
             .recovery
             .as_ref()

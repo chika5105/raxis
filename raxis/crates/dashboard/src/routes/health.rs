@@ -25,8 +25,12 @@
 //! Missing file ⇒ `{ status: "Healthy", fresh: true }` (the
 //! supervisor isn't in play; kernel running directly is healthy
 //! by definition since this very handler is responding). Stale
-//! file (older than 2× window) AND supervisor PID gone ⇒
-//! `{ status: "Halted", sub_state: "SupervisorGone", fresh: false }`.
+//! file (older than 2× window) AND supervisor PID gone AND kernel
+//! PID gone ⇒ `{ status: "Halted", sub_state: "SupervisorGone",
+//! fresh: false }`. If the supervisor is gone but the kernel PID is
+//! still alive, the kernel is running unmanaged; report a healthy
+//! no-supervisor view so the dashboard does not keep a stale halt
+//! banner open for a live direct kernel.
 
 use std::path::PathBuf;
 
@@ -400,16 +404,36 @@ pub fn read_kernel_lifecycle_response(data_dir: Option<&str>) -> KernelLifecycle
         2 * i64::from(view.window_secs)
     };
     let age_secs = now.saturating_sub(view.updated_at_unix_secs);
-    let pid_alive = view.supervisor_pid == 0 || supervisor_pid_alive(view.supervisor_pid);
-    let fresh = age_secs <= staleness_window && pid_alive;
-    let (status, sub_state) = if !fresh && view.supervisor_pid != 0 {
+    let supervisor_alive = view.supervisor_pid == 0 || pid_alive(view.supervisor_pid);
+    let kernel_alive = view.kernel_pid != 0 && pid_alive(view.kernel_pid);
+    let stale = age_secs > staleness_window;
+    let unmanaged_live_kernel = view.supervisor_pid != 0 && !supervisor_alive && kernel_alive;
+    let fresh = !stale && supervisor_alive || unmanaged_live_kernel;
+    let (status, sub_state, supervisor_pid, updated_at_unix_secs) = if unmanaged_live_kernel {
+        // The dashboard handler itself proves this kernel is serving.
+        // When an old supervised sentinel outlives its supervisor but
+        // the child kernel remains alive, classify the view as a
+        // direct/unmanaged kernel instead of pinning a scary
+        // Halted{SupervisorGone} banner forever.
+        ("Healthy".to_owned(), None, 0, now)
+    } else if !fresh && view.supervisor_pid != 0 {
         // Supervisor PID we know about is gone OR the file
         // hasn't been updated for >2 windows. Either way: surface
         // `Halted{SupervisorGone}` so the operator knows the
         // sentinel data is stale.
-        ("Halted".to_owned(), Some("SupervisorGone".to_owned()))
+        (
+            "Halted".to_owned(),
+            Some("SupervisorGone".to_owned()),
+            view.supervisor_pid,
+            view.updated_at_unix_secs,
+        )
     } else {
-        (view.status.clone(), view.sub_state.clone())
+        (
+            view.status.clone(),
+            view.sub_state.clone(),
+            view.supervisor_pid,
+            view.updated_at_unix_secs,
+        )
     };
     KernelLifecycleResponse {
         status,
@@ -420,9 +444,9 @@ pub fn read_kernel_lifecycle_response(data_dir: Option<&str>) -> KernelLifecycle
         last_restart_unix_ts: view.last_restart_unix_ts,
         attempts_in_window: view.attempts_in_window,
         window_secs: view.window_secs,
-        supervisor_pid: view.supervisor_pid,
+        supervisor_pid,
         kernel_pid: view.kernel_pid,
-        updated_at_unix_secs: view.updated_at_unix_secs,
+        updated_at_unix_secs,
         fresh,
         auto_resume,
         host_restart_recovery: None,
@@ -459,7 +483,7 @@ fn unix_now_secs() -> i64 {
 }
 
 #[cfg(unix)]
-fn supervisor_pid_alive(pid: u32) -> bool {
+fn pid_alive(pid: u32) -> bool {
     // `kill(pid, 0)` is the POSIX-portable way to ask "is this
     // process still alive AND can I signal it?". `Errno::ESRCH`
     // means the process is gone; `Errno::EPERM` means it exists
@@ -477,7 +501,7 @@ fn supervisor_pid_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn supervisor_pid_alive(_pid: u32) -> bool {
+fn pid_alive(_pid: u32) -> bool {
     // Non-unix targets: skip liveness probing. The dashboard
     // crate is unix-deployed in practice, but keeping the
     // `cfg(not(unix))` arm here avoids a build break if a
@@ -630,7 +654,7 @@ mod tests {
             "max_attempts": 3,
             "window_secs": 60,
             "supervisor_pid": 99_999_999_u32,
-            "kernel_pid": 12346,
+            "kernel_pid": 99_999_998_u32,
             "updated_at_unix_secs": 0_i64,
         });
         std::fs::write(
@@ -642,6 +666,33 @@ mod tests {
         assert_eq!(resp.status, "Halted");
         assert_eq!(resp.sub_state.as_deref(), Some("SupervisorGone"));
         assert!(!resp.fresh);
+    }
+
+    #[test]
+    fn stale_sentinel_with_dead_supervisor_but_live_kernel_reports_unmanaged_healthy() {
+        let dir = tempdir().unwrap();
+        let live_kernel_pid = std::process::id();
+        let raw = serde_json::json!({
+            "schema_version": 1,
+            "status": "Healthy",
+            "attempt_n": 0,
+            "max_attempts": 3,
+            "window_secs": 60,
+            "supervisor_pid": 99_999_999_u32,
+            "kernel_pid": live_kernel_pid,
+            "updated_at_unix_secs": 0_i64,
+        });
+        std::fs::write(
+            dir.path().join("kernel_lifecycle_status.json"),
+            serde_json::to_vec(&raw).unwrap(),
+        )
+        .unwrap();
+        let resp = read_kernel_lifecycle_response(Some(dir.path().to_str().unwrap()));
+        assert_eq!(resp.status, "Healthy");
+        assert!(resp.sub_state.is_none());
+        assert!(resp.fresh);
+        assert_eq!(resp.supervisor_pid, 0);
+        assert_eq!(resp.kernel_pid, live_kernel_pid);
     }
 
     #[test]

@@ -1555,9 +1555,9 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
              \n\
              Decision order; end with one terminal tool:\n\
              1. PRIORITY: `retry_subtask` has ABSOLUTE precedence over fresh \
-             activation. If any executor row is `state=failed` with \
+             activation. If any executor or reviewer row is `state=failed` with \
              `capabilities.tasks[*].retry_admissible=true`, call \
-             `retry_subtask`; failed executors are not waiting on reviewers. \
+             `retry_subtask`; failed workers are not waiting on reviewers. \
              Also retry completed executors with `aggregate=AtLeastOneRejected` \
              and `retry_admissible=true`. DO NOT activate any pending task or \
              call `integration_merge` while a retry is admissible; rejects burn \
@@ -2619,14 +2619,13 @@ mod tests {
         );
     }
 
-    /// Live-e2e regression: a failed Executor is no longer an
+    /// Live-e2e regression: a failed worker is no longer an
     /// aggregate-review state. If policy still permits retry, the
     /// orchestrator must call `retry_subtask` from
     /// `capabilities.tasks[*].retry_admissible=true` instead of
-    /// waiting for reviewers that cannot run after the executor
-    /// failed.
+    /// waiting for reviewers that cannot run after the worker failed.
     #[test]
-    fn render_system_prompt_for_orchestrator_retries_failed_executor_before_waiting() {
+    fn render_system_prompt_for_orchestrator_retries_failed_worker_before_waiting() {
         let args = BootArgs {
             initiative_id: "init-A".to_owned(),
             task_id: None,
@@ -2636,12 +2635,12 @@ mod tests {
             prompt.contains("state=failed")
                 && prompt.contains("retry_admissible=true")
                 && prompt.contains("call `retry_subtask`"),
-            "orchestrator NNSP MUST retry failed executors when \
+            "orchestrator NNSP MUST retry failed workers when \
              retry_admissible=true; got prompt: {prompt}",
         );
         assert!(
-            prompt.contains("failed executors are not") && prompt.contains("waiting on reviewers"),
-            "orchestrator NNSP MUST prevent failed executors from being \
+            prompt.contains("failed workers are not") && prompt.contains("waiting on reviewers"),
+            "orchestrator NNSP MUST prevent failed workers from being \
              treated as reviewer waits; got prompt: {prompt}",
         );
         assert!(

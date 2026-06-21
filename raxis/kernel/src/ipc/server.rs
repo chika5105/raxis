@@ -508,6 +508,23 @@ where
     let idle_timeout = planner_ipc_idle_timeout();
     let idle_threshold_secs = idle_timeout.map(|d| d.as_secs()).unwrap_or(0);
     let mut idle_watchdog_fired = false;
+    let mut response_write_disconnect_message_kind: Option<&'static str> = None;
+
+    macro_rules! write_response {
+        ($msg:expr, $kind:literal) => {{
+            let response_msg = $msg;
+            if !write_planner_frame_or_disconnect(
+                &mut stream,
+                &response_msg,
+                $kind,
+                &mut response_write_disconnect_message_kind,
+            )
+            .await?
+            {
+                break;
+            }
+        }};
+    }
 
     loop {
         // `INV-PLANNER-IPC-IDLE-WATCHDOG-01` — wrap the
@@ -627,12 +644,10 @@ where
                         },
                     );
                 }
-                write_planner_frame(
-                    &mut stream,
-                    &IpcMessage::KernelIntentResponse(resp),
-                    "KernelIntentResponse",
-                )
-                .await?;
+                write_response!(
+                    IpcMessage::KernelIntentResponse(resp),
+                    "KernelIntentResponse"
+                );
             }
 
             // ── WitnessSubmission ─────────────────────────────────────────
@@ -697,16 +712,14 @@ where
                                 (false, uuid::Uuid::nil(), Some(format!("{reason:?}")))
                             }
                         };
-                        write_planner_frame(
-                            &mut stream,
-                            &IpcMessage::WitnessAck {
+                        write_response!(
+                            IpcMessage::WitnessAck {
                                 verifier_run_id,
                                 accepted,
                                 reason,
                             },
-                            "WitnessAck",
-                        )
-                        .await?;
+                            "WitnessAck"
+                        );
                         if should_respawn_after_gate_clear {
                             let ctx_for_respawn = Arc::clone(&ctx);
                             let task_for_respawn = task_id_for_log.clone();
@@ -732,7 +745,7 @@ where
                                     let _ = crate::session_spawn_orchestrator::respawn_orchestrator_for_initiative(
                                         &initiative_id,
                                         ctx_for_respawn,
-                                        false,
+                                        crate::session_spawn_orchestrator::OrchestratorRespawnNoProgressBypass::None,
                                     )
                                     .await;
                                 } else {
@@ -779,12 +792,10 @@ where
                 let resp = handlers::escalation::handle(req, &ctx).await;
                 let latency_ms = started.elapsed().as_millis() as u64;
                 planner_dispatch_log::escalation_response(&task_id_for_log, &resp, latency_ms);
-                write_planner_frame(
-                    &mut stream,
-                    &IpcMessage::KernelEscalationResponse(resp),
-                    "KernelEscalationResponse",
-                )
-                .await?;
+                write_response!(
+                    IpcMessage::KernelEscalationResponse(resp),
+                    "KernelEscalationResponse"
+                );
             }
 
             // ── PlannerFetchRequest ──────────────────────────────────────
@@ -809,12 +820,10 @@ where
                 let resp = handlers::planner_fetch::handle(req, &ctx).await;
                 let latency_ms = started.elapsed().as_millis() as u64;
                 planner_dispatch_log::planner_fetch_response(request_id, &resp, latency_ms);
-                write_planner_frame(
-                    &mut stream,
-                    &IpcMessage::KernelPlannerFetchResponse(resp),
-                    "KernelPlannerFetchResponse",
-                )
-                .await?;
+                write_response!(
+                    IpcMessage::KernelPlannerFetchResponse(resp),
+                    "KernelPlannerFetchResponse"
+                );
             }
 
             // ── CustomToolInvocation ────────────────────────────────────
@@ -833,12 +842,10 @@ where
                     crate::observability::IPC_MSG_KIND_CUSTOM_TOOL_INVOCATION,
                 );
                 let ack = handle_custom_tool_invocation(req, &ctx).await;
-                write_planner_frame(
-                    &mut stream,
-                    &IpcMessage::KernelCustomToolInvocationAck(ack),
-                    "KernelCustomToolInvocationAck",
-                )
-                .await?;
+                write_response!(
+                    IpcMessage::KernelCustomToolInvocationAck(ack),
+                    "KernelCustomToolInvocationAck"
+                );
             }
 
             // ── CustomToolExecution ─────────────────────────────────────
@@ -856,12 +863,10 @@ where
                     crate::observability::IPC_MSG_KIND_CUSTOM_TOOL_INVOCATION,
                 );
                 let resp = crate::ipc::custom_tools::handle_kernel_execution(req, &ctx).await;
-                write_planner_frame(
-                    &mut stream,
-                    &IpcMessage::KernelCustomToolExecutionResponse(resp),
-                    "KernelCustomToolExecutionResponse",
-                )
-                .await?;
+                write_response!(
+                    IpcMessage::KernelCustomToolExecutionResponse(resp),
+                    "KernelCustomToolExecutionResponse"
+                );
             }
 
             // ── PlannerExitNotice ─────────────────────────────────
@@ -893,12 +898,10 @@ where
                 );
                 planner_dispatch_log::planner_exit_notice(&outcome);
                 last_exit_notice = Some(outcome);
-                write_planner_frame(
-                    &mut stream,
-                    &IpcMessage::KernelPlannerExitNoticeAck,
-                    "KernelPlannerExitNoticeAck",
-                )
-                .await?;
+                write_response!(
+                    IpcMessage::KernelPlannerExitNoticeAck,
+                    "KernelPlannerExitNoticeAck"
+                );
             }
 
             other => {
@@ -916,6 +919,7 @@ where
         last_exit_notice,
         idle_watchdog_fired,
         idle_watchdog_threshold_secs: idle_threshold_secs,
+        response_write_disconnect_message_kind,
     })
 }
 
@@ -1203,6 +1207,52 @@ where
     }
 }
 
+async fn write_planner_frame_or_disconnect<S>(
+    stream: &mut S,
+    msg: &raxis_ipc::IpcMessage,
+    message_kind: &'static str,
+    response_write_disconnect_message_kind: &mut Option<&'static str>,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    match write_planner_frame(stream, msg, message_kind).await {
+        Ok(()) => Ok(true),
+        Err(e) if is_retry_neutral_planner_write_error(e.as_ref()) => {
+            *response_write_disconnect_message_kind = Some(message_kind);
+            eprintln!(
+                "{{\"level\":\"warn\",\
+                 \"event\":\"planner_ipc_response_write_disconnected\",\
+                 \"message_kind\":\"{message_kind}\",\"error\":\"{e}\"}}",
+            );
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn is_retry_neutral_planner_write_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    fn is_retry_neutral_io_kind(kind: std::io::ErrorKind) -> bool {
+        matches!(
+            kind,
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::WriteZero
+        )
+    }
+
+    if let Some(io) = err.downcast_ref::<std::io::Error>() {
+        return is_retry_neutral_io_kind(io.kind());
+    }
+    if let Some(frame) = err.downcast_ref::<raxis_ipc::FrameError>() {
+        return matches!(frame, raxis_ipc::FrameError::Io(io) if is_retry_neutral_io_kind(io.kind()));
+    }
+    false
+}
+
 /// **`INV-FAILURE-REASON-CONCRETE-01`** — value returned by
 /// [`drive_planner_stream`] when the planner-side socket reaches
 /// EOF.
@@ -1253,6 +1303,13 @@ pub(crate) struct PlannerStreamOutcome {
     /// the exact threshold without checking the kernel
     /// configuration.
     pub idle_watchdog_threshold_secs: u64,
+
+    /// Set when the planner stream closed while the kernel was
+    /// writing a response. This is host/planner transport loss, not
+    /// semantic task failure; post-exit handling can re-activate the
+    /// task without burning crash-retry or orchestrator no-progress
+    /// budgets.
+    pub response_write_disconnect_message_kind: Option<&'static str>,
 }
 
 /// `INV-PLANNER-IPC-IDLE-WATCHDOG-01` — the maximum time the
@@ -2248,7 +2305,7 @@ mod server_log_tests {
 #[cfg(test)]
 mod planner_ipc_timeout_config_tests {
     use super::{
-        parse_planner_ipc_response_write_timeout_secs,
+        is_retry_neutral_planner_write_error, parse_planner_ipc_response_write_timeout_secs,
         PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_DEFAULT_SECS,
         PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_MAX_SECS, PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_MIN_SECS,
     };
@@ -2288,6 +2345,21 @@ mod planner_ipc_timeout_config_tests {
             parse_planner_ipc_response_write_timeout_secs(Some("9999".to_owned())),
             PLANNER_IPC_RESPONSE_WRITE_TIMEOUT_MAX_SECS,
         );
+    }
+
+    #[test]
+    fn response_write_disconnect_classifier_is_retry_neutral_for_broken_pipe() {
+        let broken_pipe = raxis_ipc::FrameError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "peer closed",
+        ));
+        assert!(is_retry_neutral_planner_write_error(&broken_pipe));
+
+        let invalid_data = raxis_ipc::FrameError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "bad frame",
+        ));
+        assert!(!is_retry_neutral_planner_write_error(&invalid_data));
     }
 }
 

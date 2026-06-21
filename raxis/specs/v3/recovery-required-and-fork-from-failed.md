@@ -95,7 +95,29 @@ Expected behavior:
 * Let the operator fix external conditions and approve recovery.
 * Do not mutate the signed plan to work around the failure.
 
-### 4. Prompt, Allowlist, or Plan Shape Was Wrong
+### 4. Reviewer Runtime Failure
+
+A reviewer VM exits before submitting `SubmitReview` because the
+planner hit a turn/token/tool-error limit, disconnected, or the IPC
+stream failed.
+
+Expected behavior:
+
+* Mark the reviewer task and latest activation `Failed` with a
+  concrete `ReviewerExitedWithoutVerdict`,
+  `ReviewerTurnBudgetExhausted`, `ReviewerNoTerminalIntent`, or
+  `ReviewInfrastructureFailed` reason.
+* Surface the failed reviewer in the orchestrator KSB
+  `capabilities.tasks` block with the same `retry_admissible`
+  predicate used by `RetrySubTask`.
+* On admissible retry: the orchestrator issues `RetrySubTask`, then
+  `ActivateSubTask`, and the same reviewer task runs again against the
+  same reviewed artifact.
+* If repeated no-progress respawns exhaust the initiative ceiling, move
+  the initiative to `RecoveryRequired` and require operator approval or
+  denial.
+
+### 5. Prompt, Allowlist, or Plan Shape Was Wrong
 
 If recovery requires changing user-authored instructions, widening a
 path allowlist, adding a task, changing a verifier, or changing model
@@ -108,7 +130,7 @@ Expected behavior:
   amendment linked to the original plan artifact.
 * Reuse completed artifacts only through explicit, auditable lineage.
 
-### 5. Terminal Failed Forensics
+### 6. Terminal Failed Forensics
 
 An administrator wants to continue from a failed initiative for
 forensic or operational reasons.
