@@ -38,8 +38,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use raxis_store::{Store, Table};
 use raxis_types::{
-    unix_now_secs, BudgetSnapshot, InitiativeState, IntentKind, IntentOutcome, IntentRequest,
-    IntentResponse, PlannerErrorCode, ReviewVerdict, SessionAgentType, SessionId, TaskState,
+    unix_now_secs, BudgetSnapshot, InitiativeState, IntegrationMergeAttemptDiscardReason,
+    IntegrationMergeAttemptState, IntentKind, IntentOutcome, IntentRequest, IntentResponse,
+    PlannerErrorCode, ReviewVerdict, SessionAgentType, SessionId, TaskState,
 };
 use rusqlite::OptionalExtension;
 
@@ -55,6 +56,7 @@ const WITNESS_RECORDS: &str = Table::WitnessRecords.as_str();
 const SUBTASK_ACTIVATIONS: &str = Table::SubtaskActivations.as_str();
 const SESSIONS: &str = Table::Sessions.as_str();
 const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
+const INTEGRATION_MERGE_ATTEMPTS: &str = Table::IntegrationMergeAttempts.as_str();
 const INTEGRATION_MERGE_QUEUE: &str = Table::IntegrationMergeQueue.as_str();
 const WORKSPACE_MERGE_ATTEMPTS: &str = Table::WorkspaceMergeAttempts.as_str();
 
@@ -1564,7 +1566,9 @@ fn run_phase_a(
         Err(_) => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
     };
 
-    if matches!(req.intent_kind, IntentKind::IntegrationMerge) && base_sha_raw == head_sha_raw {
+    let integration_merge_noop =
+        matches!(req.intent_kind, IntentKind::IntegrationMerge) && base_sha_raw == head_sha_raw;
+    let integration_merge_declares_subtasks = if integration_merge_noop {
         let has_declared_subtasks: Result<bool, rusqlite::Error> = {
             let conn = store.lock_sync();
             initiative_declares_executor_or_reviewer_subtasks_for_merge(
@@ -1573,17 +1577,34 @@ fn run_phase_a(
             )
         };
         match has_declared_subtasks {
-            Ok(true) => {
+            Ok(v) => v,
+            Err(_) => {
+                return PreGateOutcome::Reject(PlannerErrorCode::FailPolicyViolation, task_state)
+            }
+        }
+    } else {
+        false
+    };
+
+    let preloaded_completed_executor_heads_for_merge = if integration_merge_noop
+        && integration_merge_declares_subtasks
+    {
+        match load_completed_executor_heads_for_merge(
+            task.initiative_id.as_str(),
+            ctx.plan_registry.as_ref(),
+            store,
+        ) {
+            Ok(heads) if heads.is_empty() => {
                 eprintln!(
-                    "{{\"level\":\"warn\",\"event\":\"IntegrationMergeRejectedNoOpWithSubtasks\",\
-                     \"task_id\":\"{}\",\"initiative_id\":\"{}\",\
-                     \"base_sha\":\"{}\",\"head_sha\":\"{}\",\
-                     \"diagnostic\":\"no-op integration_merge is invalid when the initiative declared executor/reviewer subtasks\"}}",
-                    req.task_id.as_str(),
-                    task.initiative_id,
-                    base_sha_raw,
-                    head_sha_raw,
-                );
+                        "{{\"level\":\"warn\",\"event\":\"IntegrationMergeRejectedNoOpWithSubtasks\",\
+                         \"task_id\":\"{}\",\"initiative_id\":\"{}\",\
+                         \"base_sha\":\"{}\",\"head_sha\":\"{}\",\
+                         \"diagnostic\":\"no-op integration_merge is invalid when the initiative declared executor/reviewer subtasks but no completed executor artifact is bound\"}}",
+                        req.task_id.as_str(),
+                        task.initiative_id,
+                        base_sha_raw,
+                        head_sha_raw,
+                    );
                 return PreGateOutcome::RejectWithDetail(
                     PlannerErrorCode::FailInvalidDiff,
                     task_state,
@@ -1593,16 +1614,37 @@ fn run_phase_a(
                         "base_sha": req.base_sha.as_ref().map(|s| s.as_str()),
                         "head_sha": req.head_sha.as_ref().map(|s| s.as_str()),
                         "validation_reason": "integration_merge_noop_with_declared_subtasks",
-                        "diagnostic": "no-op integration_merge is invalid when the initiative declared executor/reviewer subtasks",
+                        "diagnostic": "no-op integration_merge is invalid when the initiative declared executor/reviewer subtasks but no completed executor artifact is bound",
                     }),
                 );
             }
-            Ok(false) => {}
-            Err(_) => {
-                return PreGateOutcome::Reject(PlannerErrorCode::FailPolicyViolation, task_state)
+            Ok(heads) => Some(heads),
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"IntegrationMergeCoverageQueryFailed\",\
+                         \"task_id\":\"{}\",\"initiative_id\":\"{}\",\
+                         \"diagnostic\":\"{}\"}}",
+                    req.task_id.as_str(),
+                    task.initiative_id,
+                    e,
+                );
+                return PreGateOutcome::RejectWithDetail(
+                    PlannerErrorCode::FailInvalidDiff,
+                    task_state,
+                    serde_json::json!({
+                        "intent_kind": req.intent_kind.as_str(),
+                        "task_id": req.task_id.as_str(),
+                        "base_sha": req.base_sha.as_ref().map(|s| s.as_str()),
+                        "head_sha": req.head_sha.as_ref().map(|s| s.as_str()),
+                        "coverage_reason": "integration_merge_coverage_query_failed",
+                        "diagnostic": e.to_string(),
+                    }),
+                );
             }
         }
-    }
+    } else {
+        None
+    };
 
     // Ancestry / topology / diff dispatch through the concrete git
     // adapter. The kernel keeps the per-step planner-error-code
@@ -1635,34 +1677,37 @@ fn run_phase_a(
     // `head_sha`, causing other approved task commits to remain in the
     // object database but disappear from the published target ref.
     if matches!(req.intent_kind, IntentKind::IntegrationMerge) {
-        let completed_executor_heads = match load_completed_executor_heads_for_merge(
-            task.initiative_id.as_str(),
-            ctx.plan_registry.as_ref(),
-            store,
-        ) {
-            Ok(heads) => heads,
-            Err(e) => {
-                eprintln!(
-                    "{{\"level\":\"error\",\"event\":\"IntegrationMergeCoverageQueryFailed\",\
-                     \"task_id\":\"{}\",\"initiative_id\":\"{}\",\
-                     \"diagnostic\":\"{}\"}}",
-                    req.task_id.as_str(),
-                    task.initiative_id,
-                    e,
-                );
-                return PreGateOutcome::RejectWithDetail(
-                    PlannerErrorCode::FailInvalidDiff,
-                    task_state,
-                    serde_json::json!({
-                        "intent_kind": req.intent_kind.as_str(),
-                        "task_id": req.task_id.as_str(),
-                        "base_sha": req.base_sha.as_ref().map(|s| s.as_str()),
-                        "head_sha": req.head_sha.as_ref().map(|s| s.as_str()),
-                        "coverage_reason": "integration_merge_coverage_query_failed",
-                        "diagnostic": e.to_string(),
-                    }),
-                );
-            }
+        let completed_executor_heads = match preloaded_completed_executor_heads_for_merge {
+            Some(heads) => heads,
+            None => match load_completed_executor_heads_for_merge(
+                task.initiative_id.as_str(),
+                ctx.plan_registry.as_ref(),
+                store,
+            ) {
+                Ok(heads) => heads,
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"IntegrationMergeCoverageQueryFailed\",\
+                         \"task_id\":\"{}\",\"initiative_id\":\"{}\",\
+                         \"diagnostic\":\"{}\"}}",
+                        req.task_id.as_str(),
+                        task.initiative_id,
+                        e,
+                    );
+                    return PreGateOutcome::RejectWithDetail(
+                        PlannerErrorCode::FailInvalidDiff,
+                        task_state,
+                        serde_json::json!({
+                            "intent_kind": req.intent_kind.as_str(),
+                            "task_id": req.task_id.as_str(),
+                            "base_sha": req.base_sha.as_ref().map(|s| s.as_str()),
+                            "head_sha": req.head_sha.as_ref().map(|s| s.as_str()),
+                            "coverage_reason": "integration_merge_coverage_query_failed",
+                            "diagnostic": e.to_string(),
+                        }),
+                    );
+                }
+            },
         };
 
         for executor_head in completed_executor_heads {
@@ -2017,6 +2062,31 @@ fn run_phase_c(
     )
     .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
+    // ── Step 12A.1: Durable gated integration-attempt breadcrumb ──────────
+    //
+    // `integration_merge_attempts` is the recovery/diagnosis ledger for
+    // IntegrationMerge intents that pause on pre-merge witnesses. Without
+    // this row an operator abort during gate fixup leaves only audit-chain
+    // breadcrumbs; the dashboard cannot show "candidate accepted, awaiting
+    // verifier/fixup, then aborted" from the relational store. Insert in
+    // the same Phase C transaction as the accepted intent so RAXIS never
+    // admits a gated IntegrationMerge without durable attempt state.
+    let integration_attempt_after_commit =
+        if matches!(intent_kind, IntentKind::IntegrationMerge) && !pending_gates.is_empty() {
+            Some(
+                insert_integration_merge_attempt_in_tx(
+                    &tx,
+                    pre_state.task.initiative_id.as_str(),
+                    session_id_str.as_str(),
+                    pre_state.head_sha_raw.as_str(),
+                    None,
+                )
+                .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?,
+            )
+        } else {
+            None
+        };
+
     // ── Step 12B (V2.5 §11.1 Phase 1): set git_apply_pending = 1 ─────────
     //
     // For IntegrationMerge ONLY. Inside the SAME transaction as the
@@ -2057,6 +2127,17 @@ fn run_phase_c(
             &ctx.observability,
             &lane_id,
             reserved_cost as i64,
+        );
+    }
+    if let Some(attempt_id) = integration_attempt_after_commit.as_deref() {
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"IntegrationMergeAttemptRecorded\",\
+             \"initiative_id\":\"{}\",\"task_id\":\"{}\",\"attempt_id\":\"{}\",\
+             \"state\":\"{}\"}}",
+            pre_state.task.initiative_id,
+            task_id_owned,
+            attempt_id,
+            IntegrationMergeAttemptState::AwaitingPreMergeVerifiers.as_sql_str(),
         );
     }
 
@@ -9548,6 +9629,113 @@ fn insert_task_intent_range_in_tx(
     Ok(())
 }
 
+fn insert_integration_merge_attempt_in_tx(
+    conn: &rusqlite::Connection,
+    initiative_id: &str,
+    orchestrator_session_id: &str,
+    requested_commit_sha: &str,
+    candidate_merge_sha: Option<&str>,
+) -> Result<String, ()> {
+    let attempt_id = uuid::Uuid::new_v4().hyphenated().to_string();
+    conn.execute(
+        &format!(
+            "INSERT INTO {INTEGRATION_MERGE_ATTEMPTS}
+                (id, initiative_id, orchestrator_session_id,
+                 requested_commit_sha, candidate_merge_sha,
+                 state, discard_reason, created_at, finalized_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, NULL)"
+        ),
+        rusqlite::params![
+            &attempt_id,
+            initiative_id,
+            orchestrator_session_id,
+            requested_commit_sha,
+            candidate_merge_sha,
+            IntegrationMergeAttemptState::AwaitingPreMergeVerifiers.as_sql_str(),
+            unix_now_secs(),
+        ],
+    )
+    .map_err(|_| ())?;
+    Ok(attempt_id)
+}
+
+fn mark_latest_integration_merge_attempt_completed(
+    store: &Store,
+    initiative_id: &str,
+    candidate_merge_sha: &str,
+) {
+    let now = unix_now_secs();
+    let conn = store.lock_sync();
+    if let Err(e) = conn.execute(
+        &format!(
+            "UPDATE {INTEGRATION_MERGE_ATTEMPTS}
+                SET state = ?1,
+                    candidate_merge_sha = COALESCE(candidate_merge_sha, ?2),
+                    finalized_at = ?3
+              WHERE id = (
+                    SELECT id FROM {INTEGRATION_MERGE_ATTEMPTS}
+                     WHERE initiative_id = ?4
+                       AND state IN (?5, ?6)
+                     ORDER BY created_at DESC
+                     LIMIT 1
+              )"
+        ),
+        rusqlite::params![
+            IntegrationMergeAttemptState::CompletedAdvanceApplied.as_sql_str(),
+            candidate_merge_sha,
+            now,
+            initiative_id,
+            IntegrationMergeAttemptState::AwaitingPreMergeVerifiers.as_sql_str(),
+            IntegrationMergeAttemptState::PreMergeVerifiersPassed.as_sql_str(),
+        ],
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"IntegrationMergeAttemptCompleteFailed\",\
+             \"initiative_id\":\"{initiative_id}\",\"diagnostic\":\"{e}\"}}",
+        );
+    }
+}
+
+fn mark_latest_integration_merge_attempt_discarded(
+    store: &Store,
+    initiative_id: &str,
+    reason: IntegrationMergeAttemptDiscardReason,
+) {
+    let now = unix_now_secs();
+    let state = reason.terminal_state();
+    let conn = store.lock_sync();
+    if let Err(e) = conn.execute(
+        &format!(
+            "UPDATE {INTEGRATION_MERGE_ATTEMPTS}
+                SET state = ?1,
+                    discard_reason = ?2,
+                    finalized_at = ?3
+              WHERE id = (
+                    SELECT id FROM {INTEGRATION_MERGE_ATTEMPTS}
+                     WHERE initiative_id = ?4
+                       AND state IN (?5, ?6)
+                     ORDER BY created_at DESC
+                     LIMIT 1
+              )"
+        ),
+        rusqlite::params![
+            state.as_sql_str(),
+            reason.as_sql_str(),
+            now,
+            initiative_id,
+            IntegrationMergeAttemptState::AwaitingPreMergeVerifiers.as_sql_str(),
+            IntegrationMergeAttemptState::PreMergeVerifiersPassed.as_sql_str(),
+        ],
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"IntegrationMergeAttemptDiscardFailed\",\
+             \"initiative_id\":\"{initiative_id}\",\"reason\":\"{}\",\
+             \"diagnostic\":\"{e}\"}}",
+            reason.as_sql_str(),
+        );
+    }
+}
+
 fn parse_task_state(s: &str) -> TaskState {
     match s {
         "Admitted" => TaskState::Admitted,
@@ -9881,6 +10069,11 @@ pub(crate) fn complete_integration_merge_closeout(
                 &applied_commit_sha,
                 advance.previous_sha.as_deref(),
             );
+            mark_latest_integration_merge_attempt_completed(
+                store,
+                initiative_id,
+                &applied_commit_sha,
+            );
             eprintln!(
                 "{{\"level\":\"info\",\"event\":\"IntegrationMergeTargetAdvanced\",\
                  \"initiative_id\":\"{initiative_id}\",\
@@ -10001,6 +10194,11 @@ pub(crate) fn complete_integration_merge_closeout(
         }
         Err(err) => {
             let (category, reason) = classify_merge_ff_error(err);
+            mark_latest_integration_merge_attempt_discarded(
+                store,
+                initiative_id,
+                IntegrationMergeAttemptDiscardReason::CandidateComputationFailed,
+            );
             let operator_hint = format!(
                 "RAXIS serialized IntegrationMerge for repository '{repository_id}' on {target_ref}, \
                  but the candidate {requested_sha} could not be reconciled with the current managed-repo tip. \
@@ -11638,6 +11836,110 @@ mod tests {
         assert_eq!(head, "bbbbbbbb");
     }
 
+    fn integration_attempt_rows(
+        store: &Store,
+        initiative_id: &str,
+    ) -> Vec<(String, Option<String>, Option<String>)> {
+        let conn = store.lock_sync();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT state, candidate_merge_sha, discard_reason
+                   FROM {INTEGRATION_MERGE_ATTEMPTS}
+                  WHERE initiative_id=?1
+                  ORDER BY created_at"
+            ))
+            .unwrap();
+        stmt.query_map(rusqlite::params![initiative_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    }
+
+    #[test]
+    fn gated_integration_merge_attempt_is_persisted_and_finalized() {
+        let store = Store::open_in_memory().unwrap();
+        seed_task(&store, "integration-task");
+
+        {
+            let mut conn = store.lock_sync();
+            let tx = conn.transaction().unwrap();
+            let attempt_id = insert_integration_merge_attempt_in_tx(
+                &tx,
+                "init-int",
+                "session-orch",
+                "bbbbbbbb",
+                None,
+            )
+            .unwrap();
+            assert!(
+                !attempt_id.is_empty(),
+                "attempt id must be generated before Phase C commits"
+            );
+            tx.commit().unwrap();
+        }
+
+        let rows = integration_attempt_rows(&store, "init-int");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].0,
+            IntegrationMergeAttemptState::AwaitingPreMergeVerifiers.as_sql_str()
+        );
+        assert!(rows[0].1.is_none());
+        assert!(rows[0].2.is_none());
+
+        mark_latest_integration_merge_attempt_completed(&store, "init-int", "cccccccc");
+
+        let rows = integration_attempt_rows(&store, "init-int");
+        assert_eq!(
+            rows[0].0,
+            IntegrationMergeAttemptState::CompletedAdvanceApplied.as_sql_str()
+        );
+        assert_eq!(rows[0].1.as_deref(), Some("cccccccc"));
+        assert!(rows[0].2.is_none());
+    }
+
+    #[test]
+    fn gated_integration_merge_attempt_can_be_discarded() {
+        let store = Store::open_in_memory().unwrap();
+        seed_task(&store, "integration-task");
+
+        {
+            let mut conn = store.lock_sync();
+            let tx = conn.transaction().unwrap();
+            insert_integration_merge_attempt_in_tx(
+                &tx,
+                "init-int",
+                "session-orch",
+                "bbbbbbbb",
+                None,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        mark_latest_integration_merge_attempt_discarded(
+            &store,
+            "init-int",
+            IntegrationMergeAttemptDiscardReason::CandidateComputationFailed,
+        );
+
+        let rows = integration_attempt_rows(&store, "init-int");
+        assert_eq!(
+            rows[0].0,
+            IntegrationMergeAttemptState::DiscardedCandidateOnly.as_sql_str()
+        );
+        assert_eq!(
+            rows[0].2.as_deref(),
+            Some(IntegrationMergeAttemptDiscardReason::CandidateComputationFailed.as_sql_str())
+        );
+    }
+
     #[test]
     fn intent_range_insert_is_idempotent_on_same_head_sha() {
         let store = Store::open_in_memory().unwrap();
@@ -12810,12 +13112,65 @@ mod tests {
     }
 
     #[test]
-    fn integration_merge_rejects_noop_when_subtasks_were_declared() {
+    fn integration_merge_accepts_noop_when_candidate_contains_completed_executor_heads() {
         let store = Arc::new(Store::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let worktree_root = tmp.path();
+        let run_git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(worktree_root)
+                .output()
+                .expect("git command");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}{}",
+                args,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let rev_parse_head = || -> String {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(worktree_root)
+                .output()
+                .expect("git rev-parse");
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        run_git(&["init", "-q"]);
+        run_git(&["checkout", "-q", "-b", "main"]);
+        run_git(&["config", "user.email", "test@raxis.local"]);
+        run_git(&["config", "user.name", "raxis-test"]);
+        std::fs::write(worktree_root.join("README.md"), b"base\n").unwrap();
+        run_git(&["add", "README.md"]);
+        run_git(&["commit", "-q", "-m", "base"]);
+        run_git(&["checkout", "-q", "-b", "executor-output"]);
+        std::fs::write(worktree_root.join("out.txt"), b"executor\n").unwrap();
+        run_git(&["add", "out.txt"]);
+        run_git(&["commit", "-q", "-m", "executor output"]);
+        let executor_sha = rev_parse_head();
+        run_git(&["checkout", "-q", "main"]);
+        run_git(&[
+            "merge",
+            "--no-ff",
+            "-q",
+            "executor-output",
+            "-m",
+            "merge executor",
+        ]);
+        let merge_sha = rev_parse_head();
+
         let mut ctx_policy = default_test_policy();
-        ctx_policy.set_allowed_worktree_roots_for_tests(vec!["/tmp".to_owned()]);
+        ctx_policy.set_allowed_worktree_roots_for_tests(vec![worktree_root.display().to_string()]);
         let mut phase_policy = default_test_policy();
-        phase_policy.set_allowed_worktree_roots_for_tests(vec!["/tmp".to_owned()]);
+        phase_policy
+            .set_allowed_worktree_roots_for_tests(vec![worktree_root.display().to_string()]);
+        phase_policy.set_base_cost_per_intent_kind_for_tests(HashMap::from([(
+            "IntegrationMerge".to_owned(),
+            0,
+        )]));
         let (ctx, _sink) = build_review_test_ctx(store.clone(), ctx_policy);
         let init = "init-im-noop";
         let merge_task = "integration-merge";
@@ -12845,7 +13200,7 @@ mod tests {
             (
                 executor,
                 TaskState::Completed.as_sql_str(),
-                Some("3333333333333333333333333333333333333333"),
+                Some(executor_sha.as_str()),
             ),
         ] {
             conn.execute(
@@ -12875,7 +13230,7 @@ mod tests {
                 uuid::Uuid::new_v4().to_string(),
                 executor,
                 init,
-                "3333333333333333333333333333333333333333",
+                executor_sha.as_str(),
                 now,
             ],
         )
@@ -12884,33 +13239,45 @@ mod tests {
 
         let mut req = make_integration_merge_request(merge_task, 1);
         req.head_sha = req.base_sha.clone();
+        req.base_sha = Some(raxis_types::CommitSha::parse(&merge_sha).unwrap());
+        req.head_sha = Some(raxis_types::CommitSha::parse(&merge_sha).unwrap());
         let mut session = dummy_orchestrator_session_row();
-        session.worktree_root = Some("/tmp/raxis-im-noop-test".to_owned());
-        let outcome = run_phase_a(
-            req,
-            session,
-            dummy_session_id(),
-            1,
-            Arc::new(phase_policy),
-            ctx,
-        );
+        session.worktree_root = Some(worktree_root.display().to_string());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome = rt.block_on(async move {
+            tokio::task::spawn_blocking(move || {
+                run_phase_a(
+                    req,
+                    session,
+                    dummy_session_id(),
+                    1,
+                    Arc::new(phase_policy),
+                    ctx,
+                )
+            })
+            .await
+            .unwrap()
+        });
 
         match outcome {
-            PreGateOutcome::RejectWithDetail(code, state, detail) => {
-                assert_eq!(code, PlannerErrorCode::FailInvalidDiff);
-                assert_eq!(state, TaskState::Running);
-                assert_eq!(
-                    detail
-                        .get("validation_reason")
-                        .and_then(serde_json::Value::as_str),
-                    Some("integration_merge_noop_with_declared_subtasks"),
+            PreGateOutcome::Proceed(pre_state) => {
+                assert_eq!(pre_state.base_sha_raw, merge_sha);
+                assert_eq!(pre_state.head_sha_raw, merge_sha);
+                assert!(
+                    pre_state.touched_paths.is_empty(),
+                    "same-commit integration closeout should carry an empty diff"
                 );
             }
             PreGateOutcome::Reject(code, state) => {
-                panic!("expected no-op detail, got reject {code:?} in state {state:?}")
+                panic!("expected no-op merge closeout to proceed, got reject {code:?} in {state:?}")
             }
-            PreGateOutcome::EarlyResponse(_) | PreGateOutcome::Proceed(_) => {
-                panic!("no-op integration_merge must not proceed")
+            PreGateOutcome::RejectWithDetail(code, state, detail) => {
+                panic!(
+                    "expected no-op merge closeout to proceed, got reject {code:?} in {state:?}: {detail}"
+                )
+            }
+            PreGateOutcome::EarlyResponse(_) => {
+                panic!("expected no-op merge closeout to proceed, got early response")
             }
         }
     }
@@ -12988,14 +13355,21 @@ path_allowlist = ["**/*"]
         req.head_sha = req.base_sha.clone();
         let mut session = dummy_orchestrator_session_row();
         session.worktree_root = Some("/tmp/raxis-im-noop-plan-only-test".to_owned());
-        let outcome = run_phase_a(
-            req,
-            session,
-            dummy_session_id(),
-            1,
-            Arc::new(phase_policy),
-            ctx,
-        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome = rt.block_on(async move {
+            tokio::task::spawn_blocking(move || {
+                run_phase_a(
+                    req,
+                    session,
+                    dummy_session_id(),
+                    1,
+                    Arc::new(phase_policy),
+                    ctx,
+                )
+            })
+            .await
+            .unwrap()
+        });
 
         match outcome {
             PreGateOutcome::RejectWithDetail(code, state, detail) => {

@@ -23,7 +23,9 @@
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_store::{Store, Table};
 use raxis_types::{
-    unix_now_secs, BlockReason, CloneStrategy, InitiativeState, SessionAgentType, TaskState,
+    unix_now_secs, BlockReason, CloneStrategy, InitiativeState,
+    IntegrationMergeAttemptDiscardReason, IntegrationMergeAttemptState, SessionAgentType,
+    TaskState,
 };
 use rusqlite::OptionalExtension;
 
@@ -49,6 +51,7 @@ const TASK_CREDENTIAL_PROXIES: &str = Table::TaskCredentialProxies.as_str();
 /// `raxis_store::Table::SubtaskActivations` for the authoritative
 /// invariant note.
 const SUBTASK_ACTIVATIONS: &str = Table::SubtaskActivations.as_str();
+const INTEGRATION_MERGE_ATTEMPTS: &str = Table::IntegrationMergeAttempts.as_str();
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -2082,6 +2085,32 @@ pub fn abort_initiative(
                 )"
         ),
         rusqlite::params![now, initiative_id],
+    )?;
+
+    // Close any gated IntegrationMerge attempt owned by this initiative.
+    // Operator abort is terminal for the initiative; leaving the attempt
+    // in Awaiting/Passed makes the dashboard/recovery view look as if a
+    // verifier or target-ref advance is still alive after every task has
+    // been cancelled.
+    tx.execute(
+        &format!(
+            "UPDATE {INTEGRATION_MERGE_ATTEMPTS}
+                SET state          = ?1,
+                    discard_reason = ?2,
+                    finalized_at   = ?3
+              WHERE initiative_id  = ?4
+                AND state IN (?5, ?6)"
+        ),
+        rusqlite::params![
+            IntegrationMergeAttemptDiscardReason::MergeAbortedByOperator
+                .terminal_state()
+                .as_sql_str(),
+            IntegrationMergeAttemptDiscardReason::MergeAbortedByOperator.as_sql_str(),
+            now,
+            initiative_id,
+            IntegrationMergeAttemptState::AwaitingPreMergeVerifiers.as_sql_str(),
+            IntegrationMergeAttemptState::PreMergeVerifiersPassed.as_sql_str(),
+        ],
     )?;
 
     tx.execute(
@@ -11598,6 +11627,68 @@ name = "fixture"
         assert_eq!(
             init_state, "Aborted",
             "initiatives UPDATE must have committed in the SAME transaction"
+        );
+    }
+
+    #[test]
+    fn abort_initiative_discards_open_integration_merge_attempts() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"[[tasks]]
+        task_name = "t1"
+        path_allowlist = ["src/"]
+        "#;
+        let (init_id, pk) = seed_draft_initiative(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let live_registry = PlanRegistry::new();
+        approve_plan_for_test(&init_id, "op", None, &pk, 1, &store, &audit, &live_registry)
+            .unwrap();
+
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {INTEGRATION_MERGE_ATTEMPTS}
+                        (id, initiative_id, orchestrator_session_id,
+                         requested_commit_sha, candidate_merge_sha,
+                         state, discard_reason, created_at, finalized_at)
+                     VALUES ('imerge-open', ?1, 'sess-orch', 'bbbbbbbb',
+                             NULL, ?2, NULL, ?3, NULL)"
+                ),
+                rusqlite::params![
+                    &init_id,
+                    IntegrationMergeAttemptState::AwaitingPreMergeVerifiers.as_sql_str(),
+                    unix_now_secs(),
+                ],
+            )
+            .unwrap();
+        }
+
+        abort_initiative(&init_id, "op", &store, None).unwrap();
+
+        let conn = store.lock_sync();
+        let (state, reason, finalized_at): (String, Option<String>, Option<i64>) = conn
+            .query_row(
+                &format!(
+                    "SELECT state, discard_reason, finalized_at
+                       FROM {INTEGRATION_MERGE_ATTEMPTS}
+                      WHERE id = 'imerge-open'"
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            IntegrationMergeAttemptState::DiscardedCrashRecovery.as_sql_str()
+        );
+        assert_eq!(
+            reason.as_deref(),
+            Some(IntegrationMergeAttemptDiscardReason::MergeAbortedByOperator.as_sql_str())
+        );
+        assert!(
+            finalized_at.is_some(),
+            "operator abort must terminalize the open attempt"
         );
     }
 

@@ -1425,6 +1425,7 @@ mod async_runtime_safety {
              max_wall_seconds = 60
              max_memory_bytes = 268435456
              network_allowed  = false
+             agent_hint_default = \"Inspect the TestGate verifier output and repair the task artifact before retrying.\"
 ",
         );
 

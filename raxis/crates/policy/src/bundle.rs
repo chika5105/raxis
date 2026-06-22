@@ -6291,6 +6291,13 @@ impl PolicyBundle {
         self.max_cost_per_task = cents;
     }
 
+    /// Test-only setter for `[budget.base_cost_per_intent_kind]`.
+    /// Used by kernel handler tests that need to reach post-diff
+    /// admission without round-tripping a full signed `policy.toml`.
+    pub fn set_base_cost_per_intent_kind_for_tests(&mut self, costs: HashMap<String, u64>) {
+        self.base_cost_per_intent_kind = costs;
+    }
+
     /// Test-only setter for `[[providers]]`. Used by the kernel V2.5
     /// token-budget tests to install pricing tables without
     /// round-tripping a full `policy.toml`.

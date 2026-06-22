@@ -3111,7 +3111,7 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "raxis-artifact-store"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "hex",
  "sha2 0.10.9",
@@ -3121,7 +3121,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-audit-tools"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "hex",
  "libc",
@@ -3138,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-canonical-images"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -3152,7 +3152,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-cli"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "ed25519-dalek",
  "flate2",
@@ -3188,7 +3188,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-credential-proxy-aws"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "hex",
@@ -3207,7 +3207,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-credential-proxy-azure"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "hex",
@@ -3226,7 +3226,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-credential-proxy-cloud-shared"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "hex",
@@ -3243,7 +3243,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-credential-proxy-gcp"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3264,7 +3264,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-credential-proxy-http"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "hex",
@@ -3282,7 +3282,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-credential-proxy-manager"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "hex",
  "raxis-audit-tools",
@@ -3311,7 +3311,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-credential-proxy-mongodb"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3330,7 +3330,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-credential-proxy-mssql"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "hex",
@@ -3346,7 +3346,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-credential-proxy-mysql"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "hex",
@@ -3364,7 +3364,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-credential-proxy-postgres"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "futures",
@@ -3382,7 +3382,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-credential-proxy-redis"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "hex",
@@ -3401,7 +3401,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-credential-proxy-smtp"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "base64 0.21.7",
  "hex",
@@ -3420,11 +3420,11 @@ dependencies = [
 
 [[package]]
 name = "raxis-credential-proxy-sql-shared"
-version = "0.3.2"
+version = "0.3.3"
 
 [[package]]
 name = "raxis-credentials"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "raxis-audit-tools",
  "raxis-test-support",
@@ -3438,7 +3438,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-credentials-file"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "libc",
  "raxis-audit-tools",
@@ -3449,7 +3449,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-crypto"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
@@ -3462,7 +3462,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-dashboard"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3494,7 +3494,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-dashboard-kernel"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -3527,7 +3527,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-dev-signing-key"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
@@ -3537,7 +3537,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-domain"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "chrono",
  "raxis-types",
@@ -3549,7 +3549,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-domain-git"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "chrono",
  "gix",
@@ -3562,7 +3562,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-egress-admission"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "raxis-audit-tools",
  "raxis-observability",
@@ -3575,7 +3575,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-gateway"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -3599,7 +3599,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-gateway-substrate"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
@@ -3607,7 +3607,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-genesis-tools"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "hex",
  "raxis-crypto",
@@ -3623,7 +3623,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-image-builder"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -3640,7 +3640,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-image-cache"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3661,7 +3661,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-image-manifest"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -3675,7 +3675,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-initramfs-builder"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "flate2",
  "tempfile",
@@ -3684,7 +3684,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-ipc"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bincode",
  "raxis-observability",
@@ -3698,7 +3698,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-isolation"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "raxis-types",
  "serde",
@@ -3708,7 +3708,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-isolation-apple-vz"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "base64 0.22.1",
  "block2",
@@ -3727,7 +3727,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-isolation-firecracker"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "base64 0.22.1",
  "raxis-isolation",
@@ -3740,7 +3740,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-kernel"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -3806,7 +3806,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-ksb"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -3815,7 +3815,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-live-e2e"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3865,7 +3865,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-observability"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "parking_lot",
  "serde",
@@ -3876,7 +3876,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-otel-pusher"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "chrono",
  "flate2",
@@ -3896,7 +3896,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-plan-credentials"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "raxis-credentials",
  "serde",
@@ -3906,7 +3906,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-planner-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3929,7 +3929,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-planner-executor"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "raxis-planner-core",
  "raxis-tproxy",
@@ -3938,7 +3938,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-planner-orchestrator"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "raxis-planner-core",
  "tokio",
@@ -3946,7 +3946,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-planner-reviewer"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "raxis-planner-core",
  "tokio",
@@ -3954,7 +3954,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-policy"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -3973,7 +3973,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-runtime"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -3983,7 +3983,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-session-spawn"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "getrandom 0.2.17",
  "parking_lot",
@@ -4013,7 +4013,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-store"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -4034,7 +4034,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-supervisor"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4050,7 +4050,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-test-support"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -4071,7 +4071,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-tool-authoring"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde_json",
  "thiserror 1.0.69",
@@ -4081,7 +4081,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-tproxy"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "nix 0.27.1",
  "raxis-ipc",
@@ -4097,7 +4097,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-tproxy-protocol"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bincode",
  "hex",
@@ -4107,7 +4107,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-types"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bincode",
  "hex",
@@ -4120,7 +4120,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-verifier"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "hex",
  "raxis-ipc",
@@ -4134,7 +4134,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-verifier-no-secrets"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "raxis-ipc",
  "raxis-types",
@@ -4146,7 +4146,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-verifier-stub"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "raxis-ipc",
  "raxis-types",
@@ -4158,7 +4158,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-vsock-loopback"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -4167,7 +4167,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-worktree-provision"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "gix",
  "glob",
@@ -4179,7 +4179,7 @@ dependencies = [
 
 [[package]]
 name = "raxis-worktree-staging"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "raxis-isolation",
  "sha2 0.10.9",
@@ -5818,7 +5818,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "chrono",

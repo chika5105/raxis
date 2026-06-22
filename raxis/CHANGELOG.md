@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.3 - 2026-06-22
+
+RAXIS 0.3.3 is a patch release for post-0.3.2 live-run recovery
+correctness.
+
+- Hardened planner transport recovery so transient broken-pipe writes
+  do not burn semantic respawn or token budgets.
+- Classified reviewer exits without a terminal verdict as reviewer
+  protocol failures instead of opaque transport failures.
+- Persisted gated IntegrationMerge attempts so recovery and dashboard
+  diagnosis can distinguish candidate submission, pre-merge verifier
+  waiting, finalization, discard, and operator abort.
+- Fixed IntegrationMerge closeout when the orchestrator worktree already
+  contains completed executor outputs and submits a no-op target-range
+  closeout. RAXIS now accepts that path only when Git proves the
+  submitted merge head contains every completed executor artifact.
+- Closed open IntegrationMerge attempts on operator abort so stale
+  verifier/finalizer state does not survive a terminal initiative abort.
+
 ## 0.3.2 - 2026-06-17
 
 RAXIS 0.3.2 is a patch release for kernel retry correctness, a leaner
