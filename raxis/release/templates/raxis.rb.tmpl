@@ -158,15 +158,15 @@ class Raxis < Formula
   end
 
   service do
-    run [bin/"raxis-supervisor", "start"]
+    run [opt_bin/"raxis-supervisor", "start"]
     keep_alive true
     environment_variables PATH: std_service_path_env,
-                          RAXIS_INSTALL_DIR: pkgshare.to_s,
+                          RAXIS_INSTALL_DIR: opt_pkgshare.to_s,
                           RAXIS_DATA_DIR: (var/"lib/raxis").to_s,
                           RAXIS_ENV: "default",
                           RAXIS_SUPERVISOR_AUTO_RESTART: "1",
                           RAXIS_SUPERVISOR_REQUIRE_INITIALIZED_DATA_DIR: "1",
-                          RAXIS_SUPERVISOR_KERNEL_BINARY: (bin/"raxis-kernel").to_s
+                          RAXIS_SUPERVISOR_KERNEL_BINARY: (opt_bin/"raxis-kernel").to_s
     log_path var/"log/raxis/kernel.log"
     error_log_path var/"log/raxis/kernel.err.log"
   end

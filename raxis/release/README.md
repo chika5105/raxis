@@ -44,11 +44,11 @@ The rendered `raxis` formula installs a complete runtime bundle:
 - guest Linux kernel and validated config under `#{pkgshare}/kernel`
 - Vite-built operator dashboard frontend under `#{pkgshare}/dashboard`
 - a Homebrew service that launches
-  `#{bin}/raxis-supervisor start`
+  `#{opt_bin}/raxis-supervisor start`
   with `PATH=std_service_path_env`,
-  `RAXIS_INSTALL_DIR=#{pkgshare}`, `RAXIS_DATA_DIR`,
+  `RAXIS_INSTALL_DIR=#{opt_pkgshare}`, `RAXIS_DATA_DIR`,
   `RAXIS_SUPERVISOR_AUTO_RESTART=1`, and
-  `RAXIS_SUPERVISOR_KERNEL_BINARY=#{bin}/raxis-kernel`
+  `RAXIS_SUPERVISOR_KERNEL_BINARY=#{opt_bin}/raxis-kernel`
 
 To serve the browser UI from a Homebrew install, set
 `[dashboard].static_dir` in policy to `#{opt_pkgshare}/dashboard`.

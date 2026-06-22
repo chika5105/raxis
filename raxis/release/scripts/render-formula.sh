@@ -155,12 +155,12 @@ fi
 
 if [[ "${formula_name}" == "raxis" ]]; then
     required_snippets=(
-        'run [bin/"raxis-supervisor", "start"]'
+        'run [opt_bin/"raxis-supervisor", "start"]'
         'environment_variables PATH: std_service_path_env,'
         'RAXIS_DATA_DIR: (var/"lib/raxis").to_s,'
         'RAXIS_ENV: "default",'
         'RAXIS_SUPERVISOR_REQUIRE_INITIALIZED_DATA_DIR: "1",'
-        'RAXIS_SUPERVISOR_KERNEL_BINARY: (bin/"raxis-kernel").to_s'
+        'RAXIS_SUPERVISOR_KERNEL_BINARY: (opt_bin/"raxis-kernel").to_s'
         'def raxis_restart_homebrew_service_after_upgrade'
         'RAXIS_BREW_AUTO_RESTART'
         'disable-brew-auto-restart'
