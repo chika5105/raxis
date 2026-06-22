@@ -1553,7 +1553,7 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
              handled transparently by `ready_now` after predecessor \
              `evaluation_sha`. Prefer ripgrep `rg` for search.\n\
              \n\
-             Decision order; end with one terminal tool:\n\
+             Decision order; end with one tool:\n\
              1. PRIORITY: `retry_subtask` has ABSOLUTE precedence over fresh \
              activation. If any executor or reviewer row is `state=failed` with \
              `capabilities.tasks[*].retry_admissible=true`, call \
@@ -2519,7 +2519,7 @@ mod tests {
             "capabilities.ready_now=[",
             "gate_statuses=",
             "state=failed",
-            "failed executors are not",
+            "failed workers are not",
             "aggregate=AtLeastOneRejected",
             "retry_admissible=true",
             "batch_activate_subtasks",
