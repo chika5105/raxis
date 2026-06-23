@@ -7593,13 +7593,19 @@ fn task_row_to_view(
     let plan_fields = if t.task_id == t.initiative_id {
         None
     } else {
-        Some(
-            raxis_store::views::plan_fields::reveal_for_task(conn, &t.task_id).map_err(|e| {
-                ApiError::Internal {
+        match raxis_store::views::plan_fields::reveal_for_task(conn, &t.task_id) {
+            Ok(fields) => Some(fields),
+            Err(raxis_store::views::plan_fields::PlanFieldsError::TaskNotInPlan { .. })
+                if is_kernel_synthetic_planless_task(t) =>
+            {
+                None
+            }
+            Err(e) => {
+                return Err(ApiError::Internal {
                     log_only: format!("plan_fields::reveal_for_task({}): {e}", t.task_id),
-                }
-            })?,
-        )
+                });
+            }
+        }
     };
     let path_allowlist = plan_fields
         .as_ref()
@@ -7689,6 +7695,18 @@ fn task_row_to_view(
         max_crash_retries,
         is_active,
     })
+}
+
+fn is_kernel_synthetic_planless_task(t: &raxis_store::views::tasks::TaskRow) -> bool {
+    // Gate-fixup tasks are created by the kernel after a task
+    // verifier rejects an output. They are real task rows, but
+    // they are intentionally absent from the operator's sealed
+    // `plan.toml`, so the dashboard must render them without a
+    // `plan_config` instead of turning the whole initiative page
+    // into FAIL_DASHBOARD_INTERNAL. Operator-authored tasks are
+    // required to have a task_name and still fail loudly above
+    // when their plan fields cannot be revealed.
+    t.task_name.is_none() && t.task_id.contains("--gatefixup-")
 }
 
 /// Lifecycle-aware projection used by `get_task` /
@@ -8367,8 +8385,9 @@ fn read_activations_all(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle::Activa
 fn read_tasks_with_predecessors(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle::TaskRow> {
     let mut out: Vec<lifecycle::TaskRow> = Vec::new();
     let mut predecessors_by_successor = read_predecessors_by_successor(conn);
+    let successors_by_predecessor = read_successors_by_predecessor(conn);
     let Ok(mut stmt) = conn.prepare(&format!(
-        "SELECT task_id, state, transitioned_at FROM {TBL_TASKS}"
+        "SELECT task_id, state, transitioned_at, review_verdict FROM {TBL_TASKS}"
     )) else {
         return out;
     };
@@ -8377,28 +8396,81 @@ fn read_tasks_with_predecessors(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, i64>(2)?,
+            r.get::<_, Option<String>>(3)?,
         ))
     });
+    let mut raw_rows = Vec::new();
     if let Ok(rows) = rows {
         for row in rows.flatten() {
-            let (task_id, state, transitioned_at) = row;
-            let completed_at = if state == "Completed" {
-                Some(transitioned_at)
-            } else {
-                None
-            };
-            let preds = predecessors_by_successor
-                .remove(&task_id)
-                .unwrap_or_default();
-            out.push(lifecycle::TaskRow {
-                task_id,
-                state,
-                predecessors: preds,
-                completed_at,
-            });
+            raw_rows.push(row);
         }
     }
+
+    let mut role_by_task = std::collections::HashMap::new();
+    let mut verdict_by_task = std::collections::HashMap::new();
+    for (task_id, _state, _transitioned_at, verdict) in &raw_rows {
+        if let Some(verdict) = verdict {
+            verdict_by_task.insert(task_id.clone(), verdict.clone());
+        }
+        if let Ok(fields) = raxis_store::views::plan_fields::reveal_for_task(conn, task_id) {
+            role_by_task.insert(task_id.clone(), fields.session_agent_type);
+        }
+    }
+
+    for (task_id, state, transitioned_at, _verdict) in raw_rows {
+        let completed_at = if state == "Completed" {
+            Some(transitioned_at)
+        } else {
+            None
+        };
+        let preds = predecessors_by_successor
+            .remove(&task_id)
+            .unwrap_or_default();
+        let predecessor_review_gate_open = predecessor_review_gate_open(
+            &task_id,
+            &preds,
+            &role_by_task,
+            &successors_by_predecessor,
+            &verdict_by_task,
+        );
+        out.push(lifecycle::TaskRow {
+            task_id,
+            state,
+            predecessors: preds,
+            completed_at,
+            predecessor_review_gate_open,
+        });
+    }
     out
+}
+
+fn predecessor_review_gate_open(
+    task_id: &str,
+    predecessors: &[String],
+    role_by_task: &std::collections::HashMap<String, String>,
+    successors_by_predecessor: &std::collections::HashMap<String, Vec<String>>,
+    verdict_by_task: &std::collections::HashMap<String, String>,
+) -> bool {
+    if role_by_task.get(task_id).map(String::as_str) == Some("Reviewer") {
+        return false;
+    }
+    predecessors.iter().any(|pred| {
+        if role_by_task.get(pred).map(String::as_str) != Some("Executor") {
+            return false;
+        }
+        let mut reviewer_count = 0usize;
+        let mut open = false;
+        for succ in successors_by_predecessor.get(pred).into_iter().flatten() {
+            if role_by_task.get(succ).map(String::as_str) != Some("Reviewer") {
+                continue;
+            }
+            reviewer_count += 1;
+            if verdict_by_task.get(succ).map(String::as_str) != Some("Approved") {
+                open = true;
+            }
+        }
+        reviewer_count > 0 && open
+    })
 }
 
 /// Read every DAG predecessor edge in one pass and group by
@@ -8421,6 +8493,27 @@ fn read_predecessors_by_successor(
         for row in rows.flatten() {
             let (successor, predecessor) = row;
             out.entry(successor).or_default().push(predecessor);
+        }
+    }
+    out
+}
+
+fn read_successors_by_predecessor(
+    conn: &raxis_store::ro::RoConn,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT predecessor_task_id, successor_task_id \
+         FROM {TBL_TASK_DAG_EDGES} \
+         ORDER BY predecessor_task_id ASC, successor_task_id ASC"
+    )) else {
+        return out;
+    };
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            let (predecessor, successor) = row;
+            out.entry(predecessor).or_default().push(successor);
         }
     }
     out
@@ -10865,7 +10958,84 @@ task_name = "t-state"
             8,
             "TaskState enum length drift — update KERNEL_TASK_STATES in \
              dashboard-fe/src/lib/state-color.ts in the same commit \
-             (INV-DASHBOARD-TASK-STATE-COMPLETENESS-01).",
+            (INV-DASHBOARD-TASK-STATE-COMPLETENESS-01).",
+        );
+    }
+
+    #[test]
+    fn task_projection_allows_kernel_synthetic_gate_fixup_without_plan_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("kernel.db");
+        {
+            let store = raxis_store::Store::open(&store_path).unwrap();
+            let g = store.lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {init} \
+                     (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                     VALUES ('init-fixup', 'Executing', '{{}}', 'sha-fixup', 1)",
+                    init = raxis_store::Table::Initiatives.as_str()
+                ),
+                [],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {tasks} \
+                     (task_id, task_name, initiative_id, lane_id, state, actor, \
+                      policy_epoch, admitted_at, transitioned_at, is_gate_fixup, \
+                      parent_gate_failure_task_id) \
+                     VALUES \
+                     ('parent-task', 'parent_task', 'init-fixup', 'default', \
+                      'GatesPending', 'kernel', 1, 1, 1, 0, NULL), \
+                     ('parent-task--gatefixup-1', NULL, 'init-fixup', 'default', \
+                      'Admitted', 'kernel', 1, 2, 2, 1, 'parent-task')",
+                    tasks = raxis_store::Table::Tasks.as_str()
+                ),
+                [],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {plans} \
+                     (initiative_id, plan_bytes, plan_sig, stored_at) \
+                     VALUES ('init-fixup', ?1, x'00', 1)",
+                    plans = raxis_store::Table::SignedPlanArtifacts.as_str()
+                ),
+                [br#"[plan.initiative]
+description = "fixup fixture"
+
+[workspace]
+name = "Fixup projection"
+lane_id = "default"
+
+[[tasks]]
+task_name = "parent_task"
+session_agent_type = "Executor"
+clone_strategy = "blobless"
+prompt = "Do the work."
+"# as &[u8]],
+            )
+            .unwrap();
+        }
+
+        let conn = raxis_store::ro::open(tmp.path()).unwrap();
+        let mut row = synth_task_row(raxis_types::TaskState::Admitted);
+        row.task_id = "parent-task--gatefixup-1".into();
+        row.task_name = None;
+        row.initiative_id = "init-fixup".into();
+        row.initiative_state = "Executing".into();
+        row.admitted_at = 2;
+        row.transitioned_at = 2;
+
+        let view = task_row_to_view(&conn, &row)
+            .expect("kernel synthetic gate-fixup tasks should render without plan fields");
+        assert_eq!(view.task_id, "parent-task--gatefixup-1");
+        assert_eq!(view.title, "parent-task--gatefixup-1");
+        assert_eq!(view.agent_type, "Executor");
+        assert!(
+            view.plan_config.is_none(),
+            "gate fixup rows are kernel-generated and absent from sealed plan.toml"
         );
     }
 

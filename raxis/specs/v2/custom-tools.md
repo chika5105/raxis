@@ -986,6 +986,26 @@ A future task may be both: the operator declares both a verifier (for
 the gate) and a custom tool (for the agent's interactive use during
 work). They are not mutually exclusive.
 
+### 11.1 Composite Tools for Required Sequences
+
+RAXIS does **not** currently expose a native contract like "tool A,
+then tool B, then tool C must run before `CompleteTask`." The supported
+pattern is simpler and safer:
+
+1. Wrap the required sequence in one bounded composite custom tool
+   (for example `x_discovery_pipeline` rather than separate
+   `x_discover`, `x_rank_candidates`, and `x_build_context_pack`
+   prompt obligations).
+2. Make the tool emit deterministic artifacts or receipts.
+3. Add a verifier that checks those artifacts at `CompleteTask`.
+
+That gives the operator the practical guarantee without making the LLM
+remember an internal ritual: the agent can call one task-shaped tool,
+and the kernel-owned verifier decides whether the required evidence is
+present before review or merge proceeds. A future RAXIS release may add
+first-class required-tool sequencing, but composite tools plus
+verifiers are the V2 production pattern.
+
 ---
 
 ## §12 — Audit Event: `CustomToolInvoked`

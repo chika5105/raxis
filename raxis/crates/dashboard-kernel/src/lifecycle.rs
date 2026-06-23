@@ -116,6 +116,11 @@ pub struct TaskRow {
     /// `predecessors_completed_at` field on
     /// [`LifecycleAnnotation::OrchestratorGap`].
     pub completed_at: Option<i64>,
+    /// True when every direct predecessor may be `Completed`, but
+    /// one predecessor Executor still has an open Reviewer gate. The
+    /// kernel will reject downstream activation in that state, so it
+    /// is not an orchestrator gap.
+    pub predecessor_review_gate_open: bool,
 }
 
 // `LifecycleAnnotation` lives on the dashboard wire-shape layer
@@ -724,6 +729,9 @@ pub fn classify_orchestrator_gaps(
         let Some(task) = by_id(&act.task_id) else {
             continue;
         };
+        if task.predecessor_review_gate_open {
+            continue;
+        }
         if task.predecessors.is_empty() {
             // Root task: still emit a gap — a stuck root is an
             // orchestrator-startup issue.
@@ -1098,12 +1106,14 @@ mod tests {
                 state: "Admitted".into(),
                 predecessors: vec!["lint-runner-rust".into()],
                 completed_at: None,
+                predecessor_review_gate_open: false,
             },
             TaskRow {
                 task_id: "lint-runner-rust".into(),
                 state: "Completed".into(),
                 predecessors: Vec::new(),
                 completed_at: Some(1_700_000_010),
+                predecessor_review_gate_open: false,
             },
         ];
         let out = classify_orchestrator_gaps(&[activation], &tasks, now);
@@ -1264,18 +1274,56 @@ mod tests {
                 state: "Admitted".into(),
                 predecessors: vec!["A".into()],
                 completed_at: None,
+                predecessor_review_gate_open: false,
             },
             TaskRow {
                 task_id: "A".into(),
                 state: "Running".into(),
                 predecessors: Vec::new(),
                 completed_at: None,
+                predecessor_review_gate_open: false,
             },
         ];
         let out = classify_orchestrator_gaps(&[activation], &tasks, now);
         assert!(
             out.is_empty(),
             "PendingActivation whose predecessor is still Running is NOT a gap"
+        );
+    }
+
+    #[test]
+    fn classify_orchestrator_gaps_skips_when_reviewer_gate_open() {
+        let now = 1_700_005_000;
+        let activation = ActivationRow {
+            activation_id: "act-wait-review".into(),
+            task_id: "downstream".into(),
+            activation_state: "PendingActivation".into(),
+            created_at: 1_700_000_000,
+            crash_retry_count: 0,
+            review_reject_count: 0,
+            validation_reject_count: 0,
+            max_validation_rejections: DEFAULT_MAX_VALIDATION_REJECTIONS,
+        };
+        let tasks = vec![
+            TaskRow {
+                task_id: "downstream".into(),
+                state: "Admitted".into(),
+                predecessors: vec!["producer".into()],
+                completed_at: None,
+                predecessor_review_gate_open: true,
+            },
+            TaskRow {
+                task_id: "producer".into(),
+                state: "Completed".into(),
+                predecessors: Vec::new(),
+                completed_at: Some(1_700_000_010),
+                predecessor_review_gate_open: false,
+            },
+        ];
+        let out = classify_orchestrator_gaps(&[activation], &tasks, now);
+        assert!(
+            out.is_empty(),
+            "PendingActivation blocked by an open reviewer gate is NOT an orchestrator gap"
         );
     }
 
@@ -1297,6 +1345,7 @@ mod tests {
             state: "Admitted".into(),
             predecessors: Vec::new(),
             completed_at: None,
+            predecessor_review_gate_open: false,
         }];
         let out = classify_orchestrator_gaps(&[activation], &tasks, now);
         assert!(

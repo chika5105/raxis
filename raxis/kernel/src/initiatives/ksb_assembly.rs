@@ -733,7 +733,7 @@ fn read_dag_rows_for_initiative(
     // `lint-runner` had even started, and the kernel rejected
     // every attempt with `ActivateSubTaskReviewerNoEvalSha`
     // until the orchestrator-respawn-no-progress ceiling fired).
-    let preds_ready_map = read_preds_ready_per_task(conn, initiative_id)?;
+    let preds_ready_map = read_preds_ready_per_task(conn, registry, initiative_id)?;
 
     rows.into_iter()
         .map(|(task_id, state, evaluation_sha)| {
@@ -810,34 +810,153 @@ fn read_dag_rows_for_initiative(
 /// kernel-side `ActivateSubTaskReviewerNoEvalSha` gate.
 fn read_preds_ready_per_task(
     conn: &Connection,
+    registry: &PlanRegistry,
     initiative_id: &str,
 ) -> Result<std::collections::BTreeMap<String, bool>, rusqlite::Error> {
     let sql = format!(
-        "SELECT e.successor_task_id, p.state \
+        "SELECT DISTINCT e.successor_task_id \
            FROM {edges} AS e \
-           JOIN {tasks} AS p ON p.task_id = e.predecessor_task_id \
           WHERE e.initiative_id = ?1",
         edges = Table::TaskDagEdges.as_str(),
-        tasks = Table::Tasks.as_str(),
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map(rusqlite::params![initiative_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?
+    let successors = stmt
+        .query_map(rusqlite::params![initiative_id], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Each successor starts as ready=true; a single non-Completed
-    // predecessor flips it to false (monotone; we never flip back).
     let mut map: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
-    let completed = TaskState::Completed.as_sql_str();
-    for (successor, pred_state) in rows {
-        let entry = map.entry(successor).or_insert(true);
-        if pred_state != completed {
-            *entry = false;
-        }
+    for successor in successors {
+        map.insert(
+            successor.clone(),
+            predecessor_blockers_for_activation(conn, registry, initiative_id, &successor)?
+                .is_empty(),
+        );
     }
     Ok(map)
+}
+
+fn predecessor_blockers_for_activation(
+    conn: &Connection,
+    registry: &PlanRegistry,
+    initiative_id: &str,
+    task_id: &str,
+) -> Result<Vec<(String, String)>, rusqlite::Error> {
+    let successor_agent_type = registry
+        .get(&TaskKey::new(initiative_id.to_owned(), task_id.to_owned()))
+        .map(|fields| fields.session_agent_type);
+    let mut stmt = conn.prepare(&format!(
+        "SELECT pred.task_id, pred.state, pred.initiative_id, \
+                COALESCE(succ.is_gate_fixup, 0), \
+                succ.parent_gate_failure_task_id \
+           FROM {edges} AS e \
+           JOIN {tasks} AS pred ON pred.task_id = e.predecessor_task_id \
+           JOIN {tasks} AS succ ON succ.task_id = e.successor_task_id \
+          WHERE e.successor_task_id = ?1",
+        edges = Table::TaskDagEdges.as_str(),
+        tasks = Table::Tasks.as_str(),
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![task_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+
+    let mut blockers = Vec::new();
+    for row in rows {
+        let (pred_task_id, pred_state, pred_initiative_id, succ_is_fixup, succ_parent) = row?;
+        let is_fixup_parent_edge =
+            succ_is_fixup == 1 && succ_parent.as_deref() == Some(pred_task_id.as_str());
+        if pred_state != TaskState::Completed.as_sql_str() {
+            if !is_fixup_parent_edge {
+                blockers.push((pred_task_id, pred_state));
+            }
+            continue;
+        }
+
+        if successor_agent_type == Some(SessionAgentType::Reviewer) {
+            continue;
+        }
+
+        if let Some(verdict) = reviewer_gate_blocker_for_predecessor(
+            conn,
+            registry,
+            &pred_initiative_id,
+            &pred_task_id,
+        )? {
+            blockers.push((pred_task_id, verdict));
+        }
+    }
+    Ok(blockers)
+}
+
+fn reviewer_gate_blocker_for_predecessor(
+    conn: &Connection,
+    registry: &PlanRegistry,
+    initiative_id: &str,
+    predecessor_task_id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    let pred_agent_type = registry
+        .get(&TaskKey::new(
+            initiative_id.to_owned(),
+            predecessor_task_id.to_owned(),
+        ))
+        .map(|fields| fields.session_agent_type);
+    if pred_agent_type != Some(SessionAgentType::Executor) {
+        return Ok(None);
+    }
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT t.task_id, t.review_verdict \
+           FROM {edges} AS e \
+           JOIN {tasks} AS t ON t.task_id = e.successor_task_id \
+          WHERE e.predecessor_task_id = ?1",
+        edges = Table::TaskDagEdges.as_str(),
+        tasks = Table::Tasks.as_str(),
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![predecessor_task_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+    })?;
+
+    let mut reviewer_count = 0u32;
+    let mut any_pending = false;
+    let mut any_rejected = false;
+    let mut registry_missing = false;
+    for row in rows {
+        let (successor_task_id, raw_verdict) = row?;
+        let Some(fields) = registry.get(&TaskKey::new(initiative_id.to_owned(), successor_task_id))
+        else {
+            registry_missing = true;
+            continue;
+        };
+        if fields.session_agent_type != SessionAgentType::Reviewer {
+            continue;
+        }
+        reviewer_count += 1;
+        match raw_verdict
+            .as_deref()
+            .and_then(raxis_types::ReviewVerdict::from_sql_str)
+        {
+            Some(raxis_types::ReviewVerdict::Approved) => {}
+            Some(raxis_types::ReviewVerdict::Rejected) => any_rejected = true,
+            None => any_pending = true,
+        }
+    }
+
+    if registry_missing {
+        Ok(Some("ReviewerGateRegistryMissing".to_owned()))
+    } else if reviewer_count == 0 {
+        Ok(None)
+    } else if any_pending {
+        Ok(Some("AwaitingReviewerVerdicts".to_owned()))
+    } else if any_rejected {
+        Ok(Some("AtLeastOneRejected".to_owned()))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Count the number of `Reviewer`-typed successors per executor task
@@ -1467,31 +1586,8 @@ fn read_ready_now_task_ids(
         // parent→fixup lineage edge of a gate-fixup task. That edge
         // records which `GatesPending` parent is being repaired; it
         // is not a wait-for-parent-completion dependency.
-        let any_unfinished_pred: bool = {
-            let pred_sql = format!(
-                "SELECT 1 \
-                   FROM {edges} AS e \
-                   JOIN {tasks} AS pred \
-                     ON pred.task_id = e.predecessor_task_id \
-                   JOIN {tasks} AS succ \
-                     ON succ.task_id = e.successor_task_id \
-                  WHERE e.successor_task_id = ?1 \
-                    AND pred.state != ?2 \
-                    AND NOT (COALESCE(succ.is_gate_fixup, 0) = 1 \
-                             AND succ.parent_gate_failure_task_id = e.predecessor_task_id) \
-                  LIMIT 1",
-                edges = Table::TaskDagEdges.as_str(),
-                tasks = Table::Tasks.as_str(),
-            );
-            conn.query_row(
-                &pred_sql,
-                rusqlite::params![&task_id, TaskState::Completed.as_sql_str()],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some()
-        };
-        if any_unfinished_pred {
+        if !predecessor_blockers_for_activation(conn, registry, initiative_id, &task_id)?.is_empty()
+        {
             continue;
         }
         // Latest activation row — must be `PendingActivation`. A
@@ -2953,6 +3049,9 @@ mod tests {
         let reviewer = "reviewer-of-ready-a";
         let ready_reviewer = "reviewer-of-pred-done";
         let pred_done = "predecessor-completed";
+        let reviewed_pred = "reviewed-predecessor";
+        let pending_reviewer = "reviewer-pending-vote";
+        let review_blocked = "blocked-by-review-gate";
         let gate_parent = "gate-parent";
         let gate_fixup = "gate-fixup";
 
@@ -2976,6 +3075,9 @@ mod tests {
             (no_activation_row, SessionAgentType::Executor),
             (reviewer, SessionAgentType::Reviewer),
             (ready_reviewer, SessionAgentType::Reviewer),
+            (reviewed_pred, SessionAgentType::Executor),
+            (pending_reviewer, SessionAgentType::Reviewer),
+            (review_blocked, SessionAgentType::Executor),
             (gate_parent, SessionAgentType::Executor),
             (gate_fixup, SessionAgentType::Executor),
         ] {
@@ -3022,11 +3124,23 @@ mod tests {
             rusqlite::params![pred_done, init, "a".repeat(40)],
         )
         .expect("pred_done");
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS} (task_id, initiative_id, lane_id, state, actor, \
+                                policy_epoch, admitted_at, transitioned_at, \
+                                evaluation_sha) \
+             VALUES (?1, ?2, 'default', 'Completed', 'kernel', 0, 11, 11, ?3)"
+            ),
+            rusqlite::params![reviewed_pred, init, "b".repeat(40)],
+        )
+        .expect("reviewed_pred");
         // The candidate fixtures, all Admitted.
         for (tid, ts) in &[
             (ready_a, 20i64),
             (ready_b, 30i64),
             (ready_reviewer, 35i64),
+            (pending_reviewer, 38i64),
+            (review_blocked, 39i64),
             (blocked_pred, 40i64),
             (no_activation_row, 50i64),
             (reviewer, 60i64),
@@ -3063,10 +3177,13 @@ mod tests {
         )
         .expect("gate fixup task");
         // Edges:
-        //   ready_a   ⟵ pred_done       (pred Completed → ready)
+        //   ready_a   ⟵ pred_done       (blocked until ready_reviewer votes)
         //   blocked_pred ⟵ ready_a      (pred is Admitted not Completed → NOT ready)
         //   ready_reviewer ⟵ pred_done  (Reviewer with pred Completed → ready)
         //   reviewer  ⟵ ready_a         (pred Admitted → reviewer NOT ready)
+        //   pending_reviewer ⟵ reviewed_pred (Reviewer gate itself → ready)
+        //   review_blocked ⟵ reviewed_pred   (non-reviewer downstream waits
+        //                                      for pending_reviewer verdict)
         //   gate_fixup ⟵ gate_parent    (parent is GatesPending but this is a
         //                                fixup-lineage edge → ready)
         for (pred, succ) in &[
@@ -3074,6 +3191,8 @@ mod tests {
             (pred_done, ready_reviewer),
             (ready_a, blocked_pred),
             (ready_a, reviewer),
+            (reviewed_pred, pending_reviewer),
+            (reviewed_pred, review_blocked),
             (gate_parent, gate_fixup),
         ] {
             conn.execute(
@@ -3087,17 +3206,21 @@ mod tests {
             .expect("edge");
         }
         // Activation rows:
-        //   ready_a       latest = PendingActivation (ADMISSIBLE)
+        //   ready_a       latest = PendingActivation (blocked by open reviewer gate)
         //   ready_b       latest = PendingActivation (ADMISSIBLE)
         //   blocked_pred  latest = PendingActivation (would be admissible, but pred not Completed)
         //   no_activation_row  NO row (NOT admissible)
         //   ready_reviewer latest = PendingActivation (ADMISSIBLE reviewer)
+        //   pending_reviewer latest = PendingActivation (ADMISSIBLE reviewer)
+        //   review_blocked latest = PendingActivation (blocked by open reviewer gate)
         //   reviewer      latest = PendingActivation (blocked by predecessor)
         //   gate_fixup    latest = PendingActivation (ADMISSIBLE despite parent GatesPending)
         for (tid, state, created_at) in &[
             (ready_a, "PendingActivation", 21i64),
             (ready_b, "PendingActivation", 31i64),
             (ready_reviewer, "PendingActivation", 36i64),
+            (pending_reviewer, "PendingActivation", 38i64),
+            (review_blocked, "PendingActivation", 39i64),
             (blocked_pred, "PendingActivation", 41i64),
             (reviewer, "PendingActivation", 61i64),
             (gate_fixup, "PendingActivation", 26i64),
@@ -3144,15 +3267,16 @@ mod tests {
         assert_eq!(
             o.ready_now,
             vec![
-                ready_a.to_owned(),
                 gate_fixup.to_owned(),
                 ready_b.to_owned(),
-                ready_reviewer.to_owned()
+                ready_reviewer.to_owned(),
+                pending_reviewer.to_owned()
             ],
             "ready_now MUST list only Executor/Reviewer tasks whose latest \
              activation is PendingActivation AND whose predecessors \
              are all Completed except for the parent lineage edge of \
-             a gate-fixup task; got: {:?}",
+             a gate-fixup task, and MUST withhold downstream executors \
+             until reviewer gates close; got: {:?}",
             o.ready_now,
         );
 
@@ -3166,7 +3290,7 @@ mod tests {
         let rendered = raxis_ksb::render_ksb(&snap).expect("render");
         assert!(
             rendered.contains(&format!(
-                "ready_now=[{ready_a}, {gate_fixup}, {ready_b}, {ready_reviewer}]"
+                "ready_now=[{gate_fixup}, {ready_b}, {ready_reviewer}, {pending_reviewer}]"
             )),
             "rendered KSB MUST surface `ready_now=[…]` in order; got:\n{rendered}",
         );
