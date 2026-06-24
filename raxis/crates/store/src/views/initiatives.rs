@@ -456,6 +456,7 @@ mod tests {
             ("init-fresh", "Draft", 300),
             ("init-recovery", "RecoveryRequired", 225),
             ("init-fail", "Failed", 150),
+            ("init-abort", "Aborted", 125),
             ("init-other", "Executing", 250),
         ] {
             guard.execute(
@@ -508,8 +509,8 @@ mod tests {
         assert_eq!(counts.completed, 1);
         assert_eq!(counts.recovery_required, 1);
         assert_eq!(counts.failed, 1);
-        assert_eq!(counts.total, 6);
-        assert_eq!(counts.aborted, 0);
+        assert_eq!(counts.total, 7);
+        assert_eq!(counts.aborted, 1);
     }
 
     #[test]
@@ -629,6 +630,7 @@ mod tests {
                 "init-recovery",
                 "init-mid",
                 "init-fail",
+                "init-abort",
                 "init-old"
             ]
         );
@@ -664,6 +666,7 @@ mod tests {
                 "init-recovery",
                 "init-mid",
                 "init-fail",
+                "init-abort",
                 "init-old"
             ]
         );
@@ -685,7 +688,7 @@ mod tests {
         // Active = ApprovedPlan + Executing + Blocked. Seed has one
         // Draft (init-fresh) and RecoveryRequired (init-recovery) are
         // intentionally omitted because neither is in flight, plus two
-        // Executing rows and terminal Completed / Failed rows.
+        // Executing rows and terminal Completed / Failed / Aborted rows.
         assert_eq!(ids, vec!["init-other", "init-mid"]);
     }
 

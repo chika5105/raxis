@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.4 - 2026-06-23
+
+RAXIS 0.3.4 is a patch release for Homebrew service reliability and
+reviewer-gate diagnostics.
+
+- Fixed Homebrew service formula paths so installed services resolve the
+  packaged RAXIS runtime correctly after upgrade.
+- Aligned KSB `ready_now` reporting with the kernel's reviewer-gate
+  admission rules, avoiding false readiness hints while reviewer gates
+  are still open.
+- Fixed reviewer-gate wakeups so `AllPassed` review aggregation marks
+  the reviewed executor's downstream edges satisfied instead of leaving
+  follow-on work blocked behind stale DAG flags.
+- Fixed task-verifier completion wakeups so tasks that clear
+  `[[tasks.verifiers]]` can release downstream work without waiting for
+  an orchestrator rediscovery loop.
+- Hardened gate-fixup admission: fixup tasks now require the parent
+  task to have a concrete `evaluation_sha`, preventing parent/fixup
+  dependency cycles with no repair artifact.
+- Ran verifier commands under a clean non-login shell (`sh -c`) so host
+  profile noise does not pollute verifier stderr.
+- Pinned initiative list filtering so `Aborted` and `RecoveryRequired`
+  never appear in the active/in-flight bucket.
+- Suppressed misleading dashboard orchestrator-gap warnings when a task
+  is correctly waiting on an open reviewer gate.
+- Documented the V2 composite-tool plus verifier pattern for workflows
+  that require a fixed sequence of tool calls before `CompleteTask`.
+
 ## 0.3.3 - 2026-06-22
 
 RAXIS 0.3.3 is a patch release for post-0.3.2 live-run recovery

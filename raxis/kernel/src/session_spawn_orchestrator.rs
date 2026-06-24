@@ -1598,7 +1598,21 @@ fn is_retry_neutral_planner_boot_failure_line(line: &str) -> bool {
             || line.contains("NetworkError")
             || line.contains("GatewayUnavailable")
             || line.contains("TimeoutExceeded")
-            || line.contains("timeout after"))
+            || line.contains("timeout after")
+            || retry_neutral_upstream_http(line))
+}
+
+fn retry_neutral_upstream_http(line: &str) -> bool {
+    let Some(rest) = line.split("upstream HTTP ").nth(1) else {
+        return false;
+    };
+    let code: u16 = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0);
+    matches!(code, 408 | 429) || code >= 500
 }
 
 fn extract_planner_boot_message(line: &str) -> Option<String> {
@@ -7784,6 +7798,39 @@ mod self_exit_paired_write_tests {
         assert!(
             detail.contains("timeout after 60s"),
             "must preserve timeout detail; got {detail:?}",
+        );
+    }
+
+    #[test]
+    fn planner_boot_transport_scraper_extracts_retryable_provider_http() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("console.log");
+        let mut f = std::fs::File::create(&path).expect("create");
+        writeln!(
+            f,
+            "{{\"level\":\"error\",\"step\":\"planner-boot-error\",\"role\":\"executor\",\
+             \"message\":\"driver failure: dispatch loop failed: model error: upstream HTTP 529: \
+             {{\\\"type\\\":\\\"error\\\",\\\"error\\\":{{\\\"type\\\":\\\"overloaded_error\\\",\
+             \\\"message\\\":\\\"Overloaded\\\"}}}}\"}}"
+        )
+        .unwrap();
+        drop(f);
+
+        let detail = scrape_retry_neutral_planner_boot_failure_from_console_log(&path)
+            .expect("retryable provider HTTP should classify as retry-neutral");
+        assert!(
+            detail.contains("upstream HTTP 529"),
+            "must preserve upstream HTTP detail; got {detail:?}",
+        );
+    }
+
+    #[test]
+    fn planner_boot_transport_scraper_ignores_non_retryable_provider_http() {
+        assert!(
+            !is_retry_neutral_planner_boot_failure_line(
+                "{\"step\":\"planner-boot-error\",\"message\":\"driver failure: dispatch loop failed: model error: upstream HTTP 400: bad request\"}"
+            ),
+            "provider/client configuration errors should not be retry-neutral",
         );
     }
 

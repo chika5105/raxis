@@ -668,7 +668,7 @@ pub enum RunError {
     Wait(#[source] std::io::Error),
 }
 
-/// Run the verifier-supplied command under `sh -lc <command>`,
+/// Run the verifier-supplied command under `sh -c <command>`,
 /// capturing stdout + stderr (pre-capped at `env.*_max_bytes`) and
 /// honouring the wall-clock timeout.
 ///
@@ -678,7 +678,7 @@ pub enum RunError {
 /// the VM is torn down by the substrate after we exit anyway.
 pub async fn run_verifier_command(env: &VerifierEnv) -> Result<CommandOutcome, RunError> {
     let mut cmd = tokio::process::Command::new("sh");
-    cmd.arg("-lc")
+    cmd.arg("-c")
         .arg(&env.command)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

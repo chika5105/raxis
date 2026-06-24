@@ -845,7 +845,7 @@ fn predecessor_blockers_for_activation(
         .get(&TaskKey::new(initiative_id.to_owned(), task_id.to_owned()))
         .map(|fields| fields.session_agent_type);
     let mut stmt = conn.prepare(&format!(
-        "SELECT pred.task_id, pred.state, pred.initiative_id, \
+        "SELECT pred.task_id, pred.state, pred.initiative_id, pred.evaluation_sha, \
                 COALESCE(succ.is_gate_fixup, 0), \
                 succ.parent_gate_failure_task_id \
            FROM {edges} AS e \
@@ -860,18 +860,34 @@ fn predecessor_blockers_for_activation(
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
-            r.get::<_, i64>(3)?,
-            r.get::<_, Option<String>>(4)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, Option<String>>(5)?,
         ))
     })?;
 
     let mut blockers = Vec::new();
     for row in rows {
-        let (pred_task_id, pred_state, pred_initiative_id, succ_is_fixup, succ_parent) = row?;
+        let (
+            pred_task_id,
+            pred_state,
+            pred_initiative_id,
+            pred_evaluation_sha,
+            succ_is_fixup,
+            succ_parent,
+        ) = row?;
         let is_fixup_parent_edge =
             succ_is_fixup == 1 && succ_parent.as_deref() == Some(pred_task_id.as_str());
         if pred_state != TaskState::Completed.as_sql_str() {
-            if !is_fixup_parent_edge {
+            if is_fixup_parent_edge {
+                if pred_evaluation_sha
+                    .as_deref()
+                    .map(str::is_empty)
+                    .unwrap_or(true)
+                {
+                    blockers.push((pred_task_id, "ParentEvaluationShaMissing".to_owned()));
+                }
+            } else {
                 blockers.push((pred_task_id, pred_state));
             }
             continue;
@@ -3158,10 +3174,11 @@ mod tests {
         conn.execute(
             &format!(
                 "INSERT INTO {TASKS} (task_id, initiative_id, lane_id, state, actor, \
-                                policy_epoch, admitted_at, transitioned_at) \
-             VALUES (?1, ?2, 'default', 'GatesPending', 'kernel', 0, 24, 24)"
+                                policy_epoch, admitted_at, transitioned_at, \
+                                evaluation_sha) \
+             VALUES (?1, ?2, 'default', 'GatesPending', 'kernel', 0, 24, 24, ?3)"
             ),
-            rusqlite::params![gate_parent, init],
+            rusqlite::params![gate_parent, init, "c".repeat(40)],
         )
         .expect("gate parent");
         conn.execute(

@@ -21,7 +21,7 @@
 # manifest pattern in `images/executor-starter/manifest.toml`.
 
 role              = "Verifier"
-kernel_version    = "0.3.3"
+kernel_version    = "0.3.4"
 
 source_date_epoch = 1700000000
 erofs_version     = "1.7.1"

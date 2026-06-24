@@ -3277,6 +3277,19 @@ fn handle_complete_task(
         store,
         ctx.audit.as_ref(),
     );
+    if let Err(e) = mark_successor_edges_satisfied_if_unblocked(
+        store,
+        ctx.plan_registry.as_ref(),
+        &task.initiative_id,
+        req.task_id.as_str(),
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"SuccessorEdgeSatisfactionUpdateFailed\",\
+             \"task_id\":\"{}\",\"error\":\"{}\"}}",
+            req.task_id.as_str(),
+            e,
+        );
+    }
 
     // ── 7b. V2 §Step 24 — copy executor commit closure into the
     //         per-initiative orchestrator ODB so:
@@ -4908,6 +4921,32 @@ fn handle_submit_review(
                     );
                 }
             }
+            match mark_successor_edges_satisfied_if_unblocked(
+                store,
+                ctx.plan_registry.as_ref(),
+                initiative_id_str.as_str(),
+                predecessor.as_str(),
+            ) {
+                Ok(marked) if marked > 0 => {
+                    eprintln!(
+                        "{{\"level\":\"info\",\
+                         \"event\":\"ReviewApprovedSuccessorEdgesSatisfied\",\
+                         \"executor_task_id\":\"{predecessor}\",\
+                         \"reviewer_task_id\":\"{reviewer_task_id}\",\
+                         \"updated_edges\":{marked}}}",
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"ReviewApprovedSuccessorEdgeUpdateFailed\",\
+                         \"executor_task_id\":\"{predecessor}\",\
+                         \"reviewer_task_id\":\"{reviewer_task_id}\",\
+                         \"error\":\"{e}\"}}",
+                    );
+                }
+            }
         }
 
         eprintln!(
@@ -5736,7 +5775,7 @@ pub(crate) fn missing_predecessors_for_activation(
         .map(|fields| fields.session_agent_type);
 
     let mut stmt = tx.prepare(&format!(
-        "SELECT pred.task_id, pred.state, pred.initiative_id, \
+        "SELECT pred.task_id, pred.state, pred.initiative_id, pred.evaluation_sha, \
                 COALESCE(succ.is_gate_fixup, 0), \
                 succ.parent_gate_failure_task_id \
            FROM {TASK_DAG_EDGES} AS e \
@@ -5751,18 +5790,34 @@ pub(crate) fn missing_predecessors_for_activation(
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
-            r.get::<_, i64>(3)?,
-            r.get::<_, Option<String>>(4)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, Option<String>>(5)?,
         ))
     })?;
 
     let mut missing = Vec::new();
     for row in rows {
-        let (pred_task_id, pred_state, pred_initiative_id, succ_is_fixup, succ_parent) = row?;
+        let (
+            pred_task_id,
+            pred_state,
+            pred_initiative_id,
+            pred_evaluation_sha,
+            succ_is_fixup,
+            succ_parent,
+        ) = row?;
         let is_fixup_parent_edge =
             succ_is_fixup == 1 && succ_parent.as_deref() == Some(pred_task_id.as_str());
         if pred_state != TaskState::Completed.as_sql_str() {
-            if !is_fixup_parent_edge {
+            if is_fixup_parent_edge {
+                if pred_evaluation_sha
+                    .as_deref()
+                    .map(str::is_empty)
+                    .unwrap_or(true)
+                {
+                    missing.push((pred_task_id, "ParentEvaluationShaMissing".to_owned()));
+                }
+            } else {
                 missing.push((pred_task_id, pred_state));
             }
             continue;
@@ -5785,6 +5840,89 @@ pub(crate) fn missing_predecessors_for_activation(
         }
     }
     Ok(missing)
+}
+
+pub(crate) fn mark_successor_edges_satisfied_if_unblocked(
+    store: &Store,
+    plan_registry: &crate::initiatives::plan_registry::PlanRegistry,
+    initiative_id: &str,
+    predecessor_task_id: &str,
+) -> rusqlite::Result<usize> {
+    use crate::initiatives::plan_registry::TaskKey;
+
+    let mut conn = store.lock_sync();
+    let tx = conn.transaction()?;
+    let predecessor_completed: bool = tx
+        .query_row(
+            &format!(
+                "SELECT state = 'Completed' FROM {TASKS} \
+                  WHERE task_id = ?1 AND initiative_id = ?2"
+            ),
+            rusqlite::params![predecessor_task_id, initiative_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0)
+        != 0;
+    if !predecessor_completed {
+        tx.commit()?;
+        return Ok(0);
+    }
+
+    let mut stmt = tx.prepare(&format!(
+        "SELECT successor_task_id \
+           FROM {TASK_DAG_EDGES} \
+          WHERE initiative_id = ?1 \
+            AND predecessor_task_id = ?2 \
+            AND COALESCE(predecessor_satisfied, 0) = 0"
+    ))?;
+    let successors = stmt
+        .query_map(rusqlite::params![initiative_id, predecessor_task_id], |r| {
+            r.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    let mut changed = 0usize;
+    let mut reviewer_blocker: Option<Option<String>> = None;
+    for successor_task_id in successors {
+        let successor_agent_type = plan_registry
+            .get(&TaskKey::new(initiative_id, successor_task_id.as_str()))
+            .map(|fields| fields.session_agent_type);
+        let allowed = if successor_agent_type == Some(SessionAgentType::Reviewer) {
+            true
+        } else {
+            let blocker = match &reviewer_blocker {
+                Some(cached) => cached.clone(),
+                None => {
+                    let computed = reviewer_gate_blocker_for_predecessor(
+                        &tx,
+                        plan_registry,
+                        initiative_id,
+                        predecessor_task_id,
+                    )?;
+                    reviewer_blocker = Some(computed.clone());
+                    computed
+                }
+            };
+            blocker.is_none()
+        };
+        if !allowed {
+            continue;
+        }
+        changed += tx.execute(
+            &format!(
+                "UPDATE {TASK_DAG_EDGES} \
+                    SET predecessor_satisfied = 1 \
+                  WHERE initiative_id = ?1 \
+                    AND predecessor_task_id = ?2 \
+                    AND successor_task_id = ?3"
+            ),
+            rusqlite::params![initiative_id, predecessor_task_id, successor_task_id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(changed)
 }
 
 fn reviewer_gate_blocker_for_predecessor(
@@ -17922,6 +18060,44 @@ path_allowlist = ["**/*"]
                  not merely predecessor executor completion"
             );
         }
+        let marked = mark_successor_edges_satisfied_if_unblocked(
+            disk.store(),
+            &registry,
+            initiative_id,
+            "data-interpreter",
+        )
+        .expect("mark reviewer edge");
+        assert_eq!(
+            marked, 1,
+            "mechanical completion should satisfy the reviewer edge only"
+        );
+        {
+            let g = disk.store().lock_sync();
+            let reviewer_flag: i64 = g
+                .query_row(
+                    &format!(
+                        "SELECT predecessor_satisfied FROM {edges} \
+                          WHERE predecessor_task_id = 'data-interpreter' \
+                            AND successor_task_id = 'data-skeptic-reviewer'"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let downstream_flag: i64 = g
+                .query_row(
+                    &format!(
+                        "SELECT predecessor_satisfied FROM {edges} \
+                          WHERE predecessor_task_id = 'data-interpreter' \
+                            AND successor_task_id = 'draft-release'"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(reviewer_flag, 1);
+            assert_eq!(downstream_flag, 0);
+        }
 
         {
             let g = disk.store().lock_sync();
@@ -17947,6 +18123,32 @@ path_allowlist = ["**/*"]
                 "once all reviewer successors approve, the downstream \
                  executor becomes activatable"
             );
+        }
+        let marked = mark_successor_edges_satisfied_if_unblocked(
+            disk.store(),
+            &registry,
+            initiative_id,
+            "data-interpreter",
+        )
+        .expect("mark downstream edge after reviewer approval");
+        assert_eq!(
+            marked, 1,
+            "review approval should satisfy the downstream executor edge"
+        );
+        {
+            let g = disk.store().lock_sync();
+            let downstream_flag: i64 = g
+                .query_row(
+                    &format!(
+                        "SELECT predecessor_satisfied FROM {edges} \
+                          WHERE predecessor_task_id = 'data-interpreter' \
+                            AND successor_task_id = 'draft-release'"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(downstream_flag, 1);
         }
     }
 
@@ -17980,9 +18182,9 @@ path_allowlist = ["**/*"]
                 &format!(
                     "INSERT INTO {tasks} \
                         (task_id, initiative_id, lane_id, state, actor, \
-                         policy_epoch, admitted_at, transitioned_at) \
+                         policy_epoch, admitted_at, transitioned_at, evaluation_sha) \
                      VALUES ('parent-gated', ?1, 'lane-0', 'GatesPending', \
-                             'kernel', 0, 100, 100)"
+                             'kernel', 0, 100, 100, 'abc123')"
                 ),
                 rusqlite::params![initiative_id],
             )
@@ -18043,6 +18245,80 @@ path_allowlist = ["**/*"]
             ordinary_missing,
             vec![("parent-gated".to_owned(), "GatesPending".to_owned())],
             "normal successors MUST still be blocked by a non-Completed predecessor",
+        );
+    }
+
+    #[test]
+    fn inv_kernel_dag_authority_01_blocks_gate_fixup_without_parent_eval_sha() {
+        let initiatives = raxis_store::Table::Initiatives.as_str();
+        let tasks = raxis_store::Table::Tasks.as_str();
+        let edges = raxis_store::Table::TaskDagEdges.as_str();
+
+        let disk = DiskStore::new();
+        let initiative_id = "init-dag-authority-gate-fixup-no-sha";
+        let registry = crate::initiatives::PlanRegistry::new();
+
+        {
+            let g = disk.store().lock_sync();
+            g.execute(
+                &format!(
+                    "INSERT INTO {initiatives} \
+                        (initiative_id, state, terminal_criteria_json, \
+                         plan_artifact_sha256, created_at, git_apply_pending) \
+                     VALUES (?1, 'Executing', '{{}}', 'deadbeef', 100, 0)"
+                ),
+                rusqlite::params![initiative_id],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {tasks} \
+                        (task_id, initiative_id, lane_id, state, actor, \
+                         policy_epoch, admitted_at, transitioned_at) \
+                     VALUES ('parent-gated', ?1, 'lane-0', 'GatesPending', \
+                             'kernel', 0, 100, 100)"
+                ),
+                rusqlite::params![initiative_id],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {tasks} \
+                        (task_id, initiative_id, lane_id, state, actor, \
+                         policy_epoch, admitted_at, transitioned_at, \
+                         is_gate_fixup, parent_gate_failure_task_id, \
+                         parent_gate_failure_type) \
+                     VALUES ('fixup-child', ?1, 'lane-0', 'Admitted', \
+                             'kernel', 0, 101, 101, 1, 'parent-gated', \
+                             'coverage')"
+                ),
+                rusqlite::params![initiative_id],
+            )
+            .unwrap();
+            g.execute(
+                &format!(
+                    "INSERT INTO {edges} \
+                        (initiative_id, predecessor_task_id, successor_task_id, \
+                         predecessor_satisfied) \
+                     VALUES (?1, 'parent-gated', 'fixup-child', 0)"
+                ),
+                rusqlite::params![initiative_id],
+            )
+            .unwrap();
+        }
+
+        let mut g = disk.store().lock_sync();
+        let tx = g.transaction().unwrap();
+        let missing = missing_predecessors_for_activation(&tx, "fixup-child", &registry)
+            .expect("fixup predecessor query");
+        assert_eq!(
+            missing,
+            vec![(
+                "parent-gated".to_owned(),
+                "ParentEvaluationShaMissing".to_owned()
+            )],
+            "gate-fixup activation needs the parent's concrete evaluation_sha; \
+             otherwise the repair loop has no artifact to inspect"
         );
     }
 

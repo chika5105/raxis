@@ -95,6 +95,10 @@ pub enum AutoAdmitOutcome {
     /// Diagnostic only — the witness handler should already have
     /// looked up the parent's columns before reaching this path.
     ParentMissing,
+    /// A fixup can only repair a concrete failed evaluation. If the
+    /// parent has no evaluation SHA, admitting a child would create a
+    /// dangling repair loop.
+    ParentEvaluationShaMissing,
     /// SQL fault during admit. Diagnostic only.
     SqlError(String),
 }
@@ -131,6 +135,9 @@ pub(crate) fn admit_fixup_task_in_tx(
         )
         .map_err(|_| AdmitError::ParentMissing)?;
     let parent_eval_sha_owned = parent_eval_sha.unwrap_or_default();
+    if parent_eval_sha_owned.is_empty() {
+        return Err(AdmitError::ParentEvaluationShaMissing);
+    }
 
     let inserted = tx
         .execute(
@@ -149,11 +156,7 @@ pub(crate) fn admit_fixup_task_in_tx(
                 new_task_id,
                 initiative_id,
                 now_secs,
-                if parent_eval_sha_owned.is_empty() {
-                    None
-                } else {
-                    Some(&parent_eval_sha_owned)
-                },
+                Some(&parent_eval_sha_owned),
                 parent_task_id,
                 parent_gate_type,
             ],
@@ -200,6 +203,7 @@ pub(crate) struct AdmitOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdmitError {
     ParentMissing,
+    ParentEvaluationShaMissing,
     InsertConflict,
     SqlError,
 }
@@ -269,6 +273,9 @@ pub async fn auto_admit_gate_fixup_task(
     let outcome = match admit_result {
         Ok(Ok(o)) => o,
         Ok(Err(AdmitError::ParentMissing)) => return AutoAdmitOutcome::ParentMissing,
+        Ok(Err(AdmitError::ParentEvaluationShaMissing)) => {
+            return AutoAdmitOutcome::ParentEvaluationShaMissing;
+        }
         Ok(Err(AdmitError::InsertConflict)) => {
             return AutoAdmitOutcome::SqlError(format!(
                 "fixup task id collision: {new_task_id} already exists (attempt_index={attempt_index_1based})"
@@ -410,6 +417,38 @@ mod tests {
             )
             .unwrap();
         assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn admit_fixup_task_in_tx_rejects_parent_without_evaluation_sha() {
+        let store = Store::open_in_memory().unwrap();
+        seed_parent(&store, "init-a", "parent-1", "");
+        let now = raxis_types::unix_now_secs();
+        let err = {
+            let mut conn = store.lock_sync();
+            admit_fixup_task_in_tx(
+                &mut conn,
+                "parent-1--gatefixup-1",
+                "parent-1",
+                "CrossCuttingPolicy",
+                "init-a",
+                0,
+                now,
+            )
+            .unwrap_err()
+        };
+        assert_eq!(err, AdmitError::ParentEvaluationShaMissing);
+
+        let conn = store.lock_sync();
+        let tasks_t = Table::Tasks.as_str();
+        let attempts: i64 = conn
+            .query_row(
+                &format!("SELECT gate_fixup_attempts FROM {tasks_t} WHERE task_id = ?1"),
+                rusqlite::params!["parent-1"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, 0);
     }
 
     /// A duplicate fixup `task_id` returns `InsertConflict` and

@@ -900,7 +900,26 @@ async fn gate_recheck(
             })??
         };
         if remaining.is_empty() {
-            finalize_task_verifier_completion_after_gate_recheck(task_id, task_row, ctx).await?;
+            let finalized =
+                finalize_task_verifier_completion_after_gate_recheck(task_id, task_row, ctx)
+                    .await?;
+            if finalized {
+                let task_id_owned = task_id.to_owned();
+                let initiative_id = task_row.initiative_id.clone();
+                let store = ctx.store.clone();
+                let registry = ctx.plan_registry.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::handlers::intent::mark_successor_edges_satisfied_if_unblocked(
+                        store.as_ref(),
+                        registry.as_ref(),
+                        &initiative_id,
+                        &task_id_owned,
+                    )
+                })
+                .await
+                .map_err(|e| HandlerError::Store(format!("mark successor edges join: {e}")))?
+                .map_err(|e| HandlerError::Store(e.to_string()))?;
+            }
             eprintln!(
                 "{{\"level\":\"info\",\"event\":\"TaskVerifiersCleared\",\
                  \"task_id\":\"{task_id}\",\"final_witness_run_id\":\"(recheck-pass)\"}}",
@@ -1751,10 +1770,14 @@ async fn process_non_pass_witness(
             Ok(())
         }
         crate::gate_fixup::AutoAdmitOutcome::ParentMissing
+        | crate::gate_fixup::AutoAdmitOutcome::ParentEvaluationShaMissing
         | crate::gate_fixup::AutoAdmitOutcome::SqlError(_) => {
             let reason = match &outcome {
                 crate::gate_fixup::AutoAdmitOutcome::SqlError(s) => s.clone(),
                 crate::gate_fixup::AutoAdmitOutcome::ParentMissing => "parent_missing".to_owned(),
+                crate::gate_fixup::AutoAdmitOutcome::ParentEvaluationShaMissing => {
+                    "parent_evaluation_sha_missing".to_owned()
+                }
                 _ => unreachable!(),
             };
             eprintln!(
