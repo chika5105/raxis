@@ -2021,8 +2021,8 @@ pub struct IntegrationMergeVerifierEntry {
     /// admission step).
     pub image: String,
 
-    /// Shell command run inside the verifier VM by the
-    /// `raxis-verifier` PID-1 via `sh -lc`.
+    /// Single absolute executable path launched by the host-side
+    /// verifier runner. Arguments/env belong inside that wrapper.
     pub command: String,
 
     /// Wall-clock timeout duration string (`"30s"`, `"10m"`, `"1h"`).
@@ -3455,7 +3455,7 @@ pub const VERIFIER_TIMEOUT_MIN_SECS: u64 = 5;
 /// ### Rules enforced here
 /// 1. `name` non-empty, `[a-z][a-z0-9_]{0,31}`, unique across the
 ///    section.
-/// 2. `image` and `command` non-empty.
+/// 2. `image` non-empty and `command` is a single absolute executable path.
 /// 3. `timeout` parses as a duration string (`"30s"`, `"10m"`, …)
 ///    that resolves to ≥ 5 seconds. The full upper-bound check
 ///    (`max_verifier_timeout_seconds` from `[host_capacity]`) is
@@ -3523,6 +3523,15 @@ fn validate_integration_merge_verifiers_operator_side(
                  [[integration_merge_verifiers]] `{}` must declare a \
                  non-empty `command`.",
                 entry.name,
+            )));
+        }
+        if let Err(reason) = validate_host_verifier_command_path(&entry.command) {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_COMMAND_INVALID: \
+                 [[integration_merge_verifiers]] `{}` command invalid: \
+                 {}",
+                entry.name,
+                host_verifier_command_path_error(&entry.command, reason),
             )));
         }
 
@@ -3800,6 +3809,14 @@ pub(crate) fn validate_gates_hints(raw_gates: &[GateEntry]) -> Result<(), Policy
                 "FAIL_POLICY_GATE_VERIFIER_COMMAND_EMPTY: [[gates]] \
                  gate_type {:?} must declare verifier_command.",
                 g.gate_type,
+            )));
+        }
+        if let Err(reason) = validate_host_verifier_command_path(&g.verifier_command) {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_GATE_VERIFIER_COMMAND_INVALID: [[gates]] \
+                 gate_type {:?} verifier_command invalid: {}",
+                g.gate_type,
+                host_verifier_command_path_error(&g.verifier_command, reason),
             )));
         }
         if let Some(digest) = g.verifier_sha256.as_deref() {
@@ -4081,6 +4098,47 @@ pub fn is_valid_verifier_name(s: &str) -> bool {
     bytes[1..]
         .iter()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+}
+
+/// Validate the host-side verifier command shape shared by policy
+/// loading, plan approval, and runtime spawning.
+///
+/// The runtime launches verifier commands directly, not through a
+/// shell. That keeps verifier provenance precise: config points to
+/// one trusted executable, and any arguments/env belong inside that
+/// executable or its wrapper.
+pub fn validate_host_verifier_command_path(command: &str) -> Result<(), &'static str> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err("empty");
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err("contains_whitespace");
+    }
+    if !std::path::Path::new(trimmed).is_absolute() {
+        return Err("not_absolute");
+    }
+    Ok(())
+}
+
+/// Operator-facing explanation for `validate_host_verifier_command_path`.
+pub fn host_verifier_command_path_error(command: &str, reason: &str) -> String {
+    let trimmed = command.trim();
+    match reason {
+        "empty" => {
+            "verifier command must not be empty; set it to one trusted absolute executable path"
+                .to_owned()
+        }
+        "contains_whitespace" => format!(
+            "verifier command `{trimmed}` must be a single absolute executable path; put args/env inside a trusted wrapper"
+        ),
+        "not_absolute" => format!(
+            "verifier command `{trimmed}` must be absolute; put args/env inside a trusted wrapper"
+        ),
+        other => format!(
+            "verifier command `{trimmed}` has invalid shape ({other}); put args/env inside a trusted wrapper"
+        ),
+    }
 }
 
 /// Fully-qualified target-ref name validator
@@ -9573,7 +9631,7 @@ mod integration_merge_verifiers_tests {
         IntegrationMergeVerifierEntry {
             name: name.to_owned(),
             image: "operator/deploy-smoke@sha256:aaaa".to_owned(),
-            command: "./scripts/smoke.sh".to_owned(),
+            command: "/usr/local/bin/raxis-deploy-smoke".to_owned(),
             timeout: "10m".to_owned(),
             on_failure: IntegrationMergeVerifierOnFailure::BlockMerge,
             applies_to: IntegrationMergeVerifierAppliesTo::All,
@@ -9600,6 +9658,23 @@ mod integration_merge_verifiers_tests {
         let entries = vec![entry("production_deploy_smoke")];
         validate_integration_merge_verifiers_operator_side(&entries)
             .expect("single canonical entry must validate");
+    }
+
+    #[test]
+    fn command_must_be_single_absolute_executable_path() {
+        let mut shell_command = entry("shell_command");
+        shell_command.command = "/bin/sh /tmp/raxis-smoke".to_owned();
+        let err = validate_integration_merge_verifiers_operator_side(&[shell_command])
+            .expect_err("shell-shaped command must be rejected before runtime");
+        let text = format!("{err}");
+        assert!(text.contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_COMMAND_INVALID"));
+        assert!(text.contains("single absolute executable path"));
+
+        let mut relative_command = entry("relative_command");
+        relative_command.command = "scripts/raxis-smoke".to_owned();
+        let err = validate_integration_merge_verifiers_operator_side(&[relative_command])
+            .expect_err("relative command must be rejected before runtime");
+        assert!(format!("{err}").contains("must be absolute"));
     }
 
     // iter63-followups.md — hints validator witnesses.
@@ -9962,7 +10037,7 @@ mod integration_merge_verifiers_tests {
 [[integration_merge_verifiers]]
 name        = "production_deploy_smoke"
 image       = "operator/deploy-smoke@sha256:aaaa"
-command     = "./scripts/prod_smoke.sh"
+command     = "/usr/local/bin/raxis-prod-smoke"
 timeout     = "20m"
 on_failure  = "block_merge"
 required_for_environments = ["production"]
@@ -9970,7 +10045,7 @@ required_for_environments = ["production"]
 [[integration_merge_verifiers]]
 name        = "auth_integration"
 image       = "operator/auth-it@sha256:bbbb"
-command     = "./scripts/auth_smoke.sh"
+command     = "/usr/local/bin/raxis-auth-smoke"
 timeout     = "15m"
 on_failure  = "block_merge"
 applies_to  = "task_set"
@@ -9979,7 +10054,7 @@ task_set    = ["implement_auth", "implement_session"]
 [[integration_merge_verifiers]]
 name        = "deploy_smoke_last_only"
 image       = "operator/deploy-smoke@sha256:cccc"
-command     = "./scripts/deploy_smoke.sh"
+command     = "/usr/local/bin/raxis-deploy-smoke"
 timeout     = "10m"
 on_failure  = "block_merge"
 applies_to  = "last"
@@ -10862,6 +10937,17 @@ mod gate_validation_tests {
     fn gate_with_typed_claims_selectors_and_digest_validates() {
         validate_gates_hints(&[gate("NoSecretStrings")])
             .expect("canonical gate hardening fields must validate");
+    }
+
+    #[test]
+    fn gate_verifier_command_must_be_single_absolute_executable_path() {
+        let mut g = gate("NoSecretStrings");
+        g.verifier_command = "/bin/sh /tmp/raxis-no-secrets".to_owned();
+        let err = validate_gates_hints(&[g])
+            .expect_err("policy gates must reject shell-shaped verifier commands");
+        let text = format!("{err}");
+        assert!(text.contains("FAIL_POLICY_GATE_VERIFIER_COMMAND_INVALID"));
+        assert!(text.contains("single absolute executable path"));
     }
 
     #[test]

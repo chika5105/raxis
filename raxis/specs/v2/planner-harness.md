@@ -1723,7 +1723,7 @@ Verifier VMs are different from agent VMs in three structural ways:
 [[plan.tasks.web_implementer.verifiers]]
 name        = "node_test"
 image       = "raxis/node:20"
-command     = "npm test --silent"
+command     = "/usr/local/bin/raxis-node-test"
 timeout     = "10m"
 on_failure  = "block_review"      # or "warn_only"
 artifact    = "/raxis/test_report.json"   # optional; staged into dependent Reviewer's /raxis/

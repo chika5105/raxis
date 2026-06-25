@@ -139,7 +139,7 @@ Pre-merge verifier fail → n/a                                       FAIL_INTEG
 [[plan.tasks.web_implementer.verifiers]]
 name        = "node_test"            # required; unique within the task
 image       = "raxis-verifier-node-starter"   # required; resolves to a [[vm_images]] entry whose role_restriction includes "Verifier"
-command     = "npm test --silent"    # required; passed to /bin/sh -lc inside the verifier VM
+command     = "/usr/local/bin/raxis-node-test" # required; single absolute executable path; put args/env inside a trusted wrapper
 timeout     = "10m"                  # required; wall-clock; kernel-enforced via cgroup.kill
 on_failure  = "block_review"         # required; "block_review" | "warn_only"
 artifact    = "/raxis/test_report.json"   # optional; see §6
@@ -153,7 +153,7 @@ env         = { CI = "true" }        # optional; merged with envelope env; canno
 |---|---|---|---|
 | `name` | Required | Identifier within the task; used for `verifier_witnesses` row keying and audit events | Non-empty; `[a-z][a-z0-9_]{0,31}`; unique within `[[verifiers]]` of this task |
 | `image` | Required | OCI image used to boot the verifier VM | Must resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Verifier"` (per `INV-VM-CAP-03`); image must satisfy `INV-VERIFIER-06` (Linux 5.14+, cgroup v2, controllers in `subtree_control`) |
-| `command` | Required | Shell command executed by `raxis-verifier` PID-1 via `sh -lc` inside the verifier VM | Non-empty; rendered into `RAXIS_VERIFIER_COMMAND` env at spawn |
+| `command` | Required | Single trusted verifier executable path launched by the host-side runner | Non-empty; absolute path; no whitespace; arguments and env belong inside the wrapper executable |
 | `timeout` | Required | Wall-clock timeout, parsed as a duration string ("30s", "10m", "1h") | Parses to ≥ 5 seconds and ≤ kernel hard cap (`max_verifier_timeout_seconds` from `[host_capacity]`, default 1800 / 30 minutes) |
 | `on_failure` | Required | Routing when the verifier reports `Fail`, times out, crashes, or fails artifact validation | `block_review` \| `warn_only`; per §5 |
 | `artifact` | Optional | Absolute path inside the verifier VM whose contents are copied into the dependent Reviewer's `/raxis/` mount on success | If present: must start with `/raxis/`; max 256 chars; per §6 |
@@ -173,8 +173,8 @@ They run in parallel (subject to capacity caps); the kernel waits
 for all of them to complete before evaluating Reviewer activation.
 If a future need emerges for sequential verifiers (e.g., "build
 first, then test against the build artifact"), that is addressed
-via a single multi-step verifier command (`cargo build && cargo
-test`), not by adding inter-verifier dependencies.
+via a single trusted wrapper executable that performs those steps,
+not by adding inter-verifier dependencies or shell command strings.
 
 ---
 
@@ -334,7 +334,7 @@ Per verifier VM (identical for all three hook types):
    host with `memory.max` and `cpu.max` derived from policy
    (`max_verifier_memory_mb`, `verifier_cpu_quota`). In-VM,
    `raxis-verifier` sets up its own internal cgroups for the spawned
-   `sh -lc` per `INV-PLANNER-HARNESS-03`.
+   verifier executable per `INV-PLANNER-HARNESS-03`.
 5. **Audit emission.** `VerifierActivated { hook_kind, task_id (or
    integration_merge_id), verifier_name, verifier_run_id,
    image_digest, evaluation_sha (or candidate_merge_sha for
@@ -353,10 +353,12 @@ planner, not claw-code-derived) whose entire job is to:
    exit code 64 (`EX_USAGE`) and submit a `Crashed` witness if not.
 3. Mount cgroup v2 sub-cgroups for the upcoming subprocess
    (`/sys/fs/cgroup/raxis/verifier-cmd/`, `cpu.weight = 100`).
-4. Fork+exec the `RAXIS_VERIFIER_COMMAND` via `/bin/sh -lc` with
+4. Fork+exec the single absolute `RAXIS_VERIFIER_COMMAND` path with
    stdout and stderr piped, working directory set to `/workspace`,
    environment = envelope ∪ operator `env`. The subprocess is placed
-   in the sub-cgroup before exec.
+   in the sub-cgroup before exec. If the verifier needs arguments or
+   multi-step behavior, those belong inside the trusted wrapper
+   executable.
 5. Concurrently:
    - Drain stdout into a ring buffer (last 4 KiB retained;
      configurable via `[host_capacity] verifier_stdout_tail_bytes`,
@@ -844,8 +846,8 @@ IntegrationMerge advance gating (§5.3)
 
 Verifiers run **in parallel** within a single hook invocation by
 default. There is no plan-level ordering hint. Operators wanting
-strict ordering encode it in the verifier `command` itself
-(`cargo build && cargo test`).
+strict ordering encode it inside the trusted verifier wrapper
+executable itself.
 
 The kernel-wide concurrency cap is `[host_capacity]
 max_concurrent_verifier_vms` (default 8). When the cap is reached,
@@ -998,9 +1000,9 @@ contain:
   kernel passes `/sbin/init → raxis-verifier` by symlink at spawn).
   Statically linked recommended; dynamically linked acceptable
   with libc present.
-- `/bin/sh` (POSIX shell) — required because `raxis-verifier`
-  invokes the operator-declared `command` via `sh -lc`. busybox-sh
-  is acceptable.
+- The trusted verifier wrapper binaries referenced by plan/policy
+  `command` fields. Each `command` is launched directly as one
+  absolute executable path; wrappers own their internal args/env.
 - The toolchain the verifier command needs (`cargo`, `npm`,
   `pytest`, `ctags`, etc.) — operator's responsibility for
   operator-published images; kernel's responsibility for
@@ -1220,7 +1222,7 @@ to resolve symbols across the diff without an LSP. Solves the
 | Component | Why |
 |---|---|
 | `raxis-verifier` (statically linked) | PID 1 |
-| `/bin/sh` (busybox) | Required by `raxis-verifier` for `sh -lc` |
+| `/usr/local/bin/raxis-symbol-index` | Trusted wrapper launched directly by the verifier runner |
 | `ctags` (universal-ctags, ≥ 6.0) | Symbol-extraction tool; produces JSON output |
 | Minimal Linux 5.14+ guest kernel with cgroup v2 substrate per `INV-VERIFIER-06` | Required by all verifier images |
 
@@ -1243,7 +1245,7 @@ auto_inject_symbol_index = true`):**
 [[plan.tasks.<id>.verifiers]]
 name        = "symbol_index"
 image       = "raxis-verifier-symbol-index"           # the reserved canonical alias
-command     = "ctags -R -f /raxis/symbol_index.json --output-format=json --languages=auto src/"
+command     = "/usr/local/bin/raxis-symbol-index"
 timeout     = "60s"
 on_failure  = "warn_only"
 artifact    = "/raxis/symbol_index.json"
@@ -1405,7 +1407,7 @@ and validating the actually-merged state.
 [[plan.integration_merge_verifiers]]
 name        = "e2e_smoke"
 image       = "raxis-verifier-node-starter"
-command     = "npm run test:e2e"
+command     = "/usr/local/bin/raxis-node-e2e-smoke"
 timeout     = "30m"
 on_failure  = "block_merge"                      # block_merge | warn_only
 applies_to  = "all"                              # all | task_set | last; defaults to "all"
@@ -1414,7 +1416,7 @@ applies_to  = "all"                              # all | task_set | last; defaul
 [[plan.integration_merge_verifiers]]
 name        = "auth_integration"
 image       = "raxis-verifier-rust-starter"
-command     = "cargo test --test auth_integration"
+command     = "/usr/local/bin/raxis-auth-integration"
 timeout     = "20m"
 on_failure  = "block_merge"
 applies_to  = "task_set"
@@ -1465,7 +1467,7 @@ Operator-side declarations:
 |---|---|---|---|---|
 | `name` | Required | Yes | Yes | `[a-z][a-z0-9_]{0,31}`; unique within source |
 | `image` | Required | Yes | Yes | Resolves to `[[vm_images]]` with `Verifier` role_restriction |
-| `command` | Required | Yes | Yes | Run via `sh -lc`; cwd `/workspace` (mounted from candidate merged tree) |
+| `command` | Required | Yes | Yes | Single absolute executable path launched directly; cwd `/workspace` (mounted from candidate merged tree); args/env belong inside the wrapper |
 | `timeout` | Required | Yes | Yes | ≥ 5s, ≤ kernel hard cap |
 | `on_failure` | Required | `block_merge` \| `warn_only` | `block_merge` only (cannot downgrade to `warn_only`) | `block_review` is rejected (`FAIL_VERIFIER_INVALID_ON_FAILURE`) |
 | `applies_to` | Optional | `all` \| `task_set` \| `last` (default `all`) | Same | See §16.3 |

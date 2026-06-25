@@ -511,23 +511,12 @@ fn policy_gate_hook_label(gate: &raxis_policy::GateEntry) -> String {
 
 fn parse_verifier_command_path(command: &str) -> Result<PathBuf, GateError> {
     let trimmed = command.trim();
-    if trimmed.is_empty() {
-        return Err(GateError::PolicyMisconfigured(
-            "task verifier command must not be empty".to_owned(),
-        ));
-    }
-    if trimmed.chars().any(char::is_whitespace) {
-        return Err(GateError::PolicyMisconfigured(format!(
-            "task verifier command `{trimmed}` must be a single absolute executable path in the host-subprocess runner"
-        )));
-    }
-    let path = PathBuf::from(trimmed);
-    if !path.is_absolute() {
-        return Err(GateError::PolicyMisconfigured(format!(
-            "task verifier command `{trimmed}` must be absolute"
-        )));
-    }
-    Ok(path)
+    raxis_policy::validate_host_verifier_command_path(trimmed).map_err(|reason| {
+        GateError::PolicyMisconfigured(raxis_policy::host_verifier_command_path_error(
+            trimmed, reason,
+        ))
+    })?;
+    Ok(PathBuf::from(trimmed))
 }
 
 // ---------------------------------------------------------------------------

@@ -397,7 +397,7 @@ this decision on the operator's behalf.
 [[plan.tasks.web_implementer.verifiers]]
 name        = "symbol_index"
 image       = "raxis/parsers:1"
-command     = "ctags --output-format=json -R -f /raxis/symbol_index.json /workspace"
+command     = "/usr/local/bin/raxis-symbol-index"
 timeout     = "2m"
 on_failure  = "warn_only"     # if symbol indexing fails, Reviewer still activates
 artifact    = "/raxis/symbol_index.json"
@@ -2004,7 +2004,7 @@ required_for_environments = ["production"]                 # composes with envir
 |---|---|---|---|
 | `name` | Required | Identifier within the policy bundle; used for `verifier_witnesses` row keying and audit | Non-empty; `[a-z][a-z0-9_]{0,31}`; unique within `[[integration_merge_verifiers]]` |
 | `image` | Required | OCI image used to boot the verifier VM | Must resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Verifier"`; image must satisfy `INV-VERIFIER-06` |
-| `command` | Required | Shell command executed by `raxis-verifier` PID-1 via `sh -lc` inside the verifier VM | Non-empty |
+| `command` | Required | Single trusted verifier executable path | Non-empty; absolute path; no whitespace; arguments/env belong inside the wrapper executable |
 | `timeout` | Required | Wall-clock timeout, parsed as a duration string | ≥ 5 seconds and ≤ kernel hard cap (`max_verifier_timeout_seconds`) |
 | `on_failure` | Required | Failure routing | MUST be `"block_merge"` (operator-side declarations cannot be downgraded to `warn_only`); `"block_review"` is rejected per `FAIL_VERIFIER_INVALID_ON_FAILURE` |
 | `applies_to` | Optional | Scope filter per [`verifier-processes.md §16.3`](verifier-processes.md) | `"all"` (default) \| `"task_set"` \| `"last"` |

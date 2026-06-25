@@ -4241,9 +4241,17 @@ fn validate_plan_integration_merge_verifiers(
             return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
                 rule: "command_required",
                 offending_verifier: entry.name.clone(),
-                suggestion: "declare a non-empty `command` (run via `sh -lc` \
-                             inside the verifier VM)."
-                    .to_owned(),
+                suggestion:
+                    "declare a non-empty `command` as one trusted absolute executable path; \
+                             put args/env inside that wrapper."
+                        .to_owned(),
+            });
+        }
+        if let Err(reason) = raxis_policy::validate_host_verifier_command_path(&entry.command) {
+            return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule: "command_invalid",
+                offending_verifier: entry.name.clone(),
+                suggestion: raxis_policy::host_verifier_command_path_error(&entry.command, reason),
             });
         }
 
@@ -5674,6 +5682,14 @@ fn parse_task_verifiers_for_task(
         }
         let image = read("image")?;
         let command = read("command")?;
+        if let Err(reason) = raxis_policy::validate_host_verifier_command_path(&command) {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks.verifiers]][{idx}] (task `{task_id}`) command invalid: {}",
+                    raxis_policy::host_verifier_command_path_error(&command, reason),
+                ),
+            });
+        }
         let timeout = read("timeout")?;
         raxis_policy::parse_verifier_timeout_secs(&timeout).ok_or_else(|| {
             LifecycleError::PlanInvalid {
@@ -6420,7 +6436,7 @@ prompt = "   "
         [[tasks.verifiers]]
         name               = "cargo_test"
         image              = "raxis-verifier-rust-starter"
-        command            = "cargo test --workspace --locked"
+        command            = "/usr/local/bin/raxis-cargo-test"
         timeout            = "10m"
         on_failure         = "block_review"
         artifact           = "/raxis/cargo-test.json"
@@ -6439,7 +6455,7 @@ prompt = "   "
         let verifier = &verifiers[0];
         assert_eq!(verifier.name, "cargo_test");
         assert_eq!(verifier.image, "raxis-verifier-rust-starter");
-        assert_eq!(verifier.command, "cargo test --workspace --locked");
+        assert_eq!(verifier.command, "/usr/local/bin/raxis-cargo-test");
         assert_eq!(verifier.timeout, "10m");
         assert_eq!(
             verifier.on_failure,
@@ -6453,6 +6469,33 @@ prompt = "   "
             verifier.hints.get("toolchain"),
             Some(&serde_json::json!("stable"))
         );
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_task_verifier_shell_command() {
+        let toml = r#"[[tasks]]
+        task_name = "implementation"
+        description = "shell-shaped verifier commands must fail at plan validation"
+        session_agent_type = "Executor"
+        clone_strategy = "blobless"
+        prompt = "shell-shaped verifier commands must fail at plan validation"
+
+        [[tasks.verifiers]]
+        name = "cargo_test"
+        image = "raxis-verifier-rust-starter"
+        command = "/bin/sh /tmp/raxis-cargo-test"
+        timeout = "10m"
+        on_failure = "block_review"
+        "#;
+        let err =
+            parse_plan_tasks(toml).expect_err("shell-shaped verifier command must be rejected");
+        match err {
+            LifecycleError::PlanInvalid { reason } => {
+                assert!(reason.contains("single absolute executable path"));
+                assert!(reason.contains("trusted wrapper"));
+            }
+            other => panic!("expected PlanInvalid, got {other:?}"),
+        }
     }
 
     #[test]
@@ -6497,7 +6540,7 @@ prompt = "   "
         [[tasks.verifiers]]
         name       = "lint_warn"
         image      = "raxis-verifier-rust-starter"
-        command    = "cargo clippy"
+        command    = "/usr/local/bin/raxis-cargo-clippy"
         timeout    = "30s"
         on_failure = "warn_only"
         artifact   = "/tmp/lint.json"
@@ -8210,7 +8253,7 @@ description = "do thing"
         raxis_policy::IntegrationMergeVerifierEntry {
             name: name.to_owned(),
             image: "raxis-verifier-rust-starter".to_owned(),
-            command: "cargo test --quiet".to_owned(),
+            command: "/usr/local/bin/raxis-integration-smoke".to_owned(),
             timeout: "10m".to_owned(),
             on_failure: raxis_policy::IntegrationMergeVerifierOnFailure::BlockMerge,
             applies_to: raxis_policy::IntegrationMergeVerifierAppliesTo::All,
@@ -8293,6 +8336,41 @@ description = "do thing"
                 assert_eq!(rule, "command_required");
             }
             other => panic!("expected command_required, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_shell_command() {
+        let mut e = pre_merge_verifier_template("e2e");
+        e.command = "/bin/sh /tmp/raxis-integration-smoke".to_owned();
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule, suggestion, ..
+            } => {
+                assert_eq!(rule, "command_invalid");
+                assert!(suggestion.contains("single absolute executable path"));
+                assert!(suggestion.contains("trusted wrapper"));
+            }
+            other => panic!("expected command_invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_relative_command() {
+        let mut e = pre_merge_verifier_template("e2e");
+        e.command = "scripts/raxis-integration-smoke".to_owned();
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule, suggestion, ..
+            } => {
+                assert_eq!(rule, "command_invalid");
+                assert!(suggestion.contains("must be absolute"));
+            }
+            other => panic!("expected command_invalid, got {other:?}"),
         }
     }
 
@@ -8477,7 +8555,7 @@ task_name = "t1"
 [[plan.integration_merge_verifiers]]
 name        = "e2e_smoke"
 image       = "raxis-verifier-node-starter"
-command     = "npm run test:e2e"
+command     = "/usr/local/bin/raxis-node-e2e-smoke"
 timeout     = "30m"
 on_failure  = "block_merge"
 applies_to  = "task_set"
@@ -8551,7 +8629,7 @@ description = "implement the auth flow"
 [[plan.integration_merge_verifiers]]
 name        = "auth_integration"
 image       = "raxis-verifier-rust-starter"
-command     = "cargo test --test auth_integration"
+command     = "/usr/local/bin/raxis-auth-integration"
 timeout     = "20m"
 on_failure  = "block_merge"
 applies_to  = "task_set"
@@ -8602,7 +8680,7 @@ description = "do thing"
 [[plan.integration_merge_verifiers]]
 name        = "smoke"
 image       = "raxis-verifier-rust-starter"
-command     = "cargo test --quiet"
+command     = "/usr/local/bin/raxis-integration-smoke"
 timeout     = "10m"
 on_failure  = "warn_only"
 applies_to  = "all"

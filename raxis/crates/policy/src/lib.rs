@@ -39,9 +39,10 @@ pub use bundle::{
 // (`approve_plan`) keeps the two surfaces in lock-step on name shape,
 // timeout parsing, and the env-cap / reserved-prefix rules.
 pub use bundle::{
-    is_valid_verifier_name, parse_verifier_timeout_secs, validate_target_ref_format,
-    validate_verifier_hints, RAXIS_RESERVED_ENV_PREFIX, VERIFIER_ARTIFACT_MAX_PATH_CHARS,
-    VERIFIER_ENV_MAX_ENTRIES, VERIFIER_ENV_MAX_TOTAL_BYTES, VERIFIER_TIMEOUT_MIN_SECS,
+    host_verifier_command_path_error, is_valid_verifier_name, parse_verifier_timeout_secs,
+    validate_host_verifier_command_path, validate_target_ref_format, validate_verifier_hints,
+    RAXIS_RESERVED_ENV_PREFIX, VERIFIER_ARTIFACT_MAX_PATH_CHARS, VERIFIER_ENV_MAX_ENTRIES,
+    VERIFIER_ENV_MAX_TOTAL_BYTES, VERIFIER_TIMEOUT_MIN_SECS,
 };
 
 // iter63-followups.md — bounded-runtime guard defaults + resolved

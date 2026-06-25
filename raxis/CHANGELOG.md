@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.5 - 2026-06-25
+
+RAXIS 0.3.5 is a patch release for verifier command validation
+parity.
+
+- Shared verifier command-shape validation across policy load, plan
+  approval, and runtime spawning.
+- Rejected shell-shaped or relative verifier commands during plan
+  validation instead of admitting plans that later fail at runtime.
+- Clarified the verifier contract: `command` must be a single absolute
+  executable path, with arguments and environment handled inside a
+  trusted wrapper.
+- Updated verifier specs and examples away from `sh -lc` command
+  strings so copied plans match the kernel runtime contract.
+
 ## 0.3.4 - 2026-06-23
 
 RAXIS 0.3.4 is a patch release for Homebrew service reliability and
