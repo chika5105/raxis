@@ -414,8 +414,9 @@ fn is_legal_transition(from: &TaskState, to: &TaskState) -> bool {
         (TaskState::Running, TaskState::Admitted) => true,
         (TaskState::Running, TaskState::Aborted) => true,
         (TaskState::Running, TaskState::Cancelled) => true,
-        // GatesPending: gates cleared → Admitted; or aborted / cancelled
+        // GatesPending: gates cleared → Admitted; verifier/report failure; or aborted / cancelled
         (TaskState::GatesPending, TaskState::Admitted) => true,
+        (TaskState::GatesPending, TaskState::Failed) => true,
         (TaskState::GatesPending, TaskState::Aborted) => true,
         (TaskState::GatesPending, TaskState::Cancelled) => true,
         // BlockedRecoveryPending: operator resume → Admitted; or abort
@@ -477,6 +478,14 @@ mod tests {
         assert!(is_legal_transition(
             &TaskState::GatesPending,
             &TaskState::Admitted
+        ));
+    }
+
+    #[test]
+    fn gates_pending_to_failed_is_legal() {
+        assert!(is_legal_transition(
+            &TaskState::GatesPending,
+            &TaskState::Failed
         ));
     }
 

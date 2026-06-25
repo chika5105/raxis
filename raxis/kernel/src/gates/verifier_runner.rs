@@ -40,6 +40,9 @@ use sha2::{Digest, Sha256};
 
 use super::GateError;
 use crate::authority::verifier_token;
+use crate::initiatives::task_transitions::{
+    transition_task, transition_task_with_audit, TransitionActor,
+};
 
 // ---------------------------------------------------------------------------
 // Per-task cumulative-verifier-time tracker (iter63-followups.md Item 2 #3)
@@ -254,6 +257,20 @@ fn verifier_exit_fields(status: &ExitStatus) -> (&'static str, Option<i32>) {
     (crate::gates::verifier_audit::SIGNAL_CLASS_KILLED, None)
 }
 
+fn verifier_process_failure_reason(status: &ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("verifier process exited with status {code}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return format!("verifier process terminated by signal {signal}");
+        }
+    }
+    "verifier process terminated without exit code".to_owned()
+}
+
 async fn read_task_initiative_id(store: &Store, task_id: &str) -> Result<String, GateError> {
     let store_clone = store.clone();
     let task_id_owned = task_id.to_owned();
@@ -271,6 +288,60 @@ async fn read_task_initiative_id(store: &Store, task_id: &str) -> Result<String,
     })
     .await
     .map_err(|e| GateError::Store(format!("read task initiative join failed: {e}")))?
+}
+
+pub(crate) fn verifier_failure_blocks_task(config: &VerifierConfig) -> bool {
+    !matches!(config.verifier_on_failure.as_deref(), Some("warn_only"))
+}
+
+pub(crate) async fn fail_task_for_blocking_verifier_failure(
+    task_id: &str,
+    gate_type: &str,
+    reason: &str,
+    store: &Store,
+    audit: Option<std::sync::Arc<dyn AuditSink>>,
+) {
+    let task_id_owned = task_id.to_owned();
+    let block_reason =
+        format!("verifier `{gate_type}` failed before submitting a witness: {reason}");
+    let store_owned = store.clone();
+    let audit_owned = audit.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        if let Some(audit) = audit_owned {
+            transition_task_with_audit(
+                &task_id_owned,
+                raxis_types::TaskState::Failed,
+                Some(&block_reason),
+                TransitionActor::Kernel,
+                &store_owned,
+                audit.as_ref(),
+                None,
+            )
+            .map(|_| ())
+        } else {
+            transition_task(
+                &task_id_owned,
+                raxis_types::TaskState::Failed,
+                Some(&block_reason),
+                TransitionActor::Kernel,
+                &store_owned,
+            )
+            .map(|_| ())
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"VerifierFailureTaskTransitionSkipped\",\
+             \"task_id\":\"{task_id}\",\"gate_type\":\"{gate_type}\",\"reason\":\"{e}\"}}",
+        ),
+        Err(e) => eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"VerifierFailureTaskTransitionJoinFailed\",\
+             \"task_id\":\"{task_id}\",\"gate_type\":\"{gate_type}\",\"reason\":\"{e}\"}}",
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +600,7 @@ pub async fn spawn_verifier_with_audit(
             let verifier_image_alias = config.verifier_image_alias.clone();
             let verifier_command = config.verifier_command.clone();
             let verifier_on_failure = config.verifier_on_failure.clone();
+            let failure_reason_for_status = failure_reason.clone();
             match tokio::task::spawn_blocking(move || {
                 let metadata = verifier_token::VerifierRunMetadata {
                     gate_source: gate_source.as_str(),
@@ -543,7 +615,7 @@ pub async fn spawn_verifier_with_audit(
                     &gate_type_for_status,
                     &evaluation_sha_for_status,
                     "ConfigInvalid",
-                    &failure_reason,
+                    &failure_reason_for_status,
                     metadata,
                     &store_for_status,
                 )
@@ -579,6 +651,16 @@ pub async fn spawn_verifier_with_audit(
                     initiative_id.as_deref(),
                 );
             }
+            if verifier_failure_blocks_task(config) {
+                fail_task_for_blocking_verifier_failure(
+                    task_id,
+                    gate_type,
+                    &failure_reason,
+                    store,
+                    audit.clone(),
+                )
+                .await;
+            }
             return Err(err);
         }
     };
@@ -611,6 +693,18 @@ pub async fn spawn_verifier_with_audit(
                 Some(task_id),
                 None,
             );
+        }
+        if verifier_failure_blocks_task(config) {
+            fail_task_for_blocking_verifier_failure(
+                task_id,
+                gate_type,
+                &format!(
+                    "verifier budget exhausted ({cumulative}s spent, budget {budget_seconds}s)"
+                ),
+                store,
+                audit.clone(),
+            )
+            .await;
         }
         return Err(GateError::VerifierBudgetExhausted {
             task_id: task_id.to_owned(),
@@ -681,10 +775,30 @@ pub async fn spawn_verifier_with_audit(
             Ok(Ok(outcome)) => outcome,
             Ok(Err(e)) => {
                 release_verifier_slot();
+                if verifier_failure_blocks_task(config) {
+                    fail_task_for_blocking_verifier_failure(
+                        task_id,
+                        gate_type,
+                        &format!("issue verifier token: {e}"),
+                        store,
+                        audit.clone(),
+                    )
+                    .await;
+                }
                 return Err(GateError::AuthorityError(e.to_string()));
             }
             Err(e) => {
                 release_verifier_slot();
+                if verifier_failure_blocks_task(config) {
+                    fail_task_for_blocking_verifier_failure(
+                        task_id,
+                        gate_type,
+                        &format!("issue verifier token join failed: {e}"),
+                        store,
+                        audit.clone(),
+                    )
+                    .await;
+                }
                 return Err(GateError::AuthorityError(format!(
                     "issue_verifier_token spawn_blocking join failed: {e}"
                 )));
@@ -735,16 +849,27 @@ pub async fn spawn_verifier_with_audit(
             let store_for_cleanup = store.clone();
             let run_id_for_cleanup = verifier_run_id.clone();
             let reason = format!("serialise operator hints to JSON: {e}");
+            let reason_for_cleanup = reason.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 verifier_token::mark_verifier_run_terminal_by_run_id(
                     &run_id_for_cleanup,
                     "ConfigInvalid",
-                    Some(reason.as_str()),
+                    Some(reason_for_cleanup.as_str()),
                     &store_for_cleanup,
                 )
             })
             .await;
             release_verifier_slot();
+            if verifier_failure_blocks_task(config) {
+                fail_task_for_blocking_verifier_failure(
+                    task_id,
+                    gate_type,
+                    &reason,
+                    store,
+                    audit.clone(),
+                )
+                .await;
+            }
             return Err(GateError::SpawnFailed {
                 gate_type: gate_type.to_owned(),
                 reason: format!("serialise operator hints to JSON: {e}"),
@@ -849,6 +974,16 @@ pub async fn spawn_verifier_with_audit(
                     Some(&initiative_id),
                 );
             }
+            if verifier_failure_blocks_task(config) {
+                fail_task_for_blocking_verifier_failure(
+                    task_id,
+                    gate_type,
+                    &e.to_string(),
+                    store,
+                    audit.clone(),
+                )
+                .await;
+            }
             return Err(GateError::SpawnFailed {
                 gate_type: gate_type.to_owned(),
                 reason: e.to_string(),
@@ -897,6 +1032,7 @@ pub async fn spawn_verifier_with_audit(
     let audit_for_watcher = audit.clone();
     let gate_type_clone = gate_type.to_owned();
     let initiative_id_clone = initiative_id.clone();
+    let blocks_task_on_failure = verifier_failure_blocks_task(config);
 
     // Step 6: Register completion watcher. The global slot was
     // reserved before token issuance and is released exactly once
@@ -949,9 +1085,17 @@ pub async fn spawn_verifier_with_audit(
                 if !status.success() {
                     let store_for_status = store_for_watcher.clone();
                     let run_id_for_status = run_id_clone.clone();
-                    let reason = exit_code
-                        .map(|c| format!("verifier process exited with status {c}"))
-                        .unwrap_or_else(|| "verifier process terminated without exit code".into());
+                    let reason = verifier_process_failure_reason(&status);
+                    if blocks_task_on_failure {
+                        fail_task_for_blocking_verifier_failure(
+                            &task_id_clone,
+                            &gate_type_clone,
+                            &reason,
+                            &store_for_watcher,
+                            audit_for_watcher.clone(),
+                        )
+                        .await;
+                    }
                     let _ = tokio::task::spawn_blocking(move || {
                         verifier_token::mark_verifier_run_terminal_by_run_id(
                             &run_id_for_status,
@@ -989,6 +1133,16 @@ pub async fn spawn_verifier_with_audit(
                 let store_for_status = store_for_watcher.clone();
                 let run_id_for_status = run_id_clone.clone();
                 let reason_for_status = wait_error.clone();
+                if blocks_task_on_failure {
+                    fail_task_for_blocking_verifier_failure(
+                        &task_id_clone,
+                        &gate_type_clone,
+                        &wait_error,
+                        &store_for_watcher,
+                        audit_for_watcher.clone(),
+                    )
+                    .await;
+                }
                 let _ = tokio::task::spawn_blocking(move || {
                     verifier_token::mark_verifier_run_terminal_by_run_id(
                         &run_id_for_status,
@@ -1050,6 +1204,16 @@ pub async fn spawn_verifier_with_audit(
                 let store_for_status = store_for_watcher.clone();
                 let run_id_for_status = run_id_clone.clone();
                 let reason = format!("verifier exceeded wall-clock budget of {wall_seconds}s");
+                if blocks_task_on_failure {
+                    fail_task_for_blocking_verifier_failure(
+                        &task_id_clone,
+                        &gate_type_clone,
+                        &reason,
+                        &store_for_watcher,
+                        audit_for_watcher.clone(),
+                    )
+                    .await;
+                }
                 let _ = tokio::task::spawn_blocking(move || {
                     verifier_token::mark_verifier_run_terminal_by_run_id(
                         &run_id_for_status,
@@ -1235,7 +1399,7 @@ mod integration {
     /// in this module runs on a tokio runtime and `blocking_lock` would
     /// panic from within async context (same root cause as the P0 in
     /// production `spawn_verifier`).
-    async fn seed_task_for(store: &Store, task_id: &str) {
+    async fn seed_task_with_state(store: &Store, task_id: &str, state: raxis_types::TaskState) {
         use raxis_types::{InitiativeState, TaskState};
         let initiative_id = format!("init-{}", uuid::Uuid::new_v4().simple());
         let conn = store.lock().await;
@@ -1249,16 +1413,24 @@ mod integration {
             rusqlite::params![&initiative_id, InitiativeState::ApprovedPlan.as_sql_str()],
         )
         .expect("seed initiative");
+        let evaluation_sha = match state {
+            TaskState::GatesPending => Some("abcd1234abcd1234abcd1234abcd1234abcd1234"),
+            _ => None,
+        };
         conn.execute(
             &format!(
                 "INSERT INTO {TASKS}
                     (task_id, initiative_id, lane_id, state, actor,
-                     policy_epoch, admitted_at, transitioned_at)
-                 VALUES (?1, ?2, 'default', ?3, 'planner', 1, 0, 0)"
+                     policy_epoch, admitted_at, transitioned_at, evaluation_sha, base_sha)
+                 VALUES (?1, ?2, 'default', ?3, 'planner', 1, 0, 0, ?4, ?4)"
             ),
-            rusqlite::params![task_id, &initiative_id, TaskState::Running.as_sql_str()],
+            rusqlite::params![task_id, &initiative_id, state.as_sql_str(), evaluation_sha],
         )
         .expect("seed task");
+    }
+
+    async fn seed_task_for(store: &Store, task_id: &str) {
+        seed_task_with_state(store, task_id, raxis_types::TaskState::Running).await;
     }
 
     // ── PRIORITY 1 — counter, cap, token row ─────────────────────────────────
@@ -1440,6 +1612,77 @@ mod integration {
         assert_eq!(db_gate, "TestCoverage");
         assert_eq!(db_eval, "f00dbabef00dbabef00dbabef00dbabe");
         assert_eq!(consumed, 0, "freshly issued tokens are unconsumed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_verifier_process_failure_fails_gates_pending_task() {
+        let _guard = acquire_global_lock();
+        if skip_if_missing("/usr/bin/false") {
+            return;
+        }
+        let store = mem_store();
+        let tmp = TempDir::new().unwrap();
+        let cfg = config_for(Path::new("/usr/bin/false"));
+
+        let task_id = unique_id("task");
+        seed_task_with_state(&store, &task_id, raxis_types::TaskState::GatesPending).await;
+        let run_id = spawn_verifier(
+            &task_id,
+            "test-gate",
+            "abcd1234abcd1234abcd1234abcd1234abcd1234",
+            tmp.path(),
+            &cfg,
+            &store,
+        )
+        .await
+        .expect("spawn must succeed against /usr/bin/false");
+
+        let started = Instant::now();
+        let failed = loop {
+            let state = {
+                let conn = store.lock().await;
+                conn.query_row(
+                    &format!("SELECT state FROM {TASKS} WHERE task_id = ?1"),
+                    rusqlite::params![&task_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()
+            };
+            if state.as_deref() == Some(raxis_types::TaskState::Failed.as_sql_str()) {
+                break true;
+            }
+            if started.elapsed() >= Duration::from_secs(2) {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(
+            failed,
+            "blocking verifier process failure must move GatesPending task to Failed"
+        );
+
+        let conn = store.lock().await;
+        let (state, block_reason, token_status): (String, Option<String>, String) = conn
+            .query_row(
+                &format!(
+                    "SELECT t.state, t.block_reason, v.status
+                       FROM {TASKS} t
+                       JOIN {VERIFIER_RUN_TOKENS} v ON v.task_id = t.task_id
+                      WHERE t.task_id = ?1 AND v.verifier_run_id = ?2"
+                ),
+                rusqlite::params![&task_id, &run_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("task and verifier token rows");
+        assert_eq!(state, raxis_types::TaskState::Failed.as_sql_str());
+        assert_eq!(token_status, "ProcessFailed");
+        assert!(
+            block_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("verifier `test-gate` failed before submitting a witness"),
+            "block_reason should explain the verifier failure, got {block_reason:?}",
+        );
     }
 
     // ── PRIORITY 2 — wall-clock timeout ──────────────────────────────────────

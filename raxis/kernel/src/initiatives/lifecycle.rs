@@ -53,6 +53,24 @@ const TASK_CREDENTIAL_PROXIES: &str = Table::TaskCredentialProxies.as_str();
 const SUBTASK_ACTIVATIONS: &str = Table::SubtaskActivations.as_str();
 const INTEGRATION_MERGE_ATTEMPTS: &str = Table::IntegrationMergeAttempts.as_str();
 
+fn write_plan_signature_companion(
+    astore: &raxis_artifact_store::ArtifactStore,
+    key: &raxis_artifact_store::ArtifactKey,
+    plan_sig: &[u8],
+) -> Result<(), raxis_artifact_store::ArtifactStoreError> {
+    match astore.write_companion(raxis_artifact_store::Category::Plans, key, "sig", plan_sig) {
+        Ok(_) => Ok(()),
+        Err(raxis_artifact_store::ArtifactStoreError::BytesDiverge { .. }) => {
+            let sig_key = raxis_artifact_store::ArtifactKey::compute(plan_sig);
+            let ext = format!("sig.{}", sig_key.as_hex());
+            astore
+                .write_companion(raxis_artifact_store::Category::Plans, key, &ext, plan_sig)
+                .map(|_| ())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -1022,12 +1040,7 @@ pub fn approve_plan(
             );
         } else {
             let key = raxis_artifact_store::ArtifactKey::compute(&plan_bytes);
-            if let Err(e) = astore.write_companion(
-                raxis_artifact_store::Category::Plans,
-                &key,
-                "sig",
-                &plan_sig,
-            ) {
+            if let Err(e) = write_plan_signature_companion(astore, &key, &plan_sig) {
                 eprintln!(
                     "{{\"level\":\"warn\",\"event\":\"PlanArtifactSigWriteFailed\",\
                      \"initiative\":\"{initiative_id}\",\"reason\":\"{e}\"}}",
@@ -9792,6 +9805,107 @@ max_concurrent_admissions   = 7
         assert_eq!(
             sig_on_disk, plan_sig,
             "companion .sig artifact must equal the verified signature"
+        );
+    }
+
+    #[test]
+    fn approve_plan_writes_distinct_sig_companion_for_same_plan_signed_by_different_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let astore = raxis_artifact_store::ArtifactStore::open(tmp.path()).unwrap();
+        let plan = r#"
+            [[tasks]]
+            task_name = "same-plan"
+        "#;
+
+        let approve = |store: &Store, sk: &SigningKey| -> (Vec<u8>, Vec<u8>) {
+            let (init_id, pk_bytes) = seed_draft_initiative(store, plan, sk);
+            let audit = FakeAuditSink::new();
+            let registry = PlanRegistry::new();
+
+            let empty_envs: std::collections::HashMap<String, raxis_policy::EnvironmentConfig> =
+                std::collections::HashMap::new();
+            let empty_creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
+            let empty_vm_images: Vec<raxis_policy::VmImageConfig> = Vec::new();
+            let default_elastic = raxis_policy::ElasticConfig::default();
+            let empty_lanes: Vec<raxis_policy::LaneEntry> = Vec::new();
+            approve_plan(
+                &init_id,
+                "op",
+                None,
+                &pk_bytes,
+                1,
+                "refs/heads/main",
+                false,
+                &empty_envs,
+                &empty_creds,
+                &empty_vm_images,
+                None,
+                &default_elastic,
+                &empty_lanes,
+                None,
+                store,
+                &audit,
+                &registry,
+                Some(&astore),
+            )
+            .unwrap();
+
+            let conn = store.lock_sync();
+            let plan_bytes: Vec<u8> = conn
+                .query_row(
+                    &format!(
+                        "SELECT plan_bytes FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id = ?1"
+                    ),
+                    rusqlite::params![&init_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let plan_sig: Vec<u8> = conn
+                .query_row(
+                    &format!(
+                        "SELECT plan_sig FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id = ?1"
+                    ),
+                    rusqlite::params![&init_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            (plan_bytes, plan_sig)
+        };
+
+        let store_a = Store::open_in_memory().unwrap();
+        let (sk_a, _) = fixture_keypair();
+        let (plan_bytes_a, sig_a) = approve(&store_a, &sk_a);
+
+        let store_b = Store::open_in_memory().unwrap();
+        let sk_b = SigningKey::from_bytes(&[0x43u8; 32]);
+        let (plan_bytes_b, sig_b) = approve(&store_b, &sk_b);
+
+        assert_eq!(
+            plan_bytes_a, plan_bytes_b,
+            "test setup must approve byte-identical plan artifacts",
+        );
+        assert_ne!(
+            sig_a, sig_b,
+            "different operator keys should produce distinct signatures",
+        );
+
+        let plan_key = raxis_artifact_store::ArtifactKey::compute(&plan_bytes_a);
+        let legacy_sig_path =
+            astore.companion_path(raxis_artifact_store::Category::Plans, &plan_key, "sig");
+        assert_eq!(
+            std::fs::read(&legacy_sig_path).unwrap(),
+            sig_a,
+            "legacy .sig companion should preserve the first signature",
+        );
+
+        let sig_b_key = raxis_artifact_store::ArtifactKey::compute(&sig_b);
+        let sig_b_ext = format!("sig.{}", sig_b_key.as_hex());
+        let sig_b_path =
+            astore.companion_path(raxis_artifact_store::Category::Plans, &plan_key, &sig_b_ext);
+        assert_eq!(
+            std::fs::read(&sig_b_path).unwrap(),
+            sig_b,
+            "same plan bytes with a different valid signature must get a deterministic companion",
         );
     }
 

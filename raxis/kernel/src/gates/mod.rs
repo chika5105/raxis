@@ -500,6 +500,19 @@ pub async fn spawn_integration_merge_verifiers_for_task(
                      \"gate_type\":\"{}\",\"gate_source\":\"{}\",\"error\":\"{e}\"}}",
                     spec.entry.name, spec.gate_source,
                 );
+                if !matches!(
+                    spec.entry.on_failure,
+                    raxis_policy::IntegrationMergeVerifierOnFailure::WarnOnly
+                ) {
+                    verifier_runner::fail_task_for_blocking_verifier_failure(
+                        task_id,
+                        &spec.entry.name,
+                        &format!("integration verifier config invalid: {e}"),
+                        ctx.store.as_ref(),
+                        Some(ctx.audit.clone()),
+                    )
+                    .await;
+                }
                 continue;
             }
         };
@@ -565,6 +578,19 @@ async fn spawn_task_verifiers_for_task_filtered(
                          \"error\":\"{e}\"}}",
                     verifier.name,
                 );
+                if matches!(
+                    verifier.on_failure,
+                    raxis_policy::TaskVerifierOnFailure::BlockReview
+                ) {
+                    verifier_runner::fail_task_for_blocking_verifier_failure(
+                        task_id,
+                        &verifier.name,
+                        &format!("task verifier config invalid: {e}"),
+                        ctx.store.as_ref(),
+                        Some(ctx.audit.clone()),
+                    )
+                    .await;
+                }
                 continue;
             }
         };
