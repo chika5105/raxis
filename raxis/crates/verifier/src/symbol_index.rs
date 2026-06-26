@@ -3,7 +3,7 @@
 //
 // Activated when the spawn envelope sets
 // `RAXIS_VERIFIER_BUILTIN = "symbol-index"`. The verifier binary
-// bypasses `sh -lc $RAXIS_VERIFIER_COMMAND` and runs this pipeline
+// bypasses the configured check executable and runs this pipeline
 // directly. The pipeline is the deliverable behind the
 // `INV-VERIFIER-SYMBOL-INDEX-PERF-CEILING-01` budget (D11):
 //

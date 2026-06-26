@@ -52,6 +52,10 @@ mkdir -p "${cellar}/bin" "${cellar}/share/raxis" "${cellar}/.brew"
 
 cp -p "${pkg_dir}/bin/"* "${cellar}/bin/"
 chmod 0755 "${cellar}/bin/"*
+if [[ ! -x "${cellar}/bin/raxis-verifier" ]]; then
+    echo "package-homebrew-bottle.sh: runtime archive missing executable bin/raxis-verifier" >&2
+    exit 70
+fi
 cp -R "${pkg_dir}/images" "${cellar}/share/raxis/images"
 cp -R "${pkg_dir}/kernel" "${cellar}/share/raxis/kernel"
 

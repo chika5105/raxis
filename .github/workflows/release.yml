@@ -471,6 +471,7 @@ jobs:
             -p raxis-cli \
             -p raxis-gateway \
             -p raxis-otel-pusher \
+            -p raxis-verifier \
             -p raxis-supervisor \
             -p raxis-planner-orchestrator \
             -p raxis-planner-executor \
@@ -507,6 +508,7 @@ jobs:
           cp target/${{ matrix.target }}/release/raxis-kernel "${outdir}/bin/raxis-kernel"
           cp target/${{ matrix.target }}/release/raxis-gateway "${outdir}/bin/raxis-gateway"
           cp target/${{ matrix.target }}/release/raxis-otel-pusher "${outdir}/bin/raxis-otel-pusher"
+          cp target/${{ matrix.target }}/release/raxis-verifier "${outdir}/bin/raxis-verifier"
           cp target/${{ matrix.target }}/release/raxis-supervisor "${outdir}/bin/raxis-supervisor"
           cp target/${{ matrix.target }}/release/raxis-orchestrator "${outdir}/bin/raxis-orchestrator"
           cp target/${{ matrix.target }}/release/raxis-executor "${outdir}/bin/raxis-executor"
@@ -615,6 +617,7 @@ jobs:
             -p raxis-cli \
             -p raxis-gateway \
             -p raxis-otel-pusher \
+            -p raxis-verifier \
             -p raxis-supervisor \
             -p raxis-planner-orchestrator \
             -p raxis-planner-executor \
@@ -653,6 +656,7 @@ jobs:
           cp target/${{ matrix.target }}/release/raxis-kernel "${outdir}/bin/raxis-kernel"
           cp target/${{ matrix.target }}/release/raxis-gateway "${outdir}/bin/raxis-gateway"
           cp target/${{ matrix.target }}/release/raxis-otel-pusher "${outdir}/bin/raxis-otel-pusher"
+          cp target/${{ matrix.target }}/release/raxis-verifier "${outdir}/bin/raxis-verifier"
           cp target/${{ matrix.target }}/release/raxis-supervisor "${outdir}/bin/raxis-supervisor"
           cp target/${{ matrix.target }}/release/raxis-orchestrator "${outdir}/bin/raxis-orchestrator"
           cp target/${{ matrix.target }}/release/raxis-executor "${outdir}/bin/raxis-executor"

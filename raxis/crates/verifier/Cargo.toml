@@ -17,8 +17,8 @@ repository.workspace  = true
 #     binary with a scrubbed env containing the spawn envelope
 #     (`RAXIS_VERIFIER_*`, `RAXIS_TASK_ID`, `RAXIS_KERNEL_SOCKET`, …)
 #     and `RAXIS_VERIFIER_COMMAND` carrying the verifier-supplied
-#     shell command.
-#   * The binary runs `sh -lc $RAXIS_VERIFIER_COMMAND`, captures
+#     single executable path.
+#   * The binary runs `RAXIS_VERIFIER_COMMAND` directly, captures
 #     `(stdout, stderr, exit_code)` (size-capped), and maps the exit
 #     code to a `WitnessResultClass` per the §6 table.
 #   * Wall-clock timeout from `RAXIS_VERIFIER_TIMEOUT_SECONDS`; on
@@ -60,7 +60,8 @@ raxis-types = { workspace = true }
 raxis-ipc   = { workspace = true }
 
 # Async runtime — the verifier connects to the UDS via
-# `tokio::net::UnixStream` and shells out via `tokio::process::Command`
+# `tokio::net::UnixStream` and executes the child verifier via
+# `tokio::process::Command`
 # so the wall-clock timeout, the child-wait, and the kernel
 # round-trip can all share one runtime.
 tokio       = { workspace = true }

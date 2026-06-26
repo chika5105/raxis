@@ -23,12 +23,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use raxis_audit_tools::AuditEventKind;
 use rusqlite::OptionalExtension;
 use tokio::process::Command;
+use tokio::sync::oneshot;
 
 use raxis_audit_tools::AuditSink;
 use raxis_policy::{
@@ -88,25 +89,28 @@ fn resolve_and_verify_binary(
         return Err(GateError::SpawnFailed {
             gate_type: gate_type.to_owned(),
             reason: format!(
-                "verifier_command `{}` is not absolute; production verifier \
-                 commands must be pinned host paths.",
+                "raxis-verifier binary `{}` is not absolute; production verifier \
+                 shims must be pinned host paths.",
                 raw.display()
             ),
         });
     }
     let canonical = fs::canonicalize(raw).map_err(|e| GateError::SpawnFailed {
         gate_type: gate_type.to_owned(),
-        reason: format!("canonicalize verifier_command `{}`: {e}", raw.display()),
+        reason: format!(
+            "canonicalize raxis-verifier binary `{}`: {e}",
+            raw.display()
+        ),
     })?;
     let meta = fs::metadata(&canonical).map_err(|e| GateError::SpawnFailed {
         gate_type: gate_type.to_owned(),
-        reason: format!("stat verifier_command `{}`: {e}", canonical.display()),
+        reason: format!("stat raxis-verifier binary `{}`: {e}", canonical.display()),
     })?;
     if !meta.is_file() {
         return Err(GateError::SpawnFailed {
             gate_type: gate_type.to_owned(),
             reason: format!(
-                "verifier_command `{}` is not a regular file",
+                "raxis-verifier binary `{}` is not a regular file",
                 canonical.display()
             ),
         });
@@ -119,23 +123,19 @@ fn resolve_and_verify_binary(
             return Err(GateError::SpawnFailed {
                 gate_type: gate_type.to_owned(),
                 reason: format!(
-                    "verifier_command `{}` is not executable",
+                    "raxis-verifier binary `{}` is not executable",
                     canonical.display()
                 ),
             });
         }
     }
 
-    let actual_digest = if config.verifier_binary_sha256.is_some() {
-        let bytes = fs::read(&canonical).map_err(|e| GateError::SpawnFailed {
-            gate_type: gate_type.to_owned(),
-            reason: format!("read verifier_command `{}`: {e}", canonical.display()),
-        })?;
-        let digest = Sha256::digest(&bytes);
-        Some(hex::encode(digest))
-    } else {
-        None
-    };
+    let bytes = fs::read(&canonical).map_err(|e| GateError::SpawnFailed {
+        gate_type: gate_type.to_owned(),
+        reason: format!("read raxis-verifier binary `{}`: {e}", canonical.display()),
+    })?;
+    let digest = Sha256::digest(&bytes);
+    let actual_digest = Some(hex::encode(digest));
 
     if let (Some(expected), Some(actual)) = (
         config.verifier_binary_sha256.as_deref(),
@@ -145,7 +145,7 @@ fn resolve_and_verify_binary(
             return Err(GateError::SpawnFailed {
                 gate_type: gate_type.to_owned(),
                 reason: format!(
-                    "verifier_command `{}` sha256 mismatch: expected {}, got {}",
+                    "raxis-verifier binary `{}` sha256 mismatch: expected {}, got {}",
                     canonical.display(),
                     expected,
                     actual
@@ -154,7 +154,76 @@ fn resolve_and_verify_binary(
         }
     }
 
+    resolve_and_verify_inner_verifier_command(gate_type, config)?;
+
     Ok((canonical, actual_digest))
+}
+
+fn resolve_and_verify_inner_verifier_command(
+    gate_type: &str,
+    config: &VerifierConfig,
+) -> Result<PathBuf, GateError> {
+    let command = config
+        .verifier_command
+        .as_deref()
+        .ok_or_else(|| GateError::SpawnFailed {
+            gate_type: gate_type.to_owned(),
+            reason: "verifier command missing; raxis-verifier needs one inner check command"
+                .to_owned(),
+        })?;
+    let path = parse_verifier_command_path(command)?;
+    let canonical = fs::canonicalize(&path).map_err(|e| GateError::SpawnFailed {
+        gate_type: gate_type.to_owned(),
+        reason: format!(
+            "canonicalize verifier check command `{}`: {e}",
+            path.display()
+        ),
+    })?;
+    let meta = fs::metadata(&canonical).map_err(|e| GateError::SpawnFailed {
+        gate_type: gate_type.to_owned(),
+        reason: format!("stat verifier check command `{}`: {e}", canonical.display()),
+    })?;
+    if !meta.is_file() {
+        return Err(GateError::SpawnFailed {
+            gate_type: gate_type.to_owned(),
+            reason: format!(
+                "verifier check command `{}` is not a regular file",
+                canonical.display()
+            ),
+        });
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return Err(GateError::SpawnFailed {
+                gate_type: gate_type.to_owned(),
+                reason: format!(
+                    "verifier check command `{}` is not executable",
+                    canonical.display()
+                ),
+            });
+        }
+    }
+    if let Some(expected) = config.verifier_command_sha256.as_deref() {
+        let bytes = fs::read(&canonical).map_err(|e| GateError::SpawnFailed {
+            gate_type: gate_type.to_owned(),
+            reason: format!("read verifier check command `{}`: {e}", canonical.display()),
+        })?;
+        let actual = hex::encode(Sha256::digest(&bytes));
+        if !expected.eq_ignore_ascii_case(&actual) {
+            return Err(GateError::SpawnFailed {
+                gate_type: gate_type.to_owned(),
+                reason: format!(
+                    "verifier check command `{}` sha256 mismatch: expected {}, got {}",
+                    canonical.display(),
+                    expected,
+                    actual
+                ),
+            });
+        }
+    }
+    Ok(canonical)
 }
 
 /// Record a verifier's elapsed wall-time against its task's
@@ -271,6 +340,230 @@ fn verifier_process_failure_reason(status: &ExitStatus) -> String {
     "verifier process terminated without exit code".to_owned()
 }
 
+#[derive(Debug, Clone)]
+struct ExpiredPendingVerifierRun {
+    verifier_run_id: String,
+    task_id: String,
+    initiative_id: Option<String>,
+    gate_type: String,
+    issued_at: i64,
+    expires_at: i64,
+    verifier_on_failure: Option<String>,
+    task_state: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct VerifierReconcileReport {
+    pub expired_pending: usize,
+    pub blocking_tasks_failed: usize,
+}
+
+const EXPIRED_PENDING_VERIFIER_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+const EXPIRED_PENDING_VERIFIER_FAILURE_REASON: &str =
+    "verifier run token expired without a witness or terminal watcher result";
+
+async fn verifier_run_has_consumed_witness_or_terminal_status(
+    run_id: &str,
+    store: &Store,
+) -> Result<bool, GateError> {
+    let run_id_owned = run_id.to_owned();
+    let store_owned = store.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = store_owned.lock_sync();
+        let verifier_tokens = Table::VerifierRunTokens.as_str();
+        conn.query_row(
+            &format!("SELECT consumed, status FROM {verifier_tokens} WHERE verifier_run_id = ?1"),
+            rusqlite::params![&run_id_owned],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|e| GateError::Store(e.to_string()))?
+        .ok_or_else(|| {
+            GateError::Store(format!(
+                "verifier_run_tokens row missing for verifier_run_id={run_id_owned}"
+            ))
+        })
+        .map(|(consumed, status)| consumed != 0 || status != "Pending")
+    })
+    .await
+    .map_err(|e| GateError::Store(format!("read verifier token join failed: {e}")))?
+}
+
+async fn wait_for_verifier_witness_or_terminal_status(run_id: &str, store: &Store) -> bool {
+    // The verifier binary only exits after reading the kernel's WitnessAck,
+    // so a consumed token should normally be visible immediately. The small
+    // grace window absorbs scheduler ordering between the witness handler and
+    // this watcher without letting a GatesPending task linger indefinitely.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        match verifier_run_has_consumed_witness_or_terminal_status(run_id, store).await {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"VerifierWitnessPostExitCheckFailed\",\
+                     \"verifier_run_id\":\"{run_id}\",\"reason\":\"{e}\"}}"
+                );
+                return false;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+pub(crate) async fn reconcile_expired_pending_verifier_runs(
+    store: &Store,
+    audit: Option<Arc<dyn AuditSink>>,
+    now_unix_secs: i64,
+) -> Result<VerifierReconcileReport, GateError> {
+    let store_for_query = store.clone();
+    let expired = tokio::task::spawn_blocking(move || {
+        let conn = store_for_query.lock_sync();
+        let verifier_tokens = Table::VerifierRunTokens.as_str();
+        let tasks = Table::Tasks.as_str();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT v.verifier_run_id,
+                        v.task_id,
+                        t.initiative_id,
+                        v.gate_type,
+                        v.issued_at,
+                        v.expires_at,
+                        v.verifier_on_failure,
+                        t.state
+                   FROM {verifier_tokens} v
+                   LEFT JOIN {tasks} t ON t.task_id = v.task_id
+                  WHERE v.consumed = 0
+                    AND v.status = 'Pending'
+                    AND v.expires_at <= ?1
+                  ORDER BY v.expires_at ASC, v.issued_at ASC"
+            ))
+            .map_err(|e| GateError::Store(e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params![now_unix_secs], |r| {
+                Ok(ExpiredPendingVerifierRun {
+                    verifier_run_id: r.get(0)?,
+                    task_id: r.get(1)?,
+                    initiative_id: r.get(2)?,
+                    gate_type: r.get(3)?,
+                    issued_at: r.get(4)?,
+                    expires_at: r.get(5)?,
+                    verifier_on_failure: r.get(6)?,
+                    task_state: r.get(7)?,
+                })
+            })
+            .map_err(|e| GateError::Store(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| GateError::Store(e.to_string()))
+    })
+    .await
+    .map_err(|e| GateError::Store(format!("expired verifier query join failed: {e}")))??;
+
+    let mut report = VerifierReconcileReport {
+        expired_pending: expired.len(),
+        blocking_tasks_failed: 0,
+    };
+
+    for run in expired {
+        let timeout_seconds = run
+            .expires_at
+            .saturating_sub(run.issued_at)
+            .try_into()
+            .unwrap_or_default();
+        if let Some(sink) = audit.as_ref() {
+            crate::gates::verifier_audit::emit_timeout(
+                sink.as_ref(),
+                &run.verifier_run_id,
+                timeout_seconds,
+                0,
+                Some(&run.task_id),
+                run.initiative_id.as_deref(),
+            );
+        }
+
+        let store_for_status = store.clone();
+        let run_id_for_status = run.verifier_run_id.clone();
+        tokio::task::spawn_blocking(move || {
+            verifier_token::mark_verifier_run_terminal_by_run_id(
+                &run_id_for_status,
+                "Timeout",
+                Some(EXPIRED_PENDING_VERIFIER_FAILURE_REASON),
+                &store_for_status,
+            )
+        })
+        .await
+        .map_err(|e| GateError::Store(format!("expired verifier status join failed: {e}")))?
+        .map_err(|e| GateError::Store(e.to_string()))?;
+
+        let blocks_task = !matches!(run.verifier_on_failure.as_deref(), Some("warn_only"));
+        if blocks_task
+            && run.task_state.as_deref() == Some(raxis_types::TaskState::GatesPending.as_sql_str())
+        {
+            fail_task_for_blocking_verifier_failure(
+                &run.task_id,
+                &run.gate_type,
+                EXPIRED_PENDING_VERIFIER_FAILURE_REASON,
+                store,
+                audit.clone(),
+            )
+            .await;
+            report.blocking_tasks_failed += 1;
+        }
+    }
+
+    Ok(report)
+}
+
+pub(crate) async fn expired_pending_verifier_reconciler_loop(
+    store: Arc<Store>,
+    audit: Arc<dyn AuditSink>,
+    mut shutdown: oneshot::Receiver<()>,
+) {
+    let mut interval = tokio::time::interval(EXPIRED_PENDING_VERIFIER_RECONCILE_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let now = raxis_types::unix_now_secs();
+                match reconcile_expired_pending_verifier_runs(
+                    store.as_ref(),
+                    Some(Arc::clone(&audit)),
+                    now,
+                )
+                .await
+                {
+                    Ok(report) if report.expired_pending > 0 => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"ExpiredPendingVerifierRunsReconciled\",\
+                             \"expired_pending\":{},\"blocking_tasks_failed\":{},\
+                             \"now_unix_secs\":{now}}}",
+                            report.expired_pending,
+                            report.blocking_tasks_failed,
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"ExpiredPendingVerifierRunReconcileFailed\",\
+                             \"reason\":\"{e}\"}}"
+                        );
+                    }
+                }
+            }
+            _ = &mut shutdown => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"expired_pending_verifier_reconciler_stopping\"}}",
+                );
+                return;
+            }
+        }
+    }
+}
+
 async fn read_task_initiative_id(store: &Store, task_id: &str) -> Result<String, GateError> {
     let store_clone = store.clone();
     let task_id_owned = task_id.to_owned();
@@ -350,12 +643,19 @@ pub(crate) async fn fail_task_for_blocking_verifier_failure(
 
 #[derive(Debug, Clone)]
 pub struct VerifierConfig {
-    /// Absolute path to the gate-type-specific verifier binary.
+    /// Absolute path to the canonical RAXIS verifier shim. This is the
+    /// only process the kernel expects to speak the WitnessSubmission
+    /// protocol; operator-authored commands are passed to it as the
+    /// inner mechanical check.
     pub verifier_binary_path: PathBuf,
     /// Optional SHA-256 digest of the verifier binary bytes. When
     /// present, spawn verifies the executable on disk before issuing a
     /// verifier token so audit can attribute the exact binary.
     pub verifier_binary_sha256: Option<String>,
+    /// Optional SHA-256 digest of the operator-authored inner check
+    /// command. Policy `verifier_sha256` pins this, not the
+    /// `raxis-verifier` shim.
+    pub verifier_command_sha256: Option<String>,
     /// TTL for the verifier run token.
     pub verifier_token_ttl_secs: u64,
     /// CPU-second hard limit (RLIMIT_CPU).
@@ -373,6 +673,9 @@ pub struct VerifierConfig {
     pub gate_hook: String,
     pub verifier_image_alias: Option<String>,
     pub verifier_command: Option<String>,
+    pub verifier_artifact_path: Option<String>,
+    pub verifier_artifact_max_bytes: Option<u64>,
+    pub verifier_env: BTreeMap<String, String>,
     pub verifier_on_failure: Option<String>,
 
     /// iter63-followups.md Item 1 — operator-authored hints
@@ -396,8 +699,9 @@ impl VerifierConfig {
     pub fn from_policy(policy: &PolicyBundle, gate_type: &str, data_dir: &Path) -> Option<Self> {
         let gate = policy.gates().iter().find(|g| g.gate_type == gate_type)?;
         Some(Self {
-            verifier_binary_path: PathBuf::from(&gate.verifier_command),
-            verifier_binary_sha256: gate.verifier_sha256.clone(),
+            verifier_binary_path: canonical_raxis_verifier_binary_path(),
+            verifier_binary_sha256: None,
+            verifier_command_sha256: gate.verifier_sha256.clone(),
             verifier_token_ttl_secs: 300, // 5 min default
             verifier_cpu_secs: gate.max_wall_seconds as u64,
             verifier_memory_bytes: gate.max_memory_bytes,
@@ -412,6 +716,9 @@ impl VerifierConfig {
             gate_hook: policy_gate_hook_label(gate),
             verifier_image_alias: Some("mechanical-verifier".to_owned()),
             verifier_command: Some(gate.verifier_command.clone()),
+            verifier_artifact_path: None,
+            verifier_artifact_max_bytes: None,
+            verifier_env: BTreeMap::new(),
             verifier_on_failure: Some("block".to_owned()),
             hints: gate.hints.clone(),
             verifier_runtime: policy.verifier_runtime(),
@@ -423,7 +730,7 @@ impl VerifierConfig {
         entry: &TaskVerifierEntry,
         data_dir: &Path,
     ) -> Result<Self, GateError> {
-        let verifier_binary_path = parse_verifier_command_path(&entry.command)?;
+        parse_verifier_command_path(&entry.command)?;
         let timeout_secs = raxis_policy::parse_verifier_timeout_secs(&entry.timeout)
             .ok_or_else(|| {
                 GateError::PolicyMisconfigured(format!(
@@ -437,8 +744,9 @@ impl VerifierConfig {
             TaskVerifierOnFailure::WarnOnly => "warn_only",
         };
         Ok(Self {
-            verifier_binary_path,
+            verifier_binary_path: canonical_raxis_verifier_binary_path(),
             verifier_binary_sha256: None,
+            verifier_command_sha256: None,
             verifier_token_ttl_secs: 300,
             verifier_cpu_secs: timeout_secs as u64,
             verifier_memory_bytes: 512 * 1024 * 1024,
@@ -453,6 +761,13 @@ impl VerifierConfig {
             gate_hook: "complete_task".to_owned(),
             verifier_image_alias: Some(entry.image.clone()),
             verifier_command: Some(entry.command.clone()),
+            verifier_artifact_path: entry.artifact.clone(),
+            verifier_artifact_max_bytes: entry.artifact_max_bytes,
+            verifier_env: entry
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             verifier_on_failure: Some(on_failure.to_owned()),
             hints: entry.hints.clone(),
             verifier_runtime: policy.verifier_runtime(),
@@ -465,7 +780,7 @@ impl VerifierConfig {
         data_dir: &Path,
         gate_source: &'static str,
     ) -> Result<Self, GateError> {
-        let verifier_binary_path = parse_verifier_command_path(&entry.command)?;
+        parse_verifier_command_path(&entry.command)?;
         let timeout_secs = raxis_policy::parse_verifier_timeout_secs(&entry.timeout)
             .ok_or_else(|| {
                 GateError::PolicyMisconfigured(format!(
@@ -479,8 +794,9 @@ impl VerifierConfig {
             IntegrationMergeVerifierOnFailure::WarnOnly => "warn_only",
         };
         Ok(Self {
-            verifier_binary_path,
+            verifier_binary_path: canonical_raxis_verifier_binary_path(),
             verifier_binary_sha256: None,
+            verifier_command_sha256: None,
             verifier_token_ttl_secs: 300,
             verifier_cpu_secs: timeout_secs as u64,
             verifier_memory_bytes: 512 * 1024 * 1024,
@@ -495,6 +811,13 @@ impl VerifierConfig {
             gate_hook: "integration_merge".to_owned(),
             verifier_image_alias: Some(entry.image.clone()),
             verifier_command: Some(entry.command.clone()),
+            verifier_artifact_path: entry.artifact.clone(),
+            verifier_artifact_max_bytes: entry.artifact_max_bytes,
+            verifier_env: entry
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             verifier_on_failure: Some(on_failure.to_owned()),
             hints: entry.hints.clone(),
             verifier_runtime: policy.verifier_runtime(),
@@ -507,6 +830,59 @@ fn policy_gate_hook_label(gate: &raxis_policy::GateEntry) -> String {
         return "intent".to_owned();
     }
     gate.selectors.hooks.join(",")
+}
+
+fn canonical_raxis_verifier_binary_path() -> PathBuf {
+    if let Some(raw) = std::env::var_os("RAXIS_VERIFIER_BINARY") {
+        let path = PathBuf::from(raw);
+        if !path.as_os_str().is_empty() {
+            return path;
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("raxis-verifier"));
+            if let Some(parent) = dir.parent() {
+                candidates.push(parent.join("raxis-verifier"));
+            }
+        }
+    }
+    if let Some(raw) = std::env::var_os("RAXIS_INSTALL_DIR") {
+        let install = PathBuf::from(raw);
+        candidates.push(install.join("bin").join("raxis-verifier"));
+        if let Some(parent) = install.parent().and_then(|p| p.parent()) {
+            candidates.push(parent.join("bin").join("raxis-verifier"));
+        }
+    }
+    if let Some(path) = find_on_path("raxis-verifier") {
+        candidates.push(path);
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from("/usr/local/bin/raxis-verifier"))
+}
+
+fn find_on_path(binary: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(binary))
+        .find(|path| path.is_file())
+}
+
+fn verifier_hook_kind(config: &VerifierConfig) -> &'static str {
+    match config.gate_source.as_str() {
+        "task_verifier" => "per_task",
+        "policy_gate" => "policy_claim_gate",
+        "plan_integration_merge_verifier"
+        | "policy_integration_merge_verifier"
+        | "plan_integration_verifier"
+        | "policy_integration_verifier" => "pre_merge",
+        _ => "unknown",
+    }
 }
 
 fn parse_verifier_command_path(command: &str) -> Result<PathBuf, GateError> {
@@ -866,6 +1242,13 @@ pub async fn spawn_verifier_with_audit(
         }
     };
 
+    let declared = config.verifier_max_wall_secs;
+    let policy_max = config.verifier_runtime.max_verifier_wall_seconds as u64;
+    let wall_seconds = declared.min(policy_max);
+    let grace_seconds = config
+        .verifier_runtime
+        .verifier_force_shutdown_grace_seconds as u64;
+
     // Step 4: Build spawn envelope environment (scrubbed — env_clear() first).
     let mut cmd = Command::new(&verifier_binary_path);
     cmd.env_clear()
@@ -875,6 +1258,14 @@ pub async fn spawn_verifier_with_audit(
         .env("RAXIS_EVALUATION_SHA", evaluation_sha)
         .env("RAXIS_KERNEL_SOCKET", &config.kernel_socket_path)
         .env("RAXIS_WORKTREE_ROOT", worktree_root.display().to_string())
+        .env(
+            "RAXIS_VERIFIER_COMMAND",
+            config.verifier_command.as_deref().unwrap_or_default(),
+        )
+        .env("RAXIS_VERIFIER_TIMEOUT_SECONDS", wall_seconds.to_string())
+        .env("RAXIS_VERIFIER_NAME", gate_type)
+        .env("RAXIS_VERIFIER_HOOK_KIND", verifier_hook_kind(config))
+        .env("RAXIS_INITIATIVE_ID", &initiative_id)
         // iter63 — operator hints, single env var (avoids the
         // per-key escaping mess of `RAXIS_HINT_<KEY>=<VAL>`).
         // Always set (even if empty `{}`) so a verifier that
@@ -888,6 +1279,18 @@ pub async fn spawn_verifier_with_audit(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .current_dir(worktree_root);
+
+    if let Some(path) = config.verifier_artifact_path.as_deref() {
+        cmd.env("RAXIS_VERIFIER_ARTIFACT_PATH", path);
+    }
+    if let Some(max_bytes) = config.verifier_artifact_max_bytes {
+        cmd.env("RAXIS_VERIFIER_ARTIFACT_MAX_BYTES", max_bytes.to_string());
+    }
+    for (key, value) in &config.verifier_env {
+        if !key.starts_with(raxis_policy::RAXIS_RESERVED_ENV_PREFIX) {
+            cmd.env(key, value);
+        }
+    }
 
     // Apply documented RLIMIT_CPU + RLIMIT_AS via `pre_exec`
     // before exec. The cpu/mem limits originate from the
@@ -1012,12 +1415,6 @@ pub async fn spawn_verifier_with_audit(
     // policy-bundle ceiling (verifier_runtime.max_verifier_wall_seconds).
     // `min(...)` is the canonical reading of
     // `iter63-followups.md` Item 2 #1.
-    let declared = config.verifier_max_wall_secs;
-    let policy_max = config.verifier_runtime.max_verifier_wall_seconds as u64;
-    let wall_seconds = declared.min(policy_max);
-    let grace_seconds = config
-        .verifier_runtime
-        .verifier_force_shutdown_grace_seconds as u64;
     let audit_for_watcher = audit.clone();
     let gate_type_clone = gate_type.to_owned();
     let initiative_id_clone = initiative_id.clone();
@@ -1090,6 +1487,49 @@ pub async fn spawn_verifier_with_audit(
                             &run_id_for_status,
                             "ProcessFailed",
                             Some(reason.as_str()),
+                            &store_for_status,
+                        )
+                    })
+                    .await;
+                } else if !wait_for_verifier_witness_or_terminal_status(
+                    &run_id_clone,
+                    &store_for_watcher,
+                )
+                .await
+                {
+                    let reason =
+                        "verifier process exited successfully without submitting a witness"
+                            .to_owned();
+                    if let Some(sink) = audit_for_watcher.as_ref() {
+                        let _ = sink.emit(
+                            AuditEventKind::VerifierProcessFailed {
+                                task_id: task_id_clone.clone(),
+                                exit_code,
+                                gate_type: gate_type_clone.clone(),
+                            },
+                            None,
+                            Some(&task_id_clone),
+                            Some(&initiative_id_clone),
+                        );
+                    }
+                    if blocks_task_on_failure {
+                        fail_task_for_blocking_verifier_failure(
+                            &task_id_clone,
+                            &gate_type_clone,
+                            &reason,
+                            &store_for_watcher,
+                            audit_for_watcher.clone(),
+                        )
+                        .await;
+                    }
+                    let store_for_status = store_for_watcher.clone();
+                    let run_id_for_status = run_id_clone.clone();
+                    let reason_for_status = reason.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        verifier_token::mark_verifier_run_terminal_by_run_id(
+                            &run_id_for_status,
+                            "ProcessFailed",
+                            Some(reason_for_status.as_str()),
                             &store_for_status,
                         )
                     })
@@ -1337,6 +1777,7 @@ mod integration {
         VerifierConfig {
             verifier_binary_path: verifier_binary.to_path_buf(),
             verifier_binary_sha256: None,
+            verifier_command_sha256: None,
             verifier_token_ttl_secs: 60,
             verifier_cpu_secs: 30,
             verifier_memory_bytes: 1 << 30, // 1 GiB
@@ -1347,6 +1788,9 @@ mod integration {
             gate_hook: "intent".to_owned(),
             verifier_image_alias: Some("mechanical-verifier".to_owned()),
             verifier_command: Some(verifier_binary.display().to_string()),
+            verifier_artifact_path: None,
+            verifier_artifact_max_bytes: None,
+            verifier_env: BTreeMap::new(),
             verifier_on_failure: Some("block".to_owned()),
             hints: BTreeMap::new(),
             verifier_runtime: VerifierRuntimeConfig::default(),
@@ -1514,7 +1958,7 @@ mod integration {
             failure_reason
                 .as_deref()
                 .unwrap_or_default()
-                .contains("canonicalize verifier_command"),
+                .contains("canonicalize raxis-verifier binary"),
             "operator-facing failure_reason should identify the failed binary validation step; got {failure_reason:?}",
         );
     }
@@ -1564,12 +2008,15 @@ mod integration {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn successful_spawn_persists_verifier_run_tokens_row_with_correct_fields() {
         let _guard = acquire_global_lock();
-        if skip_if_missing("/usr/bin/true") {
+        if skip_if_missing("/bin/sh") {
             return;
         }
         let store = mem_store();
         let tmp = TempDir::new().unwrap();
-        let cfg = config_for(Path::new("/usr/bin/true"));
+        let script = tmp.path().join("sleep-briefly.sh");
+        std::fs::write(&script, "#!/bin/sh\nexec /bin/sleep 1\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cfg = config_for(&script);
 
         let task_id = unique_id("task");
         seed_task_for(&store, &task_id).await;
@@ -1601,6 +2048,171 @@ mod integration {
         assert_eq!(db_gate, "TestCoverage");
         assert_eq!(db_eval, "f00dbabef00dbabef00dbabef00dbabe");
         assert_eq!(consumed, 0, "freshly issued tokens are unconsumed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_verifier_zero_exit_without_witness_fails_gates_pending_task() {
+        let _guard = acquire_global_lock();
+        if skip_if_missing("/usr/bin/true") {
+            return;
+        }
+        let store = mem_store();
+        let tmp = TempDir::new().unwrap();
+        let cfg = config_for(Path::new("/usr/bin/true"));
+
+        let task_id = unique_id("task");
+        seed_task_with_state(&store, &task_id, raxis_types::TaskState::GatesPending).await;
+        let run_id = spawn_verifier(
+            &task_id,
+            "test-gate",
+            "abcd1234abcd1234abcd1234abcd1234abcd1234",
+            tmp.path(),
+            &cfg,
+            &store,
+        )
+        .await
+        .expect("spawn must succeed against /usr/bin/true");
+
+        let started = Instant::now();
+        let failed = loop {
+            let state = {
+                let conn = store.lock().await;
+                conn.query_row(
+                    &format!("SELECT state FROM {TASKS} WHERE task_id = ?1"),
+                    rusqlite::params![&task_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()
+            };
+            if state.as_deref() == Some(raxis_types::TaskState::Failed.as_sql_str()) {
+                break true;
+            }
+            if started.elapsed() >= Duration::from_secs(3) {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(
+            failed,
+            "zero-exit verifier without witness must move GatesPending task to Failed"
+        );
+
+        let conn = store.lock().await;
+        let (state, block_reason, token_status, token_failure): (
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                &format!(
+                    "SELECT t.state, t.block_reason, v.status, v.failure_reason
+                       FROM {TASKS} t
+                       JOIN {VERIFIER_RUN_TOKENS} v ON v.task_id = t.task_id
+                      WHERE t.task_id = ?1 AND v.verifier_run_id = ?2"
+                ),
+                rusqlite::params![&task_id, &run_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("task and verifier token rows");
+        assert_eq!(state, raxis_types::TaskState::Failed.as_sql_str());
+        assert_eq!(token_status, "ProcessFailed");
+        assert!(
+            token_failure
+                .as_deref()
+                .unwrap_or_default()
+                .contains("without submitting a witness"),
+            "token failure should identify missing witness, got {token_failure:?}",
+        );
+        assert!(
+            block_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("without submitting a witness"),
+            "block_reason should explain missing witness, got {block_reason:?}",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn expired_pending_blocking_verifier_reconciler_fails_gates_pending_task() {
+        let _guard = acquire_global_lock();
+        let store = mem_store();
+        let task_id = unique_id("task");
+        let run_id = unique_id("verifier-run");
+        let evaluation_sha = "abcd1234abcd1234abcd1234abcd1234abcd1234";
+        seed_task_with_state(&store, &task_id, raxis_types::TaskState::GatesPending).await;
+
+        let now = raxis_types::unix_now_secs();
+        {
+            let conn = store.lock().await;
+            conn.execute(
+                &format!(
+                    "INSERT INTO {VERIFIER_RUN_TOKENS}
+                        (verifier_run_id, task_id, gate_type, evaluation_sha,
+                         token_hash, issued_at, expires_at, consumed,
+                         gate_source, gate_hook, verifier_on_failure)
+                     VALUES (?1, ?2, 'test-gate', ?3, ?4, ?5, ?6, 0,
+                             'task_verifier', 'complete_task', 'block_review')"
+                ),
+                rusqlite::params![
+                    &run_id,
+                    &task_id,
+                    evaluation_sha,
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    now.saturating_sub(120),
+                    now.saturating_sub(60),
+                ],
+            )
+            .expect("seed expired verifier token");
+        }
+
+        let report = reconcile_expired_pending_verifier_runs(&store, None, now)
+            .await
+            .expect("reconcile expired verifier token");
+        assert_eq!(
+            report,
+            VerifierReconcileReport {
+                expired_pending: 1,
+                blocking_tasks_failed: 1,
+            }
+        );
+
+        let conn = store.lock().await;
+        let (state, block_reason, token_status, token_consumed, token_failure): (
+            String,
+            Option<String>,
+            String,
+            i64,
+            Option<String>,
+        ) = conn
+            .query_row(
+                &format!(
+                    "SELECT t.state, t.block_reason, v.status, v.consumed, v.failure_reason
+                       FROM {TASKS} t
+                       JOIN {VERIFIER_RUN_TOKENS} v ON v.task_id = t.task_id
+                      WHERE t.task_id = ?1 AND v.verifier_run_id = ?2"
+                ),
+                rusqlite::params![&task_id, &run_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("task and expired verifier token rows");
+        assert_eq!(state, raxis_types::TaskState::Failed.as_sql_str());
+        assert_eq!(token_status, "Timeout");
+        assert_eq!(token_consumed, 1);
+        assert!(
+            token_failure
+                .as_deref()
+                .unwrap_or_default()
+                .contains("expired without a witness"),
+            "token failure should explain stale pending token, got {token_failure:?}",
+        );
+        assert!(
+            block_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("expired without a witness"),
+            "block_reason should explain stale pending token, got {block_reason:?}",
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2433,6 +3045,7 @@ mod stub_round_trip {
         let cfg = VerifierConfig {
             verifier_binary_path: stub_bin.clone(),
             verifier_binary_sha256: None,
+            verifier_command_sha256: None,
             verifier_token_ttl_secs: 60,
             verifier_cpu_secs: 30,
             verifier_memory_bytes: 1 << 30,
@@ -2447,6 +3060,9 @@ mod stub_round_trip {
             gate_hook: "intent".to_owned(),
             verifier_image_alias: Some("mechanical-verifier".to_owned()),
             verifier_command: Some(stub_bin.display().to_string()),
+            verifier_artifact_path: None,
+            verifier_artifact_max_bytes: None,
+            verifier_env: BTreeMap::new(),
             verifier_on_failure: Some("block".to_owned()),
             hints: BTreeMap::new(),
             verifier_runtime: VerifierRuntimeConfig::default(),
@@ -2663,6 +3279,7 @@ mod stub_round_trip {
         let cfg = VerifierConfig {
             verifier_binary_path: stub_bin.clone(),
             verifier_binary_sha256: None,
+            verifier_command_sha256: None,
             verifier_token_ttl_secs: 60,
             verifier_cpu_secs: 30,
             verifier_memory_bytes: 1 << 30,
@@ -2673,6 +3290,9 @@ mod stub_round_trip {
             gate_hook: "intent".to_owned(),
             verifier_image_alias: Some("mechanical-verifier".to_owned()),
             verifier_command: Some(stub_bin.display().to_string()),
+            verifier_artifact_path: None,
+            verifier_artifact_max_bytes: None,
+            verifier_env: BTreeMap::new(),
             verifier_on_failure: Some("block".to_owned()),
             hints: BTreeMap::new(),
             verifier_runtime: VerifierRuntimeConfig::default(),
@@ -2827,6 +3447,7 @@ mod stub_round_trip {
         let cfg = VerifierConfig {
             verifier_binary_path: stub_bin.clone(),
             verifier_binary_sha256: None,
+            verifier_command_sha256: None,
             verifier_token_ttl_secs: 60,
             verifier_cpu_secs: 30,
             verifier_memory_bytes: 1 << 30,
@@ -2837,6 +3458,9 @@ mod stub_round_trip {
             gate_hook: "intent".to_owned(),
             verifier_image_alias: Some("mechanical-verifier".to_owned()),
             verifier_command: Some(stub_bin.display().to_string()),
+            verifier_artifact_path: None,
+            verifier_artifact_max_bytes: None,
+            verifier_env: BTreeMap::new(),
             verifier_on_failure: Some("block".to_owned()),
             hints: BTreeMap::new(),
             verifier_runtime: VerifierRuntimeConfig::default(),

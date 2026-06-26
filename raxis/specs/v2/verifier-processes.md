@@ -139,7 +139,7 @@ Pre-merge verifier fail → n/a                                       FAIL_INTEG
 [[plan.tasks.web_implementer.verifiers]]
 name        = "node_test"            # required; unique within the task
 image       = "raxis-verifier-node-starter"   # required; resolves to a [[vm_images]] entry whose role_restriction includes "Verifier"
-command     = "/usr/local/bin/raxis-node-test" # required; single absolute executable path; put args/env inside a trusted wrapper
+command     = "/usr/local/bin/raxis-node-test" # required; single absolute check executable path run by raxis-verifier
 timeout     = "10m"                  # required; wall-clock; kernel-enforced via cgroup.kill
 on_failure  = "block_review"         # required; "block_review" | "warn_only"
 artifact    = "/raxis/test_report.json"   # optional; see §6
@@ -153,7 +153,7 @@ env         = { CI = "true" }        # optional; merged with envelope env; canno
 |---|---|---|---|
 | `name` | Required | Identifier within the task; used for `verifier_witnesses` row keying and audit events | Non-empty; `[a-z][a-z0-9_]{0,31}`; unique within `[[verifiers]]` of this task |
 | `image` | Required | OCI image used to boot the verifier VM | Must resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Verifier"` (per `INV-VM-CAP-03`); image must satisfy `INV-VERIFIER-06` (Linux 5.14+, cgroup v2, controllers in `subtree_control`) |
-| `command` | Required | Single trusted verifier executable path launched by the host-side runner | Non-empty; absolute path; no whitespace; arguments and env belong inside the wrapper executable |
+| `command` | Required | Single trusted mechanical check executable path run by the canonical `raxis-verifier` shim | Non-empty; absolute path; no whitespace; arguments and env belong inside the check wrapper executable |
 | `timeout` | Required | Wall-clock timeout, parsed as a duration string ("30s", "10m", "1h") | Parses to ≥ 5 seconds and ≤ kernel hard cap (`max_verifier_timeout_seconds` from `[host_capacity]`, default 1800 / 30 minutes) |
 | `on_failure` | Required | Routing when the verifier reports `Fail`, times out, crashes, or fails artifact validation | `block_review` \| `warn_only`; per §5 |
 | `artifact` | Optional | Absolute path inside the verifier VM whose contents are copied into the dependent Reviewer's `/raxis/` mount on success | If present: must start with `/raxis/`; max 256 chars; per §6 |
@@ -173,8 +173,11 @@ They run in parallel (subject to capacity caps); the kernel waits
 for all of them to complete before evaluating Reviewer activation.
 If a future need emerges for sequential verifiers (e.g., "build
 first, then test against the build artifact"), that is addressed
-via a single trusted wrapper executable that performs those steps,
-not by adding inter-verifier dependencies or shell command strings.
+via a single trusted check wrapper executable that performs those
+steps, not by adding inter-verifier dependencies or shell command
+strings. That wrapper does not speak the RAXIS witness protocol; the
+kernel-spawned `raxis-verifier` shim owns token use, witness
+submission, and witness acknowledgement.
 
 ---
 
@@ -353,12 +356,14 @@ planner, not claw-code-derived) whose entire job is to:
    exit code 64 (`EX_USAGE`) and submit a `Crashed` witness if not.
 3. Mount cgroup v2 sub-cgroups for the upcoming subprocess
    (`/sys/fs/cgroup/raxis/verifier-cmd/`, `cpu.weight = 100`).
-4. Fork+exec the single absolute `RAXIS_VERIFIER_COMMAND` path with
+4. Fork+exec the single absolute `RAXIS_VERIFIER_COMMAND` check path with
    stdout and stderr piped, working directory set to `/workspace`,
    environment = envelope ∪ operator `env`. The subprocess is placed
    in the sub-cgroup before exec. If the verifier needs arguments or
-   multi-step behavior, those belong inside the trusted wrapper
-   executable.
+   multi-step behavior, those belong inside the trusted check wrapper
+   executable. The check process must not submit witnesses directly;
+   it exits with process status and lets `raxis-verifier` submit the
+   mechanical witness.
 5. Concurrently:
    - Drain stdout into a ring buffer (last 4 KiB retained;
      configurable via `[host_capacity] verifier_stdout_tail_bytes`,
@@ -1921,7 +1926,7 @@ This spec implies amendments in adjacent specs:
   escalate per [`agent-disagreement.md §6`](agent-disagreement.md).
 - **Inter-verifier dependencies within a hook.** Verifiers run in
   parallel within a hook invocation; sequential dependencies are
-  encoded via shell `&&` in a single verifier's command.
+  encoded inside one trusted check wrapper executable.
 - **V3 audit retention treatment of artifact bytes.** Audit events
   reference artifacts by `artifact_sha256` and `artifact_size_bytes`;
   the bytes themselves live in the per-session staging directory
@@ -1939,7 +1944,7 @@ This section enumerates every crate, binary, source file, kernel handler change,
 
 | Crate path                                                  | Kind   | Status | Purpose                                                                                                                                                                                |
 | ----------------------------------------------------------- | ------ | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `crates/raxis-verifier/`                                    | `[bin]` | NEW   | The PID-1 binary that runs inside every verifier VM. Reads its `VerifierSpec` from VirtioFS at `/raxis/verifier-spec.json`, executes the declared command line under cgroup-v2 limits, captures stdout/stderr + structured counters + declared artefacts, then emits exactly one `WitnessSubmission` over `vsock` and exits. No tools, no LLM, no shell of its own. (`INV-VERIFIER-08`.)  |
+| `crates/raxis-verifier/`                                    | `[bin]` | NEW   | The PID-1 binary that runs inside every verifier VM. Reads its verifier envelope, executes the declared single executable path under cgroup-v2 limits, captures stdout/stderr + structured counters + declared artefacts, then emits exactly one `WitnessSubmission` over `vsock` and exits. No tools, no LLM, no shell of its own. (`INV-VERIFIER-08`.)  |
 | `crates/raxis-verifier-protocol/`                           | `[lib]` | NEW   | Wire schema: `WitnessSubmission`, `VerifierSpec`, `StructuredCounters`, `ArtifactUpload`, `FinalStatus`. Imported by both `raxis-verifier` (writer) and the kernel (reader/verifier).      |
 | `crates/raxis-verifier-runtime/`                            | `[lib]` | NEW   | Kernel-side helpers: `VerifierScheduler`, the per-task and pre-merge orchestrators, the witness-validator (`§7.6` schema gate), the artefact-staging filesystem ops. Carved out so kernel handlers stay small. |
 | `crates/raxis-verifier-images/`                             | `[lib]` | NEW   | Build manifests (`raxis-verifier-symbol-index`, `raxis-verifier-rust`, `raxis-verifier-node`, `raxis-verifier-python`, `raxis-verifier-go`). Mirrors `crates/raxis-image-builder/` but for verifier images; the embedded vs operator-pinned distinction is per-image.                  |

@@ -148,7 +148,6 @@ services:
       SSL_TYPE: ""
       PERMIT_DOCKER: connected-networks
       LOG_LEVEL: warn
-      ONE_DIR: "1"
     cap_add:
       - NET_ADMIN
     volumes:
@@ -165,7 +164,6 @@ services:
       start_period: 30s
     tmpfs:
       - /var/mail
-      - /var/mail-state
       - /var/log/mail
       - /tmp
 

@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+## 0.3.6 - 2026-06-26
+
+- Hardened mechanical verifier execution so the kernel always launches the
+  canonical `raxis-verifier` shim as the witness-speaking process. Plan and
+  policy `command` values now identify the inner mechanical check executable,
+  while `raxis-verifier` owns token consumption, witness submission, and
+  witness acknowledgement.
+- Added release packaging checks so Homebrew/runtime archives must include
+  `bin/raxis-verifier`.
+- Preserved the simple custom-script authoring model: write one executable
+  check wrapper that exits 0/nonzero and optionally emits an artifact; do not
+  implement the RAXIS witness protocol in user verifier code.
+
 ## 0.3.5 - 2026-06-25
 
 RAXIS 0.3.5 is a patch release for verifier command validation

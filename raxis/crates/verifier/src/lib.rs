@@ -6,8 +6,8 @@
 // verifier binary, hands it a spawn envelope through the process
 // environment, and expects it to:
 //
-//   1. Read `RAXIS_VERIFIER_COMMAND` and run it under
-//      `sh -lc <command>` (per `verifier-processes.md §6` /
+//   1. Read `RAXIS_VERIFIER_COMMAND` and run it directly as one
+//      executable path (per `verifier-processes.md §6` /
 //      `peripherals.md §3.3`).
 //   2. Capture `(stdout, stderr, exit_code)` — size-capped per
 //      `RAXIS_VERIFIER_*_MAX_BYTES`.
@@ -58,7 +58,7 @@
 //   RAXIS_KERNEL_SOCKET      ← path to the UDS we connect to
 //
 // Verifier-specific (this crate):
-//   RAXIS_VERIFIER_COMMAND          ← shell command line (`sh -lc`)
+//   RAXIS_VERIFIER_COMMAND          ← single executable path
 //   RAXIS_VERIFIER_TIMEOUT_SECONDS  ← wall-clock timeout (≥ 5s)
 //   RAXIS_VERIFIER_ARTIFACT_PATH    ← optional artefact path
 //   RAXIS_VERIFIER_ARTIFACT_MAX_BYTES ← artefact cap, default 1 MiB
@@ -100,9 +100,9 @@ use sha2::{Digest, Sha256};
 // The `symbol_index` module is a pure-Rust orchestration layer the
 // `raxis-verifier-symbol-index` image activates by setting
 // `RAXIS_VERIFIER_BUILTIN = "symbol-index"`. It bypasses the
-// `sh -lc $RAXIS_VERIFIER_COMMAND` path so the diff-scoped /
+// configured-check-executable path so the diff-scoped /
 // content-addressed / parallel-ctags pipeline can be unit-tested in
-// Rust without depending on a shell script inside the image.
+// Rust without depending on an external script inside the image.
 pub mod symbol_index;
 
 // ---------------------------------------------------------------------------
@@ -178,8 +178,8 @@ pub struct VerifierEnv {
     /// `RAXIS_KERNEL_SOCKET` — UDS we connect to after running the
     /// command.
     pub socket_path: String,
-    /// `RAXIS_VERIFIER_COMMAND` — shell line to execute under
-    /// `sh -lc`. The kernel populates this from the per-gate
+    /// `RAXIS_VERIFIER_COMMAND` — single executable path to run
+    /// directly. The kernel populates this from the per-gate
     /// `[[plan.tasks.<id>.verifiers]] command = "..."` field.
     pub command: String,
     /// `RAXIS_VERIFIER_TIMEOUT_SECONDS` — wall-clock timeout for
@@ -206,14 +206,14 @@ pub struct VerifierEnv {
     // The five fields below are optional inputs the
     // `raxis-verifier-symbol-index` image's built-in pipeline reads.
     // For the general `verifier-starter` image the kernel does NOT
-    // set them and the verifier falls back to the
-    // `sh -lc $RAXIS_VERIFIER_COMMAND` path. See the module-level
+    // set them and the verifier falls back to the configured check
+    // executable path. See the module-level
     // doc comment in `symbol_index.rs` for the full design.
     /// `RAXIS_VERIFIER_BUILTIN` — when set to `"symbol-index"` the
-    /// verifier bypasses `sh -lc $RAXIS_VERIFIER_COMMAND` and runs
+    /// verifier bypasses the configured check executable and runs
     /// the in-process [`symbol_index`] pipeline instead. Any other
-    /// value (or absence) leaves the existing shell-command path
-    /// active. Reserved for the kernel-canonical
+    /// value (or absence) leaves direct executable dispatch active.
+    /// Reserved for the kernel-canonical
     /// `verifier-symbol-index` image.
     pub builtin: Option<VerifierBuiltin>,
     /// `RAXIS_BASE_SHA` — the kernel-supplied base commit SHA the
@@ -240,7 +240,7 @@ pub struct VerifierEnv {
 // Sealed enum so adding a future built-in (e.g. `lint-aggregator`)
 // requires extending the parser AND the orchestrator; we don't want
 // the kernel to silently accept an unknown built-in by falling
-// through to `sh -lc`.
+// through to direct executable dispatch.
 /// Discriminator for the verifier's in-process built-in modes.
 /// Only set by the kernel for the kernel-canonical verifier images
 /// that ship a Rust pipeline alongside the binary.
@@ -258,7 +258,7 @@ impl VerifierBuiltin {
     pub const SYMBOL_INDEX_STR: &'static str = "symbol-index";
 
     /// Parse the `RAXIS_VERIFIER_BUILTIN` value. Empty / missing →
-    /// `Ok(None)` so the existing `sh -lc` path stays the default.
+    /// `Ok(None)` so direct executable dispatch stays the default.
     pub fn parse_optional(raw: Option<&str>) -> Result<Option<Self>, String> {
         match raw {
             None => Ok(None),
@@ -336,7 +336,7 @@ pub fn parse_verifier_env_from_process() -> Result<VerifierEnv, VerifierEnvError
     // === iter62 verifier-runtime D7: built-in dispatch ===
     //
     // When `RAXIS_VERIFIER_BUILTIN` is set to a recognised value the
-    // verifier bypasses the `sh -lc $RAXIS_VERIFIER_COMMAND` path,
+    // verifier bypasses the configured check executable path,
     // so `RAXIS_VERIFIER_COMMAND` becomes optional in that case
     // (kernel still typically populates it for audit traceability,
     // but we accept its absence to keep the kernel side simpler).
@@ -353,7 +353,9 @@ pub fn parse_verifier_env_from_process() -> Result<VerifierEnv, VerifierEnvError
         // string the audit-event payload can carry.
         env::var("RAXIS_VERIFIER_COMMAND").unwrap_or_else(|_| "<builtin>".to_owned())
     } else {
-        require_env("RAXIS_VERIFIER_COMMAND")?
+        let raw = require_env("RAXIS_VERIFIER_COMMAND")?;
+        validate_verifier_command_env(&raw)?;
+        raw
     };
 
     let timeout_secs = parse_optional_u64(
@@ -441,6 +443,24 @@ fn require_env(var: &'static str) -> Result<String, VerifierEnvError> {
         Ok(v) if !v.is_empty() => Ok(v),
         _ => Err(VerifierEnvError::Missing(var)),
     }
+}
+
+fn validate_verifier_command_env(raw: &str) -> Result<(), VerifierEnvError> {
+    if raw.chars().any(char::is_whitespace) {
+        return Err(VerifierEnvError::Invalid {
+            var: "RAXIS_VERIFIER_COMMAND",
+            value: raw.to_owned(),
+            reason: "must be one absolute executable path with no whitespace; put args or multi-step behavior inside that executable".to_owned(),
+        });
+    }
+    if !Path::new(raw).is_absolute() {
+        return Err(VerifierEnvError::Invalid {
+            var: "RAXIS_VERIFIER_COMMAND",
+            value: raw.to_owned(),
+            reason: "must be an absolute executable path".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn parse_optional_u64(var: &'static str, default: u64) -> Result<u64, VerifierEnvError> {
@@ -657,8 +677,8 @@ pub struct CommandOutcome {
 /// [`CommandOutcome::exit_code`]).
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
-    /// `tokio::process::Command::spawn()` failed (e.g., the shell
-    /// binary is missing). The verifier short-circuits to
+    /// `tokio::process::Command::spawn()` failed. The verifier
+    /// short-circuits to
     /// [`ExitCode::IoError`] without touching the kernel UDS.
     #[error("spawn failed: {0}")]
     Spawn(#[source] std::io::Error),
@@ -668,19 +688,17 @@ pub enum RunError {
     Wait(#[source] std::io::Error),
 }
 
-/// Run the verifier-supplied command under `sh -c <command>`,
-/// capturing stdout + stderr (pre-capped at `env.*_max_bytes`) and
-/// honouring the wall-clock timeout.
+/// Run the verifier-supplied executable path directly, capturing
+/// stdout + stderr (pre-capped at `env.*_max_bytes`) and honouring
+/// the wall-clock timeout.
 ///
 /// The verifier executes as PID 1 of a single-purpose VM; cleaning
 /// up the child on a timeout is best-effort. We send a kill and
 /// proceed regardless of whether the child cleans up promptly —
 /// the VM is torn down by the substrate after we exit anyway.
 pub async fn run_verifier_command(env: &VerifierEnv) -> Result<CommandOutcome, RunError> {
-    let mut cmd = tokio::process::Command::new("sh");
-    cmd.arg("-c")
-        .arg(&env.command)
-        .stdin(Stdio::null())
+    let mut cmd = tokio::process::Command::new(&env.command);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(root) = env.worktree_root.as_ref() {
@@ -691,7 +709,8 @@ pub async fn run_verifier_command(env: &VerifierEnv) -> Result<CommandOutcome, R
 }
 
 /// Pulled out of `run_verifier_command` for testability — tests can
-/// inject a pre-spawned child without going through the real shell.
+/// inject a pre-spawned child without going through the real command
+/// path.
 async fn wait_for_child_with_timeout(
     mut child: tokio::process::Child,
     env: &VerifierEnv,
@@ -736,11 +755,10 @@ async fn wait_for_child_with_timeout(
         Ok(Err(e)) => return Err(RunError::Wait(e)),
         Err(_) => {
             let _ = child.start_kill();
-            // Best-effort reap of the shell process. Do not wait
-            // indefinitely here: `sh -lc` can leave a timed-out
-            // grandchild holding stdout/stderr open, and the verifier
-            // must still report Timeout promptly so the VM teardown can
-            // clean the process tree.
+            // Best-effort reap of the child process. Do not wait
+            // indefinitely here: the verifier must still report
+            // Timeout promptly so the VM teardown can clean the
+            // process tree.
             let _ = tokio::time::timeout(Duration::from_millis(250), child.wait()).await;
             stdout_task.abort();
             stderr_task.abort();
@@ -1213,6 +1231,17 @@ fn base64_encode(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn write_executable_script(dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
     fn fixture_env() -> VerifierEnv {
         VerifierEnv {
             verifier_token: "tok".to_owned(),
@@ -1220,7 +1249,7 @@ mod tests {
             gate_type: "test-gate".to_owned(),
             evaluation_sha: "abcd1234abcd1234abcd1234abcd1234abcd1234".to_owned(),
             socket_path: "/tmp/kernel.sock".to_owned(),
-            command: "true".to_owned(),
+            command: "/usr/bin/true".to_owned(),
             timeout_secs: 10,
             artifact_path: None,
             artifact_max_bytes: VerifierEnv::DEFAULT_ARTIFACT_MAX_BYTES,
@@ -1229,7 +1258,7 @@ mod tests {
             worktree_root: None,
             // iter62 verifier-runtime D7: built-in pipeline inputs
             // default to None — the existing tests exercise the
-            // `sh -lc $RAXIS_VERIFIER_COMMAND` path.
+            // direct executable dispatch path.
             builtin: None,
             base_sha: None,
             base_symbol_index_path: None,
@@ -1523,8 +1552,10 @@ mod tests {
     // INV-VERIFIER-COMMAND-EXEC-01 happy path: `true` exits 0.
     #[tokio::test]
     async fn run_verifier_command_captures_zero_exit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let script = write_executable_script(&tmp, "pass.sh", "#!/bin/sh\nexit 0\n");
         let env = VerifierEnv {
-            command: "true".to_owned(),
+            command: script.display().to_string(),
             ..fixture_env()
         };
         let out = run_verifier_command(&env).await.unwrap();
@@ -1534,8 +1565,10 @@ mod tests {
 
     #[tokio::test]
     async fn run_verifier_command_captures_nonzero_exit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let script = write_executable_script(&tmp, "fail.sh", "#!/bin/sh\nexit 7\n");
         let env = VerifierEnv {
-            command: "exit 7".to_owned(),
+            command: script.display().to_string(),
             ..fixture_env()
         };
         let out = run_verifier_command(&env).await.unwrap();
@@ -1545,8 +1578,14 @@ mod tests {
 
     #[tokio::test]
     async fn run_verifier_command_captures_stdout_and_stderr() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let script = write_executable_script(
+            &tmp,
+            "stdout-stderr.sh",
+            "#!/bin/sh\necho hello-out\necho hello-err 1>&2\n",
+        );
         let env = VerifierEnv {
-            command: "echo hello-out; echo hello-err 1>&2".to_owned(),
+            command: script.display().to_string(),
             ..fixture_env()
         };
         let out = run_verifier_command(&env).await.unwrap();
@@ -1558,8 +1597,14 @@ mod tests {
     async fn run_verifier_command_caps_stdout_at_max_bytes() {
         // Emit 32 KiB of stdout but cap the verifier's capture at
         // 128 bytes. Result: stdout.len() ≤ 128.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let script = write_executable_script(
+            &tmp,
+            "large-stdout.sh",
+            "#!/bin/sh\ndd if=/dev/zero bs=32768 count=1 2>/dev/null | tr '\\000' r\n",
+        );
         let env = VerifierEnv {
-            command: "yes raxis | head -c 32768".to_owned(),
+            command: script.display().to_string(),
             stdout_max_bytes: 128,
             ..fixture_env()
         };
@@ -1574,8 +1619,10 @@ mod tests {
     #[tokio::test]
     async fn run_verifier_command_marks_timeout_when_wall_clock_fires() {
         // sleep 10 with a 1-second wall-clock cap → timed_out=true.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let script = write_executable_script(&tmp, "sleep.sh", "#!/bin/sh\nsleep 10\n");
         let env = VerifierEnv {
-            command: "sleep 10".to_owned(),
+            command: script.display().to_string(),
             timeout_secs: 1,
             ..fixture_env()
         };
@@ -1596,7 +1643,7 @@ mod tests {
     fn iter62_verifier_builtin_string_is_pinned() {
         // Pin the literal env-var value so a future rename surfaces
         // immediately at the test layer rather than after a kernel
-        // dispatch silently falling through to `sh -lc`.
+        // dispatch silently falling through to direct executable dispatch.
         assert_eq!(VerifierBuiltin::SYMBOL_INDEX_STR, "symbol-index");
     }
 

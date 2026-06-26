@@ -1594,8 +1594,6 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
              timeout    = \"30s\"\n\
              on_failure = \"block_merge\"\n\
              applies_to = \"all\"\n\
-             artifact   = \"/raxis/reports/policy-no-secret-merge.json\"\n\
-             artifact_max_bytes = 1048576\n\
              \n\
              [integration_merge_verifiers.hints]\n\
              purpose = \"Policy-scoped integration verifier coverage for every realistic e2e merged tree.\"\n",
@@ -4413,8 +4411,6 @@ mod tests {
              timeout    = \"30s\"\n\
              on_failure = \"block_merge\"\n\
              applies_to = \"all\"\n\
-             artifact   = \"/raxis/reports/policy-no-secret-merge.json\"\n\
-             artifact_max_bytes = 1048576\n\
              \n\
              [integration_merge_verifiers.hints]\n\
              purpose = \"Policy-scoped integration verifier coverage for every realistic e2e merged tree.\"\n",

@@ -56,23 +56,22 @@
 // ────────────────────
 //   - `scan` — pure scanning logic over a directory tree. No env, no
 //     I/O beyond file reads. Unit-tested in this file's `tests` module.
-//   - `env` — env-var parsing into a typed `ScannerEnv`. Pure (the
-//     `parse_scanner_env_from_process` shim is the only env-touching
+//   - `env` — env-var parsing into a typed `MechanicalEnv`. Pure (the
+//     `parse_mechanical_env_from_process` shim is the only env-touching
 //     function and is exercised by the binary's smoke tests).
-//   - `submission` — env+ScanReport → WitnessSubmission. No I/O.
-//     Unit-tested in this file's `tests` module.
+//   - `artifact` — ScanReport → stable JSON artifact/summary. No
+//     witness tokens, no socket, no kernel protocol.
 //
-// The binary half (`main.rs`) is the thin `#[tokio::main]` shim that
-// glues the three together with the UDS round trip.
+// The binary half (`main.rs`) is deliberately sync and mechanical:
+// scan, optionally write the declared artifact, print JSON, exit.
+// The canonical `raxis-verifier` shim is the only process that
+// submits WitnessSubmission to the kernel.
 
 #![forbid(unsafe_code)]
 
-use std::env;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-
-use raxis_types::{CommitSha, GateType, TaskId, WitnessResultClass, WitnessSubmission};
 
 // ---------------------------------------------------------------------------
 // Patterns
@@ -195,11 +194,21 @@ pub enum ScanReport {
 }
 
 impl ScanReport {
-    pub fn result_class(&self) -> WitnessResultClass {
+    /// Result-class string mirrored into the JSON report.
+    pub fn result_class_str(&self) -> &'static str {
         match self {
-            ScanReport::Clean { .. } => WitnessResultClass::Pass,
-            ScanReport::Found { .. } => WitnessResultClass::Fail,
-            ScanReport::Inconclusive { .. } => WitnessResultClass::Inconclusive,
+            ScanReport::Clean { .. } => "Pass",
+            ScanReport::Found { .. } => "Fail",
+            ScanReport::Inconclusive { .. } => "Inconclusive",
+        }
+    }
+
+    /// Mechanical process exit code for the parent `raxis-verifier` shim.
+    pub fn exit_code(&self) -> ExitCode {
+        match self {
+            ScanReport::Clean { .. } => ExitCode::Clean,
+            ScanReport::Found { .. } => ExitCode::SecretFound,
+            ScanReport::Inconclusive { .. } => ExitCode::Inconclusive,
         }
     }
 }
@@ -398,24 +407,28 @@ fn relative_to(path: &Path, root: &Path) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Exit codes — same surface as raxis-verifier-stub for harness parity.
+// Mechanical exit codes — interpreted by the canonical raxis-verifier shim.
 // ---------------------------------------------------------------------------
 
-/// Process exit codes the verifier returns. Stable across releases —
-/// integration test harnesses assert on these literals. Kept in
-/// declaration parity with `raxis-verifier-stub::ExitCode` so a
-/// future kernel-side dashboard rendering "verifier exit codes"
-/// doesn't need a per-verifier translation table.
+/// Process exit codes the mechanical check returns. These are not
+/// witness-protocol statuses. The parent `raxis-verifier` maps them to
+/// a witness:
+///
+///   - `0` → Pass
+///   - `1..=9` → Fail
+///   - `10+` → Inconclusive
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitCode {
-    /// Witness was submitted AND the kernel acked with `accepted = true`.
-    AcceptedPass = 0,
-    /// Witness was submitted AND the kernel acked with `accepted = false`.
-    Rejected = 1,
-    /// One or more REQUIRED env vars were missing.
-    MissingEnv = 2,
-    /// Connect, send, or read failed at the syscall level.
-    IoError = 3,
+    /// Scan completed and no secret-shaped strings were found.
+    Clean = 0,
+    /// Scan completed and found at least one secret-shaped string.
+    SecretFound = 1,
+    /// Required mechanical env vars were missing.
+    MissingEnv = 10,
+    /// The scan could not produce a conclusive result.
+    Inconclusive = 11,
+    /// The scan result was known, but the declared artifact could not be written.
+    ArtifactWriteFailed = 12,
 }
 
 impl ExitCode {
@@ -428,91 +441,72 @@ impl ExitCode {
 // Env parsing
 // ---------------------------------------------------------------------------
 
-/// All inputs the verifier harvests from the spawn envelope, in one
+/// All inputs the mechanical checker harvests from the spawn envelope, in one
 /// place. Kept behind a struct (rather than scattering `env::var`
-/// calls across the binary) so unit tests can build `ScannerEnv`
+/// calls across the binary) so unit tests can build `MechanicalEnv`
 /// literals without the process-global hassle of `set_var`.
 #[derive(Debug, Clone)]
-pub struct ScannerEnv {
-    pub verifier_token: String,
-    pub task_id: String,
-    pub gate_type: String,
-    pub evaluation_sha: String,
-    pub socket_path: String,
+pub struct MechanicalEnv {
+    /// Root directory to scan.
     pub worktree_root: PathBuf,
+    /// Optional artifact path declared by the plan/policy. When present,
+    /// the checker writes a stable JSON report here for the parent shim
+    /// to load into the witness body.
+    pub artifact_path: Option<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ScannerEnvError {
+pub enum MechanicalEnvError {
     #[error("required environment variable {0} is not set or is empty")]
     Missing(&'static str),
 }
 
 /// Read the spawn envelope from the process environment. Fails fast
 /// on any missing / empty required var.
-pub fn parse_scanner_env_from_process() -> Result<ScannerEnv, ScannerEnvError> {
-    Ok(ScannerEnv {
-        verifier_token: require_env("RAXIS_VERIFIER_TOKEN")?,
-        task_id: require_env("RAXIS_TASK_ID")?,
-        gate_type: require_env("RAXIS_GATE_TYPE")?,
-        evaluation_sha: require_env("RAXIS_EVALUATION_SHA")?,
-        socket_path: require_env("RAXIS_KERNEL_SOCKET")?,
+pub fn parse_mechanical_env_from_process() -> Result<MechanicalEnv, MechanicalEnvError> {
+    Ok(MechanicalEnv {
         worktree_root: PathBuf::from(require_env("RAXIS_WORKTREE_ROOT")?),
+        artifact_path: optional_env("RAXIS_VERIFIER_ARTIFACT_PATH").map(PathBuf::from),
     })
 }
 
-fn require_env(var: &'static str) -> Result<String, ScannerEnvError> {
-    match env::var(var) {
+fn require_env(var: &'static str) -> Result<String, MechanicalEnvError> {
+    match std::env::var(var) {
         Ok(v) if !v.is_empty() => Ok(v),
-        _ => Err(ScannerEnvError::Missing(var)),
+        _ => Err(MechanicalEnvError::Missing(var)),
+    }
+}
+
+fn optional_env(var: &'static str) -> Option<String> {
+    match std::env::var(var) {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => None,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Submission construction
+// Artifact / summary construction
 // ---------------------------------------------------------------------------
 
-/// Errors `build_submission` can surface. Distinct from `ScannerEnvError`
-/// so tests can pin "envelope-shape-was-wrong" cases (e.g. a 39-char
-/// `evaluation_sha` from a misconfigured spawn) separately.
-#[derive(Debug, thiserror::Error)]
-pub enum BuildError {
-    #[error("RAXIS_TASK_ID is invalid: {0}")]
-    BadTaskId(#[from] raxis_types::TaskIdError),
-    #[error("RAXIS_GATE_TYPE is invalid: {0}")]
-    BadGateType(#[from] raxis_types::GateTypeError),
-    #[error("RAXIS_EVALUATION_SHA is invalid: {0}")]
-    BadEvaluationSha(#[from] raxis_types::CommitShaError),
-}
-
-/// Fold `ScannerEnv + ScanReport` into the wire-shape `WitnessSubmission`
-/// the binary will write. Pure function (no I/O) so unit tests can
-/// drive every result_class without touching the process environment.
+/// Fold a scan report into the stable JSON body emitted on stdout and,
+/// when configured, written as the declared verifier artifact.
 ///
-/// The body shape is small and forensic-friendly:
+/// The shape is small and forensic-friendly:
 ///   - On `Pass`: `{ "files_scanned": N, "matches": [] }`
 ///   - On `Fail`: `{ "files_scanned": null,  "matches": [<SecretMatch>...] }`
 ///   - On `Inconclusive`: `{ "files_scanned": null, "matches": [], "reason": "<text>" }`
 ///
 /// The `files_scanned` field on the Pass path is the strongest
-/// available "did the scanner actually run?" signal short of replaying
-/// the scan from the witness body.
-pub fn build_submission(
-    env: &ScannerEnv,
-    report: &ScanReport,
-) -> Result<WitnessSubmission, BuildError> {
-    let body = match report {
+/// available "did the scanner actually run?" signal short of replaying the scan.
+pub fn report_json(report: &ScanReport) -> serde_json::Value {
+    match report {
         ScanReport::Clean { files_scanned } => serde_json::json!({
+            "verifier": "raxis-verifier-no-secrets",
+            "result_class": "Pass",
             "files_scanned": files_scanned,
             "matches":       [],
         }),
         ScanReport::Found { matches } => {
-            // Collapse to a stable JSON array. We use serde_json's
-            // value builder rather than a hand-rolled string concat
-            // so the body round-trips through the kernel's JSON
-            // body re-parser without escape surprises (see the
-            // `WitnessSubmission.body` doc comment for the wire
-            // round-trip rationale).
             let arr: Vec<serde_json::Value> = matches
                 .iter()
                 .map(|m| {
@@ -524,25 +518,36 @@ pub fn build_submission(
                 })
                 .collect();
             serde_json::json!({
+                "verifier": "raxis-verifier-no-secrets",
+                "result_class": "Fail",
                 "files_scanned": serde_json::Value::Null,
                 "matches":       arr,
             })
         }
         ScanReport::Inconclusive { reason } => serde_json::json!({
+            "verifier": "raxis-verifier-no-secrets",
+            "result_class": "Inconclusive",
             "files_scanned": serde_json::Value::Null,
             "matches":       [],
             "reason":        reason,
         }),
-    };
+    }
+}
 
-    Ok(WitnessSubmission {
-        verifier_token: env.verifier_token.clone(),
-        task_id: TaskId::parse(&env.task_id)?,
-        gate_type: GateType::parse(&env.gate_type)?,
-        evaluation_sha: CommitSha::parse(&env.evaluation_sha)?,
-        result_class: report.result_class(),
-        body,
-    })
+/// Write the report artifact when the parent shim supplied an artifact path.
+pub fn write_artifact_if_requested(
+    env: &MechanicalEnv,
+    report: &ScanReport,
+) -> std::io::Result<()> {
+    let Some(path) = env.artifact_path.as_ref() else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(&report_json(report))
+        .expect("report_json must serialize to JSON bytes");
+    fs::write(path, bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -554,16 +559,17 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // ── ScanReport → result_class plumbing ─────────────────────────────────
+    // ── ScanReport → mechanical result plumbing ────────────────────────────
 
     #[test]
-    fn clean_scan_maps_to_pass() {
+    fn clean_scan_maps_to_pass_exit() {
         let r = ScanReport::Clean { files_scanned: 3 };
-        assert_eq!(r.result_class(), WitnessResultClass::Pass);
+        assert_eq!(r.result_class_str(), "Pass");
+        assert_eq!(r.exit_code(), ExitCode::Clean);
     }
 
     #[test]
-    fn found_scan_maps_to_fail() {
+    fn found_scan_maps_to_fail_exit() {
         let r = ScanReport::Found {
             matches: vec![SecretMatch {
                 relative_path: "x".to_owned(),
@@ -571,43 +577,33 @@ mod tests {
                 byte_offset: 0,
             }],
         };
-        assert_eq!(r.result_class(), WitnessResultClass::Fail);
+        assert_eq!(r.result_class_str(), "Fail");
+        assert_eq!(r.exit_code(), ExitCode::SecretFound);
     }
 
     #[test]
-    fn inconclusive_maps_to_inconclusive() {
+    fn inconclusive_maps_to_inconclusive_exit() {
         let r = ScanReport::Inconclusive {
             reason: "no root".to_owned(),
         };
-        assert_eq!(r.result_class(), WitnessResultClass::Inconclusive);
+        assert_eq!(r.result_class_str(), "Inconclusive");
+        assert_eq!(r.exit_code(), ExitCode::Inconclusive);
     }
 
-    // ── build_submission body shape ────────────────────────────────────────
-
-    fn fixture_env() -> ScannerEnv {
-        ScannerEnv {
-            verifier_token: "tok".to_owned(),
-            task_id: "task-1".to_owned(),
-            gate_type: "NoSecretStrings".to_owned(),
-            evaluation_sha: "abcd1234abcd1234abcd1234abcd1234abcd1234".to_owned(),
-            socket_path: "/tmp/k.sock".to_owned(),
-            worktree_root: PathBuf::from("/tmp/wt"),
-        }
-    }
+    // ── report JSON body shape ─────────────────────────────────────────────
 
     #[test]
-    fn submission_clean_body_carries_files_scanned() {
-        let env = fixture_env();
+    fn report_clean_body_carries_files_scanned() {
         let report = ScanReport::Clean { files_scanned: 7 };
-        let s = build_submission(&env, &report).unwrap();
-        assert_eq!(s.result_class, WitnessResultClass::Pass);
-        assert_eq!(s.body["files_scanned"], serde_json::json!(7));
-        assert_eq!(s.body["matches"], serde_json::json!([]));
+        let body = report_json(&report);
+        assert_eq!(body["verifier"], "raxis-verifier-no-secrets");
+        assert_eq!(body["result_class"], "Pass");
+        assert_eq!(body["files_scanned"], serde_json::json!(7));
+        assert_eq!(body["matches"], serde_json::json!([]));
     }
 
     #[test]
-    fn submission_found_body_lists_each_match() {
-        let env = fixture_env();
+    fn report_found_body_lists_each_match() {
         let report = ScanReport::Found {
             matches: vec![
                 SecretMatch {
@@ -622,24 +618,29 @@ mod tests {
                 },
             ],
         };
-        let s = build_submission(&env, &report).unwrap();
-        assert_eq!(s.result_class, WitnessResultClass::Fail);
-        assert_eq!(s.body["matches"][0]["relative_path"], "src/foo.rs");
-        assert_eq!(s.body["matches"][0]["pattern_name"], "aws_access_key_id");
-        assert_eq!(s.body["matches"][0]["byte_offset"], 42);
-        assert_eq!(s.body["matches"][1]["pattern_name"], "github_pat");
+        let body = report_json(&report);
+        assert_eq!(body["result_class"], "Fail");
+        assert_eq!(body["matches"][0]["relative_path"], "src/foo.rs");
+        assert_eq!(body["matches"][0]["pattern_name"], "aws_access_key_id");
+        assert_eq!(body["matches"][0]["byte_offset"], 42);
+        assert_eq!(body["matches"][1]["pattern_name"], "github_pat");
     }
 
     #[test]
-    fn submission_rejects_short_evaluation_sha() {
-        let mut env = fixture_env();
-        env.evaluation_sha = "abcd".to_owned();
+    fn artifact_writer_creates_parent_dirs() {
+        let tmp = TempDir::new().unwrap();
+        let artifact = tmp.path().join("nested/report.json");
+        let env = MechanicalEnv {
+            worktree_root: tmp.path().to_path_buf(),
+            artifact_path: Some(artifact.clone()),
+        };
         let report = ScanReport::Clean { files_scanned: 0 };
-        let err = build_submission(&env, &report).expect_err("4-char sha must fail");
-        assert!(matches!(err, BuildError::BadEvaluationSha(_)));
+        write_artifact_if_requested(&env, &report).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&fs::read(artifact).unwrap()).unwrap();
+        assert_eq!(body["result_class"], "Pass");
     }
 
-    // ── scan_worktree_for_secrets — the witness test ───────────────────────
+    // ── scan_worktree_for_secrets — the scanner tests ──────────────────────
 
     /// Writes one file inside `dir` with `name` and `body`. Auto-creates
     /// any parent directories. Returns the absolute path.
@@ -805,7 +806,7 @@ mod tests {
 
     // ── env parsing — exercised through the constructor only ──────────────
     //
-    // We deliberately avoid `parse_scanner_env_from_process` in unit
+    // We deliberately avoid `parse_mechanical_env_from_process` in unit
     // tests: it touches process-global env and would force every test
     // here through a serialisation mutex (the same pattern
     // `raxis-verifier-stub::tests` uses). The body is small enough

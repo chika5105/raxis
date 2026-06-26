@@ -5,8 +5,9 @@
 // the responsibility of this file is the I/O glue:
 //
 //   1. Parse the spawn-envelope env vars (`parse_verifier_env_from_process`).
-//   2. Run `RAXIS_VERIFIER_COMMAND` under `sh -lc` with the
-//      operator-supplied wall-clock timeout (`run_verifier_command`).
+//   2. Run the single executable path in `RAXIS_VERIFIER_COMMAND`
+//      with the operator-supplied wall-clock timeout
+//      (`run_verifier_command`).
 //   3. Optionally load the artefact at `RAXIS_VERIFIER_ARTIFACT_PATH`
 //      (size-capped, path-traversal-rejected; `load_artifact_if_present`).
 //   4. Map the exit code to a `WitnessResultClass` per
@@ -18,7 +19,7 @@
 //
 // Why `#[tokio::main(flavor = "current_thread")]`
 // ───────────────────────────────────────────────
-// Most of the wall-clock budget is the verifier command (`sh -lc`),
+// Most of the wall-clock budget is the verifier command,
 // which runs in its own subprocess. The shim itself does one
 // command spawn, one UDS round-trip, and one process exit. A
 // multi-thread runtime would just add startup latency; the
@@ -69,7 +70,7 @@ async fn run() -> Result<ExitCode, ExitCode> {
     // iter62 verifier-runtime D7 dispatch: when the spawn envelope
     // sets `RAXIS_VERIFIER_BUILTIN = "symbol-index"` the kernel-
     // canonical `verifier-symbol-index` image executes the in-process
-    // pipeline instead of `sh -lc $RAXIS_VERIFIER_COMMAND`. Both
+    // pipeline instead of the configured check executable. Both
     // paths produce a `CommandOutcome` with the same shape so the
     // downstream classifier / submission builder is unchanged.
     let outcome = match env.builtin {

@@ -1661,6 +1661,27 @@ async fn main() {
         })
     };
 
+    // Step 8c: Spawn the verifier-token reconciler. A blocking verifier
+    // must never be able to strand its parent task in GatesPending just
+    // because the verifier watcher disappeared after token issuance. The
+    // live reconciler closes any expired Pending verifier_run_tokens row
+    // and routes blocking gates through the same task-failure path as a
+    // normal verifier timeout.
+    let (verifier_reconcile_shutdown_tx, verifier_reconcile_shutdown_rx) =
+        tokio::sync::oneshot::channel::<()>();
+    let verifier_reconcile_handle = {
+        let store_for_reconcile = Arc::clone(&store);
+        let audit_for_reconcile = Arc::clone(&audit);
+        tokio::spawn(async move {
+            gates::verifier_runner::expired_pending_verifier_reconciler_loop(
+                store_for_reconcile,
+                audit_for_reconcile,
+                verifier_reconcile_shutdown_rx,
+            )
+            .await;
+        })
+    };
+
     // Step 7b: Construct the in-memory PlanRegistry and repopulate it from
     // every non-terminal initiative's signed plan artifact. Per
     // kernel-store.md §2.5.8 the four path-scope plan fields live only
@@ -2379,6 +2400,7 @@ async fn main() {
             let _ = gateway_shutdown_tx.send(());
             let _ = heartbeat_shutdown_tx.send(());
             let _ = nonce_sweep_shutdown_tx.send(());
+            let _ = verifier_reconcile_shutdown_tx.send(());
             exit_with_code(e);
         }
     };
@@ -2394,6 +2416,7 @@ async fn main() {
     let _ = gateway_shutdown_tx.send(());
     let _ = heartbeat_shutdown_tx.send(());
     let _ = nonce_sweep_shutdown_tx.send(());
+    let _ = verifier_reconcile_shutdown_tx.send(());
     if let Some(h) = dashboard_handle {
         match h.shutdown().await {
             Ok(()) => eprintln!("{{\"level\":\"info\",\"event\":\"dashboard_shutdown\"}}"),
@@ -2432,6 +2455,16 @@ async fn main() {
         Err(join_err) => eprintln!(
             "{{\"level\":\"warn\",\
              \"event\":\"plan_bundle_nonce_sweep_loop_join_failed\",\
+             \"reason\":\"{join_err}\"}}"
+        ),
+    }
+    match verifier_reconcile_handle.await {
+        Ok(()) => eprintln!(
+            "{{\"level\":\"info\",\"event\":\"expired_pending_verifier_reconciler_done\"}}"
+        ),
+        Err(join_err) => eprintln!(
+            "{{\"level\":\"warn\",\
+             \"event\":\"expired_pending_verifier_reconciler_join_failed\",\
              \"reason\":\"{join_err}\"}}"
         ),
     }

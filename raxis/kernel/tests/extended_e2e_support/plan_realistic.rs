@@ -417,8 +417,6 @@ command    = "/Users/jinanwachikafavour/raxis/raxis/target/release/raxis-verifie
 timeout    = "30s"
 on_failure = "block_merge"
 applies_to = "all"
-artifact   = "/raxis/reports/plan-no-secret-merge.json"
-artifact_max_bytes = 1048576
 
 [plan.integration_merge_verifiers.hints]
 purpose = "Plan-scoped integration verifier coverage for the realistic e2e merged tree.""#;
@@ -1165,8 +1163,6 @@ const REALISTIC_PLAN_ALLOWLIST_POSITIVE_VERIFIER: &str = r#"
   command    = "/Users/jinanwachikafavour/raxis/raxis/target/release/raxis-verifier-no-secrets"
   timeout    = "30s"
   on_failure = "block_review"
-  artifact   = "/raxis/reports/no-secret-strings.json"
-  artifact_max_bytes = 1048576
 
   [tasks.verifiers.hints]
   purpose = "Per-task verifier coverage for the realistic e2e allowlist task.""#;

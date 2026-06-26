@@ -247,8 +247,6 @@ command    = "/Users/jinanwachikafavour/raxis/raxis/target/release/raxis-verifie
 timeout    = "30s"
 on_failure = "block_merge"
 applies_to = "all"
-artifact   = "/raxis/reports/policy-no-secret-merge.json"
-artifact_max_bytes = 1048576
 
 [integration_merge_verifiers.hints]
 purpose = "Policy-scoped integration verifier coverage for every realistic e2e merged tree."
