@@ -96,7 +96,13 @@ pub fn get_lane_status_in_tx(
     )?;
 
     let reserved_cost: u64 = conn.query_row(
-        &format!("SELECT COALESCE(SUM(reserved_cost), 0) FROM {BUDGET} WHERE lane_id=?1"),
+        &format!(
+            "SELECT COALESCE(SUM(b.reserved_cost), 0)
+               FROM {BUDGET} b
+               JOIN {TASKS} t ON t.task_id = b.task_id
+              WHERE b.lane_id = ?1
+                AND t.state NOT IN ({terminal})"
+        ),
         rusqlite::params![lane_id],
         |r| r.get(0),
     )?;

@@ -119,7 +119,7 @@ pub fn permitted_ops_with_operator_cert_install() -> Vec<String> {
 /// `intent_kind_keys_match_canonical_set` test in `lib.rs::tests`.
 const BASE_COST_PER_INTENT_KIND: &[(&str, u64)] = &[
     ("SingleCommit", 10),
-    ("IntegrationMerge", 50),
+    ("IntegrationMerge", 0),
     ("CompleteTask", 5),
     ("ReportFailure", 1),
 ];
@@ -565,9 +565,10 @@ mod tests {
     fn every_canonical_intent_kind_appears_in_budget_table() {
         // Pin the exact TOML keys we emit against the four real
         // `IntentKind` variants. If a future spec amendment adds a fifth
-        // intent kind without updating BASE_COST_PER_INTENT_KIND here,
-        // any task admission of that kind would fail with
-        // `BudgetError::UnknownIntentKindCost`. We can't depend on
+        // priced intent kind without updating BASE_COST_PER_INTENT_KIND
+        // here, any task admission of that kind would fail with
+        // `BudgetError::UnknownIntentKindCost`. `IntegrationMerge` stays
+        // present as a visible zero-cost closeout row. We can't depend on
         // `raxis-types` (would create a cycle: types → policy → genesis-tools
         // → types is fine, but the existing budget code already lives in
         // the kernel and isn't a workspace dep we have here), so the

@@ -1995,8 +1995,14 @@ fn run_phase_c(
     // same Phase C transaction, eliminating the pre-fix TOCTOU window
     // where two concurrent intents could both pass `check_budget` before
     // either ran `consume_budget`, over-committing the lane.
+    //
+    // `IntegrationMerge` is a kernel-owned mechanical closeout, not
+    // delegated agent work. It still passes the merge/review/path/gate
+    // checks above, but it must not consume lane cost or concurrency:
+    // otherwise a lane full of completed executor/reviewer work can block
+    // the very merge step that closes and proves the initiative.
     let mut budget_reserved_after_commit: Option<(String, u64)> = None;
-    if task_state == TaskState::Admitted && pending_gates.is_empty() {
+    if should_reserve_lane_budget(task_state, pending_gates.is_empty(), intent_kind) {
         match budget::reserve_budget_in_tx(
             &tx,
             &pre_state.task.lane_id,
@@ -2544,6 +2550,16 @@ fn run_phase_c(
             warn_delegation_stale: warn_stale,
         },
     })
+}
+
+fn should_reserve_lane_budget(
+    task_state: TaskState,
+    gates_clear: bool,
+    intent_kind: IntentKind,
+) -> bool {
+    task_state == TaskState::Admitted
+        && gates_clear
+        && !matches!(intent_kind, IntentKind::IntegrationMerge)
 }
 
 // ---------------------------------------------------------------------------
@@ -9358,15 +9374,10 @@ fn commit_task_completion(
     // `lane_budget_reservations` rows accumulated monotonically. On
     // multi-task initiatives every task's `compute_admission_cost`
     // contribution stayed reserved on the workspace lane forever,
-    // and the `IntegrationMerge` synthetic coordinator-task —
-    // admitted by `auto_spawn_orchestrator_session_in_tx` against
-    // the same workspace_lane — could not reserve budget once the
-    // sub-task tail had saturated the lane ceiling. Symptom in the
-    // realistic e2e was a 100% `FailBudgetExceeded` rejection on
-    // every `IntegrationMerge` after ~8 sub-task completions, with
-    // the orchestrator dying after `planner_session_revoked_on_exit`
-    // and never respawning — a hard hang detectable only by the
-    // harness-side deadline.
+    // starving later executor/reviewer work on the same workspace
+    // lane. `IntegrationMerge` is now budget-neutral closeout
+    // plumbing, but terminal release remains load-bearing for normal
+    // delegated work and for accurate operator budget projections.
     //
     // The DELETE is `WHERE lane_id=? AND task_id=?`; the call is
     // idempotent (rows == 0 → already released, e.g. an Admitted
@@ -12536,6 +12547,26 @@ mod tests {
             task_state_of(&store, "t-drift-1"),
             TaskState::GatesPending.as_sql_str(),
             "SQL state must reflect the GatesPending transition (drift fix)"
+        );
+    }
+
+    #[test]
+    fn phase_c_does_not_reserve_lane_budget_for_integration_merge() {
+        assert!(
+            should_reserve_lane_budget(TaskState::Admitted, true, IntentKind::SingleCommit),
+            "ordinary admitted work with clear gates should reserve lane budget"
+        );
+        assert!(
+            !should_reserve_lane_budget(TaskState::Admitted, true, IntentKind::IntegrationMerge),
+            "IntegrationMerge is kernel-owned closeout and must be lane-budget neutral"
+        );
+        assert!(
+            !should_reserve_lane_budget(TaskState::Admitted, false, IntentKind::SingleCommit),
+            "gated work waits for witnesses before first budget reservation"
+        );
+        assert!(
+            !should_reserve_lane_budget(TaskState::Running, true, IntentKind::SingleCommit),
+            "continuation intents do not insert a fresh budget reservation"
         );
     }
 

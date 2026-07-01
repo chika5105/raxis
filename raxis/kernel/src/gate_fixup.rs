@@ -15,8 +15,10 @@
 //           `parent_gate_failure_task_id = parent`,
 //           `parent_gate_failure_type = gate_type`, `state = 'Admitted'`,
 //        b. INSERTs a `task_dag_edges` row anchoring the fixup
-//           lineage to the parent, and
-//        c. UPDATEs `parent.gate_fixup_attempts += 1`,
+//           lineage to the parent,
+//        c. INSERTs a `subtask_activations` row in `PendingActivation`,
+//           and
+//        d. UPDATEs `parent.gate_fixup_attempts += 1`,
 //      all in a single SQLite transaction
 //      (`INV-GATE-FIXUP-ADMIT-ATOMIC-01`).
 //   4. The kernel emits a `GateFixupSpawned` audit event so the
@@ -66,9 +68,14 @@
 use std::sync::Arc;
 
 use raxis_audit_tools::AuditEventKind;
+use raxis_policy::bundle::GateFixupProfile;
 use raxis_store::Table;
+use raxis_types::SessionAgentType;
 use rusqlite::Connection;
 
+use crate::initiatives::plan_registry::{
+    TaskKey, TaskKind, TaskPlanFields, WorkspaceMergeOnConflict,
+};
 use crate::ipc::context::HandlerContext;
 
 /// Outcome of [`auto_admit_gate_fixup_task`].
@@ -105,12 +112,12 @@ pub enum AutoAdmitOutcome {
 
 /// Admit one fixup task in a single SQLite transaction.
 ///
-/// `INV-GATE-FIXUP-ADMIT-ATOMIC-01` — the three writes (INSERT the
-/// fixup `tasks` row, INSERT the `task_dag_edges` lineage row, UPDATE
-/// `parent.gate_fixup_attempts`) MUST land in one transaction so a
-/// crash mid-admit never leaves the parent's counter incremented
-/// without a corresponding fixup row, nor orphans a fixup row from
-/// the DAG.
+/// `INV-GATE-FIXUP-ADMIT-ATOMIC-01` — the durable writes (INSERT the
+/// fixup `tasks` row, INSERT the `task_dag_edges` lineage row, INSERT
+/// the `subtask_activations` row, UPDATE `parent.gate_fixup_attempts`)
+/// MUST land in one transaction so a crash mid-admit never leaves the
+/// parent's counter incremented without a corresponding activatable
+/// fixup row, nor orphans a fixup row from the DAG.
 ///
 /// Returns the post-increment `gate_fixup_attempts` so the caller's
 /// audit row carries the 1-based attempt index.
@@ -126,6 +133,7 @@ pub(crate) fn admit_fixup_task_in_tx(
     let tx = conn.transaction().map_err(|_| AdmitError::SqlError)?;
     let tasks = Table::Tasks.as_str();
     let dag_edges = Table::TaskDagEdges.as_str();
+    let activations = Table::SubtaskActivations.as_str();
 
     let parent_eval_sha: Option<String> = tx
         .query_row(
@@ -177,6 +185,21 @@ pub(crate) fn admit_fixup_task_in_tx(
     )
     .map_err(|_| AdmitError::SqlError)?;
 
+    let activation_id = uuid::Uuid::new_v4().to_string();
+    tx.execute(
+        &format!(
+            "INSERT INTO {activations} (
+                activation_id, task_id, initiative_id,
+                activation_state, session_id, evaluation_sha,
+                crash_retry_count, review_reject_count,
+                created_at, activated_at, terminated_at
+             ) VALUES (?1, ?2, ?3, 'PendingActivation', NULL, NULL,
+                       0, 0, ?4, NULL, NULL)"
+        ),
+        rusqlite::params![activation_id, new_task_id, initiative_id, now_secs],
+    )
+    .map_err(|_| AdmitError::SqlError)?;
+
     let new_attempts: i64 = parent_attempts_pre + 1;
     tx.execute(
         &format!(
@@ -206,6 +229,27 @@ pub(crate) enum AdmitError {
     ParentEvaluationShaMissing,
     InsertConflict,
     SqlError,
+}
+
+fn gate_fixup_plan_fields(
+    parent_fields: &TaskPlanFields,
+    parent_task_id: &str,
+    parent_gate_type: &str,
+    profile: &GateFixupProfile,
+) -> TaskPlanFields {
+    let mut fields = parent_fields.clone();
+    fields.task_kind = TaskKind::Agent;
+    fields.workspace_merge_on_conflict = WorkspaceMergeOnConflict::FailClosed;
+    fields.session_agent_type = SessionAgentType::Executor;
+    fields.vm_image = profile.executor_image.clone();
+    fields.description = format!(
+        "Repair the failed {parent_gate_type} gate for task {parent_task_id}. \
+         Make the smallest change needed inside the inherited task scope, then submit CompleteTask."
+    );
+    fields.task_verifiers.clear();
+    fields.max_turns = Some(profile.max_turns);
+    fields.max_turns_step = None;
+    fields
 }
 
 /// Kernel-authoritative gate-fixup admission pipeline.
@@ -246,9 +290,18 @@ pub async fn auto_admit_gate_fixup_task(
         };
     }
 
+    let parent_key = TaskKey::new(parent_initiative_id.to_owned(), parent_task_id.to_owned());
+    let Some(parent_fields) = ctx.plan_registry.get(&parent_key) else {
+        return AutoAdmitOutcome::SqlError(format!(
+            "missing parent plan registry entry for gate-fixup parent task {parent_task_id}"
+        ));
+    };
+
     // ── Step 3: atomic admit (INV-GATE-FIXUP-ADMIT-ATOMIC-01) ─────
     let attempt_index_1based = parent_gate_fixup_attempts_pre + 1;
     let new_task_id = format!("{parent_task_id}--gatefixup-{attempt_index_1based}");
+    let fixup_fields =
+        gate_fixup_plan_fields(&parent_fields, parent_task_id, parent_gate_type, profile);
     let parent_task_id_owned = parent_task_id.to_owned();
     let parent_gate_type_owned = parent_gate_type.to_owned();
     let initiative_id_owned = parent_initiative_id.to_owned();
@@ -288,6 +341,9 @@ pub async fn auto_admit_gate_fixup_task(
             return AutoAdmitOutcome::SqlError(format!("admit spawn_blocking join: {join_err}"));
         }
     };
+
+    let fixup_key = TaskKey::new(parent_initiative_id.to_owned(), new_task_id.clone());
+    ctx.plan_registry.insert(fixup_key, fixup_fields);
 
     // ── Step 4: emit GateFixupSpawned audit event ─────────────────
     //
@@ -354,9 +410,9 @@ mod tests {
         .unwrap();
     }
 
-    /// Atomic admit-pipeline contract: the three writes (INSERT
-    /// fixup task row, INSERT dag edge, UPDATE parent counter) all
-    /// land in one transaction, observable post-commit.
+    /// Atomic admit-pipeline contract: the durable writes (INSERT
+    /// fixup task row, INSERT dag edge, INSERT activation row, UPDATE
+    /// parent counter) all land in one transaction, observable post-commit.
     #[test]
     fn admit_fixup_task_in_tx_pins_three_writes_atomically() {
         let store = Store::open_in_memory().unwrap();
@@ -409,6 +465,22 @@ mod tests {
             .unwrap();
         assert_eq!(edge_count, 1);
 
+        let activations_t = Table::SubtaskActivations.as_str();
+        let activation_state: String = conn
+            .query_row(
+                &format!(
+                    "SELECT activation_state FROM {activations_t} \
+                       WHERE task_id = ?1 AND initiative_id = ?2"
+                ),
+                rusqlite::params!["parent-1--gatefixup-1", "init-a"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            activation_state, "PendingActivation",
+            "gate-fixup tasks must be activatable through the normal subtask FSM"
+        );
+
         let attempts: i64 = conn
             .query_row(
                 &format!("SELECT gate_fixup_attempts FROM {tasks_t} WHERE task_id = ?1"),
@@ -417,6 +489,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn gate_fixup_plan_fields_inherits_parent_scope_but_overrides_runtime_shape() {
+        let parent = TaskPlanFields {
+            task_kind: TaskKind::WorkspaceMerge,
+            workspace_merge_on_conflict: WorkspaceMergeOnConflict::OperatorManual,
+            path_allowlist: vec!["gtm/reports/".to_owned()],
+            custom_tools_json: Some("{\"tools\":[]}".to_owned()),
+            task_verifiers: vec![raxis_policy::TaskVerifierEntry {
+                name: "parent-verifier".to_owned(),
+                image: "verifier".to_owned(),
+                command: "/bin/true".to_owned(),
+                timeout: "1m".to_owned(),
+                on_failure: raxis_policy::TaskVerifierOnFailure::BlockReview,
+                artifact: None,
+                artifact_max_bytes: None,
+                env: std::collections::HashMap::new(),
+                allowed_egress: Vec::new(),
+                hints: std::collections::BTreeMap::new(),
+            }],
+            max_turns: Some(40),
+            ..TaskPlanFields::default()
+        };
+        let profile = GateFixupProfile {
+            max_attempts: 2,
+            executor_image: "fixup-executor".to_owned(),
+            max_turns: 8,
+            max_cost_per_run: 500,
+            wall_clock_seconds: 120,
+        };
+
+        let fields = gate_fixup_plan_fields(&parent, "parent-task", "NoSecrets", &profile);
+
+        assert_eq!(fields.task_kind, TaskKind::Agent);
+        assert_eq!(
+            fields.workspace_merge_on_conflict,
+            WorkspaceMergeOnConflict::FailClosed
+        );
+        assert_eq!(fields.session_agent_type, SessionAgentType::Executor);
+        assert_eq!(fields.path_allowlist, vec!["gtm/reports/"]);
+        assert_eq!(fields.custom_tools_json, parent.custom_tools_json);
+        assert!(fields.task_verifiers.is_empty());
+        assert_eq!(fields.vm_image, "fixup-executor");
+        assert_eq!(fields.max_turns, Some(8));
     }
 
     #[test]

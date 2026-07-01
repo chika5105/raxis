@@ -1549,7 +1549,7 @@ pub(crate) struct DelegationsSection {
 /// [budget.base_cost_per_intent_kind]
 /// SingleCommit       = 10
 /// MultiBranchCommit  = 25
-/// IntegrationMerge   = 50
+/// IntegrationMerge   = 0
 /// PrGateEvaluation   = 15
 /// # per-session LLM token ceilings.
 /// # All three are optional; absent ⇒ uncapped on that axis.
@@ -6965,7 +6965,7 @@ max_cost_per_task     = 10000
 
 [budget.base_cost_per_intent_kind]
 SingleCommit     = 10
-IntegrationMerge = 50
+IntegrationMerge = 0
 CompleteTask     = 5
 ReportFailure    = 1
 

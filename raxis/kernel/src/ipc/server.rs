@@ -509,6 +509,13 @@ where
     let idle_threshold_secs = idle_timeout.map(|d| d.as_secs()).unwrap_or(0);
     let mut idle_watchdog_fired = false;
     let mut response_write_disconnect_message_kind: Option<&'static str> = None;
+    let worker_no_progress_threshold = worker_no_progress_fetch_threshold();
+    let session_agent_type_for_activity = match session_id_for_activity.as_deref() {
+        Some(sid) => lookup_session_agent_type_for_activity(&ctx, sid).await,
+        None => None,
+    };
+    let mut worker_no_progress_fired: Option<crate::session_activity::WorkerNoProgressExceeded> =
+        None;
 
     macro_rules! write_response {
         ($msg:expr, $kind:literal) => {{
@@ -810,6 +817,7 @@ where
                 if let Some(token) = bound_session_token.as_ref() {
                     req.session_token = token.clone();
                 }
+                let fetch_kind_for_activity = req.fetch_kind;
                 let _ipc_metric = crate::observability::KernelSubstrateIpcRoundtrip::start(
                     ctx.observability.as_ref(),
                     crate::observability::IPC_ROLE_PLANNER,
@@ -824,6 +832,38 @@ where
                     IpcMessage::KernelPlannerFetchResponse(resp),
                     "KernelPlannerFetchResponse"
                 );
+                if matches!(
+                    session_agent_type_for_activity,
+                    Some(raxis_types::SessionAgentType::Executor)
+                        | Some(raxis_types::SessionAgentType::Reviewer)
+                ) && matches!(
+                    fetch_kind_for_activity,
+                    raxis_types::PlannerFetchKind::Inference
+                ) {
+                    if let Some(sid) = session_id_for_activity.as_deref() {
+                        if let Some(fired) = ctx.session_activity.record_model_fetch(
+                            sid,
+                            worker_no_progress_threshold,
+                            raxis_types::clock::unix_now_secs(),
+                        ) {
+                            eprintln!(
+                                "{{\"level\":\"warn\",\
+                                 \"event\":\"worker_no_durable_progress_watchdog_fired\",\
+                                 \"session_id\":\"{sid}\",\
+                                 \"fetches_since_progress\":{fetches},\
+                                 \"threshold_fetches\":{threshold},\
+                                 \"last_progress_unix\":{last_progress},\
+                                 \"fired_at_unix\":{fired_at}}}",
+                                fetches = fired.fetches_since_progress,
+                                threshold = fired.threshold_fetches,
+                                last_progress = fired.last_progress_unix,
+                                fired_at = fired.fired_at_unix,
+                            );
+                            worker_no_progress_fired = Some(fired);
+                            break;
+                        }
+                    }
+                }
             }
 
             // ── CustomToolInvocation ────────────────────────────────────
@@ -842,6 +882,12 @@ where
                     crate::observability::IPC_MSG_KIND_CUSTOM_TOOL_INVOCATION,
                 );
                 let ack = handle_custom_tool_invocation(req, &ctx).await;
+                if ack.accepted {
+                    if let Some(sid) = session_id_for_activity.as_deref() {
+                        ctx.session_activity
+                            .record_progress(sid, raxis_types::clock::unix_now_secs());
+                    }
+                }
                 write_response!(
                     IpcMessage::KernelCustomToolInvocationAck(ack),
                     "KernelCustomToolInvocationAck"
@@ -863,6 +909,12 @@ where
                     crate::observability::IPC_MSG_KIND_CUSTOM_TOOL_INVOCATION,
                 );
                 let resp = crate::ipc::custom_tools::handle_kernel_execution(req, &ctx).await;
+                if resp.accepted {
+                    if let Some(sid) = session_id_for_activity.as_deref() {
+                        ctx.session_activity
+                            .record_progress(sid, raxis_types::clock::unix_now_secs());
+                    }
+                }
                 write_response!(
                     IpcMessage::KernelCustomToolExecutionResponse(resp),
                     "KernelCustomToolExecutionResponse"
@@ -920,7 +972,33 @@ where
         idle_watchdog_fired,
         idle_watchdog_threshold_secs: idle_threshold_secs,
         response_write_disconnect_message_kind,
+        worker_no_progress_fired,
     })
+}
+
+async fn lookup_session_agent_type_for_activity(
+    ctx: &Arc<HandlerContext>,
+    session_id: &str,
+) -> Option<raxis_types::SessionAgentType> {
+    let store = Arc::clone(&ctx.store);
+    let sid = session_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!(
+                "SELECT session_agent_type FROM {} WHERE session_id = ?1",
+                raxis_store::Table::Sessions.as_str(),
+            ),
+            rusqlite::params![sid],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .and_then(|raw| raxis_types::SessionAgentType::from_sql_str(raw.as_str()))
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 async fn handle_custom_tool_invocation(
@@ -1310,6 +1388,12 @@ pub(crate) struct PlannerStreamOutcome {
     /// task without burning crash-retry or orchestrator no-progress
     /// budgets.
     pub response_write_disconnect_message_kind: Option<&'static str>,
+
+    /// Set when a worker session remains transport-healthy but
+    /// consumes too many inference turns without accepted governed
+    /// progress. The post-exit hook treats this as a concrete
+    /// no-durable-progress failure and terminates the substrate VM.
+    pub worker_no_progress_fired: Option<crate::session_activity::WorkerNoProgressExceeded>,
 }
 
 /// `INV-PLANNER-IPC-IDLE-WATCHDOG-01` — the maximum time the
@@ -1359,6 +1443,28 @@ pub(crate) struct PlannerStreamOutcome {
 /// used by long-running stress tests that may have many minutes
 /// between frames by design.
 pub(crate) const PLANNER_IPC_IDLE_TIMEOUT_DEFAULT_SECS: u64 = 900;
+
+const WORKER_NO_PROGRESS_FETCHES_ENV: &str = "RAXIS_WORKER_NO_PROGRESS_FETCHES";
+const WORKER_NO_PROGRESS_FETCHES_DEFAULT: u32 = 24;
+const WORKER_NO_PROGRESS_FETCHES_MAX: u32 = 300;
+
+/// Resolve the worker no-durable-progress threshold.
+///
+/// `0` disables the detector. Non-zero values are clamped so a typo
+/// cannot create either an immediate kill-loop or an effectively
+/// unbounded semantic hang. The value is host/runtime-owned, not a
+/// plan field: an agent should not be able to widen how long the
+/// kernel tolerates model churn without accepted progress.
+pub(crate) fn worker_no_progress_fetch_threshold() -> u32 {
+    match std::env::var(WORKER_NO_PROGRESS_FETCHES_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+    {
+        Some(0) => 0,
+        Some(n) => n.clamp(3, WORKER_NO_PROGRESS_FETCHES_MAX),
+        None => WORKER_NO_PROGRESS_FETCHES_DEFAULT,
+    }
+}
 
 /// Read the configured planner-IPC idle timeout. See
 /// [`PLANNER_IPC_IDLE_TIMEOUT_DEFAULT_SECS`] for the rationale.

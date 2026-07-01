@@ -190,6 +190,34 @@ pub struct SessionActivity {
     pub recorded_at_unix: i64,
 }
 
+/// Concrete signal emitted by the worker semantic-progress watchdog.
+///
+/// Transport-idle detection lives in `ipc::server` and fires when the
+/// VM stops sending frames. This signal is different: the VM is alive
+/// and still issuing model fetches, but has not produced any accepted
+/// governed progress since the last reset point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerNoProgressExceeded {
+    /// Number of inference/model fetches observed since the last
+    /// accepted progress event for this session.
+    pub fetches_since_progress: u32,
+    /// Host-configured threshold that was exceeded.
+    pub threshold_fetches: u32,
+    /// Unix timestamp of the last accepted progress event. `0`
+    /// means the session had not produced any accepted progress
+    /// before the watchdog fired.
+    pub last_progress_unix: i64,
+    /// Unix timestamp when the watchdog fired.
+    pub fired_at_unix: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionActivityState {
+    last_intent: Option<SessionActivity>,
+    model_fetches_since_progress: u32,
+    last_progress_unix: i64,
+}
+
 /// Kernel-wide per-session activity tracker.
 ///
 /// Held inside [`crate::ipc::context::HandlerContext`] so every
@@ -207,7 +235,7 @@ pub struct SessionActivityTracker {
     /// surface (the IPC arm holds it briefly between intent
     /// handling and the next frame read; the post-exit reader
     /// runs inside `spawn_blocking`).
-    inner: Mutex<HashMap<String, SessionActivity>>,
+    inner: Mutex<HashMap<String, SessionActivityState>>,
 }
 
 impl SessionActivityTracker {
@@ -227,7 +255,55 @@ impl SessionActivityTracker {
     /// panicking on the planner-IPC hot path.
     pub fn record(&self, session_id: &str, activity: SessionActivity) {
         if let Ok(mut g) = self.inner.lock() {
-            g.insert(session_id.to_owned(), activity);
+            let state = g.entry(session_id.to_owned()).or_default();
+            if matches!(activity.last_intent_outcome, LastIntentOutcome::Accepted) {
+                state.model_fetches_since_progress = 0;
+                state.last_progress_unix = activity.recorded_at_unix;
+            }
+            state.last_intent = Some(activity);
+        }
+    }
+
+    /// Record accepted non-intent progress for `session_id`.
+    ///
+    /// Used for custom-tool execution/audit paths that do real,
+    /// governed work but do not flow through `IntentRequest`.
+    pub fn record_progress(&self, session_id: &str, recorded_at_unix: i64) {
+        if let Ok(mut g) = self.inner.lock() {
+            let state = g.entry(session_id.to_owned()).or_default();
+            state.model_fetches_since_progress = 0;
+            state.last_progress_unix = recorded_at_unix;
+        }
+    }
+
+    /// Record one inference/model fetch and return a watchdog signal
+    /// when the session has exceeded `threshold_fetches` model turns
+    /// without accepted progress.
+    ///
+    /// `threshold_fetches == 0` disables the detector. The caller is
+    /// responsible for scoping calls to worker sessions; orchestrator
+    /// turns are intentionally not counted.
+    pub fn record_model_fetch(
+        &self,
+        session_id: &str,
+        threshold_fetches: u32,
+        recorded_at_unix: i64,
+    ) -> Option<WorkerNoProgressExceeded> {
+        if threshold_fetches == 0 {
+            return None;
+        }
+        let mut g = self.inner.lock().ok()?;
+        let state = g.entry(session_id.to_owned()).or_default();
+        state.model_fetches_since_progress = state.model_fetches_since_progress.saturating_add(1);
+        if state.model_fetches_since_progress >= threshold_fetches {
+            Some(WorkerNoProgressExceeded {
+                fetches_since_progress: state.model_fetches_since_progress,
+                threshold_fetches,
+                last_progress_unix: state.last_progress_unix,
+                fired_at_unix: recorded_at_unix,
+            })
+        } else {
+            None
         }
     }
 
@@ -245,7 +321,7 @@ impl SessionActivityTracker {
         self.inner
             .lock()
             .ok()
-            .and_then(|mut g| g.remove(session_id))
+            .and_then(|mut g| g.remove(session_id).and_then(|state| state.last_intent))
     }
 
     /// Test-only: peek the entry without consuming it. Production
@@ -253,10 +329,10 @@ impl SessionActivityTracker {
     /// same id never inherits a predecessor's activity.
     #[cfg(test)]
     pub fn peek(&self, session_id: &str) -> Option<SessionActivity> {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|g| g.get(session_id).cloned())
+        self.inner.lock().ok().and_then(|g| {
+            g.get(session_id)
+                .and_then(|state| state.last_intent.clone())
+        })
     }
 
     /// **`INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01`
@@ -280,10 +356,10 @@ impl SessionActivityTracker {
     /// session_id; Mode A reads + Mode B takes is the canonical
     /// consumer order.
     pub fn get(&self, session_id: &str) -> Option<SessionActivity> {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|g| g.get(session_id).cloned())
+        self.inner.lock().ok().and_then(|g| {
+            g.get(session_id)
+                .and_then(|state| state.last_intent.clone())
+        })
     }
 }
 
@@ -561,6 +637,60 @@ mod tests {
             },
             recorded_at_unix: 1_715_694_342_i64,
         }
+    }
+
+    #[test]
+    fn model_fetch_watchdog_fires_after_threshold_without_progress() {
+        let tracker = SessionActivityTracker::new();
+        assert!(tracker.record_model_fetch("s-1", 3, 10).is_none());
+        assert!(tracker.record_model_fetch("s-1", 3, 11).is_none());
+        let fired = tracker
+            .record_model_fetch("s-1", 3, 12)
+            .expect("third model fetch without progress must fire");
+        assert_eq!(fired.fetches_since_progress, 3);
+        assert_eq!(fired.threshold_fetches, 3);
+        assert_eq!(fired.last_progress_unix, 0);
+        assert_eq!(fired.fired_at_unix, 12);
+    }
+
+    #[test]
+    fn accepted_intent_resets_model_fetch_watchdog() {
+        let tracker = SessionActivityTracker::new();
+        assert!(tracker.record_model_fetch("s-1", 3, 10).is_none());
+        assert!(tracker.record_model_fetch("s-1", 3, 11).is_none());
+        tracker.record("s-1", act(IntentKind::StructuredOutput, 7, true));
+        assert!(tracker.record_model_fetch("s-1", 3, 12).is_none());
+        assert!(tracker.record_model_fetch("s-1", 3, 13).is_none());
+        let fired = tracker
+            .record_model_fetch("s-1", 3, 14)
+            .expect("three fresh fetches after accepted progress must fire");
+        assert_eq!(fired.fetches_since_progress, 3);
+        assert_eq!(fired.last_progress_unix, 1_715_694_342_i64);
+    }
+
+    #[test]
+    fn rejected_intent_does_not_reset_model_fetch_watchdog() {
+        let tracker = SessionActivityTracker::new();
+        assert!(tracker.record_model_fetch("s-1", 3, 10).is_none());
+        assert!(tracker.record_model_fetch("s-1", 3, 11).is_none());
+        tracker.record("s-1", act(IntentKind::StructuredOutput, 7, false));
+        let fired = tracker
+            .record_model_fetch("s-1", 3, 12)
+            .expect("rejected intents are not durable progress");
+        assert_eq!(fired.fetches_since_progress, 3);
+        assert_eq!(fired.last_progress_unix, 0);
+    }
+
+    #[test]
+    fn custom_tool_progress_resets_model_fetch_watchdog() {
+        let tracker = SessionActivityTracker::new();
+        assert!(tracker.record_model_fetch("s-1", 2, 10).is_none());
+        tracker.record_progress("s-1", 11);
+        assert!(tracker.record_model_fetch("s-1", 2, 12).is_none());
+        let fired = tracker
+            .record_model_fetch("s-1", 2, 13)
+            .expect("two fetches after tool progress must fire");
+        assert_eq!(fired.last_progress_unix, 11);
     }
 
     #[test]

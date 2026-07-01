@@ -1376,6 +1376,42 @@ pub(crate) fn build_worker_post_exit_failure_reason(
     last_activity: Option<&crate::session_activity::SessionActivity>,
     idle_watchdog: Option<IdleWatchdogFired>,
 ) -> String {
+    build_worker_post_exit_failure_reason_inner(
+        role_str,
+        exit_notice,
+        dispatch_err_str,
+        last_activity,
+        idle_watchdog,
+        None,
+    )
+}
+
+pub(crate) fn build_worker_post_exit_failure_reason_with_no_progress(
+    role_str: &str,
+    exit_notice: Option<&raxis_types::PlannerExitOutcome>,
+    dispatch_err_str: Option<&str>,
+    last_activity: Option<&crate::session_activity::SessionActivity>,
+    idle_watchdog: Option<IdleWatchdogFired>,
+    no_progress: Option<crate::session_activity::WorkerNoProgressExceeded>,
+) -> String {
+    build_worker_post_exit_failure_reason_inner(
+        role_str,
+        exit_notice,
+        dispatch_err_str,
+        last_activity,
+        idle_watchdog,
+        no_progress,
+    )
+}
+
+fn build_worker_post_exit_failure_reason_inner(
+    role_str: &str,
+    exit_notice: Option<&raxis_types::PlannerExitOutcome>,
+    dispatch_err_str: Option<&str>,
+    last_activity: Option<&crate::session_activity::SessionActivity>,
+    idle_watchdog: Option<IdleWatchdogFired>,
+    no_progress: Option<crate::session_activity::WorkerNoProgressExceeded>,
+) -> String {
     use raxis_types::PlannerExitOutcome;
     // 0) `INV-PLANNER-IPC-IDLE-WATCHDOG-01` — the kernel-side
     //    idle watchdog fired before the planner sent any frame.
@@ -1413,6 +1449,36 @@ pub(crate) fn build_worker_post_exit_failure_reason(
             role_str = role_str,
             secs = fired.threshold_secs,
             last = last_seen_short,
+        );
+    }
+    // 0b) Worker semantic no-progress watchdog. This is distinct
+    //     from the IPC idle watchdog: the VM kept sending frames
+    //     and model fetches, but produced no accepted governed
+    //     progress (no accepted IntentRequest / progress report /
+    //     audited custom tool) for too many inference turns.
+    if let Some(fired) = no_progress {
+        let last_progress = if fired.last_progress_unix == 0 {
+            "no accepted progress observed in this session".to_owned()
+        } else {
+            format!(
+                "last accepted progress at unix={}",
+                fired.last_progress_unix
+            )
+        };
+        return format!(
+            "WorkerNoDurableProgress: {role_str} VM remained transport-healthy \
+             but consumed {fetches} inference turns since the last accepted \
+             governed progress event (threshold {threshold}) without any \
+             accepted IntentRequest, progress_report, audited custom tool, \
+             file-change admission, review verdict, or terminal task intent. \
+             The kernel terminated the session instead of letting it burn more \
+             model tokens silently; {last_progress}. This is a semantic \
+             no-progress watchdog, not a substrate broken-pipe failure. Tighten \
+             the task prompt or use a composite tool/verifier when the work has \
+             a long deterministic sequence.",
+            fetches = fired.fetches_since_progress,
+            threshold = fired.threshold_fetches,
+            last_progress = last_progress,
         );
     }
     // 1) Concrete structured exit notice from the planner.
@@ -1747,6 +1813,10 @@ pub fn spawn_planner_dispatcher(
             .map(|o| IdleWatchdogFired {
                 threshold_secs: o.idle_watchdog_threshold_secs,
             });
+        let worker_no_progress_for_post_exit = dispatch_result
+            .as_ref()
+            .ok()
+            .and_then(|o| o.worker_no_progress_fired);
         if let Err(e) = &dispatch_result {
             // Per the planner-dispatch logging convention, the
             // structured log keys on `step:"planner-dispatch"` so a
@@ -1779,40 +1849,48 @@ pub fn spawn_planner_dispatcher(
         // is surfaced as a structured warn but never propagates
         // — the SQL revoke and Mode-B synthesis MUST still fire
         // so the orchestrator can decide retry vs. settle.
-        if idle_watchdog_for_post_exit.is_some() {
+        if idle_watchdog_for_post_exit.is_some() || worker_no_progress_for_post_exit.is_some() {
             let session_for_terminate = session_id.to_string();
             let svc = Arc::clone(&ctx.session_spawn);
             // 5-second grace — well above the AVF runtime's
             // internal stop-then-force watchdog (see
             // `isolation-apple-vz::runtime::stop`).
             let grace = std::time::Duration::from_secs(5);
+            let watchdog_event = if idle_watchdog_for_post_exit.is_some() {
+                "planner_ipc_idle_watchdog"
+            } else {
+                "worker_no_durable_progress_watchdog"
+            };
             match svc.terminate_session(&session_for_terminate, grace).await {
                 Ok(report) => {
                     eprintln!(
                         "{{\"level\":\"info\",\
-                         \"event\":\"planner_ipc_idle_watchdog_session_terminated\",\
+                         \"event\":\"{watchdog_event}_session_terminated\",\
                          \"session_id\":\"{session}\",\
                          \"exit_status\":\"{status:?}\"}}",
                         session = session_for_terminate,
                         status = report.exit_status,
+                        watchdog_event = watchdog_event,
                     );
                 }
                 Err(raxis_session_spawn::SpawnError::SessionNotActive { .. }) => {
                     eprintln!(
                         "{{\"level\":\"info\",\
-                         \"event\":\"planner_ipc_idle_watchdog_session_already_inactive\",\
+                         \"event\":\"{watchdog_event}_session_already_inactive\",\
                          \"session_id\":\"{session}\"}}",
                         session = session_for_terminate,
+                        watchdog_event = watchdog_event,
                     );
                 }
                 Err(e) => {
                     eprintln!(
                         "{{\"level\":\"warn\",\
-                         \"event\":\"planner_ipc_idle_watchdog_terminate_failed\",\
+                         \"event\":\"{watchdog_event}_terminate_failed\",\
                          \"session_id\":\"{session}\",\
                          \"error\":\"{err}\"}}",
                         session = session_for_terminate,
                         err = e,
+                        watchdog_event = watchdog_event,
                     );
                 }
             }
@@ -2251,6 +2329,7 @@ pub fn spawn_planner_dispatcher(
         let retry_neutral_planner_boot_failure_for_synth =
             retry_neutral_planner_boot_failure_for_post_exit.clone();
         let idle_watchdog_for_synth = idle_watchdog_for_post_exit;
+        let worker_no_progress_for_synth = worker_no_progress_for_post_exit;
         // INV-FAILURE-REASON-CONCRETE-01 (P2 ladder slot): clone
         // the activity tracker handle so the spawn_blocking body
         // can `take` the per-session breadcrumb when neither a
@@ -2893,12 +2972,13 @@ pub fn spawn_planner_dispatcher(
             // when neither a `PlannerExitNotice` (P3) nor a
             // dispatch-stream error (P1) is available.
             let last_activity = session_activity_for_post_exit.take(&session_for_post_exit);
-            let justification = build_worker_post_exit_failure_reason(
+            let justification = build_worker_post_exit_failure_reason_with_no_progress(
                 role_str,
                 exit_notice_for_synth.as_ref(),
                 dispatch_err_for_synth.as_deref(),
                 last_activity.as_ref(),
                 idle_watchdog_for_synth,
+                worker_no_progress_for_synth,
             );
             if let Err(e) = transition_task_in_tx(
                 &tx,
@@ -7167,7 +7247,10 @@ mod tests {
 
 #[cfg(test)]
 mod concrete_reason_tests {
-    use super::build_worker_post_exit_failure_reason;
+    use super::{
+        build_worker_post_exit_failure_reason,
+        build_worker_post_exit_failure_reason_with_no_progress,
+    };
     use raxis_types::PlannerExitOutcome;
 
     /// `INV-FAILURE-REASON-CONCRETE-01` — substrings forbidden in
@@ -7439,6 +7522,56 @@ mod concrete_reason_tests {
         assert!(
             s.contains("planner-boot-error: RAXIS_MODEL_ID unresolved"),
             "must inline the dispatch error verbatim; got {s:?}"
+        );
+    }
+
+    #[test]
+    fn concrete_reason_worker_no_progress_watchdog_pre_empts_activity() {
+        use crate::session_activity::{
+            LastIntentOutcome, SessionActivity, WorkerNoProgressExceeded,
+        };
+        use raxis_types::IntentKind;
+
+        let activity = SessionActivity {
+            last_intent_kind: IntentKind::StructuredOutput,
+            last_intent_seq: 7,
+            last_intent_outcome: LastIntentOutcome::Accepted,
+            recorded_at_unix: 1_715_694_342_i64,
+        };
+        let no_progress = WorkerNoProgressExceeded {
+            fetches_since_progress: 24,
+            threshold_fetches: 24,
+            last_progress_unix: 1_715_694_342_i64,
+            fired_at_unix: 1_715_695_000_i64,
+        };
+        let s = build_worker_post_exit_failure_reason_with_no_progress(
+            "executor",
+            None,
+            Some("this dispatch detail must be pre-empted"),
+            Some(&activity),
+            None,
+            Some(no_progress),
+        );
+        assert_no_forbidden(&s);
+        assert!(
+            s.starts_with("WorkerNoDurableProgress"),
+            "must lead with semantic no-progress taxonomy; got {s:?}"
+        );
+        assert!(
+            s.contains("24 inference turns"),
+            "must show fetch count; got {s:?}"
+        );
+        assert!(
+            s.contains("threshold 24"),
+            "must show configured threshold; got {s:?}"
+        );
+        assert!(
+            s.contains("transport-healthy"),
+            "must distinguish from broken-pipe/IPC stalls; got {s:?}"
+        );
+        assert!(
+            !s.contains("this dispatch detail"),
+            "no-progress watchdog must pre-empt stale dispatch detail; got {s:?}"
         );
     }
 

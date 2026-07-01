@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.3.7 - 2026-07-01
+
+RAXIS 0.3.7 is a patch release for gate-fixup activation, worker
+stall recovery, and IntegrationMerge accounting correctness.
+
+- Fixed gate-fixup admission so synthetic repair tasks are admitted
+  with a normal `PendingActivation` row, inherited task scope, and an
+  executor runtime shape, making them activatable through the standard
+  subtask FSM.
+- Kept gate-fixup parent edges as repair lineage rather than ordinary
+  completion dependencies, while still requiring the failed parent to
+  have a concrete `evaluation_sha`.
+- Added worker no-durable-progress detection for executor/reviewer
+  sessions so repeated model fetches with no accepted intent, tool
+  call, or durable task progress can be classified and recovered
+  without disguising the issue as normal orchestration progress.
+- Pruned stale terminal lane reservations before new admission and
+  excluded terminal tasks from live lane accounting.
+- Made IntegrationMerge budget-neutral and prevented it from consuming
+  lane cost/concurrency reservations, since the merge is kernel-owned
+  mechanical closeout rather than user-agent work.
+- Updated specs and default policy emission to reflect that
+  IntegrationMerge has zero admission cost.
+
 ## 0.3.6 - 2026-06-26
 
 - Hardened mechanical verifier execution so the kernel always launches the

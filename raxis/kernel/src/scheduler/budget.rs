@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use raxis_policy::PolicyBundle;
 use raxis_store::{Store, Table};
-use raxis_types::{unix_now_secs, IntentKind};
+use raxis_types::{unix_now_secs, IntentKind, TaskState};
 
 use crate::scheduler::lane::{get_lane_status, get_lane_status_in_tx};
 use crate::scheduler::{BudgetError, SchedulerError};
@@ -18,6 +18,7 @@ use crate::scheduler::{BudgetError, SchedulerError};
 // INV-STORE-03 (kernel-store.md §2.5.1): all SQL identifiers in this
 // module flow through the typed `Table` enum.
 const LANE_BUDGET_RESERVATIONS: &str = Table::LaneBudgetReservations.as_str();
+const TASKS: &str = Table::Tasks.as_str();
 
 /// Budget snapshot for a lane — alias for LaneStatus in budget-centric terms.
 pub type LaneBudgetSnapshot = crate::scheduler::lane::LaneStatus;
@@ -109,6 +110,7 @@ pub fn reserve_budget_in_tx(
     policy: &PolicyBundle,
 ) -> Result<(), SchedulerError> {
     let lane_cfg = crate::scheduler::lane::lane_config_for_row(lane_id, policy)?;
+    prune_terminal_reservations_in_tx(conn, lane_id)?;
     let status = get_lane_status_in_tx(conn, lane_id)?;
 
     if status.active_tasks >= lane_cfg.max_concurrent_tasks {
@@ -130,6 +132,38 @@ pub fn reserve_budget_in_tx(
     }
 
     consume_budget_in_tx(conn, lane_id, task_id, estimated_cost)
+}
+
+/// Live backstop for terminal tasks that escaped their normal
+/// `release_budget_in_tx` call. The boot-time recovery sweep also removes
+/// these rows, but a daemon that never restarts must not let stale terminal
+/// reservations starve later root closeout or integration work.
+fn prune_terminal_reservations_in_tx(
+    conn: &rusqlite::Connection,
+    lane_id: &str,
+) -> Result<usize, SchedulerError> {
+    let terminal = [
+        TaskState::Completed,
+        TaskState::Failed,
+        TaskState::Aborted,
+        TaskState::Cancelled,
+    ]
+    .iter()
+    .map(|s| format!("'{}'", s.as_sql_str()))
+    .collect::<Vec<_>>()
+    .join(", ");
+    let rows = conn.execute(
+        &format!(
+            "DELETE FROM {LANE_BUDGET_RESERVATIONS}
+              WHERE lane_id = ?1
+                AND task_id IN (
+                    SELECT task_id FROM {TASKS}
+                     WHERE state IN ({terminal})
+                )"
+        ),
+        rusqlite::params![lane_id],
+    )?;
+    Ok(rows)
 }
 
 /// Get current budget snapshot for a lane (active tasks + reserved cost).
@@ -202,6 +236,7 @@ pub fn release_budget_in_tx(
 
 /// Compute the admission cost for an intent.
 /// Formula (§2.3):
+///   IntegrationMerge is kernel-owned closeout plumbing → 0 units
 ///   base_cost = policy.base_cost_for_intent_kind(intent_kind_str) → None = error
 ///   path_cost = touched_paths.len() * policy.cost_per_touched_path()
 ///   raw       = base_cost.saturating_add(path_cost)
@@ -212,6 +247,10 @@ pub fn compute_admission_cost(
     intent_kind: IntentKind,
     policy: &PolicyBundle,
 ) -> Result<u64, BudgetError> {
+    if intent_kind == IntentKind::IntegrationMerge {
+        return Ok(0);
+    }
+
     // Convert IntentKind to the string key used in the policy table.
     let kind_str = intent_kind_to_str(&intent_kind);
 
@@ -594,11 +633,27 @@ mod tests {
     use super::*;
     use raxis_policy::{LaneEntry, OperatorEntry, PolicyBundle};
     use raxis_store::Store;
+    use std::collections::HashMap;
 
     #[test]
     fn saturating_add_path_cost_does_not_overflow() {
         let result = u64::MAX.saturating_add(1_000);
         assert_eq!(result, u64::MAX);
+    }
+
+    #[test]
+    fn integration_merge_admission_cost_is_kernel_neutral() {
+        let mut policy = PolicyBundle::for_tests_with_operators(Vec::<OperatorEntry>::new());
+        policy.set_base_cost_per_intent_kind_for_tests(HashMap::new());
+
+        let paths = vec![PathBuf::from("src/lib.rs"), PathBuf::from("README.md")];
+        let cost = compute_admission_cost(&paths, IntentKind::IntegrationMerge, &policy)
+            .expect("IntegrationMerge must not require a policy cost row");
+
+        assert_eq!(
+            cost, 0,
+            "IntegrationMerge is mechanical closeout and must not consume lane admission units"
+        );
     }
 
     /// Build a minimal policy with a single lane configured for the test.
@@ -920,6 +975,72 @@ mod tests {
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    /// Root closeout and late integration work must not be starved by a
+    /// stale reservation whose owning task is already terminal. The canonical
+    /// terminal handlers release in-tx, but this backstop protects daemon
+    /// mode from older/bypassed paths without waiting for a restart sweep.
+    #[test]
+    fn reserve_in_tx_prunes_terminal_reservations_before_counting_budget() {
+        let store = Store::open_in_memory().unwrap();
+        let policy = policy_with_lane("lane-D", /*max_concurrent=*/ 8, /*max_cost=*/ 100);
+        seed_initiative_and_tasks(
+            &store,
+            "init-D",
+            &[
+                ("completed-old", "lane-D", "Completed"),
+                ("task-new", "lane-D", "Admitted"),
+            ],
+        );
+
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction().unwrap();
+        consume_budget_in_tx(&tx, "lane-D", "completed-old", 500).unwrap();
+
+        reserve_budget_in_tx(&tx, "lane-D", "task-new", 10, &policy)
+            .expect("terminal stale reservation must be pruned before admission");
+
+        let stale_count: i64 = tx
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {LANE_BUDGET_RESERVATIONS}
+                      WHERE lane_id = 'lane-D' AND task_id = 'completed-old'"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_count, 0);
+
+        let status = get_lane_status_in_tx(&tx, "lane-D").unwrap();
+        assert_eq!(status.active_tasks, 1);
+        assert_eq!(status.reserved_cost, 10);
+    }
+
+    #[test]
+    fn lane_status_ignores_terminal_task_reservations() {
+        let store = Store::open_in_memory().unwrap();
+        seed_initiative_and_tasks(
+            &store,
+            "init-E",
+            &[
+                ("completed-old", "lane-E", "Completed"),
+                ("running-now", "lane-E", "Running"),
+            ],
+        );
+
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction().unwrap();
+        consume_budget_in_tx(&tx, "lane-E", "completed-old", 500).unwrap();
+        consume_budget_in_tx(&tx, "lane-E", "running-now", 10).unwrap();
+
+        let status = get_lane_status_in_tx(&tx, "lane-E").unwrap();
+        assert_eq!(status.active_tasks, 1);
+        assert_eq!(
+            status.reserved_cost, 10,
+            "status projections must not let stale terminal reservations make the lane look full"
+        );
     }
 
     // ── V2 §2.5 — token-cost admission gate (per-provider pricing) ──────
